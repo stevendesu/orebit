@@ -11,7 +11,7 @@ import java.util.Map;
  * I pass a 3x3x3 sliding window over the ChunkSection. This is
  * akin to our access pattern for computing NavSections.
  *
- * The goal if this profile is to figure out if rearranging the
+ * The goal of this profile is to figure out if rearranging the
  * elements in the array yields meaningful improvement in
  * performance by optimizing for cache line hits.
  */

@@ -39,6 +39,42 @@ dependencies {
 	// Fabric API. This is technically optional, but you probably want it anyway.
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
+	// JMH (Java Microbenchmark Harness) for trustworthy, warmed-up performance
+	// benchmarks. Lives in the test source set so it inherits the (remapped)
+	// Minecraft classpath. Run with `./gradlew jmh`.
+	testImplementation "org.openjdk.jmh:jmh-core:1.37"
+	testAnnotationProcessor "org.openjdk.jmh:jmh-generator-annprocess:1.37"
+	testImplementation "org.openjdk.jmh:jmh-generator-annprocess:1.37"
+
+	// Runs tests inside Fabric's Knot classloader so Minecraft can be bootstrapped
+	// headlessly (applies access wideners + intermediary). Without this,
+	// Bootstrap.initialize() throws IllegalAccessError on package-private MC members.
+	testImplementation "net.fabricmc:fabric-loader-junit:${project.loader_version}"
+	testImplementation platform("org.junit:junit-bom:5.10.2")
+	testImplementation "org.junit.jupiter:junit-jupiter"
+}
+
+test {
+	useJUnitPlatform()
+}
+
+// Runs JMH benchmarks. They are driven by BenchmarkRunnerTest (JUnit) so they
+// execute inside Fabric's Knot classloader (required to bootstrap Minecraft);
+// JMH therefore runs with forks=0 to stay in that JVM. The runner is gated by
+// the `jmh` system property so a normal `./gradlew test` skips the slow benchmarks.
+tasks.register('jmh', Test) {
+	group = "verification"
+	description = "Run JMH benchmarks (inside the Knot classloader, forks=0)."
+	useJUnitPlatform()
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	filter { includeTestsMatching "profile.BenchmarkRunnerTest" }
+	systemProperty "jmh", "true"
+	if (project.hasProperty("bench")) {
+		systemProperty "bench", project.property("bench")
+	}
+	testLogging { showStandardStreams = true }
+	outputs.upToDateWhen { false }
 }
 
 processResources {

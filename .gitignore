@@ -42,3 +42,7 @@ replay_*.log
 # unknown crap that showed up
 
 logs/
+
+# orebit one-off build logs
+/first-build.log
+/gensources.log
