@@ -2,7 +2,7 @@ package com.orebit.mod.worldmodel.region;
 
 import java.util.Arrays;
 
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.core.BlockPos;
 
 public class LeafRegion extends Region {
     private static final int MAX_BLOCKS = 4096;
@@ -72,7 +72,7 @@ public class LeafRegion extends Region {
         int dy = (encoded >> 10) & 0x1F;
         int dx = (encoded >> 5) & 0x1F;
         int dz = encoded & 0x1F;
-        return origin.add(dx, dy, dz);
+        return origin.offset(dx, dy, dz);
     }    
 
     @Override

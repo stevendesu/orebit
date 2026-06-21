@@ -1,8 +1,8 @@
 {
 	"schemaVersion": 1,
-	"id": "orebit",
+	"id": "${id}",
 	"version": "${version}",
-	"name": "Orebit",
+	"name": "${name}",
 	"description": "This is an example description! Tell everyone what your mod is about!",
 	"authors": [
 		"Me!"
@@ -16,26 +16,17 @@
 	"environment": "*",
 	"entrypoints": {
 		"main": [
-			"com.orebit.mod.Orebit"
+			"com.orebit.mod.fabric.OrebitFabric"
 		],
 		"client": [
-			"com.orebit.mod.OrebitClient"
+			"com.orebit.mod.fabric.OrebitClient"
 		]
 	},
-	"mixins": [
-		"orebit.mixins.json",
-		{
-			"config": "orebit.client.mixins.json",
-			"environment": "client"
-		}
-	],
 	"depends": {
 		"fabricloader": ">=0.16.13",
-		"minecraft": "~1.21.4",
+		"minecraft": "${minecraft}",
 		"java": ">=21",
-		"fabric-api": "*"
-	},
-	"suggests": {
-		"another-mod": "*"
+		"fabric-api": "*",
+		"architectury": "*"
 	}
 }

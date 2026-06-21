@@ -63,22 +63,22 @@
  */
 package com.orebit.mod.worldmodel.region;
 
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.phys.AABB;
 import java.util.Set;
 import java.util.HashSet;
 
 public class PortalShape {
     private final Set<BlockPos> entryBlocks; // All valid portal entry points
-    private final Box boundingBox;
+    private final AABB boundingBox;
 
     public PortalShape(Set<BlockPos> entryBlocks) {
         this.entryBlocks = new HashSet<>(entryBlocks);
         this.boundingBox = computeBoundingBox(entryBlocks);
     }
 
-    private Box computeBoundingBox(Set<BlockPos> positions) {
-        if (positions.isEmpty()) return new Box(0, 0, 0, 0, 0, 0);
+    private AABB computeBoundingBox(Set<BlockPos> positions) {
+        if (positions.isEmpty()) return new AABB(0, 0, 0, 0, 0, 0);
 
         int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
         int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
@@ -92,7 +92,7 @@ public class PortalShape {
             maxZ = Math.max(maxZ, pos.getZ());
         }
 
-        return new Box(minX, minY, minZ, maxX + 1, maxY + 1, maxZ + 1); // inclusive range
+        return new AABB(minX, minY, minZ, maxX + 1, maxY + 1, maxZ + 1); // inclusive range
     }
 
     public Set<BlockPos> getAllBlocks() {
@@ -103,7 +103,7 @@ public class PortalShape {
         return entryBlocks.contains(pos);
     }
 
-    public Box getBounds() {
+    public AABB getBounds() {
         return boundingBox;
     }
 
@@ -112,7 +112,7 @@ public class PortalShape {
         double nearestDistSq = Double.MAX_VALUE;
 
         for (BlockPos entry : entryBlocks) {
-            double distSq = from.getSquaredDistance(entry);
+            double distSq = from.distSqr(entry);
             if (distSq < nearestDistSq) {
                 nearestDistSq = distSq;
                 nearest = entry;

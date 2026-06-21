@@ -5,23 +5,23 @@ import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
-import net.minecraft.Bootstrap;
 import net.minecraft.SharedConstants;
-import net.minecraft.block.BambooBlock;
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.BlockWithEntity;
-import net.minecraft.block.Blocks;
-import net.minecraft.block.DoorBlock;
-import net.minecraft.block.FallingBlock;
-import net.minecraft.block.FenceGateBlock;
-import net.minecraft.block.PointedDripstoneBlock;
-import net.minecraft.block.TrapdoorBlock;
-import net.minecraft.fluid.FluidState;
-import net.minecraft.fluid.Fluids;
-import net.minecraft.registry.Registries;
-import net.minecraft.state.property.Properties;
-import net.minecraft.util.math.Direction;
+import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.server.Bootstrap;
+import net.minecraft.world.level.block.BambooStalkBlock;
+import net.minecraft.world.level.block.BaseEntityBlock;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.FallingBlock;
+import net.minecraft.world.level.block.FenceGateBlock;
+import net.minecraft.world.level.block.PointedDripstoneBlock;
+import net.minecraft.world.level.block.TrapDoorBlock;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.level.material.Fluids;
 
 /**
  * Counts how many DISTINCT navigation fingerprints all ~28k Minecraft block
@@ -38,8 +38,8 @@ public class BlockStateDedupTest {
 
     @Test
     void countDistinctNavFingerprints() {
-        SharedConstants.createGameVersion();
-        Bootstrap.initialize();
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
 
         // Built after bootstrap — referencing Blocks.* before init throws.
         final Set<Block> SLIPPERY = Set.of(
@@ -56,37 +56,37 @@ public class BlockStateDedupTest {
         int blocks = 0, states = 0, errors = 0;
         String firstErr = null;
 
-        for (Block block : Registries.BLOCK) {
+        for (Block block : BuiltInRegistries.BLOCK) {
             blocks++;
-            for (BlockState state : block.getStateManager().getStates()) {
+            for (BlockState state : block.getStateDefinition().getPossibleStates()) {
                 states++;
                 try {
-                    boolean special = block instanceof BlockWithEntity
-                            || block instanceof BambooBlock
+                    boolean special = block instanceof BaseEntityBlock
+                            || block instanceof BambooStalkBlock
                             || block instanceof PointedDripstoneBlock;
 
                     // solid faces (6 bits)
                     StringBuilder faces = new StringBuilder();
                     for (Direction d : Direction.values()) {
-                        boolean solid = special || state.isSideSolidFullSquare(null, null, d);
+                        boolean solid = special || state.isFaceSturdy(null, null, d);
                         faces.append(solid ? '1' : '0');
                     }
 
-                    double maxY = special ? 1.0 : state.getCollisionShape(null, null).getMax(Direction.Axis.Y);
-                    float hardness = block.getHardness();
-                    int luminance = state.getLuminance();
-                    boolean replaceable = state.isReplaceable();
-                    boolean toolReq = state.isToolRequired();
-                    boolean waterloggable = state.contains(Properties.WATERLOGGED);
+                    double maxY = special ? 1.0 : state.getCollisionShape(null, null).max(Direction.Axis.Y);
+                    float hardness = block.defaultDestroyTime();
+                    int luminance = state.getLightEmission();
+                    boolean replaceable = state.canBeReplaced();
+                    boolean toolReq = state.requiresCorrectToolForDrops();
+                    boolean waterloggable = state.hasProperty(BlockStateProperties.WATERLOGGED);
                     boolean climbable = CLIMBABLE.contains(block);
                     boolean gravity = block instanceof FallingBlock;
 
                     FluidState fs = state.getFluidState();
                     int fluid = fs.isEmpty() ? 0
-                            : (fs.getFluid() == Fluids.LAVA || fs.getFluid() == Fluids.FLOWING_LAVA ? 2 : 1);
+                            : (fs.getType() == Fluids.LAVA || fs.getType() == Fluids.FLOWING_LAVA ? 2 : 1);
 
                     int openable = block instanceof DoorBlock ? 1
-                            : block instanceof TrapdoorBlock ? 2
+                            : block instanceof TrapDoorBlock ? 2
                             : block instanceof FenceGateBlock ? 3 : 0;
 
                     Block b = state.getBlock();
@@ -106,7 +106,7 @@ public class BlockStateDedupTest {
                     if (firstErr == null) {
                         StackTraceElement[] st = e.getStackTrace();
                         firstErr = e + (st.length > 0 ? " @ " + st[0] : "")
-                                + " [block=" + Registries.BLOCK.getId(block) + "]";
+                                + " [block=" + BuiltInRegistries.BLOCK.getKey(block) + "]";
                     }
                 }
             }

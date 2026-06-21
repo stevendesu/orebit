@@ -3,7 +3,7 @@ package com.orebit.mod.worldmodel.region;
 import java.util.HashSet;
 import java.util.Set;
 
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.core.BlockPos;
 
 public class CompositeRegion extends Region {
     private int depth = 0;

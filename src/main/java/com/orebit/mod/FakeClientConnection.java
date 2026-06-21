@@ -1,11 +1,10 @@
 package com.orebit.mod;
 
-import io.netty.channel.local.LocalChannel;
-import net.minecraft.network.ClientConnection;
-import net.minecraft.network.NetworkSide;
+import net.minecraft.network.Connection;
+import net.minecraft.network.protocol.PacketFlow;
 
-public class FakeClientConnection extends ClientConnection {
+public class FakeClientConnection extends Connection {
     public FakeClientConnection() {
-        super(NetworkSide.SERVERBOUND);
+        super(PacketFlow.SERVERBOUND);
     }
 }

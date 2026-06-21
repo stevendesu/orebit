@@ -1,29 +1,24 @@
 package com.orebit.mod;
 
-import net.minecraft.SharedConstants;
-import net.minecraft.network.packet.Packet;
+import net.minecraft.network.protocol.Packet;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.network.ConnectedClientData;
-import net.minecraft.server.network.ServerPlayNetworkHandler;
-import net.minecraft.server.network.ServerPlayerEntity;
-public class FakeNetworkHandler extends ServerPlayNetworkHandler {
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.network.CommonListenerCookie;
+import net.minecraft.server.network.ServerGamePacketListenerImpl;
 
-    public FakeNetworkHandler(MinecraftServer server, ServerPlayerEntity player) {
+public class FakeNetworkHandler extends ServerGamePacketListenerImpl {
+
+    public FakeNetworkHandler(MinecraftServer server, ServerPlayer player) {
         super(
                 server,
                 new FakeClientConnection(),
                 player,
-                new ConnectedClientData(
-                        player.getGameProfile(),
-                        SharedConstants.getProtocolVersion(),
-                        player.getClientOptions(),
-                        false
-                )
+                CommonListenerCookie.createInitial(player.getGameProfile(), false)
         );
     }
 
     @Override
-    public void sendPacket(Packet<?> packet) {
+    public void send(Packet<?> packet) {
         // Do nothing
     }
 }

@@ -1,7 +1,7 @@
 package com.orebit.mod.worldmodel.region;
 
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.phys.AABB;
 
 public class RegionBoundingBox {
     public double minX, minY, minZ;
@@ -16,7 +16,7 @@ public class RegionBoundingBox {
         maxX = maxY = maxZ = -Double.MAX_VALUE;
     }
 
-    public void include(Box b) {
+    public void include(AABB b) {
         minX = Math.min(minX, b.minX);
         minY = Math.min(minY, b.minY);
         minZ = Math.min(minZ, b.minZ);
@@ -40,7 +40,7 @@ public class RegionBoundingBox {
                pos.getZ() >= minZ && pos.getZ() <= maxZ;
     }
 
-    public Box toImmutableBox() {
-        return new Box(minX, minY, minZ, maxX, maxY, maxZ);
+    public AABB toImmutableBox() {
+        return new AABB(minX, minY, minZ, maxX, maxY, maxZ);
     }
 }

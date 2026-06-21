@@ -1,7 +1,7 @@
 package com.orebit.mod.worldmodel.pathing;
 
 import com.orebit.mod.worldmodel.region.Region;
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.core.BlockPos;
 
 import java.util.Arrays;
 
@@ -13,7 +13,7 @@ public class NavSection {
     private final Region[] candidateRegions = new Region[MAX_REGIONS];
     private byte regionCount = 0;
 
-    private BlockPos origin = BlockPos.ORIGIN; // min corner of the section
+    private BlockPos origin = BlockPos.ZERO; // min corner of the section
 
     public static NavSection create(BlockPos origin) {
         return NavSectionPool.get(origin);
@@ -56,7 +56,7 @@ public class NavSection {
     }
 
     public Region getRegionFor(int x, int y, int z) {
-        BlockPos pos = origin.add(x, y, z);
+        BlockPos pos = origin.offset(x, y, z);
         for (int i = 0; i < regionCount; i++) {
             Region region = candidateRegions[i];
             if (region.contains(pos)) return region;

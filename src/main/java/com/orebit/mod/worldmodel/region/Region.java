@@ -1,6 +1,6 @@
 package com.orebit.mod.worldmodel.region;
 
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.core.BlockPos;
 
 public abstract class Region {
     protected long regionId;

@@ -7,14 +7,14 @@ import org.junit.jupiter.api.Test;
 
 import com.orebit.mod.worldmodel.pathing.NavSectionBuilder;
 
-import net.minecraft.Bootstrap;
 import net.minecraft.SharedConstants;
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.world.chunk.Palette;
-import net.minecraft.world.chunk.PalettedContainer;
-import net.minecraft.world.chunk.SingularPalette;
+import net.minecraft.server.Bootstrap;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.Palette;
+import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.SingleValuePalette;
 
 /**
  * De-risk test: confirms Minecraft can be bootstrapped headlessly under the
@@ -26,16 +26,16 @@ public class McBootstrapTest {
 
     @Test
     void bootstrapsAndBuildsContainer() {
-        SharedConstants.createGameVersion();
-        Bootstrap.initialize();
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
 
-        BlockState air = Blocks.AIR.getDefaultState();
+        BlockState air = Blocks.AIR.defaultBlockState();
         PalettedContainer<BlockState> c = new PalettedContainer<>(
-                Block.STATE_IDS, air, PalettedContainer.PaletteProvider.BLOCK_STATE);
+                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
 
-        // All air -> SingularPalette, and get() returns air.
+        // All air -> SingleValuePalette, and get() returns air.
         Palette<BlockState> palette = NavSectionBuilder.getPaletteViaReflection(c);
-        assertTrue(palette instanceof SingularPalette, "expected SingularPalette, got " + palette.getClass());
+        assertTrue(palette instanceof SingleValuePalette, "expected SingleValuePalette, got " + palette.getClass());
         assertEquals(air, c.get(0, 0, 0));
 
         System.out.println("[McBootstrapTest] OK - palette=" + palette.getClass().getSimpleName());
