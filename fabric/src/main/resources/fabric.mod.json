@@ -1,8 +1,8 @@
 {
 	"schemaVersion": 1,
-	"id": "orebit",
+	"id": "${id}",
 	"version": "${version}",
-	"name": "Orebit",
+	"name": "${name}",
 	"description": "This is an example description! Tell everyone what your mod is about!",
 	"authors": [
 		"Me!"
@@ -24,12 +24,9 @@
 	},
 	"depends": {
 		"fabricloader": ">=0.16.13",
-		"minecraft": "~1.21.4",
+		"minecraft": "${minecraft}",
 		"java": ">=21",
 		"fabric-api": "*",
 		"architectury": "*"
-	},
-	"suggests": {
-		"another-mod": "*"
 	}
 }
