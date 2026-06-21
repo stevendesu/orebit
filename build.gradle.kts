@@ -42,8 +42,10 @@ dependencies {
 
 java {
     withSourcesJar()
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
+    // MC < 1.20.5 runs on Java 17; 1.20.5+ on Java 21.
+    val javaVersion = if (stonecutter.eval(minecraft, ">=1.20.5")) JavaVersion.VERSION_21 else JavaVersion.VERSION_17
+    sourceCompatibility = javaVersion
+    targetCompatibility = javaVersion
 }
 
 tasks.named<Test>("test") {
@@ -68,4 +70,37 @@ tasks.register<Test>("jmh") {
 tasks.build {
     group = "versioned"
     description = "Must run through 'chiseledBuild'"
+}
+
+// ---- Version overlays (PRD §9 portability) -------------------------------------
+// Files that can't compile across every supported MC version don't live in the
+// common `src/main/java`; they live in `overlays/<era>/java`, where <era> is the
+// FIRST MC version that flavor applies to (forward-looking — you add a new era dir
+// only when a newer version breaks something, never rename old ones).
+//
+// NB: overlays live in a TOP-LEVEL `overlays/` dir, OUTSIDE `src/`. Stonecutter
+// copies the whole `src/` tree into its per-version chiseledSrc, so an overlay under
+// `src/` would get every era swept in at once (duplicate class).
+//
+// For a given build we add the single highest era dir whose version is <= the active
+// MC version; its files supersede older eras. Each era dir holds the complete set of
+// version-divergent files for that era, so there's never a duplicate class with core.
+run {
+    fun mcKey(v: String): List<Int> = v.split('.', '-').mapNotNull(String::toIntOrNull)
+    fun cmp(a: List<Int>, b: List<Int>): Int {
+        for (i in 0 until maxOf(a.size, b.size)) {
+            val d = a.getOrElse(i) { 0 } - b.getOrElse(i) { 0 }
+            if (d != 0) return d
+        }
+        return 0
+    }
+    val overlaysDir = rootProject.file("overlays")
+    val activeKey = mcKey(minecraft)
+    val era = overlaysDir.listFiles()
+        ?.filter { it.isDirectory && it.resolve("java").isDirectory && cmp(mcKey(it.name), activeKey) <= 0 }
+        ?.maxWithOrNull { a, b -> cmp(mcKey(a.name), mcKey(b.name)) }
+    if (era != null) {
+        sourceSets["main"].java.srcDir(era.resolve("java"))
+        logger.lifecycle("[orebit] MC $minecraft -> overlay era '${era.name}'")
+    }
 }

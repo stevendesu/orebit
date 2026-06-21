@@ -1,5 +1,6 @@
 package com.orebit.mod.worldmodel.pathing;
 
+import com.orebit.mod.platform.LevelBounds;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.chunk.ChunkAccess;
@@ -9,7 +10,7 @@ public final class ChunkNavBuilder {
     private ChunkNavBuilder() {}
 
     public static NavSection[] buildAllSections(Level world, ChunkAccess chunk) {
-        int minY = world.getMinY();            // -64
+        int minY = LevelBounds.minY(world);    // -64
         int maxY = minY + world.getHeight();   // 320
         int sectionCount = (maxY - minY) / 16; // 384 / 16 = 24
 

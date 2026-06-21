@@ -18,7 +18,7 @@ base {
 }
 architectury {
     platformSetupLoomIde()
-    fabric()
+    forge()
 }
 
 val commonBundle: Configuration by configurations.creating {
@@ -32,10 +32,11 @@ val shadowBundle: Configuration by configurations.creating {
 configurations {
     compileClasspath.get().extendsFrom(commonBundle)
     runtimeClasspath.get().extendsFrom(commonBundle)
-    get("developmentFabric").extendsFrom(commonBundle)
+    get("developmentForge").extendsFrom(commonBundle)
 }
 
 repositories {
+    maven("https://maven.minecraftforge.net")
     maven("https://maven.parchmentmc.org")
 }
 
@@ -45,12 +46,11 @@ dependencies {
         officialMojangMappings()
         parchment("org.parchmentmc.data:parchment-$minecraft:${common.mod.dep("parchment")}@zip")
     })
-    modImplementation("net.fabricmc:fabric-loader:${mod.dep("fabric_loader")}")
-    modApi("net.fabricmc.fabric-api:fabric-api:${common.mod.dep("fabric_api")}")
-    modApi("dev.architectury:architectury-fabric:${common.mod.dep("architectury_api")}")
+    "forge"("net.minecraftforge:forge:$minecraft-${common.mod.dep("forge_loader")}")
+    modApi("dev.architectury:architectury-forge:${common.mod.dep("architectury_api")}")
 
     commonBundle(project(common.path, "namedElements")) { isTransitive = false }
-    shadowBundle(project(common.path, "transformProductionFabric")) { isTransitive = false }
+    shadowBundle(project(common.path, "transformProductionForge")) { isTransitive = false }
 }
 
 loom {
@@ -62,28 +62,31 @@ loom {
 
 java {
     withSourcesJar()
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
+    // MC < 1.20.5 runs on Java 17; 1.20.5+ on Java 21.
+    val javaVersion = if (stonecutter.eval(minecraft, ">=1.20.5")) JavaVersion.VERSION_21 else JavaVersion.VERSION_17
+    sourceCompatibility = javaVersion
+    targetCompatibility = javaVersion
 }
 
+tasks.jar {
+    archiveClassifier = "dev"
+}
 tasks.shadowJar {
     configurations = listOf(shadowBundle)
     archiveClassifier = "dev-shadow"
+    exclude("fabric.mod.json", "architectury.common.json")
 }
 tasks.remapJar {
     input = tasks.shadowJar.get().archiveFile
     archiveClassifier = null
     dependsOn(tasks.shadowJar)
 }
-tasks.jar {
-    archiveClassifier = "dev"
-}
 tasks.processResources {
-    properties(listOf("fabric.mod.json"),
+    properties(listOf("META-INF/mods.toml", "pack.mcmeta"),
         "id" to mod.id,
         "name" to mod.name,
         "version" to mod.version,
-        "minecraft" to common.mod.prop("mc_dep_fabric")
+        "minecraft" to common.mod.prop("mc_dep_forgelike")
     )
 }
 tasks.build {
