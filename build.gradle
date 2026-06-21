@@ -1,134 +1,48 @@
 plugins {
-	id 'fabric-loom' version '1.10-SNAPSHOT'
-	id 'maven-publish'
+	id 'architectury-plugin' version '3.4-SNAPSHOT'
+	id 'dev.architectury.loom' version '1.10-SNAPSHOT' apply false
 }
 
-version = project.mod_version
-group = project.maven_group
-
-base {
-	archivesName = project.archives_base_name
+architectury {
+	minecraft = project.minecraft_version
 }
 
-repositories {
-	// Parchment supplies parameter names + javadoc layered on top of the
-	// official Mojang mappings (Mojmap has class/method names but no params).
-	maven { url 'https://maven.parchmentmc.org' }
+allprojects {
+	group = project.maven_group
+	version = "${project.mod_version}+${project.minecraft_version}"
 }
 
-loom {
-	splitEnvironmentSourceSets()
+subprojects {
+	apply plugin: 'dev.architectury.loom'
+	apply plugin: 'architectury-plugin'
 
-	mods {
-		"orebit" {
-			sourceSet sourceSets.main
-			sourceSet sourceSets.client
-		}
+	base {
+		// e.g. orebit-fabric, orebit-common
+		archivesName = "${rootProject.archives_base_name}-${project.name}"
 	}
 
-}
-
-dependencies {
-	// To change the versions see the gradle.properties file
-	minecraft "com.mojang:minecraft:${project.minecraft_version}"
-	// Migrated off Yarn to official Mojang mappings (+ Parchment param names) so
-	// the codebase can share one naming scheme across Fabric and NeoForge under
-	// Architectury (see PRD §9 / PORTABILITY-AUDIT.md). Yarn is Fabric-only.
-	mappings loom.layered {
-		officialMojangMappings()
-		parchment("org.parchmentmc.data:parchment-${project.minecraft_version}:${project.parchment_version}@zip")
-	}
-	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-
-	// Fabric API. This is technically optional, but you probably want it anyway.
-	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
-
-	// JMH (Java Microbenchmark Harness) for trustworthy, warmed-up performance
-	// benchmarks. Lives in the test source set so it inherits the (remapped)
-	// Minecraft classpath. Run with `./gradlew jmh`.
-	testImplementation "org.openjdk.jmh:jmh-core:1.37"
-	testAnnotationProcessor "org.openjdk.jmh:jmh-generator-annprocess:1.37"
-	testImplementation "org.openjdk.jmh:jmh-generator-annprocess:1.37"
-
-	// Runs tests inside Fabric's Knot classloader so Minecraft can be bootstrapped
-	// headlessly (applies access wideners + intermediary). Without this,
-	// Bootstrap.initialize() throws IllegalAccessError on package-private MC members.
-	testImplementation "net.fabricmc:fabric-loader-junit:${project.loader_version}"
-	testImplementation platform("org.junit:junit-bom:5.10.2")
-	testImplementation "org.junit.jupiter:junit-jupiter"
-}
-
-test {
-	useJUnitPlatform()
-}
-
-// Runs JMH benchmarks. They are driven by BenchmarkRunnerTest (JUnit) so they
-// execute inside Fabric's Knot classloader (required to bootstrap Minecraft);
-// JMH therefore runs with forks=0 to stay in that JVM. The runner is gated by
-// the `jmh` system property so a normal `./gradlew test` skips the slow benchmarks.
-tasks.register('jmh', Test) {
-	group = "verification"
-	description = "Run JMH benchmarks (inside the Knot classloader, forks=0)."
-	useJUnitPlatform()
-	testClassesDirs = sourceSets.test.output.classesDirs
-	classpath = sourceSets.test.runtimeClasspath
-	filter { includeTestsMatching "profile.BenchmarkRunnerTest" }
-	systemProperty "jmh", "true"
-	if (project.hasProperty("bench")) {
-		systemProperty "bench", project.property("bench")
-	}
-	testLogging { showStandardStreams = true }
-	outputs.upToDateWhen { false }
-}
-
-processResources {
-	inputs.property "version", project.version
-
-	filesMatching("fabric.mod.json") {
-		expand "version": inputs.properties.version
-	}
-}
-
-tasks.withType(JavaCompile).configureEach {
-	it.options.release = 21
-}
-
-runClient {
-    jvmArgs "-XX:StartFlightRecording=duration=60s,filename=myrecording.jfr"
-}
-
-java {
-	// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
-	// if it is present.
-	// If you remove this line, sources will not be generated.
-	withSourcesJar()
-
-	sourceCompatibility = JavaVersion.VERSION_21
-	targetCompatibility = JavaVersion.VERSION_21
-}
-
-jar {
-	inputs.property "archivesName", project.base.archivesName
-
-	from("LICENSE") {
-		rename { "${it}_${inputs.properties.archivesName}"}
-	}
-}
-
-// configure the maven publication
-publishing {
-	publications {
-		create("mavenJava", MavenPublication) {
-			artifactId = project.archives_base_name
-			from components.java
-		}
-	}
-
-	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
 	repositories {
-		// Add repositories to publish to here.
-		// Notice: This block does NOT have the same function as the block in the top level.
-		// The repositories here will be used for publishing your artifact, not for
-		// retrieving dependencies.
+		maven { url 'https://maven.parchmentmc.org' }
+		maven { url 'https://maven.architectury.dev/' }
+		maven { url 'https://maven.neoforged.net/releases/' }
+	}
+
+	dependencies {
+		minecraft "com.mojang:minecraft:${rootProject.minecraft_version}"
+		// Official Mojang mappings + Parchment param names (shared by all loaders).
+		mappings(loom.layered {
+			officialMojangMappings()
+			parchment("org.parchmentmc.data:parchment-${rootProject.minecraft_version}:${rootProject.parchment_version}@zip")
+		})
+	}
+
+	tasks.withType(JavaCompile).configureEach {
+		it.options.release = 21
+	}
+
+	java {
+		withSourcesJar()
+		sourceCompatibility = JavaVersion.VERSION_21
+		targetCompatibility = JavaVersion.VERSION_21
 	}
 }

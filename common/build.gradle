@@ -1,0 +1,49 @@
+architectury {
+	common rootProject.enabled_platforms.split(',')
+	injectInjectables = true
+}
+
+loom {
+	// No accessWidener yet — the NavSectionBuilder palette access-widener is
+	// introduced in Phase 1 (it currently uses reflection; see PORTABILITY-AUDIT.md).
+}
+
+dependencies {
+	// Fabric Loader is used in common only for the @Environment annotations that
+	// Architectury's common module relies on (compile-time).
+	modImplementation "net.fabricmc:fabric-loader:${rootProject.fabric_loader_version}"
+	// Architectury API (platform-agnostic artifact).
+	modImplementation "dev.architectury:architectury:${rootProject.architectury_api_version}"
+
+	// ---- JMH micro-benchmark harness + headless-MC test harness ----
+	// Lives in common because the benchmarked code (NavSectionBuilder, block
+	// reads) is loader-agnostic. Run with `./gradlew :common:jmh`.
+	testImplementation "org.openjdk.jmh:jmh-core:1.37"
+	testAnnotationProcessor "org.openjdk.jmh:jmh-generator-annprocess:1.37"
+	testImplementation "org.openjdk.jmh:jmh-generator-annprocess:1.37"
+	testImplementation "net.fabricmc:fabric-loader-junit:${rootProject.fabric_loader_version}"
+	testImplementation platform("org.junit:junit-bom:5.10.2")
+	testImplementation "org.junit.jupiter:junit-jupiter"
+}
+
+test {
+	useJUnitPlatform()
+}
+
+// Run JMH benchmarks inside Fabric's Knot classloader (required to bootstrap
+// Minecraft headlessly); JMH therefore runs forks=0. Gated by -Djmh=true so a
+// normal `./gradlew test` skips the slow benchmarks. Invoke via `./gradlew :common:jmh`.
+tasks.register('jmh', Test) {
+	group = "verification"
+	description = "Run JMH benchmarks (inside the Knot classloader, forks=0)."
+	useJUnitPlatform()
+	testClassesDirs = sourceSets.test.output.classesDirs
+	classpath = sourceSets.test.runtimeClasspath
+	filter { includeTestsMatching "profile.BenchmarkRunnerTest" }
+	systemProperty "jmh", "true"
+	if (project.hasProperty("bench")) {
+		systemProperty "bench", project.property("bench")
+	}
+	testLogging { showStandardStreams = true }
+	outputs.upToDateWhen { false }
+}

@@ -1,4 +1,4 @@
-package com.orebit.mod;
+package com.orebit.mod.fabric;
 
 import net.fabricmc.api.ClientModInitializer;
 

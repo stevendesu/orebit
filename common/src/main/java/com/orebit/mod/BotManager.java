@@ -45,7 +45,7 @@ public class BotManager {
 
         botsByOwner.put(player.getUUID(), bot);
 
-        Orebit.LOGGER.info("[Orebit] Spawned bot for {}", player.getName().getString());
+        OrebitCommon.LOGGER.info("[Orebit] Spawned bot for {}", player.getName().getString());
     }
 
     public static void removeBotFor(ServerPlayer player) {
@@ -53,7 +53,7 @@ public class BotManager {
         if (bot != null && bot.isAlive()) {
             bot.kill((ServerLevel) bot.level());
             bot.discard();
-            Orebit.LOGGER.info("[Orebit] Removed bot for {}", player.getName().getString());
+            OrebitCommon.LOGGER.info("[Orebit] Removed bot for {}", player.getName().getString());
         }
     }
 
