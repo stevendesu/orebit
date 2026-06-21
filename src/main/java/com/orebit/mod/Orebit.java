@@ -9,7 +9,7 @@ import com.orebit.mod.worldmodel.pathing.ChunkNavLoader;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
-import net.minecraft.server.network.ServerPlayerEntity;
+import net.minecraft.server.level.ServerPlayer;
 
 
 public class Orebit implements ModInitializer {
@@ -30,13 +30,13 @@ public class Orebit implements ModInitializer {
 		});
 
 		ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
-			ServerPlayerEntity player = handler.getPlayer();
+			ServerPlayer player = handler.getPlayer();
 			LOGGER.info("[Orebit] Player {} connected.", player.getName());
 			BotManager.spawnBotFor(player);
 		});
 
 		ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
-			ServerPlayerEntity player = handler.getPlayer();
+			ServerPlayer player = handler.getPlayer();
 			LOGGER.info("[Orebit] Player {} disconnected.", player.getName());
 			BotManager.removeBotFor(player);
 		});

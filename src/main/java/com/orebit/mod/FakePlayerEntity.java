@@ -1,18 +1,16 @@
 package com.orebit.mod;
 
 import com.mojang.authlib.GameProfile;
-import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.network.packet.c2s.common.SyncedClientOptions;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.server.world.ServerWorld;
-import net.minecraft.util.math.Vec3d;
+import net.minecraft.server.level.ClientInformation;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 
-public class FakePlayerEntity extends ServerPlayerEntity {
+public class FakePlayerEntity extends ServerPlayer {
 
-    public FakePlayerEntity(MinecraftServer server, ServerWorld world, GameProfile profile, SyncedClientOptions options) {
+    public FakePlayerEntity(MinecraftServer server, ServerLevel world, GameProfile profile, ClientInformation options) {
         super(server, world, profile, options);
-        this.networkHandler = new FakeNetworkHandler(server, this);
+        this.connection = new FakeNetworkHandler(server, this);
 
         this.setNoGravity(false);
     }
@@ -21,7 +19,7 @@ public class FakePlayerEntity extends ServerPlayerEntity {
     public void tick() {
         super.baseTick();
         this.setNoGravity(false);
-        this.tickMovement();
+        this.aiStep();
     }
 
 }

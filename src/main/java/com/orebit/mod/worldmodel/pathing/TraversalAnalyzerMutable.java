@@ -2,15 +2,15 @@ package com.orebit.mod.worldmodel.pathing;
 
 import java.util.Set;
 
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Direction;
-import net.minecraft.world.World;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 
 public final class TraversalAnalyzerMutable {
-    private static final BlockPos.Mutable scratchPos = new BlockPos.Mutable();
+    private static final BlockPos.MutableBlockPos scratchPos = new BlockPos.MutableBlockPos();
     private static final int[][] neighborOffsets = {
         {-1, 0},
         {1, 0},
@@ -28,13 +28,13 @@ public final class TraversalAnalyzerMutable {
 
     private TraversalAnalyzerMutable() {}
 
-    public static TraversalClass classify(World world, BlockState[] blocks, int x, int y, int z) {
+    public static TraversalClass classify(Level world, BlockState[] blocks, int x, int y, int z) {
         BlockState ground = getBlockState(blocks, x, y, z);
         BlockState air1 = getBlockState(blocks, x, y + 1, z);
         BlockState air2 = getBlockState(blocks, x, y + 2, z);
 
-        float air1Hardness = air1.getBlock().getHardness();
-        float air2Hardness = air2.getBlock().getHardness();
+        float air1Hardness = air1.getBlock().defaultDestroyTime();
+        float air2Hardness = air2.getBlock().defaultDestroyTime();
 
         // There is no room to stand, and breaking the blocks
         // in the way is non-trivial (e.g. not leaves)
@@ -103,14 +103,14 @@ public final class TraversalAnalyzerMutable {
     }
 
     private static BlockState getBlockState(BlockState[] blocks, int x, int y, int z) {
-        if (x < 0 || x >= 16 || z < 0 || z >= 16 || y < 0 || y >= 16) return Blocks.AIR.getDefaultState();
+        if (x < 0 || x >= 16 || z < 0 || z >= 16 || y < 0 || y >= 16) return Blocks.AIR.defaultBlockState();
 
         return blocks[y + z * 16 + x * 16 * 16];
     }
 
-    private static boolean isStandable(World world, BlockState state, int x, int y, int z) {
+    private static boolean isStandable(Level world, BlockState state, int x, int y, int z) {
         scratchPos.set(x, y, z);
-        return state.getCollisionShape(world, scratchPos).getMax(Direction.Axis.Y) >= 0.5;
+        return state.getCollisionShape(world, scratchPos).max(Direction.Axis.Y) >= 0.5;
     }
 
     private static boolean isReplaceable(BlockState state) {
@@ -122,7 +122,7 @@ public final class TraversalAnalyzerMutable {
             || block == Blocks.LAVA;
     }
 
-    public static boolean isPlaceable(World world, BlockState[] blocks, BlockState state, int x, int y, int z) {
+    public static boolean isPlaceable(Level world, BlockState[] blocks, BlockState state, int x, int y, int z) {
         // Step 1: Block must be replaceable (air, tall grass, fluid, etc.)
         if (!isReplaceable(state)) {
             return false;

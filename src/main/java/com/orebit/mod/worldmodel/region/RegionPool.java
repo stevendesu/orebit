@@ -2,7 +2,7 @@ package com.orebit.mod.worldmodel.region;
 
 import java.util.ArrayDeque;
 
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.core.BlockPos;
 
 public final class RegionPool {
     private static final int POOL_SIZE = 256;

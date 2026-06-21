@@ -20,21 +20,21 @@ import org.openjdk.jmh.infra.Blackhole;
 
 import com.orebit.mod.worldmodel.pathing.NavSectionBuilder;
 
-import net.minecraft.Bootstrap;
 import net.minecraft.SharedConstants;
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.registry.Registries;
-import net.minecraft.util.collection.IndexedIterable;
-import net.minecraft.util.collection.Int2ObjectBiMap;
-import net.minecraft.util.collection.PaletteStorage;
-import net.minecraft.world.chunk.ArrayPalette;
-import net.minecraft.world.chunk.BiMapPalette;
-import net.minecraft.world.chunk.IdListPalette;
-import net.minecraft.world.chunk.Palette;
-import net.minecraft.world.chunk.PalettedContainer;
-import net.minecraft.world.chunk.SingularPalette;
+import net.minecraft.core.IdMap;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.server.Bootstrap;
+import net.minecraft.util.BitStorage;
+import net.minecraft.util.CrudeIncrementalIntIdentityHashBiMap;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.GlobalPalette;
+import net.minecraft.world.level.chunk.HashMapPalette;
+import net.minecraft.world.level.chunk.LinearPalette;
+import net.minecraft.world.level.chunk.Palette;
+import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.SingleValuePalette;
 
 /**
  * Reconstructs the block-reading optimization journey from
@@ -42,9 +42,9 @@ import net.minecraft.world.chunk.SingularPalette;
  * trustworthy, warmed-up ns/block numbers for the three read strategies that
  * survive the "bypass the World API" step:
  *
- *   containerGet   -> STEP 2/3: container.get(x,y,z) (megamorphic palette.get)
+ *   containerGet   -> STEP 2/3: container.get(x,y,z) (megamorphic palette.valueFor)
  *   reflectIndexed -> STEP 4: reflect into palette internals, per-type switch, indexed access
- *   reflectForEach -> STEP 5: reflect once, then PaletteStorage.forEach sequential scan
+ *   reflectForEach -> STEP 5: reflect once, then BitStorage.getAll sequential scan
  *
  * STEP 1 (world.getBlockState) is the documented ~3,000,000 ns baseline; it
  * requires a live World and is intentionally not synthesized here.
@@ -63,11 +63,11 @@ import net.minecraft.world.chunk.SingularPalette;
 public class BlockReadBenchmark {
 
     public enum Scenario {
-        /** All air -> SingularPalette (the ~60% common case). */
+        /** All air -> SingleValuePalette (the ~60% common case). */
         SINGULAR(0),
-        /** ~8 distinct blocks -> ArrayPalette. */
+        /** ~8 distinct blocks -> LinearPalette. */
         ARRAY(8),
-        /** ~64 distinct blocks -> BiMapPalette. */
+        /** ~64 distinct blocks -> HashMapPalette. */
         BIMAP(64);
 
         final int distinct;
@@ -86,38 +86,38 @@ public class BlockReadBenchmark {
     @Setup(Level.Trial)
     public void setup() {
         if (!bootstrapped) {
-            SharedConstants.createGameVersion();
-            Bootstrap.initialize();
+            SharedConstants.tryDetectVersion();
+            Bootstrap.bootStrap();
             bootstrapped = true;
         }
 
         container = newContainer(scenario.distinct);
 
         // Report which palette type the scenario actually produced, and confirm
-        // PaletteStorage.forEach visits all 4096 cells (guards reflectForEach
+        // BitStorage.getAll visits all 4096 cells (guards reflectForEach
         // against silently measuring nothing on, e.g., an empty storage).
         Palette<BlockState> palette = NavSectionBuilder.getPaletteViaReflection(container);
-        PaletteStorage storage = NavSectionBuilder.getStorageViaReflection(container);
+        BitStorage storage = NavSectionBuilder.getStorageViaReflection(container);
         int[] visited = {0};
-        storage.forEach(id -> visited[0]++);
-        System.out.printf("[setup] scenario=%s palette=%s storage=%s forEachVisited=%d%n",
+        storage.getAll(id -> visited[0]++);
+        System.out.printf("[setup] scenario=%s palette=%s storage=%s getAllVisited=%d%n",
                 scenario, palette.getClass().getSimpleName(),
                 storage.getClass().getSimpleName(), visited[0]);
     }
 
     /** Build a container whose distinct-block count forces a particular palette type. */
     private static PalettedContainer<BlockState> newContainer(int distinct) {
-        BlockState air = Blocks.AIR.getDefaultState();
+        BlockState air = Blocks.AIR.defaultBlockState();
         PalettedContainer<BlockState> c = new PalettedContainer<>(
-                Block.STATE_IDS, air, PalettedContainer.PaletteProvider.BLOCK_STATE);
+                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
 
         if (distinct <= 0) {
             return c; // all air -> singular
         }
 
         List<BlockState> states = new ArrayList<>(distinct);
-        for (Block b : Registries.BLOCK) {
-            BlockState s = b.getDefaultState();
+        for (Block b : BuiltInRegistries.BLOCK) {
+            BlockState s = b.defaultBlockState();
             if (s == air) continue;
             states.add(s);
             if (states.size() >= distinct) break;
@@ -135,7 +135,7 @@ public class BlockReadBenchmark {
         return c;
     }
 
-    // ---- STEP 2/3: the standard container path (megamorphic palette.get) ----
+    // ---- STEP 2/3: the standard container path (megamorphic palette.valueFor) ----
 
     @Benchmark
     public void containerGet(Blackhole bh) {
@@ -154,52 +154,52 @@ public class BlockReadBenchmark {
     @Benchmark
     public void reflectIndexed(Blackhole bh) {
         PalettedContainer<BlockState> c = container;
-        PaletteStorage storage = NavSectionBuilder.getStorageViaReflection(c);
+        BitStorage storage = NavSectionBuilder.getStorageViaReflection(c);
         Palette<BlockState> palette = NavSectionBuilder.getPaletteViaReflection(c);
         switch (palette) {
-            case SingularPalette<BlockState> sp -> {
-                BlockState entry = palette.get(0);
+            case SingleValuePalette<BlockState> sp -> {
+                BlockState entry = palette.valueFor(0);
                 for (int i = 0; i < CELLS; i++) { bh.consume(entry); }
             }
-            case ArrayPalette<BlockState> ap -> {
+            case LinearPalette<BlockState> ap -> {
                 Object[] array = NavSectionBuilder.getArrayFieldViaReflection(ap);
                 for (int i = 0; i < CELLS; i++) { bh.consume((BlockState) array[storage.get(i)]); }
             }
-            case BiMapPalette<BlockState> bp -> {
-                Int2ObjectBiMap<BlockState> map = NavSectionBuilder.getBiMapFieldViaReflection(bp);
-                for (int i = 0; i < CELLS; i++) { bh.consume(map.get(storage.get(i))); }
+            case HashMapPalette<BlockState> bp -> {
+                CrudeIncrementalIntIdentityHashBiMap<BlockState> map = NavSectionBuilder.getBiMapFieldViaReflection(bp);
+                for (int i = 0; i < CELLS; i++) { bh.consume(map.byId(storage.get(i))); }
             }
-            case IdListPalette<BlockState> ip -> {
-                IndexedIterable<BlockState> idList = NavSectionBuilder.getIdListFieldViaReflection(ip);
-                for (int i = 0; i < CELLS; i++) { bh.consume(idList.get(storage.get(i))); }
+            case GlobalPalette<BlockState> ip -> {
+                IdMap<BlockState> idList = NavSectionBuilder.getIdListFieldViaReflection(ip);
+                for (int i = 0; i < CELLS; i++) { bh.consume(idList.byId(storage.get(i))); }
             }
             default -> throw new IllegalStateException("Unexpected palette: " + palette);
         }
     }
 
-    // ---- STEP 5: reflect once, then PaletteStorage.forEach sequential scan ----
+    // ---- STEP 5: reflect once, then BitStorage.getAll sequential scan ----
 
     @Benchmark
     public void reflectForEach(Blackhole bh) {
         PalettedContainer<BlockState> c = container;
-        PaletteStorage storage = NavSectionBuilder.getStorageViaReflection(c);
+        BitStorage storage = NavSectionBuilder.getStorageViaReflection(c);
         Palette<BlockState> palette = NavSectionBuilder.getPaletteViaReflection(c);
         switch (palette) {
-            case SingularPalette<BlockState> sp -> {
-                BlockState entry = palette.get(0);
-                storage.forEach(id -> bh.consume(entry));
+            case SingleValuePalette<BlockState> sp -> {
+                BlockState entry = palette.valueFor(0);
+                storage.getAll(id -> bh.consume(entry));
             }
-            case ArrayPalette<BlockState> ap -> {
+            case LinearPalette<BlockState> ap -> {
                 Object[] array = NavSectionBuilder.getArrayFieldViaReflection(ap);
-                storage.forEach(id -> bh.consume((BlockState) array[id]));
+                storage.getAll(id -> bh.consume((BlockState) array[id]));
             }
-            case BiMapPalette<BlockState> bp -> {
-                Int2ObjectBiMap<BlockState> map = NavSectionBuilder.getBiMapFieldViaReflection(bp);
-                storage.forEach(id -> bh.consume(map.get(id)));
+            case HashMapPalette<BlockState> bp -> {
+                CrudeIncrementalIntIdentityHashBiMap<BlockState> map = NavSectionBuilder.getBiMapFieldViaReflection(bp);
+                storage.getAll(id -> bh.consume(map.byId(id)));
             }
-            case IdListPalette<BlockState> ip -> {
-                IndexedIterable<BlockState> idList = NavSectionBuilder.getIdListFieldViaReflection(ip);
-                storage.forEach(id -> bh.consume(idList.get(id)));
+            case GlobalPalette<BlockState> ip -> {
+                IdMap<BlockState> idList = NavSectionBuilder.getIdListFieldViaReflection(ip);
+                storage.getAll(id -> bh.consume(idList.byId(id)));
             }
             default -> throw new IllegalStateException("Unexpected palette: " + palette);
         }

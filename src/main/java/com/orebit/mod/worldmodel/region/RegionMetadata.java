@@ -1,9 +1,9 @@
 package com.orebit.mod.worldmodel.region;
 
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.world.World;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.Arrays;
 
@@ -19,7 +19,7 @@ public class RegionMetadata {
     private byte maxLight = 0;
     private float avgLight = 0f;
 
-    public void scan(World world, BlockPos origin, short[] offsets, int count) {
+    public void scan(Level world, BlockPos origin, short[] offsets, int count) {
         int[] rawBlockCounts = new int[MAX_BLOCK_TYPES];
         int totalLight = 0;
 
@@ -34,7 +34,7 @@ public class RegionMetadata {
             int type = RegionBlockIndex.getIndexForBlock(block);
             if (type >= 0) rawBlockCounts[type]++;
 
-            int light = world.getLightLevel(pos);
+            int light = world.getMaxLocalRawBrightness(pos);
             minLight = (byte) Math.min(minLight, light);
             maxLight = (byte) Math.max(maxLight, light);
             totalLight += light;
@@ -53,7 +53,7 @@ public class RegionMetadata {
         int dx = (offset >> 8) & 0xF;
         int dy = (offset >> 4) & 0xF;
         int dz = offset & 0xF;
-        return origin.add(dx, dy, dz);
+        return origin.offset(dx, dy, dz);
     }
 
     public void reset() {

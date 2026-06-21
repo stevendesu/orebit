@@ -1,33 +1,31 @@
 package com.orebit.mod;
 
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.Vec3d;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.entity.Entity;
-import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.server.world.ServerWorld;
+import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
 
 public class BotPositioning {
 
-    public static BlockPos findSafeSpotNear(ServerPlayerEntity player, int radius) {
-        ServerWorld world = (ServerWorld) player.getWorld();
-        BlockPos playerPos = player.getBlockPos();
+    public static BlockPos findSafeSpotNear(ServerPlayer player, int radius) {
+        ServerLevel world = (ServerLevel) player.level();
+        BlockPos playerPos = player.blockPosition();
 
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dz = -radius; dz <= radius; dz++) {
                 if (dx * dx + dz * dz > radius * radius) continue; // circle shape
 
                 for (int dy = -1; dy <= 1; dy++) { // allow vertical range
-                    BlockPos candidate = playerPos.add(dx, dy, dz);
-                    BlockState blockBelow = world.getBlockState(candidate.down());
+                    BlockPos candidate = playerPos.offset(dx, dy, dz);
+                    BlockState blockBelow = world.getBlockState(candidate.below());
                     BlockState blockAt = world.getBlockState(candidate);
-                    BlockState blockAbove = world.getBlockState(candidate.up());
+                    BlockState blockAbove = world.getBlockState(candidate.above());
 
                     boolean isSafe = blockAt.isAir()
                             && blockAbove.isAir()
-                            && blockBelow.isOpaqueFullCube()
+                            && blockBelow.isSolidRender()
                             && blockAt.getFluidState().isEmpty();
 
                     if (isSafe) {
@@ -41,10 +39,10 @@ public class BotPositioning {
     }
 
     public static void faceEachOther(Entity a, Entity b) {
-        Vec3d diff = b.getPos().subtract(a.getPos());
+        Vec3 diff = b.position().subtract(a.position());
         float yaw = (float) (Math.toDegrees(Math.atan2(-diff.x, diff.z)));
-        a.setYaw(yaw);
-        a.setHeadYaw(yaw);
-        a.setBodyYaw(yaw);
+        a.setYRot(yaw);
+        a.setYHeadRot(yaw);
+        a.setYBodyRot(yaw);
     }
 }

@@ -1,26 +1,26 @@
 package com.orebit.mod.worldmodel.pathing;
 
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.fluid.FluidState;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Direction;
-import net.minecraft.world.World;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.FluidState;
 
 public final class TraversalAnalyzer {
     private TraversalAnalyzer() {}
 
-    public static TraversalClass classify(World world, BlockPos pos) {
+    public static TraversalClass classify(Level world, BlockPos pos) {
         // We can't path in the void
-        if (pos.getY() <= world.getBottomY()) return TraversalClass.BLOCKED;
+        if (pos.getY() <= world.getMinY()) return TraversalClass.BLOCKED;
 
         BlockState ground = world.getBlockState(pos);
-        BlockState air1 = world.getBlockState(pos.up());
-        BlockState air2 = world.getBlockState(pos.up(2));
+        BlockState air1 = world.getBlockState(pos.above());
+        BlockState air2 = world.getBlockState(pos.above(2));
 
-        float air1Hardness = air1.getBlock().getHardness();
-        float air2Hardness = air2.getBlock().getHardness();
+        float air1Hardness = air1.getBlock().defaultDestroyTime();
+        float air2Hardness = air2.getBlock().defaultDestroyTime();
 
         // There is no room to stand, and breaking the blocks
         // in the way is non-trivial (e.g. not leaves)
@@ -39,13 +39,13 @@ public final class TraversalAnalyzer {
         if (isGravityBlock(ground) && isUnsupported(world, pos)) {
             return TraversalClass.BLOCKED;
         }
-        if (isGravityBlock(air1) && isUnsupported(world, pos.up())) {
+        if (isGravityBlock(air1) && isUnsupported(world, pos.above())) {
             return TraversalClass.BLOCKED;
         }
 
         // If breaking a block would cause fluid to flow, then we
         // should avoid operations in the area
-        if (risksFluidFlow(world, pos.up()) || risksFluidFlow(world, pos.up(2))) {
+        if (risksFluidFlow(world, pos.above()) || risksFluidFlow(world, pos.above(2))) {
             return TraversalClass.BLOCKED;
         }
 
@@ -86,19 +86,19 @@ public final class TraversalAnalyzer {
         return TraversalClass.BLOCKED;
     }
 
-    private static boolean isStandable(World world, BlockPos pos, BlockState state) {
-        return state.getCollisionShape(world, pos).getMax(Direction.Axis.Y) >= 0.5;
+    private static boolean isStandable(Level world, BlockPos pos, BlockState state) {
+        return state.getCollisionShape(world, pos).max(Direction.Axis.Y) >= 0.5;
     }
 
-    public static boolean isPlaceable(World world, BlockPos pos, BlockState state) {
+    public static boolean isPlaceable(Level world, BlockPos pos, BlockState state) {
         // Step 1: Block must be replaceable (air, tall grass, fluid, etc.)
-        if (!state.isReplaceable()) {
+        if (!state.canBeReplaced()) {
             return false;
         }
 
         // Step 2: Look for ANY face we could attach to
         for (Direction dir : Direction.values()) {
-            BlockPos neighborPos = pos.offset(dir);
+            BlockPos neighborPos = pos.relative(dir);
             BlockState neighbor = world.getBlockState(neighborPos);
 
             if (!neighbor.isAir() && neighbor.getFluidState().isEmpty()) {
@@ -140,8 +140,8 @@ public final class TraversalAnalyzer {
             || block == Blocks.SOUL_CAMPFIRE;
     }
 
-    private static boolean isUnsupported(World world, BlockPos pos) {
-        BlockState belowState = world.getBlockState(pos.down());
+    private static boolean isUnsupported(Level world, BlockPos pos) {
+        BlockState belowState = world.getBlockState(pos.below());
         return belowState.isAir();
     }
 
@@ -156,13 +156,13 @@ public final class TraversalAnalyzer {
             || block.toString().contains("CONCRETE_POWDER");
     }
 
-    private static boolean risksFluidFlow(World world, BlockPos pos) {
+    private static boolean risksFluidFlow(Level world, BlockPos pos) {
         for (Direction dir : Direction.values()) {
-            BlockPos neighborPos = pos.offset(dir);
+            BlockPos neighborPos = pos.relative(dir);
             FluidState fluid = world.getFluidState(neighborPos);
             // Is the adjacent block a fluid?
             if (!fluid.isEmpty()) {
-                BlockPos belowNeighbor = neighborPos.down();
+                BlockPos belowNeighbor = neighborPos.below();
                 FluidState fluidBelow = world.getFluidState(belowNeighbor);
                 // Is that fluid already flowing down?
                 return fluidBelow.isEmpty();

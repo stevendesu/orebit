@@ -11,24 +11,24 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import net.minecraft.block.BambooBlock;
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.BlockWithEntity;
-import net.minecraft.block.Blocks;
-import net.minecraft.block.DoorBlock;
-import net.minecraft.block.FallingBlock;
-import net.minecraft.block.PointedDripstoneBlock;
-import net.minecraft.block.SlabBlock;
-import net.minecraft.block.SnowBlock;
-import net.minecraft.block.StairsBlock;
-import net.minecraft.block.TrapdoorBlock;
-import net.minecraft.registry.Registries;
-import net.minecraft.registry.tag.BlockTags;
-import net.minecraft.state.property.Properties;
-import net.minecraft.util.math.Direction;
-import net.minecraft.util.shape.VoxelShape;
-import net.minecraft.util.shape.VoxelShapes;
+import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.world.level.block.BambooStalkBlock;
+import net.minecraft.world.level.block.BaseEntityBlock;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.FallingBlock;
+import net.minecraft.world.level.block.PointedDripstoneBlock;
+import net.minecraft.world.level.block.SlabBlock;
+import net.minecraft.world.level.block.SnowLayerBlock;
+import net.minecraft.world.level.block.StairBlock;
+import net.minecraft.world.level.block.TrapDoorBlock;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.phys.shapes.Shapes;
+import net.minecraft.world.phys.shapes.VoxelShape;
 
 public final class NavBlock {
 
@@ -55,7 +55,7 @@ public final class NavBlock {
 
     private static final Set<Direction> ALL_FACES = EnumSet.allOf(Direction.class);
     private static final Set<Direction> NO_FACES = EnumSet.noneOf(Direction.class);
-    private static final VoxelShape FULL_CUBE = VoxelShapes.fullCube();
+    private static final VoxelShape FULL_CUBE = Shapes.block();
 
     private static boolean blockIsClimbable(Block block) {
         return block == Blocks.LADDER ||
@@ -82,18 +82,18 @@ public final class NavBlock {
     }
 
     private static Tool getBestToolForBlock(BlockState state) {
-        if (/*state.isOf(Blocks.WOOL) || state.isOf(Blocks.LEAVES) || */state.isOf(Blocks.VINE) || state.isOf(Blocks.COBWEB)) {
+        if (/*state.is(Blocks.WOOL) || state.is(Blocks.LEAVES) || */state.is(Blocks.VINE) || state.is(Blocks.COBWEB)) {
             return Tool.SHEARS;
         }
-        if (state.isIn(BlockTags.PICKAXE_MINEABLE)) {
+        if (state.is(BlockTags.MINEABLE_WITH_PICKAXE)) {
             return Tool.PICKAXE; // or any other pickaxe
-        } else if (state.isIn(BlockTags.AXE_MINEABLE)) {
+        } else if (state.is(BlockTags.MINEABLE_WITH_AXE)) {
             return Tool.AXE; // or any other axe
-        } else if (state.isIn(BlockTags.SHOVEL_MINEABLE)) {
+        } else if (state.is(BlockTags.MINEABLE_WITH_SHOVEL)) {
             return Tool.SHOVEL; // or any other shovel
-        } else if (state.isIn(BlockTags.HOE_MINEABLE)) {
+        } else if (state.is(BlockTags.MINEABLE_WITH_HOE)) {
             return Tool.HOE; // or any other hoe
-        } else if (state.isIn(BlockTags.SWORD_EFFICIENT)) {
+        } else if (state.is(BlockTags.SWORD_EFFICIENT)) {
             return Tool.SWORD;
         }
         return Tool.NONE; // No specific tool
@@ -102,10 +102,10 @@ public final class NavBlock {
     private static boolean blockIsDirectional(Block block) {
         return (
             block instanceof DoorBlock ||
-            block instanceof TrapdoorBlock ||
+            block instanceof TrapDoorBlock ||
             block instanceof SlabBlock ||
-            block instanceof StairsBlock ||
-            block instanceof SnowBlock
+            block instanceof StairBlock ||
+            block instanceof SnowLayerBlock
         );
     }
 
@@ -117,13 +117,13 @@ public final class NavBlock {
     );
 
     static {
-        Registries.BLOCK.forEach(block -> {
-            final BlockState bs = block.getDefaultState();
+        BuiltInRegistries.BLOCK.forEach(block -> {
+            final BlockState bs = block.defaultBlockState();
             Set<Direction> solidFaces;
             VoxelShape shape;
             if (
-                block instanceof BlockWithEntity ||
-                block instanceof BambooBlock ||
+                block instanceof BaseEntityBlock ||
+                block instanceof BambooStalkBlock ||
                 block instanceof PointedDripstoneBlock
             ) {
                 solidFaces = ALL_FACES;
@@ -131,13 +131,13 @@ public final class NavBlock {
             } else {
                 solidFaces = Arrays.stream(Direction.values())
                     .filter(direction -> {
-                        return bs.isSideSolidFullSquare(null, null, direction);
+                        return bs.isFaceSturdy(null, null, direction);
                     })
                     .collect(Collectors.toSet());
                 shape = bs.getCollisionShape(null, null);
             }
             NavBlock navBlock = NavBlock.builder()
-                .height(shape.getMax(Direction.Axis.Y))
+                .height(shape.max(Direction.Axis.Y))
                 .solidFaces(solidFaces)
                 // closedFaces
                 .climbable(blockIsClimbable(block))
@@ -145,19 +145,19 @@ public final class NavBlock {
                 .gravity(block instanceof FallingBlock)
                 .damaging(blockWillCauseDamage(block))
                 .slowing(blockWillCauseSlow(block))
-                .replaceable(bs.isReplaceable())
-                .hardness(block.getHardness())
+                .replaceable(bs.canBeReplaced())
+                .hardness(block.defaultDestroyTime())
                 .tool(getBestToolForBlock(bs))
-                .toolRequired(bs.isToolRequired())
+                .toolRequired(bs.requiresCorrectToolForDrops())
                 .directional(blockIsDirectional(block))
-                .waterloggable(bs.contains(Properties.WATERLOGGED))
+                .waterloggable(bs.hasProperty(BlockStateProperties.WATERLOGGED))
                 .build();
             byte index = register(navBlock);
             map(block, index);
         });
 
         System.out.println("Number of registered navblocks: " + Arrays.toString(nextIndex));
-        System.out.println("Mapped MineCraft blocks: " + blockMappings().size() + " / " + Registries.BLOCK.size());
+        System.out.println("Mapped MineCraft blocks: " + blockMappings().size() + " / " + BuiltInRegistries.BLOCK.size());
         dumpBlockCsv();
     }
 
