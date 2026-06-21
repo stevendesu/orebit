@@ -10,8 +10,6 @@ import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.world.World;
 
 
 public class Orebit implements ModInitializer {
@@ -23,24 +21,6 @@ public class Orebit implements ModInitializer {
 	public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
 	volatile byte sink;
-	volatile boolean sink2;
-
-	private void benchmarkMe(ServerPlayerEntity player) {
-		World world = player.getWorld();
-		BlockPos origin = player.getBlockPos();
-		final int origX = origin.getX();
-		final int origZ = origin.getZ();
-		long start = System.nanoTime();
-		for (int i = 0; i < 100; i++) {
-			int x = i % 10;
-			int y = 40;
-			int z = i / 10;
-			BlockPos pos = new BlockPos(origX + x * 8 - 80, y, origZ + z * 8 - 80);
-			sink2 = world.getBlockState(pos).isSolidBlock(world, pos);
-		}
-		long duration = System.nanoTime() - start;
-		System.out.println("Benchmark: " + (duration / 100) + "ns");
-	}
 
 	@Override
 	public void onInitialize() {
@@ -53,8 +33,6 @@ public class Orebit implements ModInitializer {
 			ServerPlayerEntity player = handler.getPlayer();
 			LOGGER.info("[Orebit] Player {} connected.", player.getName());
 			BotManager.spawnBotFor(player);
-
-			benchmarkMe(player);
 		});
 
 		ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
