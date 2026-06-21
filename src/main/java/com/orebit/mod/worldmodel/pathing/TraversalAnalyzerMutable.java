@@ -2,6 +2,7 @@ package com.orebit.mod.worldmodel.pathing;
 
 import java.util.Set;
 
+import com.orebit.mod.platform.VersionedBlocks;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
@@ -117,7 +118,7 @@ public final class TraversalAnalyzerMutable {
         Block block = state.getBlock();
         return block == Blocks.AIR
             || block == Blocks.TALL_GRASS
-            || block == Blocks.SHORT_GRASS
+            || block == VersionedBlocks.SHORT_GRASS
             || block == Blocks.WATER
             || block == Blocks.LAVA;
     }

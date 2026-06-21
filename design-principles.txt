@@ -21,6 +21,20 @@ large.
 Instead, all classes should have a single responsibility and should manage their own
 state and logic internally.
 
+### Static-accessor classes are fine — IF they are narrow and well-named
+
+The problem above is *breadth*, not *staticness*. A static class whose purpose is obvious
+from its name and which holds ONE well-defined responsibility is perfectly good design.
+`LevelBounds.minY(world)` is fine: the name tells you exactly what lives there and you
+would naturally type `LevelBounds` to find it. What is NOT fine is `VersionUtils` or
+`McHelper` — a name so broad that fifty unrelated methods inevitably accumulate in it,
+at which point you can no longer tell who calls it, what it's for, or what to pass it.
+
+So the test is: does the class name name a single, bounded concern? If yes, a static
+accessor is a legitimate way to colocate that concern (and, for version/loader seams,
+to keep the version-divergent call in exactly one discoverable place). If the name could
+absorb almost anything, split it until each piece is nameable.
+
 This leads to my next design principle:
 
 ## Prefer smart objects over plain data objects

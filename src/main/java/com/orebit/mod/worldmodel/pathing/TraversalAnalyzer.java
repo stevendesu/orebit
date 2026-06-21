@@ -1,5 +1,6 @@
 package com.orebit.mod.worldmodel.pathing;
 
+import com.orebit.mod.platform.LevelBounds;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
@@ -13,7 +14,7 @@ public final class TraversalAnalyzer {
 
     public static TraversalClass classify(Level world, BlockPos pos) {
         // We can't path in the void
-        if (pos.getY() <= world.getMinY()) return TraversalClass.BLOCKED;
+        if (pos.getY() <= LevelBounds.minY(world)) return TraversalClass.BLOCKED;
 
         BlockState ground = world.getBlockState(pos);
         BlockState air1 = world.getBlockState(pos.above());

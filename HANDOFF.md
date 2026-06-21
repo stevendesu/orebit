@@ -1,108 +1,89 @@
 # HANDOFF — Orebit multi-version/loader work
 
 > **Temporary file.** Delete (or overwrite) this at the end of the next session.
-> Written 2026-06-21.
+> Updated 2026-06-21 (session 2).
 
 ## Where we are
 
-- **Phase 0 is COMPLETE and merged to `master`** (merge commit `a129dec`): foundation
-  hygiene + full Yarn→Mojmap migration + Architectury (common/fabric/neoforge) +
-  Stonecutter-native multi-version wrap. Fabric & NeoForge both build *and launch*
-  (user-confirmed) on MC 1.21.4. `master` is green; don't disturb it casually.
-- **In progress on branch `feature/forge-1.20.1`** (tip `3a8578e`): adding a 2nd MC
-  version (1.20.1) + a Forge loader branch, as a portability stress-test.
-  - ✅ `RegionBlockIndex` now resolves blocks by registry id, skipping absent ones
-    (commit `d370916`) — handles version-divergent blocks (e.g. `pale_oak_log`).
-  - ✅ Stonecutter matrix: `versions("1.21.4","1.20.1")`; fabric/neoforge pinned to
-    1.21.4, `forge` branch pinned to 1.20.1. Per-version deps in
-    `versions/<mcver>/gradle.properties`; Java 17-vs-21 chosen via
-    `stonecutter.eval(minecraft, ">=1.20.5")`.
-  - ✅ Forge adapter (`forge/…/OrebitForge` + `ForgePlatformEvents` on the
-    `net.minecraftforge` event API), `mods.toml`, `pack.mcmeta`.
-  - ✅ `RegionPool` pattern-switch → `instanceof` chain (Java 17 compatible).
-  - ✅ **1.21.4 fabric+neoforge still green** (verified `chiseledBuildFabric`).
-  - ❌ **Forge 1.20.1 does NOT yet build** — one remaining divergence (below).
+- **Phase 0 complete + merged to `master`** (merge `a129dec`): foundation hygiene,
+  Yarn→Mojmap, Architectury (common/fabric/neoforge), Stonecutter multi-version.
+- **On branch `feature/forge-1.20.1`:** **ALL THREE loader/version combos now BUILD.**
+  `./gradlew chiseledBuildFabric chiseledBuildNeoforge chiseledBuildForge` → green.
+  Produces `orebit-fabric-…+1.21.4.jar`, `orebit-neoforge-…+1.21.4.jar`, and
+  **`orebit-forge-…+1.20.1.jar`**. Changes are uncommitted (working tree).
 
-## The ONE remaining divergence for 1.20.1
+## What was done this session — the version-overlay mechanism
 
-The 1.20.1 common compile fails *only* on the **1.20.2 login refactor**: `ClientInformation`
-and `CommonListenerCookie` don't exist pre-1.20.2. Affected files (all in `src/main/java/com/orebit/mod/`):
-`FakePlayerEntity`, `AllyBotEntity`, `BotManager`, `FakeNetworkHandler`.
+The user prefers file-level version adapters over Stonecutter `//?` comments. We built a
+**forward-looking overlay system**:
 
-1.20.1 fake-player API (vs current 1.21.4 code):
-- `ServerPlayer(MinecraftServer, ServerLevel, GameProfile)` — **3-arg** (no `ClientInformation`).
-- `ServerGamePacketListenerImpl(MinecraftServer, Connection, ServerPlayer)` — **3-arg** (no `CommonListenerCookie`).
-- No `ClientInformation` type; no `ServerPlayer.clientInformation()` getter.
+- **Overlays live in a TOP-LEVEL `overlays/<era>/java/…` dir** (mirrors the package tree).
+  `<era>` = the FIRST MC version that flavor applies to. Add a new era dir only when a
+  newer version breaks something; never rename old ones.
+- **Must be OUTSIDE `src/`.** Stonecutter copies the *entire* `src/` tree into its
+  per-version `chiseledSrc`, so any overlay under `src/` gets every era swept in at once →
+  duplicate-class. (Tried `src/main/overlays` and `src/overlays`; both failed for this
+  reason. Top-level `overlays/` is the only location that works.)
+- **Selection logic in `build.gradle.kts`** (the common script, applied to common nodes):
+  for the active MC version it adds the single highest `overlays/<era>` whose version ≤
+  active, as an extra `sourceSets.main.java.srcDir`. Logs `[orebit] MC <v> -> overlay era
+  '<era>'`. Confirmed: `1.20.1 → era 1.20.1`, `1.21.4 → era 1.20.2`.
+- **Each era dir is a complete snapshot** of the version-divergent files for that era (so
+  "highest era ≤ active" always provides every divergent class with no core duplicate).
+  Divergent files do NOT live in `src/main/java`.
 
-**Nothing else diverged** — no block-name changes (`BambooStalkBlock`/`SHORT_GRASS` are stable
-in Mojmap back to 1.20.1), no method renames, nothing in worldmodel/pathing. This strongly
-validates `PORTABILITY-AUDIT.md`: the only version-volatile surface is the fake-player stack.
+### Divergences found and fixed (the HANDOFF in session 1 was WRONG)
 
-### >>> USER DIRECTIVE on HOW to fix it (important — changes the approach)
+Session 1 reported "only the login refactor diverges" — but compilation had stopped at the
+first error. With that fixed, 4 more surfaced, **exactly as `PORTABILITY-AUDIT.md`
+predicted**. All now fixed:
 
-The user **prefers dynamic dispatch / strategy pattern over inline version conditionals.**
-Do NOT fill the 4 files with Stonecutter `//?` comments / multiple constructors (a "spaghetti
-mess"). Preferred shape: a common interface/abstract for the bot player, with simple
-version-specific implementations (e.g. `Pre1_20_2Player` / `Post1_20_2Player`) instantiated via
-a factory; the rest of the code stays version-agnostic.
+| Divergence | 1.20.1 API | Fix |
+|---|---|---|
+| `ServerPlayer` 4-arg ctor (`ClientInformation`, 1.20.2) | 3-arg | `FakePlayerEntity` overlay (1.20.1 vs 1.20.2 era); ctor now 3-arg `(server,world,profile)`, 1.20.2 era supplies `ClientInformation.createDefault()` internally |
+| `ServerGamePacketListenerImpl` 4-arg ctor (`CommonListenerCookie`, 1.20.2) | 3-arg | `FakeNetworkHandler` overlay |
+| `LivingEntity.kill(ServerLevel)` (1.21) | `kill()` | `FakePlayerEntity.removeFromWorld()` (smart object); `BotManager` just calls `bot.removeFromWorld()` |
+| `BlockState.isSolidRender()` | `isSolidRender(BlockGetter,BlockPos)` | `platform.BlockShapes.isSolidRender(state,level,pos)` accessor (overlay) |
+| `Level.getMinY()` (1.21) | `getMinBuildHeight()` | `platform.LevelBounds.minY(world)` accessor (overlay) |
+| `Blocks.SHORT_GRASS` (1.20.3) | `Blocks.GRASS` | `platform.VersionedBlocks.SHORT_GRASS` constant (overlay) |
 
-**Design constraint to resolve first:** Stonecutter compiles ONE MC version per source set, and a
-`Post1_20_2Player` that names `ClientInformation` will NOT compile on 1.20.1 — so two
-version-incompatible classes can't both sit in `common` for a single-version compile. Options to
-work out next session: (a) put the version-divergent player/handler construction in a tiny
-factory that is the *only* place with a Stonecutter `//?` seam (minimal, behind a clean
-interface); (b) investigate whether Stonecutter supports per-version source files/overrides so the
-two classes live in version-scoped source; (c) move the fake-player entity into per-branch source
-(fabric+neoforge share post-1.20.2; forge has pre-1.20.2) — but that duplicates across
-fabric/neoforge. Lean toward (a) or (b): keep the seam tiny, keep the interface clean.
+The `platform.*` accessors are **narrow, single-responsibility, version-selected concrete
+classes** compiled one-flavor-per-version (compile-time selection = zero runtime dispatch —
+satisfies the hot-path requirement). `design-principles.txt` was updated to clarify that
+narrow well-named static-accessor classes are fine (the anti-pattern is broad `*Utils`).
 
-If `//?` is unavoidable at the seam, CONFIRM the exact Stonecutter/Stitcher comment syntax first
-(docs fetches came back garbled this session) — wrong syntax breaks BOTH versions. Check the
-Stonecutter IntelliJ "Stonecutter Dev" plugin docs or a real mod's source for a verified
-`//? if … { } else { }` example.
+### Known imprecision (intentional, to be resolved by the walk-back)
 
-After the fix: `./gradlew chiseledBuild` must be green on **both** 1.20.1 and 1.21.4; then the
-user runs `:forge:1.20.1:runClient` (interactive) to confirm the bot spawns+follows on Forge.
+The `1.20.2` era currently bundles ALL post-1.20.1 deltas, even ones that actually changed
+later (`kill`/`getMinY` at 1.21, `SHORT_GRASS` at 1.20.3, `isSolidRender` sig later). This
+is correct for the only two targets today (1.20.1, 1.21.4) but would be wrong for an
+untargeted 1.20.2–1.20.6. The version walk-back (below) will split `1.20.2` into finer eras
+and the bundled flavors carry `// this era currently targets 1.21.4` notes pointing at it.
 
-## Then: version walk-back test plan (user's strategy)
+## Next steps
 
-We know *what* diverged 1.21.4↔1.20.1 but not *when* (1.20.2? .3? .5? 1.21.0?).
-1. Once 1.20.1 works, do a **quick pass adding every version between 1.20.1 and 1.21.4** to pin
-   down exactly which version introduced each divergence.
-2. **Going forward, when targeting a NEW version, walk back ONE version at a time** so any break
-   is attributed to a specific version. For the upcoming 26.2 target, the ladder is:
-   1.21.5 (Spring to Life) → 1.21.6 (Chase the Skies) → 1.21.7–1.21.9 (Copper age) →
-   1.21.10–1.21.11 (Mounts of Mayhem) → 26.1 (Tiny Takeover) → 26.2 (Chaos Cubed).
-
-## Then: document per-version divergences (user's idea)
-
-Maintain a reference of what changed per version + the code pointers/branching seams. The user
-suggests a **new internal docs folder** (e.g. `internal_docs/`) — NOT `docs/` (that's the public
-MkDocs site). Consider **moving `PRD.md` (and `PORTABILITY-AUDIT.md`) into `internal_docs/`** at
-the same time. (Update CLAUDE.md "Where to look" paths if you move them.)
+1. **Interactive verify (USER runs):** `./gradlew :forge:1.20.1:runClient` — confirm the bot
+   spawns + follows on Forge 1.20.1. (Fabric/NeoForge 1.21.4 already user-confirmed.)
+2. **Commit** the working tree (overlay mechanism + fixes + principle doc).
+3. **Version walk-back:** add every MC version between 1.20.1 and 1.21.4 to pin exactly
+   which version introduced each divergence, then split the `1.20.2` era accordingly.
+4. **Going forward (new targets):** walk back ONE version at a time so each break is
+   attributed precisely. Upcoming 26.2 ladder: 1.21.5 → 1.21.6 → 1.21.7–9 → 1.21.10–11 →
+   26.1 → 26.2.
+5. **Docs:** move `PRD.md` + `PORTABILITY-AUDIT.md` into a new `internal_docs/` (NOT `docs/`,
+   that's the public MkDocs site); update CLAUDE.md "Where to look" paths. CLAUDE.md still
+   describes the repo as Fabric/1.21.4-only in places — refresh for multi-loader/version.
 
 ## Reference
 
-- **Toolchain:** Stonecutter 0.6, architectury-loom 1.10.455, architectury-plugin 3.4.164,
-  shadow 8.1.1, Gradle 8.12.1. MC 1.21.4 (Java 21, Mojmap+Parchment 2025.03.23,
-  fabric-api 0.119.2+1.21.4, neoforge 21.4.157, architectury-api 15.0.2). MC 1.20.1 (Java 17,
-  Parchment 2023.09.03, forge 47.3.0, architectury-api 9.2.14).
-- **Node layout:** `:1.21.4` & `:1.20.1` (common), `:fabric:1.21.4`, `:neoforge:1.21.4`,
-  `:forge:1.20.1`. Common source = root `src/`; loader source = `<loader>/src/`.
-- **Stonecutter gotchas learned this session:** (1) build non-active versions via
-  `chiseledBuild`/`chiseledBuild<Loader>` (direct `:node:build` is NO-SOURCE — only the active
-  version's source is exposed). (2) branch scripts read version-specific deps via
-  `common.mod.dep(...)` (the common sibling carries `versions/<ver>` props), root-level deps via
-  `mod.dep(...)`. (3) every `deps.*` key referenced at config time must exist for the active
-  version (we keep them per-version, read via `common.mod.dep`). (4) `loom.platform=<loader>` must
-  be in each branch's `gradle.properties`.
-- **Key commands:** build all → `./gradlew chiseledBuild`; per loader →
-  `./gradlew chiseledBuildFabric|Neoforge|Forge`; run → `./gradlew :fabric:1.21.4:runClient`,
-  `:neoforge:1.21.4:runClient`, `:forge:1.20.1:runClient`; benchmarks →
-  `./gradlew :1.21.4:jmh [-Pbench=X]`. Set active version via the Stonecutter "Set active" task.
-- **Deferred (Phase 1):** access-widener for `NavSectionBuilder` palette access (still reflection;
-  JMH benchmark consumes it). Plan file: `~/.claude/plans/cheeky-squishing-summit.md`.
-  Audit: `PORTABILITY-AUDIT.md`. Status memory: project-status.
+- **Overlay convention:** top-level `overlays/<introducing-version>/java/<package>/…`;
+  selection in `build.gradle.kts` (`overlaysDir`/`era` block). Outside `src/` is mandatory.
+- **Toolchain:** Stonecutter 0.6, architectury-loom 1.10, Gradle 8.12.1. MC 1.21.4 (Java 21,
+  Mojmap+Parchment, fabric-api 0.119.2, neoforge 21.4.157, arch-api 15.0.2). MC 1.20.1
+  (Java 17, forge 47.3.0, arch-api 9.2.14).
+- **Build all:** `./gradlew chiseledBuild`; per loader `chiseledBuild{Fabric,Neoforge,Forge}`.
+  Run: `:fabric:1.21.4:runClient`, `:neoforge:1.21.4:runClient`, `:forge:1.20.1:runClient`.
+- Audit: `PORTABILITY-AUDIT.md` (validated again this session). Status memory: project-status.
 
 ## Cleanup
-Delete this `HANDOFF.md` (or overwrite with the next handoff) before ending the next session.
+Delete/overwrite this `HANDOFF.md` before ending the next session.

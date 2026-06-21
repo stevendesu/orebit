@@ -2,7 +2,6 @@ package com.orebit.mod;
 
 import com.mojang.authlib.GameProfile;
 import net.minecraft.server.MinecraftServer;
-import net.minecraft.server.level.ClientInformation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.phys.Vec3;
@@ -11,8 +10,8 @@ public class AllyBotEntity extends FakePlayerEntity {
 
     private final Player owner;
 
-    public AllyBotEntity(MinecraftServer server, ServerLevel world, GameProfile profile, ClientInformation options, Player owner) {
-        super(server, world, profile, options);
+    public AllyBotEntity(MinecraftServer server, ServerLevel world, GameProfile profile, Player owner) {
+        super(server, world, profile);
         this.owner = owner;
     }
 

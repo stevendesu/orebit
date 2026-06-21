@@ -1,5 +1,6 @@
 package com.orebit.mod;
 
+import com.orebit.mod.platform.BlockShapes;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -25,7 +26,7 @@ public class BotPositioning {
 
                     boolean isSafe = blockAt.isAir()
                             && blockAbove.isAir()
-                            && blockBelow.isSolidRender()
+                            && BlockShapes.isSolidRender(blockBelow, world, candidate.below())
                             && blockAt.getFluidState().isEmpty();
 
                     if (isSafe) {
