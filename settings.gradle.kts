@@ -4,6 +4,7 @@ pluginManagement {
         gradlePluginPortal()
         maven("https://maven.fabricmc.net/")
         maven("https://maven.architectury.dev")
+        maven("https://maven.minecraftforge.net")
         maven("https://maven.neoforged.net/releases/")
         maven("https://maven.kikugie.dev/releases")
         maven("https://maven.kikugie.dev/snapshots")
@@ -19,10 +20,11 @@ stonecutter {
     kotlinController = true
     create(rootProject) {
         // Root `src/` is the loader-agnostic 'common' project; branches are loaders.
-        // Add more Minecraft versions here (e.g. "1.20.1", "1.21.6") to expand the matrix.
-        versions("1.21.4")
-        branch("fabric")
-        branch("neoforge")
+        // common is built for every version any loader targets.
+        versions("1.21.4", "1.20.1")
+        branch("fabric") { versions("1.21.4") }
+        branch("neoforge") { versions("1.21.4") }
+        branch("forge") { versions("1.20.1") }
     }
 }
 

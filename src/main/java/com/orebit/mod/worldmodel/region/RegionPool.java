@@ -31,13 +31,14 @@ public final class RegionPool {
 
     public static void recycle(Region region) {
         region.reset();
-        switch (region) {
-            case LeafRegion leafRegion -> leafPool.push(leafRegion);
-            case CompositeRegion compositeRegion -> compositePool.push(compositeRegion);
-            default -> {
-                // Throw an error. This should never happen.
-                throw new IllegalArgumentException("Unknown region type: " + region.getClass().getName());
-            }
+        // instanceof patterns (not a pattern switch) so this also compiles on Java 17 (MC 1.20.1).
+        if (region instanceof LeafRegion leafRegion) {
+            leafPool.push(leafRegion);
+        } else if (region instanceof CompositeRegion compositeRegion) {
+            compositePool.push(compositeRegion);
+        } else {
+            // Throw an error. This should never happen.
+            throw new IllegalArgumentException("Unknown region type: " + region.getClass().getName());
         }
     }
 }
