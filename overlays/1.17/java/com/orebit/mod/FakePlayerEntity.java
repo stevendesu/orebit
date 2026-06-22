@@ -12,9 +12,9 @@ import net.minecraft.server.level.ServerPlayer;
  * <p>{@code ServerPlayer} took a plain 3-arg constructor in this range: 1.17 moved the game-mode
  * creation inside {@code ServerPlayer} (≤1.16.5 needed a 4-arg {@code ServerPlayerGameMode}, the
  * future floor when support extends below 1.17), and the 4th arg only returns at 1.19
- * (ProfilePublicKey) before going away again at 1.19.4. The overlay eras compose
+ * (ProfilePublicKey) before going away again at 1.19.3. The overlay eras compose
  * (build.gradle.kts): this is OVERRIDDEN by {@code overlays/1.19} (ProfilePublicKey 4-arg),
- * {@code overlays/1.19.4} (back to 3-arg), {@code overlays/1.20.2} (ClientInformation ctor, still
+ * {@code overlays/1.19.3} (back to 3-arg), {@code overlays/1.20.2} (ClientInformation ctor, still
  * no-arg kill), and {@code overlays/1.21.2} (kill() takes a
  * {@link net.minecraft.server.level.ServerLevel}). Everything else about the fake player is
  * version-agnostic and stays in {@code src/main/java}.
