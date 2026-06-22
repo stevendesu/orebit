@@ -205,10 +205,37 @@ root-level **`era.properties`** (era-owned; absent on `core`):
 
 **Remaining sequencing (do NOT branch prematurely):**
 1. ✅ **Done:** record the strategy; execute the `core` split (`core` + `main`).
-2. **Prove the model backward first** (chosen because going *forward* redefines `main`=newest while
-   going *backward* leaves it stable): probe the first backward toolchain wall (add a few ≤1.20
-   versions as common nodes, run `chiseledCompileCommon` to find where the current toolchain breaks
-   — likely a Java drop ~1.17/1.16 or the Fabric floor ~1.14), then cut the first older-era branch
-   off `core` (its own `era.properties` + `gradle-wrapper.properties`) and verify the merge/build/
-   propagate flow end-to-end.
+2. ✅ **Done (session 8): proved the model backward.** Result below.
 3. **Then forward to 26.x** once JDK 25 is installed (new era branch becomes the default).
+
+### 8.1 Backward probe result (session 8) — the wall is 1.13.2; current era reaches 1.14.4
+
+Probed with `chiseledCompileCommon` on a scratch branch, appending older MC versions to
+`mc.versions.common`:
+
+- **The current toolchain has NO wall down to 1.14.4.** Loom 1.13.469 / Gradle 8.12.1 / official
+  Mojang mappings resolve and set up Minecraft and reach `compileJava` for **every version
+  1.14.4 → 1.21.11**. The era's compile floor is the **Mojang-mappings floor (1.14.4)** — much
+  further back than the originally guessed Java/Fabric walls (the Java *level* is not a compile wall:
+  JDK 21 emits older bytecode via `--release`; old-MC *runClient* would need an older JDK, but
+  building/compiling does not).
+- **The wall is 1.13.2 and below**, and it is **not** a normal toolchain bump: `officialMojangMappings()`
+  fails at configuration (`Failed to find official mojang mappings for 1.13.2` — Mojang first
+  published maps for 1.14.4), **compounded** by the **1.13 Flattening** (block id+metadata, not
+  BlockState/PalettedContainer — PRD §9 "second port"). So pre-1.14 is a separate era requiring a
+  **different mappings source (Yarn/MCP)** *and* a block-layer port — deliberately deferred (the
+  1.12.2 stretch). **No placeholder branch was cut** (it couldn't build); the wall is documented here
+  instead.
+- **Current era extended (common) to 1.17.1 and landed.** The re-baselined overlay chain + new
+  platform shims make the loader-agnostic common source compile on **1.17.1, 1.18.2, 1.19.2, 1.19.4**
+  (existing 1.20.1–1.21.11 unregressed). Portable work on `core`; `mc.versions.common` extension on
+  `main`. **Loader matrices unchanged** — per-loader builds for the backward range (their
+  `versions/<ver>/gradle.properties` + loader-event overlays) are follow-up.
+- **≤1.16.5 not yet done.** It is a deep cascade of 1.14–1.16 entity/block API shims (rotation setters
+  became methods at 1.17, `Entity.discard`/`remove`, `Block.defaultDestroyTime`, dripstone/cave-vines
+  classes, `Material`-based tool detection) and is **common-compile-only value** (a runnable ≤1.16.5
+  jar also needs a log4j logging shim — 1.16.5 predates slf4j). A partial prototype is preserved on
+  the local `scratch/backward-probe` branch. See HANDOFF "NEXT" for the remaining shim list.
+
+This validated the whole Model C loop **backward**: author on `core` → `git merge core` into the era
+branch → per-era `chiseledCompileCommon` green, with toolchain values untouched on `core`.
