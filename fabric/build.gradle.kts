@@ -53,7 +53,14 @@ dependencies {
     // depends on "fabric-api". (A 1.21.11 module-subset workaround was tried to dodge a Loom
     // source-namespace assertion on Loom 1.11, but it left the umbrella mod absent at dev-launch
     // → "fabric-api is missing". On Loom 1.13 the full bundle remaps cleanly.)
-    modApi("net.fabricmc.fabric-api:fabric-api:${common.mod.dep("fabric_api")}")
+    // Exclude fabric-api's transitive fabric-loader. Old fabric-api (e.g. 0.46.x for 1.17) pins an
+    // old loader (0.12.x) that Loom remaps onto the run classpath alongside our declared loader
+    // (deps.fabric_loader), and Knot aborts with "duplicate fabric loader classes". We always
+    // supply our own newer loader (backward-compatible with older fabric-api), so drop the
+    // transitive one. Harmless on newer versions where it deduped anyway.
+    modApi("net.fabricmc.fabric-api:fabric-api:${common.mod.dep("fabric_api")}") {
+        exclude(group = "net.fabricmc", module = "fabric-loader")
+    }
     // Architectury API is optional: the loader glue uses native Fabric events, not the
     // Architectury API (only the Architectury Loom plugin orchestrates the build). Versions
     // lacking an architectury build (e.g. transient 1.20.3) leave it blank.
