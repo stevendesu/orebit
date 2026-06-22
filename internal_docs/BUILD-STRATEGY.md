@@ -178,20 +178,37 @@ newest-era-authored call that doesn't exist on an older era fails loudly, not si
 
 ## 8. Current state & sequencing
 
-Current `master` (to become `main`) is a single Stonecutter+Architectury build spanning MC
-1.20.1→1.21.11 on Architectury Loom 1.13.469 / Gradle 8.12.1 — **45 JARs build green** (Fabric 18,
-NeoForge 12, Forge 15). It IS, already, one complete era (the "Loom 1.13 / Gradle 8.12 / JDK 21"
-era); we just haven't split `core` out of it yet.
+**The `core` split is DONE (step 1, session 7).** The former single `master` (Stonecutter+Architectury
+spanning MC 1.20.1→1.21.11 on Architectury Loom 1.13.469 / Gradle 8.12.1 — 45 JARs green) is now two
+branches:
+- **`core`** — version-portable logic + overlays + `versions/*/gradle.properties` + build-script
+  logic. Holds no toolchain values; **not buildable** (a missing `era.properties` makes Gradle fail
+  fast with a clear message).
+- **`main`** — `core` + a single commit adding the era-owned `era.properties` (the ≤1.21.11 era).
+  The newest/current era; intended GitHub default.
 
-**Do NOT branch prematurely.** Plan of record:
-1. **Now:** record this strategy (done) + keep building on `master`/`main` as the ≤1.21.11 era.
+**Externalization mechanism (settled at the split):** the per-era toolchain values live in a
+root-level **`era.properties`** (era-owned; absent on `core`):
+- `loom.version` — read in `settings.gradle.kts`'s `pluginManagement { resolutionStrategy { eachPlugin
+  { useVersion(...) } } }` (the block reads the file inline via `settingsDir`, since the
+  pluginManagement preamble can't see the script-body helpers). `stonecutter.gradle.kts` declares
+  `id("dev.architectury.loom") apply false` with no literal version.
+- `mc.versions.{common,fabric,neoforge,forge}` — comma-separated, sorted ascending; `settings.gradle.kts`
+  feeds them to `versions()`/`branch()` via an `eraList(key)` helper. The loader-coverage policy
+  comments stay on `core` (portable).
+- `java.version` — recorded for reference; the Java source/target LEVEL is still derived from the MC
+  version in the build scripts (portable, stays on `core`).
+- The **Gradle wrapper version** (`gradle/wrapper/gradle-wrapper.properties`) is era-owned by nature —
+  `core` never edits it, so merges never conflict on it.
+- The Stonecutter **active marker** (`stonecutter active "…"`) is tool-managed dev-state, set to the
+  newest in-era version (1.21.11). **1.21.4 is no longer special** anywhere.
+
+**Remaining sequencing (do NOT branch prematurely):**
+1. ✅ **Done:** record the strategy; execute the `core` split (`core` + `main`).
 2. **Prove the model backward first** (chosen because going *forward* redefines `main`=newest while
    going *backward* leaves it stable): probe the first backward toolchain wall (add a few ≤1.20
    versions as common nodes, run `chiseledCompileCommon` to find where the current toolchain breaks
-   — likely a Java drop ~1.17/1.16 or the Fabric floor ~1.14), then cut `core` + the first older-era
-   branch and verify the merge/build/propagate flow end-to-end.
+   — likely a Java drop ~1.17/1.16 or the Fabric floor ~1.14), then cut the first older-era branch
+   off `core` (its own `era.properties` + `gradle-wrapper.properties`) and verify the merge/build/
+   propagate flow end-to-end.
 3. **Then forward to 26.x** once JDK 25 is installed (new era branch becomes the default).
-
-The `core` split itself is a one-time restructuring (extract toolchain values into the era-owned
-file; `core` = common+overlays+logic; `main` = `core` + the 1.21-era toolchain commit). Cheapest to
-do while there are few branches.
