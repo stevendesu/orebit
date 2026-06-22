@@ -1,6 +1,11 @@
 plugins {
     id("dev.kikugie.stonecutter")
-    // Loom 1.13.469 — the version that builds the WHOLE matrix on Gradle 8.12.1:
+    // Architectury Loom version is era-owned: it lives in era.properties (loom.version) and
+    // is injected by settings.gradle.kts's pluginManagement resolutionStrategy, so this
+    // declaration carries no literal version (keeping `core` toolchain-free).
+    //
+    // This era pins Loom 1.13.469 — the one version that builds the WHOLE matrix on Gradle
+    // 8.12.1:
     //  • ≥1.13.3 so it consumes fabric-api for MC 1.21.11 (remapped with Fabric Loom 1.13.3;
     //    Loom rejects artifacts built by a NEWER Loom),
     //  • new enough to provide NeoForge 1.21.10+ (which dropped the old data/server.lzma patch
@@ -8,11 +13,11 @@ plugins {
     //  • still has working legacy-Forge support (Loom 1.14 broke Forge remap for MC ≥1.20.6 and
     //    Forge compile for ≥1.21.6; Loom 1.17 also needs a newer Gradle than our 8.12.1).
     // The single sweet spot across Fabric + NeoForge + legacy Forge.
-    id("dev.architectury.loom") version "1.13.469" apply false
+    id("dev.architectury.loom") apply false
     id("architectury-plugin") version "3.4-SNAPSHOT" apply false
     id("com.github.johnrengelman.shadow") version "8.1.1" apply false
 }
-stonecutter active "1.21.4" /* [SC] DO NOT EDIT */
+stonecutter active "1.21.11" /* [SC] DO NOT EDIT */
 
 // Builds every version into `build/libs/{mod.version}/{loader}`
 stonecutter registerChiseled tasks.register("chiseledBuild", stonecutter.chiseled) {
