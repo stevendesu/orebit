@@ -1,101 +1,94 @@
-# HANDOFF — Orebit: backward wall FOUND (1.13.2); current era extended to 1.17.1
+# HANDOFF — Orebit: backward era extended to 1.17.1 (Fabric+Forge); runtime pass in progress
 
 > **Temporary file.** Delete/overwrite at the end of the next session.
-> Written end of session 8 (2026-06-22). Supersedes the session-7 "prove backward" handoff.
+> Written end of session 9 (2026-06-22). Supersedes the session-8 "wall found" handoff.
 
-## What this session did
+## TL;DR
 
-1. **Found & PROVED the backward toolchain wall: it is at 1.13.2** (the current era's floor is
-   **1.14.4**). Probed via `chiseledCompileCommon` on a scratch branch with older MC versions
-   appended to the matrix:
-   - **1.14.4 → 1.19.4 all reach `compileJava`** — the toolchain (Architectury Loom 1.13.469 /
-     Gradle 8.12.1 / official Mojang mappings) resolves and sets up Minecraft cleanly that far
-     back. Failures there are pure source/API divergences, not toolchain.
-   - **1.13.2 and 1.12.2 fail at configuration**: `Failed to find official mojang mappings for
-     1.13.2` — Mojang first published obfuscation maps for **1.14.4**. This is a fatal config-phase
-     failure (not `--continue`-able). Compounded by the **1.13 "Flattening"** (block model goes
-     BlockState→numeric id+metadata, PRD §9). So pre-1.14 is a genuinely **separate era** (needs
-     Yarn/MCP mappings + a second port of the block layer), NOT a simple toolchain bump.
-2. **Extended the current era backward to 1.17.1 (common compile) and LANDED it.** Re-baselined the
-   overlay chain and added platform shims so the loader-agnostic common source compiles on
-   **1.17.1, 1.18.2, 1.19.2, 1.19.4** (verified `chiseledCompileCommon`), with the existing
-   1.20.1–1.21.11 era **unregressed**.
-   - Portable work committed on **`core`** (`bb6fb9e`): overlay re-baseline 1.20.1→1.17 (baseline
-     dir named for the lowest supported version; renames down to 1.14.4 when ≤1.16.5 lands) + new
-     override eras (1.19, 1.19.3, 1.19.4, 1.20); new platform shims `Worlds` (Entity.level),
-     `EntityState` (onGround), `Replaceable` (canBeReplaced/Material), `MineableTags`
-     (sword_efficient), `BlockKinds` (BambooStalkBlock); `BlockLookup` registry split
-     (Registry→BuiltInRegistries→Identifier) + iteration helpers; FakePlayerEntity ctor flavors
-     (1.19 ProfilePublicKey / 1.19.4 3-arg); core src (NavBlock, AllyBotEntity, BotManager,
-     BotPositioning, OrebitCommon, TraversalAnalyzer) routed through the shims.
-   - Matrix extension committed on **`main`** (`e88816a`): added 1.17.1,1.18.2,1.19.2,1.19.4 to
-     `mc.versions.common`. **Loader matrices unchanged** — per-loader builds for the backward range
-     are follow-up (see below).
-3. **Decided (with the user):** extend the era as far as the toolchain allows; **defer** the pre-1.14
-   legacy era branch (document the wall instead of cutting a non-buildable placeholder); **stop the
-   source-port grind at 1.17.1** (≤1.16.5 is deep, fragile, common-compile-only value on
-   non-committed versions — see below).
+The current toolchain era (Loom 1.13.469 / Gradle 8.12.1) now spans **MC 1.17.1 → 1.21.11**.
+Common + Fabric + Forge all **compile** across that whole range. **Runtime-verified:** Fabric on
+1.17.1/1.18.1/1.19/1.19.3/1.20/1.20.1 and **Forge on 1.17.1** (in-world, bot spawns). The user is
+working through the remaining Forge versions at runtime. The backward **toolchain wall stays 1.13.2**
+(no official Mojang mappings; the 1.13 Flattening) — a separate, deferred era. **≤1.16.5** is still
+deferred (WIP on the local `scratch/backward-probe` branch).
 
-## Branch state (NOT yet pushed)
+## Branches / build (unchanged model)
 
-- **`core`** `bb6fb9e` — portable 1.17.1 overlay/shim work. (toolless, not buildable.)
-- **`main`** `e88816a` — `core` merged + the common-matrix extension. **Buildable; verified green**
-  (`chiseledCompileCommon` SUCCESSFUL, 1.17.1→1.21.11).
-- **`scratch/backward-probe`** `2bfed15` — LOCAL probe branch. Holds the full backward probe matrix
-  AND a **WIP partial ≤1.16.5 hard-tier** commit (`DO NOT propagate`) preserved as a reference for
-  the follow-up. Safe to delete once the ≤1.16.5 work is redone properly.
-- Plus the doc commit this handoff is part of (on `core`, propagated to `main`).
-- **Nothing pushed yet** — local commits on `core` + `main` await `git push` (personal SSH key;
-  `gh` is authed as the work account, so use plain `git push`).
+- **`core`** — portable trunk (no toolchain values; not buildable). Author common/overlay/version
+  files here, then `git merge core` into era branches.
+- **`main`** — the ≤1.21.11 era (= `core` + `era.properties`); buildable; GitHub default.
+- **`scratch/backward-probe`** — LOCAL only; partial ≤1.16.5 WIP (`DO NOT propagate`).
+- **NOT pushed** — local commits well ahead of origin (core ~15, main ~34). Push when the user asks
+  (personal SSH key; `gh` is the work account so use plain `git push`).
+- Toolchain: **per-version Java toolchain** — `<1.20.5 → JDK 17`, `≥1.20.5 → JDK 21`. **Both Temurin
+  17.0.19 and 21.0.11 are installed** (winget); Gradle auto-detects them.
 
-## NEXT (pick up here)
+## What this era covers now
 
-**A. Land the loader builds for 1.17.1–1.19.4** (the matrix extension was common-only):
-   - Add `versions/<ver>/gradle.properties` for 1.17.1/1.18.2/1.19.2/1.19.4 (parchment, fabric_api,
-     forge_loader; NeoForge floor is 1.21 so none there). Add them to `mc.versions.fabric` /
-     `mc.versions.forge` on `main`.
-   - Build with `chiseledBuild{Fabric,Forge}`; expect loader-event overlay drift (Fabric/Forge event
-     APIs across 1.17–1.19) — handle in `overlays`/`overlays-forge` like the 1.21.6 EventBus-7 case.
-   - Densify the common matrix to every patch in 1.17–1.19 if desired (each new patch may add a
-     boundary; re-run `chiseledCompileCommon`).
+- `era.properties` matrices: **Fabric = 1.17.1→1.21.11 contiguous**; **Forge = same minus its skips**
+  (no 1.17.0/1.20.3/1.20.5/1.21.2); **NeoForge floor 1.21**. `versions/<ver>/gradle.properties` exist
+  for all (fabric_api/forge_loader from each repo's maven-metadata). **1.17.0 dropped** (no viable
+  fabric-api; Forge skipped it). **1.20.0 added**.
+- Overlay chain (common): baseline **`overlays/1.17`** + override eras `1.19`, `1.19.3`, `1.20`,
+  `1.20.2`, `1.20.3`, `1.20.5`, `1.21.2`, `1.21.6`, `1.21.11`. Key backward boundaries:
+  - **1.19.3**: 3-arg ServerPlayer ctor returns (ProfilePublicKey was 1.19–1.19.2);
+    BambooBlock→BambooStalkBlock; Registry→BuiltInRegistries.
+  - **1.20**: Entity.level/onGround field→method; Material→canBeReplaced; sword_efficient tag.
+  - Platform shims (route core src through these): `Worlds`, `EntityState`, `Replaceable`,
+    `MineableTags`, `BlockKinds`, `BlockLookup`.
+- Overlay chain (forge): baseline **`overlays-forge/1.17.1`** + `1.18`, `1.19`, `1.21.6`, `1.21.9`.
+  Forge backward boundaries: **1.18** (`fmlserverevents.FMLServerStartedEvent` →
+  `event.server.ServerStartedEvent`), **1.19** (world→level rename).
 
-**B. (Optional) Resume the ≤1.16.5 hard tier** — only if 1.14–1.16 become worth it. It is a deep
-   cascade of 1.14–1.16 entity/block API shims and is **common-compile-only** (a runnable ≤1.16.5
-   jar also needs a log4j-flavored logging shim — 1.16.5 has no slf4j — plus the loader work in A).
-   The WIP on `scratch/backward-probe` already prototypes: FakePlayerEntity 4-arg
-   `ServerPlayerGameMode` baseline + 1.17 3-arg override; `LevelBounds` baseline `return 0` + 1.17
-   `getMinBuildHeight`; `MineableTags` Material-based baseline + 1.17 mineable-tags flavor; NavBlock
-   tag checks via the shim + `getBlock()==`; `compileOnly` slf4j for <1.17. **Remaining shims** (the
-   1.17 boundary, all field→method or class-rename changes):
-   - rotation setters: `setYRot`/`setXRot` are public fields `yRot`/`xRot` pre-1.17 (AllyBotEntity,
-     BotPositioning) — add `EntityState.setYRot/setXRot(Entity,float)` (baseline field, 1.17 method).
-   - `Entity.discard()` → pre-1.17 `remove()` (FakePlayerEntity baseline).
-   - `Block.defaultDestroyTime()` absent pre-1.17 — used in NavBlock + both TraversalAnalyzers; needs
-     a `BlockHardness` shim (verify the pre-1.17 base-hardness accessor).
-   - `PointedDripstoneBlock`, `Blocks.CAVE_VINES` are 1.17 — add `BlockKinds.isPointedDripstone` /
-     `isCaveVines` (baseline `false`, 1.17 real); a 1.17 BlockKinds flavor is then needed.
-   - verify the baseline `Material` constant names (STONE/METAL/WOOD/DIRT/SAND/…); 1.14.4 still had
-     ~82 errors so expect more 1.15.2/1.14.4 surface after the above.
+## Runtime fixes landed this session (the fragile loader-specific surface)
 
-**C. (Future) The pre-1.14 legacy era** — when the 1.12.2 stretch is actually pursued: new era branch
-   off `core` with its own `era.properties` (older Loom/Gradle + **Yarn or MCP mappings**, since no
-   official Mojang maps) and the Flattening block-layer port. Big; deliberately deferred.
+- **Java run JVM:** Loom honors the `java{}` toolchain for COMPILE but launches runs on the Gradle
+  daemon JDK. Old-Forge's modlauncher ASM can't read Java 21 → `Unsupported class file major version
+  65`. Fixed by pinning the run JVM to the toolchain in `forge/build.gradle.kts`
+  (`tasks.withType<JavaExec>{ javaLauncher = … }`). (Fabric runs fine on 21, untouched.)
+- **Fabric:** exclude fabric-api's transitive fabric-loader (old fabric-api pins 0.12.x →
+  "duplicate fabric loader classes"); `fabric.mod.json` depends on mod-id **`fabric`** not
+  `fabric-api` (old umbrella id is `fabric`; modern provides it).
+- **Forge `mods.toml`:** `loaderVersion`/forge `versionRange` were hardcoded `[47,)`; now templated
+  `[${loader_major},)` from `deps.forge_loader` (new processResources prop) — FML's javafml version ==
+  the Forge MAJOR (37 on 1.17.1).
+- **Forge bot spawn (`FakeClientConnection`, common baseline `overlays/1.17`):** the socketless bot
+  connection broke Forge's network path in `placeNewPlayer` twice — (a) `NetworkHooks.getConnectionType`
+  NPE on a null `fml:netversion` channel attr → set it to `"NONE"` (vanilla marker); (b) the vanilla
+  network filter does `pipeline.addBefore("packet_handler", …)` → name the Connection handler
+  `"packet_handler"` via a ChannelInitializer (added before channelActive so `Connection.channel` is
+  still set). Both set by netty attr/name → no Forge import, harmless on Fabric.
 
-## How to work this model (reminders)
+## GOTCHAS (read before debugging next session)
 
-- Author common/overlay/version-file changes on **`core`**; toolchain values (`era.properties`,
-  wrapper) on the era branch only. Propagate with `sh scripts/propagate.sh` (= `git merge core`).
-- Truth tool: **`./gradlew chiseledCompileCommon --continue`** (compiles every common node; the
-  standing pre-release gate). A single `:<ver>:compileJava` is **hollow** — it compiles only the
-  overlay-merged files, not the chiseledSrc core source (confirmed this session). Trust the chiseled
-  task.
-- Overlay re-baseline procedure: RENAME the baseline dir down to the new oldest version; fix it to the
-  older API; add an override dir at the introducing version that restores newer behavior. (Memory:
-  `overlay-rebaseline-procedure`.)
-- Verify a real jar isn't hollow: `unzip -l <jar> | grep com/orebit/mod` (~50 classes).
+- **Loader nodes build from `chiseledSrc`**, which only re-syncs from `src/`+overlays on
+  **`Set active project to <ver>`** (or a chiseled task). After ANY common/overlay/loader-src edit,
+  run `Set active project to <ver>` BEFORE `:<loader>:<ver>:runClient`, or you test a stale copy.
+- A single `:<ver>:compileJava` is HOLLOW for *core* src (compiles only overlay-merged), but it DOES
+  compile overlay files — handy for syntax-checking an overlay edit. Trust `chiseledCompile*` for the
+  full picture. New probe tasks: **`chiseledCompileForge` / `chiseledCompileFabric`** (compileJava-only,
+  like `chiseledCompileCommon`).
+- **Loom run JVM = Gradle daemon JDK unless `javaLauncher` is pinned** (done for forge; do the same if
+  fabric/neoforge ever need a non-daemon JDK).
+- **Commit hygiene** (user pref, memory `commit-hygiene`): don't commit half-working runtime builds —
+  accumulate fixes in the working tree, commit at a confirmed-working point. (Compile-only milestones
+  may commit when green.)
+
+## NEXT
+
+1. **Finish the Forge runtime pass** (user driving): 1.18.x, 1.19.x, 1.20.x. Same `Set active` →
+   `runClient` loop. **Watch:** Forge 1.20+ uses `net.minecraftforge.network` (not `fmllegacy`) — the
+   `fml:netversion`/`packet_handler` fix may behave differently or be unneeded there; a newer Forge may
+   surface a different bot-spawn issue (it's an `overlays-forge`/`FakeClientConnection`-flavor fix if so).
+   Forge 1.20.1 bot-spawn was runtime-confirmed in earlier sessions, so the modern path likely already works.
+2. **Fabric runtime spot-checks** for the untested patches (1.18, 1.18.2, 1.19.1, 1.19.2, 1.19.4) — low
+   risk (shared overlay composition with confirmed versions).
+3. **≤1.16.5 hard tier** — deferred; partial WIP on `scratch/backward-probe` (rotation setters, Entity
+   discard/remove, Block.defaultDestroyTime, dripstone/cave-vines, Material tooling, slf4j→log4j).
+4. **26.x forward era** — needs JDK 25 (Temurin 25 not yet installed) + a newer-era branch.
+5. **Push** `core` + `main` when the user is ready.
 
 ## Reference
 
-- Full plan: `internal_docs/BUILD-STRATEGY.md` (§8 now records this backward result).
-- Memory: `multiversion-build-strategy`, `overlay-rebaseline-procedure`, `version-overlays`,
-  `loader-matrix`, `portability-findings`.
+- Full plan: `internal_docs/BUILD-STRATEGY.md` (§8 / §8.1). Memory: `loader-matrix`,
+  `overlay-rebaseline-procedure`, `commit-hygiene`, `multiversion-build-strategy`, `version-overlays`.
