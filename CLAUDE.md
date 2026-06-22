@@ -10,12 +10,23 @@ There are effectively **two architectures**: (1) the elaborate, modular design e
 
 ## Build / Run
 
-- JDK 21 (Temurin). Fabric Loom 1.10, Gradle 8.12.1, Fabric API `0.119.2+1.21.4`, Yarn `1.21.4+build.8`.
-- `./gradlew build` — compile + package.
-- `./gradlew runClient` — launches MC with the mod (confirmed working; bot spawns and follows the player on join).
-- `./gradlew runServer` — dev dedicated server.
-- `./gradlew genSources` — generate decompiled MC sources for navigation.
-- Version is hard-pinned: `gradle.properties` (`minecraft_version=1.21.4`) and `fabric.mod.json` (`"minecraft": "~1.21.4"`).
+- JDK 21 (Temurin). **Architectury Loom 1.13.469**, Gradle 8.12.1, official Mojang mappings (+ optional Parchment). This is now a **Stonecutter + Architectury multi-version, multi-loader** build (NOT a single hard-pinned version) — see the branching section below.
+- `./gradlew chiseledBuild{Fabric,Neoforge,Forge}` — build all versions for a loader; JARs land in `build/libs/<modver>/<loader>/`. (`chiseledBuild` = all loaders; heavier.)
+- `./gradlew chiseledCompileCommon --continue` — cheap probe: compile the common source against every version (pins which MC version introduced an API divergence).
+- Run/dev a specific version: `./gradlew "Set active project to <ver>"` then `:<loader>:<ver>:runClient`; `"Reset active project"` returns active to the era's default. (Per-version deps live in `versions/<ver>/gradle.properties`; the matrix is in `settings.gradle.kts`.)
+- **GOTCHA:** a direct `:<loader>:<ver>:buildAndCollect` can succeed with a hollow **NO-SOURCE** jar (Stonecutter only fills `chiseledSrc` via `setupChiseledBuild`, which runs in `chiseledBuild<Loader>`). Trust the chiseled tasks; verify a jar with `unzip -l <jar> | grep com/orebit/mod`.
+
+## Branching & multi-version strategy (Model C — full plan in `internal_docs/BUILD-STRATEGY.md`)
+
+Orebit supports many MC versions × loaders via **branch-per-toolchain-era** (NOT per individual version). An *era* is a span of versions sharing one Loom/Gradle/Java toolchain; within an era, Stonecutter + the `overlays/` chain cover the individual versions.
+
+**CRITICAL authoring rules** (these keep cross-era bugfix propagation clean — violating them is the main way to break the model):
+- **`core` branch** = everything version-portable: common logic, the `overlays/` chain, `versions/*/gradle.properties`, and build-script *logic*. It holds **NO toolchain version values** and is **not directly buildable**. **Author ALL common/overlay/version-file changes here**, then `git merge core` into each era branch (conflict-free, because `core` has no toolchain to drag).
+- **Era branches** — `main` (newest era; GitHub default = "builds latest") and `mc-1.20` / `mc-1.16` / … (older). Each = `core` + **one** commit of era toolchain values (Loom/Gradle/Java versions + the Stonecutter version-matrix). Each is buildable; `runClient`/dev happens **here** (or in a git worktree).
+- **NEVER author common-logic/overlay changes directly on an era branch (including `main`)**, and **NEVER edit toolchain values on `core`**. Either one breaks clean propagation. Common change → `core`; toolchain change → the era branch.
+- Before release, run `chiseledCompileCommon` on **every** era branch (CI gate) to catch common code that accidentally depends on an API absent from an older era.
+
+**CURRENT STATUS: not yet split.** The repo is still a single branch (`master`) that *is* the ≤1.21.11 era (Loom 1.13.469 / Gradle 8.12.1 / JDK 21). The `core` split + first older-era branch is the next migration step (backward first, then 26.x forward). Until the split lands, `master` is both trunk and current era — but write code as if these rules already apply.
 
 ## Repo map (package-by-package, with completeness)
 

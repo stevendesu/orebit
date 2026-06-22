@@ -94,36 +94,104 @@ no conflict. This is exactly why the ecosystem branches.
 These are **choices, not mistakes.** The actual mistake was the unified-range build (§3), which
 branch-per-version fixes without disturbing either choice above.
 
-## 5. Ratified decisions (session 6)
+## 5. Ratified architecture — branch-per-ERA, "Model C" (session 6)
 
-1. **Move to branch-per-version.** A git branch per MC version (naming TBD, e.g. `mc/1.20.1`).
-   Each branch builds all its version's loader JARs with its own pinned Loom/Gradle/deps. `master`
-   stays the latest/primary dev branch. (`git checkout 1.20.1` ≈ today's `Set active project`.)
-2. **Keep Forge for every version with a Forge release** — branch-per-version makes it viable
-   (per-branch toolchain), and Forge still ships through 26.x for die-hard users.
-3. **No Architectury API.** Native glue, zero runtime deps (§4.1).
-4. **Keep the `overlays/` mechanism** for genuine MC API drift within a branch (§4.2).
-5. **Loader coverage:** Fabric every version; NeoForge every 1.21+ version with any release (beta
-   where no stable exists); Forge every version with a Forge release (skips 1.20.3/1.20.5/1.21.2).
+Branches map to **toolchain eras**, not individual MC versions. An era = a span of MC versions
+that share one Loom/Gradle/Java toolchain. Within an era, Stonecutter + overlays cover the
+individual versions (single source, many versions). Branches exist only where the toolchain is
+*mutually incompatible* (Java/Loom/Gradle walls) — because that's the only thing that can't share
+one Gradle build.
 
-## 6. Open questions for the migration (to settle before executing)
+**The branches:**
+- **`core`** — the common trunk. Holds **everything version-portable**: common logic, the full
+  overlay chain, per-version `versions/<ver>/gradle.properties`, and the build-script *logic*
+  (`build.gradle.kts`, `settings.gradle.kts`, `stonecutter.gradle.kts`, loader `build.gradle.kts`).
+  **`core` holds NO toolchain version values and is not directly buildable.** It is where all
+  common/overlay work is authored.
+- **Era branches** — `main` (the newest era, GitHub default = "builds latest"), plus `mc-1.20`,
+  `mc-1.16`, `mc-1.12`, … going back. Each = `core` **+ one small commit** holding that era's
+  toolchain values. Each is independently buildable.
 
-- **Branch granularity:** one branch per MC version (Mouse Tweaks/JEI style) vs. per MC "era" (a
-  few anchors with a small Stonecutter span each). Per-version is simplest and matches our goal of
-  *every* version; per-era is less branch sprawl but reintroduces mini-span toolchain risk.
-- **Shared-code propagation:** with N branches, how do common-code changes (BotManager, world model,
-  AI) propagate? Options: forward-merge from an oldest base, cherry-pick, or a shared `common`
-  submodule/branch. (JEI/Mouse Tweaks forward-port; this is the main ongoing cost of branching.)
-- **Release/CI:** a workflow that checks out each branch, builds, and collects JARs into one
-  release. (Replaces today's `chiseledBuild`.)
-- **What happens to Stonecutter:** likely retire it once branched (each branch is single-version),
-  OR keep a tiny Stonecutter span per branch for adjacent point releases. TBD.
-- **Within-branch loader layout:** keep the current common + fabric/neoforge/forge module split
-  (it's the idiomatic Architectury multiloader template).
+**Why this is the dedup answer:** a common bug is fixed **once on `core`**; `git merge core` into
+each era branch propagates it **conflict-free** — because `core` contains no toolchain values,
+the merge can never drag a toolchain change. Within an era, Stonecutter means that one fix already
+covers all that era's MC versions. So a fix reaches every build via **one edit + a handful of clean
+merges (one per era)** — never N hand-applied copies. (`git merge` carries whole commits; isolating
+toolchain values onto era branches, off `core`, is precisely what keeps the merge path clean.)
 
-## 7. Current state (pre-migration, on `master`)
+**Toolchain isolation (the load-bearing rule):** the per-era values — Architectury Loom version,
+Gradle (wrapper) version, Java version, and the Stonecutter version-matrix — live **only on era
+branches**. `core` must **never edit a toolchain file**; era branches own them. Implementation
+target (settle at first split): collapse these into a single, well-known era-owned file (e.g.
+`era.properties` read by the build scripts) plus `gradle/wrapper/gradle-wrapper.properties` (the
+Gradle version, which the wrapper reads at bootstrap and so is inherently era-owned). The crisper
+that boundary, the harder it is to violate the rule. Floor (if not yet externalized): pure
+discipline — toolchain values are edited on era branches, never on `core`.
 
-`master` is a single Stonecutter+Architectury build spanning MC 1.20.1→1.21.11 on Architectury
-Loom 1.13.469 / Gradle 8.12.1 — **45 JARs build green** (Fabric 18, NeoForge 12, Forge 15). 26.x is
-staged (version files written) but blocked on Java 25 + the single-build Loom ceiling — i.e. 26.x is
-the trigger to actually do the branch split. See `HANDOFF.md`.
+**Authoring rules (also encoded in CLAUDE.md):**
+- Common logic, overlays, `versions/*/gradle.properties` → **`core`** (then merge into era branches).
+- Toolchain values (Loom/Gradle/Java/matrix) → **the era branch only**, never `core`.
+- Build/dev/`runClient` happens **on an era branch** (or a worktree), never on `core` (it can't build).
+
+**Kept from before:** no Architectury API (native glue, zero runtime deps — §4.1); the `overlays/`
+mechanism (§4.2); the common + fabric/neoforge/forge module layout (idiomatic Architectury
+multiloader); Forge for every version with a Forge release; NeoForge for every 1.21+ version with
+any release (beta where no stable exists); Fabric everywhere.
+
+## 6. Procedures (no "revert commits" anywhere)
+
+**Add a NEW (newer) era — e.g. 26.x:**
+1. Add the era's portable content to `core`: new overlays + `versions/26.*/gradle.properties`.
+2. `git branch mc-26 core`; on `mc-26` add **one** toolchain commit (Loom 1.14+/Gradle 9/JDK 25 +
+   the 26.x matrix).
+3. Make `mc-26` the GitHub **default** (it's the new "latest"). The previous newest era branch just
+   stays as a named branch (e.g. rename old `main`→`mc-1.21` *before* repointing default, or keep
+   `main` as the moving default and snapshot the old era first — decide at execution).
+
+**Add an OLDER era — e.g. down to a 1.16 toolchain:**
+1. On `core`: extend the overlay chain backward (this means **re-baselining** — the oldest era's
+   overlay dir is the baseline holding *all* files; adding 1.16 splits today's `1.20.1` baseline into
+   a `1.16` baseline + a `1.20.1` override era, the same "walk-back" already done 1.21.4→1.20.1) and
+   add the older `versions/*/gradle.properties`.
+2. `git branch mc-1.16 core`; add its toolchain commit (older Loom/Gradle, Java 8/16/17, its matrix).
+3. `core` stays the default? No — default stays `main` (newest). The older branch is just added.
+
+**Propagate a common fix:** commit on `core` → `git merge core` into each era branch. Conflict-free
+for common changes (toolchain files untouched). A `propagate` script automates the fan-out.
+
+**Guard against accidental new-API dependence (§4.1 / Q1):** before release, **compile common on
+every era** (`chiseledCompileCommon --continue` on each era branch, ideally in CI). That is the tool
+that has caught every API divergence in this project; run it as a standing pre-release gate so a
+newest-era-authored call that doesn't exist on an older era fails loudly, not silently at runtime.
+
+## 7. Tooling, scripts, CI
+
+- **Convenience scripts** (hide the branch-juggling): `dev <version>` (resolve era → checkout era
+  branch → `Set active project` → `runClient`); `build-all` (build every era, collect JARs);
+  `reset` (return to `main`, reset active). Scripts MUST guard a clean working tree before any
+  checkout and restore state on exit.
+- **git worktrees** for `build-all`/CI: check each era branch out into its own directory and build
+  independently (even in parallel) without disturbing the primary checkout. Each era needs its own
+  JDK (e.g. JDK 25 for `mc-26`), so CI/scripts set `JAVA_HOME` per era.
+- **Release**: tag the commit that produced each published build; aggregate all eras' JARs into one
+  release. (Replaces the single `chiseledBuild`.)
+
+## 8. Current state & sequencing
+
+Current `master` (to become `main`) is a single Stonecutter+Architectury build spanning MC
+1.20.1→1.21.11 on Architectury Loom 1.13.469 / Gradle 8.12.1 — **45 JARs build green** (Fabric 18,
+NeoForge 12, Forge 15). It IS, already, one complete era (the "Loom 1.13 / Gradle 8.12 / JDK 21"
+era); we just haven't split `core` out of it yet.
+
+**Do NOT branch prematurely.** Plan of record:
+1. **Now:** record this strategy (done) + keep building on `master`/`main` as the ≤1.21.11 era.
+2. **Prove the model backward first** (chosen because going *forward* redefines `main`=newest while
+   going *backward* leaves it stable): probe the first backward toolchain wall (add a few ≤1.20
+   versions as common nodes, run `chiseledCompileCommon` to find where the current toolchain breaks
+   — likely a Java drop ~1.17/1.16 or the Fabric floor ~1.14), then cut `core` + the first older-era
+   branch and verify the merge/build/propagate flow end-to-end.
+3. **Then forward to 26.x** once JDK 25 is installed (new era branch becomes the default).
+
+The `core` split itself is a one-time restructuring (extract toolchain values into the era-owned
+file; `core` = common+overlays+logic; `main` = `core` + the 1.21-era toolchain commit). Cheapest to
+do while there are few branches.
