@@ -11,10 +11,12 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import com.orebit.mod.platform.BlockKinds;
+import com.orebit.mod.platform.BlockLookup;
+import com.orebit.mod.platform.MineableTags;
+import com.orebit.mod.platform.Replaceable;
 import net.minecraft.core.Direction;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.tags.BlockTags;
-import net.minecraft.world.level.block.BambooStalkBlock;
 import net.minecraft.world.level.block.BaseEntityBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -93,7 +95,7 @@ public final class NavBlock {
             return Tool.SHOVEL; // or any other shovel
         } else if (state.is(BlockTags.MINEABLE_WITH_HOE)) {
             return Tool.HOE; // or any other hoe
-        } else if (state.is(BlockTags.SWORD_EFFICIENT)) {
+        } else if (MineableTags.swordEfficient(state)) {
             return Tool.SWORD;
         }
         return Tool.NONE; // No specific tool
@@ -117,13 +119,13 @@ public final class NavBlock {
     );
 
     static {
-        BuiltInRegistries.BLOCK.forEach(block -> {
+        BlockLookup.forEachBlock(block -> {
             final BlockState bs = block.defaultBlockState();
             Set<Direction> solidFaces;
             VoxelShape shape;
             if (
                 block instanceof BaseEntityBlock ||
-                block instanceof BambooStalkBlock ||
+                BlockKinds.isBambooStalk(block) ||
                 block instanceof PointedDripstoneBlock
             ) {
                 solidFaces = ALL_FACES;
@@ -145,7 +147,7 @@ public final class NavBlock {
                 .gravity(block instanceof FallingBlock)
                 .damaging(blockWillCauseDamage(block))
                 .slowing(blockWillCauseSlow(block))
-                .replaceable(bs.canBeReplaced())
+                .replaceable(Replaceable.isReplaceable(bs))
                 .hardness(block.defaultDestroyTime())
                 .tool(getBestToolForBlock(bs))
                 .toolRequired(bs.requiresCorrectToolForDrops())
@@ -157,7 +159,7 @@ public final class NavBlock {
         });
 
         System.out.println("Number of registered navblocks: " + Arrays.toString(nextIndex));
-        System.out.println("Mapped MineCraft blocks: " + blockMappings().size() + " / " + BuiltInRegistries.BLOCK.size());
+        System.out.println("Mapped MineCraft blocks: " + blockMappings().size() + " / " + BlockLookup.blockCount());
         dumpBlockCsv();
     }
 

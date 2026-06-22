@@ -2,6 +2,7 @@ package com.orebit.mod;
 
 import com.mojang.authlib.GameProfile;
 import com.orebit.mod.platform.BotSpawn;
+import com.orebit.mod.platform.Worlds;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
@@ -13,7 +14,7 @@ public class BotManager {
     private static final Map<UUID, AllyBotEntity> botsByOwner = new HashMap<>();
 
     public static void spawnBotFor(ServerPlayer player) {
-        ServerLevel world = (ServerLevel) player.level();
+        ServerLevel world = (ServerLevel) Worlds.of(player);
         // Get the server via the level, not Entity.getServer() — the latter was removed
         // from Entity in MC 1.21.9. ServerLevel.getServer() exists on every supported version.
         MinecraftServer server = world.getServer();
@@ -69,7 +70,7 @@ public class BotManager {
     // discard() would despawn the entity but leave a ghost player in the list.
     private static void removeBot(AllyBotEntity bot) {
         // Via the level, not Entity.getServer() (removed in MC 1.21.9).
-        MinecraftServer server = ((ServerLevel) bot.level()).getServer();
+        MinecraftServer server = ((ServerLevel) Worlds.of(bot)).getServer();
         if (server != null) {
             server.getPlayerList().remove(bot);
         }

@@ -1,6 +1,7 @@
 package com.orebit.mod.worldmodel.pathing;
 
 import com.orebit.mod.platform.LevelBounds;
+import com.orebit.mod.platform.Replaceable;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.level.Level;
@@ -93,7 +94,7 @@ public final class TraversalAnalyzer {
 
     public static boolean isPlaceable(Level world, BlockPos pos, BlockState state) {
         // Step 1: Block must be replaceable (air, tall grass, fluid, etc.)
-        if (!state.canBeReplaced()) {
+        if (!Replaceable.isReplaceable(state)) {
             return false;
         }
 

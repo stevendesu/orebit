@@ -1,23 +1,23 @@
 package com.orebit.mod.platform;
 
 import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.block.Block;
 
 /**
- * Version overlay (MC 1.21.11+): the {@code Identifier} flavor of {@link BlockLookup}.
- *
- * <p>Mojang renamed {@code net.minecraft.resources.ResourceLocation} to
- * {@code net.minecraft.resources.Identifier} in <b>1.21.11</b> (the deobfuscation pass);
- * {@code tryParse} and {@code Registry.getOptional} are otherwise identical. Overrides the
- * baseline {@code ResourceLocation} flavor ({@code overlays/1.20.1}) for 1.21.11 and up.
+ * Version overlay (MC 1.19.3+): the 1.19.3 registry refactor moved the static registry
+ * holders from {@code net.minecraft.core.Registry} to
+ * {@code net.minecraft.core.registries.BuiltInRegistries}. This overrides the baseline
+ * {@code Registry.BLOCK} flavor ({@code overlays/1.14.4}) for 1.19.3 and up, and is itself
+ * overridden at {@code overlays/1.21.11} (the {@code ResourceLocation} → {@code Identifier}
+ * rename). See {@link com.orebit.mod.platform.BlockLookup} baseline for the contract.
  */
 public final class BlockLookup {
     private BlockLookup() {}
 
     /** The block registered under {@code id} ("namespace:path"), or null if malformed or absent on this version. */
     public static Block byId(String id) {
-        Identifier rl = Identifier.tryParse(id);
+        ResourceLocation rl = ResourceLocation.tryParse(id);
         if (rl == null) return null;
         return BuiltInRegistries.BLOCK.getOptional(rl).orElse(null);
     }
