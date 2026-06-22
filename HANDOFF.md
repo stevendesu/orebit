@@ -1,83 +1,81 @@
-# HANDOFF — Orebit: `core` split DONE (Model C step 1); prove-backward is next
+# HANDOFF — Orebit: Model C live & pushed; NEXT = prove the model BACKWARD
 
 > **Temporary file.** Delete/overwrite at the end of the next session.
 > Written end of session 7 (2026-06-22).
 
-## State: stable & committed — branch model is now LIVE
+## State: split DONE, pushed, remote clean — branch model is live
 
-The repo has been split into the Model C branch structure (was a single `master`):
+- **`core`** @ `74fda1f` — version-portable trunk (common logic, `overlays/` chain,
+  `versions/*/gradle.properties`, build-script logic). **No toolchain values; not buildable** (missing
+  `era.properties` → Gradle fail-fast). Author ALL common/overlay/version-file changes here.
+- **`main`** @ `a920af4` — newest era = `core` + the one `era.properties` commit (≤1.21.11 era:
+  Loom 1.13.469 / Gradle 8.12.1 / JDK 21, MC 1.20.1→1.21.11). Buildable. **GitHub default.**
+- **Pushed to the PERSONAL repo** `git@github-personal:stevendesu/orebit.git` (repo was renamed
+  `orebit-1.21.4`→`orebit`; remote URL already updated). Remote heads: `core`, `main` (default),
+  `gh-pages`. Old `master` deleted. `core`↔`origin/core`, `main`↔`origin/main`; `origin/HEAD`→`main`.
+  NOTE: `gh` CLI is authed as the WORK account (`UBTCodeNinja`); `git push` is fine (personal SSH key
+  `stevendesu`), but API ops (default branch, etc.) need personal `gh auth` or the web UI.
+- Local working dir is still named `orebit-1.21.4/` (cosmetic; not renamed).
 
-- **`core`** @ `1b46068` — version-portable trunk: common logic, the `overlays/` chain,
-  `versions/*/gradle.properties`, and build-script *logic*. Holds **NO toolchain values** and is
-  **not buildable** (a missing `era.properties` makes Gradle fail fast with a clear message). All
-  common/overlay/version-file work is authored HERE.
-- **`main`** @ `5c22fc9` — newest era = `core` + **one** commit adding `era.properties` (the ≤1.21.11
-  era: Loom 1.13.469 / Gradle 8.12.1 / JDK 21, MC 1.20.1→1.21.11). Buildable. Intended GitHub default.
-  `runClient`/dev/builds happen here (or in a worktree).
-- Stale merged branches `feature/forge-1.20.1` and `migrate/architectury-stonecutter` were deleted.
+## How the era model works now (so the backward work respects it)
 
-**NOT pushed — all local (user's call).** `core` still shows `[origin/master: ahead 18]` (it inherited
-`master`'s upstream on rename); `main` has no upstream yet. When pushing: push both branches, set
-`main` as the GitHub default, and fix the upstreams (`git branch -u origin/core core`, etc.).
+- Toolchain values live in root **`era.properties`** (era-owned; ABSENT on `core`): `loom.version`
+  (injected via `settings.gradle.kts` pluginManagement `resolutionStrategy.eachPlugin.useVersion`),
+  `mc.versions.{common,fabric,neoforge,forge}` (ascending; fed to `versions()`/`branch()` via
+  `eraList`), `java.version` (reference only). Gradle wrapper version is era-owned in
+  `gradle/wrapper/gradle-wrapper.properties`. Active marker = newest in-era (1.21.11). 1.21.4 is NOT
+  special anywhere — see memory `version-1214-not-special`.
+- **Authoring rules:** common/overlay/`versions/*`/build-logic → `core`, then propagate
+  (`sh scripts/propagate.sh` = `git merge core` into every era branch, conflict-free). Toolchain
+  values (`era.properties` + wrapper) → the era branch ONLY, never `core`.
 
-**Build verified after the split:** `chiseledBuildFabric` on `main` → 18 real Fabric jars (50
-`com/orebit/mod` classes each, spot-checked 1.20.1 + 1.21.11). The matrix/values are unchanged from
-session 6 — only their *location* moved — so the 45-JAR matrix is still expected green. `core` was
-confirmed inert (fresh checkout has no `era.properties`; Gradle fails fast).
+## NEXT: prove the model BACKWARD (find the first older toolchain wall, cut the era)
 
-## How toolchain values are externalized (the mechanism settled this session)
+Rationale: going backward leaves `main` (=newest) stable, vs. forward which redefines it. Full plan:
+`internal_docs/BUILD-STRATEGY.md` §6 ("Add an OLDER era") + §8.
 
-Root-level **`era.properties`** (era-owned; absent on `core`) holds:
-- `loom.version=1.13.469` — injected by `settings.gradle.kts` `pluginManagement { resolutionStrategy
-  { eachPlugin { useVersion(...) } } }` (reads the file inline via `settingsDir` — the pluginManagement
-  preamble can't see script-body helpers). `stonecutter.gradle.kts` now declares
-  `id("dev.architectury.loom") apply false` with no literal.
-- `mc.versions.{common,fabric,neoforge,forge}` — comma-separated, **sorted ascending**; fed to
-  `versions()`/`branch()` via the `eraList(key)` helper. Loader-coverage policy comments stay on `core`.
-- `java.version=21` — recorded for reference; the per-version Java LEVEL is still derived from MC
-  version in the build scripts (portable).
-- Gradle wrapper version stays in `gradle/wrapper/gradle-wrapper.properties` (era-owned by nature).
-- Stonecutter active marker is now `1.21.11` (newest in-era). **1.21.4 is no longer special anywhere.**
+**The matrix is now era-owned, so DON'T add backward versions to `main`'s era.properties** (that would
+pollute the ≤1.21.11 era). Probe on a **scratch branch off `core`** (or the prospective older-era
+branch), not on `core` itself and not on `main`.
 
-## Authoring rules (now enforceable — CLAUDE.md + BUILD-STRATEGY.md encode them)
+Suggested sequence for the next session:
+1. **Probe how far back the CURRENT toolchain reaches.** Cut a scratch branch off `core`, give it a
+   copy of `main`'s `era.properties`, and append older MC versions to `mc.versions.common` in
+   descending batches: e.g. `1.19.4, 1.19.2, 1.18.2, 1.17.1, 1.16.5, 1.15.2, 1.14.4`. Run
+   `./gradlew chiseledCompileCommon --continue`. This needs only the MC jar + mappings (pure common
+   source), so it sidesteps per-loader/fabric-api gaps and pins exactly which version first fails.
+   - Likely walls: Loom 1.13.469 / Gradle 8.12.1 can no longer resolve old MC mappings/intermediary;
+     the **Fabric floor (~1.14** — no Fabric before it). The Java *level* is NOT a compile wall (JDK 21
+     compiles older bytecode via `--release`), but old-MC **dev/runClient** may need an older JDK
+     (1.18–1.20.4 → JDK 17; 1.17 → JDK 16; ≤1.16 → JDK 8) — relevant when building loader jars / running,
+     not for the `chiseledCompileCommon` probe.
+2. **Discover the boundary.** The last version that compiles extends the *current* era's lower bound;
+   the first that fails marks where the *older* era begins (a new Loom/Gradle/JDK combo). Research the
+   older era's toolchain (older Architectury Loom + matching Gradle that still build that MC range).
+3. **Author the portable parts on `core`:** add `versions/<ver>/gradle.properties` (parchment, loader
+   versions, mc_dep ranges) for each new backward version; any overlay-chain extension (re-baselining
+   the oldest overlay era — see BUILD-STRATEGY §6 "Add an OLDER era"). Commit on `core`.
+4. **Cut the older-era branch off `core`** (name it for the era, e.g. `mc-1.19`/`mc-1.16` per the wall):
+   add ITS `era.properties` (older Loom/Gradle/Java + its own ascending matrix) and ITS own
+   `gradle/wrapper/gradle-wrapper.properties`. This is the era's single toolchain commit.
+5. **Verify end-to-end:** build the older era; `sh scripts/propagate.sh` (merge `core`) and confirm it's
+   conflict-free; `chiseledCompileCommon` green on both eras (the pre-release gate). That proves the
+   whole Model C loop (author-on-core → propagate → per-era build) backward.
 
-- Common logic / overlays / `versions/*/gradle.properties` / build-script logic → **`core`**, then
-  propagate: commit on `core`, then `sh scripts/propagate.sh` (merges `core` into every era branch;
-  conflict-free because `core` has no toolchain values). With one era today this is just `core`→`main`.
-- Toolchain values (Loom/Gradle/Java/matrix = `era.properties` + the wrapper) → **the era branch only**,
-  never `core`.
-- Pre-release gate: `chiseledCompileCommon` on every era branch.
+## Known deferred issue (does NOT block shipping)
 
-## Next steps (in order)
-
-1. **Prove the model backward FIRST** (going forward redefines `main`; backward leaves it stable).
-   NOTE the matrix now lives in `era.properties` (era-owned), so the backward probe happens on an era
-   branch, not `core`: cut a scratch/older-era branch off `core`, add a few ≤1.20 versions to ITS
-   `mc.versions.common`, and run `chiseledCompileCommon` there to find the first backward toolchain
-   wall (likely a Java drop ~1.17/1.16 or the Fabric floor ~1.14). Then finalize that older-era branch
-   with its own `era.properties` (older Loom/Gradle/Java + its matrix) and its own
-   `gradle-wrapper.properties`; verify build + the `propagate` (merge `core`) flow.
-2. **Forward to 26.x** once **Temurin JDK 25** is installed: new era branch (Loom 1.14+/Gradle 9/JDK 25),
-   becomes the default. 26.x version files are staged under `versions/26.*`; add them to that era's
-   `era.properties` (not to `core`/`main`). Expect new overlay eras.
-
-## Known deferred issue (does NOT block anything shipping)
-
-The common-node **test/JMH harness** (`src/test/java/profile/{McBootstrapTest,BlockReadBenchmark}`)
-fails to compile when the active version is **≥1.21.11**: MC 1.21.11 moved `PalettedContainer.Strategy`
-(nested) → top-level `net.minecraft.world.level.chunk.Strategy` and changed the ctor (3-arg→2-arg).
-**Dev-tooling only** — `chiseledBuild` never compiles the common node's tests, so all 45 JARs ship
-green and `runClient` is unaffected. NOTE: the active version is now **1.21.11**, so a bare
-`./gradlew test`/`jmh` on the active node will hit this until fixed (overlay the section-palette helper,
-or fix per-era during the migration).
+Active version is now **1.21.11**, so a bare `./gradlew test`/`jmh` on the active node hits the
+`PalettedContainer.Strategy` test-harness break (1.21.11 moved it nested→top-level
+`net.minecraft.world.level.chunk.Strategy`, ctor 3-arg→2-arg). Dev-tooling only — `chiseledBuild`
+never compiles common tests, so all JARs ship green and `runClient` is unaffected. Fix per-era (or via
+a `platform`-overlaid section-palette helper) if/when Phase 1 needs it.
 
 ## Reference
 
-- Build: `./gradlew chiseledBuild{Fabric,Neoforge,Forge}` (per-loader). Probe: `chiseledCompileCommon --continue`.
+- Build: `./gradlew chiseledBuild{Fabric,Neoforge,Forge}`. Probe: `chiseledCompileCommon --continue`.
 - Run a version: `"Set active project to <ver>"` → `:<loader>:<ver>:runClient`; `"Reset active project"`.
   Verify a jar isn't hollow: `unzip -l <jar> | grep com/orebit/mod` (real ≈ 50 classes).
-- Era toolchain values: `era.properties` (+ `gradle/wrapper/gradle-wrapper.properties`). Matrix/Loom
-  wiring: `settings.gradle.kts`. Overlays: `overlays/<era>/java` (common), `overlays-forge/<era>/java`.
-- Propagate a `core` fix to eras: `sh scripts/propagate.sh`.
-- Full plan + rationale: `internal_docs/BUILD-STRATEGY.md`. Memory: `multiversion-build-strategy`,
-  `version-1214-not-special`.
+- Era values: `era.properties` (+ `gradle/wrapper/gradle-wrapper.properties`). Wiring: `settings.gradle.kts`.
+  Overlays: `overlays/<era>/java` (common), `overlays-forge/<era>/java`. Propagate: `sh scripts/propagate.sh`.
+- Full plan: `internal_docs/BUILD-STRATEGY.md`. Memory: `multiversion-build-strategy`, `version-1214-not-special`,
+  `loader-matrix`, `portability-findings`.
