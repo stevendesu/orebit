@@ -12,26 +12,25 @@ import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
-import net.minecraftforge.event.world.ChunkEvent;
-import net.minecraftforge.fmlserverevents.FMLServerStartedEvent;
+import net.minecraftforge.event.level.ChunkEvent;
+import net.minecraftforge.event.server.ServerStartedEvent;
 
 /**
  * Bridges legacy-Forge game-bus events to the loader-agnostic {@link PlatformEvents} seam.
  *
- * <p>OLDEST baseline flavor for Forge on MC <b>1.17.1</b>. Two things differ from later eras:
- * server-started is the legacy {@code net.minecraftforge.fmlserverevents.FMLServerStartedEvent}
- * (Forge moved it to {@code event.server.ServerStartedEvent} at 1.18 → {@code overlays-forge/1.18}),
- * and the "world→level" rename had not happened, so chunk/tick events are
- * {@code event.world.ChunkEvent} ({@code getWorld()}) and {@code TickEvent.WorldTickEvent}
- * ({@code event.world}) — renamed at 1.19 ({@code overlays-forge/1.19}). The overlay eras compose
- * via {@code applyVersionOverlays} in {@code forge/build.gradle.kts}. {@code FMLServerStartedEvent}
- * is a forge-bus ({@code MinecraftForge.EVENT_BUS}) event despite the FML name.
+ * <p>Flavor for Forge on MC <b>1.19–1.21.5</b>: the <b>1.19</b> "world→level" rename landed
+ * ({@code event.world}→{@code event.level} package, {@code ChunkEvent.getWorld}→{@code getLevel},
+ * {@code TickEvent.WorldTickEvent}→{@code LevelTickEvent}/{@code event.level}), on top of the
+ * 1.18 {@code event.server.ServerStartedEvent}. Overrides the {@code overlays-forge/1.18} flavor.
+ * Still the classic single {@code MinecraftForge.EVENT_BUS} bus — Forge's EventBus 7 rewrite
+ * (1.21.6) and the {@code LevelTickEvent} record change (1.21.9) override this again in
+ * {@code overlays-forge/1.21.6} and {@code overlays-forge/1.21.9}.
  */
 public final class ForgePlatformEvents implements PlatformEvents {
 
     @Override
     public void onServerStarted(Consumer<MinecraftServer> callback) {
-        MinecraftForge.EVENT_BUS.addListener((FMLServerStartedEvent event) -> callback.accept(event.getServer()));
+        MinecraftForge.EVENT_BUS.addListener((ServerStartedEvent event) -> callback.accept(event.getServer()));
     }
 
     @Override
@@ -55,7 +54,7 @@ public final class ForgePlatformEvents implements PlatformEvents {
     @Override
     public void onChunkLoad(BiConsumer<ServerLevel, ChunkAccess> callback) {
         MinecraftForge.EVENT_BUS.addListener((ChunkEvent.Load event) -> {
-            if (event.getWorld() instanceof ServerLevel level) {
+            if (event.getLevel() instanceof ServerLevel level) {
                 callback.accept(level, event.getChunk());
             }
         });
@@ -63,8 +62,8 @@ public final class ForgePlatformEvents implements PlatformEvents {
 
     @Override
     public void onWorldTickEnd(Consumer<ServerLevel> callback) {
-        MinecraftForge.EVENT_BUS.addListener((TickEvent.WorldTickEvent event) -> {
-            if (event.phase == TickEvent.Phase.END && event.world instanceof ServerLevel level) {
+        MinecraftForge.EVENT_BUS.addListener((TickEvent.LevelTickEvent event) -> {
+            if (event.phase == TickEvent.Phase.END && event.level instanceof ServerLevel level) {
                 callback.accept(level);
             }
         });
