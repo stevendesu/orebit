@@ -1,5 +1,5 @@
 modLoader="javafml"
-loaderVersion="[47,)"
+loaderVersion="[${loader_major},)"
 license="CC0-1.0"
 issueTrackerURL="https://github.com/FabricMC/fabric-example-mod"
 
@@ -16,7 +16,7 @@ logoFile="assets/orebit/icon.png"
 [[dependencies.${id}]]
 modId="forge"
 mandatory=true
-versionRange="[47,)"
+versionRange="[${loader_major},)"
 ordering="NONE"
 side="BOTH"
 
