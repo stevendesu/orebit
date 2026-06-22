@@ -71,10 +71,13 @@ loom {
 
 java {
     withSourcesJar()
-    // MC < 1.20.5 runs on Java 17; 1.20.5+ on Java 21.
-    val javaVersion = if (stonecutter.eval(minecraft, ">=1.20.5")) JavaVersion.VERSION_21 else JavaVersion.VERSION_17
-    sourceCompatibility = javaVersion
-    targetCompatibility = javaVersion
+    // Per-version JDK toolchain: MC <1.20.5 builds AND RUNS on JDK 17; 1.20.5+ need JDK 21 (Java 21
+    // bytecode). Old-Forge's modlauncher bundles an ASM (e.g. 9.1 on 1.17.1) that can't read Java
+    // 21 class files, so its runClient must use JDK 17 — a per-version run-JDK concern, NOT an era
+    // branch. Gradle selects the matching installed JDK (toolchain detection).
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(if (stonecutter.eval(minecraft, ">=1.20.5")) 21 else 17)
+    }
 }
 
 tasks.jar {

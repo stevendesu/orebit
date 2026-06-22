@@ -68,10 +68,12 @@ loom {
 
 java {
     withSourcesJar()
-    // NeoForge 1.20.2-1.20.4 run on Java 17; 1.20.5+ on Java 21.
-    val javaVersion = if (stonecutter.eval(minecraft, ">=1.20.5")) JavaVersion.VERSION_21 else JavaVersion.VERSION_17
-    sourceCompatibility = javaVersion
-    targetCompatibility = javaVersion
+    // Per-version JDK toolchain: NeoForge floor is 1.21 so all nodes resolve to JDK 21 (Java 21
+    // bytecode); the conditional is kept uniform with the other modules. Gradle selects the
+    // matching installed JDK (toolchain detection).
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(if (stonecutter.eval(minecraft, ">=1.20.5")) 21 else 17)
+    }
 }
 
 tasks.jar {
