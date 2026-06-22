@@ -1,5 +1,7 @@
 package com.orebit.mod;
 
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelInitializer;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.util.AttributeKey;
 import net.minecraft.network.Connection;
@@ -30,7 +32,17 @@ import net.minecraft.network.protocol.PacketFlow;
 public class FakeClientConnection extends Connection {
     public FakeClientConnection() {
         super(PacketFlow.SERVERBOUND);
-        EmbeddedChannel channel = new EmbeddedChannel(this);
+        // Name the connection handler "packet_handler" (MC's pipeline convention) via an
+        // initializer so it is added while the channel is registering — BEFORE channelActive, so
+        // Connection.channelActive still fires and sets Connection.channel. Forge's vanilla network
+        // filter injects itself with pipeline.addBefore("packet_handler", ...); a socketless bot's
+        // EmbeddedChannel otherwise has no such handler → NoSuchElementException during placeNewPlayer.
+        EmbeddedChannel channel = new EmbeddedChannel(new ChannelInitializer<Channel>() {
+            @Override
+            protected void initChannel(Channel ch) {
+                ch.pipeline().addLast("packet_handler", FakeClientConnection.this);
+            }
+        });
         channel.attr(AttributeKey.<String>valueOf("fml:netversion")).set("NONE");
     }
 
