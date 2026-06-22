@@ -15,7 +15,15 @@ import net.neoforged.neoforge.event.level.ChunkEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.tick.LevelTickEvent;
 
-/** Bridges NeoForge game-bus events to the loader-agnostic {@link PlatformEvents} seam. */
+/**
+ * Bridges NeoForge game-bus events to the loader-agnostic {@link PlatformEvents} seam.
+ *
+ * <p>Version overlay (NeoForge loader): MC <b>1.20.5+</b> flavor. NeoForge 1.20.5 replaced
+ * the Forge-style phase-based {@code TickEvent.LevelTickEvent} with the split
+ * {@code net.neoforged.neoforge.event.tick.LevelTickEvent.Post}. The pre-1.20.5 flavor
+ * lives in {@code overlays-neoforge/1.20.2}. (NeoForge's earliest version is 1.20.2, so
+ * there is no 1.20.1 era here.)
+ */
 public final class NeoForgePlatformEvents implements PlatformEvents {
 
     @Override

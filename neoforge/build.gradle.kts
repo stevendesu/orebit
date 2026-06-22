@@ -42,12 +42,18 @@ repositories {
 
 dependencies {
     minecraft("com.mojang:minecraft:$minecraft")
+    // Parchment optional (no stable release for 1.20.5 / 1.21.2).
+    val parchmentVer = common.prop("deps.parchment")
     mappings(loom.layered {
         officialMojangMappings()
-        parchment("org.parchmentmc.data:parchment-$minecraft:${common.mod.dep("parchment")}@zip")
+        if (!parchmentVer.isNullOrBlank())
+            parchment("org.parchmentmc.data:parchment-$minecraft:$parchmentVer@zip")
     })
     "neoForge"("net.neoforged:neoforge:${common.mod.dep("neoforge_loader")}")
-    modApi("dev.architectury:architectury-neoforge:${common.mod.dep("architectury_api")}")
+    // Architectury API optional — loader glue uses native NeoForge events, not the API.
+    val architecturyVer = common.prop("deps.architectury_api")
+    if (!architecturyVer.isNullOrBlank())
+        modApi("dev.architectury:architectury-neoforge:$architecturyVer")
 
     commonBundle(project(common.path, "namedElements")) { isTransitive = false }
     shadowBundle(project(common.path, "transformProductionNeoForge")) { isTransitive = false }
@@ -62,8 +68,10 @@ loom {
 
 java {
     withSourcesJar()
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
+    // NeoForge 1.20.2-1.20.4 run on Java 17; 1.20.5+ on Java 21.
+    val javaVersion = if (stonecutter.eval(minecraft, ">=1.20.5")) JavaVersion.VERSION_21 else JavaVersion.VERSION_17
+    sourceCompatibility = javaVersion
+    targetCompatibility = javaVersion
 }
 
 tasks.jar {
@@ -80,7 +88,9 @@ tasks.remapJar {
     dependsOn(tasks.shadowJar)
 }
 tasks.processResources {
-    properties(listOf("META-INF/neoforge.mods.toml"),
+    // NeoForge floor is 1.21, which uses the modern metadata (neoforge.mods.toml +
+    // type="required"). Every mod is also a resource pack, so pack.mcmeta is required.
+    properties(listOf("META-INF/neoforge.mods.toml", "pack.mcmeta"),
         "id" to mod.id,
         "name" to mod.name,
         "version" to mod.version,

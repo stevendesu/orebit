@@ -42,12 +42,21 @@ repositories {
 
 dependencies {
     minecraft("com.mojang:minecraft:$minecraft")
+    // Parchment optional (no stable release for 1.20.5 / 1.21.2 — though Forge has no build
+    // for those anyway).
+    val parchmentVer = common.prop("deps.parchment")
     mappings(loom.layered {
         officialMojangMappings()
-        parchment("org.parchmentmc.data:parchment-$minecraft:${common.mod.dep("parchment")}@zip")
+        if (!parchmentVer.isNullOrBlank())
+            parchment("org.parchmentmc.data:parchment-$minecraft:$parchmentVer@zip")
     })
     "forge"("net.minecraftforge:forge:$minecraft-${common.mod.dep("forge_loader")}")
-    modApi("dev.architectury:architectury-forge:${common.mod.dep("architectury_api")}")
+    // Architectury dropped legacy-Forge support after MC 1.20.4 (architectury-forge ends at
+    // 11.1.17). We don't use the API anyway (native Forge events), so only pull it where it
+    // exists; 1.20.6+ Forge builds without it via the Architectury Loom plugin alone.
+    val architecturyVer = common.prop("deps.architectury_api")
+    if (!architecturyVer.isNullOrBlank() && stonecutter.eval(minecraft, "<=1.20.4"))
+        modApi("dev.architectury:architectury-forge:$architecturyVer")
 
     commonBundle(project(common.path, "namedElements")) { isTransitive = false }
     shadowBundle(project(common.path, "transformProductionForge")) { isTransitive = false }

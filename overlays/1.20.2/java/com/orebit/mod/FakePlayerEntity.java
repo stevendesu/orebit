@@ -7,19 +7,22 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 
 /**
- * Version overlay: MC 1.20.2+ era (post login refactor).
+ * Version overlay delta — introduced at MC <b>1.20.2</b>, overrides the 1.20.1 baseline.
  *
  * <p>1.20.2 added the {@link ClientInformation} parameter to the {@code ServerPlayer}
- * constructor. We hand it a default {@link ClientInformation#createDefault()} — a
- * server-side bot has no real client to report view distance / chat options — so the
- * caller never has to name the version-specific type. The pre-1.20.2 flavor lives in
- * {@code overlays/1.20.1/java}.
+ * constructor (pre-1.20.2 used a 3-arg ctor — see {@code overlays/1.20.1}). We pass
+ * {@link ClientInformation#createDefault()} — a server-side bot has no real client to
+ * report view distance / chat options. {@code LivingEntity.kill()} is still no-arg in this
+ * flavor.
+ *
+ * <p>The overlay eras compose (build.gradle.kts), so this file is the active
+ * {@code FakePlayerEntity} for 1.20.2 through 1.21.1, then OVERRIDDEN by
+ * {@code overlays/1.21.2} (which switches kill() to take a {@link ServerLevel}).
  */
 public class FakePlayerEntity extends ServerPlayer {
 
     public FakePlayerEntity(MinecraftServer server, ServerLevel world, GameProfile profile) {
         super(server, world, profile, ClientInformation.createDefault());
-        this.connection = new FakeNetworkHandler(server, this);
 
         this.setNoGravity(false);
     }
@@ -31,14 +34,10 @@ public class FakePlayerEntity extends ServerPlayer {
         this.aiStep();
     }
 
-    /**
-     * Removes this bot from the world. As of 1.21 {@code kill()} requires the
-     * {@link ServerLevel}. (The exact boundary — 1.21.0 — will get its own overlay era
-     * when the version walk-back pins it; this era currently targets 1.21.4.)
-     */
+    /** Removes this bot from the world. Pre-1.21.2 {@code kill()} takes no arguments. */
     public void removeFromWorld() {
         if (this.isAlive()) {
-            this.kill((ServerLevel) this.level());
+            this.kill();
             this.discard();
         }
     }

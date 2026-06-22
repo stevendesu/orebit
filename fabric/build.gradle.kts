@@ -41,13 +41,21 @@ repositories {
 
 dependencies {
     minecraft("com.mojang:minecraft:$minecraft")
+    // Parchment is optional — some versions (1.20.5, 1.21.2) have no stable release.
+    val parchmentVer = common.prop("deps.parchment")
     mappings(loom.layered {
         officialMojangMappings()
-        parchment("org.parchmentmc.data:parchment-$minecraft:${common.mod.dep("parchment")}@zip")
+        if (!parchmentVer.isNullOrBlank())
+            parchment("org.parchmentmc.data:parchment-$minecraft:$parchmentVer@zip")
     })
     modImplementation("net.fabricmc:fabric-loader:${mod.dep("fabric_loader")}")
     modApi("net.fabricmc.fabric-api:fabric-api:${common.mod.dep("fabric_api")}")
-    modApi("dev.architectury:architectury-fabric:${common.mod.dep("architectury_api")}")
+    // Architectury API is optional: the loader glue uses native Fabric events, not the
+    // Architectury API (only the Architectury Loom plugin orchestrates the build). Versions
+    // lacking an architectury build (e.g. transient 1.20.3) leave it blank.
+    val architecturyVer = common.prop("deps.architectury_api")
+    if (!architecturyVer.isNullOrBlank())
+        modApi("dev.architectury:architectury-fabric:$architecturyVer")
 
     commonBundle(project(common.path, "namedElements")) { isTransitive = false }
     shadowBundle(project(common.path, "transformProductionFabric")) { isTransitive = false }
@@ -62,8 +70,10 @@ loom {
 
 java {
     withSourcesJar()
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
+    // MC < 1.20.5 runs on Java 17; 1.20.5+ on Java 21.
+    val javaVersion = if (stonecutter.eval(minecraft, ">=1.20.5")) JavaVersion.VERSION_21 else JavaVersion.VERSION_17
+    sourceCompatibility = javaVersion
+    targetCompatibility = javaVersion
 }
 
 tasks.shadowJar {

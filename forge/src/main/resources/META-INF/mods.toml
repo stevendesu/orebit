@@ -26,10 +26,3 @@ mandatory=true
 versionRange="${minecraft}"
 ordering="NONE"
 side="BOTH"
-
-[[dependencies.${id}]]
-modId="architectury"
-mandatory=true
-versionRange="[9,)"
-ordering="NONE"
-side="BOTH"

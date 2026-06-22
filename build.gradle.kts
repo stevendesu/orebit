@@ -22,12 +22,24 @@ repositories {
 dependencies {
     minecraft("com.mojang:minecraft:$minecraft")
     // Official Mojang mappings + Parchment param names (shared by all loaders).
+    // Parchment is OPTIONAL: some MC versions (e.g. 1.20.5, 1.21.2) never got a
+    // stable Parchment release. When `deps.parchment` is blank we fall back to
+    // official Mojang mappings only (param names are uglier; compile is unaffected).
+    val parchmentVer = prop("deps.parchment")
     mappings(loom.layered {
         officialMojangMappings()
-        parchment("org.parchmentmc.data:parchment-$minecraft:${mod.dep("parchment")}@zip")
+        if (!parchmentVer.isNullOrBlank())
+            parchment("org.parchmentmc.data:parchment-$minecraft:$parchmentVer@zip")
     })
     modImplementation("net.fabricmc:fabric-loader:${mod.dep("fabric_loader")}")
-    modImplementation("dev.architectury:architectury:${mod.dep("architectury_api")}")
+    // Architectury is OPTIONAL too: the common source imports ZERO architectury
+    // classes (the only loader seam, PlatformEvents, is pure-MC), so the
+    // common node compiles without it. Versions lacking a stable architectury
+    // build (e.g. 1.20.3) leave `deps.architectury_api` blank — used for the
+    // version walk-back, which only needs common to compile, not a loader jar.
+    val architecturyVer = prop("deps.architectury_api")
+    if (!architecturyVer.isNullOrBlank())
+        modImplementation("dev.architectury:architectury:$architecturyVer")
 
     // ---- JMH micro-benchmark + headless-MC test harness ----
     // Loader-agnostic (benchmarks NavSectionBuilder / block reads). Bootstraps MC
@@ -73,34 +85,8 @@ tasks.build {
 }
 
 // ---- Version overlays (PRD §9 portability) -------------------------------------
-// Files that can't compile across every supported MC version don't live in the
-// common `src/main/java`; they live in `overlays/<era>/java`, where <era> is the
-// FIRST MC version that flavor applies to (forward-looking — you add a new era dir
-// only when a newer version breaks something, never rename old ones).
-//
-// NB: overlays live in a TOP-LEVEL `overlays/` dir, OUTSIDE `src/`. Stonecutter
-// copies the whole `src/` tree into its per-version chiseledSrc, so an overlay under
-// `src/` would get every era swept in at once (duplicate class).
-//
-// For a given build we add the single highest era dir whose version is <= the active
-// MC version; its files supersede older eras. Each era dir holds the complete set of
-// version-divergent files for that era, so there's never a duplicate class with core.
-run {
-    fun mcKey(v: String): List<Int> = v.split('.', '-').mapNotNull(String::toIntOrNull)
-    fun cmp(a: List<Int>, b: List<Int>): Int {
-        for (i in 0 until maxOf(a.size, b.size)) {
-            val d = a.getOrElse(i) { 0 } - b.getOrElse(i) { 0 }
-            if (d != 0) return d
-        }
-        return 0
-    }
-    val overlaysDir = rootProject.file("overlays")
-    val activeKey = mcKey(minecraft)
-    val era = overlaysDir.listFiles()
-        ?.filter { it.isDirectory && it.resolve("java").isDirectory && cmp(mcKey(it.name), activeKey) <= 0 }
-        ?.maxWithOrNull { a, b -> cmp(mcKey(a.name), mcKey(b.name)) }
-    if (era != null) {
-        sourceSets["main"].java.srcDir(era.resolve("java"))
-        logger.lifecycle("[orebit] MC $minecraft -> overlay era '${era.name}'")
-    }
-}
+// MC-version-divergent files live in the TOP-LEVEL `overlays/<era>/java` (outside src/),
+// composed by the active MC version. The full design lives in the shared buildSrc helper
+// `applyVersionOverlays` (buildSrc/.../version-overlays.kt); each loader module composes
+// its own overlay dir the same way.
+applyVersionOverlays(minecraft, rootProject.file("overlays"))

@@ -1,9 +1,8 @@
 package com.orebit.mod;
 
 import com.mojang.authlib.GameProfile;
+import com.orebit.mod.platform.BotSpawn;
 import net.minecraft.core.BlockPos;
-import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
-import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket.Action;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -20,14 +19,12 @@ public class BotManager {
         if (baseName.length() > 12) {
             baseName = baseName.substring(0, 12);
         }
-        String botName = baseName + "_bot";
-        GameProfile profile = new GameProfile(UUID.randomUUID(), botName);
+        GameProfile profile = new GameProfile(UUID.randomUUID(), baseName + "_bot");
 
         AllyBotEntity bot = new AllyBotEntity(server, world, profile, player);
         BlockPos safeSpot = BotPositioning.findSafeSpotNear(player, 3);
         if (safeSpot != null) {
             bot.setPos(safeSpot.getX() + 0.5, safeSpot.getY(), safeSpot.getZ() + 0.5);
-
             BotPositioning.faceEachOther(bot, player);
             BotPositioning.faceEachOther(player, bot);
         } else {
@@ -36,24 +33,22 @@ public class BotManager {
         bot.setCustomName(player.getDisplayName().copy().append("'s Bot"));
         bot.setCustomNameVisible(true);
 
-        // Register the bot in every client's player list (its GameProfile) BEFORE adding
-        // the entity to the world. Pre-1.20.2 spawns players via the dedicated AddPlayer
-        // packet, which the client REJECTS if no player-info arrived first ("Server
-        // attempted to add player prior to sending player info"). Broadcasting up front is
-        // correct on every version and for every viewer, not just the owner.
-        server.getPlayerList().broadcastAll(new ClientboundPlayerInfoUpdatePacket(Action.ADD_PLAYER, bot));
-
-        world.addFreshEntity(bot);
+        // Spawn the bot the vanilla way. PlayerList.placeNewPlayer runs the real join
+        // sequence — it broadcasts the bot's player-info in the correct order, then sets up
+        // entity tracking and adds it to the world — so the client always has the player-info
+        // before the spawn packet (no "add player prior to sending player info" race) and the
+        // bot renders. This replaces the old hand-rolled broadcast + addFreshEntity. The
+        // version-specific cookie / placeNewPlayer signature lives in the BotSpawn overlay.
+        BotSpawn.place(server, bot);
 
         botsByOwner.put(player.getUUID(), bot);
-
         OrebitCommon.LOGGER.info("[Orebit] Spawned bot for {}", player.getName().getString());
     }
 
     public static void removeBotFor(ServerPlayer player) {
         AllyBotEntity bot = botsByOwner.remove(player.getUUID());
         if (bot != null) {
-            bot.removeFromWorld();
+            removeBot(bot);
             OrebitCommon.LOGGER.info("[Orebit] Removed bot for {}", player.getName().getString());
         }
     }
@@ -61,9 +56,19 @@ public class BotManager {
     public static void removeAllBots() {
         for (AllyBotEntity bot : botsByOwner.values()) {
             if (bot != null) {
-                bot.removeFromWorld();
+                removeBot(bot);
             }
         }
         botsByOwner.clear();
+    }
+
+    // The bot is a real PlayerList member (placeNewPlayer), so remove it the vanilla way —
+    // this drops it from the list, broadcasts its removal, and despawns the entity. kill() +
+    // discard() would despawn the entity but leave a ghost player in the list.
+    private static void removeBot(AllyBotEntity bot) {
+        MinecraftServer server = bot.getServer();
+        if (server != null) {
+            server.getPlayerList().remove(bot);
+        }
     }
 }

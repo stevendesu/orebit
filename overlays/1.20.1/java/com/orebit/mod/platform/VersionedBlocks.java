@@ -11,7 +11,10 @@ import net.minecraft.world.level.block.Blocks;
  * (e.g. {@code block == VersionedBlocks.SHORT_GRASS}) cost a constant load + reference
  * compare — no method dispatch.
  *
- * <p>This is the MC 1.20.1 era flavor: short grass was {@code Blocks.GRASS} before 1.20.3.
+ * <p>{@code Blocks.GRASS} was renamed to {@code SHORT_GRASS} in <b>1.20.3</b>
+ * (walk-back-pinned). This is the baseline pre-rename flavor (aliases to {@code Blocks.GRASS}).
+ * The overlay eras compose (build.gradle.kts), so it is supplied to 1.20.1 / 1.20.2 builds
+ * and then OVERRIDDEN by the renamed flavor in {@code overlays/1.20.3}.
  */
 public final class VersionedBlocks {
     private VersionedBlocks() {}

@@ -12,6 +12,18 @@ stonecutter registerChiseled tasks.register("chiseledBuild", stonecutter.chisele
     ofTask("buildAndCollect")
 }
 
+// Version walk-back probe: compile ONLY the common (loader-agnostic) source for
+// every version, with its selected overlay era. The common source is pure
+// Minecraft (no architectury/fabric-api imports), so this needs only the MC jar +
+// mappings — dodging per-version dependency gaps (missing parchment/architectury).
+// A compile error pins exactly which MC version introduced a divergence.
+// Run: `./gradlew chiseledCompileCommon --continue` and read the per-version errors.
+stonecutter registerChiseled tasks.register("chiseledCompileCommon", stonecutter.chiseled) {
+    group = "project"
+    versions { branch, _ -> branch.isEmpty() }
+    ofTask("compileJava")
+}
+
 // Builds loader-specific versions into `build/libs/{mod.version}/{loader}`
 for (it in stonecutter.tree.branches) {
     if (it.id.isEmpty()) continue
