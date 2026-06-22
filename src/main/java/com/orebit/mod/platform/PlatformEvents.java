@@ -9,7 +9,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.chunk.ChunkAccess;
 
 /**
- * The single loader-specific seam (PRD §9 / PORTABILITY-AUDIT.md). All Fabric/
+ * The single loader-specific seam (internal_docs/PRD.md §9 / PORTABILITY-AUDIT.md). All Fabric/
  * NeoForge event wiring is hidden behind this interface; everything else in the
  * mod is platform-agnostic and lives in {@code common}. Each loader module
  * supplies an implementation that forwards its native events to these callbacks.

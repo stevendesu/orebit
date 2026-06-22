@@ -1,6 +1,14 @@
 plugins {
     id("dev.kikugie.stonecutter")
-    id("dev.architectury.loom") version "1.10-SNAPSHOT" apply false
+    // Loom 1.13.469 — the version that builds the WHOLE matrix on Gradle 8.12.1:
+    //  • ≥1.13.3 so it consumes fabric-api for MC 1.21.11 (remapped with Fabric Loom 1.13.3;
+    //    Loom rejects artifacts built by a NEWER Loom),
+    //  • new enough to provide NeoForge 1.21.10+ (which dropped the old data/server.lzma patch
+    //    format that pre-1.13 Loom can't unpack), and
+    //  • still has working legacy-Forge support (Loom 1.14 broke Forge remap for MC ≥1.20.6 and
+    //    Forge compile for ≥1.21.6; Loom 1.17 also needs a newer Gradle than our 8.12.1).
+    // The single sweet spot across Fabric + NeoForge + legacy Forge.
+    id("dev.architectury.loom") version "1.13.469" apply false
     id("architectury-plugin") version "3.4-SNAPSHOT" apply false
     id("com.github.johnrengelman.shadow") version "8.1.1" apply false
 }

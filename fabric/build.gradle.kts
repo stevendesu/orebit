@@ -49,6 +49,10 @@ dependencies {
             parchment("org.parchmentmc.data:parchment-$minecraft:$parchmentVer@zip")
     })
     modImplementation("net.fabricmc:fabric-loader:${mod.dep("fabric_loader")}")
+    // Full fabric-api bundle (umbrella mod) so it's present at runtime — Orebit's fabric.mod.json
+    // depends on "fabric-api". (A 1.21.11 module-subset workaround was tried to dodge a Loom
+    // source-namespace assertion on Loom 1.11, but it left the umbrella mod absent at dev-launch
+    // → "fabric-api is missing". On Loom 1.13 the full bundle remaps cleanly.)
     modApi("net.fabricmc.fabric-api:fabric-api:${common.mod.dep("fabric_api")}")
     // Architectury API is optional: the loader glue uses native Fabric events, not the
     // Architectury API (only the Architectury Loom plugin orchestrates the build). Versions

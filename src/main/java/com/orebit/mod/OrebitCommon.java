@@ -5,6 +5,8 @@ import org.slf4j.LoggerFactory;
 
 import com.orebit.mod.platform.PlatformEvents;
 
+import net.minecraft.server.level.ServerLevel;
+
 /**
  * Loader-agnostic entry point. Each platform module (fabric, forge, neoforge) calls
  * {@link #init(PlatformEvents)} from its native initializer, passing an implementation
@@ -38,7 +40,8 @@ public final class OrebitCommon {
             // Defer the spawn to the next server tick. Since 1.20.2 the join handshake gained
             // a configuration phase, so JOIN fires while the client is still entering the PLAY
             // phase; spawning immediately races that transition.
-            player.getServer().execute(() -> BotManager.spawnBotFor(player));
+            // Server via the level — Entity.getServer() was removed in MC 1.21.9.
+            ((ServerLevel) player.level()).getServer().execute(() -> BotManager.spawnBotFor(player));
         });
 
         events.onPlayerDisconnect(player -> {

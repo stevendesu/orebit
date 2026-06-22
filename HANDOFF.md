@@ -1,93 +1,104 @@
-# HANDOFF — Orebit multi-loader/version matrix (runtime-validated)
+# HANDOFF — Orebit version ladder extended to 1.21.11 (Goal 2 in progress)
 
 > **Temporary file.** Delete/overwrite at the end of the next session.
-> Written end of session 5 (2026-06-21). Big milestone: the bot spawns & renders across
-> the whole matrix; spawn is now done the vanilla way.
+> Written end of session 6 (2026-06-22). Milestone: the build matrix now spans
+> **MC 1.20.1 → 1.21.11** across Fabric + NeoForge + Forge. 26.x is staged, gated on Java 25.
 
-## State
+## State — the matrix BUILDS clean (JDK 21, Loom 1.13.469)
 
-**23-target matrix builds, and the bot RUNS (spawns + renders + follows) on every
-dev-launchable target:**
-- **Fabric**: all 11 versions (1.20.1 → 1.21.4) — user-confirmed in-game.
-- **NeoForge**: 1.21, 1.21.1, 1.21.3, 1.21.4 — user-confirmed in-game.
-- **Forge**: 1.20.1, 1.20.2 — user-confirmed in-game. **1.20.4 / 1.20.6 / 1.21 / 1.21.1 /
-  1.21.3 / 1.21.4 build fine but CANNOT dev-launch** (see Forge-dev wall below).
+`./gradlew chiseledBuild{Fabric,Neoforge,Forge}` → **45 primary jars**, zero failures:
+- **Fabric**: 1.20.1–1.21.11 — all 18 versions.
+- **NeoForge**: 1.21, 1.21.1, **1.21.2**, 1.21.3, 1.21.4, 1.21.5–1.21.11 — 12 (1.21.2 back-filled this session).
+- **Forge**: 1.20.1, 1.20.2, 1.20.4, 1.20.6, 1.21, 1.21.1, 1.21.3, 1.21.4, 1.21.5–1.21.11 — 15
+  (Forge still skips 1.20.3/1.20.5/1.21.2 — no Forge release exists for those).
 
-Active version is reset to **1.21.4**. Build heap is **4G** (`gradle.properties`) — the
-combined `chiseledBuild` OOMs at 2G.
+Active version reset to **1.21.4**. Build heap 4G. These are **build-verified only** — runtime
+testing (the user's pass) is still pending for the new versions.
 
-### Scope (decided this session)
-- **NeoForge floor = 1.21** (4 targets) — older NeoForge is rare and added metadata/tick-event
-  complexity; deleted.
-- **Transient 1.20.3 / 1.20.5 / 1.21.2 = Fabric-only** (no stable Forge, beta-only NeoForge).
-- **Forge = every version with a Forge release**: 1.20.1, 1.20.2, 1.20.4, 1.20.6, 1.21,
-  1.21.1, 1.21.3, 1.21.4 (Forge skipped 1.20.3/1.20.5/1.21.2).
+### Loader coverage policy (decided this session)
+- **Fabric** every version. **NeoForge** every 1.21+ version with ANY release — uses the latest
+  **stable**, or the latest **beta** when NeoForge never promoted a stable (the beta is then the
+  de-facto/only NeoForge for that MC: 1.21.2, 1.21.6/.7/.9). **Forge** every version with a Forge
+  release. (Earlier belief that "we never use beta NeoForge" was wrong — we now do, deliberately.)
 
-## The big architecture change this session: vanilla bot spawn
+## The toolchain saga (the session's hard part)
 
-The bot is now spawned via **`PlayerList.placeNewPlayer`** (the real player-join path), not the
-old hand-rolled `broadcastAll(player-info) + addFreshEntity`. This fixed BOTH the
-"add player prior to sending player info" render race AND the per-version construction NPEs.
+Each new MC version exposed a different tooling wall. Net result: **Architectury Loom 1.10 →
+1.13.469** (pinned in `stonecutter.gradle.kts`). Why 1.13.469 specifically:
+- **≥1.13.3** is required to consume **fabric-api for 1.21.11** (remapped with Fabric Loom 1.13.3;
+  Loom refuses artifacts built by a *newer* Loom).
+- New enough to provide **NeoForge 1.21.10+**, which **dropped the `data/server.lzma`** patch
+  format that pre-1.13 Loom can't unpack.
+- Still has **working legacy-Forge** support: **Loom 1.14 broke Forge** (remap "Unfixable
+  conflicts" for MC ≥1.20.6; compile failures ≥1.21.6), and **Loom 1.17 needs a newer Gradle**
+  than our 8.12.1 (`Configuration.extendsFrom(Provider[])`). 1.13.469 is the single sweet spot.
+- A single Gradle plugin version applies to the whole build, so per-loader Loom versions are not
+  possible — one version must serve all three loaders.
 
-- **`FakeNetworkHandler` DELETED.** `placeNewPlayer` builds the real
-  `ServerGamePacketListenerImpl`; we no longer construct it.
-- **`FakeClientConnection`** is now a socketless `Connection`: a dummy `EmbeddedChannel`
-  (MC touches `connection.channel` in `tick()`/`isConnected()`) + no-op `send` + no-op of the
-  protocol-setup method. It's a **version overlay**: `setListener` no-op (≤1.20.4) vs
-  `setupInboundProtocol` no-op (≥1.20.5). (`player.connection = this` is set inside the
-  listener ctor *before* the protocol call, so no-op'ing it is safe.)
-- **`platform.BotSpawn`** (overlay) does `placeNewPlayer` + the per-version cookie:
-  no cookie (1.20.1) / `createInitial(profile)` (1.20.2–1.20.4) / `createInitial(profile,false)`
-  (1.20.5+).
-- **CRITICAL guard** (`OrebitCommon`): `onPlayerJoin`/`onPlayerDisconnect` early-return for
-  `FakePlayerEntity`. `placeNewPlayer` makes the bot a real PlayerList member, so the join
-  event fires *for the bot* → without the guard it spawns bots infinitely (OOM). Bot removal
-  uses `PlayerList.remove(bot)` (vanilla counterpart; `kill`+`discard` would leave a ghost).
-- `FakePlayerEntity` overlays keep only ctor + `removeFromWorld` (kill); the connection
-  assignment was removed. `removeFromWorld` is now effectively dead code (removal goes through
-  `PlayerList.remove`) — fine to delete later.
+## MC/loader API changes handled (verified via `javap` on the named jars)
 
-### Other notable changes
-- **World-model pipeline DECOUPLED from runtime.** `OrebitCommon.init` no longer touches
-  `NavBlock` or registers `ChunkNavLoader`. NavBlock's byte index overflowed on non-1.21.4
-  versions (`Too many blocks registered for mode: 3`) and the pipeline is unwired/discards
-  output anyway. **Re-engage in Phase 1** with the PRD's short-index NavBlock.
-- **Version overlays are a shared buildSrc helper** now: `applyVersionOverlays(minecraft, dir)`
-  (`buildSrc/.../version-overlays.kt`), composing eras (highest ≤ active wins per file) via a
-  `Sync` merge. Only `common` uses it (`overlays/`); loader modules currently need none.
-- `deps.parchment` / `deps.architectury_api` are optional (skip-if-blank); architectury API is
-  unused (loader glue is native events), so it's not bundled — only the loom plugin is needed.
+Common source (validated by `chiseledCompileCommon`, which compiles common against every MC):
+- **1.21.6** — `Connection.send` 2nd arg `PacketSendListener` → `io.netty.channel.ChannelFutureListener`.
+  New overlay `overlays/1.21.6/.../FakeClientConnection.java`.
+- **1.21.9** — `Entity.getServer()` **removed**. Fixed version-agnostically in common src: get the
+  server via `((ServerLevel) x.level()).getServer()` (BotManager, OrebitCommon).
+- **1.21.11** — `net.minecraft.resources.ResourceLocation` **renamed to `Identifier`** (Mojang
+  deobfuscation). Hidden behind a new `platform.BlockLookup` shim: baseline
+  `overlays/1.20.1` (ResourceLocation) + `overlays/1.21.11` (Identifier); `RegionBlockIndex`
+  now calls `BlockLookup.byId(...)` and names neither type.
 
-## Known issues / caveats
-- **Forge-dev wall (architectury-loom [#205]):** Forge 49.x+ (MC **1.20.4+**) dev `runClient`
-  dies with a JPMS split-package — `com.orebit.mod*` is exported by both the common dev module
-  AND the shadowed-into-Forge copy. Every common package splits; the resolver just reports one.
-  Forge 1.21 dev also lacks `jopt.simple` on the module path (related toolchain gap). **Not our
-  code — production Forge jars are single shadowed jars and are unaffected.** Fix is a dedicated
-  toolchain task (likely a `loom.mods` source-set merge so common+forge load as one module,
-  plus the `jopt.simple` classpath gap).
-- **1.20.1 `FakeClientConnection`** skips the `send` no-op (its signature differs pre-1.20.2) —
-  harmless EmbeddedChannel buffer growth; pin the exact 1.20.1 `send` signature if it matters.
-- **Bot position**: set via `bot.setPos` before `placeNewPlayer`; user didn't report
-  mispositioning, so it's apparently fine (Carpet does a post-spawn `teleportTo` if needed).
+Fabric loader (`fabric/build.gradle.kts`):
+- **1.21.11+** the full `fabric-api` bundle trips a Loom source-namespace assertion on
+  `fabric-content-registries-v0` (a module we don't use). From 1.21.11 we depend on only the two
+  modules the glue needs (`fabric-networking-api-v1`, `fabric-lifecycle-events-v1`) via
+  `fabricApi.module(...)`. Older versions keep the full bundle.
+
+Forge loader — **the forge module now uses the overlay mechanism** (new this session):
+`forge/build.gradle.kts` calls `applyVersionOverlays(minecraft, rootProject.file("overlays-forge"))`,
+and `ForgePlatformEvents` moved out of `forge/src` into eras (OrebitForge stays in src):
+- `overlays-forge/1.20.1` — legacy `MinecraftForge.EVENT_BUS.addListener` + phase-based
+  `TickEvent.LevelTickEvent` (Forge MC 1.20.1–1.21.5).
+- **1.21.6** — Forge migrated to **EventBus 7**: `MinecraftForge.EVENT_BUS` became an
+  `EventBusMigrationHelper` (no `addListener`); register per-event via
+  `SomeEvent.BUS.addListener(Consumer)`. Tick end is `TickEvent.LevelTickEvent.Post` (no phase
+  check). Level read via the public `event.level` field.
+- **1.21.9** — `TickEvent.LevelTickEvent` became an interface/record: `event.level` field →
+  `event.level()` accessor. (Only that one line differs from the 1.21.6 flavor.)
+
+## Other changes
+- **`deps.architectury_api` removed** from all version files — the Architectury *API* is unused
+  (loader glue is native events); only the Architectury Loom *plugin* is needed. The
+  `if (!architecturyVer.isNullOrBlank())` guards in the build files are now permanently dead but
+  harmless (left in place).
+
+## 26.x — staged, BLOCKED on Java 25 (next step)
+`versions/26.1`, `26.1.1`, `26.1.2`, `26.2` gradle.properties exist (fabric_api / neoforge_loader
+[betas for 26.1/26.1.1/26.2, stable 26.1.2] / forge_loader filled in). They are **commented out of
+`settings.gradle.kts`** (search "26.x"). MC 26.x **requires Java 25**; only JDK 21 is installed —
+config aborts globally with "Minecraft 26.1 requires Java 25 but Gradle is using 21".
+- **User is installing Temurin 25.** Once present: point the Gradle daemon at JDK 25 (set
+  `org.gradle.java.home` or `JAVA_HOME`; a JDK-25 daemon still builds the 1.21.x targets since
+  25 ≥ 21), re-add the four 26.x versions to all three branch lists + the root common list, then
+  build. **Expect further toolchain bumps** — 26.x is newer than 1.21.11, so its fabric-api may
+  need Loom >1.13.469 (→ which needs Gradle >8.12.1), and its NeoForge/Forge may have new API
+  drift needing more overlay eras (same pattern as 1.21.6–1.21.11). The walk-forward
+  (`chiseledCompileCommon`) + `javap` loop is the tool.
 
 ## Next steps (pick one)
-1. **Forge-dev #205 workaround** — only if in-dev Forge testing matters; shipped jars work.
-2. **Goal 2: Fabric + 26.2** — extend the version ladder above 1.21.4 (new overlay eras as
-   APIs diverge; reuse `chiseledCompileCommon` to pin boundaries).
-3. **Phase 1: make the world-model pipeline run** — short-index NavBlock (per-BlockState),
-   fix `NavSectionBuilder`, wire `ChunkNavLoader` to store sections; re-enable what we decoupled.
-4. **Docs reorg (deferred)**: move `PRD.md` + `PORTABILITY-AUDIT.md` into `internal_docs/`
-   (NOT `docs/` — public MkDocs); refresh `CLAUDE.md` (still says Fabric/1.21.4-only).
+1. **26.x** once JDK 25 is in (above). The likely first wall is Loom-vs-Gradle for 26.x fabric-api.
+2. **Runtime-test the new 1.21.5–1.21.11 jars** (user's manual pass) — catch issues compile can't.
+3. **Phase 1: world-model pipeline** — short-index NavBlock, fix NavSectionBuilder, wire ChunkNavLoader.
+4. **Docs/CLAUDE.md** still say Fabric/1.21.4-only — refresh.
 
 ## Reference
-- Build all real targets: `./gradlew chiseledBuild` (4G heap). Per loader:
-  `chiseledBuild{Fabric,Neoforge,Forge}`. Jars land in `build/libs/<modver>/<loader>/`.
-- Cheap boundary probe (no loader deps): `./gradlew chiseledCompileCommon --continue`.
-- Run a version: `./gradlew "Set active project to <ver>"` then `:<loader>:<ver>:runClient`.
-  Always `./gradlew "Reset active project"` (→ 1.21.4) before committing.
+- Build all: `./gradlew chiseledBuild{Fabric,Neoforge,Forge}` (per-loader; combined `chiseledBuild`
+  is heavier). Cheap common probe: `./gradlew chiseledCompileCommon --continue`.
+- Run a version: `./gradlew "Set active project to <ver>"` then `:<loader>:<ver>:runClient`;
+  always `"Reset active project"` (→1.21.4) before committing.
+  **Caution:** direct `:<loader>:<ver>:buildAndCollect` can report success with a **NO-SOURCE**
+  (hollow, no compiled glue) jar — Stonecutter only populates `chiseledSrc` via
+  `setupChiseledBuild`, which runs in `chiseledBuild<Loader>`. Trust the chiseled tasks; verify a
+  jar with `unzip -l <jar> | grep com/orebit/mod`.
 - Matrix: `settings.gradle.kts`. Per-version deps: `versions/<ver>/gradle.properties`.
-- Overlays: top-level `overlays/<era>/java` + `applyVersionOverlays`. See the
-  `version-overlays` and `loader-matrix` memories.
-
-[#205]: https://github.com/architectury/architectury-loom/issues/205
+- Overlays: common `overlays/<era>/java`; forge `overlays-forge/<era>/java`; both composed by
+  `applyVersionOverlays` (buildSrc). Loom pin: `stonecutter.gradle.kts`.

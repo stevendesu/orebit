@@ -5,9 +5,9 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
-import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.block.Block;
+
+import com.orebit.mod.platform.BlockLookup;
 
 /**
  * Maps tracked resource blocks to a small set of resource-class indices.
@@ -223,10 +223,11 @@ public final class RegionBlockIndex {
         int index = nextIndex++;
         if (index >= MAX_INDEX) throw new IllegalStateException("Too many blocks registered");
         for (String id : ids) {
-            ResourceLocation rl = ResourceLocation.tryParse("minecraft:" + id);
-            if (rl == null) continue;
-            // Absent on this Minecraft version -> empty -> skipped (graceful degradation).
-            BuiltInRegistries.BLOCK.getOptional(rl).ifPresent(block -> BLOCK_TO_INDEX.put(block, index));
+            // Absent on this Minecraft version -> null -> skipped (graceful degradation).
+            // BlockLookup hides the registry-id type (Mojang renamed ResourceLocation ->
+            // Identifier in 1.21.11), so this stays version-agnostic.
+            Block block = BlockLookup.byId("minecraft:" + id);
+            if (block != null) BLOCK_TO_INDEX.put(block, index);
         }
         REGISTERED_INDICES.add(index);
         return index;

@@ -108,3 +108,10 @@ tasks.register<Copy>("buildAndCollect") {
     into(rootProject.layout.buildDirectory.file("libs/${mod.version}/$loader"))
     dependsOn("build")
 }
+
+// ---- Version overlays (forge loader) -------------------------------------------
+// Forge's event API is MC-version-divergent (the EventBus 7 migration at 1.21.6), so
+// ForgePlatformEvents lives in TOP-LEVEL `overlays-forge/<era>/java` (NOT forge/src), composed
+// per MC version by the same buildSrc helper the common module uses. Baseline era 1.20.1
+// (classic MinecraftForge.EVENT_BUS); 1.21.6 era overrides it (per-event Event.BUS.addListener).
+applyVersionOverlays(minecraft, rootProject.file("overlays-forge"))

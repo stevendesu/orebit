@@ -67,7 +67,7 @@ What actually runs: `Orebit.onInitialize` registers Fabric `ServerPlayConnection
 
 ## Where to look
 
-- **Canonical design: `PRD.md`** (repo root, NOT under `docs/`) — the ratified foundational design (world model + pathfinding), decisions log, and phased build plan. Start here for "what are we building and why." **Kept out of `docs/` deliberately: `docs/` is the PUBLIC MkDocs site** (`docs_dir: .`, auto-deployed to GitHub Pages by `.github/workflows/docs.yml` on any push to `docs/**`), so internal docs (PRD, honest status) must NOT live there.
+- **Canonical design: `internal_docs/PRD.md`** — the ratified foundational design (world model + pathfinding), decisions log, and phased build plan. Start here for "what are we building and why." **Internal docs live in `internal_docs/` deliberately, NOT `docs/`: `docs/` is the PUBLIC MkDocs site** (`docs_dir: .`, auto-deployed to GitHub Pages by `.github/workflows/docs.yml` on any push to `docs/**`), so internal docs must NOT live there. Other internal docs: `internal_docs/PORTABILITY-AUDIT.md`, `internal_docs/BUILD-STRATEGY.md` (multi-version/multi-loader strategy + ecosystem findings).
 - Vision/architecture: `src/main/java/com/orebit/mod/README.md` (far more complete than the code; module table + end-to-end flow + open design questions).
 - Optimization rationale: `docs/Optimizations/block_reading.md` (most complete doc), `object_pooling.md` (TBD).
 - Design specs (updated 2026-06 to match the PRD; the old movement-table/bitfield drift is fixed): `docs/pathfinding.md` (adopted movement vocabulary + cost model), `docs/worldmodel.md` (NavBlock index-table model + region/HPA* layers). Note: the *code* stubs still carry the OLD drifted vocabulary until Phase 4 reconciles them.

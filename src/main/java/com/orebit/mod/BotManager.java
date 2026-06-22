@@ -13,8 +13,10 @@ public class BotManager {
     private static final Map<UUID, AllyBotEntity> botsByOwner = new HashMap<>();
 
     public static void spawnBotFor(ServerPlayer player) {
-        MinecraftServer server = player.getServer();
         ServerLevel world = (ServerLevel) player.level();
+        // Get the server via the level, not Entity.getServer() — the latter was removed
+        // from Entity in MC 1.21.9. ServerLevel.getServer() exists on every supported version.
+        MinecraftServer server = world.getServer();
         String baseName = player.getName().getString();
         if (baseName.length() > 12) {
             baseName = baseName.substring(0, 12);
@@ -66,7 +68,8 @@ public class BotManager {
     // this drops it from the list, broadcasts its removal, and despawns the entity. kill() +
     // discard() would despawn the entity but leave a ghost player in the list.
     private static void removeBot(AllyBotEntity bot) {
-        MinecraftServer server = bot.getServer();
+        // Via the level, not Entity.getServer() (removed in MC 1.21.9).
+        MinecraftServer server = ((ServerLevel) bot.level()).getServer();
         if (server != null) {
             server.getPlayerList().remove(bot);
         }
