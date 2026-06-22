@@ -239,3 +239,26 @@ Probed with `chiseledCompileCommon` on a scratch branch, appending older MC vers
 
 This validated the whole Model C loop **backward**: author on `core` → `git merge core` into the era
 branch → per-era `chiseledCompileCommon` green, with toolchain values untouched on `core`.
+
+### 8.2 Runtime pass to 1.17.1 (session 9) — Fabric + Forge actually launch
+
+Extended the era to **1.17.1** as real, shippable per-loader builds (not just common compile) and
+runtime-tested in-game. Floor is **1.17.1** (1.17.0 dropped: no viable fabric-api, Forge skipped it);
+**1.20.0 added**. Fabric matrix is contiguous 1.17.1→1.21.11; Forge matches minus its skips; NeoForge
+floor stays 1.21.
+
+- **Java is per-version, NOT per-era.** Added a Gradle **Java toolchain** (`<1.20.5 → JDK 17`,
+  `≥1.20.5 → JDK 21`); both Temurin JDKs installed. A different *run* JDK is a per-version toolchain
+  concern handled inside one era — it does NOT warrant a new era branch (an era is a Loom/Gradle wall).
+  Loom honors the toolchain for compile but launches runs on the daemon JDK, so the Forge run JVM is
+  pinned via `javaLauncher` (old-Forge modlauncher ASM can't read Java 21 → "major version 65").
+- **Loader-version metadata are per-version deps, not toolchain values** — `deps.fabric_api`,
+  `deps.forge_loader`, `deps.parchment` vary freely per version within the era.
+- **Fragile loader-specific surfaces fixed** (the fake-player network stack the PRD flagged):
+  Fabric — drop fabric-api's transitive fabric-loader, and depend on mod-id `fabric` (not `fabric-api`);
+  Forge — re-baseline `overlays-forge` to 1.17.1 with `1.18`/`1.19` flavors (ServerStartedEvent move,
+  world→level rename), template `mods.toml` loaderVersion/range from the Forge major, and make the bot's
+  socketless `FakeClientConnection` survive Forge's `placeNewPlayer` network path (`fml:netversion`
+  attr + a `"packet_handler"`-named handler).
+- **Verified in-game:** Fabric 1.17.1/1.18.1/1.19/1.19.3/1.20/1.20.1; **Forge 1.17.1**. Remaining Forge
+  versions are the user's in-progress runtime pass. ≤1.16.5 and the 26.x (Java 25) era remain deferred.
