@@ -8,7 +8,7 @@ import net.minecraft.world.level.block.Block;
  * Version overlay (MC 1.19.3+): the 1.19.3 registry refactor moved the static registry
  * holders from {@code net.minecraft.core.Registry} to
  * {@code net.minecraft.core.registries.BuiltInRegistries}. This overrides the baseline
- * {@code Registry.BLOCK} flavor ({@code overlays/1.14.4}) for 1.19.3 and up, and is itself
+ * {@code Registry.BLOCK} flavor ({@code overlays/1.17}) for 1.19.3 and up, and is itself
  * overridden at {@code overlays/1.21.11} (the {@code ResourceLocation} → {@code Identifier}
  * rename). See {@link com.orebit.mod.platform.BlockLookup} baseline for the contract.
  */

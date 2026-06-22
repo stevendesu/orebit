@@ -10,7 +10,7 @@ import net.minecraft.server.level.ServerPlayer;
  *
  * <p><b>1.19.4</b> moved the chat session out of the {@code ServerPlayer} constructor, dropping
  * the {@code ProfilePublicKey} arg that 1.19–1.19.3 required ({@code overlays/1.19}) — so the
- * ctor is 3-arg again here, matching the {@code overlays/1.14.4} baseline. (We can't simply let
+ * ctor is 3-arg again here, matching the {@code overlays/1.17} baseline. (We can't simply let
  * the baseline serve 1.19.4+, because the {@code overlays/1.19} override sits between them and
  * would otherwise win.) Overridden at {@code overlays/1.20.2} (ClientInformation 4-arg).
  */

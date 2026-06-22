@@ -12,7 +12,7 @@ import net.minecraft.server.level.ServerPlayer;
  * {@code @Nullable ProfilePublicKey} argument; <b>1.19.4</b> moved the chat session out of the
  * constructor and went back to 3 args. This overlay supplies the 4-arg flavor (a bot has no
  * chat key → {@code null}) for 1.19/1.19.1/1.19.2/1.19.3. It overrides the baseline 3-arg
- * flavor ({@code overlays/1.14.4}) and is itself overridden at {@code overlays/1.19.4} (back to
+ * flavor ({@code overlays/1.17}) and is itself overridden at {@code overlays/1.19.4} (back to
  * 3 args) and {@code overlays/1.20.2} (ClientInformation).
  */
 public class FakePlayerEntity extends ServerPlayer {
