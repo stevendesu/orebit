@@ -80,6 +80,16 @@ java {
     }
 }
 
+// Loom honors the java{} toolchain for COMPILE but launches runClient/runServer on the Gradle
+// daemon's JDK, so old-Forge runs would still hit ASM "Unsupported class file major version 65"
+// on JDK 21 (its modlauncher ASM can't read Java 21 classes). Loom's run task extends JavaExec,
+// so pin the run JVM to the same per-version toolchain.
+tasks.withType<JavaExec>().configureEach {
+    javaLauncher.set(javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(if (stonecutter.eval(minecraft, ">=1.20.5")) 21 else 17)
+    })
+}
+
 tasks.jar {
     archiveClassifier = "dev"
 }
@@ -98,7 +108,11 @@ tasks.processResources {
         "id" to mod.id,
         "name" to mod.name,
         "version" to mod.version,
-        "minecraft" to common.mod.prop("mc_dep_forgelike")
+        "minecraft" to common.mod.prop("mc_dep_forgelike"),
+        // FML's javafml language-loader version == the Forge MAJOR (37 on 1.17.1, 47 on 1.20.1, …);
+        // mods.toml's loaderVersion + the forge dependency range must match this version, not a
+        // hardcoded [47,). Derive it from deps.forge_loader.
+        "loader_major" to common.mod.dep("forge_loader").substringBefore(".")
     )
 }
 tasks.build {
