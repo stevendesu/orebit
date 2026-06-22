@@ -1,6 +1,7 @@
 package com.orebit.mod;
 
 import com.orebit.mod.platform.BlockShapes;
+import com.orebit.mod.platform.Worlds;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -11,7 +12,7 @@ import net.minecraft.world.phys.Vec3;
 public class BotPositioning {
 
     public static BlockPos findSafeSpotNear(ServerPlayer player, int radius) {
-        ServerLevel world = (ServerLevel) player.level();
+        ServerLevel world = (ServerLevel) Worlds.of(player);
         BlockPos playerPos = player.blockPosition();
 
         for (int dx = -radius; dx <= radius; dx++) {

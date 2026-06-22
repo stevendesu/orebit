@@ -1,6 +1,7 @@
 package com.orebit.mod;
 
 import com.mojang.authlib.GameProfile;
+import com.orebit.mod.platform.EntityState;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.player.Player;
@@ -67,7 +68,7 @@ public class AllyBotEntity extends FakePlayerEntity {
         Vec3 velocity = this.getDeltaMovement();
         boolean stuck = distance > 3 && velocity.horizontalDistanceSqr() < 0.001;
 
-        if (stuck && this.onGround()) {
+        if (stuck && EntityState.onGround(this)) {
             this.jumpFromGround();
         }
 

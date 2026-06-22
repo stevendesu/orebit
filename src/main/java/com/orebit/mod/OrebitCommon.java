@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.orebit.mod.platform.PlatformEvents;
+import com.orebit.mod.platform.Worlds;
 
 import net.minecraft.server.level.ServerLevel;
 
@@ -41,7 +42,7 @@ public final class OrebitCommon {
             // a configuration phase, so JOIN fires while the client is still entering the PLAY
             // phase; spawning immediately races that transition.
             // Server via the level — Entity.getServer() was removed in MC 1.21.9.
-            ((ServerLevel) player.level()).getServer().execute(() -> BotManager.spawnBotFor(player));
+            ((ServerLevel) Worlds.of(player)).getServer().execute(() -> BotManager.spawnBotFor(player));
         });
 
         events.onPlayerDisconnect(player -> {
