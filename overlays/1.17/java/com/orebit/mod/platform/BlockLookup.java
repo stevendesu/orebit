@@ -11,7 +11,7 @@ import net.minecraft.world.level.block.Block;
  * ({@code RegionBlockIndex} and any future caller) stay version-agnostic: they pass a
  * {@code "namespace:path"} string and get a {@code Block} or {@code null}.
  *
- * <p>This is the OLDEST baseline flavor (MC 1.14.4 era): the block registry is the static
+ * <p>This is the OLDEST baseline flavor (MC 1.17 era): the block registry is the static
  * {@code net.minecraft.core.Registry.BLOCK}. The overlay eras compose (build.gradle.kts), so
  * this is supplied to every build through 1.19.2 and then OVERRIDDEN:
  * <ul>

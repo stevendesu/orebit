@@ -20,7 +20,8 @@
    overlay chain and added platform shims so the loader-agnostic common source compiles on
    **1.17.1, 1.18.2, 1.19.2, 1.19.4** (verified `chiseledCompileCommon`), with the existing
    1.20.1–1.21.11 era **unregressed**.
-   - Portable work committed on **`core`** (`bb6fb9e`): overlay re-baseline 1.20.1→1.14.4 + new
+   - Portable work committed on **`core`** (`bb6fb9e`): overlay re-baseline 1.20.1→1.17 (baseline
+     dir named for the lowest supported version; renames down to 1.14.4 when ≤1.16.5 lands) + new
      override eras (1.19, 1.19.3, 1.19.4, 1.20); new platform shims `Worlds` (Entity.level),
      `EntityState` (onGround), `Replaceable` (canBeReplaced/Material), `MineableTags`
      (sword_efficient), `BlockKinds` (BambooStalkBlock); `BlockLookup` registry split
