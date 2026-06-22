@@ -48,6 +48,20 @@ for (it in stonecutter.tree.branches) {
     }
 }
 
+// Cheap per-loader compile probe: compileJava only (no remap/jar) for every version of one
+// loader. Mirrors chiseledCompileCommon for the loader modules — pins which MC version a loader
+// adapter (e.g. ForgePlatformEvents) first fails on, the same way the common probe does.
+// Run: `./gradlew chiseledCompileForge --continue` and read the per-version errors.
+for (it in stonecutter.tree.branches) {
+    if (it.id.isEmpty()) continue
+    val loader = it.id.upperCaseFirst()
+    stonecutter registerChiseled tasks.register("chiseledCompile$loader", stonecutter.chiseled) {
+        group = "project"
+        versions { branch, _ -> branch == it.id }
+        ofTask("compileJava")
+    }
+}
+
 // Runs active versions for each loader (runActiveClientFabric, runActiveServerNeoforge, ...)
 for (it in stonecutter.tree.nodes) {
     if (it.metadata != stonecutter.current || it.branch.id.isEmpty()) continue
