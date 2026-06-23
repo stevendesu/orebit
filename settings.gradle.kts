@@ -1,26 +1,31 @@
-// ---- Era toolchain values (Model C — internal_docs/BUILD-STRATEGY.md) ----------------
-// All version-portable build LOGIC lives in these scripts on `core`; the per-era toolchain
-// VALUES (Loom version + the version matrix) live in the era-owned `era.properties`, which
-// is intentionally ABSENT on `core` (so `core` is not buildable). Reading it fails fast
-// with a clear message when missing.
+// ---- 26.x ERA — Fabric-only, PURE Fabric Loom (NOT Architectury) ---------------------
+// Architectury Loom has no MC 26.1+ support yet (architectury/architectury-loom#328:
+// unobfuscated 26.x ships no mappings, which Architectury Loom still requires). Orebit's
+// source is 100% Architectury-API-free — the loader seam is hand-written DI (OrebitFabric
+// hands a FabricPlatformEvents to OrebitCommon.init) — so the Fabric jar builds on plain
+// Fabric Loom with no Architectury at all. One module compiles common (src/) + the Fabric
+// glue (fabric/src/) + the version overlays into a single jar. Forge/NeoForge for 26.x wait
+// until #328 lands; the mc-1.21 era keeps Architectury + all three loaders.
 //
-// `pluginManagement {}` is compiled as an isolated preamble (it runs before the main script
-// body), so it cannot see the `eraProps`/`eraList` helpers declared below — it reads the
-// file inline. `settingsDir` works in both places because it's a Settings API member.
+// Model C refinement: when an era's LOADER TOOLCHAIN itself differs (Architectury vs Fabric
+// Loom, multi-module vs single-module), the build SCRIPTS join the era-owned set alongside
+// era.properties + the Gradle wrapper. Common SOURCE and overlays still merge cleanly from
+// `core` (they are build-tool-agnostic).
+//
+// The Loom plugin VERSION is era-owned (era.properties / loom.version), injected below; the
+// version matrix comes from era.properties (mc.versions.fabric). `core` carries neither, so
+// it is not buildable (a missing era.properties fails fast with a clear message).
 
 pluginManagement {
     repositories {
         mavenCentral()
         gradlePluginPortal()
         maven("https://maven.fabricmc.net/")
-        maven("https://maven.architectury.dev")
-        maven("https://maven.minecraftforge.net")
-        maven("https://maven.neoforged.net/releases/")
         maven("https://maven.kikugie.dev/releases")
         maven("https://maven.kikugie.dev/snapshots")
     }
-    // Architectury Loom version is era-owned (era.properties), injected here so the
-    // declaration in stonecutter.gradle.kts (and the loader modules) needs no literal.
+    // Fabric Loom version is era-owned (era.properties), injected here so the declaration in
+    // stonecutter.gradle.kts needs no literal.
     val loomVersion = java.util.Properties().apply {
         val f = settingsDir.resolve("era.properties")
         if (!f.exists()) error(
@@ -33,7 +38,7 @@ pluginManagement {
     }.getProperty("loom.version") ?: error("era.properties is missing required key 'loom.version'")
     resolutionStrategy {
         eachPlugin {
-            if (requested.id.id == "dev.architectury.loom") useVersion(loomVersion)
+            if (requested.id.id == "net.fabricmc.fabric-loom") useVersion(loomVersion)
         }
     }
 }
@@ -54,32 +59,10 @@ stonecutter {
     centralScript = "build.gradle.kts"
     kotlinController = true
     create(rootProject) {
-        // Root `src/` is the loader-agnostic 'common' project; branches are loaders.
-        // common is built for every version any loader targets. `chiseledCompileCommon`
-        // compiles common against every node to pin which MC version introduced each
-        // overlay divergence.
-        //
-        // The version VALUES are era-owned and live in era.properties (mc.versions.*),
-        // sorted ascending — no version is special. The LOGIC and the loader-coverage
-        // policy below are version-portable and stay on `core`.
-        //
-        // Loader coverage policy:
-        //   Fabric   — EVERY version (fabric-api exists for all).
-        //   NeoForge — every 1.21+ version with ANY release; uses the latest STABLE build,
-        //              or the latest BETA when NeoForge never promoted a stable (the beta is
-        //              then the de-facto/only NeoForge for that MC version, e.g. 1.21.2,
-        //              1.21.6/.7/.9, 26.1/26.1.1/26.2). Floor stays 1.21 — older NeoForge has
-        //              the legacy metadata + tick-event API churn we don't support.
-        //   Forge    — every MC version that has a Forge release (Forge skipped 1.20.3,
-        //              1.20.5, 1.21.2 — those stay Forge-less).
-        //   1.21.6+ Forge uses the EventBus-7 ForgePlatformEvents overlay (overlays-forge/1.21.6).
-        //
-        // 26.x (Java 25) is a SEPARATE era branch — its version files are staged under
-        // versions/26.* and added to that era's era.properties, not here.
-        versions(*eraList("mc.versions.common").toTypedArray())
-        branch("fabric") { versions(*eraList("mc.versions.fabric").toTypedArray()) }
-        branch("neoforge") { versions(*eraList("mc.versions.neoforge").toTypedArray()) }
-        branch("forge") { versions(*eraList("mc.versions.forge").toTypedArray()) }
+        // Fabric-only era: ONE project per version (no loader branches). The single build
+        // compiles common + fabric glue + overlays into the Fabric jar. Versions are
+        // era-owned (era.properties: mc.versions.fabric), sorted ascending.
+        versions(*eraList("mc.versions.fabric").toTypedArray())
     }
 }
 

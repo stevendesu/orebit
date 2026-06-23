@@ -1,86 +1,56 @@
 plugins {
-    id("dev.architectury.loom")
-    id("architectury-plugin")
+    // PURE Fabric Loom (non-remapping) for unobfuscated MC 26.x — NOT Architectury Loom.
+    // See settings.gradle.kts for the full rationale (architectury-loom#328).
+    id("net.fabricmc.fabric-loom")
 }
 
 val minecraft = stonecutter.current.version
 
 version = "${mod.version}+$minecraft"
 base {
-    archivesName.set("${mod.id}-common")
+    archivesName.set(mod.id)
 }
 
-architectury.common(stonecutter.tree.branches.mapNotNull {
-    if (stonecutter.current.project !in it) null
-    else it.project.prop("loom.platform")
-})
-
 repositories {
-    maven("https://maven.parchmentmc.org")
+    mavenCentral()
+    maven("https://maven.fabricmc.net/")
 }
 
 dependencies {
     minecraft("com.mojang:minecraft:$minecraft")
-    // Official Mojang mappings + Parchment param names (shared by all loaders).
-    // Parchment is OPTIONAL: some MC versions (e.g. 1.20.5, 1.21.2) never got a
-    // stable Parchment release. When `deps.parchment` is blank we fall back to
-    // official Mojang mappings only (param names are uglier; compile is unaffected).
-    val parchmentVer = prop("deps.parchment")
-    mappings(loom.layered {
-        officialMojangMappings()
-        if (!parchmentVer.isNullOrBlank())
-            parchment("org.parchmentmc.data:parchment-$minecraft:$parchmentVer@zip")
-    })
-    modImplementation("net.fabricmc:fabric-loader:${mod.dep("fabric_loader")}")
-    // Architectury is OPTIONAL too: the common source imports ZERO architectury
-    // classes (the only loader seam, PlatformEvents, is pure-MC), so the
-    // common node compiles without it. Versions lacking a stable architectury
-    // build (e.g. 1.20.3) leave `deps.architectury_api` blank — used for the
-    // version walk-back, which only needs common to compile, not a loader jar.
-    val architecturyVer = prop("deps.architectury_api")
-    if (!architecturyVer.isNullOrBlank())
-        modImplementation("dev.architectury:architectury:$architecturyVer")
+    // MC >=26 ships UNOBFUSCATED: Mojang publishes no mappings artifact and Loom does NOT
+    // remap, so there is no mappings() call and dependencies use the PLAIN configurations
+    // (implementation/api, not modImplementation; jar, not remapJar). Fabric 26.1 porting guide.
+    implementation("net.fabricmc:fabric-loader:${mod.dep("fabric_loader")}")
+    implementation("net.fabricmc.fabric-api:fabric-api:${mod.dep("fabric_api")}")
+}
 
-    // ---- JMH micro-benchmark + headless-MC test harness ----
-    // Loader-agnostic (benchmarks NavSectionBuilder / block reads). Bootstraps MC
-    // headlessly via fabric-loader-junit. Run with `./gradlew :<commonNode>:jmh`.
-    testImplementation("org.openjdk.jmh:jmh-core:1.37")
-    testAnnotationProcessor("org.openjdk.jmh:jmh-generator-annprocess:1.37")
-    testImplementation("org.openjdk.jmh:jmh-generator-annprocess:1.37")
-    testImplementation("net.fabricmc:fabric-loader-junit:${mod.dep("fabric_loader")}")
-    testImplementation(platform("org.junit:junit-bom:5.10.2"))
-    testImplementation("org.junit.jupiter:junit-jupiter")
+// Single Fabric module: fold the loader glue (fabric/src) in next to the common source (src/).
+// OrebitFabric (the fabric.mod.json `main` entrypoint) wires FabricPlatformEvents into
+// OrebitCommon.init — plain DI, no Architectury bundling. Version-divergent files come from
+// the composed overlays (applyVersionOverlays, below).
+sourceSets {
+    named("main") {
+        java.srcDir(rootProject.file("fabric/src/main/java"))
+        resources.srcDir(rootProject.file("fabric/src/main/resources"))
+    }
 }
 
 java {
     withSourcesJar()
-    // Per-version JDK toolchain: MC <1.20.5 builds AND RUNS on JDK 17; 1.20.5+ need JDK 21 (Java 21
-    // bytecode); 26+ need JDK 25 (the 26.x era, on its own era branch). This also fixes old-loader
-    // runtime: old-Forge's modlauncher bundles an ASM that can't read Java 21 class files, so its
-    // runClient must use JDK 17 — a per-version run-JDK concern, NOT an era branch. Gradle selects
-    // the matching installed JDK (toolchain detection).
+    // 26.x runs on JDK 25 (the per-version toolchain logic kept consistent with mc-1.21).
     toolchain {
         languageVersion = JavaLanguageVersion.of(if (stonecutter.eval(minecraft, ">=26")) 25 else if (stonecutter.eval(minecraft, ">=1.20.5")) 21 else 17)
     }
 }
 
-tasks.named<Test>("test") {
-    useJUnitPlatform()
-}
-
-// JMH benchmarks inside Fabric's Knot classloader (forks=0). Gated by -Djmh=true so
-// a normal `test` skips them. Invoke via `./gradlew :<commonNode>:jmh [-Pbench=...]`.
-tasks.register<Test>("jmh") {
-    group = "verification"
-    description = "Run JMH benchmarks (inside the Knot classloader, forks=0)."
-    useJUnitPlatform()
-    testClassesDirs = sourceSets["test"].output.classesDirs
-    classpath = sourceSets["test"].runtimeClasspath
-    filter { includeTestsMatching("profile.BenchmarkRunnerTest") }
-    systemProperty("jmh", "true")
-    if (project.hasProperty("bench")) systemProperty("bench", project.property("bench")!!)
-    testLogging { showStandardStreams = true }
-    outputs.upToDateWhen { false }
+tasks.processResources {
+    properties(listOf("fabric.mod.json"),
+        "id" to mod.id,
+        "name" to mod.name,
+        "version" to mod.version,
+        "minecraft" to mod.prop("mc_dep_fabric")
+    )
 }
 
 tasks.build {
@@ -88,9 +58,16 @@ tasks.build {
     description = "Must run through 'chiseledBuild'"
 }
 
+// Collect the (un-remapped) mod jar into build/libs/<modver>.
+tasks.register<Copy>("buildAndCollect") {
+    group = "versioned"
+    from(tasks.named("jar"))
+    into(rootProject.layout.buildDirectory.dir("libs/${mod.version}"))
+    dependsOn("build")
+}
+
 // ---- Version overlays (PRD §9 portability) -------------------------------------
-// MC-version-divergent files live in the TOP-LEVEL `overlays/<era>/java` (outside src/),
-// composed by the active MC version. The full design lives in the shared buildSrc helper
-// `applyVersionOverlays` (buildSrc/.../version-overlays.kt); each loader module composes
-// its own overlay dir the same way.
+// MC-version-divergent files live in TOP-LEVEL `overlays/<era>/java` (outside src/), composed
+// by the active MC version. 26.x is far past the 1.21.4 baseline, so expect a new overlays/26
+// era for Mojang's continued rename pass (ResourceLocation->Identifier, etc.).
 applyVersionOverlays(minecraft, rootProject.file("overlays"))
