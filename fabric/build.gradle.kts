@@ -120,3 +120,13 @@ tasks.register<Copy>("buildAndCollect") {
     into(rootProject.layout.buildDirectory.file("libs/${mod.version}/$loader"))
     dependsOn("build")
 }
+
+// ---- Version overlays (fabric loader) ------------------------------------------
+// Fabric's command API made a breaking change at MC 1.19 (fabric-command-api v1's
+// (dispatcher, dedicated) -> v2's (dispatcher, registryAccess, environment), a different package),
+// so the tiny FabricCommandRegistrar primitive lives in TOP-LEVEL `overlays-fabric/<era>/java`
+// (NOT fabric/src), composed per MC version by the same buildSrc helper the common + forge modules
+// use. Baseline era 1.17 (v1); 1.19 era overrides it (v2). FabricPlatformEvents (stable) stays in
+// fabric/src and just delegates to the merged registrar. (The 26.x era builds Fabric-only from its
+// own scripts and wires this inline, so it doesn't compose this dir.)
+applyVersionOverlays(minecraft, rootProject.file("overlays-fabric"))

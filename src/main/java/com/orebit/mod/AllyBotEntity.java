@@ -58,6 +58,20 @@ public class AllyBotEntity extends FakePlayerEntity {
     /** Cap the rebuilt span per axis (chunks) so a far-away owner can't spike the rebuild cost. */
     private static final int REFRESH_MAX_SPAN_CHUNKS = 2;
 
+    /**
+     * What the bot is currently trying to do, set by the {@code /bot} commands (defaults to
+     * {@link Mode#FOLLOW} so a freshly spawned bot behaves as before — auto-follow the owner):
+     * <ul>
+     *   <li>{@link Mode#FOLLOW} — continuously path to the owner (the original behaviour).
+     *   <li>{@link Mode#STAY} — hold position; don't path anywhere.
+     *   <li>{@link Mode#COME} — path once to a fixed summon cell, then drop to {@link Mode#STAY}.
+     * </ul>
+     */
+    public enum Mode { FOLLOW, STAY, COME }
+
+    private Mode mode = Mode.FOLLOW;
+    private BlockPos comeTarget;    // fixed summon cell (owner's feet block at /bot come time)
+
     private BlockPathPlan path;
     private int waypointIndex;
     private int replanCooldown;
@@ -86,6 +100,27 @@ public class AllyBotEntity extends FakePlayerEntity {
         this.setXRot(pitch);      // up/down looking
     }
 
+    // ---- Command-driven mode control (the /bot commands call these) --------------------------
+
+    /** The bot's current behaviour mode. */
+    public Mode mode() {
+        return mode;
+    }
+
+    /** Switch behaviour mode (e.g. {@code /bot follow}, {@code /bot stay}); clears any active path. */
+    public void setMode(Mode mode) {
+        this.mode = mode;
+        this.comeTarget = null;
+        this.path = null;
+    }
+
+    /** {@code /bot come}: path once to {@code summonCell} (the caller's feet block), then hold there. */
+    public void comeTo(BlockPos summonCell) {
+        this.mode = Mode.COME;
+        this.comeTarget = summonCell.immutable();
+        this.path = null;
+    }
+
     @Override
     public void tick() {
         // Drive the player tick directly: baseTick() + a single aiStep() with our inputs set first.
@@ -99,25 +134,51 @@ public class AllyBotEntity extends FakePlayerEntity {
             return;
         }
 
-        double dx = owner.getX() - this.getX();
-        double dz = owner.getZ() - this.getZ();
-        double distXZ = Math.sqrt(dx * dx + dz * dz);
-
         this.xxa = 0.0f;
         this.yya = this.isInWater() ? 1.0f : 0.0f;
 
+        switch (mode) {
+            case STAY -> holdPosition();
+            case COME -> {
+                // Summon to a fixed cell; once there, settle into STAY (distinct from FOLLOW, which
+                // would keep chasing). comeTarget can't be null in COME, but guard defensively.
+                if (comeTarget == null) { setMode(Mode.STAY); holdPosition(); break; }
+                double tx = comeTarget.getX() + 0.5, ty = comeTarget.getY(), tz = comeTarget.getZ() + 0.5;
+                if (driveToward(tx, ty, tz, comeTarget.below())) setMode(Mode.STAY); // arrived
+            }
+            default -> // FOLLOW
+                driveToward(owner.getX(), owner.getY(), owner.getZ(), owner.blockPosition().below());
+        }
+
+        this.aiStep();
+    }
+
+    /** STAY: stop in place and face the owner. */
+    private void holdPosition() {
+        this.zza = 0.0f;
+        this.path = null;
+        lookAtPlayer(owner);
+    }
+
+    /**
+     * Path toward {@code (tx,ty,tz)} (goal floor cell {@code goalFloor}), steering along the plan and
+     * falling back to a straight-line steer off-grid. Returns {@code true} once within
+     * {@link #ARRIVE_DIST} horizontally (the caller decides what arrival means for its mode).
+     */
+    private boolean driveToward(double tx, double ty, double tz, BlockPos goalFloor) {
+        double dx = tx - this.getX();
+        double dz = tz - this.getZ();
+        double distXZ = Math.sqrt(dx * dx + dz * dz);
+
         if (distXZ <= ARRIVE_DIST) {
-            // Arrived: stop and face the owner.
             this.zza = 0.0f;
             this.path = null;
             lookAtPlayer(owner);
-            this.aiStep();
-            return;
+            return true;
         }
 
         // Replan when the goal moves to a new block, the path is spent, or the safety interval elapses.
-        // Holding a stable path while the owner stands still stops the debug particles from ghosting.
-        BlockPos goalFloor = owner.blockPosition().below();
+        // Holding a stable path while the goal stands still stops the debug particles from ghosting.
         if (path == null || waypointIndex >= path.size()
                 || !goalFloor.equals(lastGoalCell) || --replanCooldown <= 0) {
             replan(goalFloor);
@@ -135,8 +196,7 @@ public class AllyBotEntity extends FakePlayerEntity {
             PathDebugRenderer.render((ServerLevel) Worlds.of(this), path, waypointIndex,
                     this.getX(), this.getY(), this.getZ());
         }
-
-        this.aiStep();
+        return false;
     }
 
     /** Plan a fresh block path from the bot's floor cell to the owner's floor cell. */
