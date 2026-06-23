@@ -4,6 +4,7 @@ import java.lang.reflect.Field;
 import java.util.Arrays;
 
 import com.orebit.mod.platform.SectionPalette;
+import com.orebit.mod.platform.Sections;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 import net.minecraft.core.BlockPos;
@@ -135,7 +136,7 @@ public final class NavSectionBuilder {
      */
     public static NavSection build(LevelChunkSection section, BlockPos origin) {
         NavSection navSection = NavSection.create(origin);
-        classifyInto(section.getStates(), section.hasOnlyAir(), navSection.getTraversalGrid());
+        classifyInto(section.getStates(), Sections.hasOnlyAir(section), navSection.getTraversalGrid());
         return navSection;
     }
 
