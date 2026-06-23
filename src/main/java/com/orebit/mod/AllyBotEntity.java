@@ -44,6 +44,14 @@ public class AllyBotEntity extends FakePlayerEntity {
     private static final int REPLAN_TICKS = 10;
     /** Advance to the next waypoint once within this distance (blocks, horizontal). */
     private static final double WAYPOINT_REACH = 0.7;
+    /**
+     * Don't advance off a waypoint until the bot has climbed to (within this of, or above) its level.
+     * Without this, the horizontal-only reach would advance the target to the <i>next</i> step while
+     * the bot is still on the current one — so on a stacked staircase it would skip the middle step
+     * and try to jump two blocks at once (the pit-escape bug). One-sided so a descent (bot above the
+     * next waypoint) still advances and drops.
+     */
+    private static final double WAYPOINT_VERTICAL_REACH = 0.5;
     /** Below this squared horizontal speed while trying to move, treat the bot as stuck → jump. */
     private static final double STUCK_SPEED_SQR = 0.0016;
 
@@ -193,7 +201,7 @@ public class AllyBotEntity extends FakePlayerEntity {
         double ddx = tx - this.getX();
         double ddz = tz - this.getZ();
 
-        if (Math.sqrt(ddx * ddx + ddz * ddz) < WAYPOINT_REACH) {
+        if (reachedWaypoint(wp, ddx, ddz)) {
             if (++waypointIndex >= path.size()) {
                 this.zza = 0.0f;
                 return;
@@ -217,6 +225,12 @@ public class AllyBotEntity extends FakePlayerEntity {
         if ((stepUp || stuck) && EntityState.onGround(this)) {
             this.jumpFromGround();
         }
+    }
+
+    /** A waypoint is reached only when the bot is close horizontally <b>and</b> has climbed to its level. */
+    private boolean reachedWaypoint(BlockPos wp, double ddx, double ddz) {
+        return Math.sqrt(ddx * ddx + ddz * ddz) < WAYPOINT_REACH
+                && this.getY() >= wp.getY() - WAYPOINT_VERTICAL_REACH;
     }
 
     /** Original straight-at-the-owner steer, used when nav data for the route isn't built yet. */
