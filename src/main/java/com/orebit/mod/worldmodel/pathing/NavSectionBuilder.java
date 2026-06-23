@@ -3,6 +3,7 @@ package com.orebit.mod.worldmodel.pathing;
 import java.lang.reflect.Field;
 import java.util.Arrays;
 
+import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.platform.SectionPalette;
 import com.orebit.mod.platform.Sections;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
@@ -37,12 +38,12 @@ public final class NavSectionBuilder {
     private static final ThreadLocal<long[]> DESC_SCRATCH = ThreadLocal.withInitial(() -> new long[4096]);
     private static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
 
-    // NOTE (Phase 0 / Mojmap migration): the reflection below is migrated to
-    // Mojang mapping names but otherwise unchanged. It is consumed by the JMH
-    // reference benchmark (profile.BlockReadBenchmark) per PRD §8. Phase 1
-    // reimplements build() as a correct read+classify with the uniform-section
-    // bypass and replaces this reflection with an access-widener
-    // (orebit.accesswidener) — at which point these helpers move/retire.
+    // LEGACY reflection helpers, consumed ONLY by the JMH reference benchmark
+    // (profile.BlockReadBenchmark, PRD §8). The RUNTIME read+classify path uses the
+    // self-degrading platform/SectionPalette instead, so these are no longer on the live
+    // pipeline. Kept until the benchmark is ported. The static init below must NOT throw —
+    // that would break NavSectionBuilder class-load (and the whole pipeline) on versions whose
+    // PalettedContainer internals differ (e.g. pre-1.18, before the Data record).
     private static Field dataField;
     private static Field storageField;
     private static Field paletteField;
@@ -73,8 +74,9 @@ public final class NavSectionBuilder {
 
             globalRegistryField = GlobalPalette.class.getDeclaredField("registry");
             globalRegistryField.setAccessible(true);
-        } catch (NoSuchFieldException | ClassNotFoundException e) {
-            throw new RuntimeException("Failed to initialize reflection fields", e);
+        } catch (Throwable e) {
+            // Benchmark-only helpers; don't fail class-load. The runtime path uses SectionPalette.
+            OrebitCommon.LOGGER.debug("[Orebit] NavSectionBuilder legacy reflection unavailable: {}", e.toString());
         }
     }
 

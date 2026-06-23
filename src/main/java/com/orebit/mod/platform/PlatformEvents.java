@@ -26,5 +26,11 @@ public interface PlatformEvents {
 
     void onChunkLoad(BiConsumer<ServerLevel, ChunkAccess> callback);
 
+    /**
+     * Fires when a chunk is unloaded. Default no-op so loaders that don't yet wire it (and the
+     * 26.x era's own impl) still compile; loaders override it to recycle nav data on unload.
+     */
+    default void onChunkUnload(BiConsumer<ServerLevel, ChunkAccess> callback) {}
+
     void onWorldTickEnd(Consumer<ServerLevel> callback);
 }
