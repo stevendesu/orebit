@@ -4,6 +4,7 @@ import com.mojang.authlib.GameProfile;
 import com.orebit.mod.pathfinding.PathDebugRenderer;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
+import com.orebit.mod.pathfinding.blockpathfinder.MovementRegistry;
 import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.pathing.ChunkNavBuilder;
@@ -225,10 +226,14 @@ public class AllyBotEntity extends FakePlayerEntity {
         this.setYHeadRot(yaw);
         this.zza = 1.0f;
 
-        boolean stepUp = wp.getY() > this.getY() + 0.4;
+        // Jump only when the step the planner chose is an Ascend (a real jump-up onto a full block,
+        // head-clearance already verified). A Traverse step-assist (slab/stair/snow lip) is auto-stepped
+        // by vanilla movement and must NOT jump, or the bot launches over low steps. Stuck is the
+        // backstop for physical hitches the planner can't see.
+        boolean ascend = path.movement(waypointIndex) == MovementRegistry.ASCEND;
         Vec3 velocity = this.getDeltaMovement();
         boolean stuck = velocity.horizontalDistanceSqr() < STUCK_SPEED_SQR;
-        if ((stepUp || stuck) && EntityState.onGround(this)) {
+        if ((ascend || stuck) && EntityState.onGround(this)) {
             this.jumpFromGround();
         }
 
