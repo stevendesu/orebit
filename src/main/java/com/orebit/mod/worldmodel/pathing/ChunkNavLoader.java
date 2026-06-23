@@ -41,17 +41,13 @@ public final class ChunkNavLoader {
     private static int totalBuilt = 0;
     private static int nextLogAt = 1;
 
-    // Orebit's OWN chunk-key packing for NavStore. The key is internal (never compared to vanilla's),
-    // so packing it ourselves sidesteps ChunkPos.toLong()/new ChunkPos(long) — both removed when 26.1
-    // made ChunkPos a record. Chunk X/Z come through the ChunkCoords overlay (public field vs x()/z()).
-    private static long key(int x, int z) { return ((long) x << 32) | (z & 0xFFFFFFFFL); }
-    private static int keyX(long k) { return (int) (k >> 32); }
-    private static int keyZ(long k) { return (int) k; }
+    // Chunk-key packing lives on NavStore now (the owner of the key space), so the consumer
+    // (NavGridView) reads entries back with the exact same packing this loader writes them with.
 
     public static void register(PlatformEvents events) {
         events.onChunkLoad((level, chunk) ->
                 pending.computeIfAbsent(level, l -> new ConcurrentLinkedQueue<>())
-                        .add(key(ChunkCoords.x(chunk.getPos()), ChunkCoords.z(chunk.getPos()))));
+                        .add(NavStore.key(ChunkCoords.x(chunk.getPos()), ChunkCoords.z(chunk.getPos()))));
 
         events.onWorldTickEnd(level -> {
             Queue<Long> queue = pending.get(level);
@@ -59,7 +55,7 @@ public final class ChunkNavLoader {
             int built = 0;
             Long k;
             while (built < MAX_BUILDS_PER_TICK && (k = queue.poll()) != null) {
-                ChunkAccess chunk = level.getChunk(keyX(k), keyZ(k));
+                ChunkAccess chunk = level.getChunk(NavStore.keyX(k), NavStore.keyZ(k));
                 NavStore.put(level, k, ChunkNavBuilder.buildAllSections(level, chunk));
                 built++;
             }
@@ -74,6 +70,6 @@ public final class ChunkNavLoader {
         });
 
         events.onChunkUnload((level, chunk) ->
-                NavStore.remove(level, key(ChunkCoords.x(chunk.getPos()), ChunkCoords.z(chunk.getPos()))));
+                NavStore.remove(level, NavStore.key(ChunkCoords.x(chunk.getPos()), ChunkCoords.z(chunk.getPos()))));
     }
 }
