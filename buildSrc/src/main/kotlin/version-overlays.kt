@@ -50,7 +50,10 @@ fun Project.applyVersionOverlays(minecraft: String, overlaysDir: File) {
         description = "Compose version-overlay eras from ${overlaysDir.name} into one source dir."
         duplicatesStrategy = DuplicatesStrategy.INCLUDE // last `from` (highest era) wins per path
         eras.forEach { era -> from(era.resolve("java")) }
-        into(layout.buildDirectory.dir("overlay-merged/java"))
+        // Distinct destination per overlay dir: a Sync deletes anything at the destination not in its
+        // source, so two overlay dirs sharing one output dir would wipe each other (the 26.x single
+        // module composes both `overlays` and `overlays-fabric`). Name the dir after the source.
+        into(layout.buildDirectory.dir("overlay-merged/${overlaysDir.name}/java"))
     }
     extensions.getByType(SourceSetContainer::class.java)
         .getByName("main").java.srcDir(merge)
