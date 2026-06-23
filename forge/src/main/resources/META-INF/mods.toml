@@ -11,7 +11,10 @@ authors="Me!"
 description='''
 This is an example description! Tell everyone what your mod is about!
 '''
-logoFile="assets/orebit/icon.png"
+# No logoFile: Forge requires it to be a bare filename at the JAR ROOT (no "/"); a path like
+# assets/orebit/icon.png throws "Root resources can only be filenames, not paths" and crashes the
+# mod-list screen when the card is opened. To add a Forge logo later, place icon.png at the jar
+# root and set logoFile="icon.png". (Fabric's fabric.mod.json "icon" accepts the assets/ path fine.)
 
 [[dependencies.${id}]]
 modId="forge"
