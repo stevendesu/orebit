@@ -1,12 +1,15 @@
 package com.orebit.mod.worldmodel.pathing;
 
 import java.lang.reflect.Field;
+import java.util.Arrays;
+
+import com.orebit.mod.platform.SectionPalette;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.IdMap;
 import net.minecraft.util.BitStorage;
 import net.minecraft.util.CrudeIncrementalIntIdentityHashBiMap;
-import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.GlobalPalette;
 import net.minecraft.world.level.chunk.HashMapPalette;
@@ -23,6 +26,15 @@ public final class NavSectionBuilder {
     public static BlockState[] blocks = new BlockState[4096];
 
     volatile static boolean sink;
+
+    // Per-THREAD scratch (slot-per-cell + resolved descriptors). classifyInto reads/writes only
+    // these plus the grid it's handed, so the classify kernel is safe to run on a worker pool — we
+    // deliberately do NOT couple it to single-threaded execution. Reusing per thread also avoids
+    // ~64 KB of garbage per section. (The remaining single-thread touchpoint is NavSectionPool in
+    // build(); make it concurrent/per-thread when section building is moved off the tick thread.)
+    private static final ThreadLocal<int[]> SLOT_SCRATCH = ThreadLocal.withInitial(() -> new int[4096]);
+    private static final ThreadLocal<long[]> DESC_SCRATCH = ThreadLocal.withInitial(() -> new long[4096]);
+    private static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
 
     // NOTE (Phase 0 / Mojmap migration): the reflection below is migrated to
     // Mojang mapping names but otherwise unchanged. It is consumed by the JMH
@@ -111,43 +123,65 @@ public final class NavSectionBuilder {
     }
 
     /**
-     * Builds a new NavSection at the given origin (must be aligned to a 16x16x16 chunk section boundary).
+     * Build a NavSection for one chunk section: read its block states, map each to a NavBlock
+     * descriptor, and classify every cell into the 2-bit {@link TraversalGrid}.
+     *
+     * <p>Uniform-air sections (the majority underground/skyward) are bypassed: every cell classifies
+     * identically, so we classify one representative cell and fill — the big recompute win (PRD §6.2).
+     * Out-of-section neighbour reads currently resolve to air (matching the prior analyzer's edge
+     * behaviour); cross-section overscan is a later refinement.
+     *
+     * <p>The origin must be aligned to a 16×16×16 chunk-section boundary.
      */
-    public static NavSection build(Level world, LevelChunkSection chunkSection, BlockPos origin, LevelChunkSection nextSection) {
-        NavSection section = NavSection.create(origin);
+    public static NavSection build(LevelChunkSection section, BlockPos origin) {
+        NavSection navSection = NavSection.create(origin);
+        classifyInto(section.getStates(), section.hasOnlyAir(), navSection.getTraversalGrid());
+        return navSection;
+    }
 
-        // Placeholder STEP-1 read (replaced by the real read+classify in Phase 1).
-        final int origX = origin.getX();
-        final int origY = origin.getY();
-        final int origZ = origin.getZ();
-        for (int i = 0; i < 100; i++) {
-            int x = i % 10;
-            int y = 8;
-            int z = i / 10;
-            BlockPos pos = new BlockPos(origX + x, origY + y, origZ + z);
-            sink = world.getBlockState(pos).isRedstoneConductor(world, pos);
+    /**
+     * Core classify pass over a section's state container. Split out from {@link #build} so it can be
+     * exercised headless without constructing a {@link LevelChunkSection}.
+     */
+    public static void classifyInto(PalettedContainer<BlockState> states, boolean onlyAir, TraversalGrid grid) {
+        final int[] slotScratch = SLOT_SCRATCH.get();
+        final long[] descScratch = DESC_SCRATCH.get();
+
+        if (onlyAir) {
+            // Every cell is air over air: classify one representative cell and fill.
+            Arrays.fill(descScratch, AIR_DESC);
+            TraversalClass airClass = NavClassifier.classify(descScratch, 8, 8, 8);
+            fill(grid, airClass);
+            return;
         }
 
-        /*
-        // Phase 1 target: populate blocks array for quick access, then classify.
+        // Map the (small) palette to descriptors once, then resolve every cell via its slot —
+        // no per-cell state lookup.
+        BlockState[] palette = SectionPalette.read(states, slotScratch);
+        long[] slotToDesc = new long[palette.length];
+        for (int s = 0; s < palette.length; s++) {
+            slotToDesc[s] = NavBlock.descriptorFor(palette[s]);
+        }
+        for (int i = 0; i < 4096; i++) {
+            descScratch[i] = slotToDesc[slotScratch[i]];
+        }
+
         for (int y = 0; y < NavSection.SIZE; y++) {
             for (int z = 0; z < NavSection.SIZE; z++) {
                 for (int x = 0; x < NavSection.SIZE; x++) {
-                    blocks[y + z * 16 + x * 16 * 16] = chunkSection.getBlockState(x, y, z);
+                    grid.set(x, y, z, NavClassifier.classify(descScratch, x, y, z));
                 }
             }
         }
+    }
 
+    private static void fill(TraversalGrid grid, TraversalClass tc) {
         for (int y = 0; y < NavSection.SIZE; y++) {
             for (int z = 0; z < NavSection.SIZE; z++) {
                 for (int x = 0; x < NavSection.SIZE; x++) {
-                    TraversalClass tc = TraversalAnalyzerMutable.classify(world, blocks, x, y, z);
-                    section.setTraversalClass(x, y, z, tc);
+                    grid.set(x, y, z, tc);
                 }
             }
         }
-        */
-
-        return section;
     }
 }
