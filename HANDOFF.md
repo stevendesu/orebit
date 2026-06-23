@@ -1,77 +1,54 @@
-# HANDOFF — Orebit: backward era DONE (1.17.1→1.21.11, Fabric+Forge); NEXT = forward 26.x era
+# HANDOFF — Orebit: 26.2 builds on Fabric (new era); Architectury 26.x blocked upstream
 
 > **Temporary file.** Delete/overwrite at the end of the next session.
-> Written end of session 10 (2026-06-22). Supersedes the session-9 handoff.
+> Written end of session 11 (2026-06-22). Supersedes the session-10 handoff.
 
-## DONE this era (committed + pushed)
+## DONE this session — a buildable MC 26.2 Fabric jar
 
-The `main` era (Loom 1.13.469 / Gradle 8.12.1) now spans **MC 1.17.1 → 1.21.11** for **common +
-Fabric + Forge** (NeoForge 1.21+). All compile; runtime-verified in-game:
-- **Fabric:** 1.17.1, 1.18.1, 1.19, 1.19.3, 1.20, 1.20.1 (+ remaining patches low-risk).
-- **Forge:** 1.17.1 and 1.18.1 — including **1.18.1 installed on a real *recommended* Forge (39.1.0)**,
-  proving build-against-latest → runs-on-recommended.
+`main` is now the **26.x era** and produces a real, non-hollow **Fabric** jar for **MC 26.2**
+(`build/libs/<modver>/orebit-1.0.0+26.2.jar` — 57 `com/orebit/mod` classes incl. `AllyBotEntity`,
+`OrebitFabric`, the platform accessors; `fabric.mod.json` expanded for `~26.2`). `:26.2:build` is
+green. **Not yet runtime-verified in-game** (next step).
 
-Key facts settled (also in memory `loader-matrix`, `commit-hygiene`, `overlay-rebaseline-procedure`):
-- **Per-version Java toolchain**: `<1.20.5 → JDK 17`, `≥1.20.5 → JDK 21` (both Temurin installed).
-  Loom honors it for compile but NOT runs → Forge run JVM pinned via `javaLauncher`.
-- **Forge build pin = `latest`, NOT recommended**: Loom 1.13.469's remapper *corrupts* some older
-  recommended MDKs (1.18.1 `39.1.0` → scrambled signatures, won't compile); `latest` remaps clean and
-  the resulting jar still runs on the user's recommended Forge. The "Forge Beta" menu banner on
-  no-recommended versions (1.18.0/1.19.1/1.20.0) is cosmetic and accepted.
-- Forge-less: 1.20.5/1.21.2 (zero builds), **1.20.3** (betas need `bootstrap-dev:2.0.0`, unresolvable
-  under Loom 1.13.469). 1.17.0 dropped (no fabric-api). 1.20.0 added.
-- Fragile fixes landed: fabric-api transitive-loader exclude; `fabric.mod.json` depends `fabric`;
-  Forge `mods.toml` loader range templated from the Forge major + dropped the bad `logoFile`; the bot's
-  `FakeClientConnection` `fml:netversion="NONE"` + `"packet_handler"` handler name (old-Forge spawn).
-- Backward toolchain wall = **1.13.2** (no Mojang mappings + Flattening); **≤1.16.5** deferred (partial
-  WIP on local `scratch/backward-probe`).
+### The big finding: Architectury Loom can't do 26.x yet → 26 era is Fabric-only via PURE Fabric Loom
+- **Architectury Loom has no MC 26.1+ support** ([architectury/architectury-loom#328](https://github.com/architectury/architectury-loom/issues/328), open since Feb 2026, no fix/ETA). 26.1 is **unobfuscated** → Mojang ships **no mappings artifact**, but Architectury Loom still hard-requires a non-empty `mappings` config (`Configuration 'mappings' has no dependencies`).
+- **Orebit's source is 100% Architectury-API-free** (verified: zero `dev.architectury` imports; the loader seam is hand-written DI — `OrebitFabric` → `FabricPlatformEvents` → `OrebitCommon.init`). So the **Fabric** target builds on **plain Fabric Loom** with no Architectury at all.
+- **Decision (user-approved):** keep Architectury + all 3 loaders for the **mc-1.21** era; build **26.x as a Fabric-only era** on `main` with pure `net.fabricmc.fabric-loom`. Forge/NeoForge 26.x wait until #328 lands.
 
-Branches `core` + `main` are **pushed** (or being pushed this session). `scratch/backward-probe` is local.
+### Toolchain (mc-26 era, in `era.properties` + wrapper)
+- **JDK 25** (Temurin 25 installed: `jdk-25.0.3.9`). Build logic selects 25 for `>=26` (on `core`).
+- **Gradle 9.5.0** (Loom 1.17.12 requires it — 9.4.0 failed the `org.gradle.plugin.api-version` match).
+- **Fabric Loom `1.17.12`** (`net.fabricmc.fabric-loom`, the non-remapping plugin). `era.properties loom.version=1.17.12`.
+- Unobf build idioms: **no `mappings()`**, plain `implementation`/`jar` (not `modImplementation`/`remapJar`).
 
-## NEXT: the 26.x forward era — a NEW toolchain era (the whole reason Model C exists)
+### Build structure (Model C refinement)
+- `main`'s build is now **single-module, Fabric-only**: `settings.gradle.kts` (one project per version, no loader branches), `stonecutter.gradle.kts`, and `build.gradle.kts` compile `src/` (common) + `fabric/src/` (glue) + composed overlays into one jar.
+- **Refinement:** when an era's **loader toolchain** differs (Architectury vs Fabric Loom), the **build SCRIPTS** join the era-owned set (alongside `era.properties` + wrapper). Common **source + overlays still merge cleanly from `core`** (build-tool-agnostic). Because `core` never touches these build scripts, `git merge core` into `main` keeps `main`'s Fabric-only scripts (no conflict).
 
-**Why a new era:** 26.x needs **Java 25** and a **newer Architectury Loom** (1.13.469 can't build 26.x
-fabric-api), which needs **Gradle 9**. That can't coexist with legacy Forge's `≤1.13`/Gradle-8 needs in
-one build (BUILD-STRATEGY §3) → it MUST be a separate era branch. Procedure: BUILD-STRATEGY §6
-"Add a NEW (newer) era."
+### 26.x API drift fixed (thin `platform/` adapters — core logic stays in core, per user direction)
+Authored on `core` (portable; baseline keeps mc-1.21 green, `overlays/26` applies only to 26.x):
+- **`platform/ChunkCoords.x/z(ChunkPos)`** — 26.1 made `ChunkPos.x/.z` private; accessors are `x()/z()`. Baseline returns the fields, `overlays/26` the methods. `ChunkNavBuilder`/`ChunkNavLoader` call the accessor. Static one-liners → JIT-inlined (no hot-path dispatch).
+- **`platform/ConcretePowder.all()`** — 26.1 collapsed the 16 dyed concrete-powder blocks into one `Blocks.CONCRETE_POWDER` `ColorCollection`. Baseline returns the 16 constants; `overlays/26` returns `CONCRETE_POWDER.asList()`. `TraversalAnalyzerMutable` folds it into its gravity set (built once).
+- **`FabricPlatformEvents`** (loader glue, edited in place on `main`): `ServerTickEvents.END_WORLD_TICK` → `END_LEVEL_TICK`; `ServerChunkEvents.Load` gained a 3rd arg (`newlyGenerated`).
 
-**Prereqs (do first):**
-1. **Install Temurin 25** (not yet installed; we have 17 + 21 via winget — `winget install EclipseAdoptium.Temurin.25.JDK`).
-2. **Research the toolchain combo**: the Architectury Loom version that builds MC 26.x fabric-api +
-   NeoForge 26.x (likely Loom ≥1.14, which requires Gradle ≥9) and the matching Gradle wrapper version.
+### Branches (all LOCAL except mc-1.21)
+- **`mc-1.21`** (pushed) — snapshot of the previous era (Architectury, all 3 loaders, MC 1.17.1→1.21.11). Untouched, still green.
+- **`core`** (local) — + `>=26→JDK25` toolchain logic, version headers, and the `overlays/26` + accessor commit. **Build scripts still Architectury** (unchanged; that's correct — `core` stays loader-agnostic).
+- **`main`** (local) — the 26.x Fabric era (toolchain + Fabric-only build + the FabricPlatformEvents fix). **Nothing pushed yet.**
 
-**Staged already (on `core`):** `versions/26.1`, `26.1.1`, `26.1.2`, `26.2` exist with deps
-(fabric_api/neoforge_loader-beta/forge_loader). ⚠️ Their header comment says "Java 21" — **wrong, 26.x is
-Java 25**; and `build.gradle.kts`'s toolchain logic is `>=1.20.5 ? 21 : 17` → would pick 21 for 26.x.
-**Add a `>=26 → 25` branch to the toolchain logic (portable, on `core`).**
-
-**Steps:**
-1. On `core`: finalize 26.x portable content — fix the toolchain Java logic to add 25 for ≥26; add any
-   new overlay eras for 1.21.11→26.x API divergence (the deobf/rename pass continues past 1.21.11;
-   e.g. `ResourceLocation`→`Identifier` already at 1.21.11 — expect more). Probe with
-   `chiseledCompileCommon` once a 26.x node is buildable.
-2. `git branch mc-26 core`; on `mc-26` add ONE toolchain commit: `era.properties` (newer Loom version +
-   the 26.x `mc.versions.*` matrix + `java.version=25`) and `gradle/wrapper/gradle-wrapper.properties`
-   (Gradle 9). This is the era's single toolchain commit.
-3. **Default-branch decision** (decide at execution, BUILD-STRATEGY §6): `main` = "newest era = GitHub
-   default." Either (a) rename current `main`→`mc-1.21` and make `mc-26` the new `main`/default, or
-   (b) keep `main` as the moving default and snapshot the current 1.21 era to `mc-1.21` first.
-4. Verify: build `mc-26` (needs JDK 25 + the newer Loom); `sh scripts/propagate.sh` to confirm
-   `git merge core` into both eras stays conflict-free; `chiseledCompileCommon` green on each era (the
-   pre-release CI gate).
-
-**Watch:** 26.x Forge (Forge 65.x — EventBus 7 already handled at `overlays-forge/1.21.6`, but 26.x may
-diverge more); NeoForge 26.x is beta-only (consistent with policy). The newer Loom may also fix/break the
-overlay composition — re-run the probes.
+## NEXT
+1. **Runtime-verify in-game** (the real goal): `Set active project to 26.2` → `:26.2:runClient` (JDK 25). Confirm the bot spawns + follows the owner on 26.2. The fake-player network stack is the most fragile surface (PRD) — 26.x may have changed `ServerPlayer`/connection internals; it COMPILES, runtime is unproven. Needs Fabric API present at runtime.
+2. **Decide pushes / default branch.** `main` = newest era = intended GitHub default, but it's runtime-unverified. Recommend: runtime-verify, THEN push `core` + `main`. (`mc-1.21` already pushed as the safe fallback.)
+3. **Reconcile FabricPlatformEvents divergence** — it's edited in place on `main`; if `core` ever changes it, merges conflict. Consider an `overlays-fabric/` (baseline + 26) so both eras share it, OR accept the contained divergence (rare changes).
+4. **Forge/NeoForge 26.x** — blocked on architectury-loom#328; revisit when it ships (watch the issue).
+5. **Restore the JMH/test harness for 26.x** (currently deferred — test source set emptied on `main`): needs fabric-loader-junit headless bootstrap verified on unobfuscated 26.x.
+6. **Block-registry follow-up (Phase 1, user-flagged):** the concrete-powder `ColorCollection` is the first sign of 26.x block reorg; 1.21.5→26.x likely added blocks/wood our nav registries (`RegionMetadata` counters, NavBlock) don't yet handle. Audit when nav work begins.
 
 ## Gotchas (carry forward)
-- Loader nodes build from `chiseledSrc` → run **`Set active project to <ver>` before `runClient`** (and
-  before building a single loader jar) after any src/overlay edit.
-- **Commit hygiene** (memory `commit-hygiene`): accumulate runtime fixes in the working tree; commit at a
-  tested-working point, not per micro-step.
-- Single loader jar: `Set active project to <ver>` → `:<loader>:<ver>:buildAndCollect` → jar in
-  `build/libs/<modver>/<loader>/`; verify non-hollow with `unzip -l <jar> | grep com/orebit/mod`.
+- **Run from the ACTIVE node:** `./gradlew :26.2:compileJava` (active marker = 26.2). `compileJava` across ALL nodes fails because Stonecutter only fills live `src/` for the active version; non-active nodes lack the common source. `Set active project to <ver>` before building another 26.x patch.
+- Use `JAVA_HOME=…/jdk-25.0.3.9-hotspot` for all 26.x Gradle invocations.
+- `core` is not buildable (no `era.properties`) — use a **worktree** to author on `core` without disturbing `main`'s working tree (used this session for the overlay/accessor commit).
+- The `build/libs/1.0.0/{fabric,forge,neoforge}/…` jars are STALE leftovers from prior mc-1.21-era builds; the 26 era's jar is `build/libs/1.0.0/orebit-1.0.0+26.2.jar`.
 
 ## Reference
-- `internal_docs/BUILD-STRATEGY.md` §3 (Loom-span constraint), §6 (add-newer-era procedure), §8.1–8.2.
-- Memory: `loader-matrix`, `multiversion-build-strategy`, `overlay-rebaseline-procedure`, `commit-hygiene`.
+- `internal_docs/BUILD-STRATEGY.md` §3 (Loom-span), §6 (add-newer-era). Memory: `loader-matrix`, `multiversion-build-strategy`, `overlay-rebaseline-procedure`, `commit-hygiene`, `prefers-strategy-over-conditionals`.
