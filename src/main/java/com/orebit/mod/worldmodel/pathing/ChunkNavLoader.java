@@ -5,6 +5,7 @@ import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
+import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.platform.ChunkCoords;
 import com.orebit.mod.platform.PlatformEvents;
 
@@ -37,6 +38,10 @@ public final class ChunkNavLoader {
 
     private static final Map<ServerLevel, Queue<Long>> pending = new ConcurrentHashMap<>();
 
+    // Diagnostics until a consumer exists: confirm the pipeline is alive without log spam.
+    private static int totalBuilt = 0;
+    private static int nextLogAt = 1;
+
     public static void register(PlatformEvents events) {
         events.onChunkLoad((level, chunk) ->
                 pending.computeIfAbsent(level, l -> new ConcurrentLinkedQueue<>())
@@ -52,6 +57,14 @@ public final class ChunkNavLoader {
                 ChunkAccess chunk = level.getChunk(ChunkCoords.x(pos), ChunkCoords.z(pos));
                 NavStore.put(level, key, ChunkNavBuilder.buildAllSections(level, chunk));
                 built++;
+            }
+            if (built > 0) {
+                totalBuilt += built;
+                if (totalBuilt >= nextLogAt) {
+                    OrebitCommon.LOGGER.info("[Orebit] nav grid active: {} chunks built ({} stored in this level)",
+                            totalBuilt, NavStore.size(level));
+                    nextLogAt += 1024;
+                }
             }
         });
 
