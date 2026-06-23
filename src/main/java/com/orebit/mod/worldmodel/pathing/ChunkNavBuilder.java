@@ -24,12 +24,7 @@ public final class ChunkNavBuilder {
         for (int i = 0; i < chunkSections.length; i++) {
             int sectionY = minY + (i * 16);
             BlockPos origin = new BlockPos(chunkX << 4, sectionY, chunkZ << 4);
-            sections[i] = NavSectionBuilder.build(
-                world,
-                chunkSections[i],
-                origin,
-                i + 1 < chunkSections.length ? chunkSections[i + 1] : null
-            );
+            sections[i] = NavSectionBuilder.build(chunkSections[i], origin);
         }
 
         return sections;
