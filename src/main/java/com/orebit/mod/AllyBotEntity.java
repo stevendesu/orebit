@@ -1,6 +1,7 @@
 package com.orebit.mod;
 
 import com.mojang.authlib.GameProfile;
+import com.orebit.mod.pathfinding.PathDebugRenderer;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.platform.EntityState;
@@ -26,6 +27,13 @@ import net.minecraft.world.phys.Vec3;
  * never freezes.
  */
 public class AllyBotEntity extends FakePlayerEntity {
+
+    /**
+     * Debug toggle: draw the bot's planned path as particles (END_ROD line, FLAME = current target)
+     * and log each plan (size, first/last waypoint, goal). Non-final so it can be flipped at runtime
+     * (e.g. via a debugger or future command); default on while the pathfinder is being validated.
+     */
+    public static boolean DEBUG_PATH = true;
 
     private final Player owner;
 
@@ -110,6 +118,11 @@ public class AllyBotEntity extends FakePlayerEntity {
             steerStraight(dx, dz); // no nav data here — fall back to straight-line follow
         }
 
+        if (DEBUG_PATH && path != null) {
+            PathDebugRenderer.render((ServerLevel) Worlds.of(this), path, waypointIndex,
+                    this.getX(), this.getY(), this.getZ());
+        }
+
         this.aiStep();
     }
 
@@ -126,7 +139,18 @@ public class AllyBotEntity extends FakePlayerEntity {
         this.waypointIndex = 0;
 
         boolean hasPath = path != null && path.size() > 0;
-        if (hasPath != loggedHasPath) {
+        if (DEBUG_PATH) {
+            // Verbose per-plan trace while debugging: first waypoint reveals which way A* actually heads.
+            if (hasPath) {
+                OrebitCommon.LOGGER.info("[Orebit] plan: {} wp cost={} start={} first={} last={} goal={}",
+                        path.size(), path.cost(), startFloor, path.waypoint(0),
+                        path.waypoint(path.size() - 1), goalFloor);
+            } else {
+                OrebitCommon.LOGGER.info("[Orebit] plan: NONE start={}({}) goal={}({})",
+                        startFloor, grid.classAt(startFloor.getX(), startFloor.getY(), startFloor.getZ()),
+                        goalFloor, grid.classAt(goalFloor.getX(), goalFloor.getY(), goalFloor.getZ()));
+            }
+        } else if (hasPath != loggedHasPath) {
             loggedHasPath = hasPath;
             if (hasPath) {
                 OrebitCommon.LOGGER.info("[Orebit] bot path: {} waypoints (cost {})", path.size(), path.cost());
