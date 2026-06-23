@@ -10,7 +10,6 @@ import com.orebit.mod.platform.ChunkCoords;
 import com.orebit.mod.platform.PlatformEvents;
 
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.ChunkAccess;
 
 /**
@@ -42,20 +41,26 @@ public final class ChunkNavLoader {
     private static int totalBuilt = 0;
     private static int nextLogAt = 1;
 
+    // Orebit's OWN chunk-key packing for NavStore. The key is internal (never compared to vanilla's),
+    // so packing it ourselves sidesteps ChunkPos.toLong()/new ChunkPos(long) — both removed when 26.1
+    // made ChunkPos a record. Chunk X/Z come through the ChunkCoords overlay (public field vs x()/z()).
+    private static long key(int x, int z) { return ((long) x << 32) | (z & 0xFFFFFFFFL); }
+    private static int keyX(long k) { return (int) (k >> 32); }
+    private static int keyZ(long k) { return (int) k; }
+
     public static void register(PlatformEvents events) {
         events.onChunkLoad((level, chunk) ->
                 pending.computeIfAbsent(level, l -> new ConcurrentLinkedQueue<>())
-                        .add(chunk.getPos().toLong()));
+                        .add(key(ChunkCoords.x(chunk.getPos()), ChunkCoords.z(chunk.getPos()))));
 
         events.onWorldTickEnd(level -> {
             Queue<Long> queue = pending.get(level);
             if (queue == null) return;
             int built = 0;
-            Long key;
-            while (built < MAX_BUILDS_PER_TICK && (key = queue.poll()) != null) {
-                ChunkPos pos = new ChunkPos(key);
-                ChunkAccess chunk = level.getChunk(ChunkCoords.x(pos), ChunkCoords.z(pos));
-                NavStore.put(level, key, ChunkNavBuilder.buildAllSections(level, chunk));
+            Long k;
+            while (built < MAX_BUILDS_PER_TICK && (k = queue.poll()) != null) {
+                ChunkAccess chunk = level.getChunk(keyX(k), keyZ(k));
+                NavStore.put(level, k, ChunkNavBuilder.buildAllSections(level, chunk));
                 built++;
             }
             if (built > 0) {
@@ -68,6 +73,7 @@ public final class ChunkNavLoader {
             }
         });
 
-        events.onChunkUnload((level, chunk) -> NavStore.remove(level, chunk.getPos().toLong()));
+        events.onChunkUnload((level, chunk) ->
+                NavStore.remove(level, key(ChunkCoords.x(chunk.getPos()), ChunkCoords.z(chunk.getPos()))));
     }
 }
