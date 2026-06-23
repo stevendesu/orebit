@@ -71,6 +71,15 @@ public final class NavClassifier {
         // A clearable hazard in the body space (e.g. fire) — passable but costly.
         if (NavBlock.isDamaging(a1) || NavBlock.isDamaging(a2)) return TraversalClass.SLOW;
 
+        // The body space (feet a1 / head a2) holds a SOLID block — soft, since a hard one already
+        // returned BLOCKED via the headroom-hardness test. You cannot stand here without mining it, so
+        // it is EASY (breakable), never CLEAR — matching TraversalClass's own contract ("CLEAR = solid
+        // ground with 2+ AIR above"; "EASY = breakable blocks"). This is the "2-high soft wall reads as
+        // a step" bug: ground solid + a1 solid + a2 air slipped past the hardness sum (dirt 3 + air 0 <
+        // 5) and fell through to CLEAR, so a non-breaking follower kept bouncing with its head in the
+        // block. A CLEAR-only pathfinder now excludes it; a future breaking-capable bot can use EASY.
+        if (!NavBlock.isPassable(a1) || !NavBlock.isPassable(a2)) return TraversalClass.EASY;
+
         // No floor: traversable only by bridging (a replaceable cell with a face to place against).
         if (isEmptyAir(ground)) {
             if (NavBlock.isReplaceable(ground) && hasPlaceableNeighbor(desc, x, y, z)) return TraversalClass.EASY;
