@@ -40,18 +40,13 @@ public class AllyBotEntity extends FakePlayerEntity {
     // ---- Follow / path-steering tuning -------------------------------------------------------
     /** Stop moving once this close to the owner (blocks, horizontal). */
     private static final double ARRIVE_DIST = 2.5;
-    /** Replan to the owner's current cell at most this often (ticks). */
-    private static final int REPLAN_TICKS = 10;
-    /** Advance to the next waypoint once within this distance (blocks, horizontal). */
-    private static final double WAYPOINT_REACH = 0.7;
     /**
-     * Don't advance off a waypoint until the bot has climbed to (within this of, or above) its level.
-     * Without this, the horizontal-only reach would advance the target to the <i>next</i> step while
-     * the bot is still on the current one — so on a stacked staircase it would skip the middle step
-     * and try to jump two blocks at once (the pit-escape bug). One-sided so a descent (bot above the
-     * next waypoint) still advances and drops.
+     * Safety re-plan interval (ticks). We normally replan only when the owner steps to a new block
+     * (see {@link #lastGoalCell}); this is the backstop so a static owner still picks up terrain edits
+     * (the demo refresh) within a second or two. Kept long so a stationary bot replans rarely — which
+     * also keeps the debug path stable so its particles don't ghost.
      */
-    private static final double WAYPOINT_VERTICAL_REACH = 0.5;
+    private static final int REPLAN_TICKS = 40;
     /** Below this squared horizontal speed while trying to move, treat the bot as stuck → jump. */
     private static final double STUCK_SPEED_SQR = 0.0016;
 
@@ -63,7 +58,8 @@ public class AllyBotEntity extends FakePlayerEntity {
     private BlockPathPlan path;
     private int waypointIndex;
     private int replanCooldown;
-    private boolean loggedHasPath; // dedupe the path/no-path diagnostic so it logs only on change
+    private BlockPos lastGoalCell;  // owner floor cell the current path was planned to; replan when it moves
+    private boolean loggedHasPath;  // dedupe the path/no-path diagnostic so it logs only on change
 
     public AllyBotEntity(MinecraftServer server, ServerLevel world, GameProfile profile, Player owner) {
         super(server, world, profile);
@@ -115,8 +111,13 @@ public class AllyBotEntity extends FakePlayerEntity {
             return;
         }
 
-        if (--replanCooldown <= 0 || path == null || waypointIndex >= path.size()) {
-            replan();
+        // Replan when the goal moves to a new block, the path is spent, or the safety interval elapses.
+        // Holding a stable path while the owner stands still stops the debug particles from ghosting.
+        BlockPos goalFloor = owner.blockPosition().below();
+        if (path == null || waypointIndex >= path.size()
+                || !goalFloor.equals(lastGoalCell) || --replanCooldown <= 0) {
+            replan(goalFloor);
+            lastGoalCell = goalFloor;
             replanCooldown = REPLAN_TICKS;
         }
 
@@ -135,10 +136,9 @@ public class AllyBotEntity extends FakePlayerEntity {
     }
 
     /** Plan a fresh block path from the bot's floor cell to the owner's floor cell. */
-    private void replan() {
+    private void replan(BlockPos goalFloor) {
         ServerLevel level = (ServerLevel) Worlds.of(this);
         BlockPos startFloor = this.blockPosition().below();
-        BlockPos goalFloor = owner.blockPosition().below();
 
         refreshNavData(level, startFloor, goalFloor);
 
@@ -148,11 +148,11 @@ public class AllyBotEntity extends FakePlayerEntity {
 
         boolean hasPath = path != null && path.size() > 0;
         if (DEBUG_PATH) {
-            // Verbose per-plan trace while debugging: first waypoint reveals which way A* actually heads.
+            // Verbose per-plan trace while debugging: the full waypoint list shows exactly which cells
+            // A* produced (e.g. whether a stacked staircase step is present or skipped).
             if (hasPath) {
-                OrebitCommon.LOGGER.info("[Orebit] plan: {} wp cost={} start={} first={} last={} goal={}",
-                        path.size(), path.cost(), startFloor, path.waypoint(0),
-                        path.waypoint(path.size() - 1), goalFloor);
+                OrebitCommon.LOGGER.info("[Orebit] plan: {} wp cost={} start={} goal={} path={}",
+                        path.size(), path.cost(), compact(startFloor), compact(goalFloor), waypointsString());
             } else {
                 OrebitCommon.LOGGER.info("[Orebit] plan: NONE start={}({}) goal={}({})",
                         startFloor, grid.classAt(startFloor.getX(), startFloor.getY(), startFloor.getZ()),
@@ -193,25 +193,28 @@ public class AllyBotEntity extends FakePlayerEntity {
         }
     }
 
-    /** Steer toward the current waypoint, advancing as we reach each and jumping over rises. */
+    /** Steer toward the current waypoint, advancing by block occupancy and jumping over rises. */
     private void steerAlongPath() {
-        BlockPos wp = path.waypoint(waypointIndex);
-        double tx = wp.getX() + 0.5;
-        double tz = wp.getZ() + 0.5;
-        double ddx = tx - this.getX();
-        double ddz = tz - this.getZ();
-
-        if (reachedWaypoint(wp, ddx, ddz)) {
-            if (++waypointIndex >= path.size()) {
-                this.zza = 0.0f;
-                return;
+        // Advance to the furthest waypoint whose block the bot's feet currently occupy. Waypoints ARE
+        // blocks and so are the bot's feet ({@link #blockPosition()}), so this is block-exact — no
+        // distance epsilon. Because the comparison includes Y, the feet block can only equal the next
+        // step once the bot has actually climbed onto it, so a stacked staircase can't be skipped;
+        // scanning from the end also absorbs any overshoot.
+        BlockPos foot = this.blockPosition();
+        for (int j = path.size() - 1; j >= waypointIndex; j--) {
+            if (foot.equals(path.waypoint(j))) {
+                waypointIndex = j + 1;
+                break;
             }
-            wp = path.waypoint(waypointIndex);
-            tx = wp.getX() + 0.5;
-            tz = wp.getZ() + 0.5;
-            ddx = tx - this.getX();
-            ddz = tz - this.getZ();
         }
+        if (waypointIndex >= path.size()) {
+            this.zza = 0.0f;
+            return;
+        }
+
+        BlockPos wp = path.waypoint(waypointIndex);
+        double ddx = (wp.getX() + 0.5) - this.getX();
+        double ddz = (wp.getZ() + 0.5) - this.getZ();
 
         float yaw = (float) (Math.toDegrees(Math.atan2(-ddx, ddz)));
         this.setYRot(yaw);
@@ -227,10 +230,19 @@ public class AllyBotEntity extends FakePlayerEntity {
         }
     }
 
-    /** A waypoint is reached only when the bot is close horizontally <b>and</b> has climbed to its level. */
-    private boolean reachedWaypoint(BlockPos wp, double ddx, double ddz) {
-        return Math.sqrt(ddx * ddx + ddz * ddz) < WAYPOINT_REACH
-                && this.getY() >= wp.getY() - WAYPOINT_VERTICAL_REACH;
+    // ---- Debug log formatting ----------------------------------------------------------------
+
+    private static String compact(BlockPos p) {
+        return "(" + p.getX() + "," + p.getY() + "," + p.getZ() + ")";
+    }
+
+    private String waypointsString() {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < path.size(); i++) {
+            if (i > 0) sb.append(' ');
+            sb.append(compact(path.waypoint(i)));
+        }
+        return sb.append(']').toString();
     }
 
     /** Original straight-at-the-owner steer, used when nav data for the route isn't built yet. */
