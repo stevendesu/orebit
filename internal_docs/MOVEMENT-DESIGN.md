@@ -1,7 +1,9 @@
 # Orebit — Movement Vocabulary Design
 
-> Working design for the block-tier movement layer (PRD §7.2 elaborated). Written end of
-> session 14 (2026-06-23), to be built next session. Status: **design, not yet implemented.**
+> Working design for the block-tier movement layer (PRD §7.2 elaborated). Status: **Tier 1 built &
+> runtime-verified (session 15); `/bot` commands built (session 16); break/place is next.** Updated
+> session 16 (2026-06-23). **§1's "three decisions" are the canonical rules** for classifying any new
+> capability (movement kind vs. modifier vs. separate system) — apply them before adding anything.
 
 ## 1. Framing decision — movement-centric, not block-centric
 
@@ -41,7 +43,56 @@ interface Movement {
   at the movement level** rather than approximated in the grid. The grid finds candidates; geometry
   decides moves.
 
+### The three decisions (kind vs. modifier vs. separate system) — CANONICAL
+
+When any new capability comes up (break a block, place a block, climb, swim, elytra, …), classify it
+with three **independent** tests. Most apparent "should these merge?" questions dissolve once you see
+they're asking different tests.
+
+**Decision 1 — is it a block EDIT (break / place)? → it's a MODIFIER, never its own movement.**
+Every movement computes, from the cells its own geometry touches, two sets: `mustBeAir` (body path +
+clearance) and `mustBeSolid` (footing / support). For each `mustBeAir` cell that's solid → if
+breakable & `canBreak`, add to the move's break-set and `cost += miningTicks`, else the move is
+invalid. For each `mustBeSolid` cell that's air → if placeable & `canPlace`, add to the place-set and
+`cost += placeCost`, else invalid. So **"BreakThrough" and "Bridge" are NOT movements** — they're
+Traverse/Ascend/Fall with a non-empty edit-set. The move is still ONE A\* edge (A→B); the edits just
+raise its cost, so A\* prefers going around unless digging/bridging is genuinely cheaper (that
+emergent trade-off is the whole payoff). A single move may carry **more than one** edit (a 2-high wall
+in front = break feet + head, two breaks in one Traverse) but only ever clears the cells **its own
+geometry** needs — tunnelling through thickness is a **chain** of such moves, not one move mining far.
+This is exactly Baritone's `positionsToBreak[]` + `positionToPlace` on each Movement. (Why folded, not
+a separate path node: a placement doesn't change position, so a "place" node would be a zero-progress
+self-loop that breaks position-keyed A\*; attributing the place to the move that *uses* the placed
+block keeps the search clean.)
+
+**Decision 2 — is it a distinct movement KIND? → split when the follower runs DIFFERENT
+execution/validity/cost code, NOT based on the destination offset.** Sharing a destination is **free**:
+the registry lets multiple movements emit the *same* neighbour cell, and A\* keeps the cheapest. So
+sharing an offset is never a reason to merge. Examples:
+- **Climb vs. Pillar** — both target the cell directly above, but Climb is cling-and-glide on an
+  existing ladder/vine while Pillar is jump-and-self-place; different execution, validity, physics →
+  **separate classes**, each emits `(0,+1)` when its preconditions hold. (Baritone merges these into
+  `MovementPillar` via an internal `if climbable / else place` branch — precisely the
+  conditional-in-a-class our Strategy registry avoids; splitting is where we improve on its structure.)
+- **Crawl vs. Swim** — both use the prone 1-block hitbox, but that's a shared *precondition*, not a
+  shared motion (Crawl is gravity-bound horizontal on a floor; Swim is buoyant 3D) → **separate**.
+- **Merge only** when two candidates share execution and differ by at most a cost number (Traverse on
+  stone vs. dirt = same walk, different mining-adjacent cost = same kind, cost tag).
+
+**Decision 3 — does it need a separate PLANNING SYSTEM? → only when the motion is NOT
+discrete-and-stoppable** (continuous-trajectory / momentum-bound). The test is **not "is it 3D."**
+- **Swim is 3D but stays in the one A\***: you move to an adjacent water cell at ~constant speed and
+  can hover/stop anywhere → discrete + stoppable. It's just A\* with a 3D neighbour set inside water
+  volumes. In-framework; deferred only by priority.
+- **Elytra needs a separate system**: a continuous parabola you can't stop, speed coupled to pitch,
+  one decision spanning a long arc → the A\* state would need velocity + altitude, not just position.
+- **Minecart** likewise rides a rail graph (its own search space). Of the whole vocabulary, **only
+  elytra and vehicles** cross this line.
+
 ## 2. The movement vocabulary (tiered by when to build)
+
+Classify every entry below with the three decisions above: most are **kinds** (decision 2); break/place
+are **modifiers** woven into the kinds (decision 1); only Tier 4 is a separate **system** (decision 3).
 
 ### Tier 1 — ground (BUILD NEXT SESSION)
 - **Traverse** — walk to a passable neighbour. Includes **step-assist**: a player auto-steps ~0.6
@@ -63,27 +114,38 @@ interface Movement {
 - **Parkour** — horizontal gap-jump 1–4 blocks. Reads runway + the air over the gap + the landing +
   the arc clearance. Geometry decides whether the jump clears (the canonical "2-bit says the gap is
   passable; geometry says whether we make it" case).
-- **Swim / SwimUp / SwimDown** — in water (`fluid == water`); 3D movement; breath budget if
-  `caps.drowns`.
-- **Crawl** — 1-tall gap (under a trapdoor / via sneak).
+- **Swim / SwimUp / SwimDown** — in water (`fluid == water`). 3D but **in-framework** (decision 3):
+  discrete & stoppable, so it's the SAME cell-to-cell A\* with a 3D (6/26-connected) neighbour set
+  inside water volumes, plus ground↔water transition edges; breath budget if `caps.drowns`. NOT a
+  separate system — deferred only by priority (3D expansion is heavier; the region tier absorbs the
+  search-volume growth).
+- **Crawl** — horizontal move through a 1-tall gap (under a trapdoor / via sneak). Separate kind from
+  Swim despite the shared prone 1-block hitbox — that's a shared *precondition*, not motion (decision 2).
 
 ### Tier 3 — special & interaction
+
+**Break / place are MODIFIERS, not entries here** (decision 1): "BreakThrough" = Traverse/Ascend with a
+non-empty break-set; "Bridge" = Traverse/Fall with a place-set (a missing floor it places). These are
+the *same kinds* as Tier 1 with edits folded in — **no new classes**, just the break/place plumbing.
+The genuinely new KINDS in this tier are the ones whose MOTION differs:
+- **Pillar** — jump straight up in the *same column*, placing a block beneath at the apex
+  (`caps.canPlace` + block budget). A distinct kind because the motion is vertical-in-place, not
+  Ascend's diagonal-up step. It always carries a place, but that's intrinsic to the motion, not the
+  reason it's separate (decision 2).
+- **MineDown** — dig the block beneath and drop one (vertical-down-in-place; intrinsically a break).
+  Pillar in reverse; distinct motion.
 - **EnterPortal** — step into a portal block (needs the `portal` fact). The block tier only *enters*;
-  the cross-dimension routing is the region/HPA\* tier (PRD §6.5, "portals as local edges"). **User add.**
-- **Pillar** — jump and place a block beneath to gain height (`caps.canPlace` + throwaway-block budget).
-- **Bridge** — place a block across a gap (a Traverse/Parkour variant carrying a placement).
-- **BreakThrough** — Traverse/Ascend that breaks a soft block in the way (`caps.canBreak`; cost =
-  mining, per PRD §7.3). Folds breaking into the move rather than a separate op.
+  cross-dimension routing is the region/HPA\* tier (PRD §6.5, "portals as local edges"). **User add.**
 - **SlimeBounce** — use a `bouncy` block for ascent (advanced), or AVOID an unwanted bounce.
 - **PowderSnow** — sink / slow / climb-out (`sinkable`); freeze hazard unless `caps` has leather boots.
 
-### Tier 4 — uncertain / heavy (think now, don't commit)
-- **Elytra flight** — a *continuous-trajectory 3D glide*, fundamentally unlike cell-to-cell A\*; needs
-  launch height + fireworks. **Recommendation: out of scope for the block pathfinder** — if pursued,
-  it's a separate planning mode, not a `Movement`. Revisit much later.
-- **Vehicles** — Boat (water highway), Minecart (needs a `rail` fact + the rail network as its own
-  graph), Horse/mount. Each substantially changes the movement graph. **Defer**; note the `rail` fact
-  if ever pursued.
+### Tier 4 — separate planning SYSTEMS (decision 3: NOT discrete cell-to-cell)
+The ONLY capabilities that leave the one cell-to-cell A\*; everything above stays in it.
+- **Elytra flight** — continuous-trajectory glide (a parabola you can't stop, speed coupled to pitch,
+  one decision spanning a long arc) → the A\* state would need velocity + altitude. A separate planner,
+  not a `Movement`. Needs launch height + fireworks. Revisit much later.
+- **Vehicles** — Minecart rides a `rail` graph (its own search space); Boat = a water highway;
+  Horse/mount changes the graph. **Defer**; note the `rail` fact only if pursued.
 
 ## 3. NavBlock fact additions
 
@@ -145,15 +207,36 @@ enabled — then widen as movements land.
 - **Ice overshoot**: follower momentum model — build when it visibly bites.
 - **Powder snow**: freeze-hazard interplay with `caps` (leather boots) — defer with the movement.
 
-## 7. Build order for next session (Tier 1)
+## 7. Status & build order
 
-1. `Movement` interface + `MovementContext` (wraps `NavGridView` + `BotCaps`) + `CandidateSink` +
-   a static registry list.
-2. Convert `BlockPathfinder` A\* to expand a node by iterating the registry (replacing the hardcoded
-   4-cardinal `standableFloor`). Keep `classAt` CLEAR-as-prefilter; use `descriptorAt` for the precise
-   per-movement checks.
-3. Implement **Traverse** (with step-assist), **Ascend** (with real head-clearance via `descriptorAt`),
-   **Descend**, **Fall** (safe-distance only). `Diagonal` if time.
-4. `BlockPathPlan` starts carrying the chosen `Movement` per step (toward the operation list the
-   `pathfinding/blockpathfinder` stubs spec), so the follower can ask the movement how to execute it.
-5. Verify in-game (the existing `DEBUG_PATH` viz + STUCK dump still apply).
+**DONE + runtime-verified (session 15).** Tier 1: `Movement` / `MovementContext` / `CandidateSink` /
+`BotCaps` / `MovementRegistry` + **Traverse** (step-assist) / **Ascend** (real head-clearance via
+`descriptorAt`) / **Descend** / **Fall** (safe-distance). `BlockPathfinder` expands via the registry;
+`BlockPathPlan` carries the chosen `Movement` per step; the follower jumps only on Ascend. `BotCaps`
+already has `canBreak` / `canPlace` (default false). `/bot come|stay|follow|here` commands wired
+(session 16). `classAt` = the cheap built/loaded prefilter; `descriptorAt` decides every move.
+
+**NEXT — break / place (folded edits, decision 1) — the priority.** Motivating case: the bot couldn't
+`come` through a forest because leaves (collide → not passable) walled every path; breaking one leaf
+opened a route. Steps:
+1. `BotCaps`: enable `canBreak` / `canPlace`; add a throwaway-block budget (consumables tracked along
+   the path, PRD §7.3).
+2. `MovementContext.breakable(cell, caps)` / `placeableAgainst(cell, caps)` predicates — reuse
+   `hardness` / `tool` / `toolRequired` and `faces` / `replaceable`; **no new NavBlock facts**.
+3. Teach the EXISTING Traverse/Ascend/Descend/Diagonal: a blocked `mustBeAir` cell → emit the move with
+   that cell in a break-set + mining cost (if `canBreak`); a missing `mustBeSolid` floor → place-set +
+   place cost (if `canPlace`). A move carries up to its own geometry's worth of edits (Traverse ≤ 2
+   breaks); depth through a wall = a chain of moves.
+4. **Plumb the edit-set through the plan (the real new work):** a stateless `Movement` singleton can't
+   name the cells, so grow `CandidateSink` / `BlockPathPlan` to record per-edge break/place cells (the
+   `BlockPathOperation` the `pathfinding/blockpathfinder` stubs anticipate). The follower mines/places
+   them server-side (break likely needs a `platform/` shim for `destroyBlock`/drops drift) before
+   completing the step, and re-validates at execution time.
+5. Add **Pillar** + **MineDown** as new KINDS (distinct vertical-in-place motion). Cost from
+   `hardness`/`tool` (Baritone-seeded mining ticks) + place cost; heuristic stays admissible (edits
+   only raise edge cost). **Start narrow:** Traverse break-modifier on one soft block — that alone
+   solves the forest-leaves case — then Bridge (place-floor) / Pillar.
+
+**THEN — more KINDS (parallel, all in-framework, pure common Java):** Diagonal (Tier 1 leftover) →
+ClimbUp/Down (both directions) → Parkour → Swim (3D-connected A\*). Each = a new `movements/<X>` class +
+a `MovementRegistry` line; sharing a destination offset with an existing movement is free.
