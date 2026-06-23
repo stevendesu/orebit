@@ -41,7 +41,12 @@ fun Project.applyVersionOverlays(minecraft: String, overlaysDir: File) {
         .filter { it.isDirectory && it.resolve("java").isDirectory && mcCmp(mcKey(it.name), activeKey) <= 0 }
         .sortedWith { a, b -> mcCmp(mcKey(a.name), mcKey(b.name)) } // ascending: later overrides earlier
     if (eras.isEmpty()) return
-    val merge = tasks.register<Sync>("mergeOverlays") {
+    // Task name derived from the overlay dir so a SINGLE module can compose more than one dir without
+    // a name clash (the 26.x era's one module composes both `overlays` and `overlays-fabric`; the
+    // mc-1.21 era dodged this only because its loader subprojects are separate Gradle projects).
+    // "overlays" -> "mergeOverlays" (unchanged); "overlays-fabric" -> "mergeOverlaysFabric"; etc.
+    val taskSuffix = overlaysDir.name.split('-', '_').joinToString("") { it.replaceFirstChar(Char::uppercase) }
+    val merge = tasks.register<Sync>("merge$taskSuffix") {
         description = "Compose version-overlay eras from ${overlaysDir.name} into one source dir."
         duplicatesStrategy = DuplicatesStrategy.INCLUDE // last `from` (highest era) wins per path
         eras.forEach { era -> from(era.resolve("java")) }
