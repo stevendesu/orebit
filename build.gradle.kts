@@ -78,3 +78,8 @@ tasks.register<Copy>("buildAndCollect") {
 // by the active MC version. 26.x is far past the 1.21.4 baseline, so expect a new overlays/26
 // era for Mojang's continued rename pass (ResourceLocation->Identifier, etc.).
 applyVersionOverlays(minecraft, rootProject.file("overlays"))
+// Fabric loader overlays (command-api v1/v2 split): the single 26.x module compiles fabric/src too,
+// so it composes the Fabric loader overlay dir like the mc-1.21 era's fabric subproject does. 26.x is
+// past the 1.19 boundary, so the v2 FabricCommandRegistrar flavor wins — keeping FabricPlatformEvents
+// identical across eras (no era-divergence, conflict-free merges).
+applyVersionOverlays(minecraft, rootProject.file("overlays-fabric"))
