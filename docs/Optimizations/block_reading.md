@@ -1,5 +1,4 @@
-The standard way to read data about a block in MineCraft v1.21.4 Fabric is to
-use the following code:
+The standard way to read data about a block in MineCraft is like so:
 
 ```
 World world; // The MineCraft world

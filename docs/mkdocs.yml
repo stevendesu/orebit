@@ -1,8 +1,8 @@
 site_name: Orebit
-site_url: https://stevendesu.github.io/orebit-1.21.4
+site_url: https://stevendesu.github.io/orebit
 docs_dir: .
 site_dir: ../docs_site
-repo_url: https://github.com/stevendesu/orebit-1.21.4
+repo_url: https://github.com/stevendesu/orebit
 theme:
   name: material
   icon:
