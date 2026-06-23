@@ -49,6 +49,8 @@ public class AllyBotEntity extends FakePlayerEntity {
     private static final int REPLAN_TICKS = 40;
     /** Below this squared horizontal speed while trying to move, treat the bot as stuck → jump. */
     private static final double STUCK_SPEED_SQR = 0.0016;
+    /** Consecutive stuck ticks before the diagnostic dumps the surrounding blocks (≈1s). */
+    private static final int STUCK_DUMP_TICKS = 20;
 
     /** Pad the rebuilt area by one chunk on each side so a path that bulges around an obstacle has data. */
     private static final int REFRESH_PAD_CHUNKS = 1;
@@ -58,6 +60,7 @@ public class AllyBotEntity extends FakePlayerEntity {
     private BlockPathPlan path;
     private int waypointIndex;
     private int replanCooldown;
+    private int stuckTicks;         // consecutive ticks grinding in place; drives the stuck diagnostic
     private BlockPos lastGoalCell;  // owner floor cell the current path was planned to; replan when it moves
     private boolean loggedHasPath;  // dedupe the path/no-path diagnostic so it logs only on change
 
@@ -228,9 +231,38 @@ public class AllyBotEntity extends FakePlayerEntity {
         if ((stepUp || stuck) && EntityState.onGround(this)) {
             this.jumpFromGround();
         }
+
+        // Stuck-on-a-step diagnostic: when the bot grinds in place against the current target for a
+        // while, dump the ACTUAL block solidity (live world, not the coarse grid) for the bot's column
+        // and the target's column — this reveals jump head-clearance, which the floor-centric 2-bit
+        // grid can't represent (a CLEAR cell guarantees only 2 air blocks above the floor; a jump-up
+        // needs ~3). Logged once per stuck episode.
+        if (stuck && EntityState.onGround(this)) {
+            if (++stuckTicks == STUCK_DUMP_TICKS && DEBUG_PATH) dumpStuck(wp);
+        } else {
+            stuckTicks = 0;
+        }
     }
 
     // ---- Debug log formatting ----------------------------------------------------------------
+
+    private void dumpStuck(BlockPos wp) {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        BlockPos foot = this.blockPosition();
+        OrebitCommon.LOGGER.info("[Orebit] STUCK pos=({},{},{}) foot={} target={} | "
+                        + "botCol[floor,feet,head,+1,+2]={} targetCol[floor,feet,head,+1,+2]={} (S=solid .=air)",
+                String.format("%.2f", getX()), String.format("%.2f", getY()), String.format("%.2f", getZ()),
+                compact(foot), compact(wp), column(level, foot), column(level, wp));
+    }
+
+    /** Solidity of 5 cells from the floor (one below the feet block) up through head+2, as S/. */
+    private static String column(ServerLevel level, BlockPos feetBlock) {
+        StringBuilder sb = new StringBuilder();
+        for (int dy = -1; dy <= 3; dy++) {
+            sb.append(level.getBlockState(feetBlock.above(dy)).isAir() ? '.' : 'S');
+        }
+        return sb.toString();
+    }
 
     private static String compact(BlockPos p) {
         return "(" + p.getX() + "," + p.getY() + "," + p.getZ() + ")";
