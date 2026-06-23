@@ -3,6 +3,7 @@ package com.orebit.mod;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.orebit.mod.commands.OrebitCommands;
 import com.orebit.mod.platform.PlatformEvents;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.pathing.ChunkNavLoader;
@@ -28,6 +29,10 @@ public final class OrebitCommon {
         // (ChunkNavLoader.MAX_BUILDS_PER_TICK) so idle players take no measurable hit. Nothing
         // consumes the grid yet — the pathfinder is the next milestone.
         ChunkNavLoader.register(events);
+
+        // Deterministic /bot come|stay|follow|here command surface (no LLM). The common command tree
+        // builds on vanilla Brigadier; the loader seam only translates WHEN registration fires.
+        OrebitCommands.register(events);
 
         events.onPlayerJoin(player -> {
             // CRITICAL: placeNewPlayer makes the bot a real PlayerList member, so the join

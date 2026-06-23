@@ -3,13 +3,17 @@ package com.orebit.mod.neoforge;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
+import com.mojang.brigadier.CommandDispatcher;
+
 import com.orebit.mod.platform.PlatformEvents;
 
+import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.neoforged.neoforge.common.NeoForge;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.level.ChunkEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
@@ -65,5 +69,10 @@ public final class NeoForgePlatformEvents implements PlatformEvents {
                 callback.accept(level);
             }
         });
+    }
+
+    @Override
+    public void onRegisterCommands(Consumer<CommandDispatcher<CommandSourceStack>> callback) {
+        NeoForge.EVENT_BUS.addListener((RegisterCommandsEvent event) -> callback.accept(event.getDispatcher()));
     }
 }

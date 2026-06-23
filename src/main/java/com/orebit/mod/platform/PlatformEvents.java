@@ -3,6 +3,9 @@ package com.orebit.mod.platform;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
+import com.mojang.brigadier.CommandDispatcher;
+
+import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -33,4 +36,15 @@ public interface PlatformEvents {
     default void onChunkUnload(BiConsumer<ServerLevel, ChunkAccess> callback) {}
 
     void onWorldTickEnd(Consumer<ServerLevel> callback);
+
+    /**
+     * Fires when the server builds its command tree, handing the common code the Brigadier
+     * {@link CommandDispatcher} to register slash commands on (so they dispatch server-side and sync
+     * to clients for tab-completion). The dispatcher + {@link CommandSourceStack} are vanilla types
+     * stable across the range, so this signature needs no overlay — only each loader's <i>wiring</i>
+     * to its native registration event drifts (Fabric command-api v1→v2 at 1.19; Forge's EventBus 7
+     * at 1.21.6), which the loader impls/overlays absorb. Default no-op so a loader/era not yet wired
+     * (and the 26.x era's own impl) still compiles, mirroring {@link #onChunkUnload}.
+     */
+    default void onRegisterCommands(Consumer<CommandDispatcher<CommandSourceStack>> callback) {}
 }
