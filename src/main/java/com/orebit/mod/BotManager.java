@@ -48,6 +48,11 @@ public class BotManager {
         OrebitCommon.LOGGER.info("[Orebit] Spawned bot for {}", player.getName().getString());
     }
 
+    /** The bot owned by {@code player}, or {@code null} if they have none (used by the /bot commands). */
+    public static AllyBotEntity botFor(ServerPlayer player) {
+        return botsByOwner.get(player.getUUID());
+    }
+
     public static void removeBotFor(ServerPlayer player) {
         AllyBotEntity bot = botsByOwner.remove(player.getUUID());
         if (bot != null) {

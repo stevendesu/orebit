@@ -3,13 +3,17 @@ package com.orebit.mod.forge;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
+import com.mojang.brigadier.CommandDispatcher;
+
 import com.orebit.mod.platform.PlatformEvents;
 
+import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.level.ChunkEvent;
@@ -67,5 +71,10 @@ public final class ForgePlatformEvents implements PlatformEvents {
                 callback.accept(level);
             }
         });
+    }
+
+    @Override
+    public void onRegisterCommands(Consumer<CommandDispatcher<CommandSourceStack>> callback) {
+        MinecraftForge.EVENT_BUS.addListener((RegisterCommandsEvent event) -> callback.accept(event.getDispatcher()));
     }
 }
