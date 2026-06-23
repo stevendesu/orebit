@@ -3,6 +3,7 @@ package com.orebit.mod.worldmodel.pathing;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
+import com.orebit.mod.platform.ChunkCoords;
 import com.orebit.mod.platform.PlatformEvents;
 
 import net.minecraft.server.level.ServerLevel;
@@ -21,7 +22,7 @@ public class ChunkNavLoader {
         events.onWorldTickEnd(serverWorld -> {
             while (!pendingChunks.isEmpty()) {
                 ChunkPos pos = pendingChunks.poll();
-                ChunkAccess chunk = serverWorld.getChunk(pos.x, pos.z);
+                ChunkAccess chunk = serverWorld.getChunk(ChunkCoords.x(pos), ChunkCoords.z(pos));
 
                 long start = System.nanoTime();
                 NavSection[] sections = ChunkNavBuilder.buildAllSections(serverWorld, chunk);
