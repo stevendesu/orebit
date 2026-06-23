@@ -6,9 +6,12 @@
 ## DONE this session — a buildable MC 26.2 Fabric jar
 
 `main` is now the **26.x era** and produces a real, non-hollow **Fabric** jar for **MC 26.2**
-(`build/libs/<modver>/orebit-1.0.0+26.2.jar` — 57 `com/orebit/mod` classes incl. `AllyBotEntity`,
-`OrebitFabric`, the platform accessors; `fabric.mod.json` expanded for `~26.2`). `:26.2:build` is
-green. **Not yet runtime-verified in-game** (next step).
+(`build/libs/<modver>/orebit-1.0.0+26.2.jar`). **RUNTIME-VERIFIED IN-GAME:** installed into a real
+Fabric Loader 0.19.3 + Fabric API 26.2 client, the ally bot spawns, follows the owner, and works in
+multiplayer (LAN) — each player gets their own bot; all are real shared entities. **Runtime fix:**
+`fabric.mod.json` must depend on `fabric-api` (the 26.x umbrella mod-id), not `fabric` (the ≤1.21 id).
+**Docs updated** (CLAUDE.md fully rewritten for the multi-era build; 1.21.4-special refs dropped;
+repo renamed `orebit-1.21.4`→`orebit`) — authored on `core`, merged to `main`.
 
 ### The big finding: Architectury Loom can't do 26.x yet → 26 era is Fabric-only via PURE Fabric Loom
 - **Architectury Loom has no MC 26.1+ support** ([architectury/architectury-loom#328](https://github.com/architectury/architectury-loom/issues/328), open since Feb 2026, no fix/ETA). 26.1 is **unobfuscated** → Mojang ships **no mappings artifact**, but Architectury Loom still hard-requires a non-empty `mappings` config (`Configuration 'mappings' has no dependencies`).
@@ -36,13 +39,17 @@ Authored on `core` (portable; baseline keeps mc-1.21 green, `overlays/26` applie
 - **`core`** (local) — + `>=26→JDK25` toolchain logic, version headers, and the `overlays/26` + accessor commit. **Build scripts still Architectury** (unchanged; that's correct — `core` stays loader-agnostic).
 - **`main`** (local) — the 26.x Fabric era (toolchain + Fabric-only build + the FabricPlatformEvents fix). **Nothing pushed yet.**
 
+**Pivot point reached:** both eras in good shape (1.17.1–1.21.11 Fabric+Forge; 26.0–26.2 Fabric-only),
+runtime-verified, docs current. Ready to start **actual mod logic** (PRD Phase 0/1).
+
 ## NEXT
-1. **Runtime-verify in-game** (the real goal): `Set active project to 26.2` → `:26.2:runClient` (JDK 25). Confirm the bot spawns + follows the owner on 26.2. The fake-player network stack is the most fragile surface (PRD) — 26.x may have changed `ServerPlayer`/connection internals; it COMPILES, runtime is unproven. Needs Fabric API present at runtime.
-2. **Decide pushes / default branch.** `main` = newest era = intended GitHub default, but it's runtime-unverified. Recommend: runtime-verify, THEN push `core` + `main`. (`mc-1.21` already pushed as the safe fallback.)
-3. **Reconcile FabricPlatformEvents divergence** — it's edited in place on `main`; if `core` ever changes it, merges conflict. Consider an `overlays-fabric/` (baseline + 26) so both eras share it, OR accept the contained divergence (rare changes).
-4. **Forge/NeoForge 26.x** — blocked on architectury-loom#328; revisit when it ships (watch the issue).
-5. **Restore the JMH/test harness for 26.x** (currently deferred — test source set emptied on `main`): needs fabric-loader-junit headless bootstrap verified on unobfuscated 26.x.
-6. **Block-registry follow-up (Phase 1, user-flagged):** the concrete-powder `ColorCollection` is the first sign of 26.x block reorg; 1.21.5→26.x likely added blocks/wood our nav registries (`RegionMetadata` counters, NavBlock) don't yet handle. Audit when nav work begins.
+1. **Push** `core` + `main` (nothing pushed yet this session except the `mc-1.21` snapshot). Runtime is verified, so this is safe — `main` is the intended GitHub default. *(Held pending the user's go-ahead.)*
+2. **Propagate `core` → `mc-1.21`** (Model C): `git merge core` into `mc-1.21` brings the portable accessor refactor (ChunkCoords/ConcretePowder — behavior-neutral for ≤1.21 via the baseline overlays) + the updated docs, then run `chiseledCompileCommon` (the CI gate) to confirm the baseline overlays compile across 1.17.1→1.21.11. Currently `mc-1.21` is still at the pre-26 commit (not broken — just an older `core` state).
+3. **`installation.md` loader nuance** (public doc): the user's edit says ">1.21 → NeoForge or Fabric", but the real matrix is Forge+Fabric through 1.21.11 and **Fabric-only at 26.x** (no NeoForge shipped for 26). Confirm wording with the user.
+4. **Reconcile FabricPlatformEvents divergence** — edited in place on `main`; if `core` ever changes it, merges conflict. Consider an `overlays-fabric/` (baseline + 26), or accept the contained divergence (rare changes).
+5. **Forge/NeoForge 26.x** — blocked on architectury-loom#328; revisit when it ships (watch the issue).
+6. **Restore the JMH/test harness for 26.x** (deferred — test source set emptied on `main`): needs fabric-loader-junit headless bootstrap verified on unobfuscated 26.x.
+7. **Block-registry follow-up (Phase 1, user-flagged):** the concrete-powder `ColorCollection` is the first sign of 26.x block reorg; 1.21.5→26.x likely added blocks/wood our nav registries (`RegionMetadata` counters, NavBlock) don't yet handle. Audit when nav work begins.
 
 ## Gotchas (carry forward)
 - **Run from the ACTIVE node:** `./gradlew :26.2:compileJava` (active marker = 26.2). `compileJava` across ALL nodes fails because Stonecutter only fills live `src/` for the active version; non-active nodes lack the common source. `Set active project to <ver>` before building another 26.x patch.
