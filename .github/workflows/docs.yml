@@ -33,7 +33,7 @@ jobs:
           git config --global user.email "actions@github.com"
           git init
           git checkout -b gh-pages
-          git remote add origin https://${{ secrets.GH_TOKEN }}@github.com/stevendesu/orebit-1.21.4.git
+          git remote add origin https://${{ secrets.GH_TOKEN }}@github.com/stevendesu/orebit.git
           cp -r ../docs_site/* .
           git add .
           git commit -m "Deploy docs"
