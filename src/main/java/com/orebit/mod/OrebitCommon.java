@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 
 import com.orebit.mod.platform.PlatformEvents;
 import com.orebit.mod.platform.Worlds;
+import com.orebit.mod.worldmodel.pathing.ChunkNavLoader;
 
 import net.minecraft.server.level.ServerLevel;
 
@@ -20,15 +21,13 @@ public final class OrebitCommon {
     private OrebitCommon() {}
 
     public static void init(PlatformEvents events) {
-        // NOTE: the world-model pipeline (the NavBlock table + per-chunk NavSection build)
-        // is intentionally NOT engaged at runtime yet. It is prototype code that currently
-        // produces no stored data (ChunkNavLoader discards its output, PRD §2) and is
-        // version-fragile: NavBlock's byte index overflows on several MC versions ("Too many
-        // blocks registered for mode 3"), and NavSectionBuilder reflects into
-        // PalettedContainer internals. Engaging it only added cross-version crash surface
-        // with no functional benefit. It will be wired up in Phase 1 (short-index NavBlock +
-        // a version-correct section reader). Until then we run only the bot lifecycle, so the
-        // bot works on every supported loader×version.
+        // World-model pipeline (PRD Phase 1): recompute a per-chunk nav grid on load and store it
+        // (NavStore), recycling on unload. NavBlock is now a short-indexed packed-long table (the
+        // old byte index overflowed) and the section reader is the self-degrading SectionPalette, so
+        // this is safe across loaders/versions. Builds are deferred to the tick thread and budgeted
+        // (ChunkNavLoader.MAX_BUILDS_PER_TICK) so idle players take no measurable hit. Nothing
+        // consumes the grid yet — the pathfinder is the next milestone.
+        ChunkNavLoader.register(events);
 
         events.onPlayerJoin(player -> {
             // CRITICAL: placeNewPlayer makes the bot a real PlayerList member, so the join
