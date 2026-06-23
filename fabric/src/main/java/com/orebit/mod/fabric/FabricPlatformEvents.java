@@ -39,6 +39,11 @@ public final class FabricPlatformEvents implements PlatformEvents {
     }
 
     @Override
+    public void onChunkUnload(BiConsumer<ServerLevel, ChunkAccess> callback) {
+        ServerChunkEvents.CHUNK_UNLOAD.register((world, chunk) -> callback.accept(world, chunk));
+    }
+
+    @Override
     public void onWorldTickEnd(Consumer<ServerLevel> callback) {
         // MC 26.1: END_WORLD_TICK was renamed END_LEVEL_TICK (the world->level rename).
         ServerTickEvents.END_LEVEL_TICK.register(callback::accept);
