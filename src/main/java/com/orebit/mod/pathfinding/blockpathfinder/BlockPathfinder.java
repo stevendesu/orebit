@@ -8,56 +8,42 @@ import java.util.Map;
 import java.util.PriorityQueue;
 
 import com.orebit.mod.worldmodel.pathing.NavGridView;
-import com.orebit.mod.worldmodel.pathing.TraversalClass;
 
 import net.minecraft.core.BlockPos;
 
 /**
- * First-pass block-level A* over the recomputed nav grid (PRD §7.1, block tier). Given a start and
- * goal <b>floor cell</b> (the block a bot stands on), it searches for a walkable path and returns a
- * {@link BlockPathPlan} of stand positions, or {@code null} if none is found within the loaded nav
- * grid / expansion budget.
+ * Block-level A* over the nav grid (PRD §7.1, block tier). Given a start and goal <b>floor cell</b>
+ * (the block a bot stands on), it searches for a walkable path and returns a {@link BlockPathPlan} of
+ * stand positions — each tagged with the {@link Movement} that produced it — or {@code null} if none is
+ * found within the loaded nav grid / expansion budget.
  *
- * <h2>What this first pass models (and what it defers)</h2>
- * The search is 4-connected horizontally with a per-step vertical tolerance of <b>step-up 1</b> /
- * <b>fall {@value #MAX_FALL}</b>, and treats <b>only {@link TraversalClass#CLEAR}</b> as walkable.
- * That is the one 2-bit class that is unambiguously "solid floor with headroom": in the coarse grid
- * {@code SLOW} conflates slippery floors, hazards-in-face, and open falls, and {@code EASY} means
- * "no floor but bridgeable" — both need the per-descriptor fine layer (and block-place/break/swim
- * movements) to use safely, which is a later increment. Diagonals, the tick-based cost model, and
- * the full {@code BlockPathOperation}/{@code Movement} vocabulary also land then; here a step costs
- * {@value #STEP_COST} plus a small vertical penalty.
+ * <h2>Movement-driven expansion</h2>
+ * A node is expanded by iterating {@link MovementRegistry#TIER1}: each {@link Movement} reads the live
+ * geometry of the cells it touches (via {@link MovementContext}) and emits its own valid destination
+ * cells with a tick cost. The coarse 2-bit grid is used only as the cheap "is this cell built/loaded"
+ * gate ({@link MovementContext#built}); the precise per-move checks (head clearance for a jump, the
+ * drop column for a fall, the step-assist threshold for a slab) read the descriptor. So the grid finds
+ * candidates and live geometry decides moves — which is what catches the classifier's approximations
+ * (the "head-in-block" class) precisely at the move level. Adding a capability is adding a movement to
+ * the registry; this search loop doesn't change.
  *
  * <h2>Cells, not feet</h2>
- * The search space is floor cells, matching the nav grid's convention (a {@code CLEAR} cell is the
- * block you stand <i>on</i>). The returned waypoints are stand positions — {@code floorCell.above()}
- * — so a follower can steer the bot's feet straight to them.
+ * The search space is floor cells, matching the nav grid's convention (you stand <i>on</i> a floor
+ * cell). The returned waypoints are stand positions — {@code floorCell.above()} — so a follower can
+ * steer the bot's feet straight to them and ask the step's {@link Movement} how to execute it.
  *
  * <p>Stateless and allocation-bounded per call; safe to run on the server tick thread for the short
- * ranges this demo uses.
+ * ranges this consumer uses.
  */
 public final class BlockPathfinder {
 
     private BlockPathfinder() {}
 
-    /** Max blocks a step may rise (a single jump). */
-    private static final int MAX_STEP_UP = 1;
-    /** Max blocks a step may drop (a safe fall for the demo; the cost model refines this later). */
-    private static final int MAX_FALL = 3;
     /** Node-expansion ceiling — bounds per-call cost so a long/blocked goal can't stall the tick. */
     private static final int MAX_EXPANSIONS = 4000;
 
-    /** Flat-step base cost. */
-    private static final float STEP_COST = 1.0f;
-    /** Extra cost per block climbed. */
-    private static final float UP_PENALTY = 1.0f;
-    /** Extra cost per block dropped. */
-    private static final float FALL_PENALTY = 0.5f;
-
-    /** Sentinel for "no standable floor in this column near the current height." */
-    private static final int NO_FLOOR = Integer.MIN_VALUE;
-
-    private static final int[][] HORIZONTAL = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    /** The search's minimum per-step cost; the heuristic uses it as the per-block lower bound. */
+    private static final float MIN_STEP_COST = 1.0f;
 
     private static final class Node {
         final long key;
@@ -76,24 +62,37 @@ public final class BlockPathfinder {
     }
 
     /**
-     * Search for a walkable path from {@code startFloor} to {@code goalFloor} (both floor cells).
-     * Returns {@code null} if the bot isn't standing on built ground, or no path is found within the
-     * loaded grid / expansion budget. The goal is reached when within 1 block horizontally and 2
-     * vertically of {@code goalFloor} (so the owner needn't be standing on a perfectly {@code CLEAR}
-     * cell for the bot to arrive next to them).
+     * Search a walkable path from {@code startFloor} to {@code goalFloor} (both floor cells) for the
+     * default {@link BotCaps}. See {@link #findPath(NavGridView, BlockPos, BlockPos, BotCaps)}.
      */
     public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor) {
+        return findPath(grid, startFloor, goalFloor, BotCaps.DEFAULT);
+    }
+
+    /**
+     * Search for a walkable path from {@code startFloor} to {@code goalFloor} (both floor cells) given
+     * the bot's {@code caps}. Returns {@code null} if the bot isn't standing on built ground, or no path
+     * is found within the loaded grid / expansion budget. The goal is reached when within 1 block
+     * horizontally and 2 vertically of {@code goalFloor} (so the owner needn't be standing on a perfectly
+     * walkable cell for the bot to arrive next to them).
+     */
+    public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
+                                         BotCaps caps) {
         final int sx = startFloor.getX(), sy = startFloor.getY(), sz = startFloor.getZ();
         final int gx = goalFloor.getX(), gy = goalFloor.getY(), gz = goalFloor.getZ();
 
         // Bot must be on built ground for the grid-based search to mean anything.
         if (grid.classAt(sx, sy, sz) == null) return null;
 
+        final MovementContext ctx = new MovementContext(grid, caps);
         final long startKey = BlockPos.asLong(sx, sy, sz);
 
         PriorityQueue<Node> open = new PriorityQueue<>((a, b) -> Float.compare(a.f, b.f));
         Map<Long, Float> gScore = new HashMap<>();
         Map<Long, Long> cameFrom = new HashMap<>();
+        Map<Long, Movement> cameFromMove = new HashMap<>();
+
+        Relaxer relaxer = new Relaxer(open, gScore, cameFrom, cameFromMove, gx, gy, gz);
 
         gScore.put(startKey, 0f);
         open.add(new Node(startKey, sx, sy, sz, 0f, heuristic(sx, sy, sz, gx, gy, gz)));
@@ -115,70 +114,84 @@ public final class BlockPathfinder {
 
             if (++expansions > MAX_EXPANSIONS) return null;
 
-            for (int[] dir : HORIZONTAL) {
-                int nx = current.x + dir[0];
-                int nz = current.z + dir[1];
-                int ny = standableFloor(grid, nx, nz, current.y);
-                if (ny == NO_FLOOR) continue;
-
-                int dy = ny - current.y;
-                float stepCost = STEP_COST + (dy > 0 ? dy * UP_PENALTY : -dy * FALL_PENALTY);
-                float tentative = current.g + stepCost;
-
-                long nKey = BlockPos.asLong(nx, ny, nz);
-                Float known = gScore.get(nKey);
-                if (known != null && tentative >= known) continue;
-
-                gScore.put(nKey, tentative);
-                cameFrom.put(nKey, current.key);
-                float fScore = tentative + heuristic(nx, ny, nz, gx, gy, gz);
-                open.add(new Node(nKey, nx, ny, nz, tentative, fScore));
+            relaxer.current = current;
+            for (Movement m : MovementRegistry.TIER1) {
+                relaxer.move = m;
+                m.candidates(ctx, current.x, current.y, current.z, relaxer);
             }
         }
 
         if (reachedKey == -1L) return null;
 
-        return reconstruct(cameFrom, gScore, startKey, reachedKey);
+        return reconstruct(cameFrom, cameFromMove, gScore, startKey, reachedKey);
     }
 
     /**
-     * The highest standable floor cell in column {@code (x,z)} reachable from height {@code fromY}:
-     * scan from one above (a step-up) down through the fall window, taking the first {@link
-     * TraversalClass#CLEAR} cell. Returns {@link #NO_FLOOR} if the column's nav data is unknown
-     * ({@code null} — an unloaded chunk) or has no walkable floor in range (a wall, or a drop too
-     * deep). Scanning top-down means a step-up is preferred over a deeper landing in the same column.
+     * The {@link CandidateSink} the search hands each movement: it relaxes every emitted destination
+     * cell against the open set, tagging the edge with the movement currently expanding so the plan can
+     * carry the chosen move per step.
      */
-    private static int standableFloor(NavGridView grid, int x, int z, int fromY) {
-        for (int y = fromY + MAX_STEP_UP; y >= fromY - MAX_FALL; y--) {
-            TraversalClass c = grid.classAt(x, y, z);
-            if (c == null) return NO_FLOOR;            // outside built nav data — don't path into it
-            if (c == TraversalClass.CLEAR) return y;   // solid floor + headroom
+    private static final class Relaxer implements CandidateSink {
+        private final PriorityQueue<Node> open;
+        private final Map<Long, Float> gScore;
+        private final Map<Long, Long> cameFrom;
+        private final Map<Long, Movement> cameFromMove;
+        private final int gx, gy, gz;
+
+        Node current;   // node being expanded
+        Movement move;  // movement currently emitting candidates
+
+        Relaxer(PriorityQueue<Node> open, Map<Long, Float> gScore, Map<Long, Long> cameFrom,
+                Map<Long, Movement> cameFromMove, int gx, int gy, int gz) {
+            this.open = open;
+            this.gScore = gScore;
+            this.cameFrom = cameFrom;
+            this.cameFromMove = cameFromMove;
+            this.gx = gx;
+            this.gy = gy;
+            this.gz = gz;
         }
-        return NO_FLOOR;
+
+        @Override
+        public void accept(int nx, int ny, int nz, float cost) {
+            float tentative = current.g + cost;
+            long nKey = BlockPos.asLong(nx, ny, nz);
+            Float known = gScore.get(nKey);
+            if (known != null && tentative >= known) return;
+
+            gScore.put(nKey, tentative);
+            cameFrom.put(nKey, current.key);
+            cameFromMove.put(nKey, move);
+            float fScore = tentative + heuristic(nx, ny, nz, gx, gy, gz);
+            open.add(new Node(nKey, nx, ny, nz, tentative, fScore));
+        }
     }
 
     private static boolean isGoal(int x, int y, int z, int gx, int gy, int gz) {
         return Math.abs(x - gx) <= 1 && Math.abs(z - gz) <= 1 && Math.abs(y - gy) <= 2;
     }
 
-    /** Admissible: Manhattan horizontal + vertical, each step covering ≥1 block at ≥{@link #STEP_COST}. */
+    /** Admissible: Manhattan, each step covering ≥1 block at ≥{@link #MIN_STEP_COST}. */
     private static float heuristic(int x, int y, int z, int gx, int gy, int gz) {
-        return (Math.abs(x - gx) + Math.abs(z - gz) + Math.abs(y - gy)) * STEP_COST;
+        return (Math.abs(x - gx) + Math.abs(z - gz) + Math.abs(y - gy)) * MIN_STEP_COST;
     }
 
-    private static BlockPathPlan reconstruct(Map<Long, Long> cameFrom, Map<Long, Float> gScore,
-                                             long startKey, long reachedKey) {
+    private static BlockPathPlan reconstruct(Map<Long, Long> cameFrom, Map<Long, Movement> cameFromMove,
+                                             Map<Long, Float> gScore, long startKey, long reachedKey) {
         List<BlockPos> waypoints = new ArrayList<>();
+        List<Movement> moves = new ArrayList<>();
         long k = reachedKey;
         while (k != startKey) {
             // Stand position = the floor cell's top (feet block) — steer the bot's feet here.
             waypoints.add(BlockPos.of(k).above());
+            moves.add(cameFromMove.get(k));
             Long prev = cameFrom.get(k);
             if (prev == null) break; // defensive; should not happen for a reached goal
             k = prev;
         }
         Collections.reverse(waypoints);
+        Collections.reverse(moves);
         float cost = gScore.getOrDefault(reachedKey, 0f);
-        return new BlockPathPlan(waypoints, cost);
+        return new BlockPathPlan(waypoints, moves, cost);
     }
 }
