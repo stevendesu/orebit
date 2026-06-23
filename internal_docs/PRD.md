@@ -13,10 +13,10 @@ game (building, fighting, exploring) get help with the rest. Long-term, a **weak
 local LLM** translates a chat sentence into a bounded command set; **the LLM only
 recognizes intent — it never plans.** All planning is deterministic.
 
-**Loader / version are not architectural constraints.** The *current build* targets
-**Fabric on Minecraft 1.21.4**, but supporting additional loaders (NeoForge, and
-optionally Forge) and additional Minecraft versions (newer and possibly older) is an
-explicit goal. The design keeps Minecraft- and loader-specific surface deliberately
+**Loader / version are not architectural constraints.** The *current build* Minecraft
+versions 1.17.1 and later, and supports both Forge and Fabric.
+
+The design keeps Minecraft- and loader-specific surface deliberately
 thin so this expansion is a matter of adapters, not rewrites (see §9 Portability).
 
 This PRD covers the load-bearing foundation everything else needs: perceiving the

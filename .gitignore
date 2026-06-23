@@ -47,3 +47,6 @@ logs/
 # orebit one-off build logs
 /first-build.log
 /gensources.log
+
+# Session-to-session continuity scratch (NOT source-controlled)
+/HANDOFF.md

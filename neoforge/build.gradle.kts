@@ -72,7 +72,7 @@ java {
     // bytecode); the conditional is kept uniform with the other modules. Gradle selects the
     // matching installed JDK (toolchain detection).
     toolchain {
-        languageVersion = JavaLanguageVersion.of(if (stonecutter.eval(minecraft, ">=1.20.5")) 21 else 17)
+        languageVersion = JavaLanguageVersion.of(if (stonecutter.eval(minecraft, ">=26")) 25 else if (stonecutter.eval(minecraft, ">=1.20.5")) 21 else 17)
     }
 }
 
