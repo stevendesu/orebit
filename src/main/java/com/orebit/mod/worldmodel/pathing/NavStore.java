@@ -19,6 +19,21 @@ public final class NavStore {
 
     private NavStore() {}
 
+    // ---- Chunk-key packing (the shared key space for all nav data) ---------------------------
+    // Orebit's OWN packing — never compared to vanilla's, so it sidesteps ChunkPos.toLong()/
+    // new ChunkPos(long), both removed when 26.1 made ChunkPos a record. ChunkNavLoader writes
+    // entries with these; consumers (NavGridView) read them back the same way. Chunk X/Z come
+    // through the ChunkCoords overlay (public field vs x()/z()) at the call site.
+
+    /** Pack a chunk's X/Z into the {@link NavStore} key. */
+    public static long key(int chunkX, int chunkZ) { return ((long) chunkX << 32) | (chunkZ & 0xFFFFFFFFL); }
+
+    /** Chunk X from a packed key. */
+    public static int keyX(long key) { return (int) (key >> 32); }
+
+    /** Chunk Z from a packed key. */
+    public static int keyZ(long key) { return (int) key; }
+
     private static final Map<ServerLevel, ConcurrentHashMap<Long, NavSection[]>> BY_LEVEL = new ConcurrentHashMap<>();
 
     private static ConcurrentHashMap<Long, NavSection[]> levelMap(ServerLevel level) {
