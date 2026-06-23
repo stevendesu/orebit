@@ -1,7 +1,9 @@
 package com.orebit.mod.worldmodel.pathing;
 
+import java.util.HashSet;
 import java.util.Set;
 
+import com.orebit.mod.platform.ConcretePowder;
 import com.orebit.mod.platform.VersionedBlocks;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -181,30 +183,22 @@ public final class TraversalAnalyzerMutable {
         return belowState.isAir();
     }
 
-    private static final Set<Block> GRAVITY_BLOCKS = Set.of(
-        Blocks.SAND,
-        Blocks.RED_SAND,
-        Blocks.GRAVEL,
-        Blocks.ANVIL,
-        Blocks.CHIPPED_ANVIL,
-        Blocks.DAMAGED_ANVIL,
-        Blocks.BLACK_CONCRETE_POWDER,
-        Blocks.BLUE_CONCRETE_POWDER,
-        Blocks.BROWN_CONCRETE_POWDER,
-        Blocks.CYAN_CONCRETE_POWDER,
-        Blocks.GRAY_CONCRETE_POWDER,
-        Blocks.GREEN_CONCRETE_POWDER,
-        Blocks.LIGHT_BLUE_CONCRETE_POWDER,
-        Blocks.LIGHT_GRAY_CONCRETE_POWDER,
-        Blocks.LIME_CONCRETE_POWDER,
-        Blocks.MAGENTA_CONCRETE_POWDER,
-        Blocks.ORANGE_CONCRETE_POWDER,
-        Blocks.PINK_CONCRETE_POWDER,
-        Blocks.PURPLE_CONCRETE_POWDER,
-        Blocks.RED_CONCRETE_POWDER,
-        Blocks.WHITE_CONCRETE_POWDER,
-        Blocks.YELLOW_CONCRETE_POWDER
-    );
+    // The 16 dyed concrete-powder blocks come from the version-selected ConcretePowder accessor
+    // (MC 26.1 collapsed them into one Blocks.CONCRETE_POWDER ColorCollection); the rest are
+    // version-stable. Built once into an immutable Set — the per-cell check stays a Set.contains.
+    private static final Set<Block> GRAVITY_BLOCKS = buildGravityBlocks();
+
+    private static Set<Block> buildGravityBlocks() {
+        Set<Block> blocks = new HashSet<>();
+        blocks.add(Blocks.SAND);
+        blocks.add(Blocks.RED_SAND);
+        blocks.add(Blocks.GRAVEL);
+        blocks.add(Blocks.ANVIL);
+        blocks.add(Blocks.CHIPPED_ANVIL);
+        blocks.add(Blocks.DAMAGED_ANVIL);
+        blocks.addAll(ConcretePowder.all());
+        return Set.copyOf(blocks);
+    }
 
     private static boolean isGravityBlock(BlockState state) {
         return GRAVITY_BLOCKS.contains(state.getBlock());

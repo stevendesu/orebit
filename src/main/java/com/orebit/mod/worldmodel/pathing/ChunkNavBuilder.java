@@ -1,5 +1,6 @@
 package com.orebit.mod.worldmodel.pathing;
 
+import com.orebit.mod.platform.ChunkCoords;
 import com.orebit.mod.platform.LevelBounds;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.Level;
@@ -16,8 +17,8 @@ public final class ChunkNavBuilder {
 
         NavSection[] sections = new NavSection[sectionCount];
 
-        int chunkX = chunk.getPos().x;
-        int chunkZ = chunk.getPos().z;
+        int chunkX = ChunkCoords.x(chunk.getPos());
+        int chunkZ = ChunkCoords.z(chunk.getPos());
         LevelChunkSection[] chunkSections = chunk.getSections();
 
         for (int i = 0; i < chunkSections.length; i++) {
