@@ -5,11 +5,14 @@ import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.Worlds;
+import com.orebit.mod.worldmodel.pathing.ChunkNavBuilder;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
+import com.orebit.mod.worldmodel.pathing.NavStore;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -36,9 +39,15 @@ public class AllyBotEntity extends FakePlayerEntity {
     /** Below this squared horizontal speed while trying to move, treat the bot as stuck → jump. */
     private static final double STUCK_SPEED_SQR = 0.0016;
 
+    /** Pad the rebuilt area by one chunk on each side so a path that bulges around an obstacle has data. */
+    private static final int REFRESH_PAD_CHUNKS = 1;
+    /** Cap the rebuilt span per axis (chunks) so a far-away owner can't spike the rebuild cost. */
+    private static final int REFRESH_MAX_SPAN_CHUNKS = 2;
+
     private BlockPathPlan path;
     private int waypointIndex;
     private int replanCooldown;
+    private boolean loggedHasPath; // dedupe the path/no-path diagnostic so it logs only on change
 
     public AllyBotEntity(MinecraftServer server, ServerLevel world, GameProfile profile, Player owner) {
         super(server, world, profile);
@@ -107,11 +116,49 @@ public class AllyBotEntity extends FakePlayerEntity {
     /** Plan a fresh block path from the bot's floor cell to the owner's floor cell. */
     private void replan() {
         ServerLevel level = (ServerLevel) Worlds.of(this);
-        NavGridView grid = new NavGridView(level);
         BlockPos startFloor = this.blockPosition().below();
         BlockPos goalFloor = owner.blockPosition().below();
+
+        refreshNavData(level, startFloor, goalFloor);
+
+        NavGridView grid = new NavGridView(level);
         this.path = BlockPathfinder.findPath(grid, startFloor, goalFloor);
         this.waypointIndex = 0;
+
+        boolean hasPath = path != null && path.size() > 0;
+        if (hasPath != loggedHasPath) {
+            loggedHasPath = hasPath;
+            if (hasPath) {
+                OrebitCommon.LOGGER.info("[Orebit] bot path: {} waypoints (cost {})", path.size(), path.cost());
+            } else {
+                OrebitCommon.LOGGER.info("[Orebit] bot path: none (startClass={}, goalClass={})",
+                        grid.classAt(startFloor.getX(), startFloor.getY(), startFloor.getZ()),
+                        grid.classAt(goalFloor.getX(), goalFloor.getY(), goalFloor.getZ()));
+            }
+        }
+    }
+
+    /**
+     * Demo-time freshness shim. The nav grid is otherwise built only on chunk <i>load</i> (PRD §6.2),
+     * so runtime block edits — a player digging a pit or placing a staircase — are not reflected and
+     * the planner would route over stale terrain. Until a proper block-update invalidation hook
+     * exists (loader-divergent — see HANDOFF), rebuild the handful of chunks this path spans straight
+     * from the live world each replan, so the demo always plans over current blocks. (This also
+     * self-heals if the background chunk-load pipeline isn't running on a given era.)
+     */
+    private void refreshNavData(ServerLevel level, BlockPos a, BlockPos b) {
+        int cx0 = (Math.min(a.getX(), b.getX()) >> 4) - REFRESH_PAD_CHUNKS;
+        int cx1 = (Math.max(a.getX(), b.getX()) >> 4) + REFRESH_PAD_CHUNKS;
+        int cz0 = (Math.min(a.getZ(), b.getZ()) >> 4) - REFRESH_PAD_CHUNKS;
+        int cz1 = (Math.max(a.getZ(), b.getZ()) >> 4) + REFRESH_PAD_CHUNKS;
+        if (cx1 - cx0 > REFRESH_MAX_SPAN_CHUNKS) cx1 = cx0 + REFRESH_MAX_SPAN_CHUNKS;
+        if (cz1 - cz0 > REFRESH_MAX_SPAN_CHUNKS) cz1 = cz0 + REFRESH_MAX_SPAN_CHUNKS;
+        for (int cx = cx0; cx <= cx1; cx++) {
+            for (int cz = cz0; cz <= cz1; cz++) {
+                ChunkAccess chunk = level.getChunk(cx, cz);
+                NavStore.put(level, NavStore.key(cx, cz), ChunkNavBuilder.buildAllSections(level, chunk));
+            }
+        }
     }
 
     /** Steer toward the current waypoint, advancing as we reach each and jumping over rises. */
