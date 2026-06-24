@@ -4,6 +4,9 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavFlags;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.block.Blocks;
+
 /**
  * The world-and-bot context a {@link Movement} reads while expanding a node: the {@link NavGridView}
  * (the cheap "is it built" gate + live per-cell geometry) and the {@link
@@ -42,14 +45,30 @@ public final class MovementContext {
     /** Flat cost of folding one block placement (bridge / footing) into a move. */
     public static final float PLACE_COST = 3.0f;
 
+    /** Geometry a path-placed block reads as — the cobblestone the follower actually places (full cube). */
+    private static final long PLACED_DESC = NavBlock.descriptorFor(Blocks.COBBLESTONE.defaultBlockState());
+    /** Geometry a path-broken cell reads as — air. */
+    private static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
+
     private final NavGridView grid;
     private final BotCaps caps;
     /** Reused per-move edit accumulator (single-threaded per pathfind, like the grid cursor). */
     private final EditScratch editScratch = new EditScratch(this);
+    /** The planned edits along the path to the node being expanded — a diff over the grid (see below). */
+    private final PathEdits pathEdits = new PathEdits();
 
     public MovementContext(NavGridView grid, BotCaps caps) {
         this.grid = grid;
         this.caps = caps;
+    }
+
+    /**
+     * The per-path planned-edit diff. The search refills it from the current node's {@code cameFrom}
+     * chain before expanding (so reads reflect the placed/broken blocks the moves so far made). See
+     * {@link PathEdits}.
+     */
+    public PathEdits pathEdits() {
+        return pathEdits;
     }
 
     /** The shared, reusable edit accumulator a movement fills while folding in breaks/places. */
@@ -75,6 +94,11 @@ public final class MovementContext {
      * navtype grid (a live block read only as a fallback outside the built area).
      */
     public long descriptorAt(int x, int y, int z) {
+        if (!pathEdits.isEmpty()) {
+            int kind = pathEdits.kindAt(BlockPos.asLong(x, y, z));
+            if (kind == PathEdits.PLACED) return PLACED_DESC;
+            if (kind == PathEdits.BROKEN) return AIR_DESC;
+        }
         return grid.descriptorAt(x, y, z);
     }
 

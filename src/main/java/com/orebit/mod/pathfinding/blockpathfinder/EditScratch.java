@@ -96,37 +96,32 @@ public final class EditScratch {
      * beneath it first if the footing has nothing of its own to place against — the two-block staircase
      * step (MOVEMENT-DESIGN §2). Three cases: already {@link MovementContext#standable standable} → free;
      * directly {@link MovementContext#placeable placeable} (a face already exists — terrain or a wall) →
-     * place just the footing; otherwise, if both the footing and the support cells are
-     * {@link MovementContext#openForPlace open}, place <b>both</b> the support and the footing on top of it.
+     * place just the footing; otherwise, if the footing cell is {@link MovementContext#openForPlace open}
+     * and the support is {@link MovementContext#placeable placeable}, place <b>both</b> the support and the
+     * footing on top of it. Else the move is impossible.
      *
-     * <p><b>The support's face is the floor the bot stands on — an A\* invariant, not a grid read.</b> The
-     * support sits beside the cell the movement is expanding from, and that cell is solid by definition:
-     * the bot has footing there, whether it's real terrain or a block an <i>earlier step in this same path</i>
-     * places (predecessor edits execute first, so the anchor is really there before the support goes down).
-     * The world model can't show that planned block during the search, so we deliberately do <b>not</b>
-     * grid-scan the support's faces — doing so would make the staircase dead-end after one step (the second
-     * step's support would look unanchored because its anchor, the first footing, isn't in the grid yet).
-     * The caller must pass a {@code support} cell face-adjacent to its standable source floor (Ascend does:
-     * {@code support = (nx, y, nz)} beside the source {@code (x, y, z)}).
-     *
-     * <p>This is what lets the bot build a diagonal staircase up through open air / off a ledge. Two
-     * placements per step, so A* prefers a natural slope or (later) a Pillar where those are cheaper — the
-     * staircase is the general fallback, chosen only when it's the cheapest way up.
+     * <p>This is what lets the bot build a diagonal staircase up through open air / off a ledge: a lone
+     * footing one-up-and-over has no face to attach to, but a support placed beside the floor the bot
+     * stands on gives it one. That floor reads SOLID even when it's a block a <i>preceding step placed</i>,
+     * because the search feeds the path's {@link PathEdits} diff into {@code descriptorAt} — so the
+     * support's {@code placeable} check finds the face and the staircase <b>chains across steps</b> (without
+     * the diff it would dead-end after one step, the next support looking unanchored). Two placements per
+     * step, so A* prefers a natural slope or (later) a Pillar where those are cheaper.
      */
     public void requireFootingOn(int fx, int fy, int fz, int sx, int sy, int sz) {
         if (!valid) return;
         long fd = ctx.descriptorAt(fx, fy, fz);
         if (ctx.standable(fd)) return;
-        if (!allowEdits || !ctx.caps().canPlace()) { valid = false; return; }
+        if (!allowEdits) { valid = false; return; }
         if (ctx.placeable(fx, fy, fz, fd)) { // footing already has a face — one placement
             addPlace(fx, fy, fz);
             return;
         }
-        // No face for the footing of its own: place a support beneath it (anchored to the bot's current
-        // floor — solid by invariant, see above), then the footing rests on that support. Both cells just
-        // need to be open; we do NOT grid-check the support's anchor, so the staircase chains across steps.
+        // No face of the footing's own: place a support beneath it, then the footing rests on it. The
+        // support's face is the floor the bot stands on, which reads solid via the PathEdits diff (real
+        // terrain or a preceding step's block), so a plain placeable() check finds it — staircase chains.
         long sd = ctx.descriptorAt(sx, sy, sz);
-        if (ctx.openForPlace(fd) && ctx.openForPlace(sd)) {
+        if (ctx.openForPlace(fd) && ctx.placeable(sx, sy, sz, sd)) {
             addPlace(sx, sy, sz);
             addPlace(fx, fy, fz);
         } else {

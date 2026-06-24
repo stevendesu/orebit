@@ -131,6 +131,21 @@ public final class BlockPathfinder {
 
             if (++expansions > MAX_EXPANSIONS) { budgetHit = true; break; }
 
+            // Rebuild the planned-edit diff for the path to THIS node, so the movements below read the
+            // world as it will be when the bot stands here (the blocks the preceding moves place/break),
+            // not just the live grid. Per-path, not global (see PathEdits); skipped wholesale until the
+            // search has produced any edit, so plain follows pay nothing.
+            PathEdits pathEdits = ctx.pathEdits();
+            pathEdits.reset();
+            if (relaxer.anyEdits) {
+                for (long k = current.key; ; ) {
+                    pathEdits.add(cameFromEdits.get(k));
+                    Long prev = cameFrom.get(k);
+                    if (prev == null) break;
+                    k = prev;
+                }
+            }
+
             relaxer.current = current;
             for (Movement m : MovementRegistry.TIER1) {
                 relaxer.move = m;
@@ -159,8 +174,9 @@ public final class BlockPathfinder {
         private final Map<Long, StepEdits> cameFromEdits;
         private final int gx, gy, gz;
 
-        Node current;   // node being expanded
-        Movement move;  // movement currently emitting candidates
+        Node current;       // node being expanded
+        Movement move;      // movement currently emitting candidates
+        boolean anyEdits;   // has any edge carried break/place edits? (gates the per-pop diff rebuild)
 
         Relaxer(PriorityQueue<Node> open, Map<Long, Float> gScore, Map<Long, Long> cameFrom,
                 Map<Long, Movement> cameFromMove, Map<Long, StepEdits> cameFromEdits,
@@ -187,7 +203,7 @@ public final class BlockPathfinder {
             cameFromMove.put(nKey, move);
             // Keep the edit-set attached to the same (cheapest) edge as the move; clear any stale set
             // left by a costlier edge so the follower never mines/places blocks the winning move didn't.
-            if (edits != null) cameFromEdits.put(nKey, edits);
+            if (edits != null) { cameFromEdits.put(nKey, edits); anyEdits = true; }
             else cameFromEdits.remove(nKey);
             float fScore = tentative + heuristic(nx, ny, nz, gx, gy, gz);
             open.add(new Node(nKey, nx, ny, nz, tentative, fScore));
