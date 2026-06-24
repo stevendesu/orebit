@@ -1,3 +1,9 @@
+The single most effective thing Orebit does to stay fast on its hot paths is also
+the simplest to state: **don't allocate memory you could reuse instead.** This
+page is about two flavors of that idea — *object pools* and *scratch pads* — but
+first we need to understand why allocating memory is worth avoiding in the first
+place.
+
 ## Primer on RAM
 
 Every program on your computer must share the same RAM. In order to ensure
