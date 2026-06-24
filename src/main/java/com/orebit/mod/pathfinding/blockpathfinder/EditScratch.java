@@ -30,17 +30,30 @@ public final class EditScratch {
     private int placeCount;
     private float extraCost;
     private boolean valid;
+    private boolean allowEdits;
 
     EditScratch(MovementContext ctx) {
         this.ctx = ctx;
     }
 
-    /** Clear the accumulator for a fresh candidate; returns {@code this} for fluent use. */
+    /** Clear the accumulator for a fresh candidate, edits permitted; returns {@code this} for fluent use. */
     public EditScratch reset() {
+        return reset(true);
+    }
+
+    /**
+     * Clear the accumulator for a fresh candidate. When {@code allowEdits} is false, no break or place is
+     * folded — a blocked/empty required cell makes the move <i>invalid</i> instead of editing through it.
+     * Movements pass {@code false} to honour the {@code RISKY_EDIT} flag: editing this floor cell's body
+     * space could release a fluid or drop a gravity block, so the bot must reach it without editing or not
+     * at all. Returns {@code this} for fluent use.
+     */
+    public EditScratch reset(boolean allowEdits) {
         breakCount = 0;
         placeCount = 0;
         extraCost = 0f;
         valid = true;
+        this.allowEdits = allowEdits;
         return this;
     }
 
@@ -53,12 +66,12 @@ public final class EditScratch {
         if (!valid) return;
         long d = ctx.descriptorAt(x, y, z); // one read; reused by passable/breakable/breakCost below
         if (ctx.passable(d)) return;
-        if (ctx.breakable(d)) {
+        if (allowEdits && ctx.breakable(d)) {
             breaks = push(breaks, breakCount, x, y, z);
             breakCount++;
             extraCost += ctx.breakCost(d);
         } else {
-            valid = false;
+            valid = false; // blocked, and either the bot can't break it or an edit here is forbidden (risky)
         }
     }
 
@@ -71,12 +84,12 @@ public final class EditScratch {
         if (!valid) return;
         long d = ctx.descriptorAt(x, y, z); // one read; reused by standable/placeable below
         if (ctx.standable(d)) return;
-        if (ctx.placeable(x, y, z, d)) {
+        if (allowEdits && ctx.placeable(x, y, z, d)) {
             places = push(places, placeCount, x, y, z);
             placeCount++;
             extraCost += MovementContext.PLACE_COST;
         } else {
-            valid = false;
+            valid = false; // no footing, and either the bot can't place or an edit here is forbidden (risky)
         }
     }
 
