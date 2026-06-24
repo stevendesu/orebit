@@ -47,11 +47,23 @@ public final class BlockPathfinder {
      */
     public static boolean DEBUG = true;
 
-    /** Node-expansion ceiling — bounds per-call cost so a long/blocked goal can't stall the tick. */
-    private static final int MAX_EXPANSIONS = 4000;
+    /**
+     * Node-expansion ceiling — bounds per-call cost so a long/blocked goal can't stall the tick. A
+     * backstop, NOT the primary throttle: the per-axis heuristic below is what keeps a normal search far
+     * under this. (Pathing measures instant; 10k leaves headroom for genuinely long routes.)
+     */
+    private static final int MAX_EXPANSIONS = 10000;
 
-    /** The search's minimum per-step cost; the heuristic uses it as the per-block lower bound. */
-    private static final float MIN_STEP_COST = 1.0f;
+    // Heuristic cost per block on each axis, matched to the CHEAPEST real move on that axis so the
+    // estimate tracks reality and the search heads for the goal instead of exploring a huge cheap-horizontal
+    // disk before committing to a costly climb/descent. Horizontal stays the admissible floor (a plain
+    // walk), so horizontal-obstacle behaviour is unchanged — the bot still routes around walls by cost
+    // rather than boring through them. Vertical is the cheapest *full-block* gain/drop (Ascend / Descend);
+    // it's mildly inadmissible only against a lucky deep Fall, which is fine for a follow-bot and is the
+    // whole point — it stops the vertical underestimate that made tall climbs blow the budget.
+    private static final float H_HORIZONTAL = 1.0f; // Traverse
+    private static final float H_UP = 2.0f;         // Ascend
+    private static final float H_DOWN = 1.5f;       // Descend
 
     private static final class Node {
         final long key;
@@ -214,9 +226,16 @@ public final class BlockPathfinder {
         return Math.abs(x - gx) <= 1 && Math.abs(z - gz) <= 1 && Math.abs(y - gy) <= 2;
     }
 
-    /** Admissible: Manhattan, each step covering ≥1 block at ≥{@link #MIN_STEP_COST}. */
+    /**
+     * Per-axis estimate: horizontal by {@link #H_HORIZONTAL}, and the vertical gap by {@link #H_UP} or
+     * {@link #H_DOWN} depending on whether the goal is above or below. Tracks real move costs so A* heads
+     * for the goal directly instead of flooding the cheap horizontal plane (see the constants above).
+     */
     private static float heuristic(int x, int y, int z, int gx, int gy, int gz) {
-        return (Math.abs(x - gx) + Math.abs(z - gz) + Math.abs(y - gy)) * MIN_STEP_COST;
+        float horizontal = (Math.abs(x - gx) + Math.abs(z - gz)) * H_HORIZONTAL;
+        int dy = gy - y;
+        float vertical = dy >= 0 ? dy * H_UP : -dy * H_DOWN;
+        return horizontal + vertical;
     }
 
     /**
