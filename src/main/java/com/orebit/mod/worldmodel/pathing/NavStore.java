@@ -51,6 +51,16 @@ public final class NavStore {
         return m == null ? null : m.get(chunkKey);
     }
 
+    /**
+     * The per-level chunk → sections map (or {@code null} if no nav data exists for the level yet) — the
+     * backing store a single-threaded reader ({@link NavGridView}) resolves <b>once</b> so its hot per-cell
+     * reads skip the {@code BY_LEVEL.get(level)} hop and box only the chunk key (and only when the chunk
+     * changes), not on every cell. The returned map is the live store; the reader must not mutate it.
+     */
+    public static ConcurrentHashMap<Long, NavSection[]> chunksOf(ServerLevel level) {
+        return BY_LEVEL.get(level);
+    }
+
     /** Drop a chunk's nav sections (on unload), returning them to the pool. */
     public static void remove(ServerLevel level, long chunkKey) {
         ConcurrentHashMap<Long, NavSection[]> m = BY_LEVEL.get(level);
