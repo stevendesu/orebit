@@ -39,6 +39,11 @@ public final class StepEdits {
         return BlockPos.of(breaks[i]);
     }
 
+    /** The {@code i}-th cell to break, as a packed {@link BlockPos#asLong} (no allocation). */
+    public long breakAt(int i) {
+        return breaks[i];
+    }
+
     /** Number of cells this move places. */
     public int placeCount() {
         return places.length;
@@ -47,5 +52,10 @@ public final class StepEdits {
     /** The {@code i}-th cell to place, as a fresh {@link BlockPos}. */
     public BlockPos placePos(int i) {
         return BlockPos.of(places[i]);
+    }
+
+    /** The {@code i}-th cell to place, as a packed {@link BlockPos#asLong} (no allocation). */
+    public long placeAt(int i) {
+        return places[i];
     }
 }
