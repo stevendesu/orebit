@@ -22,4 +22,12 @@ public record BotCaps(
 
     /** Walk + jump 1, no break/place, conservative 3-block safe fall — the Tier 1 default. */
     public static final BotCaps DEFAULT = new BotCaps(1, 3, false, false);
+
+    /**
+     * The Tier 1 default plus break + place enabled — the test config that proves break/place
+     * pathfinding (mine through leaves, bridge a gap) before the inventory / tool / durability
+     * subsystems exist. Until then the bot breaks any breakable block and places an unlimited supply of
+     * throwaway blocks (MOVEMENT-DESIGN.md §5; the throwaway-block budget arrives with the inventory).
+     */
+    public static final BotCaps BREAK_PLACE = new BotCaps(1, 3, true, true);
 }

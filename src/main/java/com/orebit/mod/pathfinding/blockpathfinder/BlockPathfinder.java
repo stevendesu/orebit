@@ -91,8 +91,9 @@ public final class BlockPathfinder {
         Map<Long, Float> gScore = new HashMap<>();
         Map<Long, Long> cameFrom = new HashMap<>();
         Map<Long, Movement> cameFromMove = new HashMap<>();
+        Map<Long, StepEdits> cameFromEdits = new HashMap<>();
 
-        Relaxer relaxer = new Relaxer(open, gScore, cameFrom, cameFromMove, gx, gy, gz);
+        Relaxer relaxer = new Relaxer(open, gScore, cameFrom, cameFromMove, cameFromEdits, gx, gy, gz);
 
         gScore.put(startKey, 0f);
         open.add(new Node(startKey, sx, sy, sz, 0f, heuristic(sx, sy, sz, gx, gy, gz)));
@@ -123,7 +124,7 @@ public final class BlockPathfinder {
 
         if (reachedKey == -1L) return null;
 
-        return reconstruct(cameFrom, cameFromMove, gScore, startKey, reachedKey);
+        return reconstruct(cameFrom, cameFromMove, cameFromEdits, gScore, startKey, reachedKey);
     }
 
     /**
@@ -136,24 +137,27 @@ public final class BlockPathfinder {
         private final Map<Long, Float> gScore;
         private final Map<Long, Long> cameFrom;
         private final Map<Long, Movement> cameFromMove;
+        private final Map<Long, StepEdits> cameFromEdits;
         private final int gx, gy, gz;
 
         Node current;   // node being expanded
         Movement move;  // movement currently emitting candidates
 
         Relaxer(PriorityQueue<Node> open, Map<Long, Float> gScore, Map<Long, Long> cameFrom,
-                Map<Long, Movement> cameFromMove, int gx, int gy, int gz) {
+                Map<Long, Movement> cameFromMove, Map<Long, StepEdits> cameFromEdits,
+                int gx, int gy, int gz) {
             this.open = open;
             this.gScore = gScore;
             this.cameFrom = cameFrom;
             this.cameFromMove = cameFromMove;
+            this.cameFromEdits = cameFromEdits;
             this.gx = gx;
             this.gy = gy;
             this.gz = gz;
         }
 
         @Override
-        public void accept(int nx, int ny, int nz, float cost) {
+        public void accept(int nx, int ny, int nz, float cost, StepEdits edits) {
             float tentative = current.g + cost;
             long nKey = BlockPos.asLong(nx, ny, nz);
             Float known = gScore.get(nKey);
@@ -162,6 +166,10 @@ public final class BlockPathfinder {
             gScore.put(nKey, tentative);
             cameFrom.put(nKey, current.key);
             cameFromMove.put(nKey, move);
+            // Keep the edit-set attached to the same (cheapest) edge as the move; clear any stale set
+            // left by a costlier edge so the follower never mines/places blocks the winning move didn't.
+            if (edits != null) cameFromEdits.put(nKey, edits);
+            else cameFromEdits.remove(nKey);
             float fScore = tentative + heuristic(nx, ny, nz, gx, gy, gz);
             open.add(new Node(nKey, nx, ny, nz, tentative, fScore));
         }
@@ -177,21 +185,25 @@ public final class BlockPathfinder {
     }
 
     private static BlockPathPlan reconstruct(Map<Long, Long> cameFrom, Map<Long, Movement> cameFromMove,
-                                             Map<Long, Float> gScore, long startKey, long reachedKey) {
+                                             Map<Long, StepEdits> cameFromEdits, Map<Long, Float> gScore,
+                                             long startKey, long reachedKey) {
         List<BlockPos> waypoints = new ArrayList<>();
         List<Movement> moves = new ArrayList<>();
+        List<StepEdits> edits = new ArrayList<>();
         long k = reachedKey;
         while (k != startKey) {
             // Stand position = the floor cell's top (feet block) — steer the bot's feet here.
             waypoints.add(BlockPos.of(k).above());
             moves.add(cameFromMove.get(k));
+            edits.add(cameFromEdits.get(k)); // null where the step breaks/places nothing
             Long prev = cameFrom.get(k);
             if (prev == null) break; // defensive; should not happen for a reached goal
             k = prev;
         }
         Collections.reverse(waypoints);
         Collections.reverse(moves);
+        Collections.reverse(edits);
         float cost = gScore.getOrDefault(reachedKey, 0f);
-        return new BlockPathPlan(waypoints, moves, cost);
+        return new BlockPathPlan(waypoints, moves, edits, cost);
     }
 }

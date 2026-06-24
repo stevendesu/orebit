@@ -23,11 +23,13 @@ public final class BlockPathPlan {
 
     private final List<BlockPos> waypoints; // feet/stand positions, start-exclusive, in travel order
     private final List<Movement> moves;     // moves.get(i) = the movement used to reach waypoints.get(i)
+    private final List<StepEdits> edits;    // edits.get(i) = break/place folded into step i (null if none)
     private final float cost;
 
-    public BlockPathPlan(List<BlockPos> waypoints, List<Movement> moves, float cost) {
+    public BlockPathPlan(List<BlockPos> waypoints, List<Movement> moves, List<StepEdits> edits, float cost) {
         this.waypoints = waypoints;
         this.moves = moves;
+        this.edits = edits;
         this.cost = cost;
     }
 
@@ -39,6 +41,16 @@ public final class BlockPathPlan {
     /** The movement used to reach step {@code i} (so the follower knows whether to jump, fall, …). */
     public Movement movement(int i) {
         return moves.get(i);
+    }
+
+    /**
+     * The break/place edits the follower must apply to make step {@code i} traversable, or {@code null}
+     * when the step is an ordinary move. The follower mines the {@link StepEdits#breakPos break cells}
+     * and places the {@link StepEdits#placePos place cells} (re-validated against the live world) before
+     * walking into the step.
+     */
+    public StepEdits edits(int i) {
+        return edits.get(i);
     }
 
     /** Number of waypoints in the path. */

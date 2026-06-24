@@ -1,6 +1,7 @@
 package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
+import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 
@@ -25,12 +26,16 @@ public final class Descend implements Movement {
 
             if (!ctx.built(nx, dy, nz)) continue;
             if (!ctx.standable(nx, dy, nz)) continue;
-            // Clear the transit (source head level) down through the new feet/head.
-            if (!ctx.passable(nx, y + 2, nz)) continue; // head clearance stepping off
-            if (!ctx.passable(nx, y + 1, nz)) continue; // transit feet / new head
-            if (!ctx.passable(nx, y, nz)) continue;     // new feet
 
-            out.accept(nx, dy, nz, COST);
+            // Clear the transit (source head level) down through the new feet/head; a block in the way
+            // is folded into a break-set when the bot may break (else the move fails).
+            EditScratch e = ctx.edits().reset();
+            e.requireAir(nx, y + 2, nz); // head clearance stepping off
+            e.requireAir(nx, y + 1, nz); // transit feet / new head
+            e.requireAir(nx, y, nz);     // new feet
+            if (e.valid()) {
+                out.accept(nx, dy, nz, COST + e.extraCost(), e.snapshot());
+            }
         }
     }
 }
