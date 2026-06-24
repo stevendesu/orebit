@@ -12,11 +12,12 @@ import net.minecraft.world.level.block.Blocks;
  * ({@code TraversalAnalyzerMutable}) keep their block sets in common core. Resolved once into an
  * immutable {@code List} at construction; the caller folds it into its {@code Set} — no per-cell cost.
  *
- * <p>This is the baseline flavor (through MC 1.21.11): the 16 colors are individual
- * {@code Blocks.<COLOR>_CONCRETE_POWDER} constants. The overlay eras compose (build.gradle.kts),
- * so this is supplied to every build through 1.21.11 and then OVERRIDDEN in {@code overlays/26}:
- * MC 26.1 collapsed the dyed variants into a single {@code Blocks.CONCRETE_POWDER}
- * {@code ColorCollection}, so the 26 flavor returns {@code Blocks.CONCRETE_POWDER.asList()}.
+ * <p>This is the baseline flavor (through MC 1.21.11 <b>and 26.0/26.1</b>): the 16 colors are individual
+ * {@code Blocks.<COLOR>_CONCRETE_POWDER} constants. The overlay eras compose (build.gradle.kts), so this
+ * is supplied to every build through 26.1 and then OVERRIDDEN in {@code overlays/26.2}: MC <b>26.2</b>
+ * (not 26.1 — 26.1 still has the 16 constants) collapsed the dyed variants into a single
+ * {@code Blocks.CONCRETE_POWDER} {@code ColorCollection}, so the 26.2 flavor returns
+ * {@code Blocks.CONCRETE_POWDER.asList()}.
  */
 public final class ConcretePowder {
     private ConcretePowder() {}
