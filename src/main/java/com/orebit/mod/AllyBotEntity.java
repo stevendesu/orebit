@@ -48,6 +48,12 @@ public class AllyBotEntity extends FakePlayerEntity {
     /** Stop moving once this close to the owner (blocks, horizontal). */
     private static final double ARRIVE_DIST = 2.5;
     /**
+     * Vertical arrival tolerance (blocks). Paired with {@link #ARRIVE_DIST} so "arrived" means close in
+     * 3D — without it the bot treats being directly under a target as arrival (matches the block A*'s
+     * ±2 vertical goal tolerance, so the follower agrees with the planner about reaching the goal cell).
+     */
+    private static final double ARRIVE_Y = 2.5;
+    /**
      * Safety re-plan interval (ticks). We normally replan only when the owner steps to a new block
      * (see {@link #lastGoalCell}); this is the backstop so a static owner still picks up terrain edits
      * (the demo refresh) within a second or two. Kept long so a stationary bot replans rarely — which
@@ -179,14 +185,19 @@ public class AllyBotEntity extends FakePlayerEntity {
     /**
      * Path toward {@code (tx,ty,tz)} (goal floor cell {@code goalFloor}), steering along the plan and
      * falling back to a straight-line steer off-grid. Returns {@code true} once within
-     * {@link #ARRIVE_DIST} horizontally (the caller decides what arrival means for its mode).
+     * {@link #ARRIVE_DIST} horizontally <i>and</i> {@link #ARRIVE_Y} vertically (the caller decides what
+     * arrival means for its mode).
      */
     private boolean driveToward(double tx, double ty, double tz, BlockPos goalFloor) {
         double dx = tx - this.getX();
+        double dy = ty - this.getY();
         double dz = tz - this.getZ();
         double distXZ = Math.sqrt(dx * dx + dz * dz);
 
-        if (distXZ <= ARRIVE_DIST) {
+        // Arrived only when close in 3D. Horizontal proximity alone would let the bot stop directly
+        // BELOW the target (it walks under a sky platform / the top of a staircase and quits) — it must
+        // also match the target's height, which is what makes it actually climb to reach you.
+        if (distXZ <= ARRIVE_DIST && Math.abs(dy) <= ARRIVE_Y) {
             this.zza = 0.0f;
             this.path = null;
             lookAtPlayer(owner);
