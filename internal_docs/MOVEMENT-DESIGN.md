@@ -272,8 +272,8 @@ bits; `isDamaging` of the *floor* stays intrinsic in the navtype, no bit):
 
 | Bit(s) | Fact | Meaning / what it gates | Consumer |
 |---|---|---|---|
-| 1 | `risksFluidFlow` | don't BREAK/PLACE here (editing could release a neighbouring fluid into the body space) — walking is fine | fluid-aware break-modifier |
-| 1 | `risksGravityFall` | don't BREAK/PLACE here (editing could drop a sand/gravel column) | gravity-aware break-modifier |
+| 1 | `risksFluidFlow` | don't BREAK/PLACE here — editing could release a neighbouring fluid into the body space (walking through is fine) | fluid-aware break-modifier |
+| 1 | `risksGravityFall` | don't BREAK/PLACE here — sand/gravel sits above, so an edit's block update could drop it onto the bot (a BREAK/PLACE gate, **not** a movement check) | gravity-aware break-modifier |
 | 1 | `clearableHazard` | a walkable-through hazard in the body space (fire) — adds cost, not blocked | hazard-cost movement |
 | 2 | `headroomHeight` | 0 none / 1 crawl / 2 walk / 3 jump — vertical clearance above the floor | Crawl / Traverse / Ascend |
 | 1 | `hasPlaceableNeighbor` | a solid face to bridge a placed block against | Traverse bridge / Pillar |
@@ -285,21 +285,31 @@ flow/cascade. So they're break-modifier gates read in one bit instead of an 8-ce
 **Boundary handling — always within-section, NO overscan.** Each section's neighbour bits are computed
 from its own cells plus a per-fact out-of-section default, so a section's bits **never depend on another
 section** — a block update recomputes bits within one section only, never reaching into a neighbouring nav
-grid (which would mean extra data fetching + cache thrash on *every* update). The OOB default is the safe
-direction for each fact:
-- `risksFluidFlow`: treat horizontally-out-of-bounds cells as **alternating air/water by y-parity**. The
-  check runs for both body cells (y+1 / y+2, one odd / one even) and ORs, so a boundary cell always trips
-  → flagged → the bot won't break/place at an edge it can't see past. Conservative, and harmless since the
-  bit gates only break/place, not walking.
-- movement-*enabling* facts (`headroomHeight`, `risksGravityFall`, `hasPlaceableNeighbor`) keep the **air**
-  default (today's behaviour): above/around a section is usually air or more space, so optimistic is
-  correct; a pessimistic default would wall off every 16th Y layer or every chunk border.
+grid (which would mean extra data fetching + cache thrash on *every* update). The bitmask is therefore
+**exact in a section's interior and only ever suspect within one cell of a section face.** Two cases:
 
-Worst case of the conservative fluid default: the bot refuses to bridge/break *exactly on* a chunk/section
-boundary. If that ever bites at runtime, the fix is **lazy and on-demand, not eager overscan**: when A\*
-finds a boundary break/place uniquely valuable and the ONLY thing flagging it risky is the conservative
-boundary bitmask, do a *one-time* real lookup of the neighbour section's data — pay that cost rarely, when
-it matters, never constantly on every block update.
+- **Edit-hazard gates** (`risksFluidFlow`, `risksGravityFall`) — conservative OOB default (assume the
+  hazard *could* be there), so the bot won't break/place at a boundary it can't see past. `risksFluidFlow`
+  reads horizontal neighbours → treat horizontally-out-of-bounds cells as **alternating air/water by
+  y-parity** (the check runs for both body cells y+1/y+2, one odd / one even, and ORs, so a boundary cell
+  always trips → flagged). Harmless, since these gate only break/place, never walking. Worst case: the bot
+  won't edit *exactly on* a chunk/section face; a rare *valuable* boundary edit gets a **lazy one-time**
+  real-neighbour lookup in A\* — never eager overscan.
+
+- **Movement / capability facts** (`headroomHeight`, `hasPlaceableNeighbor`) — keep the **air-optimistic**
+  default (a section top / chunk edge is usually open). The hazard here is the *opposite* of the gates: the
+  bit can **over-claim** — e.g. treating a vertically-out-of-bounds cell as air says "has headroom" when
+  there's actually **unbreakable bedrock one block up in the next section**, so the move looks walkable
+  when it isn't. **Do NOT fix this with a pessimistic default** (assuming bedrock would deny walking on
+  perfectly clear blocks at every section top). Instead **use the bit as a PREFILTER:**
+  - bit says **no** headroom → reject the move immediately (the common, cheap case);
+  - bit says **yes** headroom **and the cell is within one block of a section face** → **lazily verify**
+    the real body cell(s) via `descriptorAt` (cross-section-correct) before committing the move.
+
+  This verify fires **more often** than the edit-hazard one — it's plain walking near a chunk/section
+  border, not a rare valuable edit — but it's a cheap, bounded read and only at faces; everywhere else the
+  bit is trusted with no read. (This is *why* `headroomHeight` is a movement-layer prefilter, not a hard
+  truth: the move's geometry is still confirmed by `descriptorAt` whenever the bit's accuracy is in doubt.)
 
 ### Work items (ratified — build per consumer, not speculatively)
 1. **Replace the 4-value `TraversalClass`** with the navtype + neighbour-property bitmask (**`short[4096]`,
