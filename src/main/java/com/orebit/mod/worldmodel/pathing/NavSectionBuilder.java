@@ -78,6 +78,18 @@ public final class NavSectionBuilder {
             // Benchmark-only helpers; don't fail class-load. The runtime path uses SectionPalette.
             OrebitCommon.LOGGER.debug("[Orebit] NavSectionBuilder legacy reflection unavailable: {}", e.toString());
         }
+
+        // The grid packs the navtype into 10 bits (TraversalGrid.NAVTYPE_CAPACITY). If NavBlock ever
+        // interns more navtypes than that (heavily-modded servers), the high index bits would collide
+        // with the flag bits and cells would mis-resolve. Vanilla measures ~590, well under 1024; warn
+        // loudly rather than corrupt silently. The fix is to compact the descriptor to shed navtypes
+        // (MOVEMENT-DESIGN §8), NOT to widen the cell. (AIR_DESC above already forced NavBlock
+        // class-init, so the count is final here.)
+        if (NavBlock.navtypeCount() > TraversalGrid.NAVTYPE_CAPACITY) {
+            OrebitCommon.LOGGER.error("[Orebit] navtype count {} exceeds the {}-navtype nav-grid budget — "
+                    + "grid cells will truncate and mis-resolve; compact the NavBlock descriptor (MOVEMENT-DESIGN §8).",
+                    NavBlock.navtypeCount(), TraversalGrid.NAVTYPE_CAPACITY);
+        }
     }
 
     public static BitStorage getStorageViaReflection(PalettedContainer<BlockState> container) {
@@ -127,7 +139,8 @@ public final class NavSectionBuilder {
 
     /**
      * Build a NavSection for one chunk section: read its block states, map each to a NavBlock
-     * navtype + descriptor, and pack every cell's class and navtype into the {@link TraversalGrid}.
+     * navtype + descriptor, and pack every cell's navtype and neighbour-property flags into the
+     * {@link TraversalGrid}.
      *
      * <p>Uniform-air sections (the majority underground/skyward) are bypassed: every cell classifies
      * identically, so we classify one representative cell and fill — the big recompute win (PRD §6.2).
@@ -165,7 +178,7 @@ public final class NavSectionBuilder {
 
         // Map the (small) palette to navtypes + descriptors once, then resolve every cell via its slot —
         // no per-cell state lookup. We store the navtype per cell (the fine geometry index) alongside the
-        // coarse class; the descriptor scratch is only needed transiently to classify.
+        // neighbour-property flags; the descriptor scratch is only needed transiently to compute them.
         BlockState[] palette = SectionPalette.read(states, slotScratch);
         int[] slotToNavtype = new int[palette.length];
         long[] slotToDesc = new long[palette.length];
@@ -182,29 +195,30 @@ public final class NavSectionBuilder {
             for (int z = 0; z < NavSection.SIZE; z++) {
                 for (int x = 0; x < NavSection.SIZE; x++) {
                     int navtype = slotToNavtype[slotScratch[(y << 8) | (z << 4) | x]];
-                    grid.set(x, y, z, NavClassifier.classify(descScratch, x, y, z), navtype);
+                    grid.set(x, y, z, navtype, NavFlags.compute(descScratch, x, y, z));
                 }
             }
         }
     }
 
     /**
-     * Classify a grid as entirely air — the shared path for uniform-air sections (the underground/skyward
-     * bypass) and pre-1.18 null sections. One representative cell is classified over an all-air descriptor
-     * scratch, then the whole grid is filled with that class + air's navtype.
+     * Compute flags for a grid that is entirely air — the shared path for uniform-air sections (the
+     * underground/skyward bypass) and pre-1.18 null sections. One representative cell is computed over an
+     * all-air descriptor scratch (every cell is identical), then the whole grid is filled with air's
+     * navtype + those flags.
      */
     private static void classifyAir(TraversalGrid grid) {
         final long[] descScratch = DESC_SCRATCH.get();
         Arrays.fill(descScratch, AIR_DESC);
-        TraversalClass airClass = NavClassifier.classify(descScratch, 8, 8, 8);
-        fill(grid, airClass, NavBlock.AIR & 0xFFFF);
+        int airFlags = NavFlags.compute(descScratch, 8, 8, 8);
+        fill(grid, NavBlock.AIR & 0xFFFF, airFlags);
     }
 
-    private static void fill(TraversalGrid grid, TraversalClass tc, int navtype) {
+    private static void fill(TraversalGrid grid, int navtype, int flags) {
         for (int y = 0; y < NavSection.SIZE; y++) {
             for (int z = 0; z < NavSection.SIZE; z++) {
                 for (int x = 0; x < NavSection.SIZE; x++) {
-                    grid.set(x, y, z, tc, navtype);
+                    grid.set(x, y, z, navtype, flags);
                 }
             }
         }
@@ -212,11 +226,11 @@ public final class NavSectionBuilder {
 
     /**
      * Incrementally update one cell after a live block change (the block-update hook): set the cell's
-     * navtype to {@code newState}'s, then recompute the coarse class of that cell plus the small
-     * <b>within-section</b> neighbourhood whose classification reads it. Out-of-section neighbours keep
-     * the air default (no overscan), so a change never touches another section's data — the update is
-     * self-contained. Far cheaper than a rebuild: no palette scan, an O(1) navtype write, and a ~45-cell
-     * reclassify reusing the existing {@link NavClassifier}.
+     * navtype to {@code newState}'s, then recompute the neighbour-property flags of that cell plus the
+     * small <b>within-section</b> neighbourhood whose flags read it. Out-of-section neighbours keep the
+     * air default (no overscan), so a change never touches another section's data — the update is
+     * self-contained. Far cheaper than a rebuild: no palette scan, an O(1) navtype write, and a small
+     * neighbourhood recompute reusing {@link NavFlags}.
      *
      * <p>The descriptor scratch is reconstructed from the section's own resident navtypes (≈4096 cheap
      * array reads — well below the old whole-chunk {@code refreshNavData}); it can be windowed to the
@@ -238,15 +252,16 @@ public final class NavSectionBuilder {
         }
         desc[(ly << 8) | (lz << 4) | lx] = NavBlock.descriptor(newNavtype);
 
-        // Reclassify the changed cell + the cells whose class depends on it. classify() reads
-        // x±1 / y-1..y+2 / z±1, so the inverse affected set is x±1 / y-2..y+1 / z±1 — widened a touch on
-        // y for safety. Each cell keeps its own navtype (only the changed cell's navtype is new).
-        for (int y = clampCell(ly - 2); y <= clampCell(ly + 2); y++) {
+        // Recompute the changed cell's flags + the cells whose flags depend on it. NavFlags.compute()
+        // reads the headroom column up to y+3 and the x±1 / z±1 placeable/fluid/gravity neighbourhood,
+        // so the inverse affected set is x±1 / y-3..y+1 / z±1. Each cell keeps its own navtype (only the
+        // changed cell's navtype is new).
+        for (int y = clampCell(ly - 3); y <= clampCell(ly + 1); y++) {
             for (int z = clampCell(lz - 1); z <= clampCell(lz + 1); z++) {
                 for (int x = clampCell(lx - 1); x <= clampCell(lx + 1); x++) {
                     int navtype = (x == lx && y == ly && z == lz) ? (newNavtype & 0xFFFF)
                             : grid.navtype(x, y, z);
-                    grid.set(x, y, z, NavClassifier.classify(desc, x, y, z), navtype);
+                    grid.set(x, y, z, navtype, NavFlags.compute(desc, x, y, z));
                 }
             }
         }

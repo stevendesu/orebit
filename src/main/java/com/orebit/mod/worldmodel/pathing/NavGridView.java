@@ -8,25 +8,27 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.state.BlockState;
 
 /**
- * Read view over the world model for one level — the seam the pathfinder sits on. It serves the two
- * resolutions the engine plans at:
+ * Read view over the world model for one level — the seam the pathfinder sits on. It serves three reads:
  *
  * <ul>
- *   <li><b>Coarse:</b> {@link #classAt} — the {@link TraversalClass} for cheap pruning ("tunnel
- *       passable, obsidian wall not"), read from the top 2 bits of the resident grid.
- *   <li><b>Fine:</b> {@link #descriptorAt} — the full {@link NavBlock} geometry for a cell. The grid
- *       stores the resolved navtype per cell (the low 14 bits of the same packed {@code short} — see
+ *   <li><b>Built gate:</b> {@link #built} — whether a cell's chunk/section nav data is currently built.
+ *       The cheap "is it loaded enough to trust" prefilter that keeps the search inside the loaded radius
+ *       (replaces the old {@code classAt != null}; the 4-value class it returned was dead).
+ *   <li><b>Neighbour flags:</b> {@link #flagsAt} — the precomputed {@link NavFlags} bitmask (headroom,
+ *       edit-hazard, walk-through hazard, placeable-neighbour) from the high 6 bits of the resident grid.
+ *   <li><b>Fine geometry:</b> {@link #descriptorAt} — the full {@link NavBlock} geometry for a cell. The
+ *       grid stores the resolved navtype per cell (the low 10 bits of the same packed {@code short} — see
  *       {@link TraversalGrid}), so this is a flat masked array read plus one descriptor-table index — no
  *       live {@code getBlockState} palette walk, no navtype-map lookup. (Favour-cpu-over-ram: the
  *       movement layer reads geometry constantly during A*, so the navtype is kept resident rather than
- *       re-derived; the +7 KB/section is negligible.) Cells <i>outside</i> the built grid fall back to a
- *       live read so a probe just past the loaded radius still returns real geometry.
+ *       re-derived.) Cells <i>outside</i> the built grid fall back to a live read so a probe just past the
+ *       loaded radius still returns real geometry.
  * </ul>
  *
  * <p>The nav grid is stored per-16³ {@link NavSection} (one array per chunk), but a path spans
  * sections and chunks, so a lookup finds the right chunk's section array, the section within it, and the
  * cell within that. Bound to a level and its min-Y (read once), so a lookup is a couple of shifts plus a
- * map get. {@link #classAt} returns {@code null} where that chunk's nav data isn't built (unloaded radius
+ * map get. {@link #built} returns {@code false} where that chunk's nav data isn't built (unloaded radius
  * / out of vertical bounds) — the pathfinder treats that as unknown.
  *
  * <p><b>Freshness:</b> because both reads come from the stored grid (not the live world), runtime block
@@ -48,12 +50,22 @@ public final class NavGridView {
     }
 
     /**
-     * The {@link TraversalClass} at world cell {@code (x,y,z)}, or {@code null} if that chunk's nav
-     * data isn't currently built (unloaded radius) or {@code y} is out of the level's vertical range.
+     * Whether world cell {@code (x,y,z)} has built nav data — {@code false} if that chunk's nav data
+     * isn't currently built (unloaded radius) or {@code y} is out of the level's vertical range. The
+     * cheap gate the pathfinder uses to stay inside the loaded radius.
      */
-    public TraversalClass classAt(int x, int y, int z) {
+    public boolean built(int x, int y, int z) {
+        return sectionAt(x, y, z) != null;
+    }
+
+    /**
+     * The precomputed {@link NavFlags} neighbour-property bitmask at world cell {@code (x,y,z)} (high 6
+     * bits of the resident grid), or {@code 0} where that chunk's nav data isn't built — gate with
+     * {@link #built} first if "unbuilt vs. genuinely flagless" matters.
+     */
+    public int flagsAt(int x, int y, int z) {
         NavSection section = sectionAt(x, y, z);
-        return section == null ? null : section.getTraversalClass(x & 15, y & 15, z & 15);
+        return section == null ? 0 : section.getFlags(x & 15, y & 15, z & 15);
     }
 
     /**
@@ -61,7 +73,7 @@ public final class NavGridView {
      * world cell {@code (x,y,z)}. For a built cell this is the resident navtype turned into its
      * descriptor — a flat array read, no live block lookup. This is the fine-movement seam — the
      * movement layer reads it to decide jump clearance, stair half-steps, parkour gaps, swim, etc.
-     * (the 2-bit class only says a cell is "passable," not whether a specific move through it works).
+     * (the neighbour flags are a prefilter; this descriptor is the precise per-cell geometry).
      * Outside the built grid it falls back to a live read so a probe just past the loaded radius still
      * returns real geometry.
      */

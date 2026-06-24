@@ -241,18 +241,18 @@ public class AllyBotEntity extends FakePlayerEntity {
                 OrebitCommon.LOGGER.info("[Orebit] plan: {} wp cost={} start={} goal={} path={}",
                         path.size(), path.cost(), compact(startFloor), compact(goalFloor), waypointsString());
             } else {
-                OrebitCommon.LOGGER.info("[Orebit] plan: NONE start={}({}) goal={}({})",
-                        startFloor, grid.classAt(startFloor.getX(), startFloor.getY(), startFloor.getZ()),
-                        goalFloor, grid.classAt(goalFloor.getX(), goalFloor.getY(), goalFloor.getZ()));
+                OrebitCommon.LOGGER.info("[Orebit] plan: NONE start={}(built={}) goal={}(built={})",
+                        startFloor, grid.built(startFloor.getX(), startFloor.getY(), startFloor.getZ()),
+                        goalFloor, grid.built(goalFloor.getX(), goalFloor.getY(), goalFloor.getZ()));
             }
         } else if (hasPath != loggedHasPath) {
             loggedHasPath = hasPath;
             if (hasPath) {
                 OrebitCommon.LOGGER.info("[Orebit] bot path: {} waypoints (cost {})", path.size(), path.cost());
             } else {
-                OrebitCommon.LOGGER.info("[Orebit] bot path: none (startClass={}, goalClass={})",
-                        grid.classAt(startFloor.getX(), startFloor.getY(), startFloor.getZ()),
-                        grid.classAt(goalFloor.getX(), goalFloor.getY(), goalFloor.getZ()));
+                OrebitCommon.LOGGER.info("[Orebit] bot path: none (startBuilt={}, goalBuilt={})",
+                        grid.built(startFloor.getX(), startFloor.getY(), startFloor.getZ()),
+                        grid.built(goalFloor.getX(), goalFloor.getY(), goalFloor.getZ()));
             }
         }
     }
