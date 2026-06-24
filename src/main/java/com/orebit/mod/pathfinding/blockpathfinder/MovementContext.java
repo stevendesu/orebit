@@ -86,7 +86,15 @@ public final class MovementContext {
      * conservative "this cell is genuinely clear for feet or head" test the Tier 1 moves need.
      */
     public boolean passable(int x, int y, int z) {
-        long d = descriptorAt(x, y, z);
+        return passable(descriptorAt(x, y, z));
+    }
+
+    /**
+     * {@link #passable(int, int, int)} on an already-read descriptor — the read-once form callers use
+     * when they've already fetched the cell's descriptor (a {@code descriptorAt} call is a live palette
+     * read plus a navtype map lookup, so re-reading the same cell across predicates is the cost to avoid).
+     */
+    public boolean passable(long d) {
         return NavBlock.shape(d) == NavBlock.SHAPE_EMPTY && NavBlock.fluid(d) == 0;
     }
 
@@ -97,7 +105,11 @@ public final class MovementContext {
      * {@link NavBlock#SHAPE_EMPTY} (no floor at all).
      */
     public boolean standable(int x, int y, int z) {
-        long d = descriptorAt(x, y, z);
+        return standable(descriptorAt(x, y, z));
+    }
+
+    /** {@link #standable(int, int, int)} on an already-read descriptor (read-once form). */
+    public boolean standable(long d) {
         int shape = NavBlock.shape(d);
         if (shape == NavBlock.SHAPE_EMPTY || shape == NavBlock.SHAPE_OTHER) return false;
         if (NavBlock.fluid(d) != 0) return false;
@@ -126,8 +138,12 @@ public final class MovementContext {
      * durability gating arrives with the inventory subsystem.)
      */
     public boolean breakable(int x, int y, int z) {
+        return breakable(descriptorAt(x, y, z));
+    }
+
+    /** {@link #breakable(int, int, int)} on an already-read descriptor (read-once form). */
+    public boolean breakable(long d) {
         if (!caps.canBreak()) return false;
-        long d = descriptorAt(x, y, z);
         if (NavBlock.shape(d) == NavBlock.SHAPE_EMPTY) return false; // nothing solid here to break
         if (NavBlock.fluid(d) != 0) return false;                   // don't "break" water/lava
         return NavBlock.hardness(d) != UNBREAKABLE_HARDNESS;
@@ -142,8 +158,15 @@ public final class MovementContext {
      * execution time from whatever neighbour is still solid then.
      */
     public boolean placeable(int x, int y, int z) {
+        return placeable(x, y, z, descriptorAt(x, y, z));
+    }
+
+    /**
+     * {@link #placeable(int, int, int)} on the cell's already-read descriptor {@code d} (read-once form;
+     * the neighbour cells are still read on demand — they're distinct cells, each read once).
+     */
+    public boolean placeable(int x, int y, int z, long d) {
         if (!caps.canPlace()) return false;
-        long d = descriptorAt(x, y, z);
         boolean open = NavBlock.isReplaceable(d) || NavBlock.shape(d) == NavBlock.SHAPE_EMPTY;
         if (!open || NavBlock.fluid(d) != 0) return false; // need a clear, non-fluid cell to fill
         // A sturdy neighbour to place against: the four sides, plus the block below.
@@ -154,8 +177,12 @@ public final class MovementContext {
 
     /** Tick cost to fold one break of cell {@code (x,y,z)} in — flat base plus a hardness term. */
     public float breakCost(int x, int y, int z) {
-        int hardness = NavBlock.hardness(descriptorAt(x, y, z));
-        return BREAK_BASE_COST + hardness * BREAK_PER_HARDNESS;
+        return breakCost(descriptorAt(x, y, z));
+    }
+
+    /** {@link #breakCost(int, int, int)} on an already-read descriptor (read-once form). */
+    public float breakCost(long d) {
+        return BREAK_BASE_COST + NavBlock.hardness(d) * BREAK_PER_HARDNESS;
     }
 
     /** Whether a cell has any solid collision (a face to build against) — full block, slab, stair, … */
