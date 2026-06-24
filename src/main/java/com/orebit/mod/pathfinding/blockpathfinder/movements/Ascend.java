@@ -19,12 +19,15 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  * bit can't prove (near a section face, or genuinely blocked) are read and — when the bot may break and
  * the edit isn't {@code RISKY_EDIT} — folded into a break-set.
  *
- * <p><b>Break / place modifiers (MOVEMENT-DESIGN §1, decision 1).</b> Two folds give the bot full upward
+ * <p><b>Break / place modifiers (MOVEMENT-DESIGN §1, decision 1).</b> Two folds give the bot upward
  * mobility through this one kind: a blocked body/takeoff cell is <i>broken</i> (dig a staircase up into a
- * hillside), and a missing destination floor is <i>placed</i> against the terrain (build a staircase up).
- * Repeated Ascend+place climbs a wall the bot can't otherwise reach — the fix for the "can't get out of a
- * cave / up to the owner" dead-end. (A free-standing pillar in open air still needs the dedicated Pillar
- * kind — Minecraft needs a face to place against, which a wall / hillside / the previous step always has.)
+ * hillside), and a missing destination floor is <i>placed</i> — including, when the footing one-up-and-over
+ * has no face of its own, a second <b>support</b> block beneath it placed against the floor the bot stands
+ * on ({@link com.orebit.mod.pathfinding.blockpathfinder.EditScratch#requireFootingOn the two-block step}).
+ * So repeated Ascend+place builds a diagonal staircase up through <i>open air</i> — off a ledge, out of a
+ * cave, up to a hovering owner — not just up against existing terrain. It's two placements per step, so A*
+ * picks it only when it's the cheapest way up; a straight vertical Pillar (cheaper per block, but a
+ * one-way death-trap you can't descend) stays a separate kind the search will weigh against this once built.
  */
 public final class Ascend implements Movement {
 
@@ -57,10 +60,11 @@ public final class Ascend implements Movement {
 
             int dstFlags = ctx.flagsAt(nx, uy, nz);
             EditScratch e = ctx.edits().reset(!(srcRisky || MovementContext.risksEdit(dstFlags)));
-            // Footing: stand on the block that's there, or BUILD A STEP UP — place a throwaway floor against
-            // the terrain and jump onto it (the staircase-up case). requireFloor folds the place when the
-            // bot may place and the spot is placeable against a neighbour; invalid otherwise.
-            if (!dstStandable) e.requireFloor(nx, uy, nz);
+            // Footing: stand on the block that's there, or BUILD A STEP UP. If the footing one-up-and-over
+            // has no face of its own (open air / a ledge), a support block is placed beneath it against the
+            // floor the bot stands on, then the footing on top — the two-block staircase step. requireFootingOn
+            // folds 0, 1 or 2 places; invalid if the bot can't place or the spot is RISKY_EDIT.
+            if (!dstStandable) e.requireFootingOn(nx, uy, nz, nx, y, nz);
             // The takeoff head-clearance (source y+3) and the landing body (feet+head) must be clear; cells
             // the HEADROOM bit can't prove are read and — when allowed — folded into a break-set (dig up).
             if (!srcClear) e.requireAir(x, y + 3, z);

@@ -223,12 +223,21 @@ public final class MovementContext {
      */
     public boolean placeable(int x, int y, int z, long d) {
         if (!caps.canPlace()) return false;
-        boolean open = NavBlock.isReplaceable(d) || NavBlock.shape(d) == NavBlock.SHAPE_EMPTY;
-        if (!open || NavBlock.fluid(d) != 0) return false; // need a clear, non-fluid cell to fill
+        if (!openForPlace(d)) return false;        // need a clear, non-fluid cell to fill
         // A sturdy neighbour to place against: the four sides, plus the block below.
         return standable(x, y - 1, z)
                 || hasSolidCollision(x + 1, y, z) || hasSolidCollision(x - 1, y, z)
                 || hasSolidCollision(x, y, z + 1) || hasSolidCollision(x, y, z - 1);
+    }
+
+    /**
+     * Whether {@code d} is an open target a placed block could fill — replaceable or genuinely empty, and
+     * holding no fluid. This is the "is the cell free" half of {@link #placeable}, split out because a
+     * staircase step places a footing whose face comes from a freshly-placed <i>support</i> beneath it
+     * (not from the footing's own neighbours), so {@code EditScratch} needs the open test on its own.
+     */
+    public boolean openForPlace(long d) {
+        return (NavBlock.isReplaceable(d) || NavBlock.shape(d) == NavBlock.SHAPE_EMPTY) && NavBlock.fluid(d) == 0;
     }
 
     /** Tick cost to fold one break of cell {@code (x,y,z)} in — flat base plus a hardness term. */
