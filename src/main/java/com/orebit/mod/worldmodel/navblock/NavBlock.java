@@ -56,14 +56,14 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * metadata for target selection). "Currently waterlogged" is not a separate field: a waterlogged
  * state reports water from {@link BlockState#getFluidState()}, so it is captured by the fluid field.
  *
- * <h2>Bit layout (37 bits used of 64; bits 37–63 reserved for future fields)</h2>
+ * <h2>Bit layout</h2>
  * <pre>
  *   bits  width field
  *   0–4     5   topY        collision top surface, round(maxY*16), clamped 0..31
  *   5–7     3   shape       ShapeClass ordinal (EMPTY..OTHER) — see {@link #SHAPE_FULL} etc.
- *   8–13    6   faces       solid (sturdy) faces, one bit per Direction.ordinal()
+ *   8–13    6   (free)      reclaimed sturdy-faces mask — unread by pathfinding, cost ~half the table
  *   14–15   2   openable    0 none / 1 door / 2 trapdoor / 3 fence-gate
- *   16–17   2   fluid       0 none / 1 water / 2 lava (water includes waterlogged)
+ *   16–17   2   fluid       00 none / 01 water / 11 lava (low bit = is-fluid, high = is-lava; water incl. waterlogged)
  *   18–19   2   surface     0 none / 1 slow / 2 slippery
  *   20      1   climbable
  *   21      1   gravity     falling block (sand/gravel/concrete-powder)
@@ -73,6 +73,7 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *   32–34   3   tool        Tool ordinal (NONE..SHEARS)
  *   35      1   toolRequired
  *   36      1   waterloggable (static: has the WATERLOGGED property — bucket-clutch fails)
+ *   37–40   4   precomputed predicate bits (standable / breakable / open-for-place / collision) — see {@link #withDerived}
  * </pre>
  */
 public final class NavBlock {
@@ -101,14 +102,17 @@ public final class NavBlock {
     /** Best tool for breaking; ordinal is stored in the descriptor. */
     public enum Tool { NONE, PICKAXE, AXE, SHOVEL, HOE, SWORD, SHEARS }
 
-    private static final int FLUID_NONE = 0, FLUID_WATER = 1, FLUID_LAVA = 2;
+    // Fluid encoding: low bit = "is a fluid", high bit = "is lava". So none=00, water=01, lava=11 —
+    // and "is fluid" is the low bit alone (no OR of two values), "is lava" the high bit alone.
+    private static final int FLUID_NONE = 0, FLUID_WATER = 1, FLUID_LAVA = 3;
     private static final int SURFACE_NONE = 0, SURFACE_SLOW = 1, SURFACE_SLIPPERY = 2;
     private static final int OPEN_NONE = 0, OPEN_DOOR = 1, OPEN_TRAPDOOR = 2, OPEN_GATE = 3;
 
     // ---- Bit field shifts/masks --------------------------------------------------------------
+    // Bits 8–13 are FREE (formerly a 6-bit sturdy-faces mask, reclaimed — it was unread by pathfinding
+    // and cost ~half the navtype table, almost all of it stair facings; see the block-fingerprints doc).
     private static final int TOP_Y_SHIFT = 0,  TOP_Y_MASK = 0x1F;
     private static final int SHAPE_SHIFT = 5,  SHAPE_MASK = 0x07;
-    private static final int FACES_SHIFT = 8,  FACES_MASK = 0x3F;
     private static final int OPEN_SHIFT  = 14, OPEN_MASK  = 0x03;
     private static final int FLUID_SHIFT = 16, FLUID_MASK = 0x03;
     private static final int SURF_SHIFT  = 18, SURF_MASK  = 0x03;
@@ -121,6 +125,15 @@ public final class NavBlock {
     private static final long TOOLREQ_BIT  = 1L << 35;
     private static final long WLOGABLE_BIT = 1L << 36;
 
+    // ---- Precomputed predicate bits (37+) ----------------------------------------------------
+    // Each is a PURE function of the fields above, so it adds ZERO navtypes (a function of existing bits
+    // can't split a dedup class) and turns a multi-branch movement check into one mask-and-test. Computed
+    // once per navtype by {@link #deriveBits} at table build, asserted consistent at init.
+    private static final long STANDABLE_BIT  = 1L << 37; // stand on top: solid-topped, no fluid, not damaging
+    private static final long BREAKABLE_BIT  = 1L << 38; // mineable geometry: solid, no fluid, not unbreakable
+    private static final long OPEN_PLACE_BIT = 1L << 39; // a placed block could fill it: replaceable/empty, no fluid
+    private static final long COLLISION_BIT  = 1L << 40; // has a face to build against: solid, no fluid
+
     // ---- The tables --------------------------------------------------------------------------
     // descriptor (packed long) -> navtype index, for lossless dedup at build time.
     private static final Map<Long, Short> DESCRIPTOR_TO_NAVTYPE = new HashMap<>();
@@ -131,12 +144,11 @@ public final class NavBlock {
     private static final Map<BlockState, Short> STATE_TO_NAVTYPE = new HashMap<>();
 
     /** A conservative "solid full cube" descriptor used when a block's geometry query throws. */
-    private static final long SOLID_FALLBACK =
+    private static final long SOLID_FALLBACK = withDerived(
             ((long) 16 << TOP_Y_SHIFT)
             | ((long) SHAPE_FULL << SHAPE_SHIFT)
-            | ((long) FACES_MASK << FACES_SHIFT)
             | ((long) 8 << HARD_SHIFT)            // ~1.5 hardness
-            | ((long) Tool.PICKAXE.ordinal() << TOOL_SHIFT);
+            | ((long) Tool.PICKAXE.ordinal() << TOOL_SHIFT));
 
     /** Navtype 0 is always air (a zeroed grid/palette defaults to passable air). */
     public static final short AIR;
@@ -164,6 +176,7 @@ public final class NavBlock {
             }
         });
 
+        verifyDerivedBits();
         OrebitCommon.LOGGER.info("[Orebit] NavBlock: {} states -> {} navtypes ({} B table, {} errors)",
                 STATE_TO_NAVTYPE.size(), navtypeCount, navtypeCount * 8, errorCount);
     }
@@ -195,12 +208,6 @@ public final class NavBlock {
 
         VoxelShape shape = special ? null : state.getCollisionShape(null, null);
 
-        int faces = 0;
-        for (Direction d : Direction.values()) {
-            boolean sturdy = special || state.isFaceSturdy(null, null, d);
-            if (sturdy) faces |= 1 << d.ordinal();
-        }
-
         int shapeClass = computeShape(block, state, shape, special);
         int topY = special ? 16
                 : (shape == null || shape.isEmpty()) ? 0
@@ -229,7 +236,6 @@ public final class NavBlock {
         long d = 0L;
         d |= (long) (topY & TOP_Y_MASK) << TOP_Y_SHIFT;
         d |= (long) (shapeClass & SHAPE_MASK) << SHAPE_SHIFT;
-        d |= (long) (faces & FACES_MASK) << FACES_SHIFT;
         d |= (long) (openable & OPEN_MASK) << OPEN_SHIFT;
         d |= (long) (fluid & FLUID_MASK) << FLUID_SHIFT;
         d |= (long) (surface & SURF_MASK) << SURF_SHIFT;
@@ -241,7 +247,46 @@ public final class NavBlock {
         d |= (long) (tool.ordinal() & TOOL_MASK) << TOOL_SHIFT;
         if (toolRequired)                     d |= TOOLREQ_BIT;
         if (state.hasProperty(BlockStateProperties.WATERLOGGED)) d |= WLOGABLE_BIT;
+        return withDerived(d);
+    }
+
+    /**
+     * OR the precomputed predicate bits onto a base descriptor — each a pure function of the base fields,
+     * so this never changes the dedup class (zero extra navtypes). The single source of truth for {@link
+     * #isStandable}/{@link #isBreakable}/{@link #isOpenForPlace}/{@link #hasCollision}; {@link
+     * #verifyDerivedBits} re-checks it at init so a packing slip can't ship silently.
+     */
+    private static long withDerived(long d) {
+        int shape = shape(d);
+        boolean solid = shape != SHAPE_EMPTY;
+        boolean noFluid = fluid(d) == 0;
+        if (solid && shape != SHAPE_OTHER && noFluid && !isDamaging(d)) d |= STANDABLE_BIT;
+        if (solid && noFluid && hardness(d) != 255)                     d |= BREAKABLE_BIT;
+        if ((isReplaceable(d) || shape == SHAPE_EMPTY) && noFluid)      d |= OPEN_PLACE_BIT;
+        if (solid && noFluid)                                          d |= COLLISION_BIT;
         return d;
+    }
+
+    /**
+     * Re-derive every precomputed bit from the base fields and assert it matches what's stored, over the
+     * whole table — the safety net that keeps the precomputed answer from drifting from its definition (a
+     * bad shift, an overlap with another field). Runs once at init over a few hundred navtypes.
+     */
+    private static void verifyDerivedBits() {
+        for (int i = 0; i < navtypeCount; i++) {
+            long d = descriptors[i];
+            int shape = shape(d);
+            boolean solid = shape != SHAPE_EMPTY, noFluid = fluid(d) == 0;
+            boolean standable = solid && shape != SHAPE_OTHER && noFluid && !isDamaging(d);
+            boolean breakable = solid && noFluid && hardness(d) != 255;
+            boolean openPlace = (isReplaceable(d) || shape == SHAPE_EMPTY) && noFluid;
+            boolean collision = solid && noFluid;
+            if (isStandable(d) != standable || isBreakable(d) != breakable
+                    || isOpenForPlace(d) != openPlace || hasCollision(d) != collision) {
+                throw new IllegalStateException("NavBlock precomputed predicate bit mismatch at navtype " + i
+                        + " (descriptor 0x" + Long.toHexString(d) + ")");
+            }
+        }
     }
 
     private static int computeShape(Block block, BlockState state, VoxelShape shape, boolean special) {
@@ -340,16 +385,14 @@ public final class NavBlock {
     public static int topY(long d)        { return (int) (d >>> TOP_Y_SHIFT) & TOP_Y_MASK; }
     /** ShapeClass ordinal — one of {@link #SHAPE_EMPTY}..{@link #SHAPE_OTHER}. */
     public static int shape(long d)        { return (int) (d >>> SHAPE_SHIFT) & SHAPE_MASK; }
-    /** True if the given face is solid (sturdy / full square). */
-    public static boolean isFaceSolid(long d, Direction face) {
-        return ((int) (d >>> FACES_SHIFT) & (1 << face.ordinal())) != 0;
-    }
-    /** Raw 6-bit solid-face mask (bit per {@link Direction#ordinal()}). */
-    public static int faceMask(long d)     { return (int) (d >>> FACES_SHIFT) & FACES_MASK; }
     /** Openable kind: 0 none, 1 door, 2 trapdoor, 3 fence-gate. */
     public static int openable(long d)     { return (int) (d >>> OPEN_SHIFT) & OPEN_MASK; }
-    /** Fluid: 0 none, 1 water (incl. waterlogged), 2 lava. */
+    /** Fluid: 0 none, 1 water (incl. waterlogged), 3 lava (low bit = is-fluid, high bit = is-lava). */
     public static int fluid(long d)        { return (int) (d >>> FLUID_SHIFT) & FLUID_MASK; }
+    /** Any fluid present (water or lava) — the low fluid bit. */
+    public static boolean isFluid(long d)  { return (d & ((long) 1 << FLUID_SHIFT)) != 0; }
+    /** Lava specifically — the high fluid bit. */
+    public static boolean isLava(long d)   { return (d & ((long) 2 << FLUID_SHIFT)) != 0; }
     /** Surface: 0 none, 1 slow, 2 slippery. */
     public static int surface(long d)      { return (int) (d >>> SURF_SHIFT) & SURF_MASK; }
     public static boolean isClimbable(long d)   { return (d & CLIMB_BIT) != 0; }
@@ -367,4 +410,15 @@ public final class NavBlock {
     public static boolean isWaterloggedNow(long d) { return fluid(d) == FLUID_WATER; }
     /** True if nothing collides here (air/plant/fluid). */
     public static boolean isPassable(long d) { return shape(d) == SHAPE_EMPTY; }
+
+    // ---- Precomputed predicate bits (see #withDerived) — a single mask-and-test on the hot path ------
+
+    /** Can the bot stand on top of this cell? Solid-topped, no fluid, not damaging. */
+    public static boolean isStandable(long d)    { return (d & STANDABLE_BIT) != 0; }
+    /** Is this cell's geometry mineable? Solid, no fluid, not unbreakable (still gate on the bot's caps). */
+    public static boolean isBreakable(long d)    { return (d & BREAKABLE_BIT) != 0; }
+    /** Could a placed block fill this cell? Replaceable/empty, no fluid (still gate on the bot's caps). */
+    public static boolean isOpenForPlace(long d) { return (d & OPEN_PLACE_BIT) != 0; }
+    /** Does this cell have a solid face to build against? Solid, no fluid. */
+    public static boolean hasCollision(long d)   { return (d & COLLISION_BIT) != 0; }
 }

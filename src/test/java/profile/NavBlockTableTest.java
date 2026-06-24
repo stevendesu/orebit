@@ -1,6 +1,7 @@
 package profile;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -8,7 +9,6 @@ import org.junit.jupiter.api.Test;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 import net.minecraft.SharedConstants;
-import net.minecraft.core.Direction;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -42,28 +42,37 @@ public class NavBlockTableTest {
         assertTrue(count < 65536, "navtype count must fit a short");
         assertEquals(0, NavBlock.AIR, "air must be navtype 0");
 
-        // Air: passable, replaceable, no collision.
+        // Air: passable, replaceable, no collision; precomputed bits: open-for-place, not standable.
         long air = NavBlock.descriptorFor(Blocks.AIR.defaultBlockState());
         assertTrue(NavBlock.isPassable(air), "air passable");
         assertTrue(NavBlock.isReplaceable(air), "air replaceable");
         assertEquals(NavBlock.SHAPE_EMPTY, NavBlock.shape(air));
+        assertFalse(NavBlock.isStandable(air), "air not standable");
+        assertTrue(NavBlock.isOpenForPlace(air), "air open for placement");
 
-        // Stone: full cube, all faces solid, breakable.
+        // Stone: full cube, breakable; precomputed bits: standable + breakable + collision, not open.
         long stone = NavBlock.descriptorFor(Blocks.STONE.defaultBlockState());
         assertEquals(NavBlock.SHAPE_FULL, NavBlock.shape(stone), "stone is a full cube");
         assertEquals(16, NavBlock.topY(stone), "stone top at 1.0");
-        for (Direction d : Direction.values()) {
-            assertTrue(NavBlock.isFaceSolid(stone, d), "stone face solid: " + d);
-        }
         assertTrue(NavBlock.hardness(stone) > 0 && NavBlock.hardness(stone) < 255, "stone breakable");
+        assertTrue(NavBlock.isStandable(stone), "stone standable");
+        assertTrue(NavBlock.isBreakable(stone), "stone breakable geometry");
+        assertTrue(NavBlock.hasCollision(stone), "stone has a buildable face");
+        assertFalse(NavBlock.isOpenForPlace(stone), "stone not open for placement");
 
-        // Bedrock: unbreakable sentinel.
+        // Bedrock: unbreakable sentinel — and the breakable bit reflects it.
         long bedrock = NavBlock.descriptorFor(Blocks.BEDROCK.defaultBlockState());
         assertEquals(255, NavBlock.hardness(bedrock), "bedrock unbreakable");
+        assertFalse(NavBlock.isBreakable(bedrock), "bedrock not breakable");
 
-        // Water / lava fluid field.
-        assertEquals(1, NavBlock.fluid(NavBlock.descriptorFor(Blocks.WATER.defaultBlockState())), "water");
-        assertEquals(2, NavBlock.fluid(NavBlock.descriptorFor(Blocks.LAVA.defaultBlockState())), "lava");
+        // Water / lava fluid field (lava re-encoded to 0b11 so low bit = is-fluid, high = is-lava).
+        long water = NavBlock.descriptorFor(Blocks.WATER.defaultBlockState());
+        long lava = NavBlock.descriptorFor(Blocks.LAVA.defaultBlockState());
+        assertEquals(1, NavBlock.fluid(water), "water");
+        assertEquals(3, NavBlock.fluid(lava), "lava");
+        assertTrue(NavBlock.isFluid(water) && NavBlock.isFluid(lava), "both report is-fluid");
+        assertFalse(NavBlock.isLava(water), "water is not lava");
+        assertTrue(NavBlock.isLava(lava), "lava is lava");
 
         // Bottom slab: solid lower half, top at 0.5; top slab: solid upper half.
         BlockState slabBottom = Blocks.OAK_SLAB.defaultBlockState(); // default type = BOTTOM
