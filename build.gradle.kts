@@ -64,6 +64,17 @@ java {
     }
 }
 
+// The block-change hook is the project's one mixin; it lives in the common module (composed from
+// overlays/<era>/…/mixin/) so all loaders share it. Loom's mixin AP generates the refmap that remaps
+// our dev-mapped @Inject targets onto each loader's runtime names — name it explicitly so the config
+// JSON's "refmap" field (orebit.refmap.json) matches and the generated map is bundled. (The 26.x era
+// runs UNOBFUSCATED on pure Fabric Loom, so it needs no refmap and omits this block entirely.)
+loom {
+    mixin {
+        defaultRefmapName.set("orebit.refmap.json")
+    }
+}
+
 tasks.named<Test>("test") {
     useJUnitPlatform()
 }
