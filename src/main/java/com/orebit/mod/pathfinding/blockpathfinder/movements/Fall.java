@@ -13,7 +13,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  *
  * <p>The landing must be {@link MovementContext#standable} (so it never "lands" in lava/cactus — those
  * aren't standable) and the whole drop column, plus the step-off transit, must be {@link
- * MovementContext#passable}. The highest reachable landing wins (shortest, safest drop).
+ * MovementContext#passable}. The highest reachable landing wins (shortest, safest drop). Fall folds no
+ * edits (you can't usefully break/place mid-drop), so it never consults {@code RISKY_EDIT}.
  */
 public final class Fall implements Movement {
 
@@ -31,8 +32,16 @@ public final class Fall implements Movement {
             int nx = x + d[0];
             int nz = z + d[1];
 
-            // Step off the edge: the neighbour column at the bot's level must be open.
-            if (!ctx.passable(nx, y + 1, nz) || !ctx.passable(nx, y + 2, nz)) continue;
+            // Step off the edge: the neighbour column at the bot's level must be open (2 cells) — the
+            // WALK-level HEADROOM of the air cell at the bot's level. The bit's OOB bias is one-directional
+            // (it can only over-claim clearance), so a sub-WALK reading is a trustworthy reject with no
+            // reads; only a claims-clear reading near a section top needs the per-cell verify.
+            int flags = ctx.flagsAt(nx, y, nz);
+            if (MovementContext.headroom(flags) < MovementContext.HEADROOM_WALK) continue;
+            if (!ctx.headroomProves(flags, y, MovementContext.HEADROOM_WALK)
+                    && (!ctx.passable(nx, y + 1, nz) || !ctx.passable(nx, y + 2, nz))) {
+                continue;
+            }
 
             // Scan downward for the first (highest) solid landing within the safe-fall window.
             for (int fy = y - 2; fy >= y - maxDrop; fy--) {

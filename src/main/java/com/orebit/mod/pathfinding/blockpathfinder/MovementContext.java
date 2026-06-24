@@ -1,6 +1,7 @@
 package com.orebit.mod.pathfinding.blockpathfinder;
 
 import com.orebit.mod.worldmodel.navblock.NavBlock;
+import com.orebit.mod.worldmodel.pathing.NavFlags;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 
 /**
@@ -75,6 +76,63 @@ public final class MovementContext {
      */
     public long descriptorAt(int x, int y, int z) {
         return grid.descriptorAt(x, y, z);
+    }
+
+    // ---- Neighbour-property flags (the precomputed NavFlags bitmask) --------------------------
+    // These let a movement read multi-cell facts (body clearance, edit-hazard) in ONE grid access
+    // instead of probing each cell with descriptorAt. Read the raw bitmask once per cell, decode both.
+
+    /** {@code HEADROOM} level: ≥2 clear body cells (room to stand). */
+    public static final int HEADROOM_WALK = NavFlags.HEADROOM_WALK;
+    /** {@code HEADROOM} level: ≥3 clear body cells (room to jump up). */
+    public static final int HEADROOM_JUMP = NavFlags.HEADROOM_JUMP;
+
+    /** The raw 6-bit {@link NavFlags} bitmask at floor cell {@code (x,y,z)} (0 where unbuilt). */
+    public int flagsAt(int x, int y, int z) {
+        return grid.flagsAt(x, y, z);
+    }
+
+    /** Walkable clearance above the floor encoded in {@code flags} (none/crawl/walk/jump). */
+    public static int headroom(int flags) {
+        return NavFlags.headroom(flags);
+    }
+
+    /** Whether editing this floor's body space risks a fluid flow / gravity cascade (from {@code flags}). */
+    public static boolean risksEdit(int flags) {
+        return NavFlags.risksEdit(flags);
+    }
+
+    /**
+     * Whether the resident HEADROOM bit <b>proves</b> floor {@code (.,y,.)} has at least {@code need}
+     * walkable clearance ({@link #HEADROOM_WALK} / {@link #HEADROOM_JUMP}) — letting the caller skip the
+     * per-cell {@code descriptorAt} probes entirely.
+     *
+     * <p>Two facts make this exact (MOVEMENT-DESIGN §8). (1) <b>The OOB bias is one-directional:</b>
+     * out-of-section cells read as air, so a missing neighbour can only <i>inflate</i> the clearance
+     * count, never hide a block — hence a {@code < need} reading is always trustworthy and is handled by
+     * the {@code requireAir} fallback (which short-circuits on the first blocked in-section cell, so a
+     * non-breaking bot rejects with no cross-section read; a breaking bot reads on to fold its breaks).
+     * (2) <b>The trust threshold is per level:</b> clearance {@code N} is read from cells {@code y+1..y+N},
+     * so the top cell needed is {@code y+need}; it stays inside the floor's own 16-tall section exactly
+     * when {@code (y&15) + need <= 15}. So a WALK proof is exact up to {@code (y&15) <= 13} and only a JUMP
+     * proof tightens to {@code <= 12} — verifying one fewer layer for the common walk case. A claims-clear
+     * reading nearer the top face returns {@code false} here, so the caller verifies the real cells.
+     */
+    public boolean headroomProves(int flags, int y, int need) {
+        return headroom(flags) >= need && (y & 15) + need <= 15;
+    }
+
+    /**
+     * Ensure floor {@code (fx,fy,fz)}'s two body cells (feet + head) are clear for a walker, recording any
+     * needed breaks on {@code e}. Fast path: the HEADROOM bit {@link #headroomProves proves} ≥ WALK
+     * clearance in one grid read — no per-cell probes, no edits. Otherwise read the real cells via {@code
+     * requireAir} (which folds breaks under {@code e}'s edit gate, or invalidates if blocked and the bot
+     * can't/may-not break). {@code flags} is the cell's already-read {@link NavFlags} bitmask.
+     */
+    public void requireBodyClear(EditScratch e, int fx, int fy, int fz, int flags) {
+        if (headroomProves(flags, fy, HEADROOM_WALK)) return;
+        e.requireAir(fx, fy + 1, fz);
+        e.requireAir(fx, fy + 2, fz);
     }
 
     /**

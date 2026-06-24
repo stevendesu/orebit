@@ -18,6 +18,11 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  *       falls straight out of the {@code topY} fact — no jump means the follower must <i>not</i> trigger
  *       one, which is why this is a distinct movement from {@link Ascend}.
  * </ul>
+ *
+ * <p><b>Body clearance via the resident bit.</b> The two body cells above a destination floor are checked
+ * through the precomputed {@code HEADROOM} flag ({@link MovementContext#requireBodyClear}) — one grid read
+ * instead of two {@code descriptorAt} probes — falling back to per-cell reads (which also fold breaks)
+ * only when the bit can't be trusted near a section face or when the bot must mine its way through.
  */
 public final class Traverse implements Movement {
 
@@ -38,9 +43,9 @@ public final class Traverse implements Movement {
             // the way (e.g. leaves) is folded into a break-set when the bot may break, raising the cost
             // instead of failing the move (MOVEMENT-DESIGN.md §1 — the motivating forest-leaves case).
             if (ctx.built(nx, y, nz) && ctx.standable(nx, y, nz)) {
-                EditScratch e = ctx.edits().reset();
-                e.requireAir(nx, y + 1, nz);
-                e.requireAir(nx, y + 2, nz);
+                int flags = ctx.flagsAt(nx, y, nz);
+                EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+                ctx.requireBodyClear(e, nx, y, nz, flags);
                 if (e.valid()) {
                     out.accept(nx, y, nz, cost(ctx, nx, y, nz) + e.extraCost(), e.snapshot());
                     continue; // already have footing here; don't also step-assist/bridge this column
@@ -52,9 +57,9 @@ public final class Traverse implements Movement {
             int uy = y + 1;
             if (ctx.built(nx, uy, nz) && ctx.standable(nx, uy, nz)
                     && ctx.topYOf(nx, uy, nz) <= MovementContext.STEP_ASSIST_MAX_TOP_Y) {
-                EditScratch e = ctx.edits().reset();
-                e.requireAir(nx, uy + 1, nz);
-                e.requireAir(nx, uy + 2, nz);
+                int flags = ctx.flagsAt(nx, uy, nz);
+                EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+                ctx.requireBodyClear(e, nx, uy, nz, flags);
                 if (e.valid()) {
                     out.accept(nx, uy, nz, cost(ctx, nx, uy, nz) + e.extraCost(), e.snapshot());
                     continue;
@@ -65,10 +70,10 @@ public final class Traverse implements Movement {
             // the bot may place (the source cell is always an adjacent face to build against). "Bridge"
             // is not its own movement, just Traverse with a place in its edit-set (decision 1).
             if (ctx.built(nx, y, nz) && !ctx.standable(nx, y, nz)) {
-                EditScratch e = ctx.edits().reset();
+                int flags = ctx.flagsAt(nx, y, nz);
+                EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
                 e.requireFloor(nx, y, nz);
-                e.requireAir(nx, y + 1, nz);
-                e.requireAir(nx, y + 2, nz);
+                ctx.requireBodyClear(e, nx, y, nz, flags);
                 if (e.valid()) {
                     out.accept(nx, y, nz, cost(ctx, nx, y, nz) + e.extraCost(), e.snapshot());
                 }
