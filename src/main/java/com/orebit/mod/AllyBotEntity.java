@@ -11,16 +11,13 @@ import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.Replaceable;
 import com.orebit.mod.platform.WorldEdits;
 import com.orebit.mod.platform.Worlds;
-import com.orebit.mod.worldmodel.pathing.ChunkNavBuilder;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
-import com.orebit.mod.worldmodel.pathing.NavStore;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -64,11 +61,6 @@ public class AllyBotEntity extends FakePlayerEntity {
     private static final double STUCK_SPEED_SQR = 0.0016;
     /** Consecutive stuck ticks before the diagnostic dumps the surrounding blocks (≈1s). */
     private static final int STUCK_DUMP_TICKS = 20;
-
-    /** Pad the rebuilt area by one chunk on each side so a path that bulges around an obstacle has data. */
-    private static final int REFRESH_PAD_CHUNKS = 1;
-    /** Cap the rebuilt span per axis (chunks) so a far-away owner can't spike the rebuild cost. */
-    private static final int REFRESH_MAX_SPAN_CHUNKS = 2;
 
     /**
      * Bot capabilities the planner expands with. Break + place are enabled to prove the new modifiers
@@ -231,8 +223,11 @@ public class AllyBotEntity extends FakePlayerEntity {
         ServerLevel level = (ServerLevel) Worlds.of(this);
         BlockPos startFloor = this.blockPosition().below();
 
-        refreshNavData(level, startFloor, goalFloor);
-
+        // No nav-data refresh here anymore: the nav grid is kept live by the LevelChunk.setBlockState
+        // mixin (BlockChangeEvents -> NavGridUpdater.patchCell), so a replan reads current terrain for
+        // every tracked chunk — including the bot's own break/place edits — without a per-replan rebuild.
+        // (A chunk that hasn't been built by the on-load pipeline yet simply reads as unbuilt and is
+        // skipped by A*, the same as any unloaded area.)
         NavGridView grid = new NavGridView(level);
         this.path = BlockPathfinder.findPath(grid, startFloor, goalFloor, CAPS);
         this.waypointIndex = 0;
@@ -258,29 +253,6 @@ public class AllyBotEntity extends FakePlayerEntity {
                 OrebitCommon.LOGGER.info("[Orebit] bot path: none (startClass={}, goalClass={})",
                         grid.classAt(startFloor.getX(), startFloor.getY(), startFloor.getZ()),
                         grid.classAt(goalFloor.getX(), goalFloor.getY(), goalFloor.getZ()));
-            }
-        }
-    }
-
-    /**
-     * Demo-time freshness shim. The nav grid is otherwise built only on chunk <i>load</i> (PRD §6.2),
-     * so runtime block edits — a player digging a pit or placing a staircase — are not reflected and
-     * the planner would route over stale terrain. Until a proper block-update invalidation hook
-     * exists (loader-divergent — see HANDOFF), rebuild the handful of chunks this path spans straight
-     * from the live world each replan, so the demo always plans over current blocks. (This also
-     * self-heals if the background chunk-load pipeline isn't running on a given era.)
-     */
-    private void refreshNavData(ServerLevel level, BlockPos a, BlockPos b) {
-        int cx0 = (Math.min(a.getX(), b.getX()) >> 4) - REFRESH_PAD_CHUNKS;
-        int cx1 = (Math.max(a.getX(), b.getX()) >> 4) + REFRESH_PAD_CHUNKS;
-        int cz0 = (Math.min(a.getZ(), b.getZ()) >> 4) - REFRESH_PAD_CHUNKS;
-        int cz1 = (Math.max(a.getZ(), b.getZ()) >> 4) + REFRESH_PAD_CHUNKS;
-        if (cx1 - cx0 > REFRESH_MAX_SPAN_CHUNKS) cx1 = cx0 + REFRESH_MAX_SPAN_CHUNKS;
-        if (cz1 - cz0 > REFRESH_MAX_SPAN_CHUNKS) cz1 = cz0 + REFRESH_MAX_SPAN_CHUNKS;
-        for (int cx = cx0; cx <= cx1; cx++) {
-            for (int cz = cz0; cz <= cz1; cz++) {
-                ChunkAccess chunk = level.getChunk(cx, cz);
-                NavStore.put(level, NavStore.key(cx, cz), ChunkNavBuilder.buildAllSections(level, chunk));
             }
         }
     }
