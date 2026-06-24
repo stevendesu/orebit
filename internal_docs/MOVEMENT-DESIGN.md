@@ -240,3 +240,65 @@ opened a route. Steps:
 **THEN — more KINDS (parallel, all in-framework, pure common Java):** Diagonal (Tier 1 leftover) →
 ClimbUp/Down (both directions) → Parkour → Swim (3D-connected A\*). Each = a new `movements/<X>` class +
 a `MovementRegistry` line; sharing a destination offset with an existing movement is free.
+
+## 8. Nav-grid cell encoding — navtype + neighbour-property bits (RATIFIED, session 17)
+
+The per-cell nav-grid entry (`TraversalGrid`) is being re-encoded from the legacy 4-value
+`TraversalClass` (CLEAR/EASY/SLOW/BLOCKED) into **a navtype index plus a bitmask of precomputed
+neighbour-derived properties**. The 4-class value is **dead** (grep: nothing compares it — `classAt` is
+used only as `!= null`, a "section loaded" gate), so the bits are free to repurpose with zero consumer
+migration.
+
+**Why drop the 4-class.** It was meant as a low-fidelity fast pass for pruning — but (a) the HPA\*/region
+tier is the real coarse/long-range pass, and (b) the packed nav grid (navtype → descriptor `long`, one
+in-memory array) already navigates at section level with no measured cost. What the 4-class can't tell
+us — and what a single navtype can't either — is **neighbour context**: headroom, fluid-flow risk,
+gravity risk. Those are the multi-cell facts the movement layer would otherwise re-derive on every node
+expansion. Precompute them once (at build / on block-update) and the movement layer reads ONE grid entry:
+**low bits → the cell's own geometry** (navtype → descriptor), **high bits → its neighbour context**.
+
+**Layout — widen the cell to `int[4096]` per section** (favour-cpu-over-ram: 16 KB/section is nothing,
+and it removes a fragile bit-squeeze). Low 16 bits = navtype index (the full `short` interning range — no
+overflow on heavily-modded servers, where a 10-bit/1024 cap could blow). High 16 bits = neighbour facts
+(6 used below, 10 spare). [A `short[4096]` would force navtype into ~10 bits = 1024, risky on mods — not
+recommended.]
+
+**The facts** (each added only when its consumer movement is built — same discipline as NavBlock's spare
+bits; `isDamaging` of the *floor* stays intrinsic in the navtype, no bit):
+
+| Bit(s) | Fact | Meaning / what it gates | Consumer |
+|---|---|---|---|
+| 1 | `risksFluidFlow` | don't BREAK/PLACE here (editing could release a neighbouring fluid into the body space) — walking is fine | fluid-aware break-modifier |
+| 1 | `risksGravityFall` | don't BREAK/PLACE here (editing could drop a sand/gravel column) | gravity-aware break-modifier |
+| 1 | `clearableHazard` | a walkable-through hazard in the body space (fire) — adds cost, not blocked | hazard-cost movement |
+| 2 | `headroomHeight` | 0 none / 1 crawl / 2 walk / 3 jump — vertical clearance above the floor | Crawl / Traverse / Ascend |
+| 1 | `hasPlaceableNeighbor` | a solid face to bridge a placed block against | Traverse bridge / Pillar |
+
+**Semantics shift:** fluid/gravity risk no longer means "can't go here" (old 4-class BLOCKED) — it means
+"**don't BREAK or PLACE here**," because only an *edit* triggers the block update that releases the
+flow/cascade. So they're break-modifier gates read in one bit instead of an 8-cell neighbour scan.
+
+**Boundary handling — two distinct cases:**
+- *Section-internal boundary* (the neighbour 16³ IS loaded): **overscan** — read the real neighbour from
+  the adjacent section's resident grid (cheap now navtypes are resident). Accurate.
+- *True unloaded / ungenerated edge* (render distance, world border): no data exists, overscan can't
+  help → **assume conservatively**. For `risksFluidFlow`, treat horizontally-out-of-bounds cells as
+  **alternating air/water by y-parity**: the check runs for both body cells (y+1 AND y+2, one odd / one
+  even) and ORs the result, so a border cell always trips at least one → flagged → the bot won't
+  break/place at an edge it can't see past. Air-default suffices for the rest (`hasPlaceableNeighbor` →
+  "no face" is pessimistic-safe; `headroomHeight` / `risksGravityFall` read the cell's own vertical
+  column, not horizontal neighbours, so a horizontal edge doesn't affect them).
+
+  *Overscan ↔ incremental coupling:* overscan makes a near-border block change dirty the neighbour
+  section's border cells too. So the block-update hook stays **within-section** until the first
+  border-accuracy-needing consumer lands; then overscan + cross-section dirtying arrive together.
+
+### Work items (ratified — build per consumer, not speculatively)
+1. **Replace the 4-value `TraversalClass`** with the navtype + neighbour-property bitmask (`int[4096]`);
+   `built()` becomes section-presence, not `classAt != null`.
+2. **Intercept `setBlockState`** → update the changed cell's navtype AND recompute the neighbour-property
+   bits for the affected neighbourhood (the block-update hook; retires the per-replan `refreshNavData`).
+3. **Conservative unloaded-edge default** — alternating air/water for the `risksFluidFlow` horizontal-OOB
+   read (above).
+4. **Rewrite the movement classes** to read the neighbour-property bits (one grid read/cell) instead of
+   re-deriving headroom / flow / gravity / placeable via extra per-expansion nav-grid reads.
