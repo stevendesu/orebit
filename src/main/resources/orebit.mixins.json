@@ -7,6 +7,5 @@
 	},
 	"mixins": [
 		"LevelChunkMixin"
-	],
-	"refmap": "orebit.refmap.json"
+	]
 }
