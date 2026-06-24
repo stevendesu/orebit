@@ -16,6 +16,13 @@ This is an example description! Tell everyone what your mod is about!
 # mod-list screen when the card is opened. To add a Forge logo later, place icon.png at the jar
 # root and set logoFile="icon.png". (Fabric's fabric.mod.json "icon" accepts the assets/ path fine.)
 
+# The project's one mixin (block-change hook). The config JSON is shadow-bundled from the
+# common module's resources. NOTE: mods.toml [[mixins]] registration is honored by Forge 1.18+
+# (Forge 38+); on 1.17.1 Forge it is ignored, so the hook is inert there — accepted, as Forge is
+# build-only (runClient broken post-~1.20.4) and the hook is verified on Fabric/NeoForge.
+[[mixins]]
+config="orebit.mixins.json"
+
 [[dependencies.${id}]]
 modId="forge"
 mandatory=true

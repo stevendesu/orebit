@@ -15,6 +15,11 @@ This is an example description! Tell everyone what your mod is about!
 '''
 logoFile="assets/orebit/icon.png"
 
+# The project's one mixin (block-change hook). The config JSON is shadow-bundled from the
+# common module's resources; NeoForge honors mods.toml [[mixins]] across its whole range.
+[[mixins]]
+config="orebit.mixins.json"
+
 [[dependencies.${id}]]
 modId="neoforge"
 type="required"
