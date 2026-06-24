@@ -1,11 +1,9 @@
 package com.orebit.mod.pathfinding.blockpathfinder;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.PriorityQueue;
 
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
@@ -78,19 +76,181 @@ public final class BlockPathfinder {
     private static final float H_UP = 4.0f;         // ~Ascend + a placed step (typical, not cheapest)
     private static final float H_DOWN = 2.0f;        // ~Descend + a break (typical, not cheapest)
 
-    private static final class Node {
-        final long key;
-        final int x, y, z;
-        final float g;
-        final float f;
+    /**
+     * The entire mutable search state as primitive arrays — the allocation-free replacement for the old
+     * {@code new Node(...)}-per-candidate + four {@code HashMap<Long,…>} design (whose every {@code get}/
+     * {@code put} boxed the packed-pos {@code long} key past the {@code Long} cache, ~100× per node).
+     *
+     * <p>Three structures, indices stable across the search so {@code parent} can reference them:
+     * <ul>
+     *   <li><b>Node table</b> — append-only parallel arrays ({@code key/x/y/z/g/f/parent/move/edits}),
+     *       one row per discovered cell. {@code move} is the index into {@link MovementRegistry#TIER1};
+     *       {@code parent} is the predecessor row ({@code -1} at the start). Doubles on fill.
+     *   <li><b>Index</b> — open-addressing {@code long→row} map (linear probe, power-of-two). Empty slot is
+     *       marked by {@code idx == -1}, so no key sentinel is needed; the {@code long} key is never boxed.
+     *   <li><b>Open set</b> — a binary min-heap of row indices keyed by the {@code f} snapshot at push time
+     *       ({@code heapF}). Lazy decrease-key: a relaxed-lower node is pushed again, and a pop whose
+     *       snapshot exceeds the row's current {@code f} is stale and skipped (the array-form of the old
+     *       {@code current.g > gScore.get(key)} check; equivalent because {@code f = g + h} with {@code h}
+     *       fixed per cell). All per-call sizing; reused across nodes, not reallocated per node.
+     * </ul>
+     */
+    private static final class Nodes {
+        // ---- Node table (append-only; row index is stable, parent[] points at it) ----
+        long[] key;
+        int[] x, y, z;
+        float[] g, f;
+        int[] parent;          // predecessor row, -1 at the start
+        int[] move;            // MovementRegistry.TIER1 index, -1 at the start
+        StepEdits[] edits;     // edit-set on the edge into this row (null when the move breaks/places nothing)
+        int count;
 
-        Node(long key, int x, int y, int z, float g, float f) {
-            this.key = key;
-            this.x = x;
-            this.y = y;
-            this.z = z;
-            this.g = g;
-            this.f = f;
+        // ---- key→row index (open addressing, linear probe) ----
+        long[] mapKey;
+        int[] mapRow;          // -1 marks an empty slot
+        int mapMask;
+        int mapSize;
+        int mapGrowAt;
+
+        // ---- open set (binary min-heap over heapF) ----
+        int[] heap;
+        float[] heapF;
+        int heapSize;
+        float poppedF;         // f snapshot of the last pop() — the caller's staleness test
+
+        Nodes(int nodeHint, int mapCap) {
+            key = new long[nodeHint];
+            x = new int[nodeHint];
+            y = new int[nodeHint];
+            z = new int[nodeHint];
+            g = new float[nodeHint];
+            f = new float[nodeHint];
+            parent = new int[nodeHint];
+            move = new int[nodeHint];
+            edits = new StepEdits[nodeHint];
+            mapKey = new long[mapCap];
+            mapRow = new int[mapCap];
+            Arrays.fill(mapRow, -1);
+            mapMask = mapCap - 1;
+            mapGrowAt = mapCap * 3 / 4;
+            heap = new int[nodeHint];
+            heapF = new float[nodeHint];
+        }
+
+        /** Row for {@code key}, creating it (with {@code g=+inf}, unlinked) if absent. One probe. */
+        int intern(long k, int cx, int cy, int cz) {
+            int slot = slotFor(k, mapMask);
+            for (;;) {
+                int row = mapRow[slot];
+                if (row == -1) {
+                    row = newRow(k, cx, cy, cz);
+                    mapKey[slot] = k;
+                    mapRow[slot] = row;
+                    if (++mapSize >= mapGrowAt) growMap();
+                    return row;
+                }
+                if (mapKey[slot] == k) return row;
+                slot = (slot + 1) & mapMask;
+            }
+        }
+
+        private int newRow(long k, int cx, int cy, int cz) {
+            int n = count;
+            if (n == key.length) growNodes();
+            key[n] = k;
+            x[n] = cx; y[n] = cy; z[n] = cz;
+            g[n] = Float.POSITIVE_INFINITY;
+            f[n] = Float.POSITIVE_INFINITY;
+            parent[n] = -1;
+            move[n] = -1;
+            edits[n] = null;
+            count = n + 1;
+            return n;
+        }
+
+        /** Push row {@code n} onto the open set with its current {@code f} snapshot. */
+        void push(int n) {
+            if (heapSize == heap.length) {
+                heap = Arrays.copyOf(heap, heapSize << 1);
+                heapF = Arrays.copyOf(heapF, heapSize << 1);
+            }
+            int i = heapSize++;
+            float fv = f[n];
+            heap[i] = n;
+            heapF[i] = fv;
+            while (i > 0) {
+                int p = (i - 1) >> 1;
+                if (heapF[p] <= fv) break;
+                heap[i] = heap[p]; heapF[i] = heapF[p];
+                i = p;
+            }
+            heap[i] = n; heapF[i] = fv;
+        }
+
+        /** Remove and return the min-{@code f} row; sets {@link #poppedF} to its push-time snapshot. */
+        int pop() {
+            int top = heap[0];
+            poppedF = heapF[0];
+            int last = --heapSize;
+            if (last > 0) {
+                int n = heap[last];
+                float fv = heapF[last];
+                int i = 0;
+                for (;;) {
+                    int l = (i << 1) + 1;
+                    if (l >= last) break;
+                    int r = l + 1;
+                    int c = (r < last && heapF[r] < heapF[l]) ? r : l;
+                    if (heapF[c] >= fv) break;
+                    heap[i] = heap[c]; heapF[i] = heapF[c];
+                    i = c;
+                }
+                heap[i] = n; heapF[i] = fv;
+            }
+            return top;
+        }
+
+        private void growNodes() {
+            int cap = key.length << 1;
+            key = Arrays.copyOf(key, cap);
+            x = Arrays.copyOf(x, cap);
+            y = Arrays.copyOf(y, cap);
+            z = Arrays.copyOf(z, cap);
+            g = Arrays.copyOf(g, cap);
+            f = Arrays.copyOf(f, cap);
+            parent = Arrays.copyOf(parent, cap);
+            move = Arrays.copyOf(move, cap);
+            edits = Arrays.copyOf(edits, cap);
+        }
+
+        private void growMap() {
+            long[] oldKey = mapKey;
+            int[] oldRow = mapRow;
+            int cap = oldKey.length << 1;
+            mapKey = new long[cap];
+            mapRow = new int[cap];
+            Arrays.fill(mapRow, -1);
+            mapMask = cap - 1;
+            mapGrowAt = cap * 3 / 4;
+            for (int i = 0; i < oldRow.length; i++) {
+                int row = oldRow[i];
+                if (row == -1) continue;
+                long k = oldKey[i];
+                int slot = slotFor(k, mapMask);
+                while (mapRow[slot] != -1) slot = (slot + 1) & mapMask;
+                mapKey[slot] = k;
+                mapRow[slot] = row;
+            }
+        }
+
+        /** Murmur3 64-bit finalizer → slot; spreads BlockPos-packed longs (low bits = y, then z). */
+        private static int slotFor(long k, int mask) {
+            k ^= k >>> 33;
+            k *= 0xff51afd7ed558ccdL;
+            k ^= k >>> 33;
+            k *= 0xc4ceb9fe1a85ec53L;
+            k ^= k >>> 33;
+            return (int) k & mask;
         }
     }
 
@@ -124,39 +284,38 @@ public final class BlockPathfinder {
         final MovementContext ctx = new MovementContext(grid, caps);
         final long startKey = BlockPos.asLong(sx, sy, sz);
 
-        PriorityQueue<Node> open = new PriorityQueue<>((a, b) -> Float.compare(a.f, b.f));
-        Map<Long, Float> gScore = new HashMap<>();
-        Map<Long, Long> cameFrom = new HashMap<>();
-        Map<Long, Movement> cameFromMove = new HashMap<>();
-        Map<Long, StepEdits> cameFromEdits = new HashMap<>();
+        // Per-call sizing: a few hundred rows covers a normal follow; both grow by doubling, and the map
+        // is the next pow2 above the node hint at <0.75 load. Reused across nodes, never per-node.
+        final Nodes nodes = new Nodes(512, 1024);
+        Relaxer relaxer = new Relaxer(nodes, gx, gy, gz);
 
-        Relaxer relaxer = new Relaxer(open, gScore, cameFrom, cameFromMove, cameFromEdits, gx, gy, gz);
-
-        gScore.put(startKey, 0f);
-        open.add(new Node(startKey, sx, sy, sz, 0f, heuristic(sx, sy, sz, gx, gy, gz)));
+        int startRow = nodes.intern(startKey, sx, sy, sz);
+        nodes.g[startRow] = 0f;
+        nodes.f[startRow] = heuristic(sx, sy, sz, gx, gy, gz);
+        nodes.push(startRow);
 
         int expansions = 0;
-        long reachedKey = -1L;
+        int reachedRow = -1;
         // Closest approach (min heuristic among closed nodes) + why the search stopped — the diagnostic
         // for a failed plan: where did it dead-end, and was it walled in or just out of budget?
         float bestH = Float.MAX_VALUE;
         int bestX = sx, bestY = sy, bestZ = sz;
         boolean budgetHit = false;
 
-        while (!open.isEmpty()) {
-            Node current = open.poll();
+        while (nodes.heapSize > 0) {
+            int current = nodes.pop();
 
-            // Stale queue entry (a better g was found after this node was pushed).
-            Float best = gScore.get(current.key);
-            if (best == null || current.g > best) continue;
+            // Stale queue entry (a better f was found and re-pushed after this entry).
+            if (nodes.poppedF > nodes.f[current]) continue;
 
-            if (isGoal(current.x, current.y, current.z, gx, gy, gz)) {
-                reachedKey = current.key;
+            int cx = nodes.x[current], cy = nodes.y[current], cz = nodes.z[current];
+            if (isGoal(cx, cy, cz, gx, gy, gz)) {
+                reachedRow = current;
                 break;
             }
 
-            float h = heuristic(current.x, current.y, current.z, gx, gy, gz);
-            if (h < bestH) { bestH = h; bestX = current.x; bestY = current.y; bestZ = current.z; }
+            float h = heuristic(cx, cy, cz, gx, gy, gz);
+            if (h < bestH) { bestH = h; bestX = cx; bestY = cy; bestZ = cz; }
 
             if (++expansions > MAX_EXPANSIONS) { budgetHit = true; break; }
 
@@ -167,29 +326,28 @@ public final class BlockPathfinder {
             PathEdits pathEdits = ctx.pathEdits();
             pathEdits.reset();
             if (relaxer.anyEdits) {
-                for (long k = current.key; ; ) {
-                    pathEdits.add(cameFromEdits.get(k));
-                    Long prev = cameFrom.get(k);
-                    if (prev == null) break;
-                    k = prev;
+                for (int n = current; n != -1; n = nodes.parent[n]) {
+                    pathEdits.add(nodes.edits[n]);
                 }
             }
 
             relaxer.current = current;
-            for (Movement m : MovementRegistry.TIER1) {
-                relaxer.move = m;
-                m.candidates(ctx, current.x, current.y, current.z, relaxer);
+            relaxer.currentG = nodes.g[current];
+            List<Movement> tier1 = MovementRegistry.TIER1;
+            for (int mi = 0, mn = tier1.size(); mi < mn; mi++) {
+                relaxer.move = mi;
+                tier1.get(mi).candidates(ctx, cx, cy, cz, relaxer);
             }
         }
 
-        if (reachedKey == -1L) {
+        if (reachedRow == -1) {
             if (DEBUG) explainFailure(ctx, sx, sy, sz, gx, gy, gz, expansions, budgetHit, bestX, bestY, bestZ);
             if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
                     budgetHit ? "FAIL-budget" : "FAIL-exhausted", sx, sy, sz, gx, gy, gz);
             return null;
         }
 
-        BlockPathPlan plan = reconstruct(cameFrom, cameFromMove, cameFromEdits, gScore, startKey, reachedKey);
+        BlockPathPlan plan = reconstruct(nodes, startRow, reachedRow);
         if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
                 "FOUND-" + plan.size() + "wp", sx, sy, sz, gx, gy, gz);
         return plan;
@@ -216,25 +374,16 @@ public final class BlockPathfinder {
      * carry the chosen move per step.
      */
     private static final class Relaxer implements CandidateSink {
-        private final PriorityQueue<Node> open;
-        private final Map<Long, Float> gScore;
-        private final Map<Long, Long> cameFrom;
-        private final Map<Long, Movement> cameFromMove;
-        private final Map<Long, StepEdits> cameFromEdits;
+        private final Nodes nodes;
         private final int gx, gy, gz;
 
-        Node current;       // node being expanded
-        Movement move;      // movement currently emitting candidates
+        int current;        // row being expanded
+        float currentG;     // its g (read once per expansion, not per candidate)
+        int move;           // MovementRegistry.TIER1 index currently emitting candidates
         boolean anyEdits;   // has any edge carried break/place edits? (gates the per-pop diff rebuild)
 
-        Relaxer(PriorityQueue<Node> open, Map<Long, Float> gScore, Map<Long, Long> cameFrom,
-                Map<Long, Movement> cameFromMove, Map<Long, StepEdits> cameFromEdits,
-                int gx, int gy, int gz) {
-            this.open = open;
-            this.gScore = gScore;
-            this.cameFrom = cameFrom;
-            this.cameFromMove = cameFromMove;
-            this.cameFromEdits = cameFromEdits;
+        Relaxer(Nodes nodes, int gx, int gy, int gz) {
+            this.nodes = nodes;
             this.gx = gx;
             this.gy = gy;
             this.gz = gz;
@@ -242,20 +391,20 @@ public final class BlockPathfinder {
 
         @Override
         public void accept(int nx, int ny, int nz, float cost, StepEdits edits) {
-            float tentative = current.g + cost;
+            float tentative = currentG + cost;
             long nKey = BlockPos.asLong(nx, ny, nz);
-            Float known = gScore.get(nKey);
-            if (known != null && tentative >= known) return;
+            int row = nodes.intern(nKey, nx, ny, nz);
+            if (tentative >= nodes.g[row]) return; // new rows start at +inf, so this also admits first visits
 
-            gScore.put(nKey, tentative);
-            cameFrom.put(nKey, current.key);
-            cameFromMove.put(nKey, move);
+            nodes.g[row] = tentative;
+            nodes.f[row] = tentative + heuristic(nx, ny, nz, gx, gy, gz);
+            nodes.parent[row] = current;
+            nodes.move[row] = move;
             // Keep the edit-set attached to the same (cheapest) edge as the move; clear any stale set
             // left by a costlier edge so the follower never mines/places blocks the winning move didn't.
-            if (edits != null) { cameFromEdits.put(nKey, edits); anyEdits = true; }
-            else cameFromEdits.remove(nKey);
-            float fScore = tentative + heuristic(nx, ny, nz, gx, gy, gz);
-            open.add(new Node(nKey, nx, ny, nz, tentative, fScore));
+            if (edits != null) { nodes.edits[row] = edits; anyEdits = true; }
+            else nodes.edits[row] = null;
+            nodes.push(row);
         }
     }
 
@@ -303,26 +452,21 @@ public final class BlockPathfinder {
         }
     }
 
-    private static BlockPathPlan reconstruct(Map<Long, Long> cameFrom, Map<Long, Movement> cameFromMove,
-                                             Map<Long, StepEdits> cameFromEdits, Map<Long, Float> gScore,
-                                             long startKey, long reachedKey) {
+    private static BlockPathPlan reconstruct(Nodes nodes, int startRow, int reachedRow) {
+        List<Movement> tier1 = MovementRegistry.TIER1;
         List<BlockPos> waypoints = new ArrayList<>();
         List<Movement> moves = new ArrayList<>();
         List<StepEdits> edits = new ArrayList<>();
-        long k = reachedKey;
-        while (k != startKey) {
+        for (int n = reachedRow; n != startRow; n = nodes.parent[n]) {
             // Stand position = the floor cell's top (feet block) — steer the bot's feet here.
-            waypoints.add(BlockPos.of(k).above());
-            moves.add(cameFromMove.get(k));
-            edits.add(cameFromEdits.get(k)); // null where the step breaks/places nothing
-            Long prev = cameFrom.get(k);
-            if (prev == null) break; // defensive; should not happen for a reached goal
-            k = prev;
+            waypoints.add(BlockPos.of(nodes.key[n]).above());
+            moves.add(tier1.get(nodes.move[n]));
+            edits.add(nodes.edits[n]); // null where the step breaks/places nothing
+            if (nodes.parent[n] == -1) break; // defensive; should not happen for a reached goal
         }
         Collections.reverse(waypoints);
         Collections.reverse(moves);
         Collections.reverse(edits);
-        float cost = gScore.getOrDefault(reachedKey, 0f);
-        return new BlockPathPlan(waypoints, moves, edits, cost);
+        return new BlockPathPlan(waypoints, moves, edits, nodes.g[reachedRow]);
     }
 }
