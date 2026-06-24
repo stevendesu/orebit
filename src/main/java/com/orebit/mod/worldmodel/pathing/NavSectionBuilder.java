@@ -192,4 +192,50 @@ public final class NavSectionBuilder {
             }
         }
     }
+
+    /**
+     * Incrementally update one cell after a live block change (the block-update hook): set the cell's
+     * navtype to {@code newState}'s, then recompute the coarse class of that cell plus the small
+     * <b>within-section</b> neighbourhood whose classification reads it. Out-of-section neighbours keep
+     * the air default (no overscan), so a change never touches another section's data — the update is
+     * self-contained. Far cheaper than a rebuild: no palette scan, an O(1) navtype write, and a ~45-cell
+     * reclassify reusing the existing {@link NavClassifier}.
+     *
+     * <p>The descriptor scratch is reconstructed from the section's own resident navtypes (≈4096 cheap
+     * array reads — well below the old whole-chunk {@code refreshNavData}); it can be windowed to the
+     * affected neighbourhood later if it ever profiles hot. {@code (lx,ly,lz)} are section-local 0..15.
+     */
+    public static void patchCell(NavSection section, int lx, int ly, int lz, BlockState newState) {
+        final long[] desc = DESC_SCRATCH.get();
+        final TraversalGrid grid = section.getTraversalGrid();
+        final short newNavtype = NavBlock.navtypeFor(newState);
+
+        // Rebuild this section's descriptors from its resident navtypes, then patch the changed cell so
+        // the reclassify below sees the new block.
+        for (int y = 0; y < NavSection.SIZE; y++) {
+            for (int z = 0; z < NavSection.SIZE; z++) {
+                for (int x = 0; x < NavSection.SIZE; x++) {
+                    desc[(y << 8) | (z << 4) | x] = NavBlock.descriptor((short) grid.navtype(x, y, z));
+                }
+            }
+        }
+        desc[(ly << 8) | (lz << 4) | lx] = NavBlock.descriptor(newNavtype);
+
+        // Reclassify the changed cell + the cells whose class depends on it. classify() reads
+        // x±1 / y-1..y+2 / z±1, so the inverse affected set is x±1 / y-2..y+1 / z±1 — widened a touch on
+        // y for safety. Each cell keeps its own navtype (only the changed cell's navtype is new).
+        for (int y = clampCell(ly - 2); y <= clampCell(ly + 2); y++) {
+            for (int z = clampCell(lz - 1); z <= clampCell(lz + 1); z++) {
+                for (int x = clampCell(lx - 1); x <= clampCell(lx + 1); x++) {
+                    int navtype = (x == lx && y == ly && z == lz) ? (newNavtype & 0xFFFF)
+                            : grid.navtype(x, y, z);
+                    grid.set(x, y, z, NavClassifier.classify(desc, x, y, z), navtype);
+                }
+            }
+        }
+    }
+
+    private static int clampCell(int v) {
+        return v < 0 ? 0 : (v >= NavSection.SIZE ? NavSection.SIZE - 1 : v);
+    }
 }
