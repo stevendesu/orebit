@@ -18,6 +18,13 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  * HEADROOM is {@code JUMP} exactly when {@code y+3} is clear; the landing needs {@code WALK}. Cells the
  * bit can't prove (near a section face, or genuinely blocked) are read and — when the bot may break and
  * the edit isn't {@code RISKY_EDIT} — folded into a break-set.
+ *
+ * <p><b>Break / place modifiers (MOVEMENT-DESIGN §1, decision 1).</b> Two folds give the bot full upward
+ * mobility through this one kind: a blocked body/takeoff cell is <i>broken</i> (dig a staircase up into a
+ * hillside), and a missing destination floor is <i>placed</i> against the terrain (build a staircase up).
+ * Repeated Ascend+place climbs a wall the bot can't otherwise reach — the fix for the "can't get out of a
+ * cave / up to the owner" dead-end. (A free-standing pillar in open air still needs the dedicated Pillar
+ * kind — Minecraft needs a face to place against, which a wall / hillside / the previous step always has.)
  */
 public final class Ascend implements Movement {
 
@@ -42,23 +49,22 @@ public final class Ascend implements Movement {
             int nz = z + d[1];
 
             if (!ctx.built(nx, uy, nz)) continue;
-            if (!ctx.standable(nx, uy, nz)) continue;
-            // A low partial one up is Traverse's step-assist, not a jump — leave it to Traverse.
-            if (ctx.topYOf(nx, uy, nz) <= MovementContext.STEP_ASSIST_MAX_TOP_Y) continue;
+
+            // A low partial already one up is Traverse's step-assist (a no-jump auto-step), not an Ascend —
+            // leave it to Traverse. (Only when footing already exists; a placed step is a full block.)
+            boolean dstStandable = ctx.standable(nx, uy, nz);
+            if (dstStandable && ctx.topYOf(nx, uy, nz) <= MovementContext.STEP_ASSIST_MAX_TOP_Y) continue;
 
             int dstFlags = ctx.flagsAt(nx, uy, nz);
-            boolean dstClear = ctx.headroomProves(dstFlags, uy, MovementContext.HEADROOM_WALK);
-            if (srcClear && dstClear) {
-                out.accept(nx, uy, nz, COST, null);
-                continue;
-            }
-
             EditScratch e = ctx.edits().reset(!(srcRisky || MovementContext.risksEdit(dstFlags)));
+            // Footing: stand on the block that's there, or BUILD A STEP UP — place a throwaway floor against
+            // the terrain and jump onto it (the staircase-up case). requireFloor folds the place when the
+            // bot may place and the spot is placeable against a neighbour; invalid otherwise.
+            if (!dstStandable) e.requireFloor(nx, uy, nz);
+            // The takeoff head-clearance (source y+3) and the landing body (feet+head) must be clear; cells
+            // the HEADROOM bit can't prove are read and — when allowed — folded into a break-set (dig up).
             if (!srcClear) e.requireAir(x, y + 3, z);
-            if (!dstClear) {
-                e.requireAir(nx, uy + 1, nz);
-                e.requireAir(nx, uy + 2, nz);
-            }
+            ctx.requireBodyClear(e, nx, uy, nz, dstFlags);
             if (e.valid()) out.accept(nx, uy, nz, COST + e.extraCost(), e.snapshot());
         }
     }

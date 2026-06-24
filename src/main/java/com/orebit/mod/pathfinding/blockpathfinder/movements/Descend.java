@@ -15,6 +15,11 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  * {@code JUMP}-level HEADROOM bit proves the transit clear in a single read; where it can't (near a
  * section face, or a block in the way), the cells are read and folded into a break-set under the
  * {@code RISKY_EDIT} gate.
+ *
+ * <p><b>Place modifier (MOVEMENT-DESIGN §1, decision 1).</b> When there's no footing one block down, a
+ * throwaway floor is <i>placed</i> against the wall to descend onto (the counterpart to {@link Ascend}'s
+ * staircase-up). Repeated Descend+place builds a staircase down a sheer drop the bot can't safely
+ * {@link Fall} — completing controlled 3D descent through the existing kinds.
  */
 public final class Descend implements Movement {
 
@@ -31,18 +36,20 @@ public final class Descend implements Movement {
             int dy = y - 1; // destination floor one below
 
             if (!ctx.built(nx, dy, nz)) continue;
-            if (!ctx.standable(nx, dy, nz)) continue;
 
+            boolean dstStandable = ctx.standable(nx, dy, nz);
             int flags = ctx.flagsAt(nx, dy, nz);
-            if (ctx.headroomProves(flags, dy, MovementContext.HEADROOM_JUMP)) {
-                out.accept(nx, dy, nz, COST, null); // transit provably clear — no probes, no edits
-                continue;
-            }
-
             EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
-            e.requireAir(nx, y + 2, nz); // head clearance stepping off
-            e.requireAir(nx, y + 1, nz); // transit feet / new head
-            e.requireAir(nx, y, nz);     // new feet
+            // Footing: step onto the block below, or BUILD A STEP DOWN — place a throwaway floor one down
+            // against the wall and descend onto it (if the bot may place and the spot is placeable).
+            if (!dstStandable) e.requireFloor(nx, dy, nz);
+            // The step-off transit (nx, y..y+2, nz) is the dest floor's body column; clear it through the
+            // dest's JUMP-level HEADROOM, else read/break the three cells under the RISKY_EDIT gate.
+            if (!ctx.headroomProves(flags, dy, MovementContext.HEADROOM_JUMP)) {
+                e.requireAir(nx, y + 2, nz); // head clearance stepping off
+                e.requireAir(nx, y + 1, nz); // transit feet / new head
+                e.requireAir(nx, y, nz);     // new feet
+            }
             if (e.valid()) out.accept(nx, dy, nz, COST + e.extraCost(), e.snapshot());
         }
     }
