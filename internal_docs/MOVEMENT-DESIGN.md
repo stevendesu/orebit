@@ -333,10 +333,22 @@ grid (which would mean extra data fetching + cache thrash on *every* update). Th
    horizontal-OOB read, always (no overscan). Lands with the fluid-aware break modifier that reads
    `RISKY_EDIT`; until then the bit is stored air-optimistically at boundaries (the precise check is the
    fine layer's anyway).
-4. **[deferred] Rewrite the movement classes** to read the neighbour-property bits (one grid read/cell)
-   instead of re-deriving headroom / flow / gravity / placeable via extra per-expansion nav-grid reads.
-   The bits are now stored and exposed (`NavGridView.flagsAt`, `NavFlags` accessors); the movements still
-   read `descriptorAt` until this migration.
+4. **[DONE §19 cont.] Rewrite the movement classes** to read the neighbour-property bits. Traverse /
+   Ascend / Descend / Fall now check body clearance through the `HEADROOM` bit
+   (`MovementContext.headroomProves(flags,y,need)` / `requireBodyClear`) — one grid read instead of
+   per-cell `descriptorAt` probes — and `RISKY_EDIT` now **gates** break/place (`EditScratch.reset(allowEdits)`:
+   a move won't fold an edit in a fluid/gravity-risky cell). The proof is exact via two facts: the OOB bias
+   is one-directional (air-optimistic → a sub-`need` reading is a trustworthy reject) and the trust
+   threshold is per level (`(y&15)+need<=15`, so WALK holds to `<=13`, only JUMP tightens to `<=12`). Still
+   open: `PLACEABLE_NEIGHBOR` isn't consumed yet (the bridge/pillar place still scans neighbours), and the
+   `RISKY_EDIT` *precise* flood/cascade check (item 3) + conservative fluid OOB are still deferred to the
+   fluid-aware break modifier.
+
+**Known coverage gap (next):** nothing places a block to gain *height* — Traverse bridges horizontally,
+Ascend needs an already-standable step, and Pillar/MineDown aren't built. So a bot at a cliff base / cave
+wall with the owner above gets "plan: none". `BlockPathfinder.DEBUG` now logs the closest-approach cell +
+what each movement offered from it, to confirm this before adding the **place-to-ascend staircase** (an
+Ascend place-floor modifier) and **Pillar/MineDown** kinds.
 
 ### The block-change hook — mixin, via the overlay pattern (approved, full-now)
 
