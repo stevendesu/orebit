@@ -138,7 +138,15 @@ public final class NavSectionBuilder {
      */
     public static NavSection build(LevelChunkSection section, BlockPos origin) {
         NavSection navSection = NavSection.create(origin);
-        classifyInto(section.getStates(), Sections.hasOnlyAir(section), navSection.getTraversalGrid());
+        if (section == null) {
+            // Pre-1.18, an empty section is NULL in the chunk's section array; 1.18+ always allocates a
+            // real (empty) LevelChunkSection, never null. A null section is entirely air, so classify it
+            // as all-air rather than dereferencing it (this NPE'd on 1.17.1 the moment a chunk with an
+            // empty section ticked). Guard lives in core — harmless on 1.18+ where it never triggers.
+            classifyAir(navSection.getTraversalGrid());
+        } else {
+            classifyInto(section.getStates(), Sections.hasOnlyAir(section), navSection.getTraversalGrid());
+        }
         return navSection;
     }
 
@@ -151,10 +159,7 @@ public final class NavSectionBuilder {
         final long[] descScratch = DESC_SCRATCH.get();
 
         if (onlyAir) {
-            // Every cell is air over air: classify one representative cell and fill with air's navtype.
-            Arrays.fill(descScratch, AIR_DESC);
-            TraversalClass airClass = NavClassifier.classify(descScratch, 8, 8, 8);
-            fill(grid, airClass, NavBlock.AIR & 0xFFFF);
+            classifyAir(grid);
             return;
         }
 
@@ -181,6 +186,18 @@ public final class NavSectionBuilder {
                 }
             }
         }
+    }
+
+    /**
+     * Classify a grid as entirely air — the shared path for uniform-air sections (the underground/skyward
+     * bypass) and pre-1.18 null sections. One representative cell is classified over an all-air descriptor
+     * scratch, then the whole grid is filled with that class + air's navtype.
+     */
+    private static void classifyAir(TraversalGrid grid) {
+        final long[] descScratch = DESC_SCRATCH.get();
+        Arrays.fill(descScratch, AIR_DESC);
+        TraversalClass airClass = NavClassifier.classify(descScratch, 8, 8, 8);
+        fill(grid, airClass, NavBlock.AIR & 0xFFFF);
     }
 
     private static void fill(TraversalGrid grid, TraversalClass tc, int navtype) {
