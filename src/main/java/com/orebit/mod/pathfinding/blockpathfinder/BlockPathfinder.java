@@ -54,16 +54,20 @@ public final class BlockPathfinder {
      */
     private static final int MAX_EXPANSIONS = 10000;
 
-    // Heuristic cost per block on each axis, matched to the CHEAPEST real move on that axis so the
-    // estimate tracks reality and the search heads for the goal instead of exploring a huge cheap-horizontal
-    // disk before committing to a costly climb/descent. Horizontal stays the admissible floor (a plain
-    // walk), so horizontal-obstacle behaviour is unchanged — the bot still routes around walls by cost
-    // rather than boring through them. Vertical is the cheapest *full-block* gain/drop (Ascend / Descend);
-    // it's mildly inadmissible only against a lucky deep Fall, which is fine for a follow-bot and is the
-    // whole point — it stops the vertical underestimate that made tall climbs blow the budget.
-    private static final float H_HORIZONTAL = 1.0f; // Traverse
-    private static final float H_UP = 2.0f;         // Ascend
-    private static final float H_DOWN = 1.5f;       // Descend
+    // Heuristic cost per block on each axis. Horizontal stays the admissible floor (a plain walk), so
+    // horizontal-obstacle behaviour is unchanged — the bot still routes around walls by cost rather than
+    // boring through them. Vertical is weighted to the TYPICAL cost, not the cheapest move: in open terrain
+    // an up-step usually needs a placed step (staircase ~8.0) and a down-step often a break, so the bare
+    // Ascend/Descend floors (2.0/1.5) badly underestimate and let the search flood the cheap horizontal
+    // plane before committing to a climb/descent. These stronger weights make the estimate track reality
+    // and focus the search vertically. Deliberately inadmissible (paths may be slightly suboptimal, and a
+    // node can re-expand) — fine for a follow-bot; the flip side is that where a CHEAP natural route exists
+    // (terrain climb at 2.0/step vs the 4.0 credit) f decreases along it, so A* races down real passages
+    // and only falls back to expensive building when there's no terrain — the "use the cave" behaviour.
+    // Tunable; raise further if tall paths still explore too much, lower if routing gets greedy/odd.
+    private static final float H_HORIZONTAL = 1.0f; // Traverse (admissible floor)
+    private static final float H_UP = 4.0f;         // ~Ascend + a placed step (typical, not cheapest)
+    private static final float H_DOWN = 2.0f;        // ~Descend + a break (typical, not cheapest)
 
     private static final class Node {
         final long key;
