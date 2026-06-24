@@ -175,7 +175,10 @@ public final class MovementContext {
      * across predicates is wasteful).
      */
     public boolean passable(long d) {
-        return NavBlock.shape(d) == NavBlock.SHAPE_EMPTY && NavBlock.fluid(d) == 0;
+        // Geometric "nothing collides" (the precomputed bit) AND no fluid. The fluid exclusion lives HERE,
+        // at the movement layer, not in the bit: water is geometrically passable (you can float-walk it),
+        // but Tier-1 has no swim/water cost yet, so we keep treating a fluid cell as non-clear for now.
+        return NavBlock.isPassable(d) && NavBlock.fluid(d) == 0;
     }
 
     /**
@@ -190,11 +193,7 @@ public final class MovementContext {
 
     /** {@link #standable(int, int, int)} on an already-read descriptor (read-once form). */
     public boolean standable(long d) {
-        int shape = NavBlock.shape(d);
-        if (shape == NavBlock.SHAPE_EMPTY || shape == NavBlock.SHAPE_OTHER) return false;
-        if (NavBlock.fluid(d) != 0) return false;
-        if (NavBlock.isDamaging(d)) return false;
-        return true;
+        return NavBlock.isStandable(d); // precomputed: solid-topped, no fluid, not damaging
     }
 
     /** The collision top of the cell in sixteenths (0..31); 16 = full block, 8 = slab. */
@@ -223,10 +222,8 @@ public final class MovementContext {
 
     /** {@link #breakable(int, int, int)} on an already-read descriptor (read-once form). */
     public boolean breakable(long d) {
-        if (!caps.canBreak()) return false;
-        if (NavBlock.shape(d) == NavBlock.SHAPE_EMPTY) return false; // nothing solid here to break
-        if (NavBlock.fluid(d) != 0) return false;                   // don't "break" water/lava
-        return NavBlock.hardness(d) != UNBREAKABLE_HARDNESS;
+        // Precomputed geometry (solid, no fluid, not unbreakable) AND the bot may break.
+        return caps.canBreak() && NavBlock.isBreakable(d);
     }
 
     /**
@@ -261,7 +258,7 @@ public final class MovementContext {
      * (not from the footing's own neighbours), so {@code EditScratch} needs the open test on its own.
      */
     public boolean openForPlace(long d) {
-        return (NavBlock.isReplaceable(d) || NavBlock.shape(d) == NavBlock.SHAPE_EMPTY) && NavBlock.fluid(d) == 0;
+        return NavBlock.isOpenForPlace(d); // precomputed: replaceable/empty, no fluid
     }
 
     /** Tick cost to fold one break of cell {@code (x,y,z)} in — flat base plus a hardness term. */
@@ -276,8 +273,6 @@ public final class MovementContext {
 
     /** Whether a cell has any solid collision (a face to build against) — full block, slab, stair, … */
     private boolean hasSolidCollision(int x, int y, int z) {
-        long d = descriptorAt(x, y, z);
-        int shape = NavBlock.shape(d);
-        return shape != NavBlock.SHAPE_EMPTY && NavBlock.fluid(d) == 0;
+        return NavBlock.hasCollision(descriptorAt(x, y, z)); // precomputed: solid, no fluid
     }
 }
