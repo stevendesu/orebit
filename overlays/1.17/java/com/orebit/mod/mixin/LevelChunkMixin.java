@@ -23,6 +23,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * signature drifts and a mixin <i>compiles regardless of whether its target is right</i> (it resolves at
  * class-load), so only a per-version source check + runtime verification can catch drift.
  *
+ * <p><b>Signature era (verified against the intermediary mappings):</b> this baseline targets the
+ * {@code (BlockPos, BlockState, boolean isMoving)} form, which holds for MC <b>1.17.1 → 1.21.4</b>. At
+ * <b>1.21.5</b> the third parameter became an {@code int} flags field (and a 2-arg overload appeared,
+ * making a name-only selector ambiguous) — so {@code overlays/1.21.5} overrides this with an {@code int}
+ * flavor. The {@code method} selector is the <b>full descriptor</b> (not name-only) precisely to stay
+ * unambiguous across that overload split; loom's mixin remapper rewrites it to runtime names.
+ *
  * <p>No server-side guard here: {@code setBlockState} runs for both client and server levels (and
  * off-thread during worldgen). {@link com.orebit.mod.worldmodel.pathing.NavGridUpdater} already filters
  * to {@code ServerLevel}, and {@link BlockChangeEvents}'s listener list is copy-on-write — so the mixin
@@ -30,7 +37,9 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  */
 @Mixin(LevelChunk.class)
 public class LevelChunkMixin {
-    @Inject(method = "setBlockState", at = @At("RETURN"))
+    @Inject(
+        method = "setBlockState(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;Z)Lnet/minecraft/world/level/block/state/BlockState;",
+        at = @At("RETURN"))
     private void orebit$onSetBlockState(BlockPos pos, BlockState state, boolean isMoving,
                                         CallbackInfoReturnable<BlockState> cir) {
         BlockState oldState = cir.getReturnValue();
