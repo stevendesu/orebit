@@ -32,7 +32,10 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *   bit 1     CLEARABLE_HAZARD   a walk-through damaging block in the body space (fire) — adds cost, not
  *                                blocked. (A damaging FLOOR — lava/magma/cactus — is intrinsic to the
  *                                navtype via NavBlock.isDamaging, so it needs no bit.)
- *   bits 2-3  HEADROOM           vertical clearance above the floor: 0 none / 1 crawl / 2 walk / 3 jump.
+ *   bits 2-3  HEADROOM           walkable vertical clearance above the floor: 0 none / 1 crawl / 2 walk /
+ *                                3 jump. A cell counts as clear iff it's passable AND fluid-free, so the
+ *                                value matches the walk-passable test the ground movements use (water in
+ *                                the body space is NOT clearance for a walker — swim is a later movement).
  *   bit 4     PLACEABLE_NEIGHBOR a solid (non-fluid) face among the six neighbours to bridge a placed
  *                                block against.
  *   bit 5     (reserved)
@@ -86,13 +89,14 @@ public final class NavFlags {
 
         int flags = 0;
 
-        // HEADROOM: how many body cells above the floor are physically clear (passable). Breaking a
+        // HEADROOM: how many body cells above the floor are clear for a WALKER (passable AND fluid-free,
+        // so the value lines up with MovementContext.passable — water is not walk-clearance). Breaking a
         // block in the way is the break modifier's job (it consults RISKY_EDIT); headroom is the raw
         // clearance prefilter.
         int headroom;
-        if (!NavBlock.isPassable(a1)) headroom = HEADROOM_NONE;
-        else if (!NavBlock.isPassable(a2)) headroom = HEADROOM_CRAWL;
-        else if (!NavBlock.isPassable(a3)) headroom = HEADROOM_WALK;
+        if (!walkClear(a1)) headroom = HEADROOM_NONE;
+        else if (!walkClear(a2)) headroom = HEADROOM_CRAWL;
+        else if (!walkClear(a3)) headroom = HEADROOM_WALK;
         else headroom = HEADROOM_JUMP;
         flags |= headroom << HEADROOM_SHIFT;
 
@@ -128,6 +132,11 @@ public final class NavFlags {
     private static long at(long[] desc, int x, int y, int z) {
         if (x < 0 || y < 0 || z < 0 || x >= 16 || y >= 16 || z >= 16) return AIR_DESC;
         return desc[(y << 8) | (z << 4) | x];
+    }
+
+    /** Clear for a walking body: no collision AND no fluid (water/lava block a walker — swim is later). */
+    private static boolean walkClear(long d) {
+        return NavBlock.isPassable(d) && NavBlock.fluid(d) == 0;
     }
 
     /** Nothing solid directly below — a gravity block here/above would fall. */

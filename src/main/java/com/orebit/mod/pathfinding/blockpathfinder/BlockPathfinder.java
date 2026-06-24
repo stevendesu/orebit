@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
 
+import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 
 import net.minecraft.core.BlockPos;
@@ -38,6 +39,13 @@ import net.minecraft.core.BlockPos;
 public final class BlockPathfinder {
 
     private BlockPathfinder() {}
+
+    /**
+     * When true, a failed search logs WHY (closest approach + what each movement offered from the
+     * dead-end) — the diagnostic for "plan: none". Mirrors {@code AllyBotEntity.DEBUG_PATH}; flip both off
+     * to silence. Only runs on failure (rare, and throttled by the caller's replan cadence).
+     */
+    public static boolean DEBUG = true;
 
     /** Node-expansion ceiling — bounds per-call cost so a long/blocked goal can't stall the tick. */
     private static final int MAX_EXPANSIONS = 4000;
@@ -100,6 +108,11 @@ public final class BlockPathfinder {
 
         int expansions = 0;
         long reachedKey = -1L;
+        // Closest approach (min heuristic among closed nodes) + why the search stopped — the diagnostic
+        // for a failed plan: where did it dead-end, and was it walled in or just out of budget?
+        float bestH = Float.MAX_VALUE;
+        int bestX = sx, bestY = sy, bestZ = sz;
+        boolean budgetHit = false;
 
         while (!open.isEmpty()) {
             Node current = open.poll();
@@ -113,7 +126,10 @@ public final class BlockPathfinder {
                 break;
             }
 
-            if (++expansions > MAX_EXPANSIONS) return null;
+            float h = heuristic(current.x, current.y, current.z, gx, gy, gz);
+            if (h < bestH) { bestH = h; bestX = current.x; bestY = current.y; bestZ = current.z; }
+
+            if (++expansions > MAX_EXPANSIONS) { budgetHit = true; break; }
 
             relaxer.current = current;
             for (Movement m : MovementRegistry.TIER1) {
@@ -122,7 +138,10 @@ public final class BlockPathfinder {
             }
         }
 
-        if (reachedKey == -1L) return null;
+        if (reachedKey == -1L) {
+            if (DEBUG) explainFailure(ctx, sx, sy, sz, gx, gy, gz, expansions, budgetHit, bestX, bestY, bestZ);
+            return null;
+        }
 
         return reconstruct(cameFrom, cameFromMove, cameFromEdits, gScore, startKey, reachedKey);
     }
@@ -182,6 +201,34 @@ public final class BlockPathfinder {
     /** Admissible: Manhattan, each step covering ≥1 block at ≥{@link #MIN_STEP_COST}. */
     private static float heuristic(int x, int y, int z, int gx, int gy, int gz) {
         return (Math.abs(x - gx) + Math.abs(z - gz) + Math.abs(y - gy)) * MIN_STEP_COST;
+    }
+
+    /**
+     * Log <i>why</i> a search failed: how far it got, the closest cell it reached (where it dead-ended),
+     * and what every movement offers from that cell. Turns a bare "plan: none" into a concrete missing
+     * capability — e.g. "closest = the cliff base, and from there every movement emitted nothing" points
+     * straight at the absent place-to-ascend (staircase) move. Re-running the movements from one cell is
+     * cheap and only happens on failure.
+     */
+    private static void explainFailure(MovementContext ctx, int sx, int sy, int sz, int gx, int gy, int gz,
+                                       int expansions, boolean budgetHit, int bx, int by, int bz) {
+        int remaining = Math.abs(bx - gx) + Math.abs(by - gy) + Math.abs(bz - gz);
+        OrebitCommon.LOGGER.info(
+                "[Orebit] path FAIL start=({},{},{}) goal=({},{},{}) — {} after {} expansions; "
+                        + "closest=({},{},{}), still {} blocks away. Moves from the dead-end:",
+                sx, sy, sz, gx, gy, gz,
+                budgetHit ? "hit expansion budget" : "search exhausted (nowhere left to go)",
+                expansions, bx, by, bz, remaining);
+        for (Movement m : MovementRegistry.TIER1) {
+            StringBuilder sb = new StringBuilder();
+            int[] count = {0};
+            m.candidates(ctx, bx, by, bz, (cx, cy, cz, cost, edits) -> {
+                count[0]++;
+                sb.append(String.format(" (%d,%d,%d)c=%.1f%s", cx, cy, cz, cost, edits == null ? "" : "+edit"));
+            });
+            OrebitCommon.LOGGER.info("[Orebit]   {} -> {}", m.getClass().getSimpleName(),
+                    count[0] == 0 ? "(nothing)" : sb.toString());
+        }
     }
 
     private static BlockPathPlan reconstruct(Map<Long, Long> cameFrom, Map<Long, Movement> cameFromMove,

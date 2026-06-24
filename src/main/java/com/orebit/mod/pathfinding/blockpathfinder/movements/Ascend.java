@@ -10,12 +10,14 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  * Tier 1). Distinct from {@link Traverse}'s step-assist: this is a destination whose collision top is
  * <i>above</i> {@link MovementContext#STEP_ASSIST_MAX_TOP_Y}, so gaining it needs a real jump.
  *
- * <p><b>The head-clearance fix.</b> The coarse 2-bit grid marks the destination "clear" when it has two
- * air cells above its floor — but a jump from the source column also needs the cell <i>above the bot's
- * own head</i> (source {@code y+3}) to be clear, or the bot bonks the ceiling and never gains the block.
- * That cell is exactly what the floor-centric grid can't represent (the "head-in-block" / "2-high dirt
- * wall reads as a step" class of bug, commit {@code 7beda91}). Verifying it here with live geometry —
- * not the grid — is the whole reason the fine layer exists.
+ * <p><b>The head-clearance fix.</b> A jump from the source column needs the cell <i>above the bot's own
+ * head</i> (source {@code y+3}) clear, or the bot bonks the ceiling and never gains the block — the cell
+ * the floor-centric grid can't represent (the "head-in-block" / "2-high dirt wall reads as a step" class
+ * of bug, commit {@code 7beda91}). Both that and the landing body clearance are now read through the
+ * resident HEADROOM bit: the source's own feet/head are already clear (the bot stands there), so its
+ * HEADROOM is {@code JUMP} exactly when {@code y+3} is clear; the landing needs {@code WALK}. Cells the
+ * bit can't prove (near a section face, or genuinely blocked) are read and — when the bot may break and
+ * the edit isn't {@code RISKY_EDIT} — folded into a break-set.
  */
 public final class Ascend implements Movement {
 
@@ -27,27 +29,37 @@ public final class Ascend implements Movement {
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
         if (ctx.caps().jumpHeight() < 1) return;
+        int uy = y + 1;
+
+        // Source facts are the same for all four directions — read once. The bot stands on (x,y,z) so its
+        // feet/head are clear; HEADROOM == JUMP iff the takeoff head-clearance (y+3) is also clear.
+        int srcFlags = ctx.flagsAt(x, y, z);
+        boolean srcClear = ctx.headroomProves(srcFlags, y, MovementContext.HEADROOM_JUMP);
+        boolean srcRisky = MovementContext.risksEdit(srcFlags);
 
         for (int[] d : CARDINALS) {
             int nx = x + d[0];
             int nz = z + d[1];
-            int uy = y + 1;
 
             if (!ctx.built(nx, uy, nz)) continue;
             if (!ctx.standable(nx, uy, nz)) continue;
             // A low partial one up is Traverse's step-assist, not a jump — leave it to Traverse.
             if (ctx.topYOf(nx, uy, nz) <= MovementContext.STEP_ASSIST_MAX_TOP_Y) continue;
 
-            // The three cells the jump needs clear: the takeoff head-clearance (above the bot's own
-            // head, the cell the floor-centric grid can't represent) and the landing feet + head. Any
-            // that's blocked is folded into a break-set when the bot may break (else the move fails).
-            EditScratch e = ctx.edits().reset();
-            e.requireAir(x, y + 3, z);
-            e.requireAir(nx, uy + 1, nz);
-            e.requireAir(nx, uy + 2, nz);
-            if (e.valid()) {
-                out.accept(nx, uy, nz, COST + e.extraCost(), e.snapshot());
+            int dstFlags = ctx.flagsAt(nx, uy, nz);
+            boolean dstClear = ctx.headroomProves(dstFlags, uy, MovementContext.HEADROOM_WALK);
+            if (srcClear && dstClear) {
+                out.accept(nx, uy, nz, COST, null);
+                continue;
             }
+
+            EditScratch e = ctx.edits().reset(!(srcRisky || MovementContext.risksEdit(dstFlags)));
+            if (!srcClear) e.requireAir(x, y + 3, z);
+            if (!dstClear) {
+                e.requireAir(nx, uy + 1, nz);
+                e.requireAir(nx, uy + 2, nz);
+            }
+            if (e.valid()) out.accept(nx, uy, nz, COST + e.extraCost(), e.snapshot());
         }
     }
 }
