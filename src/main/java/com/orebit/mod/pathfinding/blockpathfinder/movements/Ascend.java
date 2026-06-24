@@ -1,6 +1,7 @@
 package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
+import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 
@@ -27,9 +28,6 @@ public final class Ascend implements Movement {
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
         if (ctx.caps().jumpHeight() < 1) return;
 
-        // Head clearance at the takeoff column: the cell above the bot's head must be open to rise.
-        if (!ctx.passable(x, y + 3, z)) return;
-
         for (int[] d : CARDINALS) {
             int nx = x + d[0];
             int nz = z + d[1];
@@ -39,10 +37,17 @@ public final class Ascend implements Movement {
             if (!ctx.standable(nx, uy, nz)) continue;
             // A low partial one up is Traverse's step-assist, not a jump — leave it to Traverse.
             if (ctx.topYOf(nx, uy, nz) <= MovementContext.STEP_ASSIST_MAX_TOP_Y) continue;
-            // Destination body clear (feet + head at the landing).
-            if (!ctx.passable(nx, uy + 1, nz) || !ctx.passable(nx, uy + 2, nz)) continue;
 
-            out.accept(nx, uy, nz, COST);
+            // The three cells the jump needs clear: the takeoff head-clearance (above the bot's own
+            // head, the cell the floor-centric grid can't represent) and the landing feet + head. Any
+            // that's blocked is folded into a break-set when the bot may break (else the move fails).
+            EditScratch e = ctx.edits().reset();
+            e.requireAir(x, y + 3, z);
+            e.requireAir(nx, uy + 1, nz);
+            e.requireAir(nx, uy + 2, nz);
+            if (e.valid()) {
+                out.accept(nx, uy, nz, COST + e.extraCost(), e.snapshot());
+            }
         }
     }
 }

@@ -4,8 +4,12 @@ import com.mojang.authlib.GameProfile;
 import com.orebit.mod.pathfinding.PathDebugRenderer;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
+import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementRegistry;
+import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.platform.EntityState;
+import com.orebit.mod.platform.Replaceable;
+import com.orebit.mod.platform.WorldEdits;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.pathing.ChunkNavBuilder;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
@@ -14,6 +18,8 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.phys.Vec3;
 
@@ -59,6 +65,15 @@ public class AllyBotEntity extends FakePlayerEntity {
     private static final int REFRESH_MAX_SPAN_CHUNKS = 2;
 
     /**
+     * Bot capabilities the planner expands with. Break + place are enabled to prove the new modifiers
+     * (mine through leaves, bridge a gap) — the motivating forest-leaves case. Once the config / tool /
+     * inventory subsystems land this becomes per-bot, server-configurable.
+     */
+    private static final BotCaps CAPS = BotCaps.BREAK_PLACE;
+    /** The throwaway block the bot places when bridging/footing (infinite supply until inventory exists). */
+    private static final BlockState PLACE_BLOCK = Blocks.COBBLESTONE.defaultBlockState();
+
+    /**
      * What the bot is currently trying to do, set by the {@code /bot} commands (defaults to
      * {@link Mode#FOLLOW} so a freshly spawned bot behaves as before — auto-follow the owner):
      * <ul>
@@ -76,6 +91,7 @@ public class AllyBotEntity extends FakePlayerEntity {
     private int waypointIndex;
     private int replanCooldown;
     private int stuckTicks;         // consecutive ticks grinding in place; drives the stuck diagnostic
+    private int lastEditedIndex = -1; // last step whose break/place edits were applied (apply once per step)
     private BlockPos lastGoalCell;  // owner floor cell the current path was planned to; replan when it moves
     private boolean loggedHasPath;  // dedupe the path/no-path diagnostic so it logs only on change
 
@@ -207,8 +223,9 @@ public class AllyBotEntity extends FakePlayerEntity {
         refreshNavData(level, startFloor, goalFloor);
 
         NavGridView grid = new NavGridView(level);
-        this.path = BlockPathfinder.findPath(grid, startFloor, goalFloor);
+        this.path = BlockPathfinder.findPath(grid, startFloor, goalFloor, CAPS);
         this.waypointIndex = 0;
+        this.lastEditedIndex = -1;
 
         boolean hasPath = path != null && path.size() > 0;
         if (DEBUG_PATH) {
@@ -276,6 +293,15 @@ public class AllyBotEntity extends FakePlayerEntity {
             return;
         }
 
+        // Apply this step's folded break/place edits once, the moment it becomes the current step: the
+        // bot is standing at the previous waypoint and the cells to clear/fill are right in front, so the
+        // route is made physically walkable before the bot tries to move into it.
+        StepEdits edits = path.edits(waypointIndex);
+        if (edits != null && waypointIndex != lastEditedIndex) {
+            lastEditedIndex = waypointIndex;
+            applyEdits(edits);
+        }
+
         BlockPos wp = path.waypoint(waypointIndex);
         double ddx = (wp.getX() + 0.5) - this.getX();
         double ddz = (wp.getZ() + 0.5) - this.getZ();
@@ -306,6 +332,27 @@ public class AllyBotEntity extends FakePlayerEntity {
             if (++stuckTicks == STUCK_DUMP_TICKS && DEBUG_PATH) dumpStuck(wp);
         } else {
             stuckTicks = 0;
+        }
+    }
+
+    /**
+     * Execute a step's folded break/place edits server-side, re-validated against the live world (cells
+     * may have changed since planning). Breaks drop nothing (no inventory model yet); places use a
+     * throwaway block. The nav grid isn't refreshed here — the bot performs exactly the edits the plan
+     * assumed, so the route is now physically walkable, and the next replan rebuilds the spanned chunks
+     * from the live world (so it plans over the bot's own changes).
+     */
+    private void applyEdits(StepEdits edits) {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        for (int i = 0; i < edits.breakCount(); i++) {
+            BlockPos p = edits.breakPos(i);
+            if (!level.getBlockState(p).isAir()) WorldEdits.breakBlock(level, p);
+        }
+        for (int i = 0; i < edits.placeCount(); i++) {
+            BlockPos p = edits.placePos(i);
+            if (Replaceable.isReplaceable(level.getBlockState(p))) {
+                WorldEdits.placeBlock(level, p, PLACE_BLOCK);
+            }
         }
     }
 
