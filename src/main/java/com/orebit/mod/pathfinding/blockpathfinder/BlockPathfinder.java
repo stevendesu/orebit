@@ -82,7 +82,7 @@ public final class BlockPathfinder {
         final int gx = goalFloor.getX(), gy = goalFloor.getY(), gz = goalFloor.getZ();
 
         // Bot must be on built ground for the grid-based search to mean anything.
-        if (grid.classAt(sx, sy, sz) == null) return null;
+        if (!grid.built(sx, sy, sz)) return null;
 
         final MovementContext ctx = new MovementContext(grid, caps);
         final long startKey = BlockPos.asLong(sx, sy, sz);

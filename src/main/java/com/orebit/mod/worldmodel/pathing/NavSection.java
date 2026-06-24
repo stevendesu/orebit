@@ -35,8 +35,9 @@ public class NavSection {
         candidateRegions[regionCount++] = region;
     }
 
-    public TraversalClass getTraversalClass(int x, int y, int z) {
-        return grid.get(x, y, z);
+    /** The precomputed neighbour-property flag bitmask at this cell — see {@link NavFlags}. */
+    public int getFlags(int x, int y, int z) {
+        return grid.flags(x, y, z);
     }
 
     /** The resident {@code NavBlock} navtype index at this cell — for the fine geometry read. */

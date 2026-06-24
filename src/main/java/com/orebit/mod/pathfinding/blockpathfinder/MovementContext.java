@@ -2,11 +2,10 @@ package com.orebit.mod.pathfinding.blockpathfinder;
 
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
-import com.orebit.mod.worldmodel.pathing.TraversalClass;
 
 /**
  * The world-and-bot context a {@link Movement} reads while expanding a node: the {@link NavGridView}
- * (coarse 2-bit class for the cheap "is it built" gate + live per-cell geometry) and the {@link
+ * (the cheap "is it built" gate + live per-cell geometry) and the {@link
  * BotCaps}. It also hosts the small set of geometry <i>predicates</i> every Tier 1 movement shares —
  * {@link #passable}, {@link #standable}, {@link #topYOf} — so each movement reads facts through one
  * vocabulary rather than re-deriving bit extraction. (These live on the context, a per-pathfind smart
@@ -61,18 +60,13 @@ public final class MovementContext {
         return caps;
     }
 
-    /** The coarse 2-bit class, or {@code null} where that chunk's nav data isn't built. */
-    public TraversalClass classAt(int x, int y, int z) {
-        return grid.classAt(x, y, z);
-    }
-
     /**
      * Whether cell {@code (x,y,z)} has built nav data — the cheap gate that keeps the search inside the
      * loaded radius (so the bot never plans into chunks it can't see). The precise checks below read
      * live geometry; this only answers "is it loaded enough to trust."
      */
     public boolean built(int x, int y, int z) {
-        return grid.classAt(x, y, z) != null;
+        return grid.built(x, y, z);
     }
 
     /**
