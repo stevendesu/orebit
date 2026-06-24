@@ -5,9 +5,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import org.junit.jupiter.api.Test;
 
 import com.orebit.mod.worldmodel.navblock.NavBlock;
+import com.orebit.mod.worldmodel.pathing.NavFlags;
 import com.orebit.mod.worldmodel.pathing.NavSection;
 import com.orebit.mod.worldmodel.pathing.NavSectionBuilder;
-import com.orebit.mod.worldmodel.pathing.TraversalClass;
 import com.orebit.mod.worldmodel.pathing.TraversalGrid;
 
 import net.minecraft.SharedConstants;
@@ -21,7 +21,7 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 /**
  * Exercises the incremental block-update hook ({@link NavSectionBuilder#patchCell}): build a section,
  * change one cell, and verify the cell's navtype updates AND the within-section neighbourhood whose
- * classification depends on it is recomputed — while far cells are untouched.
+ * neighbour-property flags depend on it is recomputed — while far cells are untouched.
  */
 public class NavGridPatchTest {
 
@@ -50,19 +50,19 @@ public class NavGridPatchTest {
         NavSectionBuilder.classifyInto(c, false, section.getTraversalGrid());
         TraversalGrid g = section.getTraversalGrid();
 
-        // Baseline: standing on the floor is CLEAR; the air just above it is EASY (bridgeable).
-        assertEquals(TraversalClass.CLEAR, g.get(8, 4, 8), "floor before");
-        assertEquals(TraversalClass.EASY, g.get(8, 5, 8), "air above floor before");
+        // Baseline: standing on the floor has full (JUMP) headroom; so does the air cell above it.
+        assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(g.flags(8, 4, 8)), "floor headroom before");
+        assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(g.flags(8, 5, 8)), "air above floor before");
 
         // Place stone into the air cell directly above the floor.
         NavSectionBuilder.patchCell(section, 8, 5, 8, stone);
 
-        // The changed cell now carries stone's navtype and is itself a standable floor (CLEAR).
+        // The changed cell now carries stone's navtype and still has clear headroom above it.
         assertEquals(NavBlock.navtypeFor(stone) & 0xFFFF, g.navtype(8, 5, 8), "changed cell navtype");
-        assertEquals(TraversalClass.CLEAR, g.get(8, 5, 8), "changed cell now standable");
-        // Its downstairs neighbour now has stone in its headroom -> BLOCKED (the reclassify reached it).
-        assertEquals(TraversalClass.BLOCKED, g.get(8, 4, 8), "floor now headroom-blocked");
+        assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(g.flags(8, 5, 8)), "changed cell headroom");
+        // Its downstairs neighbour now has stone directly in its headroom -> NONE (the recompute reached it).
+        assertEquals(NavFlags.HEADROOM_NONE, NavFlags.headroom(g.flags(8, 4, 8)), "floor now headroom-blocked");
         // A floor cell far from the change is untouched.
-        assertEquals(TraversalClass.CLEAR, g.get(2, 4, 2), "far floor untouched");
+        assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(g.flags(2, 4, 2)), "far floor untouched");
     }
 }
