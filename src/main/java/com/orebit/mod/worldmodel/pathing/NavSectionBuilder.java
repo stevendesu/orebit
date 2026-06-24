@@ -127,7 +127,7 @@ public final class NavSectionBuilder {
 
     /**
      * Build a NavSection for one chunk section: read its block states, map each to a NavBlock
-     * descriptor, and classify every cell into the 2-bit {@link TraversalGrid}.
+     * navtype + descriptor, and pack every cell's class and navtype into the {@link TraversalGrid}.
      *
      * <p>Uniform-air sections (the majority underground/skyward) are bypassed: every cell classifies
      * identically, so we classify one representative cell and fill — the big recompute win (PRD §6.2).
@@ -151,19 +151,23 @@ public final class NavSectionBuilder {
         final long[] descScratch = DESC_SCRATCH.get();
 
         if (onlyAir) {
-            // Every cell is air over air: classify one representative cell and fill.
+            // Every cell is air over air: classify one representative cell and fill with air's navtype.
             Arrays.fill(descScratch, AIR_DESC);
             TraversalClass airClass = NavClassifier.classify(descScratch, 8, 8, 8);
-            fill(grid, airClass);
+            fill(grid, airClass, NavBlock.AIR & 0xFFFF);
             return;
         }
 
-        // Map the (small) palette to descriptors once, then resolve every cell via its slot —
-        // no per-cell state lookup.
+        // Map the (small) palette to navtypes + descriptors once, then resolve every cell via its slot —
+        // no per-cell state lookup. We store the navtype per cell (the fine geometry index) alongside the
+        // coarse class; the descriptor scratch is only needed transiently to classify.
         BlockState[] palette = SectionPalette.read(states, slotScratch);
+        int[] slotToNavtype = new int[palette.length];
         long[] slotToDesc = new long[palette.length];
         for (int s = 0; s < palette.length; s++) {
-            slotToDesc[s] = NavBlock.descriptorFor(palette[s]);
+            short navtype = NavBlock.navtypeFor(palette[s]);
+            slotToNavtype[s] = navtype & 0xFFFF;
+            slotToDesc[s] = NavBlock.descriptor(navtype);
         }
         for (int i = 0; i < 4096; i++) {
             descScratch[i] = slotToDesc[slotScratch[i]];
@@ -172,17 +176,18 @@ public final class NavSectionBuilder {
         for (int y = 0; y < NavSection.SIZE; y++) {
             for (int z = 0; z < NavSection.SIZE; z++) {
                 for (int x = 0; x < NavSection.SIZE; x++) {
-                    grid.set(x, y, z, NavClassifier.classify(descScratch, x, y, z));
+                    int navtype = slotToNavtype[slotScratch[(y << 8) | (z << 4) | x]];
+                    grid.set(x, y, z, NavClassifier.classify(descScratch, x, y, z), navtype);
                 }
             }
         }
     }
 
-    private static void fill(TraversalGrid grid, TraversalClass tc) {
+    private static void fill(TraversalGrid grid, TraversalClass tc, int navtype) {
         for (int y = 0; y < NavSection.SIZE; y++) {
             for (int z = 0; z < NavSection.SIZE; z++) {
                 for (int x = 0; x < NavSection.SIZE; x++) {
-                    grid.set(x, y, z, tc);
+                    grid.set(x, y, z, tc, navtype);
                 }
             }
         }

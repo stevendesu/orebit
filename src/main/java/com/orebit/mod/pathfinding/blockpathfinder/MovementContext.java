@@ -75,7 +75,10 @@ public final class MovementContext {
         return grid.classAt(x, y, z) != null;
     }
 
-    /** Live packed {@link NavBlock} descriptor for the cell (fine geometry, always fresh). */
+    /**
+     * Packed {@link NavBlock} descriptor for the cell (fine geometry) — a flat read from the resident
+     * navtype grid (a live block read only as a fallback outside the built area).
+     */
     public long descriptorAt(int x, int y, int z) {
         return grid.descriptorAt(x, y, z);
     }
@@ -91,8 +94,9 @@ public final class MovementContext {
 
     /**
      * {@link #passable(int, int, int)} on an already-read descriptor — the read-once form callers use
-     * when they've already fetched the cell's descriptor (a {@code descriptorAt} call is a live palette
-     * read plus a navtype map lookup, so re-reading the same cell across predicates is the cost to avoid).
+     * when they've already fetched the cell's descriptor (each {@code descriptorAt} still costs a section
+     * lookup + array read — a live palette read outside the built grid — so re-reading the same cell
+     * across predicates is wasteful).
      */
     public boolean passable(long d) {
         return NavBlock.shape(d) == NavBlock.SHAPE_EMPTY && NavBlock.fluid(d) == 0;
