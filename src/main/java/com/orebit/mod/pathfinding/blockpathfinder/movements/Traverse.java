@@ -1,6 +1,7 @@
 package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
+import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 
@@ -33,19 +34,44 @@ public final class Traverse implements Movement {
             int nx = x + d[0];
             int nz = z + d[1];
 
-            // Flat walk: adjacent floor at the same level, body clear above it.
-            if (ctx.built(nx, y, nz) && ctx.standable(nx, y, nz)
-                    && ctx.passable(nx, y + 1, nz) && ctx.passable(nx, y + 2, nz)) {
-                out.accept(nx, y, nz, cost(ctx, nx, y, nz));
-                continue; // can't also step-assist onto the same column when it's already flat here
+            // Flat walk onto an adjacent solid-topped cell. The two body cells must be clear; a block in
+            // the way (e.g. leaves) is folded into a break-set when the bot may break, raising the cost
+            // instead of failing the move (MOVEMENT-DESIGN.md §1 — the motivating forest-leaves case).
+            if (ctx.built(nx, y, nz) && ctx.standable(nx, y, nz)) {
+                EditScratch e = ctx.edits().reset();
+                e.requireAir(nx, y + 1, nz);
+                e.requireAir(nx, y + 2, nz);
+                if (e.valid()) {
+                    out.accept(nx, y, nz, cost(ctx, nx, y, nz) + e.extraCost(), e.snapshot());
+                    continue; // already have footing here; don't also step-assist/bridge this column
+                }
             }
 
-            // Step-assist: one cell up onto a low partial (slab / snow / stair lip) — no jump.
+            // Step-assist: one cell up onto a low partial (slab / snow / stair lip) — no jump. Same
+            // break-the-body-path modifier as the flat case.
             int uy = y + 1;
             if (ctx.built(nx, uy, nz) && ctx.standable(nx, uy, nz)
-                    && ctx.topYOf(nx, uy, nz) <= MovementContext.STEP_ASSIST_MAX_TOP_Y
-                    && ctx.passable(nx, uy + 1, nz) && ctx.passable(nx, uy + 2, nz)) {
-                out.accept(nx, uy, nz, cost(ctx, nx, uy, nz));
+                    && ctx.topYOf(nx, uy, nz) <= MovementContext.STEP_ASSIST_MAX_TOP_Y) {
+                EditScratch e = ctx.edits().reset();
+                e.requireAir(nx, uy + 1, nz);
+                e.requireAir(nx, uy + 2, nz);
+                if (e.valid()) {
+                    out.accept(nx, uy, nz, cost(ctx, nx, uy, nz) + e.extraCost(), e.snapshot());
+                    continue;
+                }
+            }
+
+            // Bridge: no footing in the neighbour column — place a throwaway floor and walk onto it when
+            // the bot may place (the source cell is always an adjacent face to build against). "Bridge"
+            // is not its own movement, just Traverse with a place in its edit-set (decision 1).
+            if (ctx.built(nx, y, nz) && !ctx.standable(nx, y, nz)) {
+                EditScratch e = ctx.edits().reset();
+                e.requireFloor(nx, y, nz);
+                e.requireAir(nx, y + 1, nz);
+                e.requireAir(nx, y + 2, nz);
+                if (e.valid()) {
+                    out.accept(nx, y, nz, cost(ctx, nx, y, nz) + e.extraCost(), e.snapshot());
+                }
             }
         }
     }

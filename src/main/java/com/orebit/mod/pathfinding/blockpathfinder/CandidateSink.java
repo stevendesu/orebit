@@ -7,12 +7,19 @@ package com.orebit.mod.pathfinding.blockpathfinder;
  * job to "emit (cell, cost)" lets the search internals (open set, g-scores, came-from) stay private to
  * {@link BlockPathfinder}.
  */
-@FunctionalInterface
 public interface CandidateSink {
 
     /**
      * Accept a reachable destination <b>floor cell</b> {@code (x,y,z)} with the per-step {@code cost}
-     * (tick-relative; ≥ the search's minimum step cost so the heuristic stays admissible).
+     * (tick-relative; ≥ the search's minimum step cost so the heuristic stays admissible) and the {@link
+     * StepEdits} the move folds in ({@code null} for an ordinary move that breaks/places nothing). The
+     * search records the edits on the chosen edge so the follower can mine/place them before completing
+     * the step.
      */
-    void accept(int x, int y, int z, float cost);
+    void accept(int x, int y, int z, float cost, StepEdits edits);
+
+    /** Accept an ordinary move that carries no break/place edits. */
+    default void accept(int x, int y, int z, float cost) {
+        accept(x, y, z, cost, null);
+    }
 }
