@@ -270,13 +270,23 @@ explicit sign-off.
 **The facts** (each added only when its consumer movement is built — same discipline as NavBlock's spare
 bits; `isDamaging` of the *floor* stays intrinsic in the navtype, no bit):
 
-| Bit(s) | Fact | Meaning / what it gates | Consumer |
+| Bit(s) | Fact (code name) | Meaning / what it gates | Consumer |
 |---|---|---|---|
-| 1 | `risksFluidFlow` | don't BREAK/PLACE here — editing could release a neighbouring fluid into the body space (walking through is fine) | fluid-aware break-modifier |
-| 1 | `risksGravityFall` | don't BREAK/PLACE here — sand/gravel sits above, so an edit's block update could drop it onto the bot (a BREAK/PLACE gate, **not** a movement check) | gravity-aware break-modifier |
-| 1 | `clearableHazard` | a walkable-through hazard in the body space (fire) — adds cost, not blocked | hazard-cost movement |
-| 2 | `headroomHeight` | 0 none / 1 crawl / 2 walk / 3 jump — vertical clearance above the floor | Crawl / Traverse / Ascend |
-| 1 | `hasPlaceableNeighbor` | a solid face to bridge a placed block against | Traverse bridge / Pillar |
+| 1 | `RISKY_EDIT` | don't BREAK/PLACE here — editing could release a neighbouring fluid into the body space **or** drop an overhead sand/gravel block onto the bot (walking through is fine). A BREAK/PLACE gate, **not** a movement check | fluid/gravity-aware break-modifier |
+| 1 | `CLEARABLE_HAZARD` | a walkable-through hazard in the body space (fire) — adds cost, not blocked | hazard-cost movement |
+| 2 | `HEADROOM` | 0 none / 1 crawl / 2 walk / 3 jump — vertical clearance above the floor | Crawl / Traverse / Ascend |
+| 1 | `PLACEABLE_NEIGHBOR` | a solid face to bridge a placed block against | Traverse bridge / Pillar |
+| 1 | *(reserved)* | bit 5 — free for a future neighbour-derived fact | — |
+
+> **Implemented (session 19).** Work items 1 & 2 below are done: `TraversalGrid` is now
+> `[6-bit flags | 10-bit navtype]`, computed by `NavFlags` (replacing the dead `NavClassifier`/
+> `TraversalClass`) at build/air-bypass and recomputed by `NavSectionBuilder.patchCell` on every block
+> change. **Design refinement:** the design's separate `risksFluidFlow` + `risksGravityFall` were
+> **merged into one `RISKY_EDIT` bit** — both mean "don't edit here," and the precise flood/cascade check
+> lives in the fine layer (`descriptorAt`) at break time (work item 3 / deferred-#3), so one prefilter bit
+> suffices and frees bit 5. Items 3 (conservative fluid OOB) & 4 (movements read the bits) stay deferred —
+> their consumers (the fluid-aware break modifier; the movement-layer migration) aren't built yet, so the
+> bits are stored air-optimistically at boundaries and the movements still read `descriptorAt`.
 
 **Semantics shift:** fluid/gravity risk no longer means "can't go here" (old 4-class BLOCKED) — it means
 "**don't BREAK or PLACE here**," because only an *edit* triggers the block update that releases the
@@ -312,15 +322,21 @@ grid (which would mean extra data fetching + cache thrash on *every* update). Th
   truth: the move's geometry is still confirmed by `descriptorAt` whenever the bit's accuracy is in doubt.)
 
 ### Work items (ratified — build per consumer, not speculatively)
-1. **Replace the 4-value `TraversalClass`** with the navtype + neighbour-property bitmask (**`short[4096]`,
-   bit-squeezed**); `built()` becomes section-presence, not `classAt != null`.
-2. **Intercept `setBlockState`** → update the changed cell's navtype AND recompute the neighbour-property
-   bits for the affected (within-section) neighbourhood — the block-update hook; retires the per-replan
+1. **[DONE §19] Replace the 4-value `TraversalClass`** with the navtype + neighbour-property bitmask
+   (**`short[4096]`, bit-squeezed**: 10-bit navtype + 6-bit flags); `built()` becomes section-presence,
+   not `classAt != null`.
+2. **[DONE §19] Intercept `setBlockState`** → update the changed cell's navtype AND recompute the
+   neighbour-property bits for the affected (within-section) neighbourhood — the block-update hook (the
+   mixin was wired §18; `patchCell` now recomputes flags, not the vestigial class); retires the per-replan
    `refreshNavData`.
-3. **Conservative out-of-section default** — alternating air/water for the `risksFluidFlow` horizontal-OOB
-   read, always (no overscan).
-4. **Rewrite the movement classes** to read the neighbour-property bits (one grid read/cell) instead of
-   re-deriving headroom / flow / gravity / placeable via extra per-expansion nav-grid reads.
+3. **[deferred] Conservative out-of-section default** — alternating air/water for the fluid-flow
+   horizontal-OOB read, always (no overscan). Lands with the fluid-aware break modifier that reads
+   `RISKY_EDIT`; until then the bit is stored air-optimistically at boundaries (the precise check is the
+   fine layer's anyway).
+4. **[deferred] Rewrite the movement classes** to read the neighbour-property bits (one grid read/cell)
+   instead of re-deriving headroom / flow / gravity / placeable via extra per-expansion nav-grid reads.
+   The bits are now stored and exposed (`NavGridView.flagsAt`, `NavFlags` accessors); the movements still
+   read `descriptorAt` until this migration.
 
 ### The block-change hook — mixin, via the overlay pattern (approved, full-now)
 
