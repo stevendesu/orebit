@@ -29,10 +29,11 @@ import net.minecraft.world.level.block.state.BlockState;
  * map get. {@link #classAt} returns {@code null} where that chunk's nav data isn't built (unloaded radius
  * / out of vertical bounds) — the pathfinder treats that as unknown.
  *
- * <p><b>Freshness:</b> because both reads now come from the stored grid (not the live world), runtime
- * block edits — including the bot's own break/place — are reflected only after that section is rebuilt.
- * The follower's per-replan {@code refreshNavData} rebuilds the path-spanning chunks, so plans stay
- * consistent; a proper block-update-invalidation hook is the standing follow-up.
+ * <p><b>Freshness:</b> because both reads come from the stored grid (not the live world), runtime block
+ * edits — including the bot's own break/place — are reflected via the {@code LevelChunk.setBlockState}
+ * mixin ({@link com.orebit.mod.platform.BlockChangeEvents} → {@link NavGridUpdater}), which patches the
+ * affected cell of every tracked section as it changes. So a replan reads current terrain with no
+ * per-replan rebuild (the old {@code refreshNavData} shim is retired).
  */
 public final class NavGridView {
 
