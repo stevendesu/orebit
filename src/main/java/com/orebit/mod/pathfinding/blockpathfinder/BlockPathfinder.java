@@ -77,6 +77,15 @@ public final class BlockPathfinder {
     private static final float H_DOWN = 2.0f;        // ~Descend + a break (typical, not cheapest)
 
     /**
+     * One reusable {@link Nodes} search-state per thread, {@link Nodes#reset() reset} at the top of each
+     * {@link #findPath} instead of allocated fresh. A short follow search is dominated by the dozen-plus
+     * arrays a fresh {@code Nodes} allocates (and re-grows) amortized over only a few hundred nodes;
+     * reusing one drives the steady state to zero per-search allocation. {@link ThreadLocal}, not a
+     * static singleton, so a future off-tick background pathfinding thread gets its own with no contention.
+     */
+    private static final ThreadLocal<Nodes> SEARCH = ThreadLocal.withInitial(() -> new Nodes(512, 1024));
+
+    /**
      * The entire mutable search state as primitive arrays — the allocation-free replacement for the old
      * {@code new Node(...)}-per-candidate + four {@code HashMap<Long,…>} design (whose every {@code get}/
      * {@code put} boxed the packed-pos {@code long} key past the {@code Long} cache, ~100× per node).
@@ -112,9 +121,13 @@ public final class BlockPathfinder {
         int mapSize;
         int mapGrowAt;
 
-        // ---- open set (binary min-heap over heapF) ----
+        // ---- open set (binary min-heap, ordered by f then by larger g) ----
+        // Ties in f are broken toward the LARGER g (the node nearer the goal, i.e. smaller h). On the
+        // big equal-f plateaus a follow-bot hits on open ground, this dives at the goal instead of
+        // fanning out, popping far fewer nodes — and it's optimality-neutral (it only orders ties).
         int[] heap;
         float[] heapF;
+        float[] heapG;         // g snapshot at push, parallel to heapF — the tie-breaker
         int heapSize;
         float poppedF;         // f snapshot of the last pop() — the caller's staleness test
 
@@ -135,6 +148,20 @@ public final class BlockPathfinder {
             mapGrowAt = mapCap * 3 / 4;
             heap = new int[nodeHint];
             heapF = new float[nodeHint];
+            heapG = new float[nodeHint];
+        }
+
+        /**
+         * Clear for the next pathfind, keeping every array at its grown high-water-mark capacity so a
+         * reused instance stops allocating after warmup. Only the index needs wiping (its {@code -1}
+         * empty marker); the node/heap arrays are written by index from 0 as the search fills them, and
+         * stale slots past {@code count}/{@code heapSize}, or where {@code mapRow==-1}, are never read.
+         */
+        void reset() {
+            count = 0;
+            heapSize = 0;
+            mapSize = 0;
+            Arrays.fill(mapRow, -1);
         }
 
         /** Row for {@code key}, creating it (with {@code g=+inf}, unlinked) if absent. One probe. */
@@ -168,44 +195,48 @@ public final class BlockPathfinder {
             return n;
         }
 
-        /** Push row {@code n} onto the open set with its current {@code f} snapshot. */
+        /** Push row {@code n} onto the open set with its current {@code f}/{@code g} snapshots. */
         void push(int n) {
             if (heapSize == heap.length) {
                 heap = Arrays.copyOf(heap, heapSize << 1);
                 heapF = Arrays.copyOf(heapF, heapSize << 1);
+                heapG = Arrays.copyOf(heapG, heapSize << 1);
             }
             int i = heapSize++;
-            float fv = f[n];
-            heap[i] = n;
-            heapF[i] = fv;
+            float fv = f[n], gv = g[n];
             while (i > 0) {
                 int p = (i - 1) >> 1;
-                if (heapF[p] <= fv) break;
-                heap[i] = heap[p]; heapF[i] = heapF[p];
+                // Stop once the parent should stay above the new node: smaller f, or equal f and
+                // g no smaller (so equal-f ties bubble the larger-g node up).
+                if (heapF[p] < fv || (heapF[p] == fv && heapG[p] >= gv)) break;
+                heap[i] = heap[p]; heapF[i] = heapF[p]; heapG[i] = heapG[p];
                 i = p;
             }
-            heap[i] = n; heapF[i] = fv;
+            heap[i] = n; heapF[i] = fv; heapG[i] = gv;
         }
 
-        /** Remove and return the min-{@code f} row; sets {@link #poppedF} to its push-time snapshot. */
+        /** Remove and return the best row (min f, ties to larger g); sets {@link #poppedF} to its f snapshot. */
         int pop() {
             int top = heap[0];
             poppedF = heapF[0];
             int last = --heapSize;
             if (last > 0) {
                 int n = heap[last];
-                float fv = heapF[last];
+                float fv = heapF[last], gv = heapG[last];
                 int i = 0;
                 for (;;) {
                     int l = (i << 1) + 1;
                     if (l >= last) break;
                     int r = l + 1;
-                    int c = (r < last && heapF[r] < heapF[l]) ? r : l;
-                    if (heapF[c] >= fv) break;
-                    heap[i] = heap[c]; heapF[i] = heapF[c];
+                    // Pick the better child: smaller f, or equal f and larger g.
+                    int c = (r < last && (heapF[r] < heapF[l]
+                            || (heapF[r] == heapF[l] && heapG[r] > heapG[l]))) ? r : l;
+                    // Stop once the sifted node is at least as good as that child.
+                    if (fv < heapF[c] || (fv == heapF[c] && gv >= heapG[c])) break;
+                    heap[i] = heap[c]; heapF[i] = heapF[c]; heapG[i] = heapG[c];
                     i = c;
                 }
-                heap[i] = n; heapF[i] = fv;
+                heap[i] = n; heapF[i] = fv; heapG[i] = gv;
             }
             return top;
         }
@@ -284,9 +315,10 @@ public final class BlockPathfinder {
         final MovementContext ctx = new MovementContext(grid, caps);
         final long startKey = BlockPos.asLong(sx, sy, sz);
 
-        // Per-call sizing: a few hundred rows covers a normal follow; both grow by doubling, and the map
-        // is the next pow2 above the node hint at <0.75 load. Reused across nodes, never per-node.
-        final Nodes nodes = new Nodes(512, 1024);
+        // Reuse this thread's search state (sized to its high-water mark), wiped to empty — so a steady
+        // stream of replans allocates nothing here. First call on a thread pays the initial 512/1024 sizing.
+        final Nodes nodes = SEARCH.get();
+        nodes.reset();
         Relaxer relaxer = new Relaxer(nodes, gx, gy, gz);
 
         int startRow = nodes.intern(startKey, sx, sy, sz);
