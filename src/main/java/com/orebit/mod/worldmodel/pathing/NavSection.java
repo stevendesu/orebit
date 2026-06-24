@@ -39,8 +39,9 @@ public class NavSection {
         return grid.get(x, y, z);
     }
 
-    public void setTraversalClass(int x, int y, int z, TraversalClass clazz) {
-        grid.set(x, y, z, clazz);
+    /** The resident {@code NavBlock} navtype index at this cell — for the fine geometry read. */
+    public int getNavtype(int x, int y, int z) {
+        return grid.navtype(x, y, z);
     }
 
     public BlockPos getOrigin() {
