@@ -7,6 +7,7 @@ import com.orebit.mod.commands.OrebitCommands;
 import com.orebit.mod.platform.PlatformEvents;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.pathing.ChunkNavLoader;
+import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
 
 import net.minecraft.server.level.ServerLevel;
 
@@ -29,6 +30,12 @@ public final class OrebitCommon {
         // (ChunkNavLoader.MAX_BUILDS_PER_TICK) so idle players take no measurable hit. Nothing
         // consumes the grid yet — the pathfinder is the next milestone.
         ChunkNavLoader.register(events);
+
+        // Block-update hook: keep the nav grid live as the world changes (player/bot mining, building,
+        // pistons, fluids) by patching the changed cell + its within-section neighbourhood — no whole-
+        // chunk rebuild. The trigger is the setBlockState mixin (overlay) firing BlockChangeEvents; until
+        // that overlay lands this is inert. Retires the follower's per-replan refreshNavData shim.
+        NavGridUpdater.register();
 
         // Deterministic /bot come|stay|follow|here command surface (no LLM). The common command tree
         // builds on vanilla Brigadier; the loader seam only translates WHEN registration fires.
