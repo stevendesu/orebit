@@ -344,16 +344,19 @@ grid (which would mean extra data fetching + cache thrash on *every* update). Th
    `RISKY_EDIT` *precise* flood/cascade check (item 3) + conservative fluid OOB are still deferred to the
    fluid-aware break modifier.
 
-**Coverage gap — staircases DONE (§19 cont.):** Ascend and Descend now fold a `requireFloor` place (like
-Traverse's bridge), so the bot builds a **staircase up** (place a step against a wall/hillside and jump
-onto it) and a **step down** a sheer drop it can't safely Fall — and with the existing break folds (dig up
-into a hill / down through the transit) it reaches any cell by some combination of the four Tier-1 kinds,
-even if inefficiently. Gated by `RISKY_EDIT`; only unlocked by place-capable caps (a non-placing bot is
-unchanged — `placeable()` is false → no candidate). **Still open:** a free-standing **open-air pillar**
-(straight up/down with nothing to place against) needs the dedicated **Pillar / MineDown** kinds; and the
-`PLACEABLE_NEIGHBOR` bit isn't consumed yet (the place still scans neighbours in `MovementContext.placeable`).
-`BlockPathfinder.DEBUG` logs the closest-approach cell + per-movement candidates from a dead-end to spot the
-next gap.
+**Coverage gap — staircases DONE incl. open air (§19 cont.):** Ascend and Descend fold a place (like
+Traverse's bridge). A lone footing one-up-and-over floats in open air (no face to attach to), so Ascend now
+places a **support** beneath it against the floor the bot stands on (`EditScratch.requireFootingOn`, the
+**two-block step**) — building a diagonal **staircase up** off a ledge / out of a pit / to a hovering owner,
+not just up against terrain. Descend places a **step down** a sheer drop it can't safely Fall. With the
+break folds (dig up into a hill / down through the transit) the bot reaches any cell by some combination of
+the four Tier-1 kinds. Gated by `RISKY_EDIT` + `canPlace` (a non-placing bot is unchanged). **Why Pillar is
+still wanted (not a reachability gap now, a trade-off):** the staircase is 2 placements/step and moves
+up-AND-over; a straight **Pillar** is 1/block but one-way (a death-trap you can't descend). A* should weigh
+them as a natural cost fall-out — so Pillar/MineDown stay queued as separate kinds, not blockers. **Also
+open:** `PLACEABLE_NEIGHBOR` isn't consumed yet (the place still scans neighbours); and a **downward
+staircase DIG** (mine a descending stair when sealed in / boxed) is failing — next investigation (logs in
+hand). `BlockPathfinder.DEBUG` dumps the dead-end's per-movement candidates to localise these.
 
 ### The block-change hook — mixin, via the overlay pattern (approved, full-now)
 
