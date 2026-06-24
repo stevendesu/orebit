@@ -257,11 +257,15 @@ gravity risk. Those are the multi-cell facts the movement layer would otherwise 
 expansion. Precompute them once (at build / on block-update) and the movement layer reads ONE grid entry:
 **low bits → the cell's own geometry** (navtype → descriptor), **high bits → its neighbour context**.
 
-**Layout — widen the cell to `int[4096]` per section** (favour-cpu-over-ram: 16 KB/section is nothing,
-and it removes a fragile bit-squeeze). Low 16 bits = navtype index (the full `short` interning range — no
-overflow on heavily-modded servers, where a 10-bit/1024 cap could blow). High 16 bits = neighbour facts
-(6 used below, 10 spare). [A `short[4096]` would force navtype into ~10 bits = 1024, risky on mods — not
-recommended.]
+**Layout — keep `short[4096]` per section; bit-squeeze, do NOT widen.** Navtype index in the low bits
+(~10 bits = 1024 navtypes; measured ~530, so ~2× headroom), neighbour facts in the high 6. **A small
+footprint is itself a SPEED optimization** — cache residency + load time — so doubling the cell to `int`
+would hurt the very thing the compact grid buys (this is *why* we keep memory small; it was never a
+space goal). If the navtype count ever outgrows its bit budget, **compact the descriptor to collapse more
+states into fewer navtypes** before even considering a wider cell: e.g. store `log2(hardness)` instead of
+the full 8-bit hardness, merge `WATER`+`LAVA` into one `FLUID` bit (differentiate via `isDamaging`), or
+drop `TOOL_REQUIRED` (assume tools are required). Compaction first; widening is a last resort needing
+explicit sign-off.
 
 **The facts** (each added only when its consumer movement is built — same discipline as NavBlock's spare
 bits; `isDamaging` of the *floor* stays intrinsic in the navtype, no bit):
@@ -278,27 +282,51 @@ bits; `isDamaging` of the *floor* stays intrinsic in the navtype, no bit):
 "**don't BREAK or PLACE here**," because only an *edit* triggers the block update that releases the
 flow/cascade. So they're break-modifier gates read in one bit instead of an 8-cell neighbour scan.
 
-**Boundary handling — two distinct cases:**
-- *Section-internal boundary* (the neighbour 16³ IS loaded): **overscan** — read the real neighbour from
-  the adjacent section's resident grid (cheap now navtypes are resident). Accurate.
-- *True unloaded / ungenerated edge* (render distance, world border): no data exists, overscan can't
-  help → **assume conservatively**. For `risksFluidFlow`, treat horizontally-out-of-bounds cells as
-  **alternating air/water by y-parity**: the check runs for both body cells (y+1 AND y+2, one odd / one
-  even) and ORs the result, so a border cell always trips at least one → flagged → the bot won't
-  break/place at an edge it can't see past. Air-default suffices for the rest (`hasPlaceableNeighbor` →
-  "no face" is pessimistic-safe; `headroomHeight` / `risksGravityFall` read the cell's own vertical
-  column, not horizontal neighbours, so a horizontal edge doesn't affect them).
+**Boundary handling — always within-section, NO overscan.** Each section's neighbour bits are computed
+from its own cells plus a per-fact out-of-section default, so a section's bits **never depend on another
+section** — a block update recomputes bits within one section only, never reaching into a neighbouring nav
+grid (which would mean extra data fetching + cache thrash on *every* update). The OOB default is the safe
+direction for each fact:
+- `risksFluidFlow`: treat horizontally-out-of-bounds cells as **alternating air/water by y-parity**. The
+  check runs for both body cells (y+1 / y+2, one odd / one even) and ORs, so a boundary cell always trips
+  → flagged → the bot won't break/place at an edge it can't see past. Conservative, and harmless since the
+  bit gates only break/place, not walking.
+- movement-*enabling* facts (`headroomHeight`, `risksGravityFall`, `hasPlaceableNeighbor`) keep the **air**
+  default (today's behaviour): above/around a section is usually air or more space, so optimistic is
+  correct; a pessimistic default would wall off every 16th Y layer or every chunk border.
 
-  *Overscan ↔ incremental coupling:* overscan makes a near-border block change dirty the neighbour
-  section's border cells too. So the block-update hook stays **within-section** until the first
-  border-accuracy-needing consumer lands; then overscan + cross-section dirtying arrive together.
+Worst case of the conservative fluid default: the bot refuses to bridge/break *exactly on* a chunk/section
+boundary. If that ever bites at runtime, the fix is **lazy and on-demand, not eager overscan**: when A\*
+finds a boundary break/place uniquely valuable and the ONLY thing flagging it risky is the conservative
+boundary bitmask, do a *one-time* real lookup of the neighbour section's data — pay that cost rarely, when
+it matters, never constantly on every block update.
 
 ### Work items (ratified — build per consumer, not speculatively)
-1. **Replace the 4-value `TraversalClass`** with the navtype + neighbour-property bitmask (`int[4096]`);
-   `built()` becomes section-presence, not `classAt != null`.
+1. **Replace the 4-value `TraversalClass`** with the navtype + neighbour-property bitmask (**`short[4096]`,
+   bit-squeezed**); `built()` becomes section-presence, not `classAt != null`.
 2. **Intercept `setBlockState`** → update the changed cell's navtype AND recompute the neighbour-property
-   bits for the affected neighbourhood (the block-update hook; retires the per-replan `refreshNavData`).
-3. **Conservative unloaded-edge default** — alternating air/water for the `risksFluidFlow` horizontal-OOB
-   read (above).
+   bits for the affected (within-section) neighbourhood — the block-update hook; retires the per-replan
+   `refreshNavData`.
+3. **Conservative out-of-section default** — alternating air/water for the `risksFluidFlow` horizontal-OOB
+   read, always (no overscan).
 4. **Rewrite the movement classes** to read the neighbour-property bits (one grid read/cell) instead of
    re-deriving headroom / flow / gravity / placeable via extra per-expansion nav-grid reads.
+
+### The block-change hook — mixin, via the overlay pattern (approved, full-now)
+
+There's no loader API for "any block changed," so we accept a **mixin** — but contained the same way as
+every other version-fragile surface: behind a seam, with the version-specific code in `overlays/`.
+- **Common seam:** a small interface/registry the mod calls *consistently* to register a block-change
+  callback (e.g. `onBlockChanged(level, pos, oldState, newState)`), plus a common dispatcher the mixin
+  invokes. The nav-grid patcher registers against it in `OrebitCommon.init`.
+- **The mixin lives in `overlays/<era>/…/mixin/`** (baseline `overlays/1.17`): an `@Inject` into
+  `LevelChunk.setBlockState` that forwards to the common dispatcher. Plus the loader mixin-config JSON
+  (Fabric `fabric.mod.json` / Forge `mods.toml`) — this is the project's **first mixin**, so it adds the
+  mixin-config scaffolding too.
+- **Per-version discipline:** a mixin *compiles* regardless of whether its target signature is right (it
+  resolves at load time), so the compile gate can't catch drift. **Walk the versions forward and check the
+  Minecraft source for `setBlockState`'s signature at each step**, adding an overlay flavor only where it
+  changed. Runtime-verify on the versions we can run.
+- **Why full-now (not call-site-only):** the bot is designed to operate *alongside* a player who is
+  constantly mining/building its terrain, so it must see *all* edits, not just its own — a strong
+  foundation laid early avoids retrofitting later.
