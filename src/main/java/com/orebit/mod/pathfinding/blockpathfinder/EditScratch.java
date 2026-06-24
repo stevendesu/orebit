@@ -85,12 +85,50 @@ public final class EditScratch {
         long d = ctx.descriptorAt(x, y, z); // one read; reused by standable/placeable below
         if (ctx.standable(d)) return;
         if (allowEdits && ctx.placeable(x, y, z, d)) {
-            places = push(places, placeCount, x, y, z);
-            placeCount++;
-            extraCost += MovementContext.PLACE_COST;
+            addPlace(x, y, z);
         } else {
             valid = false; // no footing, and either the bot can't place or an edit here is forbidden (risky)
         }
+    }
+
+    /**
+     * Require footing at {@code (fx,fy,fz)}, building a <b>support</b> at {@code (sx,sy,sz)} directly
+     * beneath it first if the footing has nothing of its own to place against — the two-block staircase
+     * step (MOVEMENT-DESIGN §2). Three cases: already {@link MovementContext#standable standable} → free;
+     * directly {@link MovementContext#placeable placeable} (a face already exists — terrain or a wall) →
+     * place just the footing; otherwise, if the footing cell is {@link MovementContext#openForPlace open}
+     * and the support is itself placeable (against existing terrain — typically the bot's own floor beside
+     * it), place <b>both</b> the support and the footing on top of it. Else the move is impossible.
+     *
+     * <p>This is what lets the bot build a diagonal staircase up through open air / off a ledge: a lone
+     * footing one-up-and-over has no face to attach to, but a support placed against the floor the bot
+     * stands on gives it one. Two placements, so A* prefers a natural slope or (later) a Pillar where those
+     * are cheaper — the staircase is the general fallback, chosen only when it's the cheapest way up.
+     */
+    public void requireFootingOn(int fx, int fy, int fz, int sx, int sy, int sz) {
+        if (!valid) return;
+        long fd = ctx.descriptorAt(fx, fy, fz);
+        if (ctx.standable(fd)) return;
+        if (!allowEdits) { valid = false; return; }
+        if (ctx.placeable(fx, fy, fz, fd)) { // footing already has a face — one placement
+            addPlace(fx, fy, fz);
+            return;
+        }
+        // No face for the footing: place a support beneath it (against existing terrain), then the footing
+        // rests on that support. We don't re-test the footing's placeability — the support guarantees it.
+        long sd = ctx.descriptorAt(sx, sy, sz);
+        if (ctx.openForPlace(fd) && ctx.placeable(sx, sy, sz, sd)) {
+            addPlace(sx, sy, sz);
+            addPlace(fx, fy, fz);
+        } else {
+            valid = false;
+        }
+    }
+
+    private void addPlace(int x, int y, int z) {
+        places = push(places, placeCount, x, y, z);
+        placeCount++;
+        extraCost += MovementContext.PLACE_COST;
     }
 
     /** Whether every required cell was satisfiable (directly or via an allowed break/place). */
