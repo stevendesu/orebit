@@ -51,11 +51,12 @@ public final class EditScratch {
      */
     public void requireAir(int x, int y, int z) {
         if (!valid) return;
-        if (ctx.passable(x, y, z)) return;
-        if (ctx.breakable(x, y, z)) {
+        long d = ctx.descriptorAt(x, y, z); // one read; reused by passable/breakable/breakCost below
+        if (ctx.passable(d)) return;
+        if (ctx.breakable(d)) {
             breaks = push(breaks, breakCount, x, y, z);
             breakCount++;
-            extraCost += ctx.breakCost(x, y, z);
+            extraCost += ctx.breakCost(d);
         } else {
             valid = false;
         }
@@ -68,8 +69,9 @@ public final class EditScratch {
      */
     public void requireFloor(int x, int y, int z) {
         if (!valid) return;
-        if (ctx.standable(x, y, z)) return;
-        if (ctx.placeable(x, y, z)) {
+        long d = ctx.descriptorAt(x, y, z); // one read; reused by standable/placeable below
+        if (ctx.standable(d)) return;
+        if (ctx.placeable(x, y, z, d)) {
             places = push(places, placeCount, x, y, z);
             placeCount++;
             extraCost += MovementContext.PLACE_COST;
