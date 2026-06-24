@@ -48,6 +48,15 @@ public final class BlockPathfinder {
     public static boolean DEBUG = true;
 
     /**
+     * When true, every search logs how long it took, how many nodes it expanded, and the derived ns/node
+     * — the empirical data for sizing {@link #MAX_EXPANSIONS}. One INFO line per pathfind, so flip off once
+     * you've collected data. Caveats when reading it: the first few are JIT-cold (ignore), break/place
+     * paths cost more per node than plain walks (the PathEdits rebuild + edit checks), and a GC pause can
+     * spike a single sample — look at the steady-state distribution, not one line.
+     */
+    public static boolean LOG_TIMING = true;
+
+    /**
      * Node-expansion ceiling — bounds per-call cost so a long/blocked goal can't stall the tick. A
      * backstop, NOT the primary throttle: the per-axis heuristic below is what keeps a normal search far
      * under this. (Pathing measures instant; 10k leaves headroom for genuinely long routes.)
@@ -102,11 +111,15 @@ public final class BlockPathfinder {
      */
     public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
                                          BotCaps caps) {
+        final long t0 = System.nanoTime();
         final int sx = startFloor.getX(), sy = startFloor.getY(), sz = startFloor.getZ();
         final int gx = goalFloor.getX(), gy = goalFloor.getY(), gz = goalFloor.getZ();
 
         // Bot must be on built ground for the grid-based search to mean anything.
-        if (!grid.built(sx, sy, sz)) return null;
+        if (!grid.built(sx, sy, sz)) {
+            if (LOG_TIMING) logTiming(t0, 0, false, "no-start-ground", sx, sy, sz, gx, gy, gz);
+            return null;
+        }
 
         final MovementContext ctx = new MovementContext(grid, caps);
         final long startKey = BlockPos.asLong(sx, sy, sz);
@@ -171,10 +184,30 @@ public final class BlockPathfinder {
 
         if (reachedKey == -1L) {
             if (DEBUG) explainFailure(ctx, sx, sy, sz, gx, gy, gz, expansions, budgetHit, bestX, bestY, bestZ);
+            if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
+                    budgetHit ? "FAIL-budget" : "FAIL-exhausted", sx, sy, sz, gx, gy, gz);
             return null;
         }
 
-        return reconstruct(cameFrom, cameFromMove, cameFromEdits, gScore, startKey, reachedKey);
+        BlockPathPlan plan = reconstruct(cameFrom, cameFromMove, cameFromEdits, gScore, startKey, reachedKey);
+        if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
+                "FOUND-" + plan.size() + "wp", sx, sy, sz, gx, gy, gz);
+        return plan;
+    }
+
+    /**
+     * One INFO line of search timing: nodes expanded, wall-clock spent, the derived ns/node, whether the
+     * path carried any break/place edits ({@code +edits}, which cost more per node), the result, and the
+     * endpoints. {@code System.nanoTime()} captures the whole search incl. the per-call map allocations.
+     */
+    private static void logTiming(long t0, int expansions, boolean edits, String result,
+                                  int sx, int sy, int sz, int gx, int gy, int gz) {
+        long ns = System.nanoTime() - t0;
+        String perNode = expansions > 0 ? String.format("%.0f", (double) ns / expansions) : "-";
+        OrebitCommon.LOGGER.info(
+                "[Orebit] path TIMING: {} nodes in {} us ({} ns/node){} -> {}  ({},{},{})->({},{},{})",
+                expansions, String.format("%.1f", ns / 1000.0), perNode, edits ? " +edits" : "",
+                result, sx, sy, sz, gx, gy, gz);
     }
 
     /**
