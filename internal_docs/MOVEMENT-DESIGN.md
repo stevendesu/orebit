@@ -344,11 +344,16 @@ grid (which would mean extra data fetching + cache thrash on *every* update). Th
    `RISKY_EDIT` *precise* flood/cascade check (item 3) + conservative fluid OOB are still deferred to the
    fluid-aware break modifier.
 
-**Known coverage gap (next):** nothing places a block to gain *height* — Traverse bridges horizontally,
-Ascend needs an already-standable step, and Pillar/MineDown aren't built. So a bot at a cliff base / cave
-wall with the owner above gets "plan: none". `BlockPathfinder.DEBUG` now logs the closest-approach cell +
-what each movement offered from it, to confirm this before adding the **place-to-ascend staircase** (an
-Ascend place-floor modifier) and **Pillar/MineDown** kinds.
+**Coverage gap — staircases DONE (§19 cont.):** Ascend and Descend now fold a `requireFloor` place (like
+Traverse's bridge), so the bot builds a **staircase up** (place a step against a wall/hillside and jump
+onto it) and a **step down** a sheer drop it can't safely Fall — and with the existing break folds (dig up
+into a hill / down through the transit) it reaches any cell by some combination of the four Tier-1 kinds,
+even if inefficiently. Gated by `RISKY_EDIT`; only unlocked by place-capable caps (a non-placing bot is
+unchanged — `placeable()` is false → no candidate). **Still open:** a free-standing **open-air pillar**
+(straight up/down with nothing to place against) needs the dedicated **Pillar / MineDown** kinds; and the
+`PLACEABLE_NEIGHBOR` bit isn't consumed yet (the place still scans neighbours in `MovementContext.placeable`).
+`BlockPathfinder.DEBUG` logs the closest-approach cell + per-movement candidates from a dead-end to spot the
+next gap.
 
 ### The block-change hook — mixin, via the overlay pattern (approved, full-now)
 
