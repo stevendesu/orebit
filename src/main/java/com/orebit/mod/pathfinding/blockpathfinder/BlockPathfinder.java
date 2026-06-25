@@ -61,6 +61,16 @@ public final class BlockPathfinder {
      */
     private static final int MAX_EXPANSIONS = 10000;
 
+    /**
+     * Minimum heuristic improvement (how much closer to the goal the closest-approach node is than the start)
+     * for a <b>budget-exhausted</b> search to return a PARTIAL path instead of {@code null}. Below this the
+     * progress is noise and committing to it would just churn the replanner. The lever that turns "the bot
+     * stands still and logs FAIL" into "the bot walks as far as it got, then replans and continues" — the fix
+     * for goals a single bounded search can't reach in one shot (a tall open-air pillar, whose per-block build
+     * cost the heuristic under-estimates, so the search floods the corridor before topping out).
+     */
+    private static final float PARTIAL_MIN_PROGRESS = 2.0f;
+
     // Heuristic = 3D octile distance to the goal, times an inflation WEIGHT. Octile is the true shortest
     // path on a grid that can move straight (cost 1), face-diagonal (√2, two axes at once) or corner-
     // diagonal (√3, three axes at once): spend the shortest axis on corner-diagonals, the next on
@@ -394,6 +404,7 @@ public final class BlockPathfinder {
         // for a failed plan: where did it dead-end, and was it walled in or just out of budget?
         float bestH = Float.MAX_VALUE;
         int bestX = sx, bestY = sy, bestZ = sz;
+        int bestRow = startRow;     // row of the closest-approach node — the partial-path target on budget exhaustion
         boolean budgetHit = false;
 
         while (nodes.heapSize > 0) {
@@ -409,7 +420,7 @@ public final class BlockPathfinder {
             }
 
             float h = relaxer.h(cx, cy, cz);
-            if (h < bestH) { bestH = h; bestX = cx; bestY = cy; bestZ = cz; }
+            if (h < bestH) { bestH = h; bestX = cx; bestY = cy; bestZ = cz; bestRow = current; }
 
             if (++expansions > MAX_EXPANSIONS) { budgetHit = true; break; }
 
@@ -436,6 +447,17 @@ public final class BlockPathfinder {
 
         if (reachedRow == -1) {
             if (DEBUG) explainFailure(ctx, sx, sy, sz, gx, gy, gz, expansions, budgetHit, bestX, bestY, bestZ, bound);
+            // Partial-path return: when the BUDGET (not connectivity) stopped the search and it made real
+            // progress toward the goal, return the path to the closest-approach node so the bot moves forward
+            // and replans from there — converging on a goal a single bounded search can't reach in one shot.
+            // A search that EXHAUSTED the heap (walled in) returns null instead: the closest cell is all it can
+            // reach, so moving there and replanning would just re-fail (and keeps the FAIL signal visible).
+            if (budgetHit && bestRow != startRow && (relaxer.h(sx, sy, sz) - bestH) > PARTIAL_MIN_PROGRESS) {
+                BlockPathPlan partial = reconstruct(nodes, startRow, bestRow);
+                if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
+                        "PARTIAL-" + partial.size() + "wp", sx, sy, sz, gx, gy, gz);
+                return partial;
+            }
             if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
                     budgetHit ? "FAIL-budget" : "FAIL-exhausted", sx, sy, sz, gx, gy, gz);
             return null;
