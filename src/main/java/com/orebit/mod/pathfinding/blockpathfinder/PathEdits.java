@@ -2,6 +2,8 @@ package com.orebit.mod.pathfinding.blockpathfinder;
 
 import java.util.Arrays;
 
+import net.minecraft.core.BlockPos;
+
 /**
  * The block edits (places + breaks) along the A* path to the node currently being expanded — a small
  * <b>diff over the nav grid</b> so a movement reads the world as it <i>will be</i> after the moves that
@@ -45,11 +47,23 @@ public final class PathEdits {
     private int size;
     private int growAt = INITIAL_CAPACITY * 3 / 4;
 
+    // Inclusive axis-aligned bounding box of every edited cell currently in the table — the cheap reject the
+    // per-cell {@link #kindAt(int, int, int)} read uses BEFORE hashing. A search's edits cluster in a tiny
+    // region (a pillar is one column; a dug step is a few cells), yet each expanded node reads ~100 cells
+    // spread around it, almost all far from any edit. Six int compares against this box short-circuit those
+    // far reads to NONE for the cost of a hash + probe each — the bulk of the per-node descriptor cost on an
+    // edit-heavy search (it was ~25% of the TOWER profile). Empty box (min>max) when {@code size==0}, so the
+    // {@code size==0} guard already rejects everything before the box is consulted.
+    private int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
+    private int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+
     /** Clear for a fresh node expansion (keeps the table's capacity for reuse). */
     public void reset() {
         if (size != 0) {
             Arrays.fill(kinds, (byte) NONE);
             size = 0;
+            minX = minY = minZ = Integer.MAX_VALUE;
+            maxX = maxY = maxZ = Integer.MIN_VALUE;
         }
     }
 
@@ -63,6 +77,19 @@ public final class PathEdits {
         if (se == null) return;
         for (int i = 0, n = se.placeCount(); i < n; i++) markIfAbsent(se.placeAt(i), (byte) PLACED);
         for (int i = 0, n = se.breakCount(); i < n; i++) markIfAbsent(se.breakAt(i), (byte) BROKEN);
+    }
+
+    /**
+     * The planned edit kind at cell {@code (x,y,z)}, or {@link #NONE} — the read-once form the movement
+     * layer uses. Rejects cells outside the edits' {@linkplain #minX bounding box} with six int compares
+     * before paying the hash + probe of {@link #kindAt(long)}; since a search's edits cluster tightly while
+     * a node's reads fan out around it, most reads reject here. Equivalent to {@code kindAt(BlockPos.asLong(
+     * x,y,z))} for in-box cells, and to {@link #NONE} (the same answer) for out-of-box ones.
+     */
+    public int kindAt(int x, int y, int z) {
+        if (size == 0) return NONE;
+        if (x < minX || x > maxX || y < minY || y > maxY || z < minZ || z > maxZ) return NONE;
+        return kindAt(BlockPos.asLong(x, y, z));
     }
 
     /** The planned edit kind at a packed-{@code BlockPos.asLong} cell, or {@link #NONE}. */
@@ -85,6 +112,13 @@ public final class PathEdits {
             if (k == NONE) {                  // empty → claim it
                 keys[slot] = pos;
                 kinds[slot] = kind;
+                int cx = BlockPos.getX(pos), cy = BlockPos.getY(pos), cz = BlockPos.getZ(pos);
+                if (cx < minX) minX = cx;
+                if (cx > maxX) maxX = cx;
+                if (cy < minY) minY = cy;
+                if (cy > maxY) maxY = cy;
+                if (cz < minZ) minZ = cz;
+                if (cz > maxZ) maxZ = cz;
                 if (++size >= growAt) grow();
                 return;
             }
