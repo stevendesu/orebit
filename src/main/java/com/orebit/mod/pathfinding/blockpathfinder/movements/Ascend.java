@@ -51,14 +51,18 @@ public final class Ascend implements Movement {
             int nx = x + d[0];
             int nz = z + d[1];
 
-            if (!ctx.built(nx, uy, nz)) continue;
+            // The destination floor (nx,uy,nz) is read three ways below (standable, topY, flags) — resolve
+            // its grid slot ONCE and derive each from it.
+            int dstPacked = ctx.packedAt(nx, uy, nz);
+            if (dstPacked == MovementContext.UNBUILT) continue;
+            long dstDesc = ctx.descriptorOf(nx, uy, nz, dstPacked);
 
             // A low partial already one up is Traverse's step-assist (a no-jump auto-step), not an Ascend —
             // leave it to Traverse. (Only when footing already exists; a placed step is a full block.)
-            boolean dstStandable = ctx.standable(nx, uy, nz);
-            if (dstStandable && ctx.topYOf(nx, uy, nz) <= MovementContext.STEP_ASSIST_MAX_TOP_Y) continue;
+            boolean dstStandable = ctx.standable(dstDesc);
+            if (dstStandable && ctx.topYOf(dstDesc) <= MovementContext.STEP_ASSIST_MAX_TOP_Y) continue;
 
-            int dstFlags = ctx.flagsAt(nx, uy, nz);
+            int dstFlags = MovementContext.flagsOf(dstPacked);
             EditScratch e = ctx.edits().reset(!(srcRisky || MovementContext.risksEdit(dstFlags)));
             // Footing: stand on the block that's there, or BUILD A STEP UP. If the footing one-up-and-over
             // has no face of its own (open air / a ledge), a support block is placed beneath it against the

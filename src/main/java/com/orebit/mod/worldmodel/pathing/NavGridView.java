@@ -41,6 +41,15 @@ import net.minecraft.world.level.block.state.BlockState;
  */
 public final class NavGridView {
 
+    /**
+     * Sentinel returned by {@link #packedAt} for a cell whose chunk/section nav data isn't built — the
+     * built gate folded into the packed value (a real slot is 0..65535, so {@code -1} can't collide). A
+     * caller treats it exactly as {@code !built}: skip the cell (never derive flags/navtype from it, and
+     * never path into it). This keeps the gate that {@link #descriptorAt}'s live-{@code getBlockState}
+     * fallback rests on without paying a second section resolve.
+     */
+    public static final int UNBUILT = -1;
+
     private final ServerLevel level;
     private final int minY;
     // Reused for the on-demand geometry reads; safe because a view is used single-threaded per pathfind.
@@ -80,6 +89,21 @@ public final class NavGridView {
     public int flagsAt(int x, int y, int z) {
         NavSection section = sectionAt(x, y, z);
         return section == null ? 0 : section.getFlags(x & 15, y & 15, z & 15);
+    }
+
+    /**
+     * The whole packed grid slot at world cell {@code (x,y,z)} — flags <i>and</i> navtype in a single
+     * section resolve — or {@link #UNBUILT} where that chunk's nav data isn't built. The read-once seam
+     * for the movement prologue: instead of a {@link #built} gate plus a {@link #flagsAt} plus a {@link
+     * #descriptorAt} (three section resolves of the same cell), the caller resolves the slot once here and
+     * derives built-ness ({@code != UNBUILT}), the flags ({@link TraversalGrid#flagsOf}) and the navtype/
+     * descriptor ({@link TraversalGrid#navtypeOf} → {@link NavBlock#descriptor}) from it. Unlike {@link
+     * #descriptorAt} there is no live-block fallback (the {@code UNBUILT} sentinel <i>is</i> the gate), so
+     * a probe past the loaded radius is reported as unbuilt rather than read live.
+     */
+    public int packedAt(int x, int y, int z) {
+        NavSection section = sectionAt(x, y, z);
+        return section == null ? UNBUILT : section.getPacked(x & 15, y & 15, z & 15);
     }
 
     /**

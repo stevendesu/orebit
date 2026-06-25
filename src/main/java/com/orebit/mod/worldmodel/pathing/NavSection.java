@@ -45,6 +45,11 @@ public class NavSection {
         return grid.navtype(x, y, z);
     }
 
+    /** The whole packed slot (flags + navtype) at this cell — read once, derive both. */
+    public int getPacked(int x, int y, int z) {
+        return grid.packed(x, y, z);
+    }
+
     public BlockPos getOrigin() {
         return origin;
     }
