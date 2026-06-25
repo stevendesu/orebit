@@ -5,7 +5,6 @@ import com.orebit.mod.worldmodel.pathing.NavFlags;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 import com.orebit.mod.worldmodel.pathing.TraversalGrid;
 
-import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.Blocks;
 
 /**
@@ -102,7 +101,7 @@ public final class MovementContext {
      */
     public long descriptorAt(int x, int y, int z) {
         if (!pathEdits.isEmpty()) {
-            int kind = pathEdits.kindAt(BlockPos.asLong(x, y, z));
+            int kind = pathEdits.kindAt(x, y, z);
             if (kind == PathEdits.PLACED) return PLACED_DESC;
             if (kind == PathEdits.BROKEN) return AIR_DESC;
         }
@@ -137,7 +136,7 @@ public final class MovementContext {
      */
     public long descriptorOf(int x, int y, int z, int packed) {
         if (!pathEdits.isEmpty()) {
-            int kind = pathEdits.kindAt(BlockPos.asLong(x, y, z));
+            int kind = pathEdits.kindAt(x, y, z);
             if (kind == PathEdits.PLACED) return PLACED_DESC;
             if (kind == PathEdits.BROKEN) return AIR_DESC;
         }
