@@ -102,6 +102,19 @@ public final class NavGridView {
     }
 
     /**
+     * Public seam for the HPA* leaf-cost computer (PRD §6.3–6.5; HPA-IMPLEMENTATION.md §1, §5): a view
+     * over a synthetic, already-built section map with <b>no live level</b>, built by
+     * {@link com.orebit.mod.worldmodel.hpa.LeafCostComputer} so a bounded one-section block-A* mini-pathfind
+     * can run without standing up a {@link ServerLevel}. Delegates to the package-private test/benchmark
+     * ctor — the same no-live-level contract applies: because {@code level} is {@code null},
+     * {@link #descriptorAt}'s live-{@code getBlockState} fallback must never fire, so the caller keeps every
+     * cell the search can probe inside the supplied built map.
+     */
+    public static NavGridView overSections(int minY, ConcurrentHashMap<Long, NavSection[]> chunks) {
+        return new NavGridView(minY, chunks);
+    }
+
+    /**
      * Whether world cell {@code (x,y,z)} has built nav data — {@code false} if that chunk's nav data
      * isn't currently built (unloaded radius) or {@code y} is out of the level's vertical range. The
      * cheap gate the pathfinder uses to stay inside the loaded radius.
@@ -178,7 +191,14 @@ public final class NavGridView {
      */
     private NavSection[] lookupChunk(long key) {
         int slot = chunkSlot(key);
-        for (;;) {
+        // Bound the probe to the cache capacity. Normally a slot is found long before this (the cache is sized
+        // well above the distinct-chunk count of a single bounded search). But a saturated cache — a single
+        // unbounded search touching > CC_CAP distinct chunks (a very long open-ground walk), or a view reused
+        // across many searches — would otherwise loop forever here: every slot is full and the key isn't
+        // present. On saturation, fall back to a direct (boxing) store lookup: slow-but-correct, never a hang.
+        // (Production builds a fresh view per pathfind and the HPA* corridor bound keeps a windowed search to a
+        // handful of chunks, so this fallback should not fire on the live path.)
+        for (int probes = 0; probes < CC_CAP; probes++) {
             NavSection[] v = ccVals[slot];
             if (v == null) { // cold slot — box once, resolve from the store, and cache (even a null result)
                 NavSection[] sections = chunks == null ? null : chunks.get(key);
@@ -189,6 +209,7 @@ public final class NavGridView {
             if (ccKeys[slot] == key) return v == CC_UNBUILT ? null : v;
             slot = (slot + 1) & CC_MASK;
         }
+        return chunks == null ? null : chunks.get(key); // cache saturated — degrade to a direct lookup
     }
 
     /** Murmur3 64-bit finalizer → cache slot; spreads the structured chunk keys so probe chains stay short. */

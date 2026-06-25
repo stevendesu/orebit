@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.platform.ChunkCoords;
 import com.orebit.mod.platform.PlatformEvents;
+import com.orebit.mod.worldmodel.hpa.HpaMaintenance;
 
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.chunk.ChunkAccess;
@@ -57,6 +58,10 @@ public final class ChunkNavLoader {
             while (built < MAX_BUILDS_PER_TICK && (k = queue.poll()) != null) {
                 ChunkAccess chunk = level.getChunk(NavStore.keyX(k), NavStore.keyZ(k));
                 NavStore.put(level, k, ChunkNavBuilder.buildAllSections(level, chunk));
+                // Eager HPA* region build (HPA-IMPLEMENTATION.md §12): build the region leaves as the chunk's
+                // nav data is built, so the cost pyramid accumulates explored terrain (and survives chunk
+                // unload in RAM — the travel-then-path fix). Bounded by this loader's per-tick chunk budget.
+                HpaMaintenance.onChunkNavBuilt(level, NavStore.keyX(k), NavStore.keyZ(k));
                 built++;
             }
             if (built > 0) {
