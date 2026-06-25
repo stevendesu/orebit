@@ -51,6 +51,6 @@ public final class Pillar implements Movement {
         e.requireFloor(x, ny, z);
         // Takeoff head-clearance: the new head cell must be clear (break-fold if the bot may break).
         e.requireAir(x, y + 3, z);
-        if (e.valid()) out.accept(x, ny, z, COST + e.extraCost(), e.snapshot());
+        if (e.valid()) out.accept(x, ny, z, COST + e.extraCost(), e);
     }
 }

@@ -54,7 +54,7 @@ public final class Traverse implements Movement {
                 EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
                 ctx.requireBodyClear(e, nx, y, nz, flags);
                 if (e.valid()) {
-                    out.accept(nx, y, nz, cost(ctx, pd) + e.extraCost(), e.snapshot());
+                    out.accept(nx, y, nz, cost(ctx, pd) + e.extraCost(), e);
                     continue; // already have footing here; don't also step-assist/bridge this column
                 }
             }
@@ -70,7 +70,7 @@ public final class Traverse implements Movement {
                     EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
                     ctx.requireBodyClear(e, nx, uy, nz, flags);
                     if (e.valid()) {
-                        out.accept(nx, uy, nz, cost(ctx, pud) + e.extraCost(), e.snapshot());
+                        out.accept(nx, uy, nz, cost(ctx, pud) + e.extraCost(), e);
                         continue;
                     }
                 }
@@ -86,7 +86,7 @@ public final class Traverse implements Movement {
                 e.requireFloor(nx, y, nz);
                 ctx.requireBodyClear(e, nx, y, nz, flags);
                 if (e.valid()) {
-                    out.accept(nx, y, nz, cost(ctx, pd) + e.extraCost(), e.snapshot());
+                    out.accept(nx, y, nz, cost(ctx, pd) + e.extraCost(), e);
                 }
             }
         }

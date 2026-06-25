@@ -449,7 +449,7 @@ public final class BlockPathfinder {
         }
 
         @Override
-        public void accept(int nx, int ny, int nz, float cost, StepEdits edits) {
+        public void accept(int nx, int ny, int nz, float cost, EditScratch scratch) {
             float tentative = currentG + cost;
             long nKey = BlockPos.asLong(nx, ny, nz);
             int row = nodes.intern(nKey, nx, ny, nz);
@@ -459,9 +459,11 @@ public final class BlockPathfinder {
             nodes.f[row] = tentative + h(nx, ny, nz);
             nodes.parent[row] = current;
             nodes.move[row] = move;
-            // Keep the edit-set attached to the same (cheapest) edge as the move; clear any stale set
-            // left by a costlier edge so the follower never mines/places blocks the winning move didn't.
-            if (edits != null) { nodes.edits[row] = edits; anyEdits = true; }
+            // Snapshot the edits ONLY now that this candidate is an improvement we're keeping — the
+            // rejected majority above never allocated a StepEdits. Keep the set on the same (cheapest)
+            // edge as the move, and clear any stale set left by a costlier edge so the follower never
+            // mines/places blocks the winning move didn't.
+            if (scratch != null && scratch.hasEdits()) { nodes.edits[row] = scratch.snapshot(); anyEdits = true; }
             else nodes.edits[row] = null;
             nodes.push(row);
         }
@@ -508,7 +510,8 @@ public final class BlockPathfinder {
             int[] count = {0};
             m.candidates(ctx, bx, by, bz, (cx, cy, cz, cost, edits) -> {
                 count[0]++;
-                sb.append(String.format(" (%d,%d,%d)c=%.1f%s", cx, cy, cz, cost, edits == null ? "" : "+edit"));
+                boolean hasEdit = edits != null && edits.hasEdits();
+                sb.append(String.format(" (%d,%d,%d)c=%.1f%s", cx, cy, cz, cost, hasEdit ? "+edit" : ""));
             });
             OrebitCommon.LOGGER.info("[Orebit]   {} -> {}", m.getClass().getSimpleName(),
                     count[0] == 0 ? "(nothing)" : sb.toString());

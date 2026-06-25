@@ -14,10 +14,12 @@ import net.minecraft.core.BlockPos;
  * <p><b>Reused, not re-allocated.</b> One scratch lives on the {@link MovementContext} (single-threaded
  * per pathfind, like the underlying grid cursor). A movement calls {@link #reset()} before each
  * candidate, requires the cells it needs, then — if still {@link #valid()} — emits the destination with
- * {@code baseCost + }{@link #extraCost()} and {@link #snapshot()}. {@code snapshot()} copies the
- * accumulated cells into an immutable {@link StepEdits} (so the reused buffers never alias what the
- * search stored), and returns {@code null} when there were no edits — keeping ordinary walking moves
- * allocation-free and on the plain {@link CandidateSink#accept(int, int, int, float)} path.
+ * {@code baseCost + }{@link #extraCost()} and hands this scratch to the {@link CandidateSink}. The sink
+ * calls {@link #snapshot()} itself, but <i>only after</i> its relaxation gate accepts the candidate, so a
+ * rejected (non-improving) candidate allocates nothing. {@code snapshot()} copies the accumulated cells
+ * into an immutable {@link StepEdits} (so the reused buffers never alias what the search stored), and
+ * returns {@code null} when there were no edits — keeping ordinary walking moves allocation-free and on
+ * the plain {@link CandidateSink#accept(int, int, int, float)} path.
  */
 public final class EditScratch {
 
@@ -143,6 +145,11 @@ public final class EditScratch {
     /** The mining + placing cost to add to the move's base traversal cost. */
     public float extraCost() {
         return extraCost;
+    }
+
+    /** Whether any break or place was folded — lets a caller test for edits without {@link #snapshot()}. */
+    public boolean hasEdits() {
+        return breakCount != 0 || placeCount != 0;
     }
 
     /**
