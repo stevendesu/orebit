@@ -162,6 +162,15 @@ public final class NavGridView {
         if (section != null) {
             return NavBlock.descriptor((short) section.getNavtype(x & 15, y & 15, z & 15));
         }
+        // Synthetic/bounded view (no live world — the HPA* leaf-cost mini-pathfind over a single section, or
+        // a headless benchmark): there is no level to fall back to, so report AIR for any out-of-built probe.
+        // A movement can read a cell just outside the bounded section WITHOUT a built()/packedAt() gate (e.g.
+        // Ascend's place-footing collision check), and live-reading a null level NPEs the server tick. AIR is
+        // the safe total answer: out-of-built cells are already !built/UNBUILT for the gated reads, and air is
+        // passable-but-not-standable, so it keeps the search walled into the built region rather than crashing.
+        if (level == null) {
+            return NavBlock.descriptor(NavBlock.AIR);
+        }
         BlockState state = level.getBlockState(cursor.set(x, y, z));
         return NavBlock.descriptorFor(state);
     }
