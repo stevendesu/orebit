@@ -55,6 +55,30 @@ public final class BlockPathfinder {
     public static boolean LOG_TIMING = true;
 
     /**
+     * Step-by-step search trace sink — when non-null AND {@link #TRACE} is on, every node expansion and every
+     * candidate (with its accept/reject reason) is written here, one line each, for OFFLINE analysis of why a
+     * search explores what it does (the open-air-pillar investigation). Format (space-separated, greppable):
+     * <pre>
+     *   E &lt;seq&gt; &lt;x&gt; &lt;y&gt; &lt;z&gt; g=&lt;g&gt; f=&lt;f&gt; via=&lt;Movement|start&gt;
+     *     C &lt;Movement&gt; &lt;x&gt; &lt;y&gt; &lt;z&gt; cost=&lt;c&gt; &lt;OK|worse|corridor&gt;
+     * </pre>
+     * An {@code E} line is one pop (in expansion order); the indented {@code C} lines under it are that node's
+     * emitted candidates — {@code OK} = relaxed onto the open set, {@code worse} = not an improvement, {@code
+     * corridor} = rejected by the {@link RegionBound}. Writing per node is slow (file I/O on the tick thread),
+     * so this is a deliberate one-shot debug path driven by a command, never on in normal play.
+     */
+    public static java.io.Writer TRACE_OUT;
+
+    /** Gate for {@link #TRACE_OUT}: emit the step-by-step trace. Off in normal play (the trace is huge + slow). */
+    public static boolean TRACE = false;
+
+    private static void trace(String line) {
+        java.io.Writer w = TRACE_OUT;
+        if (w == null) return;
+        try { w.write(line); w.write('\n'); } catch (java.io.IOException ignored) { }
+    }
+
+    /**
      * Node-expansion ceiling — bounds per-call cost so a long/blocked goal can't stall the tick. A
      * backstop, NOT the primary throttle: the per-axis heuristic below is what keeps a normal search far
      * under this. (Pathing measures instant; 10k leaves headroom for genuinely long routes.)
@@ -62,12 +86,19 @@ public final class BlockPathfinder {
     private static final int MAX_EXPANSIONS = 10000;
 
     /**
+     * Master switch for partial-path return — <b>OFF by default, deliberately.</b> Partial-path is a later
+     * arc (it must NOT mask HPA* or heuristic failures while we are still verifying them — a budget-exhausted
+     * search returns {@code null} so the FAIL stays visible). When enabled, a budget-exhausted search that
+     * made real progress returns the path to its closest-approach node instead of null, so the bot walks as
+     * far as it got and replans. Re-enable only once the open-air-pillar pathology is understood/fixed at the
+     * search level, not papered over.
+     */
+    public static boolean PARTIAL_PATH = false;
+
+    /**
      * Minimum heuristic improvement (how much closer to the goal the closest-approach node is than the start)
-     * for a <b>budget-exhausted</b> search to return a PARTIAL path instead of {@code null}. Below this the
-     * progress is noise and committing to it would just churn the replanner. The lever that turns "the bot
-     * stands still and logs FAIL" into "the bot walks as far as it got, then replans and continues" — the fix
-     * for goals a single bounded search can't reach in one shot (a tall open-air pillar, whose per-block build
-     * cost the heuristic under-estimates, so the search floods the corridor before topping out).
+     * for a <b>budget-exhausted</b> search to return a PARTIAL path (only when {@link #PARTIAL_PATH}). Below
+     * this the progress is noise and committing to it would just churn the replanner.
      */
     private static final float PARTIAL_MIN_PROGRESS = 2.0f;
 
@@ -422,6 +453,11 @@ public final class BlockPathfinder {
             float h = relaxer.h(cx, cy, cz);
             if (h < bestH) { bestH = h; bestX = cx; bestY = cy; bestZ = cz; bestRow = current; }
 
+            if (TRACE) trace("E " + expansions + " " + cx + " " + cy + " " + cz
+                    + " g=" + nodes.g[current] + " f=" + nodes.f[current] + " via="
+                    + (nodes.move[current] < 0 ? "start"
+                            : MovementRegistry.TIER1.get(nodes.move[current]).getClass().getSimpleName()));
+
             if (++expansions > MAX_EXPANSIONS) { budgetHit = true; break; }
 
             // Rebuild the planned-edit diff for the path to THIS node, so the movements below read the
@@ -452,7 +488,8 @@ public final class BlockPathfinder {
             // and replans from there — converging on a goal a single bounded search can't reach in one shot.
             // A search that EXHAUSTED the heap (walled in) returns null instead: the closest cell is all it can
             // reach, so moving there and replanning would just re-fail (and keeps the FAIL signal visible).
-            if (budgetHit && bestRow != startRow && (relaxer.h(sx, sy, sz) - bestH) > PARTIAL_MIN_PROGRESS) {
+            if (PARTIAL_PATH && budgetHit && bestRow != startRow
+                    && (relaxer.h(sx, sy, sz) - bestH) > PARTIAL_MIN_PROGRESS) {
                 BlockPathPlan partial = reconstruct(nodes, startRow, bestRow);
                 if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
                         "PARTIAL-" + partial.size() + "wp", sx, sy, sz, gx, gy, gz);
@@ -534,11 +571,18 @@ public final class BlockPathfinder {
             // box. This is the single choke point through which every discovered cell passes, so one check
             // here confines the whole search without touching any movement. The start cell is interned
             // directly (not via accept), so it is always admitted even at the box edge.
-            if (bound != null && !bound.allows(nx, ny, nz)) return;
+            if (bound != null && !bound.allows(nx, ny, nz)) {
+                if (TRACE) traceCand(nx, ny, nz, cost, "corridor");
+                return;
+            }
             float tentative = currentG + cost;
             long nKey = BlockPos.asLong(nx, ny, nz);
             int row = nodes.intern(nKey, nx, ny, nz);
-            if (tentative >= nodes.g[row]) return; // new rows start at +inf, so this also admits first visits
+            if (tentative >= nodes.g[row]) { // new rows start at +inf, so this also admits first visits
+                if (TRACE) traceCand(nx, ny, nz, cost, "worse");
+                return;
+            }
+            if (TRACE) traceCand(nx, ny, nz, cost, "OK");
 
             nodes.g[row] = tentative;
             nodes.f[row] = tentative + h(nx, ny, nz);
@@ -557,6 +601,12 @@ public final class BlockPathfinder {
                 nodes.edits[row] = null;
             }
             nodes.push(row);
+        }
+
+        /** Trace one emitted candidate + its outcome (only when {@link #TRACE}). */
+        private void traceCand(int x, int y, int z, float cost, String outcome) {
+            trace("  C " + MovementRegistry.TIER1.get(move).getClass().getSimpleName()
+                    + " " + x + " " + y + " " + z + " cost=" + String.format("%.2f", cost) + " " + outcome);
         }
     }
 

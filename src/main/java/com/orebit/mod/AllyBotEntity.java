@@ -336,6 +336,43 @@ public class AllyBotEntity extends FakePlayerEntity {
         }
     }
 
+    /**
+     * One-shot diagnostic ({@code /bot trace}): run a SINGLE <b>raw</b> block-A* from the bot's floor to
+     * {@code goalFloor} with full step tracing to a file — no corridor, no region tier, so it isolates the
+     * pure block-search behaviour we're investigating (the open-air pillar). Puts the bot in {@code STAY}
+     * first so it stops auto-replanning (no console flood), runs ONE search with {@link BlockPathfinder#TRACE}
+     * on, restores state, and returns the file path. Slow (file I/O per node on the tick thread) — intended
+     * to be run once and reviewed offline, not in normal play.
+     */
+    public String traceTo(BlockPos goalFloor) {
+        setMode(Mode.STAY); // stop the per-tick replan/flood; the trace is a standalone one-shot search
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        BlockPos startFloor = this.blockPosition().below();
+        java.io.File file = new java.io.File("orebit-trace.txt"); // run dir
+        boolean savedTiming = BlockPathfinder.LOG_TIMING;
+        try (java.io.BufferedWriter w = new java.io.BufferedWriter(new java.io.FileWriter(file))) {
+            w.write("Orebit A* trace  start=" + startFloor + "  goal=" + goalFloor + "  caps=" + CAPS
+                    + "  (raw block-A*, no corridor)\n");
+            w.write("legend: 'E <seq> <x> <y> <z> g=<g> f=<f> via=<move|start>' = one expansion (pop), in"
+                    + " order;  '  C <move> <x> <y> <z> cost=<c> <OK|worse|corridor>' = a candidate it"
+                    + " emitted (OK=relaxed onto the open set, worse=not an improvement).\n\n");
+            BlockPathfinder.TRACE_OUT = w;
+            BlockPathfinder.TRACE = true;
+            BlockPathfinder.LOG_TIMING = false; // the trace IS the record; skip the one-line summary
+            BlockPathPlan plan = BlockPathfinder.findPath(new NavGridView(level), startFloor, goalFloor, CAPS);
+            BlockPathfinder.TRACE = false;
+            w.write("\nRESULT: " + (plan == null ? "FAIL (null)" : plan.size() + "wp cost=" + plan.cost())
+                    + "\n");
+        } catch (java.io.IOException e) {
+            return "trace FAILED: " + e;
+        } finally {
+            BlockPathfinder.TRACE = false;
+            BlockPathfinder.TRACE_OUT = null;
+            BlockPathfinder.LOG_TIMING = savedTiming;
+        }
+        return file.getAbsolutePath();
+    }
+
     /** Steer toward the current waypoint, advancing by block occupancy and jumping over rises. */
     private void steerAlongPath() {
         // Advance to the furthest waypoint whose block the bot's feet currently occupy. Waypoints ARE
