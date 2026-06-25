@@ -278,9 +278,13 @@ public class AllyBotEntity extends FakePlayerEntity {
 
         // Apply this step's folded break/place edits once, the moment it becomes the current step: the
         // bot is standing at the previous waypoint and the cells to clear/fill are right in front, so the
-        // route is made physically walkable before the bot tries to move into it.
+        // route is made physically walkable before the bot tries to move into it. PILLAR is the exception:
+        // its footing is placed in the bot's OWN feet cell, so it must wait until the bot has jumped clear
+        // of that cell (airborne) — otherwise the block would be set inside the bot.
+        boolean pillar = path.movement(waypointIndex) == MovementRegistry.PILLAR;
         StepEdits edits = path.edits(waypointIndex);
-        if (edits != null && waypointIndex != lastEditedIndex) {
+        if (edits != null && waypointIndex != lastEditedIndex
+                && (!pillar || !EntityState.onGround(this))) {
             lastEditedIndex = waypointIndex;
             applyEdits(edits);
         }
@@ -299,10 +303,12 @@ public class AllyBotEntity extends FakePlayerEntity {
         // head-clearance already verified). A Traverse step-assist (slab/stair/snow lip) is auto-stepped
         // by vanilla movement and must NOT jump, or the bot launches over low steps. Stuck is the
         // backstop for physical hitches the planner can't see.
+        // Jump on an Ascend (jump-up onto a full block) or a Pillar (jump-and-place straight up); both
+        // need the bot off the ground. A Traverse step-assist must NOT jump (vanilla auto-steps it).
         boolean ascend = path.movement(waypointIndex) == MovementRegistry.ASCEND;
         Vec3 velocity = this.getDeltaMovement();
         boolean stuck = velocity.horizontalDistanceSqr() < STUCK_SPEED_SQR;
-        if ((ascend || stuck) && EntityState.onGround(this)) {
+        if ((ascend || pillar || stuck) && EntityState.onGround(this)) {
             this.jumpFromGround();
         }
 
