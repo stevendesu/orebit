@@ -27,8 +27,11 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  */
 public final class Pillar implements Movement {
 
-    /** Jump-up base cost (matches {@link Ascend#COST}); the footing placement adds {@code PLACE_COST}. */
-    public static final float COST = 2.0f;
+    /**
+     * Base cost = one step of time — essentially a jump in place, but a footing must be placed first. That
+     * placement ({@code PLACE_COST}) adds its own cost, so pillaring is only chosen when climbing is wanted.
+     */
+    public static final float COST = 1.0f;
 
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {

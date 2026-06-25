@@ -23,8 +23,12 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  */
 public final class Descend implements Movement {
 
-    /** Step + one-block drop (matches the legacy {@code STEP_COST + FALL_PENALTY} for a 1-drop). */
-    public static final float COST = 1.5f;
+    /**
+     * Base cost = one step of time: a flat step plus a free one-block drop (gravity), so descending
+     * existing terrain costs no more than a Traverse. A folded place/break (building/digging a step where
+     * there's no terrain) adds its own cost.
+     */
+    public static final float COST = 1.0f;
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
