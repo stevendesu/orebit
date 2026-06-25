@@ -45,8 +45,9 @@ public final class Fall implements Movement {
 
             // Scan downward for the first (highest) solid landing within the safe-fall window.
             for (int fy = y - 2; fy >= y - maxDrop; fy--) {
-                if (!ctx.built(nx, fy, nz)) break;          // unknown below — don't path into it
-                if (!ctx.standable(nx, fy, nz)) continue;    // still air; keep falling
+                int packed = ctx.packedAt(nx, fy, nz);
+                if (packed == MovementContext.UNBUILT) break;        // unknown below — don't path into it
+                if (!ctx.standable(ctx.descriptorOf(nx, fy, nz, packed))) continue; // still air; keep falling
 
                 // Landing found: confirm the drop column (down to the new feet) is clear.
                 boolean clear = true;

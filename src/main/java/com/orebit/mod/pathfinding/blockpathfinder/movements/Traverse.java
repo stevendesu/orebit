@@ -39,49 +39,60 @@ public final class Traverse implements Movement {
             int nx = x + d[0];
             int nz = z + d[1];
 
+            // The same-level neighbour floor (nx,y,nz) drives both the flat-walk and the bridge case — read
+            // its grid slot ONCE and derive built-ness / descriptor / flags from it (no second resolve).
+            int p = ctx.packedAt(nx, y, nz);
+            boolean built = p != MovementContext.UNBUILT;
+            long pd = built ? ctx.descriptorOf(nx, y, nz, p) : 0L;
+            boolean standable = built && ctx.standable(pd);
+
             // Flat walk onto an adjacent solid-topped cell. The two body cells must be clear; a block in
             // the way (e.g. leaves) is folded into a break-set when the bot may break, raising the cost
             // instead of failing the move (MOVEMENT-DESIGN.md §1 — the motivating forest-leaves case).
-            if (ctx.built(nx, y, nz) && ctx.standable(nx, y, nz)) {
-                int flags = ctx.flagsAt(nx, y, nz);
+            if (standable) {
+                int flags = MovementContext.flagsOf(p);
                 EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
                 ctx.requireBodyClear(e, nx, y, nz, flags);
                 if (e.valid()) {
-                    out.accept(nx, y, nz, cost(ctx, nx, y, nz) + e.extraCost(), e.snapshot());
+                    out.accept(nx, y, nz, cost(ctx, pd) + e.extraCost(), e.snapshot());
                     continue; // already have footing here; don't also step-assist/bridge this column
                 }
             }
 
             // Step-assist: one cell up onto a low partial (slab / snow / stair lip) — no jump. Same
-            // break-the-body-path modifier as the flat case.
+            // break-the-body-path modifier as the flat case. Distinct cell, so its own single resolve.
             int uy = y + 1;
-            if (ctx.built(nx, uy, nz) && ctx.standable(nx, uy, nz)
-                    && ctx.topYOf(nx, uy, nz) <= MovementContext.STEP_ASSIST_MAX_TOP_Y) {
-                int flags = ctx.flagsAt(nx, uy, nz);
-                EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
-                ctx.requireBodyClear(e, nx, uy, nz, flags);
-                if (e.valid()) {
-                    out.accept(nx, uy, nz, cost(ctx, nx, uy, nz) + e.extraCost(), e.snapshot());
-                    continue;
+            int pu = ctx.packedAt(nx, uy, nz);
+            if (pu != MovementContext.UNBUILT) {
+                long pud = ctx.descriptorOf(nx, uy, nz, pu);
+                if (ctx.standable(pud) && ctx.topYOf(pud) <= MovementContext.STEP_ASSIST_MAX_TOP_Y) {
+                    int flags = MovementContext.flagsOf(pu);
+                    EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+                    ctx.requireBodyClear(e, nx, uy, nz, flags);
+                    if (e.valid()) {
+                        out.accept(nx, uy, nz, cost(ctx, pud) + e.extraCost(), e.snapshot());
+                        continue;
+                    }
                 }
             }
 
             // Bridge: no footing in the neighbour column — place a throwaway floor and walk onto it when
             // the bot may place (the source cell is always an adjacent face to build against). "Bridge"
-            // is not its own movement, just Traverse with a place in its edit-set (decision 1).
-            if (ctx.built(nx, y, nz) && !ctx.standable(nx, y, nz)) {
-                int flags = ctx.flagsAt(nx, y, nz);
+            // is not its own movement, just Traverse with a place in its edit-set (decision 1). Reuses the
+            // same-level slot read at the top of the loop.
+            if (built && !standable) {
+                int flags = MovementContext.flagsOf(p);
                 EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
                 e.requireFloor(nx, y, nz);
                 ctx.requireBodyClear(e, nx, y, nz, flags);
                 if (e.valid()) {
-                    out.accept(nx, y, nz, cost(ctx, nx, y, nz) + e.extraCost(), e.snapshot());
+                    out.accept(nx, y, nz, cost(ctx, pd) + e.extraCost(), e.snapshot());
                 }
             }
         }
     }
 
-    private static float cost(MovementContext ctx, int x, int y, int z) {
-        return ctx.isSlow(x, y, z) ? FLAT_COST + SLOW_SURCHARGE : FLAT_COST;
+    private static float cost(MovementContext ctx, long d) {
+        return ctx.isSlow(d) ? FLAT_COST + SLOW_SURCHARGE : FLAT_COST;
     }
 }

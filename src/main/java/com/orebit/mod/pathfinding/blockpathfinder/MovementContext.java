@@ -3,6 +3,7 @@ package com.orebit.mod.pathfinding.blockpathfinder;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavFlags;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
+import com.orebit.mod.worldmodel.pathing.TraversalGrid;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.Blocks;
@@ -26,6 +27,12 @@ public final class MovementContext {
      * Above it, gaining the cell needs a real jump (Ascend). 10/16 ≈ 0.625, just past the auto-step.
      */
     public static final int STEP_ASSIST_MAX_TOP_Y = 10;
+
+    /**
+     * Sentinel a {@link #packedAt} read returns for an unbuilt cell — re-exported from {@link
+     * NavGridView#UNBUILT} so a movement compares against it without importing the grid view.
+     */
+    public static final int UNBUILT = NavGridView.UNBUILT;
 
     /**
      * Quantized hardness value {@link NavBlock} uses for an unbreakable block (bedrock, barrier, …):
@@ -100,6 +107,41 @@ public final class MovementContext {
             if (kind == PathEdits.BROKEN) return AIR_DESC;
         }
         return grid.descriptorAt(x, y, z);
+    }
+
+    // ---- Read-once seam: resolve a cell's grid slot ONCE, derive flags + descriptor from it -----------
+    // The movement prologue reads a candidate cell three ways today (built / flagsAt / descriptorAt — each
+    // its own section resolve of the same slot). packedAt collapses those to one resolve; flagsOf and
+    // descriptorOf turn the returned slot into the same facts the separate reads gave.
+
+    /**
+     * The cell's whole packed grid slot in one section resolve, or {@link #UNBUILT} if it isn't built —
+     * the read-once replacement for a {@link #built} gate followed by {@link #flagsAt}/{@link
+     * #descriptorAt} on the same cell. Derive flags with {@link #flagsOf} and the descriptor with {@link
+     * #descriptorOf} (which still layers the path-edit diff).
+     */
+    public int packedAt(int x, int y, int z) {
+        return grid.packedAt(x, y, z);
+    }
+
+    /** The {@link NavFlags} bitmask of a slot already read via {@link #packedAt} (caller ensures built). */
+    public static int flagsOf(int packed) {
+        return TraversalGrid.flagsOf(packed);
+    }
+
+    /**
+     * The packed {@link NavBlock} descriptor for a slot already read via {@link #packedAt} — the read-once
+     * form of {@link #descriptorAt} for a known-built cell. Layers the same path-edit diff (a placed/broken
+     * cell reads as cobblestone/air) and otherwise turns the slot's navtype into its descriptor, with no
+     * second section resolve and no live-block fallback ({@code packed} is already proven built).
+     */
+    public long descriptorOf(int x, int y, int z, int packed) {
+        if (!pathEdits.isEmpty()) {
+            int kind = pathEdits.kindAt(BlockPos.asLong(x, y, z));
+            if (kind == PathEdits.PLACED) return PLACED_DESC;
+            if (kind == PathEdits.BROKEN) return AIR_DESC;
+        }
+        return NavBlock.descriptor((short) TraversalGrid.navtypeOf(packed));
     }
 
     // ---- Neighbour-property flags (the precomputed NavFlags bitmask) --------------------------
@@ -201,9 +243,19 @@ public final class MovementContext {
         return NavBlock.topY(descriptorAt(x, y, z));
     }
 
+    /** {@link #topYOf(int, int, int)} on an already-read descriptor (read-once form). */
+    public int topYOf(long d) {
+        return NavBlock.topY(d);
+    }
+
     /** True if standing on the cell incurs a slow surface (soul sand / honey / cobweb / slime). */
     public boolean isSlow(int x, int y, int z) {
         return NavBlock.surface(descriptorAt(x, y, z)) == 1; // SURFACE_SLOW
+    }
+
+    /** {@link #isSlow(int, int, int)} on an already-read descriptor (read-once form). */
+    public boolean isSlow(long d) {
+        return NavBlock.surface(d) == 1; // SURFACE_SLOW
     }
 
     // ---- Break / place (MOVEMENT-DESIGN.md §1, decision 1) ------------------------------------
