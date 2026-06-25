@@ -231,5 +231,6 @@ same tax. By keeping the Garbage Collector out of the hot path entirely, that
 budget goes to actually finding paths instead of cleaning up after ourselves.
 
 And we're not done. The per-node cost is now low *and* steady, which means the
-next lever — visiting *fewer* nodes through hierarchical pathfinding — is where
-the next big wins are hiding. But that's a story for another page.
+next lever — visiting *fewer* nodes — is where the next big wins are hiding: a
+sharper heuristic now, and hierarchical pathfinding later. But that's a story for
+[another page](fewer_nodes.md).
