@@ -60,16 +60,45 @@ public final class NavGridView {
     // false (no ground to plan over), which is the correct answer.
     private final ConcurrentHashMap<Long, NavSection[]> chunks;
     // Last-chunk cache: a node's ~100 cell reads cluster in one or two chunks, so caching the resolved
-    // section array by chunk key turns those ~100 ConcurrentHashMap lookups (each boxing the long key)
-    // into ~100 plain array reads, boxing only when the read crosses a chunk boundary. Safe because the
-    // view is single-threaded per pathfind and the store doesn't mutate mid-search (all on the tick thread).
+    // section array by chunk key turns those ~100 ConcurrentHashMap lookups into ~100 plain array reads.
+    // Safe because the view is single-threaded per pathfind and the store doesn't mutate mid-search (all on
+    // the tick thread). This single slot only catches CONSECUTIVE same-chunk reads, though — a flood that
+    // weaves across chunk boundaries thousands of times missed it every crossing, and {@code chunks.get}
+    // takes {@code Object}, so each miss BOXED the primitive long key onto the heap (the same boxing the
+    // custom open-addressed maps elsewhere were built to avoid — docs/Optimizations/custom_hash_map.md).
     private long cacheChunkKey = Long.MIN_VALUE; // sentinel: nothing cached yet
     private NavSection[] cacheSections;          // sections for cacheChunkKey (null = that chunk isn't built)
+
+    // Behind the single slot: a per-search open-addressed long→sections cache, so a chunk key is boxed at
+    // most ONCE per distinct chunk (its cold miss) and every later crossing back to it is a primitive array
+    // read — no boxing, no ConcurrentHashMap.get. Sized well above the distinct-chunk count any search
+    // within MAX_EXPANSIONS touches (a 10k-node flood spans ~tens of chunks), so it never fills; the view is
+    // per-pathfind, so it starts empty with no clearing. (When a time-based budget raises the node ceiling,
+    // grow CC_CAP or make it resize.)
+    private static final int CC_CAP = 512;
+    private static final int CC_MASK = CC_CAP - 1;
+    private static final NavSection[] CC_UNBUILT = new NavSection[0]; // negative-cache sentinel: chunk not built
+    private final long[] ccKeys = new long[CC_CAP];
+    private final NavSection[][] ccVals = new NavSection[CC_CAP][]; // null slot = cold (never looked up)
 
     public NavGridView(ServerLevel level) {
         this.level = level;
         this.minY = LevelBounds.minY(level);
         this.chunks = NavStore.chunksOf(level);
+    }
+
+    /**
+     * Test / benchmark seam: a view over a synthetic, already-built section map with <b>no live level</b>.
+     * Lets a headless JMH benchmark or determinism test (PRD §11) drive the pathfinder over a hand-built
+     * grid without standing up a {@link ServerLevel}. Because {@code level} is {@code null}, {@link
+     * #descriptorAt}'s live-{@code getBlockState} fallback must NEVER fire — the caller must keep every cell
+     * the search can probe inside the built map (which is the realistic case anyway: the pathfinder only
+     * plans over loaded terrain). Package-private so it isn't part of the public runtime surface.
+     */
+    NavGridView(int minY, ConcurrentHashMap<Long, NavSection[]> chunks) {
+        this.level = null;
+        this.minY = minY;
+        this.chunks = chunks;
     }
 
     /**
@@ -133,11 +162,42 @@ public final class NavGridView {
         if (chunkKey == cacheChunkKey) {
             sections = cacheSections;
         } else {
-            sections = chunks == null ? null : chunks.get(chunkKey);
+            sections = lookupChunk(chunkKey);
             cacheChunkKey = chunkKey;
             cacheSections = sections;
         }
         if (sections == null || sectionIndex >= sections.length) return null;
         return sections[sectionIndex];
+    }
+
+    /**
+     * Resolve a chunk's sections through the per-search cache: a primitive-keyed open-addressed lookup that
+     * boxes the long key (one {@code chunks.get}) only on a chunk's first touch, then serves every later
+     * crossing back to it from {@link #ccKeys}/{@link #ccVals} with no allocation. {@code null} is a real
+     * cached value (chunk unbuilt), distinguished from an empty slot by the {@link #CC_UNBUILT} sentinel.
+     */
+    private NavSection[] lookupChunk(long key) {
+        int slot = chunkSlot(key);
+        for (;;) {
+            NavSection[] v = ccVals[slot];
+            if (v == null) { // cold slot — box once, resolve from the store, and cache (even a null result)
+                NavSection[] sections = chunks == null ? null : chunks.get(key);
+                ccKeys[slot] = key;
+                ccVals[slot] = sections == null ? CC_UNBUILT : sections;
+                return sections;
+            }
+            if (ccKeys[slot] == key) return v == CC_UNBUILT ? null : v;
+            slot = (slot + 1) & CC_MASK;
+        }
+    }
+
+    /** Murmur3 64-bit finalizer → cache slot; spreads the structured chunk keys so probe chains stay short. */
+    private static int chunkSlot(long k) {
+        k ^= k >>> 33;
+        k *= 0xff51afd7ed558ccdL;
+        k ^= k >>> 33;
+        k *= 0xc4ceb9fe1a85ec53L;
+        k ^= k >>> 33;
+        return (int) k & CC_MASK;
     }
 }

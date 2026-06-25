@@ -172,5 +172,6 @@ owning these ~40 lines instead of reaching for `HashMap<Long, …>`, we get:
 - **a free, instant `clear()`** on the edit map, thanks to Trick #2.
 
 Add it up and this little structure is a big part of how the pathfinder's per-node
-cost fell from ~8,000 nanoseconds to ~1,290 — the story told in full over in
+cost fell from ~8,000 nanoseconds to ~1,290 — and later, once the last hidden
+allocations were chased out, to ~950 — the story told in full over in
 [Pathfinding on a Tick Budget](pathfinding_hot_path.md).

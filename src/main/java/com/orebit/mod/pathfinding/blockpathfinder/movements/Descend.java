@@ -56,7 +56,7 @@ public final class Descend implements Movement {
                 e.requireAir(nx, y + 1, nz); // transit feet / new head
                 e.requireAir(nx, y, nz);     // new feet
             }
-            if (e.valid()) out.accept(nx, dy, nz, COST + e.extraCost(), e.snapshot());
+            if (e.valid()) out.accept(nx, dy, nz, COST + e.extraCost(), e);
         }
     }
 }

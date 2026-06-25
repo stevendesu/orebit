@@ -46,6 +46,6 @@ public final class MineDown implements Movement {
         int flags = ctx.flagsAt(x, y, z);
         EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
         e.requireAir(x, y, z);
-        if (e.valid()) out.accept(x, dy, z, COST + e.extraCost(), e.snapshot());
+        if (e.valid()) out.accept(x, dy, z, COST + e.extraCost(), e);
     }
 }
