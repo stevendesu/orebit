@@ -95,6 +95,41 @@ public final class BlockPathfinder {
     private static final ThreadLocal<Nodes> SEARCH = ThreadLocal.withInitial(() -> new Nodes(512, 1024));
 
     /**
+     * Per-search arena of reusable {@link StepEdits} for the (many) accepted edit-bearing edges — the
+     * allocation-free replacement for {@code new StepEdits(...)} per edge, which the allocation profiler
+     * pinned as ~97% of a build-heavy search's remaining garbage. {@link #take} bump-allocates the next
+     * slot (creating a {@code StepEdits} only the first time a slot is reached on this thread, ever);
+     * {@link #reset} rewinds to 0 at the start of each search so the slots are reused. {@link ThreadLocal}
+     * like {@link #SEARCH}, so a future off-tick search gets its own with no contention.
+     *
+     * <p>A re-relaxation of a row takes a fresh slot and abandons the row's previous one (left for the next
+     * {@code reset} to reclaim), so the high-water mark is total accepted relaxations, not distinct rows —
+     * a one-time RAM cost we accept for the simpler take-only path (favour CPU over RAM). The edits on the
+     * returned path are {@link StepEdits#copy copied out} of the arena in {@link #reconstruct}, since they
+     * outlive the search.
+     */
+    private static final class EditPool {
+        private StepEdits[] slots = new StepEdits[256];
+        private int next;
+
+        /** Rewind to empty for a fresh search; the slot instances (and their grown buffers) are kept. */
+        void reset() {
+            next = 0;
+        }
+
+        /** The next reusable edit set, allocating a slot instance only the first time it's reached. */
+        StepEdits take() {
+            if (next == slots.length) slots = Arrays.copyOf(slots, slots.length << 1);
+            StepEdits e = slots[next];
+            if (e == null) { e = new StepEdits(); slots[next] = e; }
+            next++;
+            return e;
+        }
+    }
+
+    private static final ThreadLocal<EditPool> EDIT_POOL = ThreadLocal.withInitial(EditPool::new);
+
+    /**
      * The entire mutable search state as primitive arrays — the allocation-free replacement for the old
      * {@code new Node(...)}-per-candidate + four {@code HashMap<Long,…>} design (whose every {@code get}/
      * {@code put} boxed the packed-pos {@code long} key past the {@code Long} cache, ~100× per node).
@@ -328,7 +363,9 @@ public final class BlockPathfinder {
         // stream of replans allocates nothing here. First call on a thread pays the initial 512/1024 sizing.
         final Nodes nodes = SEARCH.get();
         nodes.reset();
-        Relaxer relaxer = new Relaxer(nodes, sx, sy, sz, gx, gy, gz);
+        final EditPool editPool = EDIT_POOL.get();
+        editPool.reset();
+        Relaxer relaxer = new Relaxer(nodes, editPool, sx, sy, sz, gx, gy, gz);
 
         int startRow = nodes.intern(startKey, sx, sy, sz);
         nodes.g[startRow] = 0f;
@@ -416,6 +453,7 @@ public final class BlockPathfinder {
      */
     private static final class Relaxer implements CandidateSink {
         private final Nodes nodes;
+        private final EditPool editPool; // per-search arena for accepted edges' StepEdits (no per-edge alloc)
         private final int sx, sy, sz;   // start (for the straight-line tie-break)
         private final int gx, gy, gz;   // goal
         private final float invLineLen; // 1 / horizontal |goal-start| (0 when start==goal horizontally)
@@ -425,8 +463,9 @@ public final class BlockPathfinder {
         int move;           // MovementRegistry.TIER1 index currently emitting candidates
         boolean anyEdits;   // has any edge carried break/place edits? (gates the per-pop diff rebuild)
 
-        Relaxer(Nodes nodes, int sx, int sy, int sz, int gx, int gy, int gz) {
+        Relaxer(Nodes nodes, EditPool editPool, int sx, int sy, int sz, int gx, int gy, int gz) {
             this.nodes = nodes;
+            this.editPool = editPool;
             this.sx = sx;
             this.sy = sy;
             this.sz = sz;
@@ -459,12 +498,18 @@ public final class BlockPathfinder {
             nodes.f[row] = tentative + h(nx, ny, nz);
             nodes.parent[row] = current;
             nodes.move[row] = move;
-            // Snapshot the edits ONLY now that this candidate is an improvement we're keeping — the
-            // rejected majority above never allocated a StepEdits. Keep the set on the same (cheapest)
-            // edge as the move, and clear any stale set left by a costlier edge so the follower never
-            // mines/places blocks the winning move didn't.
-            if (scratch != null && scratch.hasEdits()) { nodes.edits[row] = scratch.snapshot(); anyEdits = true; }
-            else nodes.edits[row] = null;
+            // Record the edits ONLY now that this candidate is an improvement we're keeping — the rejected
+            // majority above touched no edit storage at all. Draw a reusable set from the per-search arena
+            // and load this candidate's cells into it (no allocation in steady state). Clear any stale set
+            // left by a costlier edge so the follower never mines/places blocks the winning move didn't.
+            if (scratch != null && scratch.hasEdits()) {
+                StepEdits e = editPool.take();
+                scratch.copyInto(e);
+                nodes.edits[row] = e;
+                anyEdits = true;
+            } else {
+                nodes.edits[row] = null;
+            }
             nodes.push(row);
         }
     }
@@ -527,7 +572,10 @@ public final class BlockPathfinder {
             // Stand position = the floor cell's top (feet block) — steer the bot's feet here.
             waypoints.add(BlockPos.of(nodes.key[n]).above());
             moves.add(tier1.get(nodes.move[n]));
-            edits.add(nodes.edits[n]); // null where the step breaks/places nothing
+            // Copy out of the per-search arena: these edits ride home in the BlockPathPlan and are replayed
+            // by the follower over many ticks, while later searches reuse the arena slots. (null = plain step.)
+            StepEdits e = nodes.edits[n];
+            edits.add(e == null ? null : e.copy());
             if (nodes.parent[n] == -1) break; // defensive; should not happen for a reached goal
         }
         Collections.reverse(waypoints);

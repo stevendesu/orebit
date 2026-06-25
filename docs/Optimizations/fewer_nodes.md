@@ -2,15 +2,15 @@ Our bot could not cross an open field.
 
 Point it at a goal a thousand-odd blocks away over flat ground and the search would
 grind through its entire budget — ten thousand candidate positions — and then give up,
-leaving the bot standing there. (Why ten thousand? At roughly 1,300 nanoseconds per
-position — see the [previous chapter](pathfinding_hot_path.md) — that's about 12.5
-milliseconds, a full quarter of the server's 50 ms tick. Let one bot's thinking grow
+leaving the bot standing there. (Why ten thousand? At roughly 950 nanoseconds per
+position — see the [previous chapter](pathfinding_hot_path.md) — that's about 9.5
+milliseconds, nearly a fifth of the server's 50 ms tick. Let one bot's thinking grow
 past that and it starts stealing time from everything else, so we cap it.) Ten thousand
 positions is an absurd amount of thinking for a walk across a meadow, and that absurdity
 is what this page is about: the long, iterative hunt for *why* the search looked at so
 many places it didn't need to, and how we taught it to stop.
 
-The previous chapter made each candidate position cheap to examine — about 1,300
+The previous chapter made each candidate position cheap to examine — about 950
 nanoseconds, down from 8,000. But the total time a search takes is two factors
 multiplied together:
 
@@ -64,13 +64,15 @@ was wrong; the bot was right.
 
 The first trouble was going *up*. Picture a goal one block higher than the bot, with no
 stairs leading to it. To reach it the bot has to build a step — place a block, hop onto
-it — and at 4 a block, building a single step-up runs about **10** (two blocks placed,
-plus a move over and a move up). But the heuristic only knows *distance*, and "one block
-up" is almost no distance at all. So to the search, building that step looked absurdly
-expensive next to simply walking. Strolling nine blocks sideways (cost 9) to go hunting
-for a natural ramp scored *better* than building the step right where it stood (cost 10).
-The bot would wander the neighborhood looking for a slope rather than build the obvious
-staircase.
+it. That costs **6** (4 for block place, 1 to move up, 1 to move forward). For a target
+further in the air the cost was worse because you have to place no only the block you
+will stand on, but the block the supports it. Two blocks plus two movements (up +
+forward) and building a single step-up costs about **10**. But the heuristic only knows
+*distance*, and "one block up" is almost no distance at all. So to the search, building
+that step looked absurdly expensive next to simply walking. Strolling nine blocks
+sideways (cost 9) to go hunting for a natural ramp scored *better* than building the
+step right where it stood (cost 10). The bot would wander the neighborhood looking for
+a slope rather than build the obvious staircase.
 
 The fix was to put a thumb on the scale: treat vertical distance as worth more than
 horizontal. Any move that closed the gap to a goal above (or below) earned extra
@@ -212,7 +214,7 @@ length is exact, and that's the number that tells the real story:
 
 | Step in the journey                          | Positions visited | Path length |
 | -------------------------------------------- | ----------------: | ----------: |
-| Plain A\*, no tie-break (Fix #2 off)         | ~thousands (est.) |    78 steps |
+| Plain A\*, no tie-break                      | ~thousands (est.) |    78 steps |
 | Break ties toward the goal (Fix #2)          |               209 |    78 steps |
 | Add diagonals + the octile ruler (Fix #3)    |           **604** |    59 steps |
 | Greed + honest 3D distance (Fix #4)          |                71 |    53 steps |
