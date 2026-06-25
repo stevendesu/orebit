@@ -3,6 +3,7 @@ package com.orebit.mod.pathfinding;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
@@ -89,6 +90,11 @@ public final class PathPlan {
 
     /** Vertical corridor slack in blocks — room for a fall/jump just outside the window's region span. */
     public static final int CORRIDOR_VMARGIN = 8;
+
+    /** When true, log the region skeleton + window target + corridor box per block replan (mirrors
+     *  {@code BlockPathfinder.DEBUG}); the HPA*-tier visibility for "what is the driver asking the block
+     *  tier to do". Flip off to ship. */
+    public static boolean DEBUG = true;
 
     // ---- immutable inputs ----------------------------------------------------------------------------
     private final ServerLevel level;
@@ -311,6 +317,15 @@ public final class PathPlan {
         final BlockPos target = windowTarget();
         final NavGridView grid = new NavGridView(level);
         final RegionBound bound = corridorBound(target);
+
+        if (DEBUG) {
+            OrebitCommon.LOGGER.info(
+                    "[Orebit] HPA window: skeleton={}regions committed={} window=[{}..{}] of {} "
+                            + "bot=({},{},{}) target=({},{},{}) goalInWindow={} corridor={}",
+                    skeleton.size(), committedIndex, windowStart, windowLast(), skeleton.size() - 1,
+                    botFloor.getX(), botFloor.getY(), botFloor.getZ(),
+                    target.getX(), target.getY(), target.getZ(), target.equals(goalFloor), bound);
+        }
 
         BlockPathPlan plan = BlockPathfinder.findPath(grid, botFloor, target, caps, bound);
         if (plan == null) {

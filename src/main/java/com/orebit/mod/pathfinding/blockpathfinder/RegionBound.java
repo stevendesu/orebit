@@ -61,4 +61,10 @@ public final class RegionBound {
         return new RegionBound(minX - blocks, maxX + blocks, minY - vblocks, maxY + vblocks,
                 minZ - blocks, maxZ + blocks);
     }
+
+    @Override
+    public String toString() {
+        return "[" + minX + ".." + maxX + " x " + minY + ".." + maxY + " z " + minZ + ".." + maxZ
+                + " | " + (maxX - minX + 1) + "x" + (maxY - minY + 1) + "x" + (maxZ - minZ + 1) + "]";
+    }
 }

@@ -435,7 +435,7 @@ public final class BlockPathfinder {
         }
 
         if (reachedRow == -1) {
-            if (DEBUG) explainFailure(ctx, sx, sy, sz, gx, gy, gz, expansions, budgetHit, bestX, bestY, bestZ);
+            if (DEBUG) explainFailure(ctx, sx, sy, sz, gx, gy, gz, expansions, budgetHit, bestX, bestY, bestZ, bound);
             if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
                     budgetHit ? "FAIL-budget" : "FAIL-exhausted", sx, sy, sz, gx, gy, gz);
             return null;
@@ -566,14 +566,16 @@ public final class BlockPathfinder {
      * cheap and only happens on failure.
      */
     private static void explainFailure(MovementContext ctx, int sx, int sy, int sz, int gx, int gy, int gz,
-                                       int expansions, boolean budgetHit, int bx, int by, int bz) {
+                                       int expansions, boolean budgetHit, int bx, int by, int bz,
+                                       RegionBound bound) {
         int remaining = Math.abs(bx - gx) + Math.abs(by - gy) + Math.abs(bz - gz);
         OrebitCommon.LOGGER.info(
                 "[Orebit] path FAIL start=({},{},{}) goal=({},{},{}) — {} after {} expansions; "
-                        + "closest=({},{},{}), still {} blocks away. Moves from the dead-end:",
+                        + "closest=({},{},{}), still {} blocks away.{} Moves from the dead-end:",
                 sx, sy, sz, gx, gy, gz,
                 budgetHit ? "hit expansion budget" : "search exhausted (nowhere left to go)",
-                expansions, bx, by, bz, remaining);
+                expansions, bx, by, bz, remaining,
+                bound == null ? " (no corridor)" : "");
         for (Movement m : MovementRegistry.TIER1) {
             StringBuilder sb = new StringBuilder();
             int[] count = {0};
@@ -585,6 +587,37 @@ public final class BlockPathfinder {
             OrebitCommon.LOGGER.info("[Orebit]   {} -> {}", m.getClass().getSimpleName(),
                     count[0] == 0 ? "(nothing)" : sb.toString());
         }
+        // Column geometry up from the dead-end toward the goal: the most useful "why" for a vertical stall —
+        // shows whether the cell Pillar/Ascend would climb into is air (climbable), solid (needs mining), or
+        // unbuilt, and whether the corridor bound is capping the reach. Tag per cell: u=unbuilt, o=open/place-
+        // able, s=standable(floor), p=passable, k=breakable, X=outside corridor.
+        dumpColumn(ctx, bound, "dead-end col", bx, bz, by - 1, Math.min(by + 14, gy + 3));
+        if (bx != gx || bz != gz) {
+            dumpColumn(ctx, bound, "goal col", gx, gz, Math.min(by, gy) - 1, gy + 3);
+        }
+    }
+
+    /**
+     * Log the per-cell nav state of a vertical column {@code (x,z)} over {@code [y0, y1]} — the diagnostic
+     * for a vertical stall (the open-air pillar / mine-up case). Each cell is tagged with what the movements
+     * see there, so a "Pillar -> (nothing)" is explained as "the cell above is solid (s, not openForPlace)"
+     * or "unbuilt (u)" or "outside the corridor (X)".
+     */
+    private static void dumpColumn(MovementContext ctx, RegionBound bound, String label, int x, int z,
+                                   int y0, int y1) {
+        StringBuilder sb = new StringBuilder();
+        for (int y = y0; y <= y1; y++) {
+            sb.append(' ').append(y).append(':');
+            if (bound != null && !bound.allows(x, y, z)) { sb.append('X'); continue; }
+            if (!ctx.built(x, y, z)) { sb.append('u'); continue; }
+            long d = ctx.descriptorAt(x, y, z);
+            if (ctx.standable(d)) sb.append('s');
+            else if (ctx.openForPlace(d)) sb.append('o');
+            else if (ctx.passable(d)) sb.append('p');
+            else sb.append('.');
+            if (ctx.breakable(d)) sb.append('k');
+        }
+        OrebitCommon.LOGGER.info("[Orebit]   {} ({},{}):{}", label, x, z, sb);
     }
 
     private static BlockPathPlan reconstruct(Nodes nodes, int startRow, int reachedRow) {
