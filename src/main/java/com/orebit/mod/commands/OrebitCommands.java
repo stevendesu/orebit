@@ -31,7 +31,8 @@ public final class OrebitCommands {
             new FollowCommand(),
             new StayCommand(),
             new ComeCommand(),
-            new HereCommand());
+            new HereCommand(),
+            new TraceCommand());
 
     /** Subscribe to the seam's command-registration hook; called from {@code OrebitCommon.init}. */
     public static void register(PlatformEvents events) {
