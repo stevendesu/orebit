@@ -110,6 +110,7 @@ public class AllyBotEntity extends FakePlayerEntity {
     private int lastEditedIndex = -1; // last step whose break/place edits were applied (apply once per step)
     private BlockPos lastGoalCell;  // owner floor cell the current path was planned to; replan when it moves
     private boolean loggedHasPath;  // dedupe the path/no-path diagnostic so it logs only on change
+    private boolean loggedPlanError; // log a two-tier replan exception only once (then degrade silently)
 
     public AllyBotEntity(MinecraftServer server, ServerLevel world, GameProfile profile, Player owner) {
         super(server, world, profile);
@@ -285,8 +286,22 @@ public class AllyBotEntity extends FakePlayerEntity {
         ServerLevel level = (ServerLevel) Worlds.of(this);
         BlockPos startFloor = this.blockPosition().below();
 
-        this.pathPlan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, CAPS);
-        this.path = pathPlan.currentBlockPlan();
+        // The two-tier driver is a large, freshly-built subsystem (region A* + leaf mini-pathfinds). A bug
+        // in it must NOT crash the server tick — degrade to "no plan" (which falls back to the visible
+        // straight-line steer below), log once, and keep the game playable. Remove the guard once the region
+        // tier is hardened.
+        try {
+            this.pathPlan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, CAPS);
+            this.path = pathPlan.currentBlockPlan();
+        } catch (Throwable t) {
+            if (!loggedPlanError) {
+                loggedPlanError = true;
+                OrebitCommon.LOGGER.error("[Orebit] two-tier replan threw — falling back to straight-line "
+                        + "(this log is shown once)", t);
+            }
+            this.pathPlan = null;
+            this.path = null;
+        }
         this.lastBlockPlanRef = this.path;
         this.waypointIndex = 0;
         this.lastEditedIndex = -1;

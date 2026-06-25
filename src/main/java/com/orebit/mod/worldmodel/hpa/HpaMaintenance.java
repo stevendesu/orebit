@@ -4,6 +4,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.platform.BlockChangeEvents;
 import com.orebit.mod.platform.LevelBounds;
 import com.orebit.mod.worldmodel.pathing.NavSection;
@@ -142,10 +143,32 @@ public final class HpaMaintenance {
         final CostPyramid pyramid = RegionGrid.of(level).pyramid();
         for (int ry = 0; ry < column.length; ry++) {
             if (column[ry] == null) continue;
-            LeafCostComputer.computeLeaf(level, chunkX, chunkZ, ry, pyramid); // note the (rx, rz, ry) order
-            PyramidMerger.mergeUp(pyramid, chunkX, ry, chunkZ);
+            buildLeafSafe(level, pyramid, chunkX, ry, chunkZ); // note the (rx, rz, ry) order inside
         }
     }
+
+    /**
+     * Recompute one leaf's faces + re-merge its ancestors, <b>never throwing</b> onto the caller (the server
+     * tick thread). A leaf build runs the block tier over live geometry; an unforeseen edge there must not
+     * crash the tick — it degrades to "this leaf stays unbuilt and the planner reads the §6 optimistic
+     * default". Logs the first occurrence per session at error, then throttles to a periodic count so a
+     * systemic bug can't spam the log.
+     */
+    private static void buildLeafSafe(ServerLevel level, CostPyramid pyramid, int rx, int ry, int rz) {
+        try {
+            LeafCostComputer.computeLeaf(level, rx, rz, ry, pyramid);
+            PyramidMerger.mergeUp(pyramid, rx, ry, rz);
+        } catch (Throwable t) {
+            long n = ++buildFailures;
+            if (n == 1 || n % 256 == 0) {
+                OrebitCommon.LOGGER.error("[Orebit] HPA leaf build failed at region ({},{},{}) [{} total] — "
+                        + "leaf left unbuilt (optimistic default applies)", rx, ry, rz, n, t);
+            }
+        }
+    }
+
+    /** Count of leaf-build failures swallowed by {@link #buildLeafSafe} (diagnostics + log throttle). */
+    private static volatile long buildFailures = 0;
 
     // ---------------------------------------------------------------------------------------------------
     // The block-change listener — mark dirty (debounced; thread-safe; cheap)
@@ -215,13 +238,10 @@ public final class HpaMaintenance {
             final int ry = RegionAddress.unpackRY(key);
             final int rz = RegionAddress.unpackRZ(key);
 
-            // Recompute the leaf's six faces. If its chunk/section unloaded since the mark, computeLeaf
-            // no-ops (leaves the node as-is / unbuilt) — the planner then reads the §6 default. Note the
-            // (rx, rz, ryLevel0) argument ORDER on computeLeaf.
-            LeafCostComputer.computeLeaf(level, rx, rz, ry, pyramid);
-
-            // Roll the change up the pyramid: re-derive every ancestor from its (now-current) children.
-            PyramidMerger.mergeUp(pyramid, rx, ry, rz);
+            // Recompute the leaf's six faces + re-merge ancestors (crash-safe). If its chunk/section
+            // unloaded since the mark, computeLeaf no-ops (leaves the node unbuilt) — the planner then reads
+            // the §6 default.
+            buildLeafSafe(level, pyramid, rx, ry, rz);
 
             processed++;
         }
