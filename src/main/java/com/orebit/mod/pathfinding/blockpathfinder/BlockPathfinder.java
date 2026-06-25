@@ -77,6 +77,13 @@ public final class BlockPathfinder {
     private static final float H_FACE     = 1.41421356f; // two axes at once (√2)
     private static final float H_CORNER   = 1.7320508f;  // three axes at once (√3)
     private static final float H_WEIGHT   = 2.0f;        // greediness; 1.0 = admissible, higher = faster/greedier
+    // Straight-line tie-break weight. On open ground an off-axis goal has a huge rectangle of equal-cost
+    // paths (the correct count of diagonals can be placed anywhere) — a plateau the WEIGHT can't break,
+    // because all those paths share g and h. Adding a microscopic term proportional to the node's
+    // perpendicular distance from the start→goal line picks the on-line arrangement, collapsing that
+    // rectangle to a ~1-wide corridor (O(D) expanded nodes instead of O(D²)). Kept tiny so it only ORDERS
+    // otherwise-equal-f nodes and never overrides a real cost difference. Tunable.
+    private static final float H_TIE      = 0.001f;
 
     /**
      * One reusable {@link Nodes} search-state per thread, {@link Nodes#reset() reset} at the top of each
@@ -321,11 +328,11 @@ public final class BlockPathfinder {
         // stream of replans allocates nothing here. First call on a thread pays the initial 512/1024 sizing.
         final Nodes nodes = SEARCH.get();
         nodes.reset();
-        Relaxer relaxer = new Relaxer(nodes, gx, gy, gz);
+        Relaxer relaxer = new Relaxer(nodes, sx, sy, sz, gx, gy, gz);
 
         int startRow = nodes.intern(startKey, sx, sy, sz);
         nodes.g[startRow] = 0f;
-        nodes.f[startRow] = heuristic(sx, sy, sz, gx, gy, gz);
+        nodes.f[startRow] = relaxer.h(sx, sy, sz);
         nodes.push(startRow);
 
         int expansions = 0;
@@ -348,7 +355,7 @@ public final class BlockPathfinder {
                 break;
             }
 
-            float h = heuristic(cx, cy, cz, gx, gy, gz);
+            float h = relaxer.h(cx, cy, cz);
             if (h < bestH) { bestH = h; bestX = cx; bestY = cy; bestZ = cz; }
 
             if (++expansions > MAX_EXPANSIONS) { budgetHit = true; break; }
@@ -409,18 +416,36 @@ public final class BlockPathfinder {
      */
     private static final class Relaxer implements CandidateSink {
         private final Nodes nodes;
-        private final int gx, gy, gz;
+        private final int sx, sy, sz;   // start (for the straight-line tie-break)
+        private final int gx, gy, gz;   // goal
+        private final float invLineLen; // 1 / horizontal |goal-start| (0 when start==goal horizontally)
 
         int current;        // row being expanded
         float currentG;     // its g (read once per expansion, not per candidate)
         int move;           // MovementRegistry.TIER1 index currently emitting candidates
         boolean anyEdits;   // has any edge carried break/place edits? (gates the per-pop diff rebuild)
 
-        Relaxer(Nodes nodes, int gx, int gy, int gz) {
+        Relaxer(Nodes nodes, int sx, int sy, int sz, int gx, int gy, int gz) {
             this.nodes = nodes;
+            this.sx = sx;
+            this.sy = sy;
+            this.sz = sz;
             this.gx = gx;
             this.gy = gy;
             this.gz = gz;
+            double dxz = Math.sqrt((double) (gx - sx) * (gx - sx) + (double) (gz - sz) * (gz - sz));
+            this.invLineLen = dxz > 1e-6 ? (float) (1.0 / dxz) : 0f;
+        }
+
+        /**
+         * The search heuristic: weighted 3D-octile distance to the goal (see {@link #octile}) plus the tiny
+         * straight-line deviation tie-break. The deviation is the perpendicular horizontal distance from the
+         * start→goal line — {@code |(node−start) × (goal−start)| / |goal−start|} — scaled by {@link #H_TIE}
+         * so it only orders otherwise-equal-{@code f} nodes (collapsing the open-ground equal-cost plateau).
+         */
+        float h(int x, int y, int z) {
+            float cross = Math.abs((float) (x - sx) * (gz - sz) - (float) (z - sz) * (gx - sx));
+            return octile(x, y, z, gx, gy, gz) + H_TIE * (cross * invLineLen);
         }
 
         @Override
@@ -431,7 +456,7 @@ public final class BlockPathfinder {
             if (tentative >= nodes.g[row]) return; // new rows start at +inf, so this also admits first visits
 
             nodes.g[row] = tentative;
-            nodes.f[row] = tentative + heuristic(nx, ny, nz, gx, gy, gz);
+            nodes.f[row] = tentative + h(nx, ny, nz);
             nodes.parent[row] = current;
             nodes.move[row] = move;
             // Keep the edit-set attached to the same (cheapest) edge as the move; clear any stale set
@@ -447,20 +472,19 @@ public final class BlockPathfinder {
     }
 
     /**
-     * 3D octile distance to the goal, inflated by {@link #H_WEIGHT}. Sort the three axis gaps; spend the
-     * smallest on corner-diagonal moves ({@link #H_CORNER}, all three axes at once), the next on
-     * face-diagonals ({@link #H_FACE}), and the largest remainder on straight steps ({@link #H_STRAIGHT}).
-     * All axes are weighted equally — see the constants above for why verticality carries no extra penalty.
-     * The weight makes A* greedy toward the goal (trading optimality for far fewer nodes).
+     * Weighted 3D octile distance to the goal (the base heuristic, before the straight-line tie-break added
+     * in {@link Relaxer#h}). Sort the three axis gaps; spend the smallest on corner-diagonal moves ({@link
+     * #H_CORNER}, all three axes at once), the next on face-diagonals ({@link #H_FACE}), and the largest
+     * remainder on straight steps ({@link #H_STRAIGHT}); inflate by {@link #H_WEIGHT}. All axes are weighted
+     * equally — see the constants above for why verticality carries no extra penalty.
      */
-    private static float heuristic(int x, int y, int z, int gx, int gy, int gz) {
+    private static float octile(int x, int y, int z, int gx, int gy, int gz) {
         int a = Math.abs(x - gx), b = Math.abs(y - gy), c = Math.abs(z - gz);
         // sort a <= b <= c (three compares)
         if (a > b) { int t = a; a = b; b = t; }
         if (b > c) { int t = b; b = c; c = t; }
         if (a > b) { int t = a; a = b; b = t; }
-        float octile = a * H_CORNER + (b - a) * H_FACE + (c - b) * H_STRAIGHT;
-        return H_WEIGHT * octile;
+        return H_WEIGHT * (a * H_CORNER + (b - a) * H_FACE + (c - b) * H_STRAIGHT);
     }
 
     /**
