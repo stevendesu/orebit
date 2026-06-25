@@ -198,6 +198,19 @@ The piece Baritone lacks (and the reason Orebit scales to long distances).
   always mine through — so the lattice is **fully connected**; there is no
   "disconnected." We therefore store **a crossing cost per face**, never adjacency
   bits. The topology is implicit in the grid.
+- **No entrances / no transition graph (ratified — do not reconsider).** Classic HPA\*
+  precomputes *entrances* (border-crossing transition nodes) and an abstract edge graph
+  between them. **Orebit rejects that outright**, because in Minecraft a block can be
+  placed or broken at *any* coordinate at any time, and every such edit can create,
+  destroy, **split, or merge** the entrances on a region face arbitrarily. Maintaining a
+  correct entrance/edge graph under that churn is (a) an incremental-update nightmare (one
+  block change can re-partition a face's openings), (b) a storage cost (the openings, the
+  abstract edges), and (c) a read-time cost (finding/walking the entrances). The
+  face-to-center cost model has **none** of these: a face's cost is a single scalar
+  recomputed from the leaf when the leaf changes — no openings to track, no graph to
+  repair, no per-edit re-partition. **Regions stay dumb fixed cubes; intelligence lives in
+  the recomputed nav grid on approach.** Keeping regions simple is the whole reason the
+  block tier was made fast — the two decisions are a pair.
 - **Face-to-center cost model.** Each node stores **6 `face→center` costs**; a
   traversal = `entry-face→center + center→exit-face`, and the inter-node boundary is
   the implicit sum of the two facing halves (no separate edge storage). These
@@ -241,18 +254,45 @@ Two-tier, lazy, hierarchical A\*.
 
 ### 7.1 Tiers
 
-- **Region tier (`RegionPathfinder`)** — A\* over the persisted HPA\* graph using the
-  LCA super-region of source+target, planning **one hierarchy layer at a time** and
-  refining sub-region plans **lazily** as the bot descends. Produces a `RegionPathPlan`
-  (an ordered region skeleton). This is what makes multi-thousand-block goals tractable.
-- **Block tier (`BlockPathfinder`)** — A\* over the recomputed nav grid **within one
-  region**, targeting the **shared boundary face with the next region** in the route —
-  i.e. *any* traversable cell on that face, whichever is reached first/cheapest (not a
-  single "portal entry" point; that `PortalShape.getNearestEntryTo` notion was the old
-  semantic-region design). Dimension portals are different — those are an `EnterPortal`
-  movement (§7.2), not a region-boundary face. Produces a `BlockPathPlan`.
-- **`PathPlan`** unifies them: walks the region skeleton, invokes the block planner
-  per region just-in-time, preloads the next region while executing the current.
+- **Region tier (`RegionPathfinder`)** — A\* over the persisted HPA\* **face-to-center
+  cost** graph (§6.5), using the LCA super-region of source+target and planning **one
+  hierarchy layer at a time**, refining sub-region plans **lazily** as the bot descends.
+  Because the graph stores costs (not entrances), a region-A\* node is just a grid cell at
+  some level and its edges are the implicit 6 face-to-center sums — there is nothing to
+  maintain. Produces a `RegionPathPlan`: an **ordered sequence of regions** (the coarse
+  skeleton), NOT a list of crossing points. This is what makes multi-thousand-block goals
+  tractable.
+- **Block tier (`BlockPathfinder`)** — the existing fast, allocation-free A\* over the
+  recomputed nav grid, run **inside a bounded window** of the region skeleton (below).
+  Dimension portals are an `EnterPortal` movement (§7.2), not a region-boundary face.
+  Produces a `BlockPathPlan`.
+
+**The ratified region→block execution model: a sliding window (no portal/entry points).**
+The region skeleton gives the *sequence* of regions to pass through; the block tier does
+the actual moving, but never over the whole route at once. Instead:
+
+1. Take a **window of the next few regions** along the skeleton (target ~3 regions ≈ 48
+   blocks; the window size is a tuning knob, bounded so block-A\* stays cheap — a 3-region
+   window is ~12,288 cells, well inside budget even at pessimistic ns/node).
+2. **If the goal is inside the window**, run block-A\* straight to it — done.
+3. **Otherwise run block-A\* to the *center* of the farthest region in the window** (the
+   one nearest the goal along the skeleton). Any traversable arrival in that region is
+   fine — there is no designated entry cell, because there are no entrances. The region
+   *center* is just a waypoint that pulls the bot the right way; the block-A\* finds the
+   real, optimal micro-path to it over live geometry.
+4. **Walk that block path; when the bot crosses into the next region, replan** — slide the
+   window forward one region and go to step 1.
+
+This yields a near-optimal region-N→region-N+1 crossover *for free* (block-A\* optimizes
+the actual crossing over real terrain each time), depends ONLY on block-A\* solving
+arbitrary ≤window-sized paths (now fast + allocation-free), and stores **nothing** about
+how regions connect. Replanning every region boundary is the price; it's cheap because each
+block-A\* is windowed, and it's also what makes the bot robust to the world changing under
+it (a freshly-placed wall just changes the next window's micro-path).
+
+- **`PathPlan`** unifies them: holds the region skeleton, drives the sliding window, invokes
+  the block planner per window just-in-time, and can preload the next window's chunks while
+  executing the current.
 
 ### 7.2 Movement vocabulary
 
@@ -428,9 +468,53 @@ adapters are filled in over time.
 - **Phase 2 — Fixed-grid regions + resource octree.** Implement the grid `RegionBuilder`
   (coordinate-math assignment + incremental update); populate and **persist** the
   sparse resource octree; implement the ascend/descend resource search.
-- **Phase 3 — HPA\* graph.** Build face-to-center costs (4-bit log, 16³ leaf), the
-  octree roll-up, local portal edges; **persist** it; implement `RegionPathfinder`
-  (LCA + lazy layer A\*) and the cross-dimension heuristic.
+- **Phase 3 — HPA\* graph (face-to-center cost; NO entrances — §6.5).** This is the
+  current next arc (the block tier of Phase 4 below is already built + fast, which is what
+  makes the sliding window viable). Build it BEFORE partial-path return, so pathological
+  failures stay visible as logged `FAIL`s and HPA\*'s benefit is measured cleanly. The
+  semantic `region/` classes (`Region`/`LeafRegion`/`CompositeRegion`/`Portal`/`PortalShape`,
+  flood-fill `RegionBuilder`) are **superseded** by this — replace, don't build on. Concrete
+  ladder:
+  - **3a — Implicit grid + SoA cost store.** Addressing only (no node objects): a node at
+    level *L* is `(level, blockPos / (16·2^L))`, parent `(level+1, coord>>1)`; octree levels
+    0–5 (16³→512³, 8 children), quadtree levels 6+ (horizontal-only, 4 children) up to the
+    dimension root (§6.3). Store **6 face-to-center costs × 4-bit log-scale** per node in
+    **per-level sparse SoA** arrays (separate from the resource histogram's SoA — §6.3), one
+    layer per dimension.
+  - **3b — Leaf cost (the mini-pathfind).** For each built 16³ leaf, compute each
+    `face-center → leaf-center` cost by running the **existing fast block-A\*** from the face
+    center to the leaf center over the recomputed nav grid (with default caps/survival —
+    §7.3 baseline); quantize to the 4-bit bucket. Six small bounded searches per leaf;
+    `COST_INF` bucket where a face is unreachable from center (e.g. solid leaf — still
+    "mineable," so cost is high, not infinite, per the everything-traversable rule).
+  - **3c — Square-pyramid merge.** A coarse node's 6 face costs are rolled up from its
+    children's faces (8-child merge below the octree→quadtree transition, 4-child above —
+    identical operator). A leaf change re-merges its ancestors in O(levels).
+  - **3d — Missing / unloaded sections.** A node with no built nav data plans from its
+    **persisted** cost if present, else an **optimistic default** (straight-line / minimum
+    cost-per-block) — planning over unexplored terrain is the whole point; the nav grid
+    refines it on approach. Define the default explicitly so the region-A\* heuristic stays
+    admissible.
+  - **3e — Persistence.** Per-dimension **hierarchical index file**, separate from chunk
+    data (a high-level node spans many chunks — §6.3). Persist the pyramid; recompute the
+    nav grid (never persisted). Target ~2% of save (§6.6).
+  - **3f — Incremental maintenance.** Hook the existing `setBlockState` mixin
+    (`BlockChangeEvents` → nav-grid patch already exists): a changed cell dirties its leaf →
+    recompute that leaf's ≤6 face costs (3b) → re-merge ancestors (3c). Debounce/batch so a
+    bulk edit doesn't thrash.
+  - **3g — `RegionPathfinder`.** A\* over the cost pyramid: LCA super-region of
+    source+target, plan one layer at a time, refine lazily as the bot descends. Output = an
+    **ordered region sequence** (`RegionPathPlan`), no crossing points.
+  - **3h — Sliding-window driver (`PathPlan`).** Per §7.1: window of ~3 regions; block-A\*
+    to the goal if in-window else to the farthest window-region's center; replan on each
+    region-boundary crossing, sliding forward. Reuses the block tier as-is.
+  - **3i — Cross-dimension heuristic.** 8:1 Nether→overworld frame in the region-A\*
+    heuristic only (§6.5); edge costs stay real.
+  - **First measurable milestone (the "earns its keep" proof).** Pick a goal that flat
+    block-A\* currently `FAIL`s on (the 30-up open-air pillar, and a multi-thousand-block
+    cross-country walk). Show it now succeeds, and report **region-tier nodes + windowed
+    block-A\* nodes vs. the flat search's 10k-cap** — the clean before/after that justifies
+    the complexity, with partial-path still absent so nothing masks the signal.
 - **Phase 4 — Block pathfinder + movements + cost model.** Implement the `Movement`
   interface and the Baritone-based movement set (+ EnterPortal, + folded
   break/place/door interactions); the tick-based cost model with inventory snapshot;
@@ -463,6 +547,11 @@ Ratified during design review (with rationale recorded in project memory):
 4. Resource tracking is a **sparse log₂ octree** over ~64 classes; section-granular.
 5. HPA\* stores **face-to-center cost** (not connectivity); **16³ leaf, 4-bit
    log-scale**; **portals as local edges**; **8:1 conversion only in the heuristic**.
+   **NO entrances / transition graph** (§6.5): block edits anywhere would create/destroy/
+   split/merge entrances arbitrarily — unmaintainable; a scalar per face has none of that
+   cost. Region→block planning is a **sliding window** (block-A\* to the goal-or-farthest-
+   region-center, replan per boundary crossing — §7.1), not stored crossing points.
+   Regions stay simple by design; that pairs with keeping the block tier fast.
 6. Disk budget ~6–8%/dimension, under the 10–15% target.
 7. Movement vocabulary = **Baritone set + EnterPortal**, **extensible interface**,
    **break/place/door folded into moves**.
