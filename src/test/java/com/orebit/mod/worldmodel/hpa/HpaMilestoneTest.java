@@ -1,7 +1,7 @@
 package com.orebit.mod.worldmodel.hpa;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.concurrent.ConcurrentHashMap;
@@ -118,9 +118,12 @@ public class HpaMilestoneTest {
         System.out.println("[HpaMilestone] flat walk: single flat block-A* over " + WALK_LEN + " blocks ...");
         BlockPathPlan flat = BlockPathfinder.findPath(grid, start, goal, CAPS);
 
-        // The beeline alone needs > MAX_EXPANSIONS pops, so the budget is hit and no plan is returned.
-        assertNull(flat, "flat block-A* should hit the 10k expansion budget on a " + WALK_LEN
-                + "-block walk and return null (the before-state the region tier fixes)");
+        // A single flat search can't REACH the goal in one shot: the beeline needs > MAX_EXPANSIONS pops, so
+        // the budget is hit and it returns (at most) a PARTIAL path far short of the goal (since partial-path
+        // landed, the result is a stub toward the goal, not null). The before-state the region tier fixes.
+        assertFalse(reachesGoal(flat, goal), "a single flat block-A* should NOT reach a " + WALK_LEN
+                + "-block goal in one budget (it returns a short partial); got "
+                + (flat == null ? "null" : flat.size() + "wp"));
     }
 
     /**
@@ -187,11 +190,11 @@ public class HpaMilestoneTest {
         System.out.println("[HpaMilestone] pillar: single flat block-A* " + PILLAR_HEIGHT + " up ...");
         BlockPathPlan flat = BlockPathfinder.findPath(grid, start, goal, CAPS);
 
-        // The flood case: the budget is exhausted before a pillar-up plan is committed. (If a future
-        // heuristic fix lets the flat search solve this, this is the assertion to revisit — that would itself
-        // be the win, just at the block tier rather than the region tier.)
-        assertNull(flat, "the 30-up open-air pillar is the known flood case: flat block-A* should burn its "
-                + "budget and return null");
+        // The flood case: the budget is exhausted before the pillar tops out, so a single flat search does
+        // NOT reach the goal (it returns a partial part-way up — the bot would pillar that far, then replan).
+        assertFalse(reachesGoal(flat, goal), "the " + PILLAR_HEIGHT + "-up open-air pillar is the known flood "
+                + "case: a single flat block-A* should NOT reach the top in one budget; got "
+                + (flat == null ? "null" : flat.size() + "wp"));
     }
 
     /**
@@ -288,6 +291,20 @@ public class HpaMilestoneTest {
      */
     private static NavGridView view(ConcurrentHashMap<Long, NavSection[]> chunks) {
         return NavGridView.overSections(0, chunks);
+    }
+
+    /**
+     * Whether a plan actually reaches {@code goalFloor} (within the block tier's goal tolerance: ±1 horizontal,
+     * ±2 vertical). With partial-path return, a budget-exhausted search yields a short stub toward the goal
+     * rather than {@code null}, so "did it solve?" is "did its last waypoint land at the goal", not "is it
+     * non-null". A waypoint is a stand position ({@code floorCell.above()}), so its floor is {@code .below()}.
+     */
+    private static boolean reachesGoal(BlockPathPlan plan, BlockPos goalFloor) {
+        if (plan == null || plan.isEmpty()) return false;
+        BlockPos lastFloor = plan.waypoint(plan.size() - 1).below();
+        return Math.abs(lastFloor.getX() - goalFloor.getX()) <= 1
+                && Math.abs(lastFloor.getZ() - goalFloor.getZ()) <= 1
+                && Math.abs(lastFloor.getY() - goalFloor.getY()) <= 2;
     }
 
     /**
