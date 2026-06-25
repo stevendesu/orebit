@@ -334,7 +334,17 @@ public final class BlockPathfinder {
      * default {@link BotCaps}. See {@link #findPath(NavGridView, BlockPos, BlockPos, BotCaps)}.
      */
     public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor) {
-        return findPath(grid, startFloor, goalFloor, BotCaps.DEFAULT);
+        return findPath(grid, startFloor, goalFloor, BotCaps.DEFAULT, null);
+    }
+
+    /**
+     * Search for a walkable path from {@code startFloor} to {@code goalFloor} (both floor cells) given the
+     * bot's {@code caps}, unbounded over the loaded grid. See
+     * {@link #findPath(NavGridView, BlockPos, BlockPos, BotCaps, RegionBound)}.
+     */
+    public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
+                                         BotCaps caps) {
+        return findPath(grid, startFloor, goalFloor, caps, null);
     }
 
     /**
@@ -343,9 +353,15 @@ public final class BlockPathfinder {
      * is found within the loaded grid / expansion budget. The goal is reached when within 1 block
      * horizontally and 2 vertically of {@code goalFloor} (so the owner needn't be standing on a perfectly
      * walkable cell for the bot to arrive next to them).
+     *
+     * <p>When {@code bound} is non-null the search is confined to that corridor (HPA-IMPLEMENTATION.md §9):
+     * a candidate cell outside the box is never relaxed, so the region tier's sliding window can keep the
+     * block-A* from flooding off the skeleton (the pillar fix — see {@link RegionBound}). The {@code bound}
+     * does NOT gate the start cell (interned directly) and the caller must keep the goal/target inside the
+     * box, or the search can never reach it. {@code null} bound = the historical unbounded behaviour.
      */
     public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
-                                         BotCaps caps) {
+                                         BotCaps caps, RegionBound bound) {
         final long t0 = System.nanoTime();
         final int sx = startFloor.getX(), sy = startFloor.getY(), sz = startFloor.getZ();
         final int gx = goalFloor.getX(), gy = goalFloor.getY(), gz = goalFloor.getZ();
@@ -365,7 +381,7 @@ public final class BlockPathfinder {
         nodes.reset();
         final EditPool editPool = EDIT_POOL.get();
         editPool.reset();
-        Relaxer relaxer = new Relaxer(nodes, editPool, sx, sy, sz, gx, gy, gz);
+        Relaxer relaxer = new Relaxer(nodes, editPool, sx, sy, sz, gx, gy, gz, bound);
 
         int startRow = nodes.intern(startKey, sx, sy, sz);
         nodes.g[startRow] = 0f;
@@ -457,13 +473,15 @@ public final class BlockPathfinder {
         private final int sx, sy, sz;   // start (for the straight-line tie-break)
         private final int gx, gy, gz;   // goal
         private final float invLineLen; // 1 / horizontal |goal-start| (0 when start==goal horizontally)
+        private final RegionBound bound; // corridor confinement (null = unbounded); rejects out-of-box candidates
 
         int current;        // row being expanded
         float currentG;     // its g (read once per expansion, not per candidate)
         int move;           // MovementRegistry.TIER1 index currently emitting candidates
         boolean anyEdits;   // has any edge carried break/place edits? (gates the per-pop diff rebuild)
 
-        Relaxer(Nodes nodes, EditPool editPool, int sx, int sy, int sz, int gx, int gy, int gz) {
+        Relaxer(Nodes nodes, EditPool editPool, int sx, int sy, int sz, int gx, int gy, int gz,
+                RegionBound bound) {
             this.nodes = nodes;
             this.editPool = editPool;
             this.sx = sx;
@@ -472,6 +490,7 @@ public final class BlockPathfinder {
             this.gx = gx;
             this.gy = gy;
             this.gz = gz;
+            this.bound = bound;
             double dxz = Math.sqrt((double) (gx - sx) * (gx - sx) + (double) (gz - sz) * (gz - sz));
             this.invLineLen = dxz > 1e-6 ? (float) (1.0 / dxz) : 0f;
         }
@@ -489,6 +508,11 @@ public final class BlockPathfinder {
 
         @Override
         public void accept(int nx, int ny, int nz, float cost, EditScratch scratch) {
+            // Corridor confinement (HPA-IMPLEMENTATION.md §9): never relax a candidate outside the window's
+            // box. This is the single choke point through which every discovered cell passes, so one check
+            // here confines the whole search without touching any movement. The start cell is interned
+            // directly (not via accept), so it is always admitted even at the box edge.
+            if (bound != null && !bound.allows(nx, ny, nz)) return;
             float tentative = currentG + cost;
             long nKey = BlockPos.asLong(nx, ny, nz);
             int row = nodes.intern(nKey, nx, ny, nz);

@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 import com.orebit.mod.commands.OrebitCommands;
 import com.orebit.mod.platform.PlatformEvents;
 import com.orebit.mod.platform.Worlds;
+import com.orebit.mod.worldmodel.hpa.HpaMaintenance;
 import com.orebit.mod.worldmodel.pathing.ChunkNavLoader;
 import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
 
@@ -36,6 +37,20 @@ public final class OrebitCommon {
         // chunk rebuild. The trigger is the setBlockState mixin (overlay) firing BlockChangeEvents; until
         // that overlay lands this is inert. Retires the follower's per-replan refreshNavData shim.
         NavGridUpdater.register();
+
+        // HPA* region-tier maintenance (PRD §6.3–6.5 Phase 3; HPA-IMPLEMENTATION.md §10/§12 "3f"):
+        // attach the block-change listener that marks the containing level-0 leaf dirty so the cost
+        // pyramid stays live as the world changes. Like NavGridUpdater, this is inert until the
+        // setBlockState mixin overlay fires BlockChangeEvents, so registering it is harmless. The
+        // debounced, budgeted recompute side (HpaMaintenance.flush) is driven from the world-tick-end
+        // cadence below — the same cadence ChunkNavLoader drains its build queue on.
+        HpaMaintenance.register();
+
+        // World-tick-end drain for the HPA* dirty-leaf backlog: recompute up to MAX_LEAVES_PER_TICK
+        // dirty leaves' faces and re-merge their ancestors, once per level per tick. A separate listener
+        // (not folded into ChunkNavLoader's tick hook) keeps the region tier's wiring self-contained and
+        // ChunkNavLoader untouched. No-op when nothing is dirty / no pyramid exists for the dimension.
+        events.onWorldTickEnd(HpaMaintenance::flush);
 
         // Deterministic /bot come|stay|follow|here command surface (no LLM). The common command tree
         // builds on vanilla Brigadier; the loader seam only translates WHEN registration fires.

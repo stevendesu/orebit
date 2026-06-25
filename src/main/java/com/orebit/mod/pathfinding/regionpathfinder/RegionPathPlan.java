@@ -1,65 +1,122 @@
-/**
- * RegionPathPlan.java
- *
- * Main Component: pathfinding/regionpathfinder/
- * Environment: MAIN
- *
- * This class represents a strategic, high-level navigation plan composed of
- * a sequence of regions that a bot must traverse in order to reach a target
- * destination. It is the output of the `RegionPathfinder` and is consumed by
- * the `PathPlan`, which coordinates both region-level and block-level
- * movement planning.
- *
- * Each region in the plan is assumed to be connected to the next via one or
- * more shared portal blocks or transition boundaries, as defined in the region
- * graph maintained by the world model. The `RegionPathPlan` does not describe
- * how to move within each region—only which regions must be visited and in what
- * order.
- *
- * ---------------------------
- * What This File Does:
- * ---------------------------
- * - Stores a sequence of region transitions between source and destination
- * - May include portal information, estimated costs, or metadata per step
- * - Acts as the long-range "skeleton" for physical path planning
- *
- * ---------------------------
- * How This File Differs from Others:
- * ---------------------------
- * - Unlike `BlockPathPlan`, this plan is abstract and symbolic
- * - Unlike `RegionTree` (provided by worldmodel), this is a traversal result, not a graph structure
- * - Unlike `PathPlan`, this does not contain block-level details
- *
- * ---------------------------
- * Assumptions:
- * ---------------------------
- * - Each consecutive pair of regions is adjacent or connected via a known portal
- * - The plan will be refined into one or more `BlockPathPlan`s at runtime
- * - The world model will remain consistent for the duration of plan execution
- * - Transitions between regions are always traversable by at least one `BlockPathOperation`
- *
- * ---------------------------
- * Dependencies:
- * ---------------------------
- * - `Region`: Represents each node in the plan (from `worldmodel/region/`)
- * - (Optional) `RegionPortal`: May describe the boundary between two regions
- *
- * ---------------------------
- * Dependents:
- * ---------------------------
- * - `PathPlan`: Uses this to determine the next region goal
- * - `BlockPathfinder`: May use this to identify goal portals for block-level planning
- * - `Debug tools`: May visualize planned region route
- *
- * ---------------------------
- * Implementation Details:
- * ---------------------------
- * - Internally stores an ordered list of `Region` transitions
- * - May expose methods like:
- *     - `Region getStart()`
- *     - `Region getNextRegion()`
- *     - `boolean isComplete()`
- *     - `List<Region> getPath()`
- * - Should be immutable once constructed by `RegionPathfinder`
- */
 package com.orebit.mod.pathfinding.regionpathfinder;
+
+import com.orebit.mod.worldmodel.hpa.RegionAddress;
+
+import net.minecraft.core.BlockPos;
+
+/**
+ * The coarse navigation skeleton produced by {@link RegionPathfinder}: an <b>immutable, ordered sequence
+ * of level-0 region addresses</b> from the start region to the goal region
+ * (PRD §6.3–6.5, §7.1; HPA-IMPLEMENTATION.md §8, "3g output").
+ *
+ * <h2>Ratified design — face-to-center, NOT portals</h2>
+ * The region tier is a <b>fixed cubic-grid implicit octree</b> (PRD §6.3), NOT the superseded semantic
+ * {@code Region}/{@code Portal} flood-fill model. A {@code RegionPathPlan} therefore carries no portals,
+ * no region objects, and no per-step edge metadata — it is purely the list of <b>level-0 region cells</b>
+ * (each a single 16³ {@link com.orebit.mod.worldmodel.pathing.NavSection NavSection}) the bot should walk
+ * through, in travel order. Index {@code 0} is the start region; the last index is the goal region (or, in
+ * the lazy-refinement scale-guard case, the end of the refined leading segment — HPA-IMPLEMENTATION.md §8).
+ *
+ * <p>"Which regions, in what order" is the entire contract. <b>How</b> to move within / between regions is
+ * decided by the block tier ({@link com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder}); any
+ * traversable arrival into the next region is acceptable (no entrances, PRD §6.5). The
+ * {@link com.orebit.mod.pathfinding.PathPlan} sliding-window driver consumes this skeleton, picking a
+ * windowed block target every few regions.
+ *
+ * <h2>Storage (house style — HPA-IMPLEMENTATION.md §14)</h2>
+ * Three parallel {@code int[]} arrays of the skeleton's level-0 region coords ({@code rxs/rys/rzs}); no
+ * per-step objects, no boxing. {@link #centerOf(int)} materializes a {@link BlockPos} on demand from
+ * {@link RegionAddress#centerX}/{@link RegionAddress#centerY}/{@link RegionAddress#centerZ} (level 0). The
+ * arrays are sized exactly at construction and never mutated — the plan is immutable once built.
+ *
+ * @see RegionPathfinder
+ * @see com.orebit.mod.pathfinding.PathPlan
+ */
+public final class RegionPathPlan {
+
+    /** Level-0 region coords of each skeleton step, in travel order (index 0 = start region). */
+    private final int[] rxs;
+    private final int[] rys;
+    private final int[] rzs;
+
+    /** The dimension floor, needed to recover world-Y centers from region {@code ry} (overworld −64). */
+    private final int minY;
+
+    /** Whether the skeleton's last region is the actual goal region (vs a refined leading segment end). */
+    private final boolean reachedGoalRegion;
+
+    /**
+     * Build the immutable skeleton from parallel coord arrays in travel order. The arrays are taken by
+     * reference (the caller in {@link RegionPathfinder} hands over freshly-sized arrays it does not retain);
+     * callers must not mutate them afterward.
+     *
+     * @param rxs   level-0 region X per step, index 0 = start
+     * @param rys   level-0 region Y per step
+     * @param rzs   level-0 region Z per step
+     * @param size  number of valid leading entries (the arrays may be exactly this length)
+     * @param minY  dimension floor (for {@link #centerOf})
+     * @param reachedGoalRegion whether the last entry is the true goal region
+     */
+    public RegionPathPlan(int[] rxs, int[] rys, int[] rzs, int size, int minY, boolean reachedGoalRegion) {
+        // Trim to the valid prefix so size()/indexing is exact and the plan is truly immutable.
+        if (rxs.length != size) {
+            int[] tx = new int[size];
+            int[] ty = new int[size];
+            int[] tz = new int[size];
+            System.arraycopy(rxs, 0, tx, 0, size);
+            System.arraycopy(rys, 0, ty, 0, size);
+            System.arraycopy(rzs, 0, tz, 0, size);
+            this.rxs = tx;
+            this.rys = ty;
+            this.rzs = tz;
+        } else {
+            this.rxs = rxs;
+            this.rys = rys;
+            this.rzs = rzs;
+        }
+        this.minY = minY;
+        this.reachedGoalRegion = reachedGoalRegion;
+    }
+
+    /** Number of skeleton regions (0 for an empty/failed plan). */
+    public int size() {
+        return rxs.length;
+    }
+
+    /** {@code true} iff this plan has no regions. */
+    public boolean isEmpty() {
+        return rxs.length == 0;
+    }
+
+    /** Whether the final skeleton region is the true goal region (vs the end of a refined leading segment). */
+    public boolean reachedGoalRegion() {
+        return reachedGoalRegion;
+    }
+
+    /** Level-0 region X of skeleton step {@code i}. */
+    public int rx(int i) {
+        return rxs[i];
+    }
+
+    /** Level-0 region Y of skeleton step {@code i}. */
+    public int ry(int i) {
+        return rys[i];
+    }
+
+    /** Level-0 region Z of skeleton step {@code i}. */
+    public int rz(int i) {
+        return rzs[i];
+    }
+
+    /**
+     * The world-block center of skeleton region {@code i} (level 0). Materializes a {@link BlockPos} from
+     * {@link RegionAddress}'s level-0 center math; the driver projects this to a standable floor cell to use
+     * it as a windowed block target (HPA-IMPLEMENTATION.md §9).
+     */
+    public BlockPos centerOf(int i) {
+        int cx = RegionAddress.centerX(0, rxs[i]);
+        int cy = RegionAddress.centerY(0, rys[i], minY);
+        int cz = RegionAddress.centerZ(0, rzs[i]);
+        return new BlockPos(cx, cy, cz);
+    }
+}

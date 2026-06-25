@@ -2,6 +2,7 @@ package com.orebit.mod;
 
 import com.mojang.authlib.GameProfile;
 import com.orebit.mod.pathfinding.PathDebugRenderer;
+import com.orebit.mod.pathfinding.PathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
@@ -11,6 +12,7 @@ import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.Replaceable;
 import com.orebit.mod.platform.WorldEdits;
 import com.orebit.mod.platform.Worlds;
+import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
@@ -85,6 +87,22 @@ public class AllyBotEntity extends FakePlayerEntity {
     private Mode mode = Mode.FOLLOW;
     private BlockPos comeTarget;    // fixed summon cell (owner's feet block at /bot come time)
 
+    /**
+     * The two-tier driver (HPA-IMPLEMENTATION.md §9/§10): owns the coarse region skeleton and feeds the
+     * follower one windowed {@link BlockPathPlan} at a time via {@link PathPlan#currentBlockPlan()}. Built
+     * fresh per goal in {@link #replan}; ticked by {@link #driveToward} (which calls
+     * {@link PathPlan#onBotMoved}). The existing {@link #steerAlongPath}/{@link #applyEdits} machinery is
+     * unchanged — it walks whatever {@link #path} the driver currently exposes.
+     */
+    private PathPlan pathPlan;
+    /**
+     * Identity of the {@link BlockPathPlan} {@link #path} currently points at. When the driver advances its
+     * sliding window it swaps in a NEW {@link BlockPathPlan} instance; we detect that by reference identity
+     * and reset {@link #waypointIndex}/{@link #lastEditedIndex} so the follower restarts at the head of the
+     * new window's path (HPA-IMPLEMENTATION.md §10).
+     */
+    private BlockPathPlan lastBlockPlanRef;
+
     private BlockPathPlan path;
     private int waypointIndex;
     private int replanCooldown;
@@ -125,14 +143,25 @@ public class AllyBotEntity extends FakePlayerEntity {
     public void setMode(Mode mode) {
         this.mode = mode;
         this.comeTarget = null;
-        this.path = null;
+        clearPlan();
     }
 
     /** {@code /bot come}: path once to {@code summonCell} (the caller's feet block), then hold there. */
     public void comeTo(BlockPos summonCell) {
         this.mode = Mode.COME;
         this.comeTarget = summonCell.immutable();
+        clearPlan();
+    }
+
+    /**
+     * Drop the active two-tier driver and its exposed block plan (HPA-IMPLEMENTATION.md §10): a mode change
+     * or a STAY hold invalidates the current goal, so the {@link PathPlan} built for it must not be ticked
+     * again. The next {@link #driveToward} sees a null {@link #pathPlan} and rebuilds for the new goal.
+     */
+    private void clearPlan() {
+        this.pathPlan = null;
         this.path = null;
+        this.lastBlockPlanRef = null;
     }
 
     @Override
@@ -170,7 +199,7 @@ public class AllyBotEntity extends FakePlayerEntity {
     /** STAY: stop in place and face the owner. */
     private void holdPosition() {
         this.zza = 0.0f;
-        this.path = null;
+        clearPlan();
         lookAtPlayer(owner);
     }
 
@@ -191,18 +220,38 @@ public class AllyBotEntity extends FakePlayerEntity {
         // also match the target's height, which is what makes it actually climb to reach you.
         if (distXZ <= ARRIVE_DIST && Math.abs(dy) <= ARRIVE_Y) {
             this.zza = 0.0f;
-            this.path = null;
+            clearPlan();
             lookAtPlayer(owner);
             return true;
         }
 
-        // Replan when the goal moves to a new block, the path is spent, or the safety interval elapses.
+        // Replan when the goal moves to a new block, the driver is exhausted, or the safety interval elapses.
         // Holding a stable path while the goal stands still stops the debug particles from ghosting.
-        if (path == null || waypointIndex >= path.size()
-                || !goalFloor.equals(lastGoalCell) || --replanCooldown <= 0) {
+        // ("Exhausted" is now driver-level: the windowed block plan is spent AND the region driver reports it
+        // is not COMPLETE — the sliding window owns advancing through intermediate windows, so we no longer
+        // rebuild the whole two-tier plan just because one window's block path ran out.)
+        boolean exhausted = (pathPlan == null)
+                || (path == null && !pathPlan.isComplete())
+                || (path != null && waypointIndex >= path.size() && !pathPlan.isComplete());
+        if (exhausted || !goalFloor.equals(lastGoalCell) || --replanCooldown <= 0) {
             replan(goalFloor);
             lastGoalCell = goalFloor;
             replanCooldown = REPLAN_TICKS;
+        } else if (pathPlan != null) {
+            // Per-tick driver hook (HPA-IMPLEMENTATION.md §10): report the bot's current floor cell so the
+            // sliding window can COMMIT into the next region (the wiggle rule) and replan that window's block
+            // path. blockPosition().below() is the bot's floor cell (the same cell convention as replan's
+            // startFloor). Then refresh `path` to whatever block plan the driver now exposes; when the driver
+            // swapped in a NEW BlockPathPlan instance (window advanced / re-planned), restart the follower at
+            // its head so steerAlongPath/applyEdits don't index a stale waypoint/edit cursor.
+            pathPlan.onBotMoved(this.blockPosition().below());
+            BlockPathPlan now = pathPlan.currentBlockPlan();
+            if (now != lastBlockPlanRef) {
+                this.path = now;
+                this.lastBlockPlanRef = now;
+                this.waypointIndex = 0;
+                this.lastEditedIndex = -1;
+            }
         }
 
         if (path != null && waypointIndex < path.size()) {
@@ -218,18 +267,27 @@ public class AllyBotEntity extends FakePlayerEntity {
         return false;
     }
 
-    /** Plan a fresh block path from the bot's floor cell to the owner's floor cell. */
+    /**
+     * Plan a fresh <b>two-tier</b> path from the bot's floor cell to {@code goalFloor}
+     * (HPA-IMPLEMENTATION.md §10). Builds a new {@link PathPlan} — which plans the coarse region skeleton
+     * once ({@link com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder}) and computes the first
+     * window's block path — and exposes that window's block plan through {@link #path} so the existing
+     * follower keeps working unchanged. The driver then advances the sliding window per tick via
+     * {@link PathPlan#onBotMoved} (see {@link #driveToward}); this whole-plan rebuild only fires on a new
+     * goal / when the driver is fully exhausted.
+     *
+     * <p>The nav grid the block tier reads is kept live by the {@code LevelChunk.setBlockState} mixin
+     * (BlockChangeEvents → NavGridUpdater.patchCell), so each window's block search sees current terrain —
+     * including the bot's own break/place edits — without a per-replan rebuild. A chunk not yet built by
+     * the on-load pipeline reads as unbuilt and is skipped, the same as any unloaded area.
+     */
     private void replan(BlockPos goalFloor) {
         ServerLevel level = (ServerLevel) Worlds.of(this);
         BlockPos startFloor = this.blockPosition().below();
 
-        // No nav-data refresh here anymore: the nav grid is kept live by the LevelChunk.setBlockState
-        // mixin (BlockChangeEvents -> NavGridUpdater.patchCell), so a replan reads current terrain for
-        // every tracked chunk — including the bot's own break/place edits — without a per-replan rebuild.
-        // (A chunk that hasn't been built by the on-load pipeline yet simply reads as unbuilt and is
-        // skipped by A*, the same as any unloaded area.)
-        NavGridView grid = new NavGridView(level);
-        this.path = BlockPathfinder.findPath(grid, startFloor, goalFloor, CAPS);
+        this.pathPlan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, CAPS);
+        this.path = pathPlan.currentBlockPlan();
+        this.lastBlockPlanRef = this.path;
         this.waypointIndex = 0;
         this.lastEditedIndex = -1;
 
@@ -241,6 +299,11 @@ public class AllyBotEntity extends FakePlayerEntity {
                 OrebitCommon.LOGGER.info("[Orebit] plan: {} wp cost={} start={} goal={} path={}",
                         path.size(), path.cost(), compact(startFloor), compact(goalFloor), waypointsString());
             } else {
+                // FAIL-visible diagnostic (HPA-IMPLEMENTATION.md §10: pathological failures stay visible).
+                // The two-tier driver exposes no block plan — report whether the start/goal cells even have
+                // built nav data, the most common cause (cells outside the loaded/built radius). A throwaway
+                // NavGridView is built only on this rare no-path branch, purely for the built() probes.
+                NavGridView grid = new NavGridView(level);
                 OrebitCommon.LOGGER.info("[Orebit] plan: NONE start={}(built={}) goal={}(built={})",
                         startFloor, grid.built(startFloor.getX(), startFloor.getY(), startFloor.getZ()),
                         goalFloor, grid.built(goalFloor.getX(), goalFloor.getY(), goalFloor.getZ()));
@@ -250,6 +313,7 @@ public class AllyBotEntity extends FakePlayerEntity {
             if (hasPath) {
                 OrebitCommon.LOGGER.info("[Orebit] bot path: {} waypoints (cost {})", path.size(), path.cost());
             } else {
+                NavGridView grid = new NavGridView(level);
                 OrebitCommon.LOGGER.info("[Orebit] bot path: none (startBuilt={}, goalBuilt={})",
                         grid.built(startFloor.getX(), startFloor.getY(), startFloor.getZ()),
                         grid.built(goalFloor.getX(), goalFloor.getY(), goalFloor.getZ()));
