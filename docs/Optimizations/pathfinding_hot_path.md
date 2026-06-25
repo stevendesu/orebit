@@ -295,6 +295,64 @@ node**, with only the occasional stray spike — the kind that comes from the op
 system or other work sharing the thread, not from garbage we made. The search is, at
 last, genuinely allocation-free on its hot path.
 
+## A different question needs a different profiler
+
+With the allocation gone, the remaining question changed shape. It was no longer
+"where are the *bytes* coming from" — there were barely any left — but "where do the
+*nanoseconds* go." Those are different questions, and they need different instruments.
+The allocation profiler we'd leaned on is blind to a loop that's merely *busy*; for
+that we want a **CPU profiler**, one that periodically interrupts the search and writes
+down which method it caught running. Sample often enough and the methods that show up
+most are the ones eating the time.
+
+So we pointed one at the dig-and-climb search. The striking thing about the result was
+how *flat* it was — no single villain. The cost was spread thinly across the genuine
+work of A\*: shuffling the priority queue, hashing positions into the row table,
+generating each move's candidates. That flatness is itself the headline. It says the
+machinery is honestly tuned; the per-node cost is the algorithm, not a wart. (It also
+quietly settled a worry: the actual movement logic — read the geometry, decide if you
+can step there — was a rounding error, **about 4%** of an ordinary walk. We can keep
+*adding* movement types — swim, climb, parkour, portals — without fear of the node
+getting fatter.)
+
+But one method did stand out, and only on the build-heavy searches: `PathEdits.kindAt`,
+at a quarter of the whole search. Recall the per-path edit diff — the little table that
+remembers "this move plans to place a block here, break one there," so a later move
+reads the world as it *will* be. Every geometry read consults it first. And once the
+path has placed even a single block, *every* read — about a hundred per node — was
+paying a full hash-and-probe of that table, almost always to be told "nothing here."
+
+The waste is geometric. A search's edits are *clustered*: a pillar is one vertical
+column, a dug staircase a short diagonal smear. But the cells a node reads fan out all
+*around* it, and the overwhelming majority are nowhere near any planned edit. We were
+hashing each one to discover what a glance at the map would have told us.
+
+So we gave the diff a glance. The table now tracks the **bounding box** of every edit
+it holds — six integers, updated as edits go in. A read outside that box can't possibly
+be an edit, so it's rejected with six integer comparisons instead of a hash and a probe:
+
+```java
+public int kindAt(int x, int y, int z) {
+    if (size == 0) return NONE;
+    if (x < minX || x > maxX || y < minY || y > maxY || z < minZ || z > maxZ) return NONE;
+    return kindAt(asLong(x, y, z));   // in the box — now it's worth hashing
+}
+```
+
+It's the same idea as a spatial index's cheap reject, shrunk to fit one hot method. The
+answer is identical to before — a cell outside the box was always going to come back
+empty — but the *far* reads, which are most of them, now cost a handful of compares:
+
+| per single TOWER search | + edit pool | + box-reject |
+| --- | ---: | ---: |
+| time | 8,470 µs | **6,997 µs** |
+| per node | ~847 ns | **~700 ns** |
+
+A **17% cut** on the build-heavy search, and — because an edit-free walk never enters
+the branch at all — *nothing* lost on an ordinary follow. The lesson rhymes with the
+allocation one: a hidden cost was hiding in a structure we'd written off as cheap, and
+it took the *right* profiler — one watching CPU, not bytes — to see it.
+
 ## Why this is the difference
 
 It's tempting to look at all this and call it micro-optimization — fussing over

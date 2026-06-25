@@ -1,6 +1,7 @@
 package profile;
 
 import java.nio.file.Path;
+import java.time.Duration;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -46,11 +47,13 @@ public class BenchmarkRunnerTest {
         // StackProfiler samples the running thread and ranks methods by share of
         // runtime — exactly "which methods eat the ns/node". forks(0) is fine for both.
         boolean jfrAlloc = false;
+        boolean jfrCpu = false;
         for (String p : System.getProperty("prof", "").split(",")) {
             switch (p.trim()) {
                 case "gc" -> opt.addProfiler(GCProfiler.class);
                 case "stack" -> opt.addProfiler(StackProfiler.class, "lines=8;top=25;period=1");
                 case "jfr" -> jfrAlloc = true;
+                case "cpu" -> jfrCpu = true;
                 case "" -> { /* none requested */ }
                 default -> System.out.println("[bench] unknown profiler: " + p);
             }
@@ -68,6 +71,19 @@ public class BenchmarkRunnerTest {
             rec.start();
         }
 
+        // -Pprof=cpu → in-process CPU execution sampling (the on-CPU counterpart to the alloc recording
+        // above). JMH's StackProfiler samples EVERY thread, so a forks(0) run drowns the benchmark thread in
+        // idle Gradle-daemon/socket frames (~⅞ of samples). jdk.ExecutionSample carries the owning thread and
+        // a deep stack, so the dump can be filtered to the benchmark thread and folded into a real self-time
+        // histogram / icicle. Dump to build/cpu.jfr; read with
+        // `jfr print --events jdk.ExecutionSample build/cpu.jfr`. 1 ms is the standard JFR method-sample rate.
+        Recording cpu = null;
+        if (jfrCpu) {
+            cpu = new Recording();
+            cpu.enable("jdk.ExecutionSample").withPeriod(Duration.ofMillis(1));
+            cpu.start();
+        }
+
         new Runner(opt.build()).run();
 
         if (rec != null) {
@@ -76,6 +92,13 @@ public class BenchmarkRunnerTest {
             rec.dump(out);
             rec.close();
             System.out.println("[bench] JFR allocation recording -> " + out.toAbsolutePath());
+        }
+        if (cpu != null) {
+            cpu.stop();
+            Path out = Path.of("build/cpu.jfr");
+            cpu.dump(out);
+            cpu.close();
+            System.out.println("[bench] JFR CPU recording -> " + out.toAbsolutePath());
         }
     }
 }
