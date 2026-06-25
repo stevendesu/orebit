@@ -55,3 +55,11 @@
  * - `FAILED` – Path is unrecoverable and must be replaced
  */
 package com.orebit.mod.pathfinding;
+
+public enum PathStatus {
+    IDLE,
+    RUNNING,
+    COMPLETE,
+    BLOCKED,
+    FAILED
+}
