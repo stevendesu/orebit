@@ -73,6 +73,7 @@ public final class BlockPathfinder {
     // and only falls back to expensive building when there's no terrain — the "use the cave" behaviour.
     // Tunable; raise further if tall paths still explore too much, lower if routing gets greedy/odd.
     private static final float H_HORIZONTAL = 1.0f; // Traverse (admissible floor)
+    private static final float H_DIAG = 1.41421356f; // Diagonal step = H_HORIZONTAL · √2 (octile)
     private static final float H_UP = 4.0f;         // ~Ascend + a placed step (typical, not cheapest)
     private static final float H_DOWN = 2.0f;        // ~Descend + a break (typical, not cheapest)
 
@@ -445,12 +446,17 @@ public final class BlockPathfinder {
     }
 
     /**
-     * Per-axis estimate: horizontal by {@link #H_HORIZONTAL}, and the vertical gap by {@link #H_UP} or
-     * {@link #H_DOWN} depending on whether the goal is above or below. Tracks real move costs so A* heads
-     * for the goal directly instead of flooding the cheap horizontal plane (see the constants above).
+     * Per-axis estimate: horizontal by the OCTILE distance (admissible for the 8-connected move set —
+     * {@code dmin} diagonal steps at {@link #H_DIAG} plus the straight remainder at {@link #H_HORIZONTAL}),
+     * and the vertical gap by {@link #H_UP} or {@link #H_DOWN}. Octile (not Manhattan) is required once
+     * {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Diagonal} exists: a diagonal covers one
+     * cell in each of x and z, so Manhattan would overestimate it and break admissibility. Tracks real
+     * move costs so A* heads for the goal directly instead of flooding the cheap horizontal plane.
      */
     private static float heuristic(int x, int y, int z, int gx, int gy, int gz) {
-        float horizontal = (Math.abs(x - gx) + Math.abs(z - gz)) * H_HORIZONTAL;
+        int adx = Math.abs(x - gx), adz = Math.abs(z - gz);
+        int dmin = Math.min(adx, adz), dmax = Math.max(adx, adz);
+        float horizontal = dmax * H_HORIZONTAL + dmin * (H_DIAG - H_HORIZONTAL);
         int dy = gy - y;
         float vertical = dy >= 0 ? dy * H_UP : -dy * H_DOWN;
         return horizontal + vertical;
