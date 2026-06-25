@@ -73,6 +73,20 @@ public final class NavGridView {
     }
 
     /**
+     * Test / benchmark seam: a view over a synthetic, already-built section map with <b>no live level</b>.
+     * Lets a headless JMH benchmark or determinism test (PRD §11) drive the pathfinder over a hand-built
+     * grid without standing up a {@link ServerLevel}. Because {@code level} is {@code null}, {@link
+     * #descriptorAt}'s live-{@code getBlockState} fallback must NEVER fire — the caller must keep every cell
+     * the search can probe inside the built map (which is the realistic case anyway: the pathfinder only
+     * plans over loaded terrain). Package-private so it isn't part of the public runtime surface.
+     */
+    NavGridView(int minY, ConcurrentHashMap<Long, NavSection[]> chunks) {
+        this.level = null;
+        this.minY = minY;
+        this.chunks = chunks;
+    }
+
+    /**
      * Whether world cell {@code (x,y,z)} has built nav data — {@code false} if that chunk's nav data
      * isn't currently built (unloaded radius) or {@code y} is out of the level's vertical range. The
      * cheap gate the pathfinder uses to stay inside the loaded radius.

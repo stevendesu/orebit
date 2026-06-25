@@ -89,6 +89,7 @@ tasks.register<Test>("jmh") {
     filter { includeTestsMatching("profile.BenchmarkRunnerTest") }
     systemProperty("jmh", "true")
     if (project.hasProperty("bench")) systemProperty("bench", project.property("bench")!!)
+    if (project.hasProperty("prof")) systemProperty("prof", project.property("prof")!!)
     testLogging { showStandardStreams = true }
     outputs.upToDateWhen { false }
 }
