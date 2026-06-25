@@ -1,6 +1,6 @@
 Our bot could not cross an open field.
 
-Point it at a goal a few hundred blocks away over flat grass and the search would
+Point it at a goal a thousand-odd blocks away over flat ground and the search would
 grind through its entire budget — ten thousand candidate positions — and then give
 up, leaving the bot standing there. Ten thousand positions is an absurd amount of
 thinking for a walk across a meadow, and that absurdity is what this page is about:
@@ -14,9 +14,10 @@ search takes is two factors multiplied together:
 $$\text{search time} = \text{nodes visited} \times \text{cost per node}$$
 
 That page hammered the right-hand factor. This one is the story of the left one,
-because the cheapest position is the one you never look at. By the end, the
-meadow-crossing search that died at ten thousand positions will finish in
-**fifty-three**.
+because the cheapest position is the one you never look at. By the end, that field
+falls in about **fifteen hundred** nodes — and a shorter test we lean on to watch each
+fix land will tighten all the way to **fifty-three**, one position examined per step of
+the path it returns.
 
 ## How A\* decides what to look at
 
@@ -31,6 +32,29 @@ the search swells outward in every direction like ripples in a pond. A good `h` 
 those ripples into an arrow aimed at the goal. So the whole job is making `h` a sharp,
 honest estimate of the real remaining cost — and every twist below is either a
 sharpening of `h`, or a fix for a way that sharpening backfired.
+
+## The test bench
+
+You can't tune what you don't measure, so every change below was judged live, in-game,
+against the same four scenarios. They come up by name throughout, so here they are:
+
+- **The field** — a flat world, walking from near spawn (around `x=30, z=60`) out to
+  `(1000, 1000)`. Note that's *not* a clean 45° diagonal, which turns out to matter
+  enormously. This is the search that couldn't finish.
+- **The hill** — a normal generated world: a gentle slope up to a tree the bot has to
+  climb, about 60 blocks away. Short and repeatable, so it's our main "is this actually
+  getting better?" yardstick — most of the running numbers below are this test.
+- **The tower** — a flat world with the goal floating 30 blocks straight up. The
+  pathological case we'll end the page on.
+- **The cave** — a little maze hand-built from bedrock, where the straight line to the
+  goal runs into a wall and the bot has to back off and round a corner. A test of
+  whether the search will trade a blocked direct route for a longer correct one.
+
+That last one came with a lesson in test design. I built the cave to *force* a detour
+around the wall — but the wall was bedrock and the *floor* wasn't, so the bot took one
+look, tunneled straight *under* it, and popped up next to me in three waypoints. The
+test was wrong; the bot was right. (We'll use it for what it does prove: that greed,
+pushed too far, stops finding clever moves like that.)
 
 ## Fix #1: let the bot cut corners
 
@@ -62,9 +86,9 @@ we'll come back to — we weight all three axes *equally*, with no special penal
 going up. (Climbing isn't expensive; *placing a block* is, and that cost rides on the
 move itself, not the heuristic.)
 
-So we added the diagonal move, switched to octile, and re-ran the meadow test. The
-node count went... **up**. From 209 to 604. We had handed the bot a strictly better
-way to move and the search got three times *worse*.
+So we added the diagonal move, switched to octile, and re-ran **the hill**. The node
+count went... **up**. From 209 to 604. We had handed the bot a strictly better way to
+move and the search got three times *worse*.
 
 ## Fix #2: stop paying for a perfection nobody asked for
 
@@ -90,9 +114,9 @@ guessing. The trade is well understood: paths can come out a hair longer than op
 but the search visits far fewer nodes to find them.
 
 We landed on `W = 2` by sweeping it live. At `W = 1.5` the search still wandered; at
-`W = 3` it got *too* greedy and started refusing sensible detours — in one cave test a
-goal it solved in a tidy 3-waypoint path at `W = 2` bloated to a clumsy 7-waypoint path
-at `W = 3`. Two was the sweet spot. The meadow dropped from **604 nodes to 71.**
+`W = 3` it got *too* greedy and started refusing sensible detours — on **the cave**, a
+route it solved in a tidy 3-waypoint path at `W = 2` bloated to a clumsy 7-waypoint path
+at `W = 3`. Two was the sweet spot. The hill dropped from **604 nodes to 71.**
 
 This is also where weighting all axes *honestly* paid off. An earlier heuristic put a
 big hand-tuned penalty on vertical moves, and the bot would wastefully *build a tower*
@@ -103,17 +127,27 @@ bot now climbs existing terrain for free and only builds when it genuinely must.
 
 ## Fix #3: the field that still failed
 
-71 nodes for the meadow — lovely. So we tried the real target: a goal **1,500 blocks
-away** across flat ground. It chewed through all ten thousand nodes and failed.
+71 nodes for the hill — lovely. So we turned to **the field**: from near spawn out to
+`(1000, 1000)`, well over a thousand blocks of flat ground. It chewed through all ten
+thousand nodes and failed.
 
 Greed wasn't enough, and to understand why you have to look at *exactly* what trapped
-it. Say the goal is 1,500 east and 300 north. The optimal path uses exactly 300
-diagonal steps and 1,200 straight ones — but **those 300 diagonals can be placed
-anywhere along the route, and every arrangement costs precisely the same.** That's not
-a few equal paths; it's `C(1500, 300)` of them, an astronomical number, fanned out to
-fill the entire 1,500×300 rectangle between start and goal. Every cell in that
-rectangle sits on *some* optimal path, so every cell has the same `f`, so A\* has no
-reason to prefer any of them. It floods the whole rectangle.
+it. Take a clean illustrative case first: a goal 1,500 east and 300 north. The optimal
+path uses exactly 300 diagonal steps and 1,200 straight ones — but **those 300
+diagonals can be placed anywhere along the route, and every arrangement costs precisely
+the same.** That's not a few equal paths; it's `C(1500, 300)` of them, an astronomical
+number, fanned out to fill the entire 1,500×300 rectangle between start and goal. Every
+cell in that rectangle sits on *some* optimal path, so every cell has the same `f`, so
+A\* has no reason to prefer any of them. It floods the whole rectangle.
+
+Our actual field is *nearly* a 45° diagonal — `(1000, 1000)` from about `(30, 60)` — and
+you might think a near-perfect diagonal escapes this, since the all-diagonal path is
+unique. It doesn't: the ~30-block difference between the two axes is made up by a
+handful of straight steps that can still slot in anywhere, fanning the equal-cost paths
+across a band of tens of thousands of cells — comfortably past the ten-thousand budget.
+(The two angles that *do* escape are the perfectly axis-aligned goal and the
+perfectly-45° goal, where the optimal path really is unique. Everything in between
+pays.)
 
 This is a **plateau** — a vast region of tied scores the search wanders across because
 nothing tells it which tie to break. And critically, **greed cannot fix it**: weighting
@@ -123,8 +157,7 @@ equal. The plateau is a tie-breaking problem, so it needs a tie-breaking answer.
 Our first stab was cheap: when two candidates tie on `f`, prefer the one with the
 **larger `g`**. Equal `f` plus more cost-spent means it's further along — *closer to
 the goal* — so this makes the search dive toward the goal along a plateau instead of
-fanning across it. It helped, but the 1,500-block rectangle was far too big for it
-alone.
+fanning across it. It helped, but a rectangle that big was far too much for it alone.
 
 The real fix is to pick *one* arrangement of the diagonals — the one that tracks the
 straight line from start to goal — by adding a microscopic nudge for staying near that
@@ -149,8 +182,7 @@ fifteen hundred.
 
 ## The scoreboard
 
-The same meadow-and-tree test, watched across every fix (it's a ~60-block walk up a
-gentle hill to climb a tree):
+The hill test, watched across every fix (the ~60-block climb up to the tree):
 
 | Step in the journey                   | Nodes explored | Path length |
 | ------------------------------------- | -------------: | ----------: |
@@ -163,7 +195,7 @@ Look at that last row: **53 nodes explored to return a 53-step path.** That's
 essentially the theoretical floor — one position examined per step of the answer,
 almost nothing wasted. The bot walks straight at the goal.
 
-And the headline — the 1,500-block field that started all this:
+And the headline — the field that started all this:
 
 | Configuration                | Result                                          |
 | ---------------------------- | ----------------------------------------------- |
@@ -177,8 +209,9 @@ crosses it in fifteen hundred nodes, barely more than one per step of the route.
 
 These fixes make A\* fast and well-behaved across open and moderately complex terrain,
 which is almost everything a follow-bot meets. They are not magic, and there's one
-wall they deliberately leave standing: a goal reachable *only* by pillaring straight up
-into open air — a player hovering 30 blocks overhead with no terrain to climb. The
+wall they deliberately leave standing — **the tower**: a goal reachable *only* by
+pillaring straight up into open air, a player hovering 30 blocks overhead with no
+terrain to climb. The
 heuristic measures *distance*, and the bot is already directly below the goal, so the
 straight-line trick has nothing to grip; meanwhile the true cost is 30 expensive
 block-placements `h` can't see. The search fans out hunting a cheaper natural route —
