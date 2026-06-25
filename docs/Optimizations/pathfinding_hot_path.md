@@ -260,8 +260,40 @@ A **77% cut in garbage** and a **29% cut in time**, from a change that — like 
 #1 before it — is a few lines and a cache. And the lesson isn't subtle: a
 wall-clock timer will cheerfully report a loop as fast while it quietly buries the
 collector. Only measuring *allocation* showed where the bytes were really going.
-(There's about 1.3 MB still left per search — the planned-edit snapshots a
-*building* path carries — which is the next thread to pull.)
+
+## The last thread: pooling the edit-sets
+
+The chunk cache left about **1.3 MB** still allocating per search, and the same
+allocation profiler pointed straight at it: **97% was a single method** —
+`EditScratch.snapshot()`. Every time the search accepts a move that breaks or places
+a block, it had been minting a fresh little edit record (a `StepEdits` object plus
+two `long[]` arrays inside it) listing the affected cells. A build-heavy search
+accepts *thousands* of those edges, so that was thousands of throwaway objects — the
+entire remaining budget, concentrated in one spot.
+
+The catch is these edit-sets can't simply be reused in place: the handful that land
+on the *winning* path ride home inside the returned plan and are replayed by the bot
+over many ticks, long after the search ends. So we split their lifetime. During a
+search, every accepted edge draws a `StepEdits` from a **per-search pool** — a flat
+array of reusable instances, rewound to the start on each new search, that grows once
+to its high-water mark and then never allocates again. Only the few edits on the
+*final* path are copied out into standalone objects that outlive the pool. The
+thousands of edit-sets the search considers and discards now share zero allocations
+between them.
+
+With that, the benchmark's hard search drops from 1.35 MB to **about 900 bytes** —
+essentially nothing, a 10,000-node search that no longer troubles the collector at
+all:
+
+| per single TOWER search | start | + chunk cache | + edit pool |
+| --- | ---: | ---: | ---: |
+| allocation | 5,791,820 B | 1,354,470 B | ~900 B |
+| GC collections | dozens | a handful | none |
+
+In the live game, the dig-and-climb search now holds a **steady ~950 nanoseconds per
+node**, with only the occasional stray spike — the kind that comes from the operating
+system or other work sharing the thread, not from garbage we made. The search is, at
+last, genuinely allocation-free on its hot path.
 
 ## Why this is the difference
 
