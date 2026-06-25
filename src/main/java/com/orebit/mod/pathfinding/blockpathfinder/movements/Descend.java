@@ -35,10 +35,12 @@ public final class Descend implements Movement {
             int nz = z + d[1];
             int dy = y - 1; // destination floor one below
 
-            if (!ctx.built(nx, dy, nz)) continue;
+            // Destination floor (nx,dy,nz) is read both standable and flags — resolve its slot once.
+            int packed = ctx.packedAt(nx, dy, nz);
+            if (packed == MovementContext.UNBUILT) continue;
 
-            boolean dstStandable = ctx.standable(nx, dy, nz);
-            int flags = ctx.flagsAt(nx, dy, nz);
+            boolean dstStandable = ctx.standable(ctx.descriptorOf(nx, dy, nz, packed));
+            int flags = MovementContext.flagsOf(packed);
             EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
             // Footing: step onto the block below, or BUILD A STEP DOWN — place a throwaway floor one down
             // against the wall and descend onto it (if the bot may place and the spot is placeable).

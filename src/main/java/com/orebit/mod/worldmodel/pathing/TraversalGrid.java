@@ -56,6 +56,26 @@ public class TraversalGrid {
         return (data[getLinearIndex(x, y, z)] >>> FLAGS_SHIFT) & FLAGS_MASK;
     }
 
+    /**
+     * The whole packed slot at this cell as an unsigned 0..65535 {@code int} — flags <i>and</i> navtype in
+     * one array read, so a caller that needs both (the movement prologue) resolves the slot once and derives
+     * each with {@link #flagsOf}/{@link #navtypeOf} instead of paying two array reads. Masked to 16 bits so
+     * the high flag bit never sign-extends.
+     */
+    public int packed(int x, int y, int z) {
+        return data[getLinearIndex(x, y, z)] & 0xFFFF;
+    }
+
+    /** The navtype index of a slot read via {@link #packed} (low 10 bits). */
+    public static int navtypeOf(int packed) {
+        return packed & NAVTYPE_MASK;
+    }
+
+    /** The 6-bit {@link NavFlags} bitmask of a slot read via {@link #packed} (high 6 bits). */
+    public static int flagsOf(int packed) {
+        return (packed >>> FLAGS_SHIFT) & FLAGS_MASK;
+    }
+
     /** Pack a cell's fine navtype and its neighbour-property flags into its slot. */
     public void set(int x, int y, int z, int navtype, int flags) {
         data[getLinearIndex(x, y, z)] =
