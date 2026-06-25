@@ -61,21 +61,22 @@ public final class BlockPathfinder {
      */
     private static final int MAX_EXPANSIONS = 10000;
 
-    // Heuristic cost per block on each axis. Horizontal stays the admissible floor (a plain walk), so
-    // horizontal-obstacle behaviour is unchanged — the bot still routes around walls by cost rather than
-    // boring through them. Vertical is weighted to the TYPICAL cost, not the cheapest move: in open terrain
-    // an up-step usually needs a placed step (staircase ~8.0) and a down-step often a break, so the bare
-    // Ascend/Descend floors (2.0/1.5) badly underestimate and let the search flood the cheap horizontal
-    // plane before committing to a climb/descent. These stronger weights make the estimate track reality
-    // and focus the search vertically. Deliberately inadmissible (paths may be slightly suboptimal, and a
-    // node can re-expand) — fine for a follow-bot; the flip side is that where a CHEAP natural route exists
-    // (terrain climb at 2.0/step vs the 4.0 credit) f decreases along it, so A* races down real passages
-    // and only falls back to expensive building when there's no terrain — the "use the cave" behaviour.
-    // Tunable; raise further if tall paths still explore too much, lower if routing gets greedy/odd.
-    private static final float H_HORIZONTAL = 1.0f; // Traverse (admissible floor)
-    private static final float H_DIAG = 1.41421356f; // Diagonal step = H_HORIZONTAL · √2 (octile)
-    private static final float H_UP = 4.0f;         // ~Ascend + a placed step (typical, not cheapest)
-    private static final float H_DOWN = 2.0f;        // ~Descend + a break (typical, not cheapest)
+    // Heuristic = 3D octile distance to the goal, times an inflation WEIGHT. Octile is the true shortest
+    // path on a grid that can move straight (cost 1), face-diagonal (√2, two axes at once) or corner-
+    // diagonal (√3, three axes at once): spend the shortest axis on corner-diagonals, the next on
+    // face-diagonals, the rest straight. All THREE axes are weighted EQUALLY — verticality carries no
+    // special penalty: an Ascend/Descend is a step that happens to also change height (base cost 1.0, same
+    // as a Traverse), and climbing a pre-existing staircase is no dearer than walking. The real cost of
+    // going up/down in open air is the block place/break, which lives on the MOVE (counted in g) and is
+    // therefore already paid for and naturally avoided — it does not belong in the heuristic. The WEIGHT
+    // (>1) makes the search greedy toward the goal: it stops fanning across the equal-cost plateau and
+    // beelines, trading guaranteed-optimal paths (fine for a follow-bot) for far fewer expanded nodes.
+    // CAVEAT: a goal reachable ONLY by building straight up (a pillar in open air) is under-estimated here
+    // (h sees distance, not the forced placements counted in g), so that one case can still over-explore.
+    private static final float H_STRAIGHT = 1.0f;        // one axis
+    private static final float H_FACE     = 1.41421356f; // two axes at once (√2)
+    private static final float H_CORNER   = 1.7320508f;  // three axes at once (√3)
+    private static final float H_WEIGHT   = 2.0f;        // greediness; 1.0 = admissible, higher = faster/greedier
 
     /**
      * One reusable {@link Nodes} search-state per thread, {@link Nodes#reset() reset} at the top of each
@@ -446,20 +447,20 @@ public final class BlockPathfinder {
     }
 
     /**
-     * Per-axis estimate: horizontal by the OCTILE distance (admissible for the 8-connected move set —
-     * {@code dmin} diagonal steps at {@link #H_DIAG} plus the straight remainder at {@link #H_HORIZONTAL}),
-     * and the vertical gap by {@link #H_UP} or {@link #H_DOWN}. Octile (not Manhattan) is required once
-     * {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Diagonal} exists: a diagonal covers one
-     * cell in each of x and z, so Manhattan would overestimate it and break admissibility. Tracks real
-     * move costs so A* heads for the goal directly instead of flooding the cheap horizontal plane.
+     * 3D octile distance to the goal, inflated by {@link #H_WEIGHT}. Sort the three axis gaps; spend the
+     * smallest on corner-diagonal moves ({@link #H_CORNER}, all three axes at once), the next on
+     * face-diagonals ({@link #H_FACE}), and the largest remainder on straight steps ({@link #H_STRAIGHT}).
+     * All axes are weighted equally — see the constants above for why verticality carries no extra penalty.
+     * The weight makes A* greedy toward the goal (trading optimality for far fewer nodes).
      */
     private static float heuristic(int x, int y, int z, int gx, int gy, int gz) {
-        int adx = Math.abs(x - gx), adz = Math.abs(z - gz);
-        int dmin = Math.min(adx, adz), dmax = Math.max(adx, adz);
-        float horizontal = dmax * H_HORIZONTAL + dmin * (H_DIAG - H_HORIZONTAL);
-        int dy = gy - y;
-        float vertical = dy >= 0 ? dy * H_UP : -dy * H_DOWN;
-        return horizontal + vertical;
+        int a = Math.abs(x - gx), b = Math.abs(y - gy), c = Math.abs(z - gz);
+        // sort a <= b <= c (three compares)
+        if (a > b) { int t = a; a = b; b = t; }
+        if (b > c) { int t = b; b = c; c = t; }
+        if (a > b) { int t = a; a = b; b = t; }
+        float octile = a * H_CORNER + (b - a) * H_FACE + (c - b) * H_STRAIGHT;
+        return H_WEIGHT * octile;
     }
 
     /**

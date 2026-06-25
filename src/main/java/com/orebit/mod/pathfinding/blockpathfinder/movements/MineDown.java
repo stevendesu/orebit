@@ -26,8 +26,11 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  */
 public final class MineDown implements Movement {
 
-    /** One-block drop base cost (matches {@link Descend#COST}); the break adds its hardness-scaled cost. */
-    public static final float COST = 1.5f;
+    /**
+     * Base cost = one step of time — essentially a one-block Fall, but the floor must be broken first. That
+     * break adds its own cost, so mining down is only chosen when descending is actually wanted.
+     */
+    public static final float COST = 1.0f;
 
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {

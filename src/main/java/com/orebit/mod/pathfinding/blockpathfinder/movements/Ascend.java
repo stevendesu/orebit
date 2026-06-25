@@ -31,8 +31,13 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  */
 public final class Ascend implements Movement {
 
-    /** Step + jump: flat cost plus the climb penalty (kept equal to the legacy up-penalty model). */
-    public static final float COST = 2.0f;
+    /**
+     * Base cost = one step of time. Ascending is "walk forward while jumping" — it takes about as long as
+     * a flat step but covers a horizontal AND a vertical cell, so climbing existing terrain is no more
+     * expensive than a Traverse. A folded placement (building a step where there's no terrain) adds its own
+     * {@code PLACE_COST}, so building up is naturally avoided unless it's the only way.
+     */
+    public static final float COST = 1.0f;
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
