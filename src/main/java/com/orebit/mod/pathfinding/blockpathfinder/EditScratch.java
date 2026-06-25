@@ -14,12 +14,11 @@ import net.minecraft.core.BlockPos;
  * <p><b>Reused, not re-allocated.</b> One scratch lives on the {@link MovementContext} (single-threaded
  * per pathfind, like the underlying grid cursor). A movement calls {@link #reset()} before each
  * candidate, requires the cells it needs, then — if still {@link #valid()} — emits the destination with
- * {@code baseCost + }{@link #extraCost()} and hands this scratch to the {@link CandidateSink}. The sink
- * calls {@link #snapshot()} itself, but <i>only after</i> its relaxation gate accepts the candidate, so a
- * rejected (non-improving) candidate allocates nothing. {@code snapshot()} copies the accumulated cells
- * into an immutable {@link StepEdits} (so the reused buffers never alias what the search stored), and
- * returns {@code null} when there were no edits — keeping ordinary walking moves allocation-free and on
- * the plain {@link CandidateSink#accept(int, int, int, float)} path.
+ * {@code baseCost + }{@link #extraCost()} and hands this scratch to the {@link CandidateSink}. Only <i>after</i>
+ * its relaxation gate accepts the candidate does the sink {@link #copyInto} a {@link StepEdits} drawn from
+ * the search's per-search arena — so a rejected (non-improving) candidate allocates nothing, and an
+ * accepted one reuses a pooled set rather than minting a fresh one. An edit-free move never reaches that
+ * path at all: it stays on the plain {@link CandidateSink#accept(int, int, int, float)} call.
  */
 public final class EditScratch {
 
@@ -153,13 +152,14 @@ public final class EditScratch {
     }
 
     /**
-     * An immutable snapshot of the accumulated edits, or {@code null} if there were none (so the caller
-     * emits a plain, allocation-free move). Safe to hand to the search — it copies out of the reused
-     * buffers.
+     * Load this candidate's accumulated edits into a <b>pooled</b> {@link StepEdits} drawn from the
+     * search's per-search arena — the allocation-free replacement for the old {@code snapshot()} once the
+     * sink has decided to keep the candidate (the rejected majority never reaches here). The pooled
+     * instance reuses/grows its own buffers, so steady state touches no heap. Call only when
+     * {@link #hasEdits()} (the search gates on it; an empty set should stay a plain {@code null} edge).
      */
-    public StepEdits snapshot() {
-        if (breakCount == 0 && placeCount == 0) return null;
-        return new StepEdits(Arrays.copyOf(breaks, breakCount), Arrays.copyOf(places, placeCount));
+    void copyInto(StepEdits e) {
+        e.load(breaks, breakCount, places, placeCount);
     }
 
     private static long[] push(long[] buf, int count, int x, int y, int z) {
