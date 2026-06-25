@@ -215,6 +215,54 @@ thread, not just the one that made the garbage. So keeping the search
 allocation-free protects the rest of the server from its mess — which matters all
 the more if the search later moves to a background thread of its own.
 
+## A loose end the benchmark caught
+
+That "allocates nothing" deserves an asterisk — and finding it is a small lesson
+in *what you measure*.
+
+The four maps were gone, but look again at Fix #1, the last-chunk cache. When a
+read *does* cross into a new chunk, it still calls `chunks.get(chunkKey)` on the
+nav store — and that store was an ordinary `ConcurrentHashMap<Long, …>`. The same
+boxing villain, sitting in the one lookup we'd waved away as happening "maybe once
+or twice per node." Once or twice per node *sounds* free, until you remember a hard
+search visits ten thousand nodes. A couple of boxed `Long`s apiece is tens of
+thousands of throwaway objects per search, hiding in plain sight behind the very
+cache we'd congratulated ourselves on.
+
+The per-path `TIMING` line couldn't see it. It measures wall-clock, and a boxed
+allocation mostly costs you *later*, when the collector runs — so the bytes don't
+show up next to the nanoseconds. To actually see them we built a proper
+[JMH](https://github.com/openjdk/jmh) benchmark: drive a search over a synthetic,
+in-memory world, headless and repeatable, with an *allocation* profiler that
+reports bytes-per-search instead of time. The number was damning — for a loop
+we'd declared allocation-free:
+
+```
+TOWER  gc.alloc.rate.norm   5,791,820 B/op
+```
+
+**Nearly six megabytes of garbage for a single search.** Almost all of it that one
+residual chunk lookup, minting a `Long` on every chunk-boundary crossing.
+
+The fix is the same trick the search maps already used, applied one level out. The
+single-slot cache grows into a small **open-addressed `long`-keyed cache** of every
+chunk the search has touched, so a chunk key is boxed at most *once* — on its first
+visit — and every later crossing back into it is a plain array read. (It's the
+[custom hash map](custom_hash_map.md) again, this time mapping chunk → sections.)
+The benchmark confirmed it immediately:
+
+| per single TOWER search | before | after |
+| --- | ---: | ---: |
+| allocation | 5,791,820 B | 1,354,470 B |
+| time | 12,067 µs | 8,568 µs |
+
+A **77% cut in garbage** and a **29% cut in time**, from a change that — like Fix
+#1 before it — is a few lines and a cache. And the lesson isn't subtle: a
+wall-clock timer will cheerfully report a loop as fast while it quietly buries the
+collector. Only measuring *allocation* showed where the bytes were really going.
+(There's about 1.3 MB still left per search — the planned-edit snapshots a
+*building* path carries — which is the next thread to pull.)
+
 ## Why this is the difference
 
 It's tempting to look at all this and call it micro-optimization — fussing over
