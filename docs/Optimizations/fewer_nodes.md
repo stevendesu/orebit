@@ -1,145 +1,134 @@
-In the [chapter on the pathfinding hot path](pathfinding_hot_path.md) we drove the
-*cost of a single node* down from ~8,000 nanoseconds to ~1,300, and we ended on a
-promise. Recall the equation that governs the whole search:
+Our bot could not cross an open field.
+
+Point it at a goal a few hundred blocks away over flat grass and the search would
+grind through its entire budget — ten thousand candidate positions — and then give
+up, leaving the bot standing there. Ten thousand positions is an absurd amount of
+thinking for a walk across a meadow, and that absurdity is what this page is about:
+the long, iterative hunt for *why* the search looked at so many places it didn't need
+to, and how we taught it to stop.
+
+In the [previous chapter](pathfinding_hot_path.md) we made each candidate position
+cheap to examine — about 1,300 nanoseconds, down from 8,000. But the total time a
+search takes is two factors multiplied together:
 
 $$\text{search time} = \text{nodes visited} \times \text{cost per node}$$
 
-That page attacked the right-hand factor. This page is about the left one — **visiting
-fewer nodes in the first place** — because the cheapest node is the one you never
-look at. It turns out that with the right heuristic and a couple of tie-breaking
-tricks, a search that used to give up after 10,000 nodes can find the same path in
-*fifty-three*.
+That page hammered the right-hand factor. This one is the story of the left one,
+because the cheapest position is the one you never look at. By the end, the
+meadow-crossing search that died at ten thousand positions will finish in
+**fifty-three**.
 
-## A two-minute refresher on A\*
+## How A\* decides what to look at
 
-A\* explores outward from the start, and for every position it considers it tracks
-two numbers:
+To shrink the count, you first have to know what makes A\* examine a position at all.
+For every candidate it tracks two numbers: **`g`**, the cost to *get here* from the
+start, and **`h`**, a *heuristic* guess at the cost still ahead to the goal. It always
+expands the candidate with the smallest **`f = g + h`** — its best guess at the total
+cost of a path through that point.
 
-- **`g`** — the cost to *get here* from the start (what we've actually spent).
-- **`h`** — a *heuristic* estimate of the cost still ahead, from here to the goal.
+Everything lives in `h`. If `h` is `0`, you've got Dijkstra's algorithm: no guess, so
+the search swells outward in every direction like ripples in a pond. A good `h` turns
+those ripples into an arrow aimed at the goal. So the whole job is making `h` a sharp,
+honest estimate of the real remaining cost — and every twist below is either a
+sharpening of `h`, or a fix for a way that sharpening backfired.
 
-Their sum, **`f = g + h`**, is A\*'s guess at the total cost of the best path
-*through* this position. The search keeps all its candidates in a priority queue and
-always expands the one with the lowest `f` — the most promising — next.
+## Fix #1: let the bot cut corners
 
-The magic is entirely in `h`. If `h` never *overestimates* the true remaining cost
-(a property called being **admissible**), A\* is guaranteed to find the shortest
-path. Set `h = 0` and you've got Dijkstra's algorithm: no guess at all, so it
-expands outward in every direction like ripples in a pond — correct, but it explores
-a giant disk. A good `h` is what turns those ripples into an arrow pointing at the
-goal.
+The first suspect was the move set. The bot could only step north, south, east, and
+west, so to travel diagonally it had to staircase — east, north, east, north — taking
+two steps to cover what is really one diagonal move. Obvious fix: **let it move
+diagonally.**
 
-So the whole game is: **make `h` a tight, honest estimate of the real remaining
-cost.** Get it right and A\* barely strays from the optimal path. Get it wrong and
-you're back to exploring a pond. Almost everything below is a consequence of taking
-that one sentence seriously.
+But a diagonal move needs a ruler that knows about diagonals. The textbook grid
+heuristic is **Manhattan distance**, `|Δx| + |Δz|` — the number of steps if you can
+*only* move along the axes. The moment the bot can cut a corner, Manhattan is wrong:
+it counts a diagonal as two steps when it actually costs `√2 ≈ 1.41`. It
+*over*estimates, which breaks A\*'s guarantee and, worse, actively misleads the search
+about which direction is cheapest.
 
-## What distance even means on our grid
-
-The textbook heuristic for grid movement is **Manhattan distance** — `|Δx| + |Δz|`,
-the number of steps if you can only move along the cardinal axes. It's the right
-answer *if* the bot can only move N/S/E/W. But our bot can also move **diagonally**,
-and a diagonal step covers one block east *and* one block north for the price of
-`√2 ≈ 1.41` — cheaper than the two separate steps Manhattan assumes. So Manhattan
-*over*estimates any diagonal route, which breaks admissibility and, worse, actively
-lies to the search about which way is cheapest.
-
-The honest distance for a grid *with* diagonals is the **octile distance**: travel
-diagonally to cover the shorter axis, then straight for whatever's left over.
+The honest ruler for a grid *with* diagonals is **octile distance**: go diagonally to
+eat up the shorter axis, then straight for the leftover.
 
 $$h = (d_{max} - d_{min}) \cdot 1 + d_{min} \cdot \sqrt{2}$$
 
-We path in 3D, though — the bot climbs and descends — so we use the **3D octile**
-distance, the same idea with one more axis. Sort the three gaps `a ≤ b ≤ c`, then:
+We path in three dimensions, so we use the **3D octile** distance — the same idea with
+one more axis. Sort the three gaps `a ≤ b ≤ c`:
 
 $$h = a\sqrt{3} + (b - a)\sqrt{2} + (c - b)$$
 
-— spend the smallest axis on *corner* diagonals (moving in all three directions at
-once, cost `√3`), the next on *face* diagonals (two directions, `√2`), and the
-remainder on straight steps. It's a handful of `abs`, two compares to sort, and a
-little arithmetic — a rounding error next to the block reads it sits beside.
+Spend the smallest axis on *corner* diagonals (all three directions at once, cost
+`√3`), the next on *face* diagonals (`√2`), the rest on straight steps. And — a choice
+we'll come back to — we weight all three axes *equally*, with no special penalty for
+going up. (Climbing isn't expensive; *placing a block* is, and that cost rides on the
+move itself, not the heuristic.)
 
-### Why vertical isn't special
+So we added the diagonal move, switched to octile, and re-ran the meadow test. The
+node count went... **up**. From 209 to 604. We had handed the bot a strictly better
+way to move and the search got three times *worse*.
 
-You might expect climbing to cost *more* than walking — and an earlier version of
-our heuristic did exactly that, weighting vertical moves heavily with some
-hand-tuned magic numbers. We threw that out. The insight: **going up isn't
-intrinsically expensive — *placing a block* is.** Ascending a staircase that already
-exists is just "walk forward while jumping," which takes about as long as a flat step
-while covering a diagonal of real distance. The only thing that genuinely costs extra
-is having to *build* your way up (or *dig* your way down), and that cost lives on the
-move itself — it's already counted in `g`. So the heuristic gets to be pure, honest
-3D distance, with every axis weighted the same. No magic constants, and a cleaner
-result: the bot now prefers to climb existing terrain and only builds when it truly
-must, because the build cost shows up exactly where it belongs.
+## Fix #2: stop paying for a perfection nobody asked for
 
-## The plateau problem
+That backfire is the most important lesson in the whole story, so it's worth sitting
+with. Why would a better move set make the search explore *more*?
 
-Here's where it gets interesting, and it's the part most A\* tutorials skip.
+Because an admissible heuristic doesn't just find *a* good path — it's guaranteed to
+find the *shortest* one, and that guarantee has a price. To *prove* a path is
+shortest, A\* has to rule out every alternative that might tie or beat it. By adding
+diagonals, we'd manufactured a flood of alternatives: across open ground there are now
+countless equally-short ways to weave toward the goal, and a search bent on optimality
+dutifully examines every last one.
 
-A perfectly admissible, perfectly tight heuristic has a surprising failure mode on
-open ground. Picture a flat plain and a goal 1,500 blocks away — not straight along
-an axis, but off at an angle, say 1,500 east and 300 north. The optimal path uses
-exactly 300 diagonal steps and 1,200 straight steps. But here's the thing:
-**those 300 diagonals can be placed *anywhere* along the route, and every
-arrangement costs exactly the same.**
-
-That's not a handful of equally-good paths — it's `C(1500, 300)`, an astronomical
-number of them, and they fan out to fill the entire 1,500×300 rectangle between
-start and goal. To A\*, every cell in that rectangle sits on *some* optimal path, so
-every cell has the same `f`, so A\* has no reason to prefer any of them. It dutifully
-explores the whole rectangle — a million-plus cells — and slams into our 10,000-node
-budget having covered a tiny corner of it. **The bot fails to cross an empty field.**
-
-This is a *plateau*: a vast region of tied `f`-scores the search wanders across
-because nothing tells it which tie to break. And it's worth noticing what *doesn't*
-fix it. We do run a slightly greedy search (more on that next), but greed scales the
-whole heuristic up or down — it can't choose between paths that are *already exactly
-equal*. Adding diagonal moves doesn't fix it either; it actually made it *worse*
-(more ways to tie). The plateau is a tie-breaking problem, and it needs a
-tie-breaking fix.
-
-## Trick #1: break ties toward the goal
-
-The first, cheap improvement is in the priority queue itself. When two candidates
-have the same `f`, which should we expand first? The textbook answer is "doesn't
-matter." But it does: among tied nodes, the one with the **larger `g`** is the one
-that's already travelled further from the start — which, since `f = g + h` is equal,
-means it's *closer to the goal*. Preferring it makes the search dive toward the goal
-along a plateau instead of fanning out across it. It's optimality-neutral (we only
-reorder ties) and on the big equal-`f` plains a follow-bot hits constantly, it pops
-dramatically fewer nodes.
-
-## Trick #2: a pinch of greed
-
-A\* with an admissible heuristic is *optimal* — but optimality is expensive, because
-to *prove* a path is shortest the search must rule out all the almost-as-good
-alternatives. For a bot following a player, we don't need a provably perfect path;
-we need a good one, fast. So we let the heuristic cheat, just a little:
+Here's the unlock: **a bot following a player does not need a *provably* shortest
+path.** It needs a good one, right now. So we let the heuristic cheat, just a little —
+**Weighted A\***:
 
 $$f = g + W \cdot h, \quad W = 2$$
 
-Multiplying `h` by a weight `W > 1` makes the search greedier — it values "getting
-closer to the goal" more than "keeping the cost low," so it commits to a direction
-and stops second-guessing. This is **Weighted A\***, and the trade is well
-understood: paths can come out slightly longer than optimal, but the search visits
-far fewer nodes to find them.
+Multiplying `h` by `W > 1` makes the search value *progress toward the goal* over
+*keeping the cost provably minimal*. It commits to a direction and stops second-
+guessing. The trade is well understood: paths can come out a hair longer than optimal,
+but the search visits far fewer nodes to find them.
 
-`W = 2` is a balance point we found by sweeping it in-game. At `W = 1.5` the search
-explores more; at `W = 3` it gets *too* greedy and starts taking visibly worse
-detours — in one cave test, a goal it solved in a tidy 3-waypoint path at `W = 2`
-ballooned to a clumsy 7-waypoint path at `W = 3` because the search refused to
-backtrack properly. Two is the sweet spot: noticeably faster, paths still clean.
+We landed on `W = 2` by sweeping it live. At `W = 1.5` the search still wandered; at
+`W = 3` it got *too* greedy and started refusing sensible detours — in one cave test a
+goal it solved in a tidy 3-waypoint path at `W = 2` bloated to a clumsy 7-waypoint path
+at `W = 3`. Two was the sweet spot. The meadow dropped from **604 nodes to 71.**
 
-## Trick #3: hug the straight line
+This is also where weighting all axes *honestly* paid off. An earlier heuristic put a
+big hand-tuned penalty on vertical moves, and the bot would wastefully *build a tower*
+to gain height when simply walking to nearby high ground would do — the inflated
+vertical estimate made climbing look urgent. Switching to honest 3D distance, with the
+real build cost living on the move, fixed both the node count *and* the behavior: the
+bot now climbs existing terrain for free and only builds when it genuinely must.
 
-Greed helps, but remember — it **can't break the plateau**, because the tied paths
-are *exactly* equal and scaling them all by `W` keeps them exactly equal. To collapse
-that 1,500×300 rectangle we need to make A\* *prefer* one specific arrangement of the
-diagonals: the one that tracks the straight line from start to goal.
+## Fix #3: the field that still failed
 
-So we add a microscopic nudge to the heuristic, proportional to how far the node has
-strayed *sideways* from the direct start→goal line:
+71 nodes for the meadow — lovely. So we tried the real target: a goal **1,500 blocks
+away** across flat ground. It chewed through all ten thousand nodes and failed.
+
+Greed wasn't enough, and to understand why you have to look at *exactly* what trapped
+it. Say the goal is 1,500 east and 300 north. The optimal path uses exactly 300
+diagonal steps and 1,200 straight ones — but **those 300 diagonals can be placed
+anywhere along the route, and every arrangement costs precisely the same.** That's not
+a few equal paths; it's `C(1500, 300)` of them, an astronomical number, fanned out to
+fill the entire 1,500×300 rectangle between start and goal. Every cell in that
+rectangle sits on *some* optimal path, so every cell has the same `f`, so A\* has no
+reason to prefer any of them. It floods the whole rectangle.
+
+This is a **plateau** — a vast region of tied scores the search wanders across because
+nothing tells it which tie to break. And critically, **greed cannot fix it**: weighting
+scales every score by the same `W`, and scaling a pile of equal numbers leaves them
+equal. The plateau is a tie-breaking problem, so it needs a tie-breaking answer.
+
+Our first stab was cheap: when two candidates tie on `f`, prefer the one with the
+**larger `g`**. Equal `f` plus more cost-spent means it's further along — *closer to
+the goal* — so this makes the search dive toward the goal along a plateau instead of
+fanning across it. It helped, but the 1,500-block rectangle was far too big for it
+alone.
+
+The real fix is to pick *one* arrangement of the diagonals — the one that tracks the
+straight line from start to goal — by adding a microscopic nudge for staying near that
+line:
 
 ```java
 // perpendicular distance from the start→goal line, via the 2D cross product
@@ -147,67 +136,60 @@ float cross = Math.abs((x - sx) * (gz - sz) - (z - sz) * (gx - sx));
 return octile(...) + H_TIE * (cross * invLineLen);
 ```
 
-`H_TIE` is deliberately tiny — `0.001`. It's far too small to ever override a real
-cost difference, so it never talks A\* out of a genuinely cheaper route (the
-dig-under-the-wall detour still wins when it's actually shorter). All it does is
-settle *ties*: among the million equal-cost cells of the rectangle, the ones sitting
-on the straight line score a hair lower, so the search threads a ~1-block-wide
-corridor straight down the diagonal instead of flooding the whole field.
+`H_TIE` is deliberately tiny — `0.001` — far too small to ever override a real cost
+difference (the dig-under-the-wall detour still wins whenever it's genuinely shorter).
+All it does is settle *ties*: among the million equal-cost cells of the rectangle, the
+ones on the straight line score a hair lower, so the search threads a ~1-block-wide
+corridor down the diagonal instead of flooding the field.
 
-The effect on the math is dramatic. The plateau is two-dimensional — its size grows
-with the *area* between start and goal, `O(D^2)`. The corridor is one-dimensional —
-it grows with the *distance*, `O(D)`. For a 1,500-block path that's the difference
-between a million cells and about fifteen hundred.
+The size difference is the whole game. The plateau is two-dimensional — it grows with
+the *area* between start and goal, `O(D^2)`. The corridor is one-dimensional — it grows
+with the *distance*, `O(D)`. For 1,500 blocks that's a million cells versus about
+fifteen hundred.
 
-## The measurements
+## The scoreboard
 
-Here's a short, real test: the bot climbing a gently sloping hill toward a tree
-roughly 60 blocks away, about 60 blocks of actual path. Watch the node count fall as
-each refinement lands:
+The same meadow-and-tree test, watched across every fix (it's a ~60-block walk up a
+gentle hill to climb a tree):
 
-| Configuration                         | Nodes explored | Path length |
+| Step in the journey                   | Nodes explored | Path length |
 | ------------------------------------- | -------------: | ----------: |
-| 4-connected, Manhattan heuristic      |            209 |    78 steps |
-| ...add diagonal moves (admissible)    |        **604** |    59 steps |
-| ...3D octile + greedy weight `W = 2`  |             71 |    53 steps |
-| ...+ straight-line tie-break          |         **53** |    53 steps |
+| Where we started (4-way, Manhattan)   |            209 |    78 steps |
+| Added diagonals — and it got *worse*  |        **604** |    59 steps |
+| Stopped chasing optimality (`W = 2`)  |             71 |    53 steps |
+| Broke ties toward the straight line   |         **53** |    53 steps |
 
-Two things to notice. First, adding diagonals made the search *worse* before it got
-better — 209 nodes up to 604 — exactly the plateau effect: diagonals gave the search
-more equally-good paths to get lost among, and it took the tie-break to rein them in.
-Second, look at the final row: **53 nodes explored to produce a 53-step path.** That
-is very nearly the theoretical floor — the search examined essentially *one cell per
-step of the path it returned*, with almost nothing wasted. It walks straight at the
-goal.
+Look at that last row: **53 nodes explored to return a 53-step path.** That's
+essentially the theoretical floor — one position examined per step of the answer,
+almost nothing wasted. The bot walks straight at the goal.
 
-And the headline case — the off-angle goal across open ground, ~1,500 blocks out:
+And the headline — the 1,500-block field that started all this:
 
-| Configuration                | Result                          |
-| ---------------------------- | ------------------------------- |
-| Greedy `W = 2`, no tie-break | **fails** — hits 10,000 nodes, plateau wins |
-| ...+ straight-line tie-break | **1,493 nodes**, 1,490-step path, near-instant |
+| Configuration                | Result                                          |
+| ---------------------------- | ----------------------------------------------- |
+| Greedy `W = 2`, no tie-break | **fails** — 10,000 nodes, the plateau wins      |
+| ...+ straight-line tie-break | **1,493 nodes**, 1,490-step path, near-instant  |
 
-A search that *could not complete at all* — that left the bot standing in a field
-unable to walk across it — now finishes in fifteen hundred nodes, again barely more
-than one node per step of the answer.
+A search that could not finish at all — that left the bot stranded in a field — now
+crosses it in fifteen hundred nodes, barely more than one per step of the route.
 
-## What we don't claim
+## The cliff we haven't crossed
 
-These tricks make A\* fast and well-behaved over open and moderately complex terrain,
-which is the overwhelming majority of what a follow-bot meets. They are not magic.
-There's one case they deliberately don't solve: a goal reachable *only* by pillaring
-straight up into open air — a player hovering 30 blocks overhead with no terrain to
-climb. The heuristic measures *distance*, and the bot is already directly below the
-goal (zero horizontal distance), so the straight-line trick has nothing to grip;
-meanwhile the real cost is 30 expensive block-placements the heuristic can't see. The
-search rationally fans out looking for a cheaper natural route — the same instinct
-that finds the clever path around a wall — and there isn't one.
+These fixes make A\* fast and well-behaved across open and moderately complex terrain,
+which is almost everything a follow-bot meets. They are not magic, and there's one
+wall they deliberately leave standing: a goal reachable *only* by pillaring straight up
+into open air — a player hovering 30 blocks overhead with no terrain to climb. The
+heuristic measures *distance*, and the bot is already directly below the goal, so the
+straight-line trick has nothing to grip; meanwhile the true cost is 30 expensive
+block-placements `h` can't see. The search fans out hunting a cheaper natural route —
+the very same instinct that finds the clever way around a wall — and there simply
+isn't one.
 
 The honest fix for that isn't more heuristic cleverness; it's to stop demanding a
-*complete* path before the bot moves at all. A search that returns its **best partial
-progress** when it runs out of budget — walk as far as you got, then think again from
-there — sidesteps the whole problem, and it's the same machinery that will let us
-path across tens of thousands of blocks by computing the route in segments. That,
-together with hierarchical (region-level) pathfinding to shrink the node count
-another order of magnitude, is the next chapter. The per-node cost is low, the
-heuristic is sharp — now the frontier moves up to the *shape of the search itself*.
+*complete* path before the bot will move at all. A search that returns its **best
+partial progress** when it runs out of budget — walk as far as you got, then think
+again from there — sidesteps the problem entirely, and it's the same machinery that
+will let us path across tens of thousands of blocks by planning the route in segments.
+That, plus hierarchical (region-level) pathfinding to thin the node count another order
+of magnitude, is the next chapter. The per-node cost is low and the heuristic is sharp;
+the frontier moves up now to the *shape of the search itself*.
