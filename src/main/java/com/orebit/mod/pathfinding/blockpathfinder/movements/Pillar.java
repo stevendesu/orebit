@@ -1,10 +1,15 @@
 package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
+import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Axes;
+import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Cuboid;
+import com.orebit.mod.pathfinding.blockpathfinder.cuboid.MacroJump;
+import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
 
 /**
  * Pillar straight up one block (MOVEMENT-DESIGN.md §2) — the vertical-in-place counterpart to {@link
@@ -24,6 +29,33 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  *
  * <p><b>Caps.</b> Requires {@link BotCaps#canPlace} (it places the footing) and {@code jumpHeight ≥ 1};
  * a walk-only bot emits nothing here, exactly as before.
+ *
+ * <h2>Macro-awareness (MACRO-IMPLEMENTATION.md §8.1)</h2>
+ * When macro-movement collapse is enabled ({@link BlockPathfinder#MACRO_MOVES} <i>and</i> the search
+ * supplied a {@link NavGridCuboidsView} via {@link MovementContext#cuboids()}), Pillar collapses a long
+ * uniform run of single up-and-place steps into <b>one</b> candidate at the jump distance, instead of
+ * emitting only a 1-step rise. The bound comes from {@link MacroJump#steps}: the cuboid's vertical travel
+ * extent (HARD), the forward distance to the goal's Y (HARD — never overshoot), and the escape-hedge
+ * {@code ceil(orthogonalFace / moveCost)} (NON-NEGOTIABLE 2 — the {@code / moveCost} caps an <i>expensive</i>
+ * pillar to a short jump so it cannot sail past a cheaper exit beside the column; the canonical staircase
+ * counter-example of NON-NEGOTIABLE 1). The travel direction is fixed: {@link Axes#AXIS_Y}, {@code sign +1}.
+ *
+ * <p>The jump folds the same per-step edits the micro move makes — a {@code requireFloor} at each rise
+ * level {@code (x, y+k, z)} for {@code k = 1..J} (the support placed under each step), plus the single
+ * top head-clearance {@code requireAir(x, y+J+2, z)} (the bot ends standing at {@code y+J}, so its head
+ * cell is {@code y+J+2}; for {@code J == 1} this is {@code y+3}, identical to the micro head check). If a
+ * per-step requirement fails partway up, {@code J} is clamped to the last valid step — a conservative
+ * shrink (a shorter jump is always safe; plain A* fills the remainder). The cuboid having certified the
+ * column uniform is exactly what makes skipping the intermediate stand cells sound (NON-NEGOTIABLE 1).
+ *
+ * <p>The per-step cost is {@code Pillar.COST + MovementContext.PLACE_COST} (the move plus the folded
+ * placement), so the macro's total cost is {@code J × COST + }{@link EditScratch#extraCost()} — exactly
+ * {@code J} times the per-step cost, never cheaper than {@code J} separate micro steps (the macro is a
+ * search-shape optimization, not a cost discount).
+ *
+ * <p><b>Legacy parity.</b> When {@link BlockPathfinder#MACRO_MOVES} is off <i>or</i>
+ * {@link MovementContext#cuboids()} is {@code null}, this emits the ORIGINAL single 1-step candidate
+ * byte-for-byte, so the macro layer is a clean, revertible overlay on the verified micro search.
  */
 public final class Pillar implements Movement {
 
@@ -46,11 +78,69 @@ public final class Pillar implements Movement {
         if (!ctx.openForPlace(floorDesc)) return;
 
         int flags = MovementContext.flagsOf(packed);
+
+        // --- Legacy micro path: macros off or no cuboid view → emit the original single step, byte-for-byte.
+        NavGridCuboidsView cuboids = ctx.cuboids();
+        if (!BlockPathfinder.MACRO_MOVES || cuboids == null) {
+            EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+            // Place the footing, supported by the floor below (the bot's current floor — solid by invariant).
+            e.requireFloor(x, ny, z);
+            // Takeoff head-clearance: the new head cell must be clear (break-fold if the bot may break).
+            e.requireAir(x, y + 3, z);
+            if (e.valid()) out.accept(x, ny, z, COST + e.extraCost(), e);
+            return;
+        }
+
+        // --- Macro path: collapse a uniform vertical run of up-and-place steps into ONE candidate. -------
+        // The cuboid (over the start floor cell, travel axis Y) certifies the column is uniform for the
+        // whole jump, so skipping the intermediate stand cells is sound (NON-NEGOTIABLE 1). Its travel
+        // extent, the goal-Y bound, and the escape-hedge ceil(orthFace / moveCost) bound the jump.
+        Cuboid box = ctx.cuboidScratch();
+        cuboids.cuboidAt(x, ny, z, Axes.AXIS_Y, box);
+
+        // Real per-step cost = the upward move plus the folded placement (NON-NEGOTIABLE 2: never a literal).
+        float moveCost = COST + MovementContext.PLACE_COST;
+        int j = MacroJump.steps(box, x, y, z, Axes.AXIS_Y, +1, moveCost,
+                ctx.goalX(), ctx.goalY(), ctx.goalZ());
+
         EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
-        // Place the footing, supported by the floor below (the bot's current floor — solid by invariant).
-        e.requireFloor(x, ny, z);
-        // Takeoff head-clearance: the new head cell must be clear (break-fold if the bot may break).
-        e.requireAir(x, y + 3, z);
-        if (e.valid()) out.accept(x, ny, z, COST + e.extraCost(), e);
+        // Fold the same per-step edit the micro move makes, level by level: a support placed under each
+        // rise, at floor cell (x, y+k, z) for k = 1..J. If a placement fails partway up, clamp J to the
+        // last valid step (conservative — a shorter jump is always safe; plain A* fills the remainder).
+        // EditScratch short-circuits once invalid (the failing requireFloor folds nothing), so at the
+        // break the scratch holds exactly the places for steps 1..k-1 — the emitted prefix's edit-set.
+        for (int k = 1; k <= j; k++) {
+            // Re-evaluate RISKY_EDIT per level (the start footing k==1 was gated by reset above): don't place
+            // into a cell whose body space risks a fluid/gravity cascade just because the start was safe — the
+            // micro move re-checks per node, so the macro must too. Clamp the jump below a risky cell.
+            if (k > 1 && MovementContext.risksEdit(ctx.flagsAt(x, y + k, z))) { j = k - 1; break; }
+            e.requireFloor(x, y + k, z);
+            if (!e.valid()) { j = k - 1; break; }
+        }
+        if (j < 1) return; // nothing valid
+
+        // Validate the bot's BODY at the final landing. The bot ends standing on the footing at y+J, so it
+        // occupies feet cell y+J+1 AND head cell y+J+2. The cuboid certifies cells up to its top are air, but
+        // when the jump is bound by the box's travel extent the landing body can poke OUT the top of the
+        // column (into the ceiling/terrain just past maxY that the box stopped at) — those cells are NOT
+        // certified and may be solid. So check both explicitly (break-fold if the bot may break). For J==1
+        // the feet cell y+2 is the old head, already clear by the node body-clearance invariant, so this
+        // requireAir folds nothing → byte-for-byte parity with the micro head-only check.
+        e.requireAir(x, y + j + 1, z); // feet at landing (new cell for J>1; old head for J==1)
+        e.requireAir(x, y + j + 2, z); // head at landing
+        if (!e.valid()) {
+            // The full-J landing pokes into a non-uniform ceiling. Don't drop the move (that would forbid
+            // even a 1-step pillar and break vertical reachability) — fall back to the micro single step,
+            // which is always-correct and complete (it fails to emit only when a true 1-block pillar is
+            // itself blocked, exactly as the micro move would).
+            e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+            e.requireFloor(x, ny, z);
+            e.requireAir(x, y + 3, z);
+            if (e.valid()) out.accept(x, ny, z, COST + e.extraCost(), e);
+            return;
+        }
+
+        int dy = Axes.stepY(Axes.AXIS_Y, +1) * j; // = j
+        out.accept(x, y + dy, z, j * COST + e.extraCost(), e);
     }
 }

@@ -1,5 +1,7 @@
 package com.orebit.mod.pathfinding.blockpathfinder;
 
+import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Cuboid;
+import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavFlags;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
@@ -63,9 +65,56 @@ public final class MovementContext {
     /** The planned edits along the path to the node being expanded — a diff over the grid (see below). */
     private final PathEdits pathEdits = new PathEdits();
 
+    // ---- Macro-movement context (MACRO-IMPLEMENTATION.md §8). Null/zero when macros are off (the legacy
+    //      micro search, or an unbounded search with no corridor): every macro-aware movement then emits its
+    //      plain single micro step. Wired once per pathfind via setMacro(). ----
+    /** The per-search cuboid query seam for macro collapse; {@code null} ⇒ macros off (legacy micro search). */
+    private NavGridCuboidsView cuboids;
+    /** The search goal (absolute world block coords) — a macro jump bounds its length to it (never overshoot). */
+    private int goalX, goalY, goalZ;
+    /** A reusable {@link Cuboid} a macro movement fills via {@link #cuboids()} — no per-candidate allocation. */
+    private final Cuboid cuboidScratch = new Cuboid();
+
     public MovementContext(NavGridView grid, BotCaps caps) {
         this.grid = grid;
         this.caps = caps;
+    }
+
+    /**
+     * Wire the macro-movement search context — the per-search cuboid view and the goal — once per pathfind
+     * (after construction, before the search loop). Passing {@code cuboids == null} leaves macros off, so every
+     * macro-aware movement falls back to its single micro step (legacy parity).
+     */
+    public void setMacro(NavGridCuboidsView cuboids, int goalX, int goalY, int goalZ) {
+        this.cuboids = cuboids;
+        this.goalX = goalX;
+        this.goalY = goalY;
+        this.goalZ = goalZ;
+    }
+
+    /** The per-search cuboid query seam, or {@code null} when macro collapse is off (legacy / unbounded). */
+    public NavGridCuboidsView cuboids() {
+        return cuboids;
+    }
+
+    /** Goal X (absolute world block coord) — a macro jump never overshoots it. */
+    public int goalX() {
+        return goalX;
+    }
+
+    /** Goal Y (absolute world block coord). */
+    public int goalY() {
+        return goalY;
+    }
+
+    /** Goal Z (absolute world block coord). */
+    public int goalZ() {
+        return goalZ;
+    }
+
+    /** A reusable {@link Cuboid} out-param for a macro movement's {@link #cuboids()} query (no per-call alloc). */
+    public Cuboid cuboidScratch() {
+        return cuboidScratch;
     }
 
     /**
