@@ -7,6 +7,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementRegistry;
+import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.Replaceable;
@@ -337,29 +338,58 @@ public class AllyBotEntity extends FakePlayerEntity {
     }
 
     /**
-     * One-shot diagnostic ({@code /bot trace}): run a SINGLE <b>raw</b> block-A* from the bot's floor to
-     * {@code goalFloor} with full step tracing to a file — no corridor, no region tier, so it isolates the
-     * pure block-search behaviour we're investigating (the open-air pillar). Puts the bot in {@code STAY}
-     * first so it stops auto-replanning (no console flood), runs ONE search with {@link BlockPathfinder#TRACE}
-     * on, restores state, and returns the file path. Slow (file I/O per node on the tick thread) — intended
-     * to be run once and reviewed offline, not in normal play.
+     * One-shot diagnostic ({@code /bot trace}): run the <b>full two-tier HPA* path</b> the way {@code /bot
+     * come} does, then trace the <b>first window's block-A*</b> to a file — <i>with</i> its HPA*-derived
+     * corridor, so cuboids, macro-ops, and the goal-forced-cost premium are all ACTIVE. (The old trace ran a
+     * raw cornerless block-A*, which silently disables that whole layer — {@code CuboidExtractor} invalidates
+     * when {@code bound == null}, so macros and the premium never engage — and therefore could never
+     * reproduce, or exonerate, a corridor'd failure.)
+     *
+     * <p>It builds a {@link PathPlan} (skeleton + first window) with tracing OFF — so the region tier's
+     * leaf-cost mini-pathfinds don't pollute the dump — then reads that window's target + corridor and
+     * re-runs the <b>same</b> windowed {@link BlockPathfinder#findPath} once with {@link BlockPathfinder#TRACE}
+     * on. Puts the bot in {@code STAY} first so it stops auto-replanning. Slow (file I/O per node on the tick
+     * thread) — run once and review offline. Falls back to a raw cornerless trace (clearly labelled) only when
+     * HPA* produces no window (no built ground at the start).
      */
     public String traceTo(BlockPos goalFloor) {
         setMode(Mode.STAY); // stop the per-tick replan/flood; the trace is a standalone one-shot search
         ServerLevel level = (ServerLevel) Worlds.of(this);
         BlockPos startFloor = this.blockPosition().below();
+
+        // Build the two-tier plan exactly as /bot come does (TRACE off → the HPA* leaf-cost searches stay out
+        // of the dump); the first window's target + corridor are what we then trace.
+        BlockPos target = null;
+        RegionBound corridor = null;
+        try {
+            PathPlan plan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, CAPS);
+            target = plan.currentWindowTarget();
+            corridor = plan.currentCorridor();
+        } catch (Throwable t) {
+            return "trace FAILED: two-tier plan threw " + t;
+        }
+
         java.io.File file = new java.io.File("orebit-trace.txt"); // run dir
         boolean savedTiming = BlockPathfinder.LOG_TIMING;
         try (java.io.BufferedWriter w = new java.io.BufferedWriter(new java.io.FileWriter(file))) {
-            w.write("Orebit A* trace  start=" + startFloor + "  goal=" + goalFloor + "  caps=" + CAPS
-                    + "  (raw block-A*, no corridor)\n");
+            final boolean haveWindow = target != null && corridor != null;
+            if (haveWindow) {
+                w.write("Orebit A* trace  start=" + startFloor + "  goal=" + goalFloor
+                        + "  window target=" + target + "  corridor=" + corridor + "  caps=" + CAPS
+                        + "  (HPA* first window — corridor + cuboids + macro-ops + goal premium ACTIVE)\n");
+            } else {
+                w.write("Orebit A* trace  start=" + startFloor + "  goal=" + goalFloor + "  caps=" + CAPS
+                        + "  (HPA* produced NO window — falling back to raw block-A*, no corridor)\n");
+            }
             w.write("legend: 'E <seq> <x> <y> <z> g=<g> f=<f> via=<move|start>' = one expansion (pop), in"
                     + " order;  '  C <move> <x> <y> <z> cost=<c> <OK|worse|corridor>' = a candidate it"
                     + " emitted (OK=relaxed onto the open set, worse=not an improvement).\n\n");
             BlockPathfinder.TRACE_OUT = w;
             BlockPathfinder.TRACE = true;
             BlockPathfinder.LOG_TIMING = false; // the trace IS the record; skip the one-line summary
-            BlockPathPlan plan = BlockPathfinder.findPath(new NavGridView(level), startFloor, goalFloor, CAPS);
+            BlockPathPlan plan = haveWindow
+                    ? BlockPathfinder.findPath(new NavGridView(level), startFloor, target, CAPS, corridor)
+                    : BlockPathfinder.findPath(new NavGridView(level), startFloor, goalFloor, CAPS);
             BlockPathfinder.TRACE = false;
             w.write("\nRESULT: " + (plan == null ? "FAIL (null)" : plan.size() + "wp cost=" + plan.cost())
                     + "\n");
