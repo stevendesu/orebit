@@ -18,10 +18,21 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  */
 public final class Fall implements Movement {
 
-    /** Step base cost; each block dropped adds {@link #PER_BLOCK}. */
-    public static final float BASE_COST = 1.0f;
-    /** Cost per block dropped (matches the legacy fall penalty). */
-    public static final float PER_BLOCK = 0.5f;
+    /**
+     * Step base cost, in <b>ticks</b> = one walk-off step ({@link Traverse#FLAT_COST}): the bot walks off
+     * the edge (Baritone {@code WALK_OFF_BLOCK_COST ≈ WALK_ONE_BLOCK_COST}), then falls. Each block dropped
+     * adds {@link #PER_BLOCK}.
+     */
+    public static final float BASE_COST = Traverse.FLAT_COST;
+    /**
+     * Ticks added per block of drop. Falling is fast — under vanilla gravity the first blocks take well
+     * under a tick each, but the average rises with depth; Baritone's {@code FALL_N_BLOCKS_COST} table over
+     * the small safe-fall window (≤ {@code safeFallDistance}) averages ≈ 2.5 ticks/block once the walk-off
+     * is paid separately. Kept a flat per-block term (not the full physics table) because Tier 1 caps the
+     * drop at the safe window, where the linear approximation is within a tick of the table. Source:
+     * Baritone {@code ActionCosts.FALL_N_BLOCKS_COST}.
+     */
+    public static final float PER_BLOCK = 2.5f;
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 

@@ -51,10 +51,22 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  */
 public final class Traverse implements Movement {
 
-    /** Flat-walk base cost (the search's minimum step). */
-    public static final float FLAT_COST = 1.0f;
-    /** Surcharge for crossing a slow surface (soul sand / honey / cobweb / slime). */
-    public static final float SLOW_SURCHARGE = 2.0f;
+    /**
+     * Flat-walk base cost, in <b>ticks</b> (the search's whole cost unit is real game ticks; 20 ticks = 1 s).
+     * Seeded from Baritone's {@code WALK_ONE_BLOCK_COST = 20 / 4.317 ≈ 4.633} — the time to walk one block at
+     * vanilla ground speed (4.317 m/s). This is the per-block "ruler" every other cost (and the octile
+     * heuristic, via {@link com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder}) is measured against,
+     * so "mine vs. walk around" is a true time comparison in one unit (physically-derived-costs memory).
+     * Source: Baritone {@code baritone.api.pathing.movement.ActionCosts.WALK_ONE_BLOCK_COST}.
+     */
+    public static final float FLAT_COST = 4.633f;
+    /**
+     * Extra ticks for crossing a slow surface (soul sand / honey / cobweb / slime), on top of {@link
+     * #FLAT_COST}. Baritone walks soul sand at ~0.4× speed ({@code WALK_ONE_OVER_SOUL_SAND_COST ≈
+     * WALK_ONE_BLOCK_COST / 0.4 ≈ 11.6}), i.e. ~2.5× the flat walk; the surcharge is that delta
+     * ({@code ≈ 11.6 − 4.633 ≈ 7.0}). Source: Baritone {@code ActionCosts.WALK_ONE_OVER_SOUL_SAND_COST}.
+     */
+    public static final float SLOW_SURCHARGE = 7.0f;
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 

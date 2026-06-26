@@ -45,7 +45,7 @@ public final class MacroJump {
      * The number of steps to jump ({@code >= 1}) for a movement traveling {@code (axis, sign)} from
      * {@code (x,y,z)}, given its already-resolved {@code cuboid} (from
      * {@code NavGridCuboidsView.cuboidAt}), the movement's true per-step {@code moveCost} (base move +
-     * folded edit cost, e.g. a pillar step = {@code Pillar.COST + MovementContext.PLACE_COST}), and the
+     * folded edit cost, e.g. a pillar step = {@code Pillar.COST + MovementContext.placeCost(...)}), and the
      * goal.
      *
      * <p>{@code jump = max(1, min(travelExtent, goalBound, escapeBound))} where:

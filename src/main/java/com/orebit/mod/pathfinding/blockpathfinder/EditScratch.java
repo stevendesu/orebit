@@ -133,7 +133,7 @@ public final class EditScratch {
     private void addPlace(int x, int y, int z) {
         places = push(places, placeCount, x, y, z);
         placeCount++;
-        extraCost += MovementContext.PLACE_COST;
+        extraCost += ctx.placeCost(x, y, z); // real ticks-to-place (+ inventory premium when consuming) — 1d
     }
 
     /** Whether every required cell was satisfiable (directly or via an allowed break/place). */

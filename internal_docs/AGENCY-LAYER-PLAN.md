@@ -104,5 +104,17 @@ the end of this arc, and it retroactively improves the heuristic, macro-ops, and
 - **Deferred pathfinding-quality (opportunistic, composes with partial-path):** stronger forced-cost premium,
   dominance/symmetry pruning, the high-weight "dig out of the trap" escalation (reads `BotCaps` — lands after
   (1a/1c)), the SoA cuboid cache (`CUBOID-PERF-OPTIONS.md` option C).
+- **Inventory-quantity-aware place premium (deferred — ratified low-ROI 2026-06-26).** Today the
+  `placeRemovalPremium` uses the *softest* carried block's mine-out cost uniformly, so a finite cheap supply
+  (1 dirt + 10 obsidian, a 5-block forced pillar) under-estimates: 4 of the 5 placements are really obsidian.
+  Fix = blend the **shared** scalar over "the cheapest *R* blocks I actually own" (R = forced extent),
+  computed cold at probe time once the extent is known. **Admissible** *because* one scalar feeds both the
+  g-cost (`placeCost`) and the heuristic (`pillarPlaceCost`→`GoalForcedCost`) — raising it moves both together,
+  so `h ≤ h*` holds for any value (blending **only** the heuristic would be inadmissible — don't). The
+  position-aware form (cheap blocks low, hard high) needs per-node depletion state = the **rejected**
+  consumables-along-path stateful budget — skip it. **Low ROI:** narrow trigger (finite cheap supply <
+  placements, mixed hardness, `consumesBlocks` on) and the **per-replan snapshot already self-heals** (once the
+  dirt is spent the next plan's softest is obsidian); partial-path keeps single searches short. Gate on actually
+  observing a bad mixed-inventory pillar decision in-game. See the `place-cost-model` memory.
 - **Far horizon:** the LLM intent pipeline (`integration/`) — chat → intent → goal → the navigation + task
   machinery. Only sensible once the bot is a capable, configurable agent.

@@ -32,12 +32,15 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 public final class Ascend implements Movement {
 
     /**
-     * Base cost = one step of time. Ascending is "walk forward while jumping" — it takes about as long as
-     * a flat step but covers a horizontal AND a vertical cell, so climbing existing terrain is no more
-     * expensive than a Traverse. A folded placement (building a step where there's no terrain) adds its own
-     * {@code PLACE_COST}, so building up is naturally avoided unless it's the only way.
+     * Base cost, in <b>ticks</b> = one walk step ({@link Traverse#FLAT_COST}). Ascending is "walk forward
+     * while jumping": the jump impulse overlaps the forward motion, so gaining a horizontal AND a vertical
+     * cell up an existing step takes about as long as a flat walk — climbing pre-existing terrain (stairs,
+     * a hillside) is no dearer than a Traverse, matching Baritone, whose {@code MovementAscend} charges
+     * ≈ {@code WALK_ONE_BLOCK_COST} for the traversal and adds the build cost only when it must place. A
+     * folded placement (building a step in open air) adds its own real place ticks ({@link
+     * MovementContext#placeCost}), so building up is naturally avoided unless it's the only way.
      */
-    public static final float COST = 1.0f;
+    public static final float COST = Traverse.FLAT_COST;
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 

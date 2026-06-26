@@ -24,11 +24,12 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 public final class Descend implements Movement {
 
     /**
-     * Base cost = one step of time: a flat step plus a free one-block drop (gravity), so descending
-     * existing terrain costs no more than a Traverse. A folded place/break (building/digging a step where
-     * there's no terrain) adds its own cost.
+     * Base cost, in <b>ticks</b> = one walk step ({@link Traverse#FLAT_COST}): a flat step plus a free
+     * one-block drop (gravity is "free" time the bot would spend walking anyway), so descending existing
+     * terrain costs no more than a Traverse — matching Baritone's {@code MovementDescend} traversal term.
+     * A folded place/break (building/digging a step where there's no terrain) adds its own real ticks.
      */
-    public static final float COST = 1.0f;
+    public static final float COST = Traverse.FLAT_COST;
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 

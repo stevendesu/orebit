@@ -1,9 +1,11 @@
 package com.orebit.mod.pathfinding.blockpathfinder.cuboid;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.MineDown;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Pillar;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 /**
@@ -49,19 +51,30 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *   h = octile(...) + tieBreak(...) + GoalForcedCost.premium(forced, x,y,z, gx,gy,gz);
  * </pre>
  *
- * <h2>Per-step forced cost (the {@code forcedCost} in {@code perBlockPremium = forcedCost − 1})</h2>
- * The real movement constants are read here, never literals:
+ * <h2>Per-step forced cost (the {@code forcedCost} in {@code perBlockPremium = forcedCost − octileFloor})</h2>
+ * The real movement constants are read here in TICKS (PRD §10 Phase 1d), never literals:
  * <ul>
  *   <li><b>Build face</b> (climb a pillar to the goal): one pillar step =
- *       {@code Pillar.COST + MovementContext.PLACE_COST} = {@code 1.0 + 3.0 = 4.0}, so
- *       {@code perBlockPremium = 3.0}.</li>
+ *       {@code Pillar.COST + placeBaseCost + placeRemovalPremium} (the move plus the bot's per-search
+ *       build-face place cost — base plus the placed block's mine-out premium — supplied as the {@code
+ *       pillarPlaceCost} argument from {@link MovementContext#pillarPlaceCost()}), so
+ *       {@code perBlockPremium = Pillar.COST + pillarPlaceCost − octileFloor}. <b>Admissibility:</b> the
+ *       place cost INCLUDES the removal premium but NOT the inventory premium, so it is a true lower bound on
+ *       the real per-block place cost the bot pays when pillaring — the follower places the SOFTEST block it
+ *       carries (the block the removal premium is measured from), and running out of it only makes the real
+ *       cost higher, so under-crediting the inventory term keeps the heuristic admissible. With no
+ *       {@code InventoryView} (headless / trace / tests) {@code pillarPlaceCost()} falls back to the static
+ *       {@code MovementContext.PLACE_BASE_COST}, so those searches are unchanged; inventory-off uses the
+ *       conjured block and the bound is exact.)</li>
  *   <li><b>Dig face</b> (mine sideways/down into the goal): one break step =
- *       {@code MineDown.COST + MovementContext.breakCost(descriptor)} (a flat
- *       {@code MovementContext.BREAK_BASE_COST = 2.0} plus a per-hardness term), so
- *       {@code perBlockPremium = MineDown.COST + breakCost − 1}.</li>
+ *       {@code MineDown.COST + MiningModel.fastestTicks(descriptor)} — the move plus the mining time of the
+ *       <i>best possible</i> tool (the probe has no bot inventory, and the premium must be a LOWER bound, so
+ *       it charges the cheapest dig any tool could manage), so {@code perBlockPremium = MineDown.COST +
+ *       fastestTicks − octileFloor}.</li>
  * </ul>
- * The "{@code − 1}" is the octile floor: the heuristic already credits one unit per block of straight-line
- * distance, so the EXTRA cost the octile under-counts is {@code (forcedCost − 1)} per forced block.
+ * The "{@code octileFloor}" (= {@link Traverse#FLAT_COST}, one straight-block heuristic credit, now in ticks)
+ * is subtracted because the octile already credits that much per block of straight-line distance, so the EXTRA
+ * cost it under-counts is {@code (forcedCost − octileFloor)} per forced block.
  *
  * @see NavGridCuboidsView
  * @see Cuboid
@@ -72,11 +85,12 @@ public final class GoalForcedCost {
     private GoalForcedCost() {}
 
     /**
-     * The cost of one pillar step the bot pays to build straight up toward a goal floating in the air:
-     * the base upward move ({@link Pillar#COST}) plus the placed footing ({@link MovementContext#PLACE_COST}).
-     * The build-face {@code forcedCost}.
+     * The per-block heuristic credit the octile already gives a straight-line block (= {@link
+     * Traverse#FLAT_COST}, one walk-tick/block) — subtracted from a forced step's full cost so the premium is
+     * exactly the EXTRA the octile under-counts. In tick units (PRD §10 Phase 1d); was a literal {@code 1}
+     * when costs were dimensionless.
      */
-    private static final float PILLAR_STEP_COST = Pillar.COST + MovementContext.PLACE_COST;
+    private static final float OCTILE_FLOOR = Traverse.FLAT_COST;
 
     /**
      * Result of the once-per-search probe — a tiny mutable, reusable value object (no per-search allocation:
@@ -131,7 +145,8 @@ public final class GoalForcedCost {
      *       kills the whole correction.)</li>
      *   <li>If the adjacent cell's cuboid is <b>air</b> and the approach axis is vertical from below (the bot
      *       must PILLAR up through that air to the goal), this is a <b>build face</b>:
-     *       {@code forcedCost = Pillar.COST + PLACE_COST}.</li>
+     *       {@code forcedCost = Pillar.COST + pillarPlaceCost} (= {@code Pillar.COST + placeBaseCost +
+     *       placeRemovalPremium}, the per-search build-face place cost passed in by the caller).</li>
      *   <li>If the adjacent cell's cuboid is <b>solid breakable</b> rock (the bot must DIG through it to
      *       reach the goal), this is a <b>dig face</b>: {@code forcedCost = MineDown.COST + breakCost}.</li>
      *   <li>Otherwise (unbuilt, fluid, unbreakable wall, or an ambiguous read) the face contributes no
@@ -145,14 +160,19 @@ public final class GoalForcedCost {
      * (build up AND dig over) naturally credits only the CHEAPER single axis — never the sum (MACRO-MOVEMENTS
      * §4 conservative rule). When in doubt, this under-credits.
      *
-     * @param cuboids the per-search cuboid query seam (cache + PathEdits overlay)
-     * @param gx      goal X (absolute world block coord)
-     * @param gy      goal Y
-     * @param gz      goal Z
-     * @param caps    the bot's capabilities — gate which forced approaches are even possible
-     * @param out     filled in place with the cheapest forced approach (or "no correction")
+     * @param cuboids         the per-search cuboid query seam (cache + PathEdits overlay)
+     * @param gx              goal X (absolute world block coord)
+     * @param gy              goal Y
+     * @param gz              goal Z
+     * @param caps            the bot's capabilities — gate which forced approaches are even possible
+     * @param pillarPlaceCost the per-search build-face place cost (base + removal premium, no inventory
+     *                        premium — an admissible lower bound) from {@link MovementContext#pillarPlaceCost()};
+     *                        falls back to the static {@link MovementContext#PLACE_BASE_COST} when the search
+     *                        has no {@code InventoryView} (headless / trace / tests)
+     * @param out             filled in place with the cheapest forced approach (or "no correction")
      */
-    public static void probe(NavGridCuboidsView cuboids, int gx, int gy, int gz, BotCaps caps, Forced out) {
+    public static void probe(NavGridCuboidsView cuboids, int gx, int gy, int gz, BotCaps caps,
+            float pillarPlaceCost, Forced out) {
         out.clear();
         if (cuboids == null) {
             return; // no macro view → no correction (legacy / unbounded search)
@@ -192,14 +212,14 @@ public final class GoalForcedCost {
                 }
 
                 // (2) Build face: a vertical-from-below approach through an AIR column forces a pillar.
-                //     forcedCost = one pillar step = Pillar.COST + PLACE_COST.
+                //     forcedCost = one pillar step = Pillar.COST + pillarPlaceCost (base + removal premium).
                 if (axis == Axes.AXIS_Y && sign > 0 && caps.canPlace() && NavBlock.isPassable(desc)) {
                     // The forced air column extends AWAY from the goal (downward, the depth the bot must
                     // pillar UP through) — measure from the face cell in the -sign direction, NOT toward the
                     // goal (which would only reach the short air gap above it).
                     int extent = box.extentToward(ax, ay, az, axis, -sign); // forced air depth below the goal
                     if (extent > 0) {
-                        float premium = PILLAR_STEP_COST - 1f;
+                        float premium = (Pillar.COST + pillarPlaceCost) - OCTILE_FLOOR;
                         if (!haveBest || premium < bestPremium) {
                             bestPremium = premium;
                             haveBest = true;
@@ -219,10 +239,11 @@ public final class GoalForcedCost {
                     // reach it from this side) — measure from the face cell in the -sign direction.
                     int extent = box.extentToward(ax, ay, az, axis, -sign); // forced rock depth out from the goal
                     if (extent > 0) {
-                        float breakStep = MineDown.COST
-                                + MovementContext.BREAK_BASE_COST
-                                + NavBlock.hardness(desc) * MovementContext.BREAK_PER_HARDNESS;
-                        float premium = breakStep - 1f;
+                        // Real mining time of the BEST possible tool (admissible lower bound — the probe has no
+                        // bot inventory, and over-estimating would refuse the optimal route). Resident-table
+                        // scan, off the per-node hot path (probe runs once per search).
+                        float breakStep = MineDown.COST + MiningModel.fastestTicks(desc);
+                        float premium = breakStep - OCTILE_FLOOR;
                         if (premium > 0f && (!haveBest || premium < bestPremium)) {
                             bestPremium = premium;
                             haveBest = true;

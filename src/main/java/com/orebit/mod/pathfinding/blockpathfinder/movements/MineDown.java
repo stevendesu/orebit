@@ -49,10 +49,13 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
 public final class MineDown implements Movement {
 
     /**
-     * Base cost = one step of time — essentially a one-block Fall, but the floor must be broken first. That
-     * break adds its own cost, so mining down is only chosen when descending is actually wanted.
+     * Base cost, in <b>ticks</b> = one move step ({@link Traverse#FLAT_COST}) — essentially a one-block Fall
+     * (the drop + settle), but the floor must be broken first. That break adds its own REAL mining ticks
+     * ({@link MovementContext#breakCost}, the resident-table mining time), so a mine-down step costs {@code
+     * FLAT_COST + breakCost} — and a soft shaft (dirt) is cheap to dig while a stone shaft is a real trade-off
+     * against routing around. Mining down is chosen only when descending is actually wanted.
      */
-    public static final float COST = 1.0f;
+    public static final float COST = Traverse.FLAT_COST;
 
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
