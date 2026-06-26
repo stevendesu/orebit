@@ -86,6 +86,13 @@ the end of this arc, and it retroactively improves the heuristic, macro-ops, and
 - **Time-based expansion cap** instead of the 10k-node cap (more robust as per-node cost shifts).
 
 ## After arc (1)
+
+> **The canonical full multi-phase roadmap is PRD §10** (`internal_docs/PRD.md`) — read its STATUS OVERLAY
+> for where every phase stands. This arc (1) is the unbuilt half of PRD Phase 4 (tick-based cost model +
+> inventory) plus a config layer. The phases that MUST NOT be forgotten in later sessions are summarized
+> below and tracked canonically there: **Phase 2 residue** (resource octree + resource search), **Phase 5**
+> (`VirtualPlayerController` integration), and the **Later PRDs** (AI/task execution → LLM intent →
+> behavior/memory/social). The list below is the near-term slice; §10 is the whole arc.
 - **Resource/goal arc (the "useful helper" payoff, depends on (1)):** `RegionMetadata` → resource counts →
   search-by-resource-location → commands like `mine diamonds` / `cut wood` (+ an inventory-drop mechanism).
   This is what makes Orebit a thing people actually use in-game.

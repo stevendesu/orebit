@@ -448,6 +448,32 @@ adapters are filled in over time.
 
 ## 10. Build plan (phased, dependency-ordered)
 
+> **STATUS OVERLAY (2026-06-26 — read first; the phase BODIES below are the ratified design, this just
+> tracks where we are).** Build progress ran AHEAD of the original numbering: the block tier + movements of
+> Phase 4 landed early, which is what made Phase 3's sliding window viable. The navigation foundation is now
+> done.
+> - ✅ **Phase 0** (foundation hygiene + multi-version/multi-loader skeleton) — done, runtime-verified.
+> - ✅ **Phase 1** (world-model nav pipeline) — done, runtime-verified both eras.
+> - ✅ **Phase 3** (HPA\* graph + sliding-window `PathPlan` driver, NO entrances, corridor bound) — done
+>   (`worldmodel/hpa/`, `pathfinding/regionpathfinder/`, `pathfinding/PathPlan`).
+> - ◑ **Phase 4** — the *block tier* is done and then some: `BlockPathfinder` + the Tier-1 `Movement` set +
+>   **cuboid macro-ops** + **partial-path return** (ON) + the `GoalForcedCost` premium. **NOT done = Phase 4's
+>   "tick-based cost model with inventory snapshot"** — costs are still arbitrary magic numbers. That gap +
+>   capability config is **the CURRENT arc, the "agency layer"** → see `internal_docs/AGENCY-LAYER-PLAN.md`
+>   (capability config → inventory → tool use → tick costs).
+> - ⬜ **Remaining forward phases — DO NOT FORGET THESE (later sessions):**
+>   - **Phase 2 residue** — the fixed-grid *regions* shipped as Phase 3 (HPA\*), but the **resource octree +
+>     ascend/descend resource search are NOT built** (`RegionMetadata`/resource counts still stub). This is
+>     the keystone for "find/mine X" goals.
+>   - **Phase 5 — Integration / `VirtualPlayerController`** — replace `AllyBotEntity`'s imperative `tick()`
+>     follow with the real engine driving the bot through the full region→block pipeline.
+>   - **Later PRDs (the whole upper half of the vision, all stubs today):** AI/task execution
+>     (`tasks/`, `ai/`, `behavior/`, `requirements/` — `GoalDispatcher`/`TaskExecutor`/`AIStateMachine`);
+>     LLM intent (`integration/` — chat → `InterpretedIntent`, intent-only never planning); commands +
+>     configurability; behavior/memory/social (`memory/`, `relationships/`, `sim/`).
+> - **Near-term triage (adjacent, not a phase):** HPA\* far-goal / unloaded-chunk handling (an *exploration*
+>   mode for goals past the loaded radius); time-based search cap. See the agency-layer plan.
+
 - **Phase 0 — Foundation hygiene + platform-readiness audit.** Pick the canonical
   architecture (converge the root prototype and the `manager/agent/data` design);
   resolve duplicate identities (two `BotManager`s, `Fake*` vs `Mock*`,
