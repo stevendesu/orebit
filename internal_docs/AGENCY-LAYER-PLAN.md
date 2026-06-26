@@ -87,12 +87,13 @@ the end of this arc, and it retroactively improves the heuristic, macro-ops, and
 
 ## After arc (1)
 
-> **The canonical full multi-phase roadmap is PRD §10** (`internal_docs/PRD.md`) — read its STATUS OVERLAY
-> for where every phase stands. This arc (1) is the unbuilt half of PRD Phase 4 (tick-based cost model +
-> inventory) plus a config layer. The phases that MUST NOT be forgotten in later sessions are summarized
-> below and tracked canonically there: **Phase 2 residue** (resource octree + resource search), **Phase 5**
-> (`VirtualPlayerController` integration), and the **Later PRDs** (AI/task execution → LLM intent →
-> behavior/memory/social). The list below is the near-term slice; §10 is the whole arc.
+> **The canonical full forward plan is PRD §10 part B** (`internal_docs/PRD.md`) — the ordered, dependency-
+> ordered **Phase 1–7** roadmap. **This document is the detail for Phase 1 (the agency layer).** §10 part B
+> holds the rest in order: **Phase 2** far-goal/exploration robustness, **Phase 3** pathfinding completeness
+> (move types / portals / threading), **Phase 4** resource layer + `mine X` commands, **Phase 5** debug/UX,
+> **Phase 6** deferred pathfinding-quality, **Phase 7** the agent brain (AI/task execution → integration →
+> LLM intent → behavior/memory/social). The list below MIRRORS §10's Phases 2–7 as a near-term reference;
+> §10 is canonical — keep them in sync.
 - **Resource/goal arc (the "useful helper" payoff, depends on (1)):** `RegionMetadata` → resource counts →
   search-by-resource-location → commands like `mine diamonds` / `cut wood` (+ an inventory-drop mechanism).
   This is what makes Orebit a thing people actually use in-game.

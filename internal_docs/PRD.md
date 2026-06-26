@@ -446,116 +446,86 @@ most code is still stubs (the coupling surface multiplies as subsystems are writ
 This is a structural decision to make before heavy implementation, even if the
 adapters are filled in over time.
 
-## 10. Build plan (phased, dependency-ordered)
+## 10. Build plan
 
-> **STATUS OVERLAY (2026-06-26 — read first; the phase BODIES below are the ratified design, this just
-> tracks where we are).** Build progress ran AHEAD of the original numbering: the block tier + movements of
-> Phase 4 landed early, which is what made Phase 3's sliding window viable. The navigation foundation is now
-> done.
-> - ✅ **Phase 0** (foundation hygiene + multi-version/multi-loader skeleton) — done, runtime-verified.
-> - ✅ **Phase 1** (world-model nav pipeline) — done, runtime-verified both eras.
-> - ✅ **Phase 3** (HPA\* graph + sliding-window `PathPlan` driver, NO entrances, corridor bound) — done
->   (`worldmodel/hpa/`, `pathfinding/regionpathfinder/`, `pathfinding/PathPlan`).
-> - ◑ **Phase 4** — the *block tier* is done and then some: `BlockPathfinder` + the Tier-1 `Movement` set +
->   **cuboid macro-ops** + **partial-path return** (ON) + the `GoalForcedCost` premium. **NOT done = Phase 4's
->   "tick-based cost model with inventory snapshot"** — costs are still arbitrary magic numbers. That gap +
->   capability config is **the CURRENT arc, the "agency layer"** → see `internal_docs/AGENCY-LAYER-PLAN.md`
->   (capability config → inventory → tool use → tick costs).
-> - ⬜ **Remaining forward phases — DO NOT FORGET THESE (later sessions):**
->   - **Phase 2 residue** — the fixed-grid *regions* shipped as Phase 3 (HPA\*), but the **resource octree +
->     ascend/descend resource search are NOT built** (`RegionMetadata`/resource counts still stub). This is
->     the keystone for "find/mine X" goals.
->   - **Phase 5 — Integration / `VirtualPlayerController`** — replace `AllyBotEntity`'s imperative `tick()`
->     follow with the real engine driving the bot through the full region→block pipeline.
->   - **Later PRDs (the whole upper half of the vision, all stubs today):** AI/task execution
->     (`tasks/`, `ai/`, `behavior/`, `requirements/` — `GoalDispatcher`/`TaskExecutor`/`AIStateMachine`);
->     LLM intent (`integration/` — chat → `InterpretedIntent`, intent-only never planning); commands +
->     configurability; behavior/memory/social (`memory/`, `relationships/`, `sim/`).
->   - **Pathfinding completeness + quality backlog (Phase 4 follow-on — refines the already-built block/region
->     tiers; enumerated in `AGENCY-LAYER-PLAN.md` + `CUBOID-PERF-OPTIONS.md`):** more move types
->     (DiagonalAscend/Parkour/Swim/Crawl); portal / cross-dimension traversal; background-threading the search;
->     a debug-view enable/disable command + split HPA\*-center vs A\*-exact debug particles; and the deferred
->     pathfinding-QUALITY items (stronger forced-cost premium, dominance/symmetry pruning, the high-weight
->     "dig out of the trap" escalation, the SoA cuboid cache).
-> - **Near-term triage (adjacent, not a phase):** HPA\* far-goal / unloaded-chunk handling (an *exploration*
->   mode for goals past the loaded radius); time-based search cap. See the agency-layer plan.
+> **Rewritten 2026-06-26.** The original Phase 0–5 numbering tracked the world-model + pathfinding BUILD,
+> which is now mostly complete. This section is restructured into **(A) the completed navigation foundation**
+> (recapped, with the impl specs that own each piece) and **(B) the current ordered forward plan** (Phases
+> 1–7, dependency-ordered). Older notes that cite "PRD Phase 0–5" refer to part A; going forward "Phase N"
+> means the part-B forward plan.
 
-- **Phase 0 — Foundation hygiene + platform-readiness audit.** Pick the canonical
-  architecture (converge the root prototype and the `manager/agent/data` design);
-  resolve duplicate identities (two `BotManager`s, `Fake*` vs `Mock*`,
-  `PathfindingSettings` in two packages); remove dead experiments
-  (`ProxyNavigationEntity`, `FollowPlayerOwner`, `benchmarkMe()` in the join hot path);
-  stand up the multi-loader/multi-version project skeleton (§9). **Audit existing code
-  for version/loader-coupled API calls** (the fake-player network stack, the
-  `PalettedContainer` reflection, hardcoded `Blocks.X`/`Fluids`/registry usage, the
-  Fabric event registrations) and classify each: **cold** → route behind the platform
-  interface; **hot** → mark for a version-selected concrete implementation (§9), not a
-  per-call interface. Align to design principles where cheap.
-- **Phase 1 — Make the world-model pipeline actually run.** Finalize NavBlock
-  (per-BlockState, short index, palette codec); fix `NavSectionBuilder.build()` to a
-  correct read+classify with the uniform-section bypass, **structured as a
-  version-selected concrete class** (versioned chunk/palette APIs called directly on the
-  hot path, chosen once at load — no per-block dispatch); wire `ChunkNavLoader` to store
-  nav sections instead of discarding them; recompute on load. Verify via JMH + gametest.
-- **Phase 2 — Fixed-grid regions + resource octree.** Implement the grid `RegionBuilder`
-  (coordinate-math assignment + incremental update); populate and **persist** the
-  sparse resource octree; implement the ascend/descend resource search.
-- **Phase 3 — HPA\* graph (face-to-center cost; NO entrances — §6.5).** This is the
-  current next arc (the block tier of Phase 4 below is already built + fast, which is what
-  makes the sliding window viable). Build it BEFORE partial-path return, so pathological
-  failures stay visible as logged `FAIL`s and HPA\*'s benefit is measured cleanly. The
-  semantic `region/` classes (`Region`/`LeafRegion`/`CompositeRegion`/`Portal`/`PortalShape`,
-  flood-fill `RegionBuilder`) are **superseded** by this — replace, don't build on. Concrete
-  ladder:
-  - **3a — Implicit grid + SoA cost store.** Addressing only (no node objects): a node at
-    level *L* is `(level, blockPos / (16·2^L))`, parent `(level+1, coord>>1)`; octree levels
-    0–5 (16³→512³, 8 children), quadtree levels 6+ (horizontal-only, 4 children) up to the
-    dimension root (§6.3). Store **6 face-to-center costs × 4-bit log-scale** per node in
-    **per-level sparse SoA** arrays (separate from the resource histogram's SoA — §6.3), one
-    layer per dimension.
-  - **3b — Leaf cost (the mini-pathfind).** For each built 16³ leaf, compute each
-    `face-center → leaf-center` cost by running the **existing fast block-A\*** from the face
-    center to the leaf center over the recomputed nav grid (with default caps/survival —
-    §7.3 baseline); quantize to the 4-bit bucket. Six small bounded searches per leaf;
-    `COST_INF` bucket where a face is unreachable from center (e.g. solid leaf — still
-    "mineable," so cost is high, not infinite, per the everything-traversable rule).
-  - **3c — Square-pyramid merge.** A coarse node's 6 face costs are rolled up from its
-    children's faces (8-child merge below the octree→quadtree transition, 4-child above —
-    identical operator). A leaf change re-merges its ancestors in O(levels).
-  - **3d — Missing / unloaded sections.** A node with no built nav data plans from its
-    **persisted** cost if present, else an **optimistic default** (straight-line / minimum
-    cost-per-block) — planning over unexplored terrain is the whole point; the nav grid
-    refines it on approach. Define the default explicitly so the region-A\* heuristic stays
-    admissible.
-  - **3e — Persistence.** Per-dimension **hierarchical index file**, separate from chunk
-    data (a high-level node spans many chunks — §6.3). Persist the pyramid; recompute the
-    nav grid (never persisted). Target ~2% of save (§6.6).
-  - **3f — Incremental maintenance.** Hook the existing `setBlockState` mixin
-    (`BlockChangeEvents` → nav-grid patch already exists): a changed cell dirties its leaf →
-    recompute that leaf's ≤6 face costs (3b) → re-merge ancestors (3c). Debounce/batch so a
-    bulk edit doesn't thrash.
-  - **3g — `RegionPathfinder`.** A\* over the cost pyramid: LCA super-region of
-    source+target, plan one layer at a time, refine lazily as the bot descends. Output = an
-    **ordered region sequence** (`RegionPathPlan`), no crossing points.
-  - **3h — Sliding-window driver (`PathPlan`).** Per §7.1: window of ~3 regions; block-A\*
-    to the goal if in-window else to the farthest window-region's center; replan on each
-    region-boundary crossing, sliding forward. Reuses the block tier as-is.
-  - **3i — Cross-dimension heuristic.** 8:1 Nether→overworld frame in the region-A\*
-    heuristic only (§6.5); edge costs stay real.
-  - **First measurable milestone (the "earns its keep" proof).** Pick a goal that flat
-    block-A\* currently `FAIL`s on (the 30-up open-air pillar, and a multi-thousand-block
-    cross-country walk). Show it now succeeds, and report **region-tier nodes + windowed
-    block-A\* nodes vs. the flat search's 10k-cap** — the clean before/after that justifies
-    the complexity, with partial-path still absent so nothing masks the signal.
-- **Phase 4 — Block pathfinder + movements + cost model.** Implement the `Movement`
-  interface and the Baritone-based movement set (+ EnterPortal, + folded
-  break/place/door interactions); the tick-based cost model with inventory snapshot;
-  admissible block heuristics; `BlockPathfinder`; the support cast (follower,
-  replanner, budget, cache, smoother).
-- **Phase 5 — Integration.** Replace `AllyBotEntity`'s imperative `tick()` follow with
-  the real engine driving the bot via `VirtualPlayerController`. The bot navigates to
-  a goal through the full region→block pipeline.
-- **Later PRDs:** LLM intent, AI/task execution, behavior/memory/social, commands.
+### A. Completed — the navigation foundation (built + runtime-verified, both eras)
+
+The bot navigates the world robustly: it routes around terrain, builds staircases/pillars, digs, and now
+ascends the pathological open-air pillar (incl. the floating-block case). Built:
+
+- **Foundation + multi-version/multi-loader** (was Phase 0) — the branch-per-era + Stonecutter/overlay build
+  (§9), the hand-written platform DI seam, dead-experiment cleanup.
+- **World-model nav pipeline** (was Phase 1) — `NavBlock` / `TraversalGrid` / `NavSection`, build-on-chunk-load
+  + `setBlockState`-mixin freshness, the version-selected `platform/` adapters.
+- **HPA\* region tier** (was Phase 3) — implicit fixed-grid octree→quadtree cost pyramid (face-to-center cost,
+  **NO entrances** — §6.5), `RegionPathfinder` + the sliding-window `PathPlan` driver + corridor `RegionBound`.
+  Spec: `internal_docs/HPA-IMPLEMENTATION.md`. Supersedes the semantic `region/` classes.
+- **Block tier + movements + macro-ops + partial-path** (was Phase 4's block half) — alloc-free
+  `BlockPathfinder`, the Tier-1 `Movement` set, cuboid macro-collapse + the `GoalForcedCost` premium, and
+  `PARTIAL_PATH` (ON) as the structural net for heuristic terrain blind spots. Specs:
+  `internal_docs/MACRO-IMPLEMENTATION.md`, `CUBOID-PERF-OPTIONS.md`.
+
+**Carried forward (designed in the old plan, NOT built — mapped into part B):** the tick-based cost model +
+inventory snapshot (old Phase 4 cost half) → **Phase 1**; the resource octree + resource search (old Phase 2)
+→ **Phase 4**; the `VirtualPlayerController` integration (old Phase 5) → **Phase 7**.
+
+### B. Forward build order — the current plan (dependency-ordered)
+
+**Phase 1 — Agency layer.** ← **START HERE.** Capability config → inventory → tool use (+ block placement from
+inventory) → **tick-based costs** (Baritone-style: break time derived from the tool, place cost incl. the
+consumed block). Makes the pathfinder's costs real (today they're arbitrary magic numbers) and is the keystone
+the useful commands depend on. The hard design decision is **consumables-along-path** — a finite, depleting
+block/tool budget vs the alloc-free hot path. Detail + the per-rung seams: **`internal_docs/AGENCY-LAYER-PLAN.md`.**
+
+**Phase 2 — Far-goal / exploration robustness.** Fix the `path=NONE` flood on goals past the loaded radius (the
+1000,1000 case): an **exploration mode** — head toward the goal through loaded terrain and re-plan as chunks
+stream in (the old plan's optimistic-default-over-unexplored-terrain rule is the planning side; the driver side
+is new) — plus graceful degradation instead of log spam. Add a **time-based search cap** (replace the
+10k-node cap). Cheap and mostly independent; underpins the partial-path safety story (HPA*'s global vision is
+what keeps partials off the cave-trap), so worth doing early / in parallel with Phase 1.
+
+**Phase 3 — Pathfinding completeness.** More move types (each a `Movement`: DiagonalAscend, Parkour, Swim,
+Crawl); **portal / cross-dimension traversal** (cross-dimension skeleton stitching + the §6.5 8:1 Nether frame
+in the region heuristic); **background-threading** the search (removes the ~11 ms tick hitches seen during
+multi-replan climbs; requires making the search thread-safe first). Incremental and independent.
+
+**Phase 4 — Resource layer + useful commands.** The sparse **resource octree** / `RegionMetadata` counts
+(§6.3, persisted — §6.6) → **search-by-resource-location** (ascend/descend search over the histogram) →
+commands like `mine diamonds` / `cut wood` (+ an **inventory-drop** mechanism). Depends on **Phase 1**
+(inventory). This is the payoff that makes Orebit a genuine in-game helper, not just a follower.
+
+**Phase 5 — Debug / UX polish.** A debug-view enable/disable command; split debug particles (HPA*-center
+region path vs A*-exact block path, so a region-vs-block disagreement is visible). Small; slot anytime.
+
+**Phase 6 — Deferred pathfinding-quality** (opportunistic; composes WITH partial-path, doesn't replace it).
+A stronger forced-cost premium; **dominance/symmetry pruning** (the real anti-flood endgame — a *pruning rule*,
+so it has no admissibility constraint, unlike the heuristic); the high-weight "dig out of the trap" escalation
+(reads `BotCaps`, so it lands after Phase 1's config/tools); the SoA cuboid cache (`CUBOID-PERF-OPTIONS.md`
+option C). None blocking — each makes floods rarer and partial paths better.
+
+**Phase 7 — The agent brain + integration** (the original end-to-end vision; all stubs today; only sensible
+once the bot is a capable, configurable agent — Phases 1 + 4). In dependency order:
+- **AI / task execution** — `tasks/`, `ai/`, `behavior/`, `requirements/`: `GoalDispatcher` → a Requirements
+  graph → `TaskExecutor` / `AIStateMachine` (multi-step goals: "build a wall", "strip-mine here").
+- **`VirtualPlayerController` integration** (old Phase 5) — retire `AllyBotEntity`'s imperative `tick()`
+  follow; the task engine drives the bot through the full region→block pipeline.
+- **LLM intent** — `integration/`: `PromptBuilder` → `LLMInterface` → `LLMBackend` → `InterpretedIntent`. Chat
+  → intent ONLY (never planning — the determinism pillar), feeding `GoalDispatcher`.
+- **Behavior / memory / social** — `memory/`, `relationships/`, `sim/`: the personality, relationship, and
+  long-term-memory layers.
+
+### First-milestone discipline (kept from the old plan)
+Every phase lands behind a measurable proof or a runtime smoke test, not just a compile: JMH for hot-path
+micro-benchmarks; the `PathfinderBenchmark` scenarios + the now-faithful `/bot trace` for search shape;
+in-game smoke tests for the live stack (the headless harness can't stand up a `ServerLevel`). For a search
+change, the proof is **node-count / wall-clock before-vs-after on the case it targets** — the "earns its keep"
+bar HPA\* and the macro-ops were held to.
 
 ## 11. Testing & measurement
 
