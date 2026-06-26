@@ -1,8 +1,9 @@
 # Macro-Movements & Uniform-Region Collapse
 
-> **Status: exploratory design notes** (Steve + Claude, 2026-06-25). NOT ratified, NOT yet built. This is
-> the fix direction for the open-air-pillar flood and its kin. Steve is still researching; capture the
-> reasoning here so the next session starts from it.
+> **Status: RATIFIED** (Steve + Claude, 2026-06-25). The four §5 "still open" items are now decided (see
+> §5); this is the fix direction for the open-air-pillar flood and its kin, ready to build. The prescriptive
+> signatures/constants/algorithms the implementation authors against live in `internal_docs/MACRO-IMPLEMENTATION.md`
+> (mirrors the HPA build's locked note); this file is the *why*, that one is the *what/how*.
 
 ## 1. The pathology (measured)
 
@@ -45,6 +46,14 @@ We can't use JPS/RSR off the shelf — our move costs are **non-uniform** (place
   1-D cross, not the box the movement needs. The unit is the **maximal axis-aligned cuboid** (convex → any
   axis move between two interior cells stays interior). Finding it: the histogram→2D→3D reduction (largest
   rectangle in a histogram, swept over layers); at 16³ it's ~tens of thousands of ops, free.
+- **Directional tie-break — among equal-volume maximal cuboids, pick the one SHORTEST along the goal-travel
+  axis (DECIDED, was §5 open).** The maximal cuboid containing a cell isn't unique (a 4×1×1 and a 1×4×1 both
+  fit at a corner). The jump along the travel axis is capped by `dist_to_edge` to the *nearest* face — and a
+  near *orthogonal* (side) face cuts the jump short *before* it reaches the cuboid's far end ("stopping
+  partway through"). So choose the box with the **largest orthogonal cross-section** (= shortest extent along
+  travel): that pushes the side faces away, so the limiting edge becomes the far travel face / goal
+  projection and you jump the *whole* run. Equivalently: minimize the travel-axis extent among equal-volume
+  candidates. Cheap to evaluate during the directional extraction (§ MACRO-IMPLEMENTATION).
 - **Uniformity = identical navtype descriptor (Steve), NOT a per-movement predicate.** A single shared cuboid
   definition is reusable across all macros (so memoization actually pays off), and identical navtype also
   gives the **cost-uniformity JPS needs** (every collapsed step is the same cost). Per-movement predicates
@@ -112,9 +121,15 @@ We can't use JPS/RSR off the shelf — our move costs are **non-uniform** (place
   practice; check the handful of current-path edits against the one box (point-in-box), shrink if any hit.
 - **Do NOT precompute perimeter connectivity** (the O(n²)/O(n³) trap Steve flagged). Jump *to* the perimeter
   and let normal per-cell expansion read "wall vs opening" lazily, O(1) when you arrive. Precompute stays O(n).
-- **Section scope:** section-confined regions (jump ≤16) are a fine first cut and already collapse the
-  vertical. **Cross-section** regions (capped at corridor width) are a later refinement that helps
-  corner/boundary goals.
+- **Section scope — cross-section, bounded by the corridor (DECIDED, was §5 open).** Cuboids extend *across*
+  section boundaries into the neighbour, but **only as far as the HPA\* corridor box** (`RegionBound`) — never
+  the whole section grid (you can't scan a flat-world into a 30M×30M air cuboid). The trade-off is explicit:
+  farther extension → larger orthogonal `dist_to_edge` → bigger jumps → fewer nodes; the corridor is the
+  bound *most tightly tied to the path itself* (it's exactly the terrain we're allowed to traverse), so it's
+  the natural cap. A section-confined first cut (jump ≤16) already collapses the pure vertical; the
+  corridor-bounded cross-section is what fixes corner/boundary goals (the corner pillar whose section edge
+  *is* the corridor margin). Implementation may land section-confined first, then widen to corridor — but the
+  ratified target is corridor-bounded.
 - **Execution is transparent:** the macro collapses the *search* (one node); `reconstruct` expands that edge
   back into `N` waypoints + their `StepEdits`, so `steerAlongPath`/`applyEdits` never change.
 
@@ -156,24 +171,47 @@ so still **no blanket multiplier**; this is a cheap bounded correction near the 
 This subsumes the deferred "perimeter / backward-probe" heuristic (HANDOFF) — computed analytically from the
 goal's cuboids instead of an actual backward search.
 
-## 5. Decided (this design pass) vs still open
+- **Off-axis (up-and-over) goal — credit only the cheaper single-axis premium (DECIDED, was §5 open).** When
+  the goal is forced expensive on *more than one* axis (build up AND dig over, the diagonal mix), the true
+  cost is a continuous staircase trade — every block walked before building is a block not pillared past, so
+  the vertical climb is paid *as part of* the horizontal travel, not on top of it. Charging both full premiums
+  double-counts that shared work → **over-estimate → inadmissible → can refuse the optimal staircase** (the
+  exact failure of the old "×4" hack). The ratified rule is **conservative**: credit only the **minimum**
+  single-axis premium (equivalently: take the min over faces as already specified, which on a multi-axis-forced
+  goal naturally returns the cheaper axis). This **under**-credits the diagonal — accepting some residual flood
+  on the pure up-and-over case — but it is provably admissible and **degenerates to plain A\*** where it adds
+  nothing, so it breaks nothing. A tighter admissible lower bound on the staircase cost is a possible later
+  refinement; v1 ships the conservative single-axis credit.
 
-**Decided:** maximal cuboids (not connected components, not run-lengths); uniformity = identical navtype
-descriptor; lazy line-march toward the goal + memoize per section; jump bound = `min(goal_projection,
-dist_to_edge / move_cost)` — the `/move_cost` escape-hedge is **movement-agnostic robustness** (future-proof
-for new movements), and over-jump is valid-but-suboptimal so rounding UP is fine; err only conservative
-(shrink, never over-claim); `NavGridCuboidsView` as the query seam; the goal-cuboid heuristic correction is
-admissible (min-over-faces) and IS the principled form of a vertical premium.
+## 5. Decided (all of it — this design is ratified)
 
-**Still open:**
-- The directional maximal-cuboid query (the box that extends farthest along the goal direction, since the
-  maximal cuboid containing a cell isn't unique) — the exact extraction at 16³.
-- Cross-section cuboids for corner/boundary goals (scope + corridor-width cap; the corner pillar wants this).
-- Heuristic-correction details for the *up-and-over* (off-axis) goal, where the optimal "turn" is a cost
-  trade inside a uniform region (the pure-vertical and pure-horizontal cases are clean; the diagonal mix is
-  the subtle one).
-- Lifecycle: the per-section base cuboid cache + invalidation on committed block change (the `patchCell`
-  cadence), vs the per-search `PathEdits` overlay.
+**Core (settled the first pass):** maximal cuboids (not connected components, not run-lengths); uniformity =
+identical navtype descriptor; lazy line-march toward the goal + memoize per section; jump bound =
+`min(goal_projection, dist_to_edge / move_cost)` — the `/move_cost` escape-hedge is **movement-agnostic
+robustness** (future-proof for new movements), and over-jump is valid-but-suboptimal so rounding UP is fine;
+err only conservative (shrink, never over-claim); `NavGridCuboidsView` as the query seam; the goal-cuboid
+heuristic correction is admissible (min-over-faces) and IS the principled form of a vertical premium.
+
+**The four formerly-open items — now decided (this pass):**
+1. **Directional maximal-cuboid query** → among equal-volume maximal cuboids at a cell, pick the one
+   **shortest along the goal-travel axis** (largest orthogonal cross-section → side faces pushed away → the
+   jump is capped by the far/goal face, not a near side wall → jump the whole run). See §3a.
+2. **Cross-section scope** → cuboids **extend across section boundaries, bounded by the HPA\* corridor box**
+   (not the whole grid). Farther = bigger jumps, but the corridor is the bound tied to the path. May land
+   section-confined first then widen, but corridor-bounded is the target. See §3b "Section scope".
+3. **Off-axis (up-and-over) goal heuristic** → **conservative single-axis credit** (min over faces; credit
+   only the cheaper forced axis, never sum both → admissible, degenerates to plain A\*; accepts some flood on
+   the pure diagonal). A tighter staircase lower bound is a later refinement. See §4.
+4. **Lifecycle** → **per-search `PathEdits` overlay over a per-section base cuboid cache.** The base cuboids
+   are memoized per section and invalidated only on a *committed* block change (the `patchCell` cadence,
+   matching `NavGridView`); a *search's* speculative edits are an on-query collapse layered on top
+   (`NavGridCuboidsView`, mirroring how `MovementContext.descriptorAt` layers `PathEdits` over the grid), so
+   backtracking to a different candidate path never rebuilds the base cache. See §3a/§3b.
+
+**Genuinely deferred (not blocking v1, explicitly later):** the optional escape-hedge refinement (swap the
+assumed cost-`1` floor for a scanned neighbour's real cheapest move once cross-section cuboids reveal it,
+§3b); a tighter admissible staircase lower bound for the diagonal goal (§4); and whether the base-cuboid
+cache is worth persisting (it is recomputed cheaply, so likely not — unlike the HPA\* graph).
 
 ## 6. Relationship to the rest of the stack
 
