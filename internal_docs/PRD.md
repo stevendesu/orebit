@@ -483,12 +483,50 @@ consumed block). Makes the pathfinder's costs real (today they're arbitrary magi
 the useful commands depend on. The hard design decision is **consumables-along-path** — a finite, depleting
 block/tool budget vs the alloc-free hot path. Detail + the per-rung seams: **`internal_docs/AGENCY-LAYER-PLAN.md`.**
 
-**Phase 2 — Far-goal / exploration robustness.** Fix the `path=NONE` flood on goals past the loaded radius (the
-1000,1000 case): an **exploration mode** — head toward the goal through loaded terrain and re-plan as chunks
-stream in (the old plan's optimistic-default-over-unexplored-terrain rule is the planning side; the driver side
-is new) — plus graceful degradation instead of log spam. Add a **time-based search cap** (replace the
-10k-node cap). Cheap and mostly independent; underpins the partial-path safety story (HPA*'s global vision is
-what keeps partials off the cave-trap), so worth doing early / in parallel with Phase 1.
+**Phase 2 — Far-goal / exploration robustness + HPA\* driver bugs.** ← the next arc. Several distinct
+HPA*-tier issues surfaced during the Phase-1 cross-version smoke test (2026-06-26), in rough priority:
+
+1. **First-load / mass-chunk-gen tick stall (DO FIRST — perf).** On a fresh-world join the server ticks
+   **~1 tick/sec for ~the first minute** while chunks generate. **Prime suspect: HPA\* leaf-cost recompute.**
+   `LeafCostComputer` computes a leaf's 6 face→center costs by running **up to 6 full `BlockPathfinder.findPath`
+   searches per level-0 leaf** (face-rep → center, `BotCaps.BREAK_PLACE`); `HpaMaintenance.flush` drains
+   `MAX_LEAVES_PER_TICK = 8` dirty leaves/tick → **up to ~48 block-A\* searches per tick**, on top of
+   `ChunkNavLoader`'s `MAX_BUILDS_PER_TICK = 8` nav-grid builds/tick (PalettedContainer reflection). The
+   per-tick budgets exist, so if it still stalls ~20×, the cause is one of: per-leaf cost too high (the 6
+   searches over fresh open terrain), an **unbudgeted trigger** (a block-change/dirty-marking storm during
+   world-gen, or a full ancestor re-merge in `PyramidMerger`), or pathological searches. **Will also bite
+   Elytra full-speed flight and 8+ players exploring** (both spike the chunk-gen rate). Repros only during live
+   terrain gen, which the headless JMH harness can't stage → **diagnose by profiling a live `runClient`** (JFR
+   `jcmd` attach → `jfr print --events jdk.ExecutionSample | grep com.orebit`, or the Spark mod; recipe in
+   `HANDOFF.md`).
+
+2. **Window-target lands in mid-air (the "random pillaring" bug — diagnosed this session).** The sliding-window
+   driver aims block-A* at the far region's **center**, projected to ground by `PathPlan.projectToStandableFloor`
+   — but that projection scans only the **single center column**, confined to that region's **own 16-tall band**,
+   and on miss **falls back to the raw geometric center** (a mid-air point, `PathPlan.windowTarget()` line ~451).
+   So over **water** (not `standable` — no swim in Tier 1) and over **ravines/cliffs** (the real floor is below
+   the region's band) it targets an airborne point; the bot pillars/bridges toward it, then re-aims as the window
+   slides → "pillar at a random angle, turn around, come back" (river crossing) and "pillar 40 up then bridge
+   overhead" (ravine drop). **Fix direction — targeted, not structural:** widen the projection (small (x,z)
+   neighbourhood + search *past* the region's own band to real ground) and replace the raw-center fallback with a
+   sane one (clamp toward the bot's Y / nearest navigable cell). Confirm first via `PathPlan.DEBUG` (logs the
+   per-replan `target=`); add a headless guard test (synthetic river/ravine → assert sane target, not raw center).
+
+3. **Far-goal / unloaded-chunk `path=NONE` flood** (the original Phase 2 item; flat world, 0,0,0 → 1000,1000):
+   an **exploration mode** — head toward the goal through loaded terrain and re-plan as chunks stream in
+   (optimistic-default-over-unexplored is the planning side; the driver side is new) — plus graceful degradation
+   instead of log spam.
+
+4. **Time-based search cap** (replace the 10k-node cap; more robust as the per-node tick costs shift). Cheap,
+   independent. Underpins the partial-path safety story (HPA*'s global vision keeps partials off the cave-trap).
+
+**On growing the sliding `WINDOW` (considered, deprioritized).** Because the regions form an implicit octree and
+a path never doubles back through a visited region, the count of regions spiralled through before the goal comes
+into range is bounded (≤ the 3-D neighbour count, ~26), so a large-enough window *would* guarantee the real goal
+becomes the target and sidestep the mid-air-center bug (#2). **But** larger window → longer block path → more
+weight on a greedy A* that already shows pathologies past ~3 regions (30–40 blocks), so pushing toward 26 invites
+worse search blow-ups. **Prefer fixing the projection (#2) over growing the window**; revisit window size only if
+the projection fix proves insufficient.
 
 **Phase 3 — Pathfinding completeness.** More move types (each a `Movement`: DiagonalAscend, Parkour, Swim,
 Crawl); **portal / cross-dimension traversal** (cross-dimension skeleton stitching + the §6.5 8:1 Nether frame
