@@ -48,8 +48,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  * shrink (a shorter jump is always safe; plain A* fills the remainder). The cuboid having certified the
  * column uniform is exactly what makes skipping the intermediate stand cells sound (NON-NEGOTIABLE 1).
  *
- * <p>The per-step cost is {@code Pillar.COST + MovementContext.PLACE_COST} (the move plus the folded
- * placement), so the macro's total cost is {@code J × COST + }{@link EditScratch#extraCost()} — exactly
+ * <p>The per-step cost is {@code Pillar.COST + MovementContext.placeCost(...)} (the move plus the folded
+ * real place ticks), so the macro's total cost is {@code J × COST + }{@link EditScratch#extraCost()} — exactly
  * {@code J} times the per-step cost, never cheaper than {@code J} separate micro steps (the macro is a
  * search-shape optimization, not a cost discount).
  *
@@ -60,10 +60,13 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
 public final class Pillar implements Movement {
 
     /**
-     * Base cost = one step of time — essentially a jump in place, but a footing must be placed first. That
-     * placement ({@code PLACE_COST}) adds its own cost, so pillaring is only chosen when climbing is wanted.
+     * Base cost, in <b>ticks</b> = one move step ({@link Traverse#FLAT_COST}) — essentially a jump in place
+     * (the jump + settle takes about as long as a walk step). The footing that must be placed first adds its
+     * own real place ticks ({@link MovementContext#placeCost}), so a pillar step costs {@code FLAT_COST +
+     * placeCost ≈ 4.6 + 20 ≈ 25} ticks — expensive, so pillaring is chosen only when climbing is actually
+     * wanted, and a single floating block beside the column (a cheaper exit) easily out-competes it.
      */
-    public static final float COST = 1.0f;
+    public static final float COST = Traverse.FLAT_COST;
 
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
@@ -100,8 +103,12 @@ public final class Pillar implements Movement {
         Cuboid box = ctx.cuboidScratch();
         cuboids.cuboidAt(x, ny, z, Axes.AXIS_Y, +1, box); // travel +Y (climbs upward)
 
-        // Real per-step cost = the upward move plus the folded placement (NON-NEGOTIABLE 2: never a literal).
-        float moveCost = COST + MovementContext.PLACE_COST;
+        // Real per-step cost = the upward move plus the folded placement, in ticks (NON-NEGOTIABLE 2: the
+        // escape-hedge divides the orthogonal face by THIS, so an expensive pillar step gets a short jump and
+        // can't sail past a cheaper sideways exit — read placeCost, never a literal). The placed footing is
+        // the bot's conjured/throwaway block; placeCost is uniform per step up the (cuboid-certified uniform)
+        // column, so the start cell's place cost is the per-step edit cost.
+        float moveCost = COST + ctx.placeCost(x, ny, z);
         int j = MacroJump.steps(box, x, y, z, Axes.AXIS_Y, +1, moveCost,
                 ctx.goalX(), ctx.goalY(), ctx.goalZ());
 

@@ -9,6 +9,7 @@ import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Axes;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.GoalForcedCost;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 
 import net.minecraft.core.BlockPos;
@@ -81,12 +82,13 @@ public final class BlockPathfinder {
         try { w.write(line); w.write('\n'); } catch (java.io.IOException ignored) { }
     }
 
-    /**
-     * Node-expansion ceiling — bounds per-call cost so a long/blocked goal can't stall the tick. A
-     * backstop, NOT the primary throttle: the per-axis heuristic below is what keeps a normal search far
-     * under this. (Pathing measures instant; 10k leaves headroom for genuinely long routes.)
-     */
-    private static final int MAX_EXPANSIONS = 10000;
+    // The node-expansion ceiling and heuristic weight are NO LONGER compile-time constants here: they are
+    // owner config, carried on BotCaps ({@link BotCaps#maxNodes} / {@link BotCaps#greedyWeight}) and read
+    // ONCE into a search-start local (maxNodes below) / onto the Relaxer (its hWeight field), so the hot
+    // loop still reads a local, never a field — no per-node cost for making them configurable. Their
+    // historical values (10000 / 2.0) live as BotCaps.DEFAULT_MAX_NODES / DEFAULT_GREEDY_WEIGHT, which the
+    // DEFAULT/BREAK_PLACE test configs and the config defaults both carry, so behaviour is unchanged until
+    // the owner edits orebit.properties.
 
     /**
      * Master switch for partial-path return — <b>ON.</b> A budget-exhausted search that made real progress
@@ -124,26 +126,38 @@ public final class BlockPathfinder {
     /**
      * Minimum heuristic improvement (how much closer to the goal the closest-approach node is than the start)
      * for a <b>budget-exhausted</b> search to return a PARTIAL path (only when {@link #PARTIAL_PATH}). Below
-     * this the progress is noise and committing to it would just churn the replanner.
+     * this the progress is noise and committing to it would just churn the replanner. In TICK units (PRD §10
+     * Phase 1d) the heuristic is now ~{@link Traverse#FLAT_COST} per block of straight-line progress, so this
+     * threshold is ≈ one walk block — the old "2 units" was ~2 blocks of the dimensionless heuristic, so it is
+     * rescaled to ~one block of the tick heuristic to keep the same "real progress" intent.
      */
-    private static final float PARTIAL_MIN_PROGRESS = 2.0f;
+    private static final float PARTIAL_MIN_PROGRESS = Traverse.FLAT_COST;
 
     // Heuristic = 3D octile distance to the goal, times an inflation WEIGHT. Octile is the true shortest
-    // path on a grid that can move straight (cost 1), face-diagonal (√2, two axes at once) or corner-
-    // diagonal (√3, three axes at once): spend the shortest axis on corner-diagonals, the next on
-    // face-diagonals, the rest straight. All THREE axes are weighted EQUALLY — verticality carries no
-    // special penalty: an Ascend/Descend is a step that happens to also change height (base cost 1.0, same
-    // as a Traverse), and climbing a pre-existing staircase is no dearer than walking. The real cost of
-    // going up/down in open air is the block place/break, which lives on the MOVE (counted in g) and is
-    // therefore already paid for and naturally avoided — it does not belong in the heuristic. The WEIGHT
-    // (>1) makes the search greedy toward the goal: it stops fanning across the equal-cost plateau and
-    // beelines, trading guaranteed-optimal paths (fine for a follow-bot) for far fewer expanded nodes.
-    // CAVEAT: a goal reachable ONLY by building straight up (a pillar in open air) is under-estimated here
-    // (h sees distance, not the forced placements counted in g), so that one case can still over-explore.
-    private static final float H_STRAIGHT = 1.0f;        // one axis
-    private static final float H_FACE     = 1.41421356f; // two axes at once (√2)
-    private static final float H_CORNER   = 1.7320508f;  // three axes at once (√3)
-    private static final float H_WEIGHT   = 2.0f;        // greediness; 1.0 = admissible, higher = faster/greedier
+    // path on a grid that can move straight, face-diagonal (√2, two axes at once) or corner-diagonal (√3,
+    // three axes at once): spend the shortest axis on corner-diagonals, the next on face-diagonals, the rest
+    // straight. All THREE axes are weighted EQUALLY — verticality carries no special penalty: an
+    // Ascend/Descend is a step that happens to also change height (base cost = a walk step, same as a
+    // Traverse), and climbing a pre-existing staircase is no dearer than walking. The real cost of going
+    // up/down in open air is the block place/break, which lives on the MOVE (counted in g) and is therefore
+    // already paid for and naturally avoided — it does not belong in the heuristic. The WEIGHT (>1) makes the
+    // search greedy toward the goal: it stops fanning across the equal-cost plateau and beelines, trading
+    // guaranteed-optimal paths (fine for a follow-bot) for far fewer expanded nodes.
+    //
+    // UNITS (PRD §10 Phase 1d): g is now in REAL TICKS (a walk block ≈ Traverse.FLAT_COST ≈ 4.633 ticks), so
+    // the octile MUST be in ticks too, or h would be a few percent of g and the search would collapse toward
+    // Dijkstra (h negligible → enormous node counts). The per-axis-block weights are therefore the WALK tick
+    // cost (FLAT_COST) and its √2 / √3 multiples — i.e. octile estimates "ticks to walk the straight-line grid
+    // distance," the same unit as g. Deriving them from FLAT_COST keeps them auto-consistent if the walk ruler
+    // is retuned, and keeps the greedyWeight (config, default 2.0) meaning exactly what it did before the
+    // rescale (it multiplies a tick-unit octile, so the same weight gives the same greediness). CAVEAT
+    // unchanged: a goal reachable ONLY by building straight up is under-estimated here (h sees distance, not
+    // the forced placements counted in g) — that residual is what GoalForcedCost.premium corrects.
+    private static final float H_STRAIGHT = Traverse.FLAT_COST;               // one axis  (walk ticks/block)
+    private static final float H_FACE     = Traverse.FLAT_COST * 1.41421356f; // two axes at once (√2)
+    private static final float H_CORNER   = Traverse.FLAT_COST * 1.7320508f;  // three axes at once (√3)
+    // The greediness weight is now config (BotCaps.greedyWeight); the Relaxer reads it once into its
+    // hWeight field at search start, so octile() multiplies by a per-search field, not a global constant.
     // Straight-line tie-break weight. On open ground an off-axis goal has a huge equal-cost VOLUME of
     // paths (the correct count of diagonals can be placed anywhere) — a plateau the WEIGHT can't break,
     // because all those paths share g and h. Adding a microscopic term proportional to the node's
@@ -152,6 +166,9 @@ public final class BlockPathfinder {
     // 3D, not just horizontal, so it also breaks the pillar-then-ascend vs ascend-then-pillar symmetry —
     // a node that climbs early is off the line and loses the tie to one that climbs in step. Kept tiny so
     // it only ORDERS otherwise-equal-f nodes and never overrides a real cost difference. Tunable.
+    // UNITS: the tie term is H_TIE × (perpendicular distance in BLOCKS, ~0..D) — block units, not ticks. At
+    // 0.001 × blocks it stays a sub-tick nudge, far below the ~4.6-tick cost of any real move difference, so
+    // the tick rescale of the octile (above) leaves it correctly negligible — it still only orders ties.
     private static final float H_TIE      = 0.001f;
 
     /**
@@ -431,6 +448,21 @@ public final class BlockPathfinder {
      */
     public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
                                          BotCaps caps, RegionBound bound) {
+        return findPath(grid, startFloor, goalFloor, caps, bound, null);
+    }
+
+    /**
+     * As {@link #findPath(NavGridView, BlockPos, BlockPos, BotCaps, RegionBound)}, additionally threading the
+     * live bot's per-pathfind inventory feasibility snapshot {@code inventory} (PRD §10 Phase 1b/1c) into the
+     * {@link MovementContext} — so the break/place gates also account for the bot's REAL carried tools +
+     * blocks (see {@link MovementContext#setInventory}). {@code null} (every existing caller, the headless
+     * benchmarks, {@code /bot trace}) leaves the gates in their historical caps-only mode, so behaviour is
+     * unchanged until a bot supplies a snapshot. The snapshot is read ONCE here into the context before the
+     * loop; the hot path then reads its primitives, never the live inventory (HOT-PATH-NO-ALLOC).
+     */
+    public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
+                                         BotCaps caps, RegionBound bound,
+                                         MovementContext.InventoryView inventory) {
         final long t0 = System.nanoTime();
         final int sx = startFloor.getX(), sy = startFloor.getY(), sz = startFloor.getZ();
         final int gx = goalFloor.getX(), gy = goalFloor.getY(), gz = goalFloor.getZ();
@@ -441,7 +473,14 @@ public final class BlockPathfinder {
             return null;
         }
 
+        // Read the configurable search params into search-start locals ONCE — the hot loop's budget test
+        // (below) and the heuristic weight (on the Relaxer) then read a local / a final field, not a
+        // BotCaps accessor per node. Guarded so a mis-configured caps can never disable the backstop:
+        // a non-positive maxNodes falls back to the historical default.
+        final int maxNodes = caps.maxNodes() > 0 ? caps.maxNodes() : BotCaps.DEFAULT_MAX_NODES;
+
         final MovementContext ctx = new MovementContext(grid, caps);
+        ctx.setInventory(inventory); // null in the historical / headless / trace paths (caps-only gates)
         final long startKey = BlockPos.asLong(sx, sy, sz);
 
         // Macro-movement collapse (MACRO-IMPLEMENTATION.md §8): a corridor-bounded search builds a per-search
@@ -458,7 +497,7 @@ public final class BlockPathfinder {
         final int macroAxis = primaryAxis(sx, sy, sz, gx, gy, gz);
         ctx.setMacro(cuboids, gx, gy, gz, macroAxis);
         final GoalForcedCost.Forced forced = new GoalForcedCost.Forced();
-        GoalForcedCost.probe(cuboids, gx, gy, gz, caps, forced);
+        GoalForcedCost.probe(cuboids, gx, gy, gz, caps, ctx.pillarPlaceCost(), forced);
 
         // Reuse this thread's search state (sized to its high-water mark), wiped to empty — so a steady
         // stream of replans allocates nothing here. First call on a thread pays the initial 512/1024 sizing.
@@ -466,7 +505,8 @@ public final class BlockPathfinder {
         nodes.reset();
         final EditPool editPool = EDIT_POOL.get();
         editPool.reset();
-        Relaxer relaxer = new Relaxer(nodes, editPool, sx, sy, sz, gx, gy, gz, bound, forced);
+        final float hWeight = caps.greedyWeight() >= 1.0f ? caps.greedyWeight() : BotCaps.DEFAULT_GREEDY_WEIGHT;
+        Relaxer relaxer = new Relaxer(nodes, editPool, sx, sy, sz, gx, gy, gz, bound, forced, hWeight);
 
         int startRow = nodes.intern(startKey, sx, sy, sz);
         nodes.g[startRow] = 0f;
@@ -502,7 +542,7 @@ public final class BlockPathfinder {
                     + (nodes.move[current] < 0 ? "start"
                             : MovementRegistry.TIER1.get(nodes.move[current]).getClass().getSimpleName()));
 
-            if (++expansions > MAX_EXPANSIONS) { budgetHit = true; break; }
+            if (++expansions > maxNodes) { budgetHit = true; break; }
 
             // Rebuild the planned-edit diff for the path to THIS node, so the movements below read the
             // world as it will be when the bot stands here (the blocks the preceding moves place/break),
@@ -578,6 +618,7 @@ public final class BlockPathfinder {
         private final float invLineLen; // 1 / |goal-start| in full 3D (0 when start==goal)
         private final RegionBound bound; // corridor confinement (null = unbounded); rejects out-of-box candidates
         private final GoalForcedCost.Forced forced; // once-per-search goal-cuboid premium (extent 0 = no correction)
+        private final float hWeight; // greediness (BotCaps.greedyWeight), read once at search start
 
         int current;        // row being expanded
         float currentG;     // its g (read once per expansion, not per candidate)
@@ -585,7 +626,7 @@ public final class BlockPathfinder {
         boolean anyEdits;   // has any edge carried break/place edits? (gates the per-pop diff rebuild)
 
         Relaxer(Nodes nodes, EditPool editPool, int sx, int sy, int sz, int gx, int gy, int gz,
-                RegionBound bound, GoalForcedCost.Forced forced) {
+                RegionBound bound, GoalForcedCost.Forced forced, float hWeight) {
             this.nodes = nodes;
             this.editPool = editPool;
             this.sx = sx;
@@ -596,6 +637,7 @@ public final class BlockPathfinder {
             this.gz = gz;
             this.bound = bound;
             this.forced = forced;
+            this.hWeight = hWeight;
             double dlen = Math.sqrt((double) (gx - sx) * (gx - sx)
                     + (double) (gy - sy) * (gy - sy)
                     + (double) (gz - sz) * (gz - sz));
@@ -622,7 +664,7 @@ public final class BlockPathfinder {
             float cy = pz * dx - px * dz;
             float cz = px * dy - py * dx;
             float cross = (float) Math.sqrt(cx * cx + cy * cy + cz * cz);
-            return octile(x, y, z, gx, gy, gz) + H_TIE * (cross * invLineLen)
+            return octile(x, y, z, gx, gy, gz, hWeight) + H_TIE * (cross * invLineLen)
                     + GoalForcedCost.premium(forced, x, y, z, gx, gy, gz);
         }
 
@@ -696,16 +738,17 @@ public final class BlockPathfinder {
      * Weighted 3D octile distance to the goal (the base heuristic, before the straight-line tie-break added
      * in {@link Relaxer#h}). Sort the three axis gaps; spend the smallest on corner-diagonal moves ({@link
      * #H_CORNER}, all three axes at once), the next on face-diagonals ({@link #H_FACE}), and the largest
-     * remainder on straight steps ({@link #H_STRAIGHT}); inflate by {@link #H_WEIGHT}. All axes are weighted
-     * equally — see the constants above for why verticality carries no extra penalty.
+     * remainder on straight steps ({@link #H_STRAIGHT}); inflate by {@code hWeight} (the config greediness,
+     * {@link BotCaps#greedyWeight}, read once per search). All axes are weighted equally — see the constants
+     * above for why verticality carries no extra penalty.
      */
-    private static float octile(int x, int y, int z, int gx, int gy, int gz) {
+    private static float octile(int x, int y, int z, int gx, int gy, int gz, float hWeight) {
         int a = Math.abs(x - gx), b = Math.abs(y - gy), c = Math.abs(z - gz);
         // sort a <= b <= c (three compares)
         if (a > b) { int t = a; a = b; b = t; }
         if (b > c) { int t = b; b = c; c = t; }
         if (a > b) { int t = a; a = b; b = t; }
-        return H_WEIGHT * (a * H_CORNER + (b - a) * H_FACE + (c - b) * H_STRAIGHT);
+        return hWeight * (a * H_CORNER + (b - a) * H_FACE + (c - b) * H_STRAIGHT);
     }
 
     /**

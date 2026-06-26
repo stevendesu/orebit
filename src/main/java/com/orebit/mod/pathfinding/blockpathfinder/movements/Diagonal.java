@@ -25,7 +25,13 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  */
 public final class Diagonal implements Movement {
 
-    /** Diagonal step cost = {@link Traverse#FLAT_COST} · √2 (one cell in each of x and z). */
+    /**
+     * Diagonal step cost (ticks) = {@link Traverse#FLAT_COST} · √2 — walking one cell in each of x and z
+     * covers √2 blocks of ground, so it costs √2 walk-ticks (≈ {@code 4.633 · 1.414 ≈ 6.55}). Derived from
+     * {@code FLAT_COST} so it re-scales automatically with the walk ruler; matches Baritone's diagonal
+     * ({@code WALK_ONE_BLOCK_COST · SQRT_2}). The octile heuristic's face term uses the same √2 (see {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder}), so a clean diagonal is heuristic-exact.
+     */
     public static final float COST = Traverse.FLAT_COST * 1.41421356f;
 
     private static final int[][] DIAGONALS = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
