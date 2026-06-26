@@ -1,5 +1,6 @@
 package com.orebit.mod.pathfinding.blockpathfinder;
 
+import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Axes;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Cuboid;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
@@ -72,6 +73,16 @@ public final class MovementContext {
     private NavGridCuboidsView cuboids;
     /** The search goal (absolute world block coords) — a macro jump bounds its length to it (never overshoot). */
     private int goalX, goalY, goalZ;
+    /**
+     * The search's single <b>primary travel axis</b> {@code P} ({@link Axes#AXIS_X}/{@link Axes#AXIS_Y}/
+     * {@link Axes#AXIS_Z}) — the dominant start→goal approach direction, computed once per pathfind. Only a
+     * macro-aware movement whose own travel axis equals {@code P} extracts a cuboid and emits a macro jump;
+     * a movement travelling any other axis takes its plain micro step (Option B, {@code CUBOID-PERF-OPTIONS.md}).
+     * This pins per-node extraction to ONE axis instead of up to three (Pillar/MineDown → Y, the Traverse
+     * cardinals → X and Z), so a uniform region is extracted once per search, not once per axis. Defaults to
+     * {@link Axes#AXIS_X}; meaningful only when {@link #cuboids} is non-null.
+     */
+    private int macroAxis = Axes.AXIS_X;
     /** A reusable {@link Cuboid} a macro movement fills via {@link #cuboids()} — no per-candidate allocation. */
     private final Cuboid cuboidScratch = new Cuboid();
 
@@ -81,20 +92,32 @@ public final class MovementContext {
     }
 
     /**
-     * Wire the macro-movement search context — the per-search cuboid view and the goal — once per pathfind
-     * (after construction, before the search loop). Passing {@code cuboids == null} leaves macros off, so every
-     * macro-aware movement falls back to its single micro step (legacy parity).
+     * Wire the macro-movement search context — the per-search cuboid view, the goal, and the primary travel
+     * axis {@code P} — once per pathfind (after construction, before the search loop). Passing
+     * {@code cuboids == null} leaves macros off, so every macro-aware movement falls back to its single micro
+     * step (legacy parity). {@code macroAxis} (Option B) is the dominant start→goal approach axis the caller
+     * computed; only a movement travelling that axis emits a macro jump (see {@link #macroAxis()}).
      */
-    public void setMacro(NavGridCuboidsView cuboids, int goalX, int goalY, int goalZ) {
+    public void setMacro(NavGridCuboidsView cuboids, int goalX, int goalY, int goalZ, int macroAxis) {
         this.cuboids = cuboids;
         this.goalX = goalX;
         this.goalY = goalY;
         this.goalZ = goalZ;
+        this.macroAxis = macroAxis;
     }
 
     /** The per-search cuboid query seam, or {@code null} when macro collapse is off (legacy / unbounded). */
     public NavGridCuboidsView cuboids() {
         return cuboids;
+    }
+
+    /**
+     * The search's primary travel axis {@code P} ({@link Axes#AXIS_X}/{@link Axes#AXIS_Y}/{@link Axes#AXIS_Z})
+     * — a macro-aware movement extracts a cuboid only when its own travel axis equals this, else it emits its
+     * plain micro step (Option B, off-axis extraction elimination). Wired by {@link #setMacro}.
+     */
+    public int macroAxis() {
+        return macroAxis;
     }
 
     /** Goal X (absolute world block coord) — a macro jump never overshoots it. */
