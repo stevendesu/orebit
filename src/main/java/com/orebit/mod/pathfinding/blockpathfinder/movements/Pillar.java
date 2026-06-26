@@ -79,9 +79,11 @@ public final class Pillar implements Movement {
 
         int flags = MovementContext.flagsOf(packed);
 
-        // --- Legacy micro path: macros off or no cuboid view → emit the original single step, byte-for-byte.
+        // --- Micro path: emit the original single step, byte-for-byte. Taken when macros are off, there is no
+        // cuboid view, OR (Option B) this movement's travel axis (Y) is not the search's primary axis P — an
+        // off-P movement skips cuboidAt + MacroJump entirely so a uniform region is extracted on ONE axis only.
         NavGridCuboidsView cuboids = ctx.cuboids();
-        if (!BlockPathfinder.MACRO_MOVES || cuboids == null) {
+        if (!BlockPathfinder.MACRO_MOVES || cuboids == null || ctx.macroAxis() != Axes.AXIS_Y) {
             EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
             // Place the footing, supported by the floor below (the bot's current floor — solid by invariant).
             e.requireFloor(x, ny, z);

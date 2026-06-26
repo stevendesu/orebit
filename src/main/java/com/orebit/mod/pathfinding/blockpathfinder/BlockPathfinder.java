@@ -6,6 +6,7 @@ import java.util.Collections;
 import java.util.List;
 
 import com.orebit.mod.OrebitCommon;
+import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Axes;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.GoalForcedCost;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
@@ -438,7 +439,13 @@ public final class BlockPathfinder {
         // search (bound == null, e.g. /bot trace) gets no view → the movements emit plain micro steps.
         final NavGridCuboidsView cuboids = (MACRO_MOVES && bound != null)
                 ? new NavGridCuboidsView(grid, ctx.pathEdits(), bound) : null;
-        ctx.setMacro(cuboids, gx, gy, gz);
+        // Primary travel axis P (Option B, CUBOID-PERF-OPTIONS.md): the dominant start→goal approach axis, so
+        // only the movements travelling P extract a cuboid per node (the other axes take their micro step) —
+        // pinning per-node extraction to one axis instead of up to three. argmax(|dx|,|dy|,|dz|) with tie-break
+        // X > Z > Y (the kept axis then also has the best linear-scan locality — X is the contiguous grid axis,
+        // Y the worst). Computed once here where start + goal are both in hand.
+        final int macroAxis = primaryAxis(sx, sy, sz, gx, gy, gz);
+        ctx.setMacro(cuboids, gx, gy, gz, macroAxis);
         final GoalForcedCost.Forced forced = new GoalForcedCost.Forced();
         GoalForcedCost.probe(cuboids, gx, gy, gz, caps, forced);
 
@@ -655,6 +662,23 @@ public final class BlockPathfinder {
 
     private static boolean isGoal(int x, int y, int z, int gx, int gy, int gz) {
         return Math.abs(x - gx) <= 1 && Math.abs(z - gz) <= 1 && Math.abs(y - gy) <= 2;
+    }
+
+    /**
+     * The search's primary travel axis {@code P} (Option B, {@code CUBOID-PERF-OPTIONS.md}): the axis with the
+     * largest start→goal delta — the dominant approach direction whose long uniform runs actually warrant macro
+     * collapse. Returns one of {@link Axes#AXIS_X}/{@link Axes#AXIS_Y}/{@link Axes#AXIS_Z}. <b>Tie-break order
+     * X &gt; Z &gt; Y</b>: on equal deltas the kept axis also has the best linear-scan locality (X is the
+     * contiguous grid axis, Z next, Y the worst), so a tie picks X first, then Z, then Y. Computed once per
+     * search; only movements travelling this axis extract a cuboid per node.
+     */
+    private static int primaryAxis(int sx, int sy, int sz, int gx, int gy, int gz) {
+        int dx = Math.abs(gx - sx), dy = Math.abs(gy - sy), dz = Math.abs(gz - sz);
+        // Start at X, prefer Z then Y only on a STRICTLY larger delta (so equal deltas keep the X>Z>Y order).
+        int axis = Axes.AXIS_X, best = dx;
+        if (dz > best) { axis = Axes.AXIS_Z; best = dz; }
+        if (dy > best) { axis = Axes.AXIS_Y; best = dy; }
+        return axis;
     }
 
     /**

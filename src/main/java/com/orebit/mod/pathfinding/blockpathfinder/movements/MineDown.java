@@ -67,10 +67,12 @@ public final class MineDown implements Movement {
         // forbids the break (don't undermine a gravity stack / open a fluid); unbreakable floor → invalid.
         int flags = ctx.flagsAt(x, y, z);
 
-        // ---- Micro fallback: macros off, or no cuboid seam (legacy unbounded search). Byte-for-byte the
+        // ---- Micro fallback: macros off, no cuboid seam (legacy unbounded search), OR (Option B) this
+        //      movement's travel axis (Y) is not the search's primary axis P — an off-P movement skips
+        //      cuboidAt + MacroJump so a uniform region is extracted on ONE axis only. Byte-for-byte the
         //      original single-step behaviour — emit exactly one mine-down candidate. ----
         NavGridCuboidsView cuboids = ctx.cuboids();
-        if (!BlockPathfinder.MACRO_MOVES || cuboids == null) {
+        if (!BlockPathfinder.MACRO_MOVES || cuboids == null || ctx.macroAxis() != Axes.AXIS_Y) {
             EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
             e.requireAir(x, y, z);
             if (e.valid()) out.accept(x, dy, z, COST + e.extraCost(), e);
