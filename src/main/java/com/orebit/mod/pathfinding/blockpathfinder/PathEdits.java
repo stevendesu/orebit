@@ -72,6 +72,16 @@ public final class PathEdits {
         return size == 0;
     }
 
+    // Inclusive bounding box of every edited cell — exposed so a consumer can scan only the box ∩ edits
+    // intersection instead of its own (possibly huge) volume (the cuboid edit-shrink, MACRO-IMPLEMENTATION
+    // §5: "check the handful of current-path edits against the one box"). Meaningful only when !isEmpty().
+    public int editMinX() { return minX; }
+    public int editMinY() { return minY; }
+    public int editMinZ() { return minZ; }
+    public int editMaxX() { return maxX; }
+    public int editMaxY() { return maxY; }
+    public int editMaxZ() { return maxZ; }
+
     /** Fold one edge's edits in (first-seen-wins; call while walking node → start). */
     public void add(StepEdits se) {
         if (se == null) return;

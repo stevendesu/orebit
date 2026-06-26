@@ -19,6 +19,7 @@ import org.openjdk.jmh.infra.Blackhole;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
@@ -61,6 +62,7 @@ public class PathfinderBenchmark {
     private NavGridView grid;
     private BlockPos start;
     private BlockPos goal;
+    private RegionBound corridor; // non-null for TOWER → exercises the macro path (cuboid collapse)
 
     private static boolean bootstrapped = false;
 
@@ -80,6 +82,8 @@ public class PathfinderBenchmark {
         goal = scenario.equals("TOWER")
                 ? new BlockPos(8, 30, 8)    // 30 straight up, open air (forced pillaring)
                 : new BlockPos(50, 0, 50);  // reachable flat walk, no edits
+        // TOWER runs the corridor-bounded macro path (the in-game pillar config); OPEN stays unbounded micro.
+        corridor = scenario.equals("TOWER") ? new RegionBound(-1, 17, 0, 33, -1, 17) : null;
     }
 
     /**
@@ -126,6 +130,6 @@ public class PathfinderBenchmark {
     public void findPath(Blackhole bh) {
         // BREAK_PLACE: the tower is only solvable by placing (pillaring) — DEFAULT can't and would trivially
         // fail. Matches the in-game test bot's capability.
-        bh.consume(BlockPathfinder.findPath(grid, start, goal, BotCaps.BREAK_PLACE));
+        bh.consume(BlockPathfinder.findPath(grid, start, goal, BotCaps.BREAK_PLACE, corridor));
     }
 }
