@@ -6,6 +6,8 @@ import java.util.Collections;
 import java.util.List;
 
 import com.orebit.mod.OrebitCommon;
+import com.orebit.mod.pathfinding.blockpathfinder.cuboid.GoalForcedCost;
+import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 
 import net.minecraft.core.BlockPos;
@@ -96,6 +98,18 @@ public final class BlockPathfinder {
     public static boolean PARTIAL_PATH = false;
 
     /**
+     * Master switch for macro-movement collapse (MACRO-IMPLEMENTATION.md §8.3) — <b>ON by default</b>. When
+     * on (and the search supplied a corridor {@link RegionBound}, so {@link MovementContext#cuboids()} is
+     * non-null), the macro-aware movements ({@link com.orebit.mod.pathfinding.blockpathfinder.movements.Pillar},
+     * {@code MineDown}, {@code Traverse}) collapse a long uniform run into ONE jump candidate instead of one
+     * per block — the cone-collapse that makes the open-air pillar reachable. When OFF (or the search is
+     * unbounded, e.g. {@code /bot trace}), every movement emits its plain single micro step, reproducing the
+     * pre-macro search exactly. A clean, revertible layer over the verified micro search — flip off to A/B or
+     * to isolate a regression.
+     */
+    public static boolean MACRO_MOVES = true;
+
+    /**
      * Minimum heuristic improvement (how much closer to the goal the closest-approach node is than the start)
      * for a <b>budget-exhausted</b> search to return a PARTIAL path (only when {@link #PARTIAL_PATH}). Below
      * this the progress is noise and committing to it would just churn the replanner.
@@ -118,12 +132,14 @@ public final class BlockPathfinder {
     private static final float H_FACE     = 1.41421356f; // two axes at once (√2)
     private static final float H_CORNER   = 1.7320508f;  // three axes at once (√3)
     private static final float H_WEIGHT   = 2.0f;        // greediness; 1.0 = admissible, higher = faster/greedier
-    // Straight-line tie-break weight. On open ground an off-axis goal has a huge rectangle of equal-cost
+    // Straight-line tie-break weight. On open ground an off-axis goal has a huge equal-cost VOLUME of
     // paths (the correct count of diagonals can be placed anywhere) — a plateau the WEIGHT can't break,
     // because all those paths share g and h. Adding a microscopic term proportional to the node's
-    // perpendicular distance from the start→goal line picks the on-line arrangement, collapsing that
-    // rectangle to a ~1-wide corridor (O(D) expanded nodes instead of O(D²)). Kept tiny so it only ORDERS
-    // otherwise-equal-f nodes and never overrides a real cost difference. Tunable.
+    // perpendicular distance from the start→goal line (full 3D — see Relaxer.h) picks the on-line
+    // arrangement, collapsing that volume to a ~1-wide corridor (O(D) expanded nodes instead of O(D³)).
+    // 3D, not just horizontal, so it also breaks the pillar-then-ascend vs ascend-then-pillar symmetry —
+    // a node that climbs early is off the line and loses the tie to one that climbs in step. Kept tiny so
+    // it only ORDERS otherwise-equal-f nodes and never overrides a real cost difference. Tunable.
     private static final float H_TIE      = 0.001f;
 
     /**
@@ -416,13 +432,23 @@ public final class BlockPathfinder {
         final MovementContext ctx = new MovementContext(grid, caps);
         final long startKey = BlockPos.asLong(sx, sy, sz);
 
+        // Macro-movement collapse (MACRO-IMPLEMENTATION.md §8): a corridor-bounded search builds a per-search
+        // cuboid view over the SAME PathEdits the movements read, wires it + the goal onto the context, and
+        // probes the goal's faces once for the admissible forced-build heuristic premium (§7). An unbounded
+        // search (bound == null, e.g. /bot trace) gets no view → the movements emit plain micro steps.
+        final NavGridCuboidsView cuboids = (MACRO_MOVES && bound != null)
+                ? new NavGridCuboidsView(grid, ctx.pathEdits(), bound) : null;
+        ctx.setMacro(cuboids, gx, gy, gz);
+        final GoalForcedCost.Forced forced = new GoalForcedCost.Forced();
+        GoalForcedCost.probe(cuboids, gx, gy, gz, caps, forced);
+
         // Reuse this thread's search state (sized to its high-water mark), wiped to empty — so a steady
         // stream of replans allocates nothing here. First call on a thread pays the initial 512/1024 sizing.
         final Nodes nodes = SEARCH.get();
         nodes.reset();
         final EditPool editPool = EDIT_POOL.get();
         editPool.reset();
-        Relaxer relaxer = new Relaxer(nodes, editPool, sx, sy, sz, gx, gy, gz, bound);
+        Relaxer relaxer = new Relaxer(nodes, editPool, sx, sy, sz, gx, gy, gz, bound, forced);
 
         int startRow = nodes.intern(startKey, sx, sy, sz);
         nodes.g[startRow] = 0f;
@@ -531,8 +557,9 @@ public final class BlockPathfinder {
         private final EditPool editPool; // per-search arena for accepted edges' StepEdits (no per-edge alloc)
         private final int sx, sy, sz;   // start (for the straight-line tie-break)
         private final int gx, gy, gz;   // goal
-        private final float invLineLen; // 1 / horizontal |goal-start| (0 when start==goal horizontally)
+        private final float invLineLen; // 1 / |goal-start| in full 3D (0 when start==goal)
         private final RegionBound bound; // corridor confinement (null = unbounded); rejects out-of-box candidates
+        private final GoalForcedCost.Forced forced; // once-per-search goal-cuboid premium (extent 0 = no correction)
 
         int current;        // row being expanded
         float currentG;     // its g (read once per expansion, not per candidate)
@@ -540,7 +567,7 @@ public final class BlockPathfinder {
         boolean anyEdits;   // has any edge carried break/place edits? (gates the per-pop diff rebuild)
 
         Relaxer(Nodes nodes, EditPool editPool, int sx, int sy, int sz, int gx, int gy, int gz,
-                RegionBound bound) {
+                RegionBound bound, GoalForcedCost.Forced forced) {
             this.nodes = nodes;
             this.editPool = editPool;
             this.sx = sx;
@@ -550,19 +577,35 @@ public final class BlockPathfinder {
             this.gy = gy;
             this.gz = gz;
             this.bound = bound;
-            double dxz = Math.sqrt((double) (gx - sx) * (gx - sx) + (double) (gz - sz) * (gz - sz));
-            this.invLineLen = dxz > 1e-6 ? (float) (1.0 / dxz) : 0f;
+            this.forced = forced;
+            double dlen = Math.sqrt((double) (gx - sx) * (gx - sx)
+                    + (double) (gy - sy) * (gy - sy)
+                    + (double) (gz - sz) * (gz - sz));
+            this.invLineLen = dlen > 1e-6 ? (float) (1.0 / dlen) : 0f;
         }
 
         /**
          * The search heuristic: weighted 3D-octile distance to the goal (see {@link #octile}) plus the tiny
-         * straight-line deviation tie-break. The deviation is the perpendicular horizontal distance from the
-         * start→goal line — {@code |(node−start) × (goal−start)| / |goal−start|} — scaled by {@link #H_TIE}
-         * so it only orders otherwise-equal-{@code f} nodes (collapsing the open-ground equal-cost plateau).
+         * straight-line deviation tie-break. The deviation is the <b>full 3D</b> perpendicular distance from
+         * the start→goal line — {@code |(node−start) × (goal−start)| / |goal−start|}, the magnitude of the
+         * 3-component cross product — scaled by {@link #H_TIE} so it only orders otherwise-equal-{@code f}
+         * nodes (collapsing the open-ground equal-cost plateau, and the vertical pillar-then-ascend vs
+         * ascend-then-pillar symmetry the old horizontal-only form left untouched).
+         *
+         * <p>Finally adds the admissible goal-cuboid forced-build premium (MACRO-IMPLEMENTATION.md §7): the
+         * extra cost the octile under-counts when the goal can only be reached by building/digging through a
+         * forced uniform region (the principled vertical premium). It is {@code 0} when no face is forced
+         * ({@code forced.extent == 0}), so it never perturbs an ordinary search.
          */
         float h(int x, int y, int z) {
-            float cross = Math.abs((float) (x - sx) * (gz - sz) - (float) (z - sz) * (gx - sx));
-            return octile(x, y, z, gx, gy, gz) + H_TIE * (cross * invLineLen);
+            float px = x - sx, py = y - sy, pz = z - sz;       // node relative to start
+            float dx = gx - sx, dy = gy - sy, dz = gz - sz;    // goal relative to start (line direction)
+            float cx = py * dz - pz * dy;                      // (node−start) × (goal−start)
+            float cy = pz * dx - px * dz;
+            float cz = px * dy - py * dx;
+            float cross = (float) Math.sqrt(cx * cx + cy * cy + cz * cz);
+            return octile(x, y, z, gx, gy, gz) + H_TIE * (cross * invLineLen)
+                    + GoalForcedCost.premium(forced, x, y, z, gx, gy, gz);
         }
 
         @Override
@@ -694,22 +737,113 @@ public final class BlockPathfinder {
 
     private static BlockPathPlan reconstruct(Nodes nodes, int startRow, int reachedRow) {
         List<Movement> tier1 = MovementRegistry.TIER1;
+
+        // Collect the node rows from start to reached, in FORWARD order (the start cell itself is not a
+        // waypoint — the bot is already there). Not hot (one build per pathfind), so the boxing is fine.
+        List<Integer> rows = new ArrayList<>();
+        for (int n = reachedRow; n != -1; n = nodes.parent[n]) {
+            rows.add(n);
+            if (n == startRow) break;
+        }
+        Collections.reverse(rows);
+
         List<BlockPos> waypoints = new ArrayList<>();
         List<Movement> moves = new ArrayList<>();
         List<StepEdits> edits = new ArrayList<>();
-        for (int n = reachedRow; n != startRow; n = nodes.parent[n]) {
-            // Stand position = the floor cell's top (feet block) — steer the bot's feet here.
-            waypoints.add(BlockPos.of(nodes.key[n]).above());
-            moves.add(tier1.get(nodes.move[n]));
-            // Copy out of the per-search arena: these edits ride home in the BlockPathPlan and are replayed
-            // by the follower over many ticks, while later searches reuse the arena slots. (null = plain step.)
-            StepEdits e = nodes.edits[n];
-            edits.add(e == null ? null : e.copy());
-            if (nodes.parent[n] == -1) break; // defensive; should not happen for a reached goal
+
+        // Each consecutive (p -> n) pair is one A* edge. A MACRO edge (Pillar/MineDown/Traverse collapsed a
+        // uniform run of >1 step into one node, MACRO-IMPLEMENTATION.md §8) is re-expanded HERE into its N
+        // intermediate stand positions, each carrying just the per-step edit at its own cell — so the
+        // follower (steerAlongPath/applyEdits) sees an ordinary block-by-block path and is UNCHANGED (§9). A
+        // micro edge — or a Fall/Descend whose multi-cell drop the follower interpolates under gravity —
+        // stays a single waypoint exactly as before.
+        for (int i = 1; i < rows.size(); i++) {
+            int p = rows.get(i - 1);
+            int n = rows.get(i);
+            Movement move = tier1.get(nodes.move[n]);
+            StepEdits edge = nodes.edits[n];
+
+            int px = nodes.x[p], py = nodes.y[p], pz = nodes.z[p];
+            int nx = nodes.x[n], ny = nodes.y[n], nz = nodes.z[n];
+            int j = macroSteps(move, nx - px, ny - py, nz - pz);
+
+            if (j <= 1) {
+                // Single waypoint (the historical behaviour): floor cell's top = the bot's stand position.
+                waypoints.add(BlockPos.of(nodes.key[n]).above());
+                moves.add(move);
+                // Copy out of the per-search arena: these edits ride home in the BlockPathPlan and are
+                // replayed by the follower over many ticks, while later searches reuse the arena slots.
+                edits.add(edge == null ? null : edge.copy());
+                continue;
+            }
+
+            // Macro edge: re-expand to j stand positions, slicing the folded edit-set per step by position.
+            int ux = Integer.signum(nx - px), uy = Integer.signum(ny - py), uz = Integer.signum(nz - pz);
+            for (int k = 1; k <= j; k++) {
+                int fx = px + ux * k, fy = py + uy * k, fz = pz + uz * k; // floor cell of step k
+                waypoints.add(new BlockPos(fx, fy + 1, fz));             // floor.above() = stand position
+                moves.add(move);
+                edits.add(edge == null ? null : sliceStep(edge, fx, fy, fz));
+            }
         }
-        Collections.reverse(waypoints);
-        Collections.reverse(moves);
-        Collections.reverse(edits);
         return new BlockPathPlan(waypoints, moves, edits, nodes.g[reachedRow]);
+    }
+
+    /**
+     * The number of waypoints a (p→n) edge expands to. A macro edge is one of the three axis-aligned macro
+     * movements collapsing a uniform run of {@code >1} step along its own axis ({@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Pillar} +Y, {@code MineDown} −Y, {@code Traverse}
+     * a horizontal cardinal); everything else (a micro step, or a Fall/Descend the follower interpolates) is
+     * {@code 1}. Gating by the movement identity is what keeps a multi-block <i>Fall</i> (also a {@code >1}
+     * −Y delta) a single follower-handled waypoint rather than a per-block expansion.
+     */
+    private static int macroSteps(Movement move, int dx, int dy, int dz) {
+        if (move == MovementRegistry.PILLAR)    return (dx == 0 && dz == 0 && dy > 1)  ? dy  : 1;
+        if (move == MovementRegistry.MINE_DOWN) return (dx == 0 && dz == 0 && dy < -1) ? -dy : 1;
+        if (move == MovementRegistry.TRAVERSE) {
+            if (dy == 0 && dz == 0 && Math.abs(dx) > 1) return Math.abs(dx);
+            if (dy == 0 && dx == 0 && Math.abs(dz) > 1) return Math.abs(dz);
+        }
+        return 1;
+    }
+
+    /** Empty buffer for an edit-set with no breaks/places on one of its axes. */
+    private static final long[] NO_CELLS = new long[0];
+
+    /**
+     * Slice one expanded waypoint's edit-set out of a macro edge's folded {@link StepEdits}, by position: the
+     * step landing on floor {@code (fx,fy,fz)} owns the placement AT that floor cell (a Pillar/Traverse
+     * footing) and the breaks at its two body cells {@code (fx,fy+1,fz)} / {@code (fx,fy+2,fz)} (a MineDown
+     * descends by breaking the cell just above the new floor; a Traverse clears its body; a Pillar's top
+     * head-clearance break lands on the last step's body). Every folded edit of the three macro movements is
+     * owned by exactly one step under this rule, so nothing is dropped or double-applied. Returns {@code null}
+     * when the step owns no edit (the plain-step fast path the follower expects).
+     */
+    private static StepEdits sliceStep(StepEdits all, int fx, int fy, int fz) {
+        long floorPos = BlockPos.asLong(fx, fy, fz);
+        long body1 = BlockPos.asLong(fx, fy + 1, fz);
+        long body2 = BlockPos.asLong(fx, fy + 2, fz);
+
+        long[] pl = null;
+        int pn = 0;
+        for (int i = 0, c = all.placeCount(); i < c; i++) {
+            if (all.placeAt(i) == floorPos) {
+                if (pl == null) pl = new long[c];
+                pl[pn++] = floorPos;
+            }
+        }
+        long[] bk = null;
+        int bn = 0;
+        for (int i = 0, c = all.breakCount(); i < c; i++) {
+            long pos = all.breakAt(i);
+            if (pos == body1 || pos == body2) {
+                if (bk == null) bk = new long[c];
+                bk[bn++] = pos;
+            }
+        }
+        if (pn == 0 && bn == 0) return null;
+        StepEdits s = new StepEdits();
+        s.load(bk == null ? NO_CELLS : bk, bn, pl == null ? NO_CELLS : pl, pn);
+        return s;
     }
 }
