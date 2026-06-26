@@ -175,6 +175,32 @@ public final class NavGridView {
         return NavBlock.descriptorFor(state);
     }
 
+    /**
+     * The raw packed-grid backing array (one {@code short} per cell, {@link TraversalGrid#raw()}) of the
+     * {@link NavSection} covering world cell {@code (x,y,z)}, or {@code null} if that section isn't built
+     * (unloaded radius or {@code y} out of vertical range). This is the <b>bulk-scan seam</b> for the
+     * cuboid extractor (CUBOID-PERF-OPTIONS §A): a caller that walks a whole section-aligned sub-rectangle
+     * resolves the section's array <i>once</i> here and then indexes it directly with the section-local
+     * linear index {@code ((y&15)<<8) | ((z&15)<<4) | (x&15)} (see {@link TraversalGrid}), turning a
+     * per-cell {@link #packedAt} (which re-resolves the section and re-derives the index every call) into a
+     * single resolve plus a sequential {@code short[]} walk.
+     *
+     * <p>Resolution goes <b>through the same per-search {@link #lookupChunk} chunk cache</b> as every other
+     * read (the single-slot {@code cacheChunkKey} fast path plus the open-addressed {@code ccKeys}/{@code
+     * ccVals} behind it), so the long key is boxed at most once per distinct chunk and is never re-boxed on
+     * a recrossing — the boxing-avoidance the caller must not bypass. A {@code null} return is the exact
+     * analogue of {@link #packedAt} returning {@link #UNBUILT}: the caller treats the whole covered cell as
+     * a hard wall (in the extractor, an unbuilt sub-rectangle makes the box non-uniform, so it never grows
+     * across it).
+     *
+     * <p>Read a cell's navtype from the returned array with
+     * {@code raw[idx] & TraversalGrid.NAVTYPE_MASK}; the array is the live resident grid (do not mutate it).
+     */
+    public short[] sectionRawAt(int x, int y, int z) {
+        NavSection section = sectionAt(x, y, z);
+        return section == null ? null : section.getTraversalGrid().raw();
+    }
+
     /** The {@link NavSection} covering world cell {@code (x,y,z)}, or {@code null} if it isn't built. */
     private NavSection sectionAt(int x, int y, int z) {
         int sectionIndex = (y - minY) >> 4;

@@ -197,9 +197,18 @@ public final class CuboidExtractor {
     }
 
     // ------------------------------------------------------------------------------------------------
-    // Edge / slab uniformity probes. All offsets are relative to the start cell and resolved to absolute
-    // world coords via the (travelAxis, a, b) axis assignment. A probe returns false the moment any cell on
-    // it is out-of-corridor, unbuilt, or a different navtype — so a caller that gets false claims nothing.
+    // Edge / slab uniformity probes (CUBOID-PERF-OPTIONS §A — "bulk, section-local, memory-order scan").
+    //
+    // Each probe is a rectangle in the (travelAxis, a, b) OFFSET basis relative to the start cell. Rather
+    // than test one cell at a time (the old per-cell `cellOk` → `packedAt` → re-resolve-the-section path,
+    // ~82% of search CPU), a probe maps its offset-rectangle to an absolute WORLD-space inclusive rectangle
+    // ONCE via the axis-component plumbing, then hands it to the bulk primitive `rectUniform`, which clips
+    // the corridor into integer loop bounds, decomposes the rectangle at every 16-boundary into
+    // section-aligned sub-rectangles, resolves each section's backing `short[]` exactly once through the
+    // per-search chunk cache, and scans it in backing-array memory order (x innermost, +1 per cell). The
+    // RESULTING BOX IS BYTE-IDENTICAL to the per-cell version (same navtype key, same UNBUILT/out-of-corridor
+    // hard-wall semantics) — only the reads change. A probe returns false the moment any cell fails, so a
+    // caller that gets false claims nothing.
     // ------------------------------------------------------------------------------------------------
 
     /**
@@ -210,12 +219,9 @@ public final class CuboidExtractor {
     private static boolean edgeUniformA(NavGridView grid, int sx, int sy, int sz,
                                         int travelAxis, int a, int b, int nav, RegionBound bound,
                                         int aOff, int bLo, int bHi) {
-        for (int bOff = -bLo; bOff <= bHi; bOff++) {
-            if (!cellOk(grid, sx, sy, sz, nav, bound, 0, travelAxis, a, b, aOff, bOff)) {
-                return false;
-            }
-        }
-        return true;
+        // tOff fixed at 0 (start layer); a fixed at aOff; b spans [-bLo, +bHi].
+        return rectUniform(grid, sx, sy, sz, travelAxis, a, b, nav, bound,
+                           0, 0, aOff, aOff, -bLo, bHi);
     }
 
     /**
@@ -226,12 +232,9 @@ public final class CuboidExtractor {
     private static boolean edgeUniformB(NavGridView grid, int sx, int sy, int sz,
                                         int travelAxis, int a, int b, int nav, RegionBound bound,
                                         int bOff, int aLo, int aHi) {
-        for (int aOff = -aLo; aOff <= aHi; aOff++) {
-            if (!cellOk(grid, sx, sy, sz, nav, bound, 0, travelAxis, a, b, aOff, bOff)) {
-                return false;
-            }
-        }
-        return true;
+        // tOff fixed at 0 (start layer); a spans [-aLo, +aHi]; b fixed at bOff.
+        return rectUniform(grid, sx, sy, sz, travelAxis, a, b, nav, bound,
+                           0, 0, -aLo, aHi, bOff, bOff);
     }
 
     /**
@@ -242,32 +245,91 @@ public final class CuboidExtractor {
     private static boolean slabUniform(NavGridView grid, int sx, int sy, int sz,
                                        int travelAxis, int a, int b, int nav, RegionBound bound,
                                        int tOff, int aLo, int aHi, int bLo, int bHi) {
-        for (int aOff = -aLo; aOff <= aHi; aOff++) {
-            for (int bOff = -bLo; bOff <= bHi; bOff++) {
-                if (!cellOk(grid, sx, sy, sz, nav, bound, tOff, travelAxis, a, b, aOff, bOff)) {
-                    return false;
-                }
-            }
-        }
-        return true;
+        // tOff fixed; a spans [-aLo, +aHi]; b spans [-bLo, +bHi].
+        return rectUniform(grid, sx, sy, sz, travelAxis, a, b, nav, bound,
+                           tOff, tOff, -aLo, aHi, -bLo, bHi);
     }
 
     /**
-     * The single uniformity test: take the start cell offset by {@code tOff} along {@code travelAxis},
-     * {@code aOff} along {@code a}, {@code bOff} along {@code b}, resolve to an absolute world cell, and
-     * return whether it is inside {@code bound}, built, and of navtype {@code nav}. UNBUILT and
-     * out-of-corridor are treated as a different navtype (a hard wall) — they return false, so the box never
-     * grows across them (conservative-only, NON-NEGOTIABLE 1).
+     * <b>The bulk uniformity primitive (CUBOID-PERF-OPTIONS §A).</b> Given an inclusive rectangle in the
+     * {@code (travelAxis, a, b)} offset basis — travel offsets {@code [tLoR..tHiR]}, axis-{@code a} offsets
+     * {@code [aLoR..aHiR]}, axis-{@code b} offsets {@code [bLoR..bHiR]}, all relative to the start cell —
+     * answer whether <i>every</i> cell of the mapped world rectangle is in-corridor, built, and of navtype
+     * {@code nav}. Returns false on the first mismatch / hard wall (UNBUILT section or clipped-away cell),
+     * so the box only ever grows over a fully-uniform rectangle (conservative-only, NON-NEGOTIABLE 1).
+     *
+     * <h3>How it scans</h3>
+     * <ol>
+     *   <li>Map the offset rectangle to an absolute world inclusive box {@code [x0..x1]×[y0..y1]×[z0..z1]}
+     *       via the axis-component plumbing (each offset axis is a distinct world axis — a permutation).</li>
+     *   <li>Clip that world box against the corridor {@code bound} <b>once</b>, into integer loop bounds. If
+     *       the clip dropped any cell (the clipped span is narrower than the requested span on any axis),
+     *       a cell was out-of-corridor → <b>not uniform</b> (return false) — exactly the old per-cell
+     *       {@code !bound.allows} hard wall, but tested once per axis instead of once per cell.</li>
+     *   <li>Walk the (now fully in-corridor) box split at every 16-boundary into section-aligned
+     *       sub-boxes; for each section resolve its {@code short[]} once via
+     *       {@link NavGridView#sectionRawAt} (a {@code null} section is a hard wall → return false), then
+     *       scan <i>every</i> cell of that sub-box in backing-array memory order — {@code y} outer,
+     *       {@code z} middle, {@code x} innermost ({@code +1} per cell, contiguous) — comparing
+     *       {@code (raw[idx] & NAVTYPE_MASK) == nav}. (The section-stepping outer loops carry inner
+     *       per-cell loops over the section's Y and Z rows, so no row of the sub-box is skipped.)</li>
+     * </ol>
+     * Stack primitives only; no allocation, no boxing (the section is resolved through the view's cached
+     * {@code lookupChunk}, so a chunk key is boxed at most once per distinct chunk per search).
      */
-    private static boolean cellOk(NavGridView grid, int sx, int sy, int sz, int nav, RegionBound bound,
-                                  int tOff, int travelAxis, int a, int b, int aOff, int bOff) {
-        int x = sx + comp(Axes.AXIS_X, travelAxis, a, b, tOff, aOff, bOff);
-        int y = sy + comp(Axes.AXIS_Y, travelAxis, a, b, tOff, aOff, bOff);
-        int z = sz + comp(Axes.AXIS_Z, travelAxis, a, b, tOff, aOff, bOff);
-        if (!bound.allows(x, y, z)) return false;
-        int packed = grid.packedAt(x, y, z);
-        if (packed == NavGridView.UNBUILT) return false;
-        return TraversalGrid.navtypeOf(packed) == nav;
+    private static boolean rectUniform(NavGridView grid, int sx, int sy, int sz,
+                                       int travelAxis, int a, int b, int nav, RegionBound bound,
+                                       int tLoR, int tHiR, int aLoR, int aHiR, int bLoR, int bHiR) {
+        // --- 1. Map the (travelAxis, a, b) offset rectangle to an absolute world inclusive box. Each world
+        //        axis takes its range from whichever offset axis is mapped to it; the offset lo/hi are already
+        //        ordered (lo <= hi) by every caller, so comp(lo) <= comp(hi) per world axis. ---
+        int x0 = sx + comp(Axes.AXIS_X, travelAxis, a, b, tLoR, aLoR, bLoR);
+        int x1 = sx + comp(Axes.AXIS_X, travelAxis, a, b, tHiR, aHiR, bHiR);
+        int y0 = sy + comp(Axes.AXIS_Y, travelAxis, a, b, tLoR, aLoR, bLoR);
+        int y1 = sy + comp(Axes.AXIS_Y, travelAxis, a, b, tHiR, aHiR, bHiR);
+        int z0 = sz + comp(Axes.AXIS_Z, travelAxis, a, b, tLoR, aLoR, bLoR);
+        int z1 = sz + comp(Axes.AXIS_Z, travelAxis, a, b, tHiR, aHiR, bHiR);
+
+        // --- 2. Clip against the corridor ONCE. If clipping shrank ANY axis span, at least one requested cell
+        //        was out-of-corridor → a hard wall → not uniform. (Mirrors the old per-cell `!bound.allows`.)
+        int cx0 = Math.max(x0, bound.minX()), cx1 = Math.min(x1, bound.maxX());
+        int cy0 = Math.max(y0, bound.minY()), cy1 = Math.min(y1, bound.maxY());
+        int cz0 = Math.max(z0, bound.minZ()), cz1 = Math.min(z1, bound.maxZ());
+        if (cx0 != x0 || cx1 != x1 || cy0 != y0 || cy1 != y1 || cz0 != z0 || cz1 != z1) {
+            return false;
+        }
+
+        // --- 3. Section-aligned bulk scan. The outer Y/Z/X loops STEP BY SECTION (split at every 16-boundary
+        //        so a section's backing `short[]` is resolved exactly once); the inner (yy,zz,xl) loops scan
+        //        EVERY cell of that section's sub-box. Within a section the local linear index is
+        //        ((y&15)<<8)|((z&15)<<4)|(x&15); x is contiguous innermost (+1 per cell) for locality. ---
+        for (int y = y0; y <= y1; ) {
+            int ySecEnd = Math.min(y1, (y & ~15) + 15); // last world-Y still in this 16-section on Y
+            for (int z = z0; z <= z1; ) {
+                int zSecEnd = Math.min(z1, (z & ~15) + 15);
+                for (int x = x0; x <= x1; ) {
+                    int xSecEnd = Math.min(x1, (x & ~15) + 15);
+                    // One section covers the WHOLE sub-box [x..xSecEnd] × [z..zSecEnd] × [y..ySecEnd] (all in
+                    // one 16³ box). Resolve its backing array once, then scan every (yy,zz) row of the sub-box.
+                    short[] raw = grid.sectionRawAt(x, y, z);
+                    if (raw == null) return false; // unbuilt section — hard wall (== old packedAt == UNBUILT)
+                    int xl0 = x & 15;
+                    int xl1 = xSecEnd & 15;
+                    for (int yy = y; yy <= ySecEnd; yy++) {
+                        for (int zz = z; zz <= zSecEnd; zz++) {
+                            int rowBase = ((yy & 15) << 8) | ((zz & 15) << 4); // (x-local 0) on this zz,yy row
+                            for (int xl = xl0; xl <= xl1; xl++) {
+                                if ((raw[rowBase | xl] & TraversalGrid.NAVTYPE_MASK) != nav) return false;
+                            }
+                        }
+                    }
+                    x = xSecEnd + 1;
+                }
+                z = zSecEnd + 1;
+            }
+            y = ySecEnd + 1;
+        }
+        return true;
     }
 
     // ------------------------------------------------------------------------------------------------
