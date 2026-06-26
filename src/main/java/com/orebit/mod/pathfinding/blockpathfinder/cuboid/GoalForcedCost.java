@@ -192,7 +192,10 @@ public final class GoalForcedCost {
                 // (2) Build face: a vertical-from-below approach through an AIR column forces a pillar.
                 //     forcedCost = one pillar step = Pillar.COST + PLACE_COST.
                 if (axis == Axes.AXIS_Y && sign > 0 && caps.canPlace() && NavBlock.isPassable(desc)) {
-                    int extent = box.extentToward(ax, ay, az, axis, sign); // cells of forced air toward the goal
+                    // The forced air column extends AWAY from the goal (downward, the depth the bot must
+                    // pillar UP through) — measure from the face cell in the -sign direction, NOT toward the
+                    // goal (which would only reach the short air gap above it).
+                    int extent = box.extentToward(ax, ay, az, axis, -sign); // forced air depth below the goal
                     if (extent > 0) {
                         float premium = PILLAR_STEP_COST - 1f;
                         if (!haveBest || premium < bestPremium) {
@@ -210,7 +213,9 @@ public final class GoalForcedCost {
                 // (3) Dig face: a solid, breakable cuboid the bot must mine through to reach the goal.
                 //     forcedCost = one break step = MineDown.COST + breakCost(of this substrate).
                 if (caps.canBreak() && NavBlock.isBreakable(desc)) {
-                    int extent = box.extentToward(ax, ay, az, axis, sign); // cells of forced rock toward goal
+                    // The forced solid extends AWAY from the goal (the depth the bot must dig through to
+                    // reach it from this side) — measure from the face cell in the -sign direction.
+                    int extent = box.extentToward(ax, ay, az, axis, -sign); // forced rock depth out from the goal
                     if (extent > 0) {
                         float breakStep = MineDown.COST
                                 + MovementContext.BREAK_BASE_COST

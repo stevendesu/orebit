@@ -1,5 +1,7 @@
 package com.orebit.mod.pathfinding.blockpathfinder.cuboid;
 
+import java.util.Arrays;
+
 import com.orebit.mod.pathfinding.blockpathfinder.PathEdits;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
@@ -13,37 +15,33 @@ import net.minecraft.core.BlockPos;
  * answers {@link #cuboidAt} with the cuboid for a (cell, travelAxis) <i>with</i> the path's speculative edits
  * folded in.
  *
- * <h2>Two layers: a cached committed base, then a per-query speculative shrink</h2>
- * <ol>
- *   <li><b>Base cuboid (cached, committed state).</b> {@link #baseCuboid} returns the maximal cuboid for a
- *       (cell, axis) over COMMITTED navtypes (what {@code grid.packedAt} reports — no speculative edits),
- *       computed by {@link CuboidExtractor#extract} on a miss and cached for the rest of the search. The base
- *       is immutable to callers and is reused verbatim on a hit.</li>
- *   <li><b>Speculative shrink (per query, never cached).</b> {@link #cuboidAt} copies the cached base into the
- *       caller's pooled {@code out}, then applies the {@link PathEdits} overlay: any cell the current path has
- *       PLACED or BROKEN <i>inside</i> the box has had its navtype changed, so the box is no longer uniform
- *       there — the box is shrunk past the offending edit. The base stays cached and untouched.</li>
- * </ol>
+ * <h2>Region memoization — extract each region ONCE, not each cell (the perf crux)</h2>
+ * A {@link CuboidExtractor#extract} is O(box volume) — for a wide open corridor it scans thousands of cells.
+ * The naive cache keyed by exact {@code (cell, axis)} re-ran that extract for <i>every</i> cell of a region
+ * (they all have distinct keys), and a flood touches far more distinct cells than any fixed-size table holds,
+ * so it saturated and re-extracted on essentially every call — the search froze (~300k ns/node). The fix:
+ * cache the extracted <b>maximal boxes</b>, per axis, and answer a query by finding the box that
+ * <b>contains</b> the cell. A uniform region is extracted ONCE (anchored at the first cell that probes it)
+ * and every later cell inside it is an O(1) {@code contains()} hit. Same-navtype maximal boxes don't overlap
+ * (each is maximal within the corridor), so the containing box is unambiguous; reusing a region's box for an
+ * interior cell is conservative (the box is uniform and contains the cell — at worst a slightly shorter jump
+ * than a box re-anchored at that cell, which is always safe).
  *
- * <h2>The base cache (open-addressed, primitive, no boxing)</h2>
- * Keyed by {@code mix(BlockPos.asLong(x,y,z), travelAxis)}, mirroring the open-addressed chunk cache in
- * {@link NavGridView}: a {@code long[]} key array and a {@link Cuboid}{@code []} value array (the values are
- * <b>pooled</b> {@code Cuboid} instances filled in place on a miss). No {@code Map<Long,..>}, no autoboxing of
- * the key, no per-query allocation (HOT-PATH-NO-ALLOC). The cache is per-search — like the view itself, it
- * starts empty and is discarded at search end. <b>Cross-search base persistence + {@code patchCell}
- * invalidation is a DEFERRED optimization</b> (MACRO-MOVEMENTS §5 "deferred"); the base cuboids recompute
- * cheaply, so v1 does not build it.
+ * <p>Open terrain has a handful of regions, so the per-query scan is over a few boxes (with an MRU fast path
+ * for the common "same region as last query" case). A search that somehow exceeds {@link #MAX_BOXES} distinct
+ * regions degrades to an uncached extract for the overflow rather than growing unbounded — never a fault.
  *
- * <h2>Why keep the overlay check even though it almost never fires (do NOT optimize it out)</h2>
- * A greedy near-optimal path doesn't re-enter its own edited cells, and a goal-ward jump is <i>ahead</i> of
- * the edits made <i>behind</i> it (a pillar's support blocks are below the bot; the jump is the air above —
- * disjoint). So the overlay scan is a handful of point-in-box tests that almost always find nothing. It is
- * nonetheless the <b>conservative-only correctness guard</b> for the speculative-edit case (MACRO-MOVEMENTS
- * §3b): without it, a macro could jump through a cell the path itself just placed/broke — an invalid path.
- * Keep it.
+ * <h2>The speculative-edit shrink (bounded to the edits, not the box)</h2>
+ * {@link #cuboidAt} copies the cached committed base into the caller's {@code out}, then — if the path has
+ * any edit <i>inside</i> the box — shrinks {@code out} to exclude it (an edit changed that cell's navtype, so
+ * the box is no longer uniform there). Critically the scan is bounded to the <b>box ∩ {@link PathEdits}
+ * bounding box</b>: a path's edits cluster tightly (a pillar is one column), so this is a handful of cells,
+ * never the whole (possibly huge) box. Keep the check — it is the conservative-only correctness guard for the
+ * speculative-edit case (without it a macro could jump through a cell the path just placed/broke) even though
+ * it almost never fires (a goal-ward jump is ahead of the edits the path made behind it).
  *
  * <p><b>Single-threaded per search.</b> Like {@link NavGridView}, the view is used single-threaded during one
- * pathfind, so the mutable cache and the pooled {@code Cuboid} values need no synchronization.
+ * pathfind, so the mutable caches and pooled {@link Cuboid}s need no synchronization.
  */
 public final class NavGridCuboidsView {
 
@@ -64,20 +62,18 @@ public final class NavGridCuboidsView {
      */
     private final RegionBound bound;
 
-    // --- Per-search base-cuboid cache. Open-addressed, primitive-keyed, no boxing (mirror of the chunk cache
-    //     in NavGridView). A power-of-two capacity sized well above the distinct (cell,axis) pairs a single
-    //     bounded search touches; the view is per-pathfind, so it starts empty with no clearing. On the rare
-    //     saturation (a search probing > CAP distinct pairs) we degrade to a direct extract rather than hang.
-    //     Value slots are POOLED Cuboid instances: a slot's Cuboid is allocated once on first use of that slot
-    //     and refilled in place by CuboidExtractor.extract — never per query. ---
-    private static final int CAP = 1024;
-    private static final int MASK = CAP - 1;
-
-    private final long[] keys = new long[CAP];
-    // A slot is COLD iff its value is null (the value array is the authoritative occupancy marker — like
-    // NavGridView's ccVals[slot]==null). This avoids needing a key sentinel that could collide with a real
-    // mixed key value (any long is a legal key after the axis XOR), so no key value is ever forbidden.
-    private final Cuboid[] vals = new Cuboid[CAP]; // null slot = cold (no pooled Cuboid yet)
+    // --- Per-axis lists of extracted maximal boxes (region memoization, see class doc). Only VALID boxes are
+    //     stored, so the contains() hit-check needs no validity test. Lists grow on demand; lastHit is an MRU
+    //     index probed first (consecutive queries cluster in one region). pending[axis] is the scratch the
+    //     next extract writes into — promoted into the list iff it comes back valid, so an invalid extract
+    //     (an unbuilt / out-of-corridor cell — cheap: the extractor's start-cell gate returns at once) costs
+    //     no slot and no allocation. ---
+    private static final int MAX_BOXES = 256;
+    private final Cuboid[][] boxes = new Cuboid[3][];
+    private final int[] boxCount = new int[3];
+    private final int[] lastHit = new int[3];
+    private final Cuboid[] pending = { new Cuboid(), new Cuboid(), new Cuboid() };
+    private final Cuboid overflowScratch = new Cuboid();
 
     public NavGridCuboidsView(NavGridView grid, PathEdits pathEdits, RegionBound bound) {
         this.grid = grid;
@@ -86,52 +82,52 @@ public final class NavGridCuboidsView {
     }
 
     /**
-     * The base cuboid for {@code (x,y,z, travelAxis)} over COMMITTED state, served from the per-search cache.
-     * On a miss the slot's pooled {@link Cuboid} is filled by {@link CuboidExtractor#extract} (which sets it
-     * invalid if the start cell is unbuilt or out of corridor) and cached. <b>The returned cuboid is the
-     * cache's own instance — callers MUST NOT mutate it</b> (use {@link #cuboidAt}, which copies into a
-     * caller-owned out-param before applying the speculative shrink).
+     * The base cuboid for {@code (x,y,z, travelAxis)} over COMMITTED state. If an already-extracted maximal
+     * box of this axis contains the cell, that box is returned (O(1) MRU / short linear scan); otherwise a new
+     * box is extracted, anchored here, and cached (unless it is invalid — an unbuilt / out-of-corridor cell —
+     * or the region cache is full). <b>The returned cuboid is the cache's own instance — callers MUST NOT
+     * mutate it</b> (use {@link #cuboidAt}, which copies into a caller-owned out-param before the shrink).
      */
     private Cuboid baseCuboid(int x, int y, int z, int travelAxis) {
-        long key = cacheKey(x, y, z, travelAxis);
-        int slot = slotFor(key);
-        for (int probes = 0; probes < CAP; probes++) {
-            Cuboid box = vals[slot];
-            if (box == null) { // cold slot — allocate the pooled Cuboid once, extract into it, and cache
-                box = new Cuboid();
-                vals[slot] = box;
-                keys[slot] = key;
-                CuboidExtractor.extract(grid, x, y, z, travelAxis, bound, box);
-                return box;
+        Cuboid[] list = boxes[travelAxis];
+        int n = boxCount[travelAxis];
+        if (n > 0) {
+            int last = lastHit[travelAxis];               // MRU: same region as the previous query?
+            Cuboid b = list[last];
+            if (b.contains(x, y, z)) return b;
+            for (int i = 0; i < n; i++) {
+                b = list[i];
+                if (b.contains(x, y, z)) { lastHit[travelAxis] = i; return b; }
             }
-            if (keys[slot] == key) return box; // hit — the cached base
-            slot = (slot + 1) & MASK;
         }
-        // Cache saturated (a search probing > CAP distinct (cell,axis) pairs). Degrade to a direct extract into
-        // the caller-visible scratch path: there is no free slot, so we cannot cache — fill the spare and return
-        // it. (Production builds a fresh view per pathfind and the corridor bound keeps a windowed search to a
-        // handful of chunks, so this should not fire on the live path.)
-        Cuboid spare = saturationScratch;
-        CuboidExtractor.extract(grid, x, y, z, travelAxis, bound, spare);
-        return spare;
-    }
 
-    /** A single reusable Cuboid used only on the (should-never-fire) cache-saturation path of {@link #baseCuboid}. */
-    private final Cuboid saturationScratch = new Cuboid();
+        // Miss — extract anchored at this cell into the per-axis scratch.
+        Cuboid box = pending[travelAxis];
+        CuboidExtractor.extract(grid, x, y, z, travelAxis, bound, box);
+        if (!box.valid) {
+            return box; // unbuilt / out-of-corridor: cheap, not cached (the caller falls back to micro)
+        }
+        if (n < MAX_BOXES) { // commit the valid maximal box; allocate a fresh scratch for the next extract
+            if (list == null) { list = new Cuboid[16]; boxes[travelAxis] = list; }
+            else if (n == list.length) { list = Arrays.copyOf(list, list.length << 1); boxes[travelAxis] = list; }
+            list[n] = box;
+            boxCount[travelAxis] = n + 1;
+            lastHit[travelAxis] = n;
+            pending[travelAxis] = new Cuboid();
+        } else {
+            // Cache full (a search spanning >MAX_BOXES distinct regions — pathological). Re-extract into a
+            // throwaway so we never grow unbounded; correctness holds, only the memoization lapses here.
+            CuboidExtractor.extract(grid, x, y, z, travelAxis, bound, overflowScratch);
+            return overflowScratch;
+        }
+        return box;
+    }
 
     /**
      * The cuboid for {@code (x,y,z, travelAxis)} WITH the search's speculative edits folded in, written into
      * the caller-owned {@code out}. Copies the cached committed base into {@code out}, then — if the path has
-     * any edit inside that box — shrinks {@code out} so it excludes the offending cell (an edit changes the
-     * navtype, so the box is no longer uniform there). The cached base is left untouched.
-     *
-     * <p>The shrink trims the <b>nearest face past the offending edit</b> (the "shortest axis" cheap proxy,
-     * MACRO-MOVEMENTS §3b): for each edited cell inside the box we measure, per axis, how few cells we'd have
-     * to drop to push that face just short of the edit, and take the cheapest single such trim. Conservative
-     * by construction — every trim shrinks the box, never grows it (MACRO-MOVEMENTS §3b). If a trim would
-     * leave the start cell {@code (x,y,z)} outside the box (the edit IS the start cell, or sits between the
-     * start cell and the only trimmable face), the cuboid collapses to invalid — the caller falls back to a
-     * micro step there.
+     * any edit inside that box — shrinks {@code out} so it excludes the offending cell. The cached base is
+     * left untouched.
      *
      * @param x          start cell X (absolute world block coord)
      * @param y          start cell Y (absolute world block coord)
@@ -141,63 +137,61 @@ public final class NavGridCuboidsView {
      */
     public void cuboidAt(int x, int y, int z, int travelAxis, Cuboid out) {
         Cuboid base = baseCuboid(x, y, z, travelAxis);
-        if (base == null || !base.valid) {
+        if (!base.valid) {
             out.invalidate();
             return;
         }
-        // Copy the cached base into the caller's out-param (so the base stays cached & untouched).
         out.set(base.minX, base.minY, base.minZ, base.maxX, base.maxY, base.maxZ, base.navtype);
-
-        // Speculative-edit shrink. The check is cheap (PathEdits has its own bounding-box reject) and almost
-        // never fires, but it is the conservative-only guard for the speculative-edit case — KEEP it (§5).
-        if (pathEdits == null || pathEdits.isEmpty()) return;
+        if (pathEdits == null || pathEdits.isEmpty()) {
+            return;
+        }
         applyEditShrink(x, y, z, out);
     }
 
     /**
      * Trim {@code out} so it excludes every current-path PLACED/BROKEN cell inside it, repeatedly taking the
-     * cheapest single-face trim (the "shortest axis" proxy). Each trim drops the cells from the box's nearest
-     * face up to (and including) the offending edit on the cheapest axis; we then re-scan, since one trim may
-     * leave another edit still inside. If a trim would exclude the start cell, the box is invalidated.
+     * cheapest single-face trim (the "shortest axis" proxy). Each pass scans only the box ∩ edits-bounding-box
+     * intersection (the path's edits cluster tightly, so this is a handful of cells), trims one offending edit
+     * past the nearest face, and re-scans (a trim may resolve or expose others). If a trim would exclude the
+     * start cell, the box is invalidated (the caller falls back to a micro step).
      */
     private void applyEditShrink(int sx, int sy, int sz, Cuboid out) {
-        // Bounded loop: each pass either removes at least one edited cell from the box or terminates. The box is
-        // corridor-small, so the number of distinct edits it can contain is tiny; we cap iterations at the box's
-        // largest dimension as a hard safety so a pathological case can never spin.
         int safety = (out.maxX - out.minX) + (out.maxY - out.minY) + (out.maxZ - out.minZ) + 3;
         for (int pass = 0; pass < safety; pass++) {
-            // Find the worst-case (cheapest-to-trim) edit currently inside the box. We trim ONE edit per pass —
-            // the one whose nearest-face trim costs the fewest cells — and re-scan, because trimming may expose
-            // or resolve others.
-            long offending = findEditInside(out);
+            // Box ∩ edits-AABB: the only cells that can hold an edit. Recomputed each pass since `out` shrinks.
+            int lx = Math.max(out.minX, pathEdits.editMinX());
+            int hx = Math.min(out.maxX, pathEdits.editMaxX());
+            int ly = Math.max(out.minY, pathEdits.editMinY());
+            int hy = Math.min(out.maxY, pathEdits.editMaxY());
+            int lz = Math.max(out.minZ, pathEdits.editMinZ());
+            int hz = Math.min(out.maxZ, pathEdits.editMaxZ());
+            if (lx > hx || ly > hy || lz > hz) return; // box and the edits don't overlap → nothing to shrink
+
+            long offending = findEditInside(lx, hx, ly, hy, lz, hz);
             if (offending == NO_EDIT) return; // box is clean — done
 
             int ex = BlockPos.getX(offending);
             int ey = BlockPos.getY(offending);
             int ez = BlockPos.getZ(offending);
 
-            // Per axis, the cost (cells dropped) of trimming the LOW face up past the edit (max := edit-1) and
-            // the HIGH face down past the edit (min := edit+1). The cheapest valid trim that KEEPS the start
-            // cell wins. A trim is only valid on an axis if it leaves the start cell inside the box.
+            // Cheapest valid trim (fewest cells dropped) that KEEPS the start cell inside the box.
             int bestCost = Integer.MAX_VALUE;
             int bestAxis = -1;
             boolean bestHigh = false;
 
-            // axis X
-            { // trim high face down to ex-1: drops (maxX - (ex-1)) cells; valid iff sx <= ex-1
+            { // axis X
                 int newMax = ex - 1;
                 if (sx <= newMax && newMax >= out.minX) {
                     int cost = out.maxX - newMax;
                     if (cost < bestCost) { bestCost = cost; bestAxis = Axes.AXIS_X; bestHigh = true; }
                 }
-                int newMin = ex + 1; // trim low face up to ex+1: drops (ex+1 - minX); valid iff sx >= ex+1
+                int newMin = ex + 1;
                 if (sx >= newMin && newMin <= out.maxX) {
                     int cost = newMin - out.minX;
                     if (cost < bestCost) { bestCost = cost; bestAxis = Axes.AXIS_X; bestHigh = false; }
                 }
             }
-            // axis Y
-            {
+            { // axis Y
                 int newMax = ey - 1;
                 if (sy <= newMax && newMax >= out.minY) {
                     int cost = out.maxY - newMax;
@@ -209,8 +203,7 @@ public final class NavGridCuboidsView {
                     if (cost < bestCost) { bestCost = cost; bestAxis = Axes.AXIS_Y; bestHigh = false; }
                 }
             }
-            // axis Z
-            {
+            { // axis Z
                 int newMax = ez - 1;
                 if (sz <= newMax && newMax >= out.minZ) {
                     int cost = out.maxZ - newMax;
@@ -224,41 +217,30 @@ public final class NavGridCuboidsView {
             }
 
             if (bestAxis == -1) {
-                // No trim keeps the start cell (the edit IS the start cell, or it sits across the only trimmable
-                // faces). The box can't be salvaged — invalidate so the caller falls back to a micro step.
-                out.invalidate();
+                out.invalidate(); // no trim keeps the start cell — the box can't be salvaged
                 return;
             }
-
-            // Apply the cheapest trim.
             switch (bestAxis) {
-                case Axes.AXIS_X:
-                    if (bestHigh) out.maxX = ex - 1; else out.minX = ex + 1;
-                    break;
-                case Axes.AXIS_Y:
-                    if (bestHigh) out.maxY = ey - 1; else out.minY = ey + 1;
-                    break;
-                default: // AXIS_Z
-                    if (bestHigh) out.maxZ = ez - 1; else out.minZ = ez + 1;
-                    break;
+                case Axes.AXIS_X: if (bestHigh) out.maxX = ex - 1; else out.minX = ex + 1; break;
+                case Axes.AXIS_Y: if (bestHigh) out.maxY = ey - 1; else out.minY = ey + 1; break;
+                default:          if (bestHigh) out.maxZ = ez - 1; else out.minZ = ez + 1; break;
             }
         }
     }
 
-    /** Sentinel for {@link #findEditInside}: no PLACED/BROKEN edit lies inside the box. */
+    /** Sentinel for {@link #findEditInside}: no PLACED/BROKEN edit lies inside the scanned sub-box. */
     private static final long NO_EDIT = Long.MIN_VALUE;
 
     /**
-     * Return the packed-{@code BlockPos.asLong} position of some current-path edit (PLACED or BROKEN) lying
-     * inside the box, or {@link #NO_EDIT} if the box is clean. Scans the box cell-by-cell, querying
-     * {@link PathEdits#kindAt(int, int, int)} — which itself rejects out-of-edit-box cells with six int
-     * compares before any hash, so this is cheap (and almost always returns on the first miss because the box
-     * rarely overlaps the edits at all). The box is corridor-small, so the worst-case scan is bounded.
+     * The packed-{@code BlockPos.asLong} position of some current-path edit (PLACED or BROKEN) inside the
+     * inclusive sub-box {@code [lx..hx] × [ly..hy] × [lz..hz]} (already the box ∩ edits intersection), or
+     * {@link #NO_EDIT}. {@link PathEdits#kindAt(int, int, int)} additionally bbox-rejects with six int
+     * compares before any hash, so this is cheap and the intersection is tiny.
      */
-    private long findEditInside(Cuboid out) {
-        for (int y = out.minY; y <= out.maxY; y++) {
-            for (int z = out.minZ; z <= out.maxZ; z++) {
-                for (int x = out.minX; x <= out.maxX; x++) {
+    private long findEditInside(int lx, int hx, int ly, int hy, int lz, int hz) {
+        for (int y = ly; y <= hy; y++) {
+            for (int z = lz; z <= hz; z++) {
+                for (int x = lx; x <= hx; x++) {
                     if (pathEdits.kindAt(x, y, z) != PathEdits.NONE) {
                         return BlockPos.asLong(x, y, z);
                     }
@@ -266,37 +248,5 @@ public final class NavGridCuboidsView {
             }
         }
         return NO_EDIT;
-    }
-
-    // ------------------------------------------------------------------------------------------------
-    // Cache key + slot. The key folds (cell, travelAxis) into one long, then a Murmur3 finalizer maps it to a
-    // slot — the same primitive, no-boxing scheme as NavGridView's chunk cache.
-    // ------------------------------------------------------------------------------------------------
-
-    /**
-     * Fold {@code (x,y,z)} and {@code travelAxis} into one cache key. {@link BlockPos#asLong} packs the cell
-     * into the low ~38+26 bits; the travel axis (0..2) is mixed into a high bit region {@code asLong} doesn't
-     * use, so distinct axes for the same cell never collide. (Mirrors MACRO-IMPLEMENTATION §5
-     * "{@code key = mix(BlockPos.asLong(x,y,z), travelAxis)}".)
-     */
-    private static long cacheKey(int x, int y, int z, int travelAxis) {
-        // BlockPos.asLong uses 26 bits X + 26 bits Z + 12 bits Y = 64 bits, so there is no spare bit. XOR the
-        // axis (multiplied by a large odd constant to spread it) into the packed value: a perturbation of the
-        // hashed key, not a packed field. The open-addressing slot compares this exact mixed value, so a hit is
-        // only served when the stored key equals this one. Two different (cell,axis) pairs that mix to the same
-        // long would alias — astronomically unlikely with the constant below, and even then only a cache
-        // aliasing (a stale base served), never an out-of-bounds fault. (If that ever proves measurable, widen
-        // to parallel keyCell[]+keyAxis[] arrays; not warranted for v1.)
-        return BlockPos.asLong(x, y, z) ^ (travelAxis * 0x9E3779B97F4A7C15L);
-    }
-
-    /** Murmur3 64-bit finalizer → cache slot; spreads the structured keys so probe chains stay short. */
-    private static int slotFor(long k) {
-        k ^= k >>> 33;
-        k *= 0xff51afd7ed558ccdL;
-        k ^= k >>> 33;
-        k *= 0xc4ceb9fe1a85ec53L;
-        k ^= k >>> 33;
-        return (int) k & MASK;
     }
 }

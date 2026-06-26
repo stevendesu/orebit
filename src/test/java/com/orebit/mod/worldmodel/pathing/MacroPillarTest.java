@@ -50,9 +50,12 @@ class MacroPillarTest {
         NavGridView grid = buildFlatWorld();
         BlockPos start = new BlockPos(8, 0, 8);
         BlockPos goal = new BlockPos(8, 30, 8); // 30 straight up, open air — forced pillaring
-        // A corridor around the pillar column (±9, the region tier's CORRIDOR_MARGIN), as the windowed
-        // region tier supplies in the live two-tier search.
-        RegionBound corridor = new RegionBound(-1, 17, 0, 33, -1, 17);
+        // A WIDE corridor (~33×33 footprint) — deliberately big enough that the open-ground flood would
+        // exceed the 10k expansion cap if the search weren't collapsing it. So this guards BOTH halves of the
+        // fix at once: the macro-Pillar jumps + the goal-cuboid premium must crush the flood to a few dozen
+        // nodes, or the search floods and returns null. (A too-narrow corridor would pass even with a broken
+        // premium, as an earlier version of this test did.)
+        RegionBound corridor = new RegionBound(-16, 16, 0, 33, -16, 16);
 
         boolean savedMacro = BlockPathfinder.MACRO_MOVES;
         try {
