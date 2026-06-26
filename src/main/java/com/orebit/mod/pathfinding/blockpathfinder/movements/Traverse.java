@@ -78,9 +78,13 @@ public final class Traverse implements Movement {
                 int flags = MovementContext.flagsOf(p);
 
                 // Macro path: collapse a uniform flat run into a single jump candidate. Gated on the master
-                // flag AND a present cuboids view; otherwise fall through to the byte-for-byte micro emit.
+                // flag, a present cuboids view, AND (Option B) this cardinal's travel axis being the search's
+                // primary axis P — an off-P direction skips cuboidAt + MacroJump and takes its plain micro step,
+                // so a uniform region is extracted on ONE axis only (CUBOID-PERF-OPTIONS.md). A flat walk
+                // travels X or Z; derive its axis from the cardinal's (dx,dz) step.
+                int travelAxis = d[0] != 0 ? Axes.AXIS_X : Axes.AXIS_Z;
                 NavGridCuboidsView cuboids = ctx.cuboids();
-                if (BlockPathfinder.MACRO_MOVES && cuboids != null) {
+                if (BlockPathfinder.MACRO_MOVES && cuboids != null && travelAxis == ctx.macroAxis()) {
                     if (emitMacro(ctx, out, cuboids, x, y, z, nx, nz, d, pd, flags)) {
                         continue; // already have footing here; don't also step-assist/bridge this column
                     }
