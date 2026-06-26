@@ -52,6 +52,24 @@ public final class RegionBound {
                 && z >= minZ && z <= maxZ;
     }
 
+    // The inclusive corridor faces, exposed so a bulk scan (the cuboid extractor's section-aligned
+    // uniformity probe — CUBOID-PERF-OPTIONS §A) can CLIP a world rectangle into integer loop bounds ONCE
+    // (max with minX, min with maxX, …) instead of calling {@link #allows} per cell — a corridor-clipped
+    // empty range then needs no per-cell membership test at all. Read-only views of the immutable faces.
+
+    /** Inclusive low X face of the corridor. */
+    public int minX() { return minX; }
+    /** Inclusive high X face of the corridor. */
+    public int maxX() { return maxX; }
+    /** Inclusive low Y face of the corridor. */
+    public int minY() { return minY; }
+    /** Inclusive high Y face of the corridor. */
+    public int maxY() { return maxY; }
+    /** Inclusive low Z face of the corridor. */
+    public int minZ() { return minZ; }
+    /** Inclusive high Z face of the corridor. */
+    public int maxZ() { return maxZ; }
+
     /**
      * A copy widened by {@code blocks} on every horizontal side and {@code vblocks} vertically — the
      * "widen-on-failure" retry the driver uses when a bounded search comes back empty (a too-tight corridor),
