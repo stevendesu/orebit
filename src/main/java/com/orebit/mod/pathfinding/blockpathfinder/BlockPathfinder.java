@@ -89,14 +89,25 @@ public final class BlockPathfinder {
     private static final int MAX_EXPANSIONS = 10000;
 
     /**
-     * Master switch for partial-path return — <b>OFF by default, deliberately.</b> Partial-path is a later
-     * arc (it must NOT mask HPA* or heuristic failures while we are still verifying them — a budget-exhausted
-     * search returns {@code null} so the FAIL stays visible). When enabled, a budget-exhausted search that
-     * made real progress returns the path to its closest-approach node instead of null, so the bot walks as
-     * far as it got and replans. Re-enable only once the open-air-pillar pathology is understood/fixed at the
-     * search level, not papered over.
+     * Master switch for partial-path return — <b>ON.</b> A budget-exhausted search that made real progress
+     * toward the goal returns the path to its closest-approach node (not {@code null}), so the bot walks as
+     * far as it got and replans from there, converging on a goal a single bounded search can't reach in one
+     * shot. A search that EXHAUSTED the heap (genuinely walled in) still returns {@code null} — the closest
+     * cell is all it can reach, so committing to it would just re-fail, and that keeps a real connectivity
+     * FAIL visible.
+     *
+     * <p><b>Why on now (the design call):</b> the heuristic (the goal-forced-cost premium) is the strong lever
+     * for the open-air pillar, but ANY admissible heuristic has terrain blind spots — a single floating block
+     * inside the goal cuboid's slab caps the forced-cost premium, re-opening the horizontal cone (diagnosed +
+     * reproduced: {@code docs/Optimizations/cuboid_macro_movements.md}, the offset-pillar case). Such blind
+     * spots are a generic, infinite class (overhangs, canopies, floating islands), not an exotic corner, so
+     * patching the heuristic per-terrain is whack-a-mole. Partial-path is the structural net that makes the
+     * search robust to all of them at once (the Baritone model: time-/budget-boxed best-so-far + replan). It
+     * no longer "papers over" a bug we are mid-diagnosis on — that diagnosis is complete; this is the chosen
+     * fallback. A stronger forced-cost premium and dominance/symmetry pruning remain future work that make the
+     * floods rarer and the partial paths better, but they COMPOSE with this net rather than replace it.
      */
-    public static boolean PARTIAL_PATH = false;
+    public static boolean PARTIAL_PATH = true;
 
     /**
      * Master switch for macro-movement collapse (MACRO-IMPLEMENTATION.md §8.3) — <b>ON by default</b>. When
