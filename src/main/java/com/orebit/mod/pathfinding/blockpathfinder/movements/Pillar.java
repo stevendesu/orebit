@@ -98,7 +98,7 @@ public final class Pillar implements Movement {
         // whole jump, so skipping the intermediate stand cells is sound (NON-NEGOTIABLE 1). Its travel
         // extent, the goal-Y bound, and the escape-hedge ceil(orthFace / moveCost) bound the jump.
         Cuboid box = ctx.cuboidScratch();
-        cuboids.cuboidAt(x, ny, z, Axes.AXIS_Y, box);
+        cuboids.cuboidAt(x, ny, z, Axes.AXIS_Y, +1, box); // travel +Y (climbs upward)
 
         // Real per-step cost = the upward move plus the folded placement (NON-NEGOTIABLE 2: never a literal).
         float moveCost = COST + MovementContext.PLACE_COST;
