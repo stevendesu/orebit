@@ -74,14 +74,26 @@ We can't use JPS/RSR off the shelf — our move costs are **non-uniform** (place
   bridge (jump across flat ground), macro-MineDown (down through uniform stone), … **Any movement with a
   uniform-region symmetry is collapsible, and each defeats its own pathology** — the vertical pillar flood and
   a horizontal bridge flood are the same problem on different axes.
-- **Jump bound is GEOMETRIC: to the cuboid boundary in the travel direction, or the goal's projection on that
-  axis, whichever is nearer.** Inside a uniform cuboid there are no obstacles, hence no obstacle-forced turn —
-  the only places the optimal path turns are the cuboid boundary (terrain changes) and the goal. So jump
-  there. Cost is automatically `N × move_cost`, uniform within a single-movement macro, so JPS-validity holds
-  with **no normalization needed.** (Steve's `dist_to_edge / move_cost` errs *small* — it's in the safe
-  direction, just more nodes than the geometric bound; for the flat pillar the geometric bound jumps straight
-  to the goal Y ≈ 1,200 nodes, vs ≈ 4,000 at `/4`. If a case turns up where geometry alone doesn't bound the
-  jump, revisit — but inside a convex uniform region I don't think one exists.)
+- **Jump bound = `min(goal_projection, dist_to_edge / move_cost)`** — two AND-ed bounds (Steve; Claude
+  conceded after first arguing geometry alone):
+  - **`goal_projection`** (jump to the goal's coordinate on the travel axis) bounds overshooting **the goal**.
+  - **`dist_to_edge / move_cost`** is the **escape-hedge**: it bounds overshooting **a cheaper movement out
+    of the cuboid**. The escape isn't *inside* the uniform region (everything there is the same substrate) —
+    it's in the *unscanned* terrain just past the edge (and the scan is corridor-bounded, so the edge is
+    near). You can't know that terrain without scanning it, so you assume the cheapest possible alternative
+    (cost `1`) and don't jump so far past a potential escape that the regret exceeds ~one step. Normalizing
+    distance by the current move's cost ("pillaring is expensive → smaller jumps; cheap moves → larger
+    jumps") is JPS's uniform-cost requirement recovered by dividing the units out.
+  - **Why the division and not "emit every movement's macro bounded by its own goal-projection":** that exact
+    alternative needs per-movement optimal-turn analysis and breaks when a new movement (Parkour, …) is added.
+    The division is **movement-agnostic** — it needs nothing about the alternatives but a conservative cost
+    floor — so it stays correct-and-bounded as the movement set grows. That robustness is the whole point.
+  - It's a bound on **sub-optimality, not validity**: over-jumping yields a *valid* path, just a slightly
+    longer one — so **rounding UP is fine** (≤1-block overshoot, vs Baritone's whole-chunk doubling-back).
+  - For the flat-world pillar the corner/corridor makes `dist_to_edge` small (≈9), so jumps are ~2–3 blocks
+    and the cone collapses to ≈4,000 nodes (under budget); the §4 heuristic then removes the residual ground
+    flood. (Optional later refinement: once cross-section cuboids reveal the terrain past the edge, swap the
+    assumed `1` for that region's real cheapest move cost → bigger jumps.)
 - **The cuboid is a PERF optimization, but err in ONE direction only (Steve, sharpened).** Under-approximating
   (smaller cuboid → shorter jump → fall back to plain A\*) is always safe. *Over*-claiming (a stale cuboid
   that calls a now-solid cell "air") emits a jump through a block = an **invalid path**. So every error must
@@ -147,10 +159,11 @@ goal's cuboids instead of an actual backward search.
 ## 5. Decided (this design pass) vs still open
 
 **Decided:** maximal cuboids (not connected components, not run-lengths); uniformity = identical navtype
-descriptor; lazy line-march toward the goal + memoize per section; jump bound is geometric (cuboid edge /
-goal projection), no cost-normalization; err only conservative (shrink, never over-claim); `NavGridCuboidsView`
-as the query seam; the goal-cuboid heuristic correction is admissible (min-over-faces) and IS the principled
-form of a vertical premium.
+descriptor; lazy line-march toward the goal + memoize per section; jump bound = `min(goal_projection,
+dist_to_edge / move_cost)` — the `/move_cost` escape-hedge is **movement-agnostic robustness** (future-proof
+for new movements), and over-jump is valid-but-suboptimal so rounding UP is fine; err only conservative
+(shrink, never over-claim); `NavGridCuboidsView` as the query seam; the goal-cuboid heuristic correction is
+admissible (min-over-faces) and IS the principled form of a vertical premium.
 
 **Still open:**
 - The directional maximal-cuboid query (the box that extends farthest along the goal direction, since the
