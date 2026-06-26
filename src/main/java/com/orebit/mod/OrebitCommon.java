@@ -4,6 +4,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.orebit.mod.commands.OrebitCommands;
+import com.orebit.mod.config.ConfigLoader;
+import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
 import com.orebit.mod.platform.PlatformEvents;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.HpaMaintenance;
@@ -24,6 +26,24 @@ public final class OrebitCommon {
     private OrebitCommon() {}
 
     public static void init(PlatformEvents events) {
+        // Owner capability config (PRD §10 Phase 1a / AGENCY-LAYER-PLAN): load config/orebit.properties
+        // from the run dir once the server is up (the MinecraftServer is the loader-agnostic anchor the
+        // ConfigDir seam reads the run dir from), generating a commented default file on first run. This
+        // installs the active Config + the derived BotCaps the pathfinder and follower read; defaults
+        // reproduce today's behaviour, so nothing changes until the owner edits the file.
+        events.onServerStarted(ConfigLoader::load);
+
+        // Mining tick/feasibility table (PRD §10 Phase 1c-1d / AGENCY-LAYER-PLAN "Tool use" + "Tick costs"):
+        // precompute the resident mining-tick tables ONCE the block registry (and thus the NavBlock navtype
+        // table) is populated. Referencing MiningModel.buildTable() forces NavBlock's static-init first, so
+        // the tables cover every navtype/field-key. Threads the loaded mining-time config (ticksByHardness /
+        // ticksToMineFlat) — registered AFTER ConfigLoader::load above, so the active Config is already
+        // installed here. Off any hot path (one-time at server start); the A* then reads the table by index,
+        // never recomputing mining time per node (favour-cpu-over-ram). Re-baked on /bot config reload too
+        // (ConfigLoader.reload) so a changed mining-time model takes effect without a restart.
+        events.onServerStarted(server -> MiningModel.buildTable(
+                ConfigLoader.config().ticksByHardness(), ConfigLoader.config().ticksToMineFlat()));
+
         // World-model pipeline (PRD Phase 1): recompute a per-chunk nav grid on load and store it
         // (NavStore), recycling on unload. NavBlock is now a short-indexed packed-long table (the
         // old byte index overflowed) and the section reader is the self-degrading SectionPalette, so

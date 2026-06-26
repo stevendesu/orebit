@@ -42,17 +42,39 @@ public final class MovementContext {
      */
     public static final int UNBREAKABLE_HARDNESS = 255;
 
-    // ---- Break / place cost model (tick-relative, Baritone-seedable) --------------------------
-    /** Flat cost of folding one break into a move, before the hardness term. */
-    public static final float BREAK_BASE_COST = 2.0f;
+    // ---- Break / place cost model (REAL TICKS — PRD §10 Phase 1d, physically-derived-costs) ------------
+    // The whole search cost unit is real game ticks (20 = 1 s); break and place costs are the actual time
+    // (and, for place, the inventory value) the bot spends, NOT tuned magic numbers. Break cost is the
+    // resident mining-tick table (MiningModel); place cost is a tick-to-place plus an inventory premium.
+
     /**
-     * Added per quantized-hardness unit (≈ {@code destroyTime*5}) of the broken block, so soft leaves
-     * (hardness 1) barely cost more than a step while stone (≈8) is a real detour-or-dig trade-off. A
-     * coarse stand-in for true mining ticks until tool/haste-aware timings land.
+     * The DEFAULT flat cost (ticks) charged per block placed — NOT a physical placement time. Placing a block
+     * in-game is ~1 tick (face, reach, interact); this {@code 6} is a deliberate <b>behavioral "reluctance to
+     * place"</b> penalty: the place interaction plus a few ticks of positioning/facing overhead beyond the bare
+     * move, plus a bias against needless scaffolding (so A* prefers walking or digging around to building when a
+     * comparable route exists). It is intentionally well below the old Baritone-seeded {@code 20} — at {@code 6}
+     * against a ~4.6-tick walk the bot is appreciably more build-happy (it will pillar/bridge a short way rather
+     * than take a long detour), which is the intended trade.
+     *
+     * <p>This static value is the DEFAULT and the value the headless/benchmark/trace/test paths use (they pass
+     * no live bot). It is also what {@link com.orebit.mod.pathfinding.blockpathfinder.cuboid.GoalForcedCost}
+     * derives its anti-flood pillar premium from (the heuristic probe has no per-bot context). A live follower's
+     * actual g-cost place base is the configurable {@code placement.placeBaseCost} knob, threaded in via {@link
+     * InventoryView#placeBaseCost()} (this constant is the fallback when no snapshot is supplied).
      */
-    public static final float BREAK_PER_HARDNESS = 0.25f;
-    /** Flat cost of folding one block placement (bridge / footing) into a move. */
-    public static final float PLACE_COST = 3.0f;
+    public static final float PLACE_BASE_COST = 6.0f;
+
+    /**
+     * Extra ticks charged when a placement <b>consumes a real carried block</b> ({@code
+     * placement.consumesBlocks} on) — Steve's "premium for the cost of the placed block." Spending one of the
+     * bot's finite blocks is worth more than the place TIME alone: this surcharge makes A* prefer a route that
+     * doesn't burn inventory when a comparable one exists, and biases pillaring/bridging toward the shortest
+     * block spend. A flat premium (not a per-item market price) because the feasibility model is a cheap scalar
+     * budget, not a per-type valuation (Baritone-style); when {@code consumesBlocks} is off (the default —
+     * infinite conjured supply) it is NOT charged, so today's behaviour is unchanged. ~½ a place-time, enough
+     * to tilt ties without dominating the real time cost.
+     */
+    public static final float PLACE_INVENTORY_PREMIUM = 10.0f;
 
     /** Geometry a path-placed block reads as — the cobblestone the follower actually places (full cube). */
     private static final long PLACED_DESC = NavBlock.descriptorFor(Blocks.COBBLESTONE.defaultBlockState());
@@ -61,6 +83,19 @@ public final class MovementContext {
 
     private final NavGridView grid;
     private final BotCaps caps;
+
+    /**
+     * The per-pathfind inventory feasibility snapshot (PRD §10 Phase 1b/1c) — the cheap, Baritone-style cap
+     * read from the bot's REAL inventory ONCE before the search loop (see {@link
+     * com.orebit.mod.platform.BotInventory#feasibility}). {@code null} for the legacy / headless / test
+     * searches that pass no bot (the benchmarks and {@code /bot trace}), in which case the gates fall back
+     * to the historical caps-only behaviour (infinite throwaway blocks, insta-mine within the hardness cap)
+     * — so nothing changes until a live bot supplies one. It is plain primitives + a resident-table handle;
+     * the gate methods below read it, never the live {@link net.minecraft.world.entity.player.Inventory}, so
+     * the hot path stays alloc-free (HOT-PATH-NO-ALLOC).
+     */
+    private InventoryView inventory;
+
     /** Reused per-move edit accumulator (single-threaded per pathfind, like the grid cursor). */
     private final EditScratch editScratch = new EditScratch(this);
     /** The planned edits along the path to the node being expanded — a diff over the grid (see below). */
@@ -156,6 +191,50 @@ public final class MovementContext {
 
     public BotCaps caps() {
         return caps;
+    }
+
+    /**
+     * The per-pathfind inventory feasibility snapshot a live bot supplies — read once from its REAL
+     * inventory before the search (the decided cheap cap, NOT a per-node depleting budget). Carries:
+     * <ul>
+     *   <li><b>{@code mining}</b> — the {@link MiningModel.Snapshot}: the bot's per-tool-category best tier
+     *       (so {@link #breakable} can gate on "this bot can actually mine this block") + the resident
+     *       per-(navtype × tier) tick table handle stage 1d reads;</li>
+     *   <li><b>{@code consumesBlocks}</b> — whether placement draws from inventory ({@code
+     *       placement.consumesBlocks});</li>
+     *   <li><b>{@code placeableBlocks}</b> — the snapshotted count of carried placeable blocks (the scalar
+     *       throwaway budget the placement cap reads when {@code consumesBlocks}). When {@code consumesBlocks}
+     *       is off this is ignored (infinite conjured supply).</li>
+     *   <li><b>{@code placeRemovalPremium}</b> — the precomputed removal-premium (ticks) {@link #placeCost}
+     *       adds to every placement: the block's mine-out time × the {@code placement.removalCostWeight}
+     *       config weight (Steve's "cost of potentially having to mine this block out later"), so placing a
+     *       hard-to-remove block (obsidian) costs more than a soft one (dirt). Computed ONCE in {@link
+     *       com.orebit.mod.platform.BotInventory#feasibility} (cold) over the representative placed block, then
+     *       read on the hot path as a plain field add. {@code 0} when there's no snapshot or the weight is 0.</li>
+     *   <li><b>{@code placeBaseCost}</b> — the configured flat per-placement base cost (ticks) the live bot's
+     *       {@code placement.placeBaseCost} knob supplies, used in place of the static {@link #PLACE_BASE_COST}
+     *       default by {@link #placeCost}. A behavioral "reluctance to place" penalty, not a physical time (see
+     *       {@link #PLACE_BASE_COST}); {@code >= 0}. With no snapshot the static default is used instead.</li>
+     * </ul>
+     * A plain record of primitives + the (resident, read-only) {@link MiningModel.Snapshot}; passing it to
+     * {@link #setInventory} costs the hot path nothing (the gates do a field load + array index).
+     */
+    public record InventoryView(MiningModel.Snapshot mining, boolean consumesBlocks, int placeableBlocks,
+            float placeRemovalPremium, float placeBaseCost) { }
+
+    /**
+     * Wire the per-pathfind inventory feasibility snapshot (once, after construction, before the search
+     * loop) — see {@link #inventory}. Passing {@code null} leaves the gates in their historical caps-only
+     * mode (headless / trace / tests). The live follower's plan path supplies one built from the bot's REAL
+     * inventory via {@link com.orebit.mod.platform.BotInventory#feasibility}.
+     */
+    public void setInventory(InventoryView inventory) {
+        this.inventory = inventory;
+    }
+
+    /** The wired inventory feasibility snapshot, or {@code null} when none was supplied (caps-only mode). */
+    public InventoryView inventory() {
+        return inventory;
     }
 
     /**
@@ -334,10 +413,12 @@ public final class MovementContext {
     /**
      * Can the bot clear a body-blocking cell by mining it? True only when the bot {@link
      * BotCaps#canBreak may break}, the cell has real collision worth removing (not air/plant, which is
-     * already passable), isn't a fluid (water/lava aren't "broken" — swim/avoid handle those) and isn't
-     * unbreakable (bedrock/barrier). Reuses the existing {@code shape}/{@code fluid}/{@code hardness}
-     * facts — no new NavBlock bit. (First-cut: any breakable block is assumed tool-satisfiable; tool /
-     * durability gating arrives with the inventory subsystem.)
+     * already passable), isn't a fluid (water/lava aren't "broken" — swim/avoid handle those), isn't
+     * unbreakable (bedrock/barrier), <b>and is no harder than the bot's {@link BotCaps#maxBreakHardness}
+     * mining cap</b> (the config knob: a soft-tool / no-tool bot can be limited to mining up to a given
+     * hardness, while the default 255 means "mine anything breakable"). Reuses the existing {@code
+     * shape}/{@code fluid}/{@code hardness} facts — no new NavBlock bit. (Tool / durability gating beyond
+     * this hardness cap arrives with the inventory subsystem.)
      */
     public boolean breakable(int x, int y, int z) {
         return breakable(descriptorAt(x, y, z));
@@ -345,8 +426,22 @@ public final class MovementContext {
 
     /** {@link #breakable(int, int, int)} on an already-read descriptor (read-once form). */
     public boolean breakable(long d) {
-        // Precomputed geometry (solid, no fluid, not unbreakable) AND the bot may break.
-        return caps.canBreak() && NavBlock.isBreakable(d);
+        // Precomputed geometry (solid, no fluid, not unbreakable) AND the bot may break AND the block is
+        // within the bot's configured mining-hardness cap. The cap is read straight off caps (a field
+        // load), so a movement still pays one comparison, not a derivation.
+        if (!(caps.canBreak()
+                && NavBlock.isBreakable(d)
+                && NavBlock.hardness(d) <= caps.maxBreakHardness())) {
+            return false;
+        }
+        // Phase 1c tool-feasibility gate: when a live bot supplied an inventory snapshot, additionally
+        // require that the bot actually carries a tool able to mine this block (a tool-required block — ore,
+        // obsidian — is un-minable without the correct tool category; a non-tool-required block is always
+        // mineable bare-handed, only slower). The snapshot read is a field load + a couple of bit extracts +
+        // one array index — no live Inventory access, hot-path safe. With no snapshot (headless / trace /
+        // tests) this stays the historical caps-only gate, so nothing changes until a bot supplies one.
+        InventoryView inv = inventory;
+        return inv == null || inv.mining().canMine(d);
     }
 
     /**
@@ -367,6 +462,14 @@ public final class MovementContext {
      */
     public boolean placeable(int x, int y, int z, long d) {
         if (!caps.canPlace()) return false;
+        // Phase 1b placement-from-inventory feasibility cap: when a live bot supplied a snapshot AND
+        // placement consumes inventory, the bot can only place while it still carries a throwaway block. This
+        // is the cheap scalar Baritone-style cap (the snapshotted carried-block count), NOT a per-node
+        // depleting budget — a rare mid-path stack-exhaustion is netted by partial-path + replan. When
+        // consumesBlocks is off (the default — infinite conjured supply) or no snapshot is present (headless
+        // / trace / tests), this is a no-op, so the geometry test below is unchanged from today.
+        InventoryView inv = inventory;
+        if (inv != null && inv.consumesBlocks() && inv.placeableBlocks() <= 0) return false;
         if (!openForPlace(d)) return false;        // need a clear, non-fluid cell to fill
         // A sturdy neighbour to place against: the four sides, plus the block below.
         return standable(x, y - 1, z)
@@ -384,14 +487,69 @@ public final class MovementContext {
         return NavBlock.isOpenForPlace(d); // precomputed: replaceable/empty, no fluid
     }
 
-    /** Tick cost to fold one break of cell {@code (x,y,z)} in — flat base plus a hardness term. */
+    /** Real mining-time cost (ticks) to fold one break of cell {@code (x,y,z)} in. */
     public float breakCost(int x, int y, int z) {
         return breakCost(descriptorAt(x, y, z));
     }
 
-    /** {@link #breakCost(int, int, int)} on an already-read descriptor (read-once form). */
+    /**
+     * Real mining-time cost (ticks) to fold one break of an already-read descriptor (read-once form) — the
+     * resident {@link MiningModel} table value for this block × the bot's best tool for its category, NOT a
+     * magic-number stand-in (PRD §10 Phase 1d). When a live bot supplied an inventory snapshot the bot's own
+     * tools set the speed; with no snapshot (headless / trace / benchmarks) it falls back to {@link
+     * MiningModel#bareHandTicks bare-hand} ticks, so those searches use the same real-tick model with the
+     * worst tool. Pure resident-table read (a field-key shift+mask + array index) — no per-node arithmetic,
+     * no live inventory, hot-path safe (HOT-PATH-NO-ALLOC, favour-cpu-over-ram).
+     *
+     * <p>The caller ({@link EditScratch#requireAir}) only reaches here after {@link #breakable} has proven the
+     * block mineable, so the table never returns {@link MiningModel#UNMINEABLE} on this path.
+     */
     public float breakCost(long d) {
-        return BREAK_BASE_COST + NavBlock.hardness(d) * BREAK_PER_HARDNESS;
+        InventoryView inv = inventory;
+        return inv == null ? MiningModel.bareHandTicks(d) : inv.mining().ticksFor(d);
+    }
+
+    /** Real cost (ticks) to fold one block placement at cell {@code (x,y,z)} in — tick-to-place + premium. */
+    public float placeCost(int x, int y, int z) {
+        return placeCost();
+    }
+
+    /**
+     * Real cost (ticks) to fold one block placement in: the place-base term (the configured {@link
+     * InventoryView#placeBaseCost} when a live bot supplied a snapshot, else the static {@link #PLACE_BASE_COST}
+     * default for headless / trace / tests) plus a precomputed <b>removal premium</b> ({@link
+     * InventoryView#placeRemovalPremium} — the placed block's mine-out time × {@code placement.removalCostWeight},
+     * the cost of potentially having to mine it out later, so a hard block like obsidian is disfavoured vs. a
+     * soft one like dirt) plus, when placement draws from the bot's REAL inventory ({@code
+     * placement.consumesBlocks} on, carried on the snapshot), the {@link #PLACE_INVENTORY_PREMIUM} for spending
+     * one of its finite blocks. With no snapshot (headless / trace / tests) the base falls back to the static
+     * default, the premium is 0, and {@code consumesBlocks} is off, so those searches use the default base
+     * unchanged. Every term is a precomputed SCALAR (a field load), NOT computed per node, so the formula stays
+     * field loads + adds + a branch — hot-path safe. Position-independent today (a flat per-block model), but
+     * exposed per-cell so a future per-block valuation can refine it without touching callers.
+     */
+    public float placeCost() {
+        InventoryView inv = inventory;
+        return (inv != null ? inv.placeBaseCost() : PLACE_BASE_COST)
+                + (inv != null ? inv.placeRemovalPremium() : 0f)
+                + (inv != null && inv.consumesBlocks() ? PLACE_INVENTORY_PREMIUM : 0f);
+    }
+
+    /**
+     * Build-face place cost for the {@code GoalForcedCost} anti-flood heuristic: the configured/default place
+     * base ({@link InventoryView#placeBaseCost} when a live bot supplied a snapshot, else the static {@link
+     * #PLACE_BASE_COST}) plus the placed block's removal premium ({@link InventoryView#placeRemovalPremium}),
+     * but deliberately WITHOUT the {@link #PLACE_INVENTORY_PREMIUM} term — so it stays an admissible LOWER
+     * bound on the real per-block place cost {@link #placeCost} charges. The follower places the SOFTEST block
+     * it carries (the one the snapshot's removal premium is measured from); running out only makes the real
+     * cost higher, so under-crediting the inventory premium keeps the heuristic admissible. With no snapshot
+     * (headless / trace / tests) this falls back to the static base alone, leaving those searches unchanged.
+     * A precomputed SCALAR (field loads + a branch), read once per search by the probe — no per-node cost.
+     */
+    public float pillarPlaceCost() {
+        InventoryView inv = inventory;
+        return (inv != null ? inv.placeBaseCost() : PLACE_BASE_COST)
+                + (inv != null ? inv.placeRemovalPremium() : 0f);
     }
 
     /** Whether a cell has any solid collision (a face to build against) — full block, slab, stair, … */

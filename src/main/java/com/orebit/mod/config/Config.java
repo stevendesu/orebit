@@ -1,55 +1,109 @@
-/**
- * Config.java
- *
- * Main Component: config/
- * Environment: MAIN
- *
- * This class defines the structure of all raw configuration values loaded from disk.
- * It represents the source of truth for global mod settings, including paths, flags,
- * integration endpoints, and default system behaviors. These values are parsed from
- * a file (e.g., JSON, TOML) by `ConfigLoader`, validated by `ConfigValidator`, and
- * used to initialize runtime systems like `GlobalSettingLimits`.
- *
- * ---------------------------
- * What This File Does:
- * ---------------------------
- * - Defines fields corresponding to all configurable global options
- * - Stores values that are loaded from disk and optionally hot-reloaded
- * - Acts as the source for default limits and feature toggles
- * - May include nested structures for LLM settings, simulation, pathfinding, etc.
- *
- * ---------------------------
- * How This File Differs:
- * ---------------------------
- * - Unlike `GlobalSettingLimits`, this class stores raw values—not enforced policies
- * - Unlike `BotSettings`, this file is not per-bot—it governs mod-wide defaults
- * - Unlike `ConfigLoader`, this class contains data—not file I/O
- *
- * ---------------------------
- * Assumptions:
- * ---------------------------
- * - This file is populated via deserialization (e.g., from JSON or TOML)
- * - Defaults may be specified inline or filled by `ConfigValidator`
- * - Changes to this class may require migration support or defaulting
- *
- * ---------------------------
- * Dependencies:
- * ---------------------------
- * - JSON/TOML/YAML deserialization system (e.g., Gson, Jackson, etc.)
- * - Used by `ConfigLoader`, `ConfigValidator`, `GlobalSettingLimits`
- *
- * ---------------------------
- * Dependents:
- * ---------------------------
- * - `GlobalSettingLimits`: Interprets these values as enforced constraints
- * - `SimulationClock`, `AILoadBalancer`, `LLMInterface`: May consume settings directly
- * - `Debug tools`: May display current config for review
- *
- * ---------------------------
- * Implementation Details:
- * ---------------------------
- * - Fields should be public or use appropriate accessors for deserialization
- * - Should be serializable to support hot-reload or live inspection
- * - Field names may be defined in `ConfigKeys` to support consistent documentation
- */
 package com.orebit.mod.config;
+
+import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+
+/**
+ * The validated, immutable snapshot of every owner-facing capability knob loaded from {@code
+ * config/orebit.properties} (PRD §10 Phase 1a / AGENCY-LAYER-PLAN "Capability config"). One {@code
+ * Config} is the in-memory source of truth the rest of the agency layer reads: the pathfinder gets a
+ * {@link BotCaps} via {@link #toBotCaps()}, the follower gets its conjured-block + survival flags via the
+ * accessors below. {@link ConfigLoader} produces it (parse → validate); {@link ConfigValidator}
+ * guarantees every field here is already in range, so consumers never re-check.
+ *
+ * <h2>Why a record of primitives, not a property bag</h2>
+ * Reading raw strings out of {@link java.util.Properties} on every pathfind would be wasteful and
+ * un-typed. We parse + validate ONCE at load into this flat, typed, immutable object (favour-cpu-over-ram:
+ * the parse cost is paid at startup, never per search). The fields mirror {@link ConfigKeys} 1:1 and are
+ * grouped the same way the file is laid out (survival / placement / mining / pathing).
+ *
+ * <h2>The conjured block</h2>
+ * {@link #conjuredBlock} is stored as a resolved {@link Block} (not an id string), because the validator
+ * already proved it resolves on this version — so {@link #conjuredBlockState()} is a field read, no
+ * registry lookup per placement. The follower uses it as its throwaway {@code PLACE_BLOCK}.
+ *
+ * <h2>Mapping to {@link BotCaps}</h2>
+ * {@link #toBotCaps()} folds the placement/mining/pathing knobs into the capability gate the block-tier
+ * A* already threads per search:
+ * <ul>
+ *   <li>{@code canBreak  = mining.canMine}, {@code maxBreakHardness = mining.maxHardness};</li>
+ *   <li>{@code canPlace  = placement.canPlace};</li>
+ *   <li>{@code maxNodes  = pathing.maxNodes}, {@code greedyWeight = pathing.greedyWeight}.</li>
+ * </ul>
+ * {@code jumpHeight}/{@code safeFallDistance} stay at the Tier 1 defaults (1 / 3) — they are not yet owner
+ * knobs (they arrive with the move-completeness arc). Survival flags + the consume/tick model are NOT in
+ * {@code BotCaps}: they drive the follower's body setup and the (future) tick-cost model, not move
+ * generation, so they live on {@code Config} and are read directly by their consumers.
+ */
+public record Config(
+        // ---- survival ----
+        boolean takesDamage,
+        boolean hunger,
+        boolean needsBreath,
+        // ---- placement ----
+        boolean canPlace,
+        boolean consumesBlocks,
+        Block conjuredBlock,
+        float removalCostWeight,
+        float placeBaseCost,
+        // ---- mining ----
+        boolean canMine,
+        boolean consumesTools,
+        int maxHardness,
+        boolean ticksByHardness,
+        int ticksToMineFlat,
+        // ---- pathing ----
+        int maxNodes,
+        float greedyWeight) {
+
+    /**
+     * The all-defaults configuration — reproduces TODAY's hardcoded follower behaviour exactly (break +
+     * place on, insta-mine anything below hardness 255, infinite cobblestone, 10k-node cap, greedy weight
+     * 2.0, invulnerable / no hunger / no breath). {@link ConfigLoader} writes this out as the generated
+     * default file, and falls back to it when the file is missing or unreadable, so nothing changes until
+     * the owner edits the config. The pathing/break/place defaults line up with {@link BotCaps#BREAK_PLACE}.
+     */
+    public static final Config DEFAULT = new Config(
+            /* survival   */ false, false, false,
+            /* placement  */ true, false, Blocks.COBBLESTONE, 1.0f, MovementContext.PLACE_BASE_COST,
+            /* mining     */ true, false, BotCaps.UNBREAKABLE, true, 0,
+            /* pathing    */ BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT);
+
+    /**
+     * The capability gate the block-tier A* reads, derived from the placement / mining / pathing knobs
+     * (see the class doc for the field mapping). Built once per loaded config (and re-derived only on a
+     * {@code /bot config reload}); the pathfinder reads its fields into search-start locals, so this is
+     * never on the hot path.
+     */
+    public BotCaps toBotCaps() {
+        return new BotCaps(
+                /* jumpHeight       */ 1,
+                /* safeFallDistance */ 3,
+                /* canBreak         */ canMine,
+                /* canPlace         */ canPlace,
+                /* maxBreakHardness */ maxHardness,
+                /* maxNodes         */ maxNodes,
+                /* greedyWeight     */ greedyWeight);
+    }
+
+    /** The default {@link BlockState} the follower places when bridging/pillaring (the conjured block). */
+    public BlockState conjuredBlockState() {
+        return conjuredBlock.defaultBlockState();
+    }
+
+    // {@link #removalCostWeight} (placement group) is the record's auto-generated accessor: how strongly the
+    // planner disfavours placing hard-to-remove blocks (mine-out ticks × weight; 0 disables). Read once per
+    // pathfind into the inventory feasibility snapshot — never on the hot path.
+
+    // {@link #placeBaseCost} (placement group, auto-generated accessor) is the flat per-placement base cost
+    // (ticks) — a behavioral "reluctance to place" penalty, NOT a physical place time (see {@link
+    // MovementContext#PLACE_BASE_COST}). Read once per pathfind into the inventory feasibility snapshot (so a
+    // live bot's g-cost place base is the configured value); headless/test searches with no snapshot fall back
+    // to the static default. Default {@code 6.0}, which equals the static default so the all-defaults config is
+    // unchanged. Not in {@link BotCaps} — it rides the inventory snapshot like the removal premium, never the
+    // hot path.
+}

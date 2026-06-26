@@ -3,6 +3,7 @@ package com.orebit.mod.pathfinding;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
@@ -101,6 +102,13 @@ public final class PathPlan {
     private final RegionGrid regionGrid;
     private final BlockPos goalFloor;
     private final BotCaps caps;
+    /**
+     * The live bot's per-pathfind inventory feasibility snapshot (PRD §10 Phase 1b/1c), passed straight to
+     * each windowed {@link BlockPathfinder#findPath} so the break/place gates account for the bot's REAL
+     * carried tools + blocks. {@code null} when no bot supplied one (the existing single-arg constructor,
+     * headless callers), leaving the gates in their historical caps-only mode.
+     */
+    private final MovementContext.InventoryView inventory;
     private final int minY;
     /** The goal's level-0 region coords (so we can test "goal in window" by index). */
     private final int goalRX, goalRY, goalRZ;
@@ -145,10 +153,24 @@ public final class PathPlan {
      */
     public PathPlan(ServerLevel level, RegionGrid regionGrid, BlockPos startFloor, BlockPos goalFloor,
                     BotCaps caps) {
+        this(level, regionGrid, startFloor, goalFloor, caps, null);
+    }
+
+    /**
+     * As {@link #PathPlan(ServerLevel, RegionGrid, BlockPos, BlockPos, BotCaps)}, additionally carrying the
+     * live bot's per-pathfind inventory feasibility snapshot {@code inventory} (PRD §10 Phase 1b/1c), which
+     * is threaded into every windowed {@link BlockPathfinder#findPath} so the break/place gates account for
+     * the bot's REAL carried tools + blocks. {@code null} = the historical caps-only behaviour.
+     *
+     * @param inventory the bot's inventory feasibility snapshot, or {@code null} for caps-only gating
+     */
+    public PathPlan(ServerLevel level, RegionGrid regionGrid, BlockPos startFloor, BlockPos goalFloor,
+                    BotCaps caps, MovementContext.InventoryView inventory) {
         this.level = level;
         this.regionGrid = regionGrid;
         this.goalFloor = goalFloor;
         this.caps = caps;
+        this.inventory = inventory;
         this.minY = regionGrid.minY();
         this.botFloor = startFloor;
 
@@ -356,7 +378,7 @@ public final class PathPlan {
                     target.getX(), target.getY(), target.getZ(), target.equals(goalFloor), bound);
         }
 
-        BlockPathPlan plan = BlockPathfinder.findPath(grid, botFloor, target, caps, bound);
+        BlockPathPlan plan = BlockPathfinder.findPath(grid, botFloor, target, caps, bound, inventory);
         if (plan == null) {
             // Widen-on-failure (HPA-IMPLEMENTATION.md §9): a too-tight corridor can wall off a real crossing
             // (e.g. the skeleton bent more than the margin, or the only ascent is a wide pillar base). Widen
@@ -364,7 +386,7 @@ public final class PathPlan {
             // the widen → genuinely BLOCKED (terrain changed / no route), and AllyBotEntity's visible
             // straight-line fallback takes over (the milestone wants pathological failure visible).
             plan = BlockPathfinder.findPath(grid, botFloor, target, caps,
-                    bound.widened(CORRIDOR_MARGIN, CORRIDOR_VMARGIN));
+                    bound.widened(CORRIDOR_MARGIN, CORRIDOR_VMARGIN), inventory);
         }
         this.blockPlan = plan;
         this.status = (plan != null) ? PathStatus.RUNNING : PathStatus.BLOCKED;

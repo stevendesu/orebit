@@ -6,9 +6,13 @@ import com.orebit.mod.pathfinding.PathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementRegistry;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
+import com.orebit.mod.config.Config;
+import com.orebit.mod.config.ConfigLoader;
+import com.orebit.mod.platform.BotInventory;
 import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.Replaceable;
 import com.orebit.mod.platform.WorldEdits;
@@ -19,7 +23,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
@@ -66,13 +70,40 @@ public class AllyBotEntity extends FakePlayerEntity {
     private static final int STUCK_DUMP_TICKS = 20;
 
     /**
-     * Bot capabilities the planner expands with. Break + place are enabled to prove the new modifiers
-     * (mine through leaves, bridge a gap) — the motivating forest-leaves case. Once the config / tool /
-     * inventory subsystems land this becomes per-bot, server-configurable.
+     * The bot's planner capabilities + throwaway block now come from the owner config (PRD §10 Phase 1a):
+     * {@link #caps()} returns the {@link BotCaps} derived from {@code config/orebit.properties}
+     * (break/place toggles, mining-hardness cap, A* node cap + greedy weight) and {@link #placeBlock()}
+     * the configured conjured block. Both are read at the point of use (in {@link #replan}/{@link #traceTo}/
+     * {@link #applyEdits}) from the live {@link ConfigLoader} cache, so a {@code /bot config reload} takes
+     * effect on the next plan with no per-tick cost — the cached values are plain field reads, never on the
+     * A* hot path. Out of the box the config defaults reproduce the historical {@code BotCaps.BREAK_PLACE}
+     * + cobblestone behaviour exactly, so nothing changes until the owner edits the file.
      */
-    private static final BotCaps CAPS = BotCaps.BREAK_PLACE;
-    /** The throwaway block the bot places when bridging/footing (infinite supply until inventory exists). */
-    private static final BlockState PLACE_BLOCK = Blocks.COBBLESTONE.defaultBlockState();
+    private BotCaps caps() {
+        return ConfigLoader.botCaps();
+    }
+
+    /** The throwaway {@link BlockState} the bot places when bridging/footing — the configured conjured block. */
+    private BlockState placeBlock() {
+        return ConfigLoader.config().conjuredBlockState();
+    }
+
+    /**
+     * The per-replan inventory feasibility snapshot (PRD §10 Phase 1b/1c): read the bot's REAL inventory
+     * ONCE here (cold, before the search) through the {@link BotInventory} adapter into plain primitives the
+     * block-A* gates consult on the hot path (carried placeable-block count → placement cap; best carried
+     * tool per category → mining-feasibility gate + the resident tick table 1d reads). Built fresh each
+     * replan so it reflects the bot's current items; passed into {@link PathPlan} and threaded to every
+     * windowed search. Returns {@code null} (caps-only gating) only if the mining table isn't built yet.
+     * The {@code consumesBlocks} flag comes from {@code placement.consumesBlocks}; the conjured-block branch
+     * (infinite supply) is unaffected. Never on a per-tick / per-node path — one scan per whole replan.
+     */
+    private MovementContext.InventoryView inventoryFeasibility() {
+        Config cfg = ConfigLoader.config();
+        return new BotInventory(this).feasibility(
+                caps(), cfg.consumesBlocks(), cfg.conjuredBlockState(), cfg.removalCostWeight(),
+                cfg.placeBaseCost());
+    }
 
     /**
      * What the bot is currently trying to do, set by the {@code /bot} commands (defaults to
@@ -292,7 +323,8 @@ public class AllyBotEntity extends FakePlayerEntity {
         // straight-line steer below), log once, and keep the game playable. Remove the guard once the region
         // tier is hardened.
         try {
-            this.pathPlan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, CAPS);
+            this.pathPlan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, caps(),
+                    inventoryFeasibility());
             this.path = pathPlan.currentBlockPlan();
         } catch (Throwable t) {
             if (!loggedPlanError) {
@@ -356,13 +388,15 @@ public class AllyBotEntity extends FakePlayerEntity {
         setMode(Mode.STAY); // stop the per-tick replan/flood; the trace is a standalone one-shot search
         ServerLevel level = (ServerLevel) Worlds.of(this);
         BlockPos startFloor = this.blockPosition().below();
+        final BotCaps caps = caps(); // snapshot the configured caps once for this whole trace
+        final MovementContext.InventoryView inv = inventoryFeasibility(); // the bot's real-inventory cap
 
         // Build the two-tier plan exactly as /bot come does (TRACE off → the HPA* leaf-cost searches stay out
         // of the dump); the first window's target + corridor are what we then trace.
         BlockPos target = null;
         RegionBound corridor = null;
         try {
-            PathPlan plan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, CAPS);
+            PathPlan plan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, caps, inv);
             target = plan.currentWindowTarget();
             corridor = plan.currentCorridor();
         } catch (Throwable t) {
@@ -375,10 +409,10 @@ public class AllyBotEntity extends FakePlayerEntity {
             final boolean haveWindow = target != null && corridor != null;
             if (haveWindow) {
                 w.write("Orebit A* trace  start=" + startFloor + "  goal=" + goalFloor
-                        + "  window target=" + target + "  corridor=" + corridor + "  caps=" + CAPS
+                        + "  window target=" + target + "  corridor=" + corridor + "  caps=" + caps
                         + "  (HPA* first window — corridor + cuboids + macro-ops + goal premium ACTIVE)\n");
             } else {
-                w.write("Orebit A* trace  start=" + startFloor + "  goal=" + goalFloor + "  caps=" + CAPS
+                w.write("Orebit A* trace  start=" + startFloor + "  goal=" + goalFloor + "  caps=" + caps
                         + "  (HPA* produced NO window — falling back to raw block-A*, no corridor)\n");
             }
             w.write("legend: 'E <seq> <x> <y> <z> g=<g> f=<f> via=<move|start>' = one expansion (pop), in"
@@ -388,8 +422,8 @@ public class AllyBotEntity extends FakePlayerEntity {
             BlockPathfinder.TRACE = true;
             BlockPathfinder.LOG_TIMING = false; // the trace IS the record; skip the one-line summary
             BlockPathPlan plan = haveWindow
-                    ? BlockPathfinder.findPath(new NavGridView(level), startFloor, target, CAPS, corridor)
-                    : BlockPathfinder.findPath(new NavGridView(level), startFloor, goalFloor, CAPS);
+                    ? BlockPathfinder.findPath(new NavGridView(level), startFloor, target, caps, corridor, inv)
+                    : BlockPathfinder.findPath(new NavGridView(level), startFloor, goalFloor, caps, null, inv);
             BlockPathfinder.TRACE = false;
             w.write("\nRESULT: " + (plan == null ? "FAIL (null)" : plan.size() + "wp cost=" + plan.cost())
                     + "\n");
@@ -472,21 +506,43 @@ public class AllyBotEntity extends FakePlayerEntity {
 
     /**
      * Execute a step's folded break/place edits server-side, re-validated against the live world (cells
-     * may have changed since planning). Breaks drop nothing (no inventory model yet); places use a
-     * throwaway block. The nav grid isn't refreshed here — the bot performs exactly the edits the plan
-     * assumed, so the route is now physically walkable, and the next replan rebuilds the spanned chunks
-     * from the live world (so it plans over the bot's own changes).
+     * may have changed since planning). The nav grid isn't refreshed here — the bot performs exactly the
+     * edits the plan assumed, so the route is now physically walkable, and the next replan rebuilds the
+     * spanned chunks from the live world (so it plans over the bot's own changes).
+     *
+     * <p><b>Inventory deduction (PRD §10 Phase 1b/1c).</b> The bot's REAL inventory backs these actions:
+     * <ul>
+     *   <li><b>Break:</b> mined yields drop into the world and vanilla {@code ItemEntity} pickup carries
+     *       them into the bot's inventory — no extra pipeline needed. When {@code mining.consumesTools} is
+     *       on, each real break wears the bot's best tool by one use via the {@link BotInventory} adapter.</li>
+     *   <li><b>Place:</b> when {@code placement.consumesBlocks} is on, each footing draws one real placeable
+     *       block out of inventory ({@link BotInventory#consumeOnePlaceable}) and places THAT block; if the
+     *       bot ran dry the placement is skipped (the feasibility cap should have prevented planning it, and
+     *       a rare miss is netted by replan). When off, the configured conjured block is placed with infinite
+     *       supply (today's behaviour). The geometry/validity check is unchanged.</li>
+     * </ul>
      */
     private void applyEdits(StepEdits edits) {
         ServerLevel level = (ServerLevel) Worlds.of(this);
+        Config cfg = ConfigLoader.config();
+        BotInventory inv = (cfg.consumesTools() || cfg.consumesBlocks()) ? new BotInventory(this) : null;
+
         for (int i = 0; i < edits.breakCount(); i++) {
             BlockPos p = edits.breakPos(i);
-            if (!level.getBlockState(p).isAir()) WorldEdits.breakBlock(level, p);
+            BlockState target = level.getBlockState(p);
+            if (target.isAir()) continue;
+            if (inv != null && cfg.consumesTools()) inv.damageBestTool(target); // wear the tool one use
+            WorldEdits.breakBlock(level, p);
         }
         for (int i = 0; i < edits.placeCount(); i++) {
             BlockPos p = edits.placePos(i);
-            if (Replaceable.isReplaceable(level.getBlockState(p))) {
-                WorldEdits.placeBlock(level, p, PLACE_BLOCK);
+            if (!Replaceable.isReplaceable(level.getBlockState(p))) continue;
+            if (inv != null && cfg.consumesBlocks()) {
+                Block block = inv.consumeOnePlaceable();
+                if (block == null) continue; // out of blocks — skip; replan nets it
+                WorldEdits.placeBlock(level, p, block.defaultBlockState());
+            } else {
+                WorldEdits.placeBlock(level, p, placeBlock()); // conjured, infinite supply
             }
         }
     }
