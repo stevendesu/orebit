@@ -40,6 +40,18 @@ import net.minecraft.core.BlockPos;
  * speculative-edit case (without it a macro could jump through a cell the path just placed/broke) even though
  * it almost never fires (a goal-ward jump is ahead of the edits the path made behind it).
  *
+ * <h2>Forward-only edit-shrink (Option D — CUBOID-PERF-OPTIONS.md)</h2>
+ * A macro jump always travels from the start cell in one {@code (travelAxis, sign)} direction. An edit the
+ * path placed/broke <i>behind</i> the start cell along that direction is never traversed by the forward jump,
+ * so it can never invalidate it. {@link #cuboidAt} therefore takes the travel {@code sign} and the shrink only
+ * scans the <b>forward half</b> of the box ∩ edits intersection along the travel axis (from the start cell
+ * forward), keeping the <b>full orthogonal range</b> — a lateral edit within the forward run still reduces
+ * clearance and MUST be caught. This is conservative-only: it can merely <i>under</i>-shrink the unused
+ * backward travel extent (which {@code MacroJump.extentToward(forward)} and {@code nearestOrthogonalFace} never
+ * read), and never skips a forward or orthogonal edit. On an up-and-over (the path's pillar/bridge edits sit
+ * below/behind the goal-ward node) this skips the bulk of the scanned intersection — it was ~57% of search CPU
+ * before this clip.
+ *
  * <p><b>Single-threaded per search.</b> Like {@link NavGridView}, the view is used single-threaded during one
  * pathfind, so the mutable caches and pooled {@link Cuboid}s need no synchronization.
  */
@@ -129,13 +141,20 @@ public final class NavGridCuboidsView {
      * any edit inside that box — shrinks {@code out} so it excludes the offending cell. The cached base is
      * left untouched.
      *
+     * <p>The {@code (travelAxis, sign)} pair names the direction the caller's macro jump travels from this
+     * start cell; it scopes the edit-shrink to the FORWARD half of the box along that axis (Option D — see the
+     * class doc). An edit behind the start cell along travel is never traversed by the jump, so it is skipped;
+     * forward and orthogonal edits are still caught in full.
+     *
      * @param x          start cell X (absolute world block coord)
      * @param y          start cell Y (absolute world block coord)
      * @param z          start cell Z (absolute world block coord)
      * @param travelAxis one of {@link Axes#AXIS_X}, {@link Axes#AXIS_Y}, {@link Axes#AXIS_Z}
+     * @param sign       the travel direction along {@code travelAxis} ({@code -1} or {@code +1}) — scopes the
+     *                   edit-shrink to the forward half of the box (cells at/ahead of the start cell)
      * @param out        the caller-owned pooled {@link Cuboid} to populate (copied base, then shrunk)
      */
-    public void cuboidAt(int x, int y, int z, int travelAxis, Cuboid out) {
+    public void cuboidAt(int x, int y, int z, int travelAxis, int sign, Cuboid out) {
         Cuboid base = baseCuboid(x, y, z, travelAxis);
         if (!base.valid) {
             out.invalidate();
@@ -145,7 +164,7 @@ public final class NavGridCuboidsView {
         if (pathEdits == null || pathEdits.isEmpty()) {
             return;
         }
-        applyEditShrink(x, y, z, out);
+        applyEditShrink(x, y, z, travelAxis, sign, out);
     }
 
     /**
@@ -154,8 +173,15 @@ public final class NavGridCuboidsView {
      * intersection (the path's edits cluster tightly, so this is a handful of cells), trims one offending edit
      * past the nearest face, and re-scans (a trim may resolve or expose others). If a trim would exclude the
      * start cell, the box is invalidated (the caller falls back to a micro step).
+     *
+     * <p><b>Forward-only (Option D).</b> The scan is clipped along the travel axis to the FORWARD half — cells
+     * at and ahead of the start cell in {@code (travelAxis, sign)} — while keeping the full orthogonal range. An
+     * edit behind the start cell along travel is never traversed by the jump and is safely skipped; a forward
+     * edit (which shrinks the box's forward extent) and a lateral edit within the forward run (which reduces the
+     * orthogonal clearance) are still seen in full. This is conservative-only: it can only under-shrink the
+     * unused backward extent.
      */
-    private void applyEditShrink(int sx, int sy, int sz, Cuboid out) {
+    private void applyEditShrink(int sx, int sy, int sz, int travelAxis, int sign, Cuboid out) {
         int safety = (out.maxX - out.minX) + (out.maxY - out.minY) + (out.maxZ - out.minZ) + 3;
         for (int pass = 0; pass < safety; pass++) {
             // Box ∩ edits-AABB: the only cells that can hold an edit. Recomputed each pass since `out` shrinks.
@@ -165,7 +191,17 @@ public final class NavGridCuboidsView {
             int hy = Math.min(out.maxY, pathEdits.editMaxY());
             int lz = Math.max(out.minZ, pathEdits.editMinZ());
             int hz = Math.min(out.maxZ, pathEdits.editMaxZ());
-            if (lx > hx || ly > hy || lz > hz) return; // box and the edits don't overlap → nothing to shrink
+
+            // Option D: clip the TRAVEL axis to the forward half (cells at/ahead of the start cell along
+            // (travelAxis, sign)); keep the FULL orthogonal range so lateral edits within the run are caught.
+            // Conservative-only — only the unused backward extent is skipped, never a forward/orthogonal edit.
+            switch (travelAxis) {
+                case Axes.AXIS_X: if (sign > 0) lx = Math.max(lx, sx); else hx = Math.min(hx, sx); break;
+                case Axes.AXIS_Y: if (sign > 0) ly = Math.max(ly, sy); else hy = Math.min(hy, sy); break;
+                default:          if (sign > 0) lz = Math.max(lz, sz); else hz = Math.min(hz, sz); break;
+            }
+
+            if (lx > hx || ly > hy || lz > hz) return; // box and the (forward) edits don't overlap → nothing to shrink
 
             long offending = findEditInside(lx, hx, ly, hy, lz, hz);
             if (offending == NO_EDIT) return; // box is clean — done

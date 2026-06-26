@@ -87,7 +87,7 @@ public final class MineDown implements Movement {
         float moveCost = COST + ctx.breakCost(ctx.descriptorAt(x, y, z));
 
         Cuboid box = ctx.cuboidScratch();
-        cuboids.cuboidAt(x, y, z, Axes.AXIS_Y, box);
+        cuboids.cuboidAt(x, y, z, Axes.AXIS_Y, -1, box); // travel -Y (digs straight down)
         int J = MacroJump.steps(box, x, y, z, Axes.AXIS_Y, -1, moveCost,
                 ctx.goalX(), ctx.goalY(), ctx.goalZ());
 

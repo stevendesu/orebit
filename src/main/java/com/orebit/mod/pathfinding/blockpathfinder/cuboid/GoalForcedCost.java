@@ -175,7 +175,9 @@ public final class GoalForcedCost {
                 // Resolve the uniform box that adjacent cell lives in, measured orthogonal to the approach
                 // axis (a goal-ward jump along this face travels `axis`).
                 Cuboid box = SCRATCH.get();
-                cuboids.cuboidAt(ax, ay, az, axis, box);
+                // Pass this face's approach sign; the probe runs once at search START with pathEdits empty, so
+                // applyEditShrink early-returns and the sign is a no-op here — passed correct for completeness.
+                cuboids.cuboidAt(ax, ay, az, axis, sign, box);
                 if (!box.isValid()) {
                     continue; // unbuilt / out-of-corridor — no proven forced approach on this face
                 }

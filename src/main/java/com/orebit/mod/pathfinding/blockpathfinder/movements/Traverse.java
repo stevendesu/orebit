@@ -154,7 +154,7 @@ public final class Traverse implements Movement {
         // navtypes with the search's speculative PathEdits applied. cuboidScratch() is a per-context reusable
         // Cuboid — no per-query allocation (HOT-PATH-NO-ALLOC).
         Cuboid box = ctx.cuboidScratch();
-        cuboids.cuboidAt(nx, y, nz, axis, box);
+        cuboids.cuboidAt(nx, y, nz, axis, sign, box); // cardinal travel direction (Option D forward clip)
 
         // Jump length, bounded by the box edge (HARD), goal projection (HARD), and the cost-normalised
         // escape-hedge (NON-NEGOTIABLE 2). MacroJump divides the orthogonal face by the move cost — never
