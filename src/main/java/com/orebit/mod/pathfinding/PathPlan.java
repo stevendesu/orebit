@@ -122,6 +122,14 @@ public final class PathPlan {
     private PathStatus status;
     /** The bot's last reported floor cell (the block-A* start for the next replan). */
     private BlockPos botFloor;
+    /**
+     * The current window's block target + corridor (set by {@link #replanBlock}), exposed via
+     * {@link #currentWindowTarget()} / {@link #currentCorridor()} so {@code /bot trace} can re-run the SAME
+     * windowed block search the driver runs — with the real HPA*-derived corridor, and thus cuboids,
+     * macro-ops, and the goal premium, all active (a raw cornerless trace disables that whole layer).
+     */
+    private BlockPos windowTargetPos;
+    private RegionBound windowCorridor;
 
     /**
      * Plan a fresh two-tier path from {@code startFloor} to {@code goalFloor}. Plans the coarse region
@@ -175,6 +183,25 @@ public final class PathPlan {
     /** The driver's current lifecycle state. */
     public PathStatus status() {
         return status;
+    }
+
+    /**
+     * The current window's block-A* target — the real {@code goalFloor} when the goal's region is within the
+     * window, else the far region's standable centre (HPA-IMPLEMENTATION.md §9). Exposed so {@code /bot trace}
+     * can re-run the SAME windowed block search the driver ran (with the corridor → cuboids, macro-ops, and
+     * the goal premium active). {@code null} when no skeleton was produced (no built ground at the start).
+     */
+    public BlockPos currentWindowTarget() {
+        return windowTargetPos;
+    }
+
+    /**
+     * The current window's corridor box (the {@link RegionBound} the windowed block-A* is confined to).
+     * Exposed for {@code /bot trace} alongside {@link #currentWindowTarget()}; {@code null} when no skeleton
+     * was produced.
+     */
+    public RegionBound currentCorridor() {
+        return windowCorridor;
     }
 
     /** {@code true} once the bot's floor is within the block tier's goal tolerance of the real goal. */
@@ -317,6 +344,8 @@ public final class PathPlan {
         final BlockPos target = windowTarget();
         final NavGridView grid = new NavGridView(level);
         final RegionBound bound = corridorBound(target);
+        this.windowTargetPos = target; // expose this window's target + corridor for /bot trace
+        this.windowCorridor = bound;
 
         if (DEBUG) {
             OrebitCommon.LOGGER.info(
