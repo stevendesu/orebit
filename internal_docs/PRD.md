@@ -471,6 +471,12 @@ adapters are filled in over time.
 >     (`tasks/`, `ai/`, `behavior/`, `requirements/` — `GoalDispatcher`/`TaskExecutor`/`AIStateMachine`);
 >     LLM intent (`integration/` — chat → `InterpretedIntent`, intent-only never planning); commands +
 >     configurability; behavior/memory/social (`memory/`, `relationships/`, `sim/`).
+>   - **Pathfinding completeness + quality backlog (Phase 4 follow-on — refines the already-built block/region
+>     tiers; enumerated in `AGENCY-LAYER-PLAN.md` + `CUBOID-PERF-OPTIONS.md`):** more move types
+>     (DiagonalAscend/Parkour/Swim/Crawl); portal / cross-dimension traversal; background-threading the search;
+>     a debug-view enable/disable command + split HPA\*-center vs A\*-exact debug particles; and the deferred
+>     pathfinding-QUALITY items (stronger forced-cost premium, dominance/symmetry pruning, the high-weight
+>     "dig out of the trap" escalation, the SoA cuboid cache).
 > - **Near-term triage (adjacent, not a phase):** HPA\* far-goal / unloaded-chunk handling (an *exploration*
 >   mode for goals past the loaded radius); time-based search cap. See the agency-layer plan.
 
