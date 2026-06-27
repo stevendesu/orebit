@@ -21,9 +21,12 @@ import java.util.Arrays;
  *       {@link com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder}'s {@code Nodes} table;</li>
  *   <li>parallel {@code int[] rx/ry/rz} of each row's region coords, so a planner reading a node's center
  *       never has to unpack the key;</li>
- *   <li>{@code byte[] face} — six face buckets per row, FLATTENED ({@code face[row*6 + f]}); one
- *       {@code byte} per face (6 B/node), <b>not</b> bit-packed in RAM (favour-cpu-over-ram — the nibble
- *       packing of {@link CostCodec} is only the on-disk form, §11);</li>
+ *   <li>{@code byte[] face} — <b>twelve</b> buckets per row: six faces × two directions ({@link #ENTER}
+ *       face→center, {@link #EXIT} center→face), FLATTENED ({@code face[row*12 + dir*6 + f]}); one
+ *       {@code byte} each (12 B/node), <b>not</b> bit-packed in RAM (favour-cpu-over-ram — the nibble
+ *       packing of {@link CostCodec} is only the on-disk form, §11, where it is 6 B/node). The two
+ *       directions exist because a single per-face scalar can't express the asymmetry of vertical air travel
+ *       (fall in cheap, pillar out expensive) — see {@link #ENTER};</li>
  *   <li>{@code boolean[] built} — whether a node's faces were actually computed (a real leaf/merge) vs an
  *       interned-but-default placeholder. The planner returns an optimistic admissible default (§6) for a
  *       node that is interned-but-{@code !built}.</li>
@@ -43,8 +46,23 @@ import java.util.Arrays;
  */
 public final class CostPyramid {
 
-    /** Six face slots per node (canonical face order — see {@link RegionAddress}). */
+    /** Six faces per node (canonical face order — see {@link RegionAddress}). */
     private static final int FACES = 6;
+
+    /**
+     * Two directions stored PER FACE: {@link #ENTER} (face→center, going INTO the region through that face)
+     * and {@link #EXIT} (center→face, going OUT through it). A single scalar can't express the directional
+     * asymmetry of vertical air travel — falling IN through the top is cheap, pillaring OUT through it is
+     * expensive — and because a boundary crossing sums two facing halves, one scalar forces up- and
+     * down-crossings to be equal. For symmetric terrain (the A*-computed mixed leaves, and uniform water/
+     * stone) enter == exit (the inverse walk costs the same), so they are simply set together via
+     * {@link #setFaceBoth} — no second computation. Only the all-air leaf sets them apart.
+     */
+    public static final int ENTER = 0;
+    public static final int EXIT = 1;
+    private static final int DIRS = 2;
+    /** Stored values per row: 6 faces × 2 directions = 12 (one {@code byte} each — RAM is cheap, §14). */
+    private static final int SLOTS_PER_ROW = FACES * DIRS;
 
     /** Initial per-level map capacity (power of two); grows by doubling at 3/4 load. */
     private static final int INITIAL_MAP_CAP = 256;
@@ -67,7 +85,7 @@ public final class CostPyramid {
 
         // ---- row table (append-only; row index is stable) ----
         int[] rx, ry, rz;        // region coords per row (planning never unpacks the key)
-        byte[] face;             // 6 buckets per row, FLATTENED: face[row*6 + f] = bucket 0..15
+        byte[] face;             // 12 buckets/row, FLATTENED: face[row*12 + dir*6 + f] (dir ENTER=0/EXIT=1)
         boolean[] built;         // faces actually computed (vs interned default placeholder)
         int count;
 
@@ -81,7 +99,7 @@ public final class CostPyramid {
             rx = new int[INITIAL_ROW_CAP];
             ry = new int[INITIAL_ROW_CAP];
             rz = new int[INITIAL_ROW_CAP];
-            face = new byte[INITIAL_ROW_CAP * FACES];
+            face = new byte[INITIAL_ROW_CAP * SLOTS_PER_ROW];
             built = new boolean[INITIAL_ROW_CAP];
         }
 
@@ -117,8 +135,8 @@ public final class CostPyramid {
             int n = count;
             if (n == rx.length) growRows();
             rx[n] = cx; ry[n] = cy; rz[n] = cz;
-            int base = n * FACES;
-            for (int f = 0; f < FACES; f++) face[base + f] = (byte) CostCodec.BUCKET_INF;
+            int base = n * SLOTS_PER_ROW;
+            for (int s = 0; s < SLOTS_PER_ROW; s++) face[base + s] = (byte) CostCodec.BUCKET_INF;
             built[n] = false;
             count = n + 1;
             return n;
@@ -129,7 +147,7 @@ public final class CostPyramid {
             rx = Arrays.copyOf(rx, cap);
             ry = Arrays.copyOf(ry, cap);
             rz = Arrays.copyOf(rz, cap);
-            face = Arrays.copyOf(face, cap * FACES);
+            face = Arrays.copyOf(face, cap * SLOTS_PER_ROW);
             built = Arrays.copyOf(built, cap);
         }
 
@@ -202,19 +220,31 @@ public final class CostPyramid {
         return l.rowIfPresent(RegionAddress.packLevelKey(rx, ry, rz));
     }
 
-    /** The raw face bucket ({@code 0..15}) of {@code face} (0..5) for an interned row. */
-    public int faceBucket(int level, int row, int face) {
-        return levels[level].face[row * FACES + face] & 0xFF;
+    /** The raw bucket ({@code 0..15}) of {@code face} (0..5) in direction {@code dir} ({@link #ENTER}/{@link #EXIT}). */
+    public int faceBucket(int level, int row, int face, int dir) {
+        return levels[level].face[row * SLOTS_PER_ROW + dir * FACES + face] & 0xFF;
     }
 
-    /** Set the face bucket ({@code 0..15}) of {@code face} (0..5) for an interned row. */
-    public void setFaceBucket(int level, int row, int face, int bucket) {
-        levels[level].face[row * FACES + face] = (byte) bucket;
+    /** Set the bucket ({@code 0..15}) of {@code face} (0..5) in direction {@code dir} ({@link #ENTER}/{@link #EXIT}). */
+    public void setFaceBucket(int level, int row, int face, int dir, int bucket) {
+        levels[level].face[row * SLOTS_PER_ROW + dir * FACES + face] = (byte) bucket;
     }
 
-    /** Dequantized tick cost of {@code face} (0..5) for an interned row ({@link CostCodec#dequantize}). */
-    public float faceCost(int level, int row, int face) {
-        return CostCodec.dequantize(levels[level].face[row * FACES + face] & 0xFF);
+    /**
+     * Set BOTH directions of {@code face} (0..5) to the same {@code bucket} — the symmetric case (A*-computed
+     * mixed leaves, uniform water/stone, defaults). The asymmetric all-air leaf uses {@link #setFaceBucket}
+     * per direction instead.
+     */
+    public void setFaceBoth(int level, int row, int face, int bucket) {
+        byte[] f = levels[level].face;
+        int base = row * SLOTS_PER_ROW;
+        f[base + ENTER * FACES + face] = (byte) bucket;
+        f[base + EXIT * FACES + face] = (byte) bucket;
+    }
+
+    /** Dequantized tick cost of {@code face} (0..5) in direction {@code dir} ({@link CostCodec#dequantize}). */
+    public float faceCost(int level, int row, int face, int dir) {
+        return CostCodec.dequantize(levels[level].face[row * SLOTS_PER_ROW + dir * FACES + face] & 0xFF);
     }
 
     /**

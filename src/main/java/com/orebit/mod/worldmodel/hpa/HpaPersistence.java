@@ -33,17 +33,18 @@ import java.io.UncheckedIOException;
  *   per level:
  *     level   : varint   (0..MAX_LEVEL)
  *     nRows   : varint   = interned row count at this level
- *     per row (the §11 record — "(rx,ry,rz, 6 nibbles packed into 3 bytes, built bit)"):
+ *     per row (the §11 record, now DIRECTIONAL — "(rx,ry,rz, 12 nibbles packed into 6 bytes, built bit)"):
  *       rx    : varint (zig-zag)   region X (may be negative)
  *       ry    : varint (zig-zag)   region Y
  *       rz    : varint (zig-zag)   region Z
- *       faces : 3 bytes            6 nibbles, face[2k] = high nibble of byte k, face[2k+1] = low nibble
+ *       enter : 3 bytes            6 ENTER nibbles, face[2k] = high nibble of byte k, face[2k+1] = low
+ *       exit  : 3 bytes            6 EXIT  nibbles, same packing
  *       flags : 1 byte             bit0 = built
  * </pre>
  *
  * <p><b>Compactness.</b> Coords are zig-zag varints (small near-origin regions cost 1–2 bytes each); the
- * six face buckets are exactly 3 bytes (the {@link CostCodec} nibble form); the built bit is one flags
- * byte → ~10–13 bytes/node typical. This is the form the deferred {@code SavedData} will hand to NBT as a
+ * twelve face buckets (6 ENTER + 6 EXIT — {@link CostPyramid#ENTER}) are exactly 6 bytes (the
+ * {@link CostCodec} nibble form); the built bit is one flags byte → ~13–16 bytes/node typical. This is the form the deferred {@code SavedData} will hand to NBT as a
  * single {@code byte[]} blob (NOT a per-node compound — that would blow the disk budget). Target ~2% of
  * save (PRD §6.6); measured by the disk-budget check (PRD §11) once both this and the resource octree
  * exist.
@@ -61,9 +62,9 @@ public final class HpaPersistence {
     public static final int MAGIC = 0x4F485041; // 'O' 'H' 'P' 'A'
 
     /** On-disk format version; bump on any layout change so an old blob is detected and discarded. */
-    public static final byte FORMAT_VERSION = 1;
+    public static final byte FORMAT_VERSION = 2; // v2: 12 directional nibbles/node (was 6 symmetric)
 
-    /** Six face buckets pack into this many bytes on disk (two nibbles per byte). */
+    /** Six face buckets in ONE direction pack into this many bytes on disk (two nibbles per byte). */
     private static final int FACE_BYTES = 3;
 
     /** {@code flags} byte bit: the node's faces were actually computed (vs an interned default). */
@@ -104,11 +105,13 @@ public final class HpaPersistence {
                     writeZigZag(out, pyramid.rowRX(level, row));
                     writeZigZag(out, pyramid.rowRY(level, row));
                     writeZigZag(out, pyramid.rowRZ(level, row));
-                    // 6 nibbles → 3 bytes (face[2k] high, face[2k+1] low).
-                    for (int b = 0; b < FACE_BYTES; b++) {
-                        int hi = pyramid.faceBucket(level, row, b * 2) & 0x0F;
-                        int lo = pyramid.faceBucket(level, row, b * 2 + 1) & 0x0F;
-                        out.writeByte((hi << 4) | lo);
+                    // 12 nibbles → 6 bytes: ENTER faces 0..5 (3 bytes), then EXIT faces 0..5 (3 bytes).
+                    for (int dir = 0; dir < 2; dir++) {
+                        for (int b = 0; b < FACE_BYTES; b++) {
+                            int hi = pyramid.faceBucket(level, row, b * 2, dir) & 0x0F;
+                            int lo = pyramid.faceBucket(level, row, b * 2 + 1, dir) & 0x0F;
+                            out.writeByte((hi << 4) | lo);
+                        }
                     }
                     out.writeByte(pyramid.isBuilt(level, row) ? FLAG_BUILT : 0);
                 }
@@ -164,9 +167,14 @@ public final class HpaPersistence {
                     int rx = readZigZag(in);
                     int ry = readZigZag(in);
                     int rz = readZigZag(in);
-                    int b0 = in.readUnsignedByte();
-                    int b1 = in.readUnsignedByte();
-                    int b2 = in.readUnsignedByte();
+                    // 6 face bytes: ENTER (e0,e1,e2) then EXIT (x0,x1,x2). Read all (keep the stream aligned)
+                    // before the level-skip check below.
+                    int e0 = in.readUnsignedByte();
+                    int e1 = in.readUnsignedByte();
+                    int e2 = in.readUnsignedByte();
+                    int x0 = in.readUnsignedByte();
+                    int x1 = in.readUnsignedByte();
+                    int x2 = in.readUnsignedByte();
                     int flags = in.readUnsignedByte();
 
                     // Skip rows for a level the addressing model no longer admits (defensive against a
@@ -174,12 +182,18 @@ public final class HpaPersistence {
                     if (level < 0 || level > RegionAddress.MAX_LEVEL) continue;
 
                     int row = pyramid.rowFor(level, rx, ry, rz);
-                    pyramid.setFaceBucket(level, row, 0, (b0 >> 4) & 0x0F);
-                    pyramid.setFaceBucket(level, row, 1, b0 & 0x0F);
-                    pyramid.setFaceBucket(level, row, 2, (b1 >> 4) & 0x0F);
-                    pyramid.setFaceBucket(level, row, 3, b1 & 0x0F);
-                    pyramid.setFaceBucket(level, row, 4, (b2 >> 4) & 0x0F);
-                    pyramid.setFaceBucket(level, row, 5, b2 & 0x0F);
+                    pyramid.setFaceBucket(level, row, 0, CostPyramid.ENTER, (e0 >> 4) & 0x0F);
+                    pyramid.setFaceBucket(level, row, 1, CostPyramid.ENTER, e0 & 0x0F);
+                    pyramid.setFaceBucket(level, row, 2, CostPyramid.ENTER, (e1 >> 4) & 0x0F);
+                    pyramid.setFaceBucket(level, row, 3, CostPyramid.ENTER, e1 & 0x0F);
+                    pyramid.setFaceBucket(level, row, 4, CostPyramid.ENTER, (e2 >> 4) & 0x0F);
+                    pyramid.setFaceBucket(level, row, 5, CostPyramid.ENTER, e2 & 0x0F);
+                    pyramid.setFaceBucket(level, row, 0, CostPyramid.EXIT, (x0 >> 4) & 0x0F);
+                    pyramid.setFaceBucket(level, row, 1, CostPyramid.EXIT, x0 & 0x0F);
+                    pyramid.setFaceBucket(level, row, 2, CostPyramid.EXIT, (x1 >> 4) & 0x0F);
+                    pyramid.setFaceBucket(level, row, 3, CostPyramid.EXIT, x1 & 0x0F);
+                    pyramid.setFaceBucket(level, row, 4, CostPyramid.EXIT, (x2 >> 4) & 0x0F);
+                    pyramid.setFaceBucket(level, row, 5, CostPyramid.EXIT, x2 & 0x0F);
                     pyramid.setBuilt(level, row, (flags & FLAG_BUILT) != 0);
                     restored++;
                 }

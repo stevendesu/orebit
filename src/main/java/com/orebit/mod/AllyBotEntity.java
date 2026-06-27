@@ -212,6 +212,8 @@ public class AllyBotEntity extends FakePlayerEntity {
 
         this.xxa = 0.0f;
         this.yya = this.isInWater() ? 1.0f : 0.0f;
+        this.setJumping(false);   // discrete land jumps use jumpFromGround(); swim following re-enables this
+        this.setSprinting(false); // ditto — buoyancy + sprint-swim are refined per-step in steerAlongPath
 
         switch (mode) {
             case STAY -> holdPosition();
@@ -446,7 +448,15 @@ public class AllyBotEntity extends FakePlayerEntity {
         // scanning from the end also absorbs any overshoot.
         BlockPos foot = this.blockPosition();
         for (int j = path.size() - 1; j >= waypointIndex; j--) {
-            if (foot.equals(path.waypoint(j))) {
+            BlockPos w = path.waypoint(j);
+            boolean swimStep = path.movement(j) == MovementRegistry.SWIM
+                    || path.movement(j) == MovementRegistry.SPRINT_SWIM;
+            // While swimming the bot's Y bobs with buoyancy, so an exact 3-D block match can stall the
+            // cursor; for a swim step match horizontally with a ±1 vertical tolerance instead.
+            boolean reached = swimStep
+                    ? (foot.getX() == w.getX() && foot.getZ() == w.getZ() && Math.abs(foot.getY() - w.getY()) <= 1)
+                    : foot.equals(w);
+            if (reached) {
                 waypointIndex = j + 1;
                 break;
             }
@@ -478,6 +488,32 @@ public class AllyBotEntity extends FakePlayerEntity {
         this.setYBodyRot(yaw);
         this.setYHeadRot(yaw);
         this.zza = 1.0f;
+
+        // Swim vertical control — by DIRECT velocity, not the `yya` input. In water the movement input is
+        // weak: getInputVector NORMALIZES (xxa,yya,zza) and scales by the small water speed, so with zza=1 a
+        // yya=-1 yields only ~-0.02/tick downward — and prone sprint-swim is near-neutral buoyancy, so that
+        // tiny push is cancelled and the bot just hovers (it never descended to a submerged target). Instead
+        // drive deltaMovement.y straight toward the target depth, clamped to a swim rate: zza+yaw still propel
+        // horizontally, and aiStep's drag leaves the set velocity essentially intact, so the bot reliably
+        // sinks/rises to track the planned cell. Normal (surface) swim uses the same tracking — it converges
+        // on the surface cell and self-corrects against the gentle sink.
+        boolean normalSwim = path.movement(waypointIndex) == MovementRegistry.SWIM;
+        boolean sprintSwim = path.movement(waypointIndex) == MovementRegistry.SPRINT_SWIM;
+        if (normalSwim || sprintSwim) {
+            this.setSprinting(sprintSwim); // submerged + sprinting → vanilla prone sprint-swim (5.612 b/s)
+            this.setJumping(false);
+            this.yya = 0.0f;
+            double dyTarget = wp.getY() - this.getY();
+            double vy = Math.max(-0.20, Math.min(0.20, dyTarget * 0.3)); // proportional, clamped swim rate
+            Vec3 dm = this.getDeltaMovement();
+            this.setDeltaMovement(dm.x, vy, dm.z);
+            if (DEBUG_PATH) {
+                OrebitCommon.LOGGER.info("[Orebit] swim {} target={} botY={} dy={} inWater={} swimming={} vy->{}",
+                        sprintSwim ? "SPRINT" : "normal", compact(wp), String.format("%.2f", this.getY()),
+                        String.format("%.2f", dyTarget), this.isInWater(), this.isSwimming(),
+                        String.format("%.3f", vy));
+            }
+        }
 
         // Jump only when the step the planner chose is an Ascend (a real jump-up onto a full block,
         // head-clearance already verified). A Traverse step-assist (slab/stair/snow lip) is auto-stepped
