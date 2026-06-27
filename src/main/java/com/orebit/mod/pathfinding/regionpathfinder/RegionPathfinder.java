@@ -4,6 +4,7 @@ import java.util.Arrays;
 
 import com.orebit.mod.pathfinding.regionpathfinder.heuristics.SimpleRegionHeuristic;
 import com.orebit.mod.worldmodel.hpa.CostCodec;
+import com.orebit.mod.worldmodel.hpa.CostPyramid;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
 
@@ -167,8 +168,11 @@ public final class RegionPathfinder {
 
                 grid.ensureLeaf(nrx, nry, nrz);
 
-                final float out = grid.faceCost(0, crx, cry, crz, face);
-                final float in = grid.faceCost(0, nrx, nry, nrz, RegionAddress.opposite(face));
+                // Directional boundary sum (PRD §6.5): leaving N through `face` is N's EXIT half; entering M
+                // through the opposite face is M's ENTER half. The two differ for air (pillar-out expensive,
+                // fall-in cheap), which is what stops the region A* from treating air as a cheap up/over highway.
+                final float out = grid.faceCost(0, crx, cry, crz, face, CostPyramid.EXIT);
+                final float in = grid.faceCost(0, nrx, nry, nrz, RegionAddress.opposite(face), CostPyramid.ENTER);
                 final float edge = out + in;
                 // INF boundary → impassable; never relax across it.
                 if (edge >= CostCodec.COST_INF) continue;

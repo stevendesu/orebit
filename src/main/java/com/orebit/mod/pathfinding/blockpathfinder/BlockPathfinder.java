@@ -59,6 +59,13 @@ public final class BlockPathfinder {
     public static boolean LOG_TIMING = true;
 
     /**
+     * Node count of the most-recently-finished {@link #findPath} on this thread — an instrumentation seam so
+     * a caller (the HPA* {@code LeafCostComputer}) can attribute per-search expansions without parsing the
+     * timing log. Set at every return; one static write per search, no hot-loop cost. Temporary diagnostic.
+     */
+    public static int LAST_EXPANSIONS;
+
+    /**
      * Step-by-step search trace sink — when non-null AND {@link #TRACE} is on, every node expansion and every
      * candidate (with its accept/reject reason) is written here, one line each, for OFFLINE analysis of why a
      * search explores what it does (the open-air-pillar investigation). Format (space-separated, greppable):
@@ -464,6 +471,7 @@ public final class BlockPathfinder {
                                          BotCaps caps, RegionBound bound,
                                          MovementContext.InventoryView inventory) {
         final long t0 = System.nanoTime();
+        LAST_EXPANSIONS = 0; // reset the instrumentation seam (covers the early no-start-ground return)
         final int sx = startFloor.getX(), sy = startFloor.getY(), sz = startFloor.getZ();
         final int gx = goalFloor.getX(), gy = goalFloor.getY(), gz = goalFloor.getZ();
 
@@ -564,6 +572,8 @@ public final class BlockPathfinder {
                 tier1.get(mi).candidates(ctx, cx, cy, cz, relaxer);
             }
         }
+
+        LAST_EXPANSIONS = expansions; // instrumentation seam — the just-finished search's node count
 
         if (reachedRow == -1) {
             if (DEBUG) explainFailure(ctx, sx, sy, sz, gx, gy, gz, expansions, budgetHit, bestX, bestY, bestZ, bound);

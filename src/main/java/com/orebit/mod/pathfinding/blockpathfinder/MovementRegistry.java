@@ -8,6 +8,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.movements.Diagonal;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Fall;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.MineDown;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Pillar;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.SprintSwim;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.Swim;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse;
 
 /**
@@ -27,12 +29,15 @@ public final class MovementRegistry {
     public static final Movement FALL = new Fall();
     public static final Movement PILLAR = new Pillar();
     public static final Movement MINE_DOWN = new MineDown();
+    public static final Movement SWIM = new Swim();
+    public static final Movement SPRINT_SWIM = new SprintSwim();
 
     /**
-     * Tier 1 (ground): walk + step-assist, diagonal walk, jump-up-1, step-down-1, safe drop, and the
-     * vertical-in-place pair pillar-up / mine-down. Pillar/MineDown self-gate on place/break caps, so a
-     * walk-only bot still gets only the plain ground moves.
+     * Tier 1 (ground + water): walk + step-assist, diagonal walk, jump-up-1, step-down-1, safe drop, the
+     * vertical-in-place pair pillar-up / mine-down, and the water pair normal-swim / sprint-swim.
+     * Pillar/MineDown self-gate on place/break caps; the swim moves self-gate on the presence of water (a
+     * dry world never emits them), so a walk-only bot on land still gets only the plain ground moves.
      */
     public static final List<Movement> TIER1 =
-            List.of(TRAVERSE, DIAGONAL, ASCEND, DESCEND, FALL, PILLAR, MINE_DOWN);
+            List.of(TRAVERSE, DIAGONAL, ASCEND, DESCEND, FALL, PILLAR, MINE_DOWN, SWIM, SPRINT_SWIM);
 }

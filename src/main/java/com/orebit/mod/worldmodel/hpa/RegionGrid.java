@@ -144,25 +144,28 @@ public final class RegionGrid {
     // ---------------------------------------------------------------------------------------------------
 
     /**
-     * The dequantized tick cost of crossing from {@code face} (0..5, canonical {@link RegionAddress} order)
-     * to the center of node {@code (level, rx, ry, rz)} — the <b>single chokepoint</b> the region A* reads.
+     * The dequantized tick cost of moving between {@code face} (0..5, canonical {@link RegionAddress} order)
+     * and the center of node {@code (level, rx, ry, rz)} in direction {@code dir} ({@link CostPyramid#ENTER}
+     * face→center, {@link CostPyramid#EXIT} center→face) — the <b>single chokepoint</b> the region A* reads.
+     * The direction matters because vertical air travel is asymmetric (cheap to fall in, expensive to pillar
+     * out); a region crossing sums one node's {@code EXIT} half and the neighbour's {@code ENTER} half.
      *
      * <p>Returns the built cost if the node was actually computed; otherwise the optimistic admissible
      * default (HPA-IMPLEMENTATION.md §6): {@code AIR_TRANSIT_TICKS · (side / LEAF_SIZE)}, i.e. a free walk
-     * across the node, scaled by its side. The default keeps the region heuristic admissible over
-     * unexplored/unloaded terrain; the live grid refines it on approach.
+     * across the node, scaled by its side — direction-agnostic, since an unexplored node's terrain is unknown
+     * and optimism must hold both ways to keep the heuristic admissible.
      *
      * <p>Allocation-free: a single {@link CostPyramid#rowIfPresent} probe (no intern, no boxing) plus a
      * dequantize, or the arithmetic default.
      */
-    public float faceCost(int level, int rx, int ry, int rz, int face) {
+    public float faceCost(int level, int rx, int ry, int rz, int face, int dir) {
         int row = pyramid.rowIfPresent(level, rx, ry, rz);
         if (row != -1 && pyramid.isBuilt(level, row)) {
             // A built coarse node can still carry BUCKET_INF on a face no bordering child built up
             // (PyramidMerger §7): treat that as "unknown → use the optimistic default", NOT impassable.
             // Leaf faces are never BUCKET_INF (LeafCostComputer §5), so level-0 reads never hit this.
-            if (pyramid.faceBucket(level, row, face) != CostCodec.BUCKET_INF) {
-                return pyramid.faceCost(level, row, face);
+            if (pyramid.faceBucket(level, row, face, dir) != CostCodec.BUCKET_INF) {
+                return pyramid.faceCost(level, row, face, dir);
             }
         }
         return defaultFaceCost(level);
