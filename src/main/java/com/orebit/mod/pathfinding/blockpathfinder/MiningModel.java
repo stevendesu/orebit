@@ -314,23 +314,24 @@ public final class MiningModel {
 
         /**
          * The feasibility GATE the planner's {@link MovementContext#breakable} consults: can this bot mine a
-         * block of this descriptor at all? True only when the bot may break, the block is breakable geometry,
-         * its quantized hardness is within the configured cap, AND (when the block requires a correct tool)
-         * the bot actually carries a tool of the right category. When the bot has NO suitable tool but the
-         * block doesn't require one, it still mines (bare-hand / slow), per the AGENCY-LAYER-PLAN rule —
-         * "no suitable tool" is not "unmineable" unless hardness exceeds the cap.
+         * block of this descriptor <i>at all</i>? True when the bot may break, the block is breakable geometry
+         * (solid, non-fluid, not the {@link NavBlock#hardness} 255 unbreakable sentinel), and its quantized
+         * hardness is within the configured {@code maxBreakHardness} cap.
+         *
+         * <p><b>Tool is NOT a feasibility gate</b> (the stone-bare-hand fix). A block whose {@code
+         * requiresCorrectToolForDrops()} bit is set ({@link NavBlock#toolRequired}) — stone, ore, obsidian —
+         * is still <i>breakable</i> bare-handed; that flag governs DROPS, not breakability. The missing tool
+         * only inflates the break TIME: {@link #ticksFor} already applies the vanilla 5× ({@link #HARVEST_NO})
+         * harvest multiplier to a tool-required block mined without the matching tool, so the planner sees it
+         * as expensive (a long, drop-less dig) and routes around it when any cheaper path exists — but it is
+         * NOT walled off, so a bot with only its hands can still mine straight up out of a cave when that is
+         * the only way through. The {@code maxBreakHardness} config cap remains the lever for forbidding the
+         * truly absurd (set it below a block's hardness to make that block hard-unmineable for this bot).
          */
         public boolean canMine(long descriptor) {
             if (!canBreak) return false;
             if (!NavBlock.isBreakable(descriptor)) return false;          // air/plant/fluid/unbreakable
-            if (NavBlock.hardness(descriptor) > maxBreakHardness) return false;
-            if (NavBlock.toolRequired(descriptor)) {
-                // Needs a correct tool to make progress (e.g. obsidian/ore): the bot must carry one of the
-                // block's tool category. Without it the block is effectively unmineable (the 5× penalty on a
-                // tool-required block yields no drops and absurd time), so the planner routes around it.
-                return tierForCategory[NavBlock.tool(descriptor)] != Tier.BARE.ordinal();
-            }
-            return true;
+            return NavBlock.hardness(descriptor) <= maxBreakHardness;
         }
     }
 
