@@ -369,8 +369,30 @@ public final class MovementContext {
     public boolean passable(long d) {
         // Geometric "nothing collides" (the precomputed bit) AND no fluid. The fluid exclusion lives HERE,
         // at the movement layer, not in the bit: water is geometrically passable (you can float-walk it),
-        // but Tier-1 has no swim/water cost yet, so we keep treating a fluid cell as non-clear for now.
+        // but the WALK moves have no water cost, so a walker still treats a fluid cell as non-clear. The
+        // SWIM moves use water() (below) for the cells passable() rejects for being water.
         return NavBlock.isPassable(d) && NavBlock.fluid(d) == 0;
+    }
+
+    /**
+     * Can the bot's body occupy this cell <b>while swimming</b> — a full water cell (no collision, holds
+     * water)? The swim counterpart to {@link #passable}, which deliberately EXCLUDES fluids: surface- and
+     * submerged-swim need exactly the cells {@code passable} rejects for being water. Lava (fluid 3) is
+     * excluded — never swimmable. A <i>waterlogged solid</i> (a waterlogged slab/stair: water fluid
+     * <b>plus</b> collision geometry) is also excluded — the bot's feet can't enter it — by the
+     * {@link NavBlock#isPassable empty-shape} requirement, so this is "full water you can float in," not
+     * merely "water is present." Reads the path-edit diff like the other predicates (a placed block reads
+     * as cobblestone, a broken cell as air — neither is water).
+     */
+    public boolean water(int x, int y, int z) {
+        return water(descriptorAt(x, y, z));
+    }
+
+    /** {@link #water(int, int, int)} on an already-read descriptor (read-once form). */
+    public boolean water(long d) {
+        // FLUID_WATER == 1 (low fluid bit set, high/lava bit clear) AND no collision (empty shape) — a full
+        // water cell the bot can float in, not a waterlogged solid.
+        return NavBlock.fluid(d) == 1 && NavBlock.isPassable(d);
     }
 
     /**

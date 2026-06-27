@@ -148,7 +148,11 @@ public final class PyramidMerger {
         boolean anyChildBuilt = false;
 
         for (int f = 0; f < 6; f++) {
-            float bestCrossing = Float.POSITIVE_INFINITY;
+            // Roll up BOTH directions (PRD §6.5 / directional faces): the cheapest ENTER and the cheapest EXIT
+            // through this face among bordering children. The asymmetry propagates up — e.g. if every child
+            // bordering the +Y face is air (expensive EXIT, cheap ENTER), so is the parent.
+            float bestEnter = Float.POSITIVE_INFINITY;
+            float bestExit = Float.POSITIVE_INFINITY;
             boolean borderingBuilt = false;
 
             for (int i = 0; i < children; i++) {
@@ -163,13 +167,16 @@ public final class PyramidMerger {
                 if (p.isBuilt(childLevel, childRow)) {
                     anyChildBuilt = true;
                     borderingBuilt = true;
-                    float c = p.faceCost(childLevel, childRow, f);
-                    if (c < bestCrossing) bestCrossing = c;
+                    float ce = p.faceCost(childLevel, childRow, f, CostPyramid.ENTER);
+                    if (ce < bestEnter) bestEnter = ce;
+                    float cx = p.faceCost(childLevel, childRow, f, CostPyramid.EXIT);
+                    if (cx < bestExit) bestExit = cx;
                 }
             }
 
             if (borderingBuilt) {
-                p.setFaceBucket(parentLevel, parentRow, f, CostCodec.quantize(bestCrossing + halfSpan));
+                p.setFaceBucket(parentLevel, parentRow, f, CostPyramid.ENTER, CostCodec.quantize(bestEnter + halfSpan));
+                p.setFaceBucket(parentLevel, parentRow, f, CostPyramid.EXIT, CostCodec.quantize(bestExit + halfSpan));
             }
             // else: leave this face at its current value (default BUCKET_INF placeholder) — do not fabricate.
         }

@@ -2,6 +2,7 @@ package com.orebit.mod.worldmodel.hpa;
 
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
@@ -84,13 +85,84 @@ public final class LeafCostComputer {
     public static final float SOLID_MINE_TICKS = LEAF * MINE_PER_BLOCK; // 48
 
     /**
+     * Expensive cost for any direction through an all-air leaf that is NOT a free fall — pillaring up (the
+     * {@code +Y} EXIT / {@code -Y} ENTER) or crossing floorless air horizontally. ~{@code LEAF} blocks of
+     * placement at the block tier's place base cost (~6 ticks/block). This is what makes the region A* treat
+     * an air column as a one-way DOWN chute (cheap to fall through, dear to climb/bridge) instead of a cheap
+     * up-and-over highway — the fix for the "walk away to ascend into the sky" routing. Tunable.
+     */
+    public static final float AIR_CLIMB_TICKS = LEAF * 6f; // ~PLACE_BASE_COST per placed block
+
+    /**
+     * Symmetric cost to swim across a fully-flooded (all-water) leaf side. Swimming is reversible (up and
+     * down both cost effort), so unlike air this is the same in both directions. Seeded at ~the sprint-swim
+     * rate (5.612 b/s → ~3.56 ticks/block; a full-water column is ≥2-deep, so the bot sprint-swims it).
+     * Tunable.
+     */
+    public static final float WATER_TRANSIT_TICKS = LEAF * 3.6f; // ~sprint-swim ticks/block × LEAF
+
+    /**
+     * Quantized hardness of stone (≈ {@code round(1.5 × 5)}), the reference point at which
+     * {@link #solidTunnelTicks} equals {@link #SOLID_MINE_TICKS}. Softer blocks (dirt) tunnel cheaper,
+     * harder (obsidian) much dearer.
+     */
+    private static final float STONE_HARDNESS_REF = 8f;
+
+    /**
      * Occupancy fraction below which a leaf with no standable cell is treated as "all solid" rather than
      * "all air". A leaf with no floor is air iff it is overwhelmingly passable.
      */
     private static final float AIR_PASS_THRESHOLD = 0.5f;
 
-    /** The capability profile the leaf mini-pathfinds run with (break + place — see §5). */
-    private static final BotCaps CAPS = BotCaps.BREAK_PLACE;
+    /**
+     * The capability profile the leaf mini-pathfinds run with. <b>Walk-only</b> ({@link BotCaps#DEFAULT}), not
+     * break+place. Two reasons, one principled and one measured:
+     * <ul>
+     *   <li><b>PRD §7.3:</b> the persisted HPA* layer is a TERRAIN BASELINE computed with default capability —
+     *       the block tier adjusts for the live bot's real break/place on approach. (This supersedes
+     *       HPA-IMPLEMENTATION §5, which specified {@code BREAK_PLACE}; the PRD wins on intent.)</li>
+     *   <li><b>Cost:</b> with break+place every cell is reachable by mining/bridging, so the face→center search
+     *       weighed walk-vs-mine-vs-bridge everywhere and explored ~700 nodes/leaf on average (max ~3000) —
+     *       measured as the dominant first-load tick-stall cost. Walk-only (plus the swim moves, which self-gate
+     *       on water, not caps) confines the search to actually-walkable terrain, drops the per-node edit
+     *       folding, and yields a more discriminating gradient (open=cheap, barriers→solidity fallback).</li>
+     * </ul>
+     */
+    private static final BotCaps CAPS = BotCaps.DEFAULT;
+
+    // ---- Instrumentation (TEMPORARY — first-load tick-stall diagnosis, PRD §10.B Phase 2 #1) -----------
+    // Measures what per-leaf cost actually costs during world-gen: how many leaves are computed, how they
+    // split across the uniform-air / uniform-solid / mixed-with-searches / centerless-fallback paths, and
+    // for the mixed path the per-face search count, fail (null-plan → fallback) ratio, and expansion totals
+    // (read off BlockPathfinder.LAST_EXPANSIONS). A summary is logged every INSTRUMENT_LOG_EVERY computed
+    // leaves and reset. Flip INSTRUMENT off (or delete this block) once diagnosed.
+    public static boolean INSTRUMENT = true;
+    private static final int INSTRUMENT_LOG_EVERY = 256;
+    private static int instLeaves, instAir, instWater, instSolid, instMixed, instFallback;
+    private static int instSearches, instFails, instMaxExp;
+    private static long instExpansions, instNanos;
+
+    private static void instFinish(long t0) {
+        if (!INSTRUMENT) return;
+        instLeaves++;
+        instNanos += System.nanoTime() - t0;
+        if (instLeaves % INSTRUMENT_LOG_EVERY == 0) instDump();
+    }
+
+    /** Log + reset the accumulated leaf-cost instrumentation (also callable externally, e.g. on shutdown). */
+    public static synchronized void instDump() {
+        if (instLeaves == 0) return;
+        OrebitCommon.LOGGER.info(
+                "[Orebit] LEAFCOST {} leaves (air {} / water {} / solid {} / mixed {} / fallback {}) | "
+                        + "searches {} (fails {}, {}%) | exp total {} avg {} max {} | {} us/leaf avg",
+                instLeaves, instAir, instWater, instSolid, instMixed, instFallback,
+                instSearches, instFails, instSearches > 0 ? (100 * instFails / instSearches) : 0,
+                instExpansions, instSearches > 0 ? (instExpansions / instSearches) : 0, instMaxExp,
+                String.format("%.1f", instNanos / 1000.0 / instLeaves));
+        instLeaves = instAir = instWater = instSolid = instMixed = instFallback = 0;
+        instSearches = instFails = instMaxExp = 0;
+        instExpansions = instNanos = 0;
+    }
 
     // Reusable per-call scratch. A leaf computation is single-threaded (driven by the region planner /
     // maintenance pass on the tick thread); these are wiped at the top of computeLeaf. Flat 1-D buffers
@@ -131,6 +203,8 @@ public final class LeafCostComputer {
             return;
         }
 
+        final long instT0 = INSTRUMENT ? System.nanoTime() : 0L; // time only an actually-computed leaf
+
         // The section's world origin (min corner). Level-0 region coords map straight to it.
         final int ox = rx << 4;            // = rx * LEAF
         final int oz = rz << 4;
@@ -144,6 +218,8 @@ public final class LeafCostComputer {
         final boolean[] passable  = PASSABLE.get();
         int standCount = 0;
         int passCount = 0;
+        int waterCount = 0;     // passable cells that hold water (to tell an all-WATER column from all-AIR)
+        long hardnessSum = 0;   // Σ quantized block hardness (to scale the all-SOLID tunnel cost)
         for (int ly = 0; ly < LEAF; ly++) {
             for (int lz = 0; lz < LEAF; lz++) {
                 for (int lx = 0; lx < LEAF; lx++) {
@@ -155,18 +231,40 @@ public final class LeafCostComputer {
                     passable[i] = pa;
                     if (st) standCount++;
                     if (pa) passCount++;
+                    if (NavBlock.fluid(desc) == 1) waterCount++; // FLUID_WATER (geometrically passable cells)
+                    hardnessSum += NavBlock.hardness(desc);
                 }
             }
         }
         final float passFrac = (float) passCount / CELLS;
 
-        // 2) Uniform fast-paths — no standable floor anywhere in the leaf.
-        if (standCount == 0) {
-            int bucket = (passFrac >= AIR_PASS_THRESHOLD)
-                    ? CostCodec.quantize(AIR_TRANSIT_TICKS)   // ~all air: cheap fall/step-through
-                    : CostCodec.quantize(SOLID_MINE_TICKS);   // ~all solid: high but finite
-            fillAllFaces(pyramid, row, bucket);
+        // 2) Uniform fast-paths — skip the per-face mini-pathfind when the leaf is homogeneous.
+
+        // (a) Fully SOLID: not one passable cell, so there is no floor to walk and no air to search — the
+        // only route across is to tunnel straight through, ~LEAF blocks of mining scaled by the section's
+        // average hardness (dirt cheap, obsidian a near-wall). Symmetric (digging is the same either way) and
+        // never INF (HPA §5: everything is mineable). This catches the common underground stone/ore section,
+        // which the standCount test below CANNOT — every solid block reads as a "standable" top, so a stone
+        // leaf has standCount == 4096 and would otherwise fall into six guaranteed-to-fail walk searches.
+        if (passCount == 0) {
+            fillAllFaces(pyramid, row, CostCodec.quantize(solidTunnelTicks(hardnessSum)));
             pyramid.setBuilt(0, row, true);
+            if (INSTRUMENT) { instSolid++; instFinish(instT0); }
+            return;
+        }
+
+        // (b) No standable floor but passable throughout → an AIR or WATER column. Water swims (symmetric —
+        // sprint-swim up and down both cost effort), so it must NOT use the directional air chute (which would
+        // wrongly penalize swimming up). Air is the one-way down chute (fall cheap, pillar/horizontal dear).
+        if (standCount == 0) {
+            boolean water = waterCount * 2 >= passCount; // mostly water → swim, else air
+            if (water) {
+                fillAllFaces(pyramid, row, CostCodec.quantize(WATER_TRANSIT_TICKS)); // symmetric swim
+            } else {
+                fillAirFaces(pyramid, row);                                          // directional air chute
+            }
+            pyramid.setBuilt(0, row, true);
+            if (INSTRUMENT) { if (water) instWater++; else instAir++; instFinish(instT0); }
             return;
         }
 
@@ -214,6 +312,7 @@ public final class LeafCostComputer {
             int bucket = CostCodec.quantize(mixedDefaultTicks(passFrac));
             fillAllFaces(pyramid, row, bucket);
             pyramid.setBuilt(0, row, true);
+            if (INSTRUMENT) { instFallback++; instFinish(instT0); }
             return;
         }
 
@@ -238,6 +337,13 @@ public final class LeafCostComputer {
                 if (faceRep[f] != -1) {
                     BlockPos faceStand = standWorld(ox, oy, oz, faceRep[f]);
                     BlockPathPlan plan = BlockPathfinder.findPath(boundedGrid, faceStand, centerStand, CAPS);
+                    if (INSTRUMENT) {
+                        instSearches++;
+                        int exp = BlockPathfinder.LAST_EXPANSIONS;
+                        instExpansions += exp;
+                        if (exp > instMaxExp) instMaxExp = exp;
+                        if (plan == null) instFails++;
+                    }
                     // Fallback when the bounded search finds no plan: a mine-ish estimate scaled by solidity.
                     ticks = (plan != null) ? plan.cost()
                             : (SOLID_MINE_TICKS * (1f - passFrac) + AIR_TRANSIT_TICKS);
@@ -245,13 +351,15 @@ public final class LeafCostComputer {
                     // No standable cell on that face → enter by mining/falling (solidity-scaled).
                     ticks = SOLID_MINE_TICKS * (1f - passFrac) + AIR_TRANSIT_TICKS;
                 }
-                pyramid.setFaceBucket(0, row, f, CostCodec.quantize(ticks));
+                // Walk is reversible, so enter and exit cost the same — set both directions together.
+                pyramid.setFaceBoth(0, row, f, CostCodec.quantize(ticks));
             }
         } finally {
             BlockPathfinder.DEBUG = saveDbg;
             BlockPathfinder.LOG_TIMING = saveTim;
         }
         pyramid.setBuilt(0, row, true);
+        if (INSTRUMENT) { instMixed++; instFinish(instT0); }
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -263,9 +371,37 @@ public final class LeafCostComputer {
         return AIR_TRANSIT_TICKS * passFrac + SOLID_MINE_TICKS * (1f - passFrac);
     }
 
-    /** Set all six faces of a row to one bucket. */
+    /**
+     * Tunnel-straight-through cost (ticks) for a fully-solid leaf: ~{@code LEAF} blocks of mining scaled by
+     * the section's AVERAGE block hardness, so an obsidian wall costs far more than a dirt bank. Quantized
+     * hardness is {@code round(destroyTime × 5)}; at stone ({@link #STONE_HARDNESS_REF}) this equals
+     * {@link #SOLID_MINE_TICKS}. High-but-finite for bedrock-grade hardness (the {@link CostCodec} bucket
+     * lattice caps it below INF — never impassable, HPA §5).
+     */
+    private static float solidTunnelTicks(long hardnessSum) {
+        float avgHardness = (float) hardnessSum / CELLS;
+        return LEAF * MINE_PER_BLOCK * (avgHardness / STONE_HARDNESS_REF);
+    }
+
+    /** Set all six faces of a row to one bucket, BOTH directions (the symmetric uniform/solid/default case). */
     private static void fillAllFaces(CostPyramid pyramid, int row, int bucket) {
-        for (int f = 0; f < 6; f++) pyramid.setFaceBucket(0, row, f, bucket);
+        for (int f = 0; f < 6; f++) pyramid.setFaceBoth(0, row, f, bucket);
+    }
+
+    /**
+     * Fill an all-air leaf's faces <b>directionally</b>: an air column is a one-way DOWN chute. The only cheap
+     * motions are falling IN through the top ({@code +Y} ENTER) and falling OUT through the bottom ({@code -Y}
+     * EXIT); every other direction — pillaring up ({@code +Y} EXIT / {@code -Y} ENTER) or crossing floorless
+     * air horizontally — needs placed blocks and is set to {@link #AIR_CLIMB_TICKS}. This asymmetry is what a
+     * single per-face scalar could not express, and is the fix for the region A* flying up-and-over through
+     * cheap air. Face order: {@code 2 = -Y}, {@code 3 = +Y} (see {@link RegionAddress}).
+     */
+    private static void fillAirFaces(CostPyramid pyramid, int row) {
+        int cheap = CostCodec.quantize(AIR_TRANSIT_TICKS);
+        int dear = CostCodec.quantize(AIR_CLIMB_TICKS);
+        for (int f = 0; f < 6; f++) pyramid.setFaceBoth(0, row, f, dear); // default every direction: dear
+        pyramid.setFaceBucket(0, row, 3, CostPyramid.ENTER, cheap); // +Y enter: fall in through the top
+        pyramid.setFaceBucket(0, row, 2, CostPyramid.EXIT, cheap);  // -Y exit:  fall out through the bottom
     }
 
     /** Keep the closest standable floor cell for a face. */
