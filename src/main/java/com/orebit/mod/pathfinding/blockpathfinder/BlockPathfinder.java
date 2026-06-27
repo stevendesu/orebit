@@ -805,6 +805,13 @@ public final class BlockPathfinder {
      * for a vertical stall (the open-air pillar / mine-up case). Each cell is tagged with what the movements
      * see there, so a "Pillar -> (nothing)" is explained as "the cell above is solid (s, not openForPlace)"
      * or "unbuilt (u)" or "outside the corridor (X)".
+     *
+     * <p>Per-cell tags: {@code u}=unbuilt, {@code X}=outside corridor, {@code s}=standable, {@code o}=open
+     * for place, {@code p}=passable, {@code .}=blocked. A breakable solid is suffixed {@code k}; a solid the
+     * search WON'T dig is suffixed with {@link MovementContext#breakBlockedReason the reason} in parens
+     * (e.g. {@code s(unbreakable)}) — the diagnostic for a "mine-up walled by a ceiling the search thinks it
+     * can't break". A cell whose body-space edit is hazardous ({@code RISKY_EDIT} — a fluid/gravity cascade,
+     * which disables Pillar/place edits there) is suffixed {@code r}.
      */
     private static void dumpColumn(MovementContext ctx, RegionBound bound, String label, int x, int z,
                                    int y0, int y1) {
@@ -818,7 +825,13 @@ public final class BlockPathfinder {
             else if (ctx.openForPlace(d)) sb.append('o');
             else if (ctx.passable(d)) sb.append('p');
             else sb.append('.');
-            if (ctx.breakable(d)) sb.append('k');
+            if (ctx.breakable(d)) {
+                sb.append('k');
+            } else {
+                String why = ctx.breakBlockedReason(d); // null unless a solid the search refuses to dig
+                if (why != null) sb.append('(').append(why).append(')');
+            }
+            if (MovementContext.risksEdit(ctx.flagsAt(x, y, z))) sb.append('r');
         }
         OrebitCommon.LOGGER.info("[Orebit]   {} ({},{}):{}", label, x, z, sb);
     }

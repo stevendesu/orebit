@@ -467,6 +467,34 @@ public final class MovementContext {
     }
 
     /**
+     * <b>Cold-path diagnostic only</b> (the failed-search column dump, {@code BlockPathfinder.dumpColumn}):
+     * the reason {@link #breakable} is false for an already-read descriptor of a cell with collision, or
+     * {@code null} when the cell is breakable (or is air/fluid — nothing to break). Maps each of the
+     * {@link #breakable} gates to a short tag so a "solid wall the search won't dig through" reports WHY:
+     * <ul>
+     *   <li>{@code unbreakable} — quantized {@link #UNBREAKABLE_HARDNESS hardness 255} (vanilla {@code
+     *       destroyTime < 0}: bedrock/barrier — or a mis-classified block reading negative destroy time);</li>
+     *   <li>{@code tooHard(h=N>cap=M)} — real hardness {@code N} exceeds the bot's {@link
+     *       BotCaps#maxBreakHardness} cap {@code M};</li>
+     *   <li>{@code noTool} — a live inventory snapshot reports no carried tool can mine this block;</li>
+     *   <li>{@code noBreakCap} — the bot {@link BotCaps#canBreak cannot break} at all.</li>
+     * </ul>
+     * Allocates a String (and concatenates) — acceptable because it runs only on a search FAILURE, once per
+     * dumped cell, never in the search loop.
+     */
+    public String breakBlockedReason(long d) {
+        if (!NavBlock.hasCollision(d)) return null; // air / plant / fluid: nothing to break, not a wall
+        if (breakable(d)) return null;              // it IS breakable — the dump's 'k' tag already says so
+        if (!caps.canBreak()) return "noBreakCap";
+        int h = NavBlock.hardness(d);
+        if (h == UNBREAKABLE_HARDNESS) return "unbreakable";
+        if (h > caps.maxBreakHardness()) return "tooHard(h=" + h + ">cap=" + caps.maxBreakHardness() + ")";
+        InventoryView inv = inventory;
+        if (inv != null && !inv.mining().canMine(d)) return "noTool";
+        return "?"; // gates all passed yet breakable() is false — a packing/logic slip worth seeing
+    }
+
+    /**
      * Can the bot create footing at an empty floor cell by placing a throwaway block? True only when the
      * bot {@link BotCaps#canPlace may place}, the cell is open ({@link NavBlock#isReplaceable} or genuinely
      * empty — so we don't try to place into a solid) and at least one orthogonal/below neighbour offers a
