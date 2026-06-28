@@ -54,6 +54,24 @@ import net.minecraft.server.level.ServerLevel;
  * {@code new NavGridView(level)} — not a bounded view, because the window already bounds the search by
  * keeping the target only ~3 regions away.
  *
+ * <h2>Fragment model (HPA-FRAGMENTS.md §6, §S4 — flag-gated by {@link RegionGrid#HPA_FRAGMENTS})</h2>
+ * When the region tier runs the connectivity-aware <b>fragment</b> model, {@link RegionPathfinder#plan}
+ * returns a {@link RegionPathPlan#isFragmentModel() fragment-model} skeleton whose steps are
+ * {@code (region, fragment)} nodes carrying a per-step <b>portal cell</b> (the reachable on-face boundary cell
+ * the path enters the step's region through). The driver then changes in exactly two places — both no-ops when
+ * the skeleton is a center-model plan (flag off, or the deferred-S5 coarse branch), so the center path stays
+ * byte-for-byte unchanged:
+ * <ul>
+ *   <li><b>Window target</b> ({@link #windowTarget()}): the far step's {@link RegionPathPlan#portalCell portal
+ *       cell} — a real occupiable cell — replaces the {@code center → projectToStandableFloor} projection that
+ *       landed on buried/mid-air cells in carved terrain (the §6 "buried target" bug).</li>
+ *   <li><b>Commit key</b> ({@link #forwardIndexOf}): the bot's current skeleton step is matched on
+ *       {@code (region, fragment)} (its fragment resolved alloc-free via {@link RegionPathfinder#fragmentOf}),
+ *       so an <i>intra-region mine edge</i> (two skeleton steps sharing a region but not a fragment) is
+ *       distinguished and committed when the bot reaches the new fragment — there is no boundary thrash within
+ *       a single-region dig, so that case bypasses the inter-region wiggle hysteresis.</li>
+ * </ul>
+ *
  * <h2>House style (HPA-IMPLEMENTATION.md §14)</h2>
  * Allocation-light: the wiggle scan reads the live {@link BlockPathPlan}'s waypoints in place (≤ a window of
  * ~48 cells, no copy, no boxing), region mapping is pure {@link RegionAddress} integer math, and the per-tick
@@ -124,6 +142,15 @@ public final class PathPlan {
     /** The skeleton index the bot's floor currently sits in, for the consecutive-ticks debounce. */
     private int debounceIndex = -1;
     private int debounceTicks;
+
+    // ---- fragment-model per-tick scratch (HPA-FRAGMENTS.md §S4) ---------------------------------------
+    /**
+     * Reused 3-int scratch buffers for {@link RegionPathfinder#fragmentOf} (centroid + per-face temporary), so
+     * resolving the bot's current fragment in {@link #botFragmentAt} every tick allocates nothing (the
+     * fragment-model commit key — HOT-PATH-NO-ALLOC). Only touched when the skeleton is a fragment-model plan.
+     */
+    private final int[] fragScratchA = new int[3];
+    private final int[] fragScratchB = new int[3];
 
     // ---- active block plan ---------------------------------------------------------------------------
     private BlockPathPlan blockPlan;
@@ -252,17 +279,34 @@ public final class PathPlan {
             return;
         }
 
-        final int last = windowLast();
-        final int curRegion = forwardIndexOf(botFloor, committedIndex, last);
+        // Fragment model (HPA-FRAGMENTS.md §S4): the bot's current skeleton step is matched on
+        // (region, fragment), so resolve which fragment of its region the bot occupies (alloc-free). Center-
+        // model plans (flag off / coarse branch) skip this entirely and behave exactly as before.
+        final boolean fragModel = skeleton.isFragmentModel();
+        final int botFrag = fragModel ? botFragmentAt(botFloor) : 0;
 
-        if (curRegion > committedIndex && committed(curRegion)) {
-            // A real forward step: the path no longer revisits any region in [committedIndex, curRegion).
-            committedIndex = curRegion;
-            windowStart = curRegion;
-            debounceIndex = -1;
-            debounceTicks = 0;
-            replanBlock();
-            return;
+        final int last = windowLast();
+        final int curRegion = forwardIndexOf(botFloor, botFrag, committedIndex, last);
+
+        if (curRegion > committedIndex) {
+            // An intra-region MINE edge (the new step shares the committed step's REGION but is a different
+            // fragment — a dig between two tunnels of one region) commits the moment the bot reaches the new
+            // fragment: there is no boundary thrash within a single-region dig, so the inter-region wiggle
+            // hysteresis does not apply. Inter-region steps still gate on the wiggle/commit test exactly as the
+            // center model does. (For a center-model plan sameRegionDig is always false ⇒ pure committed().)
+            final boolean sameRegionDig = fragModel
+                    && skeleton.rx(curRegion) == skeleton.rx(committedIndex)
+                    && skeleton.ry(curRegion) == skeleton.ry(committedIndex)
+                    && skeleton.rz(curRegion) == skeleton.rz(committedIndex);
+            if (sameRegionDig || committed(curRegion)) {
+                // A real forward step: the path no longer revisits any region in [committedIndex, curRegion).
+                committedIndex = curRegion;
+                windowStart = curRegion;
+                debounceIndex = -1;
+                debounceTicks = 0;
+                replanBlock();
+                return;
+            }
         }
 
         // Debounce fallback: when the waypoint scan is inconclusive (curRegion found but not yet committed,
@@ -430,10 +474,14 @@ public final class PathPlan {
     }
 
     /**
-     * The current window's block target (HPA-IMPLEMENTATION.md §9). If the goal's level-0 region index is ≤
-     * the window's far index (goal in window), the real {@code goalFloor}. Otherwise the far window region's
-     * world center, projected down to a standable floor cell in that region's column; if no standable cell is
-     * found, the raw center (block-A* will still approach it — any traversable arrival is fine, no entrances).
+     * The current window's block target (HPA-IMPLEMENTATION.md §9; HPA-FRAGMENTS.md §6/§S4). If the goal's
+     * level-0 region is within the window (goal in window), the real {@code goalFloor}. Otherwise, for a
+     * <b>fragment-model</b> skeleton, the far step's {@link RegionPathPlan#portalCell portal cell} — the
+     * reachable on-face boundary cell the path commits to entering the far region through (a real occupiable
+     * cell, the §6 "buried target" fix). For a <b>center-model</b> skeleton (flag off / coarse branch), or a
+     * far step that carries no portal, the far region's world center projected down to a standable floor cell;
+     * if no standable cell is found, the raw center (block-A* will still approach it — any traversable arrival
+     * is fine, no entrances).
      */
     private BlockPos windowTarget() {
         final int last = windowLast();
@@ -445,6 +493,12 @@ public final class PathPlan {
                     return goalFloor;
                 }
             }
+        }
+        // Fragment model: aim at the far step's portal cell (an occupiable boundary cell) instead of the
+        // geometric center projection. Falls back to the center projection when the far step has no portal
+        // (the window starts at the skeleton start step, or this is a center-model plan).
+        if (skeleton.isFragmentModel() && skeleton.hasPortal(last)) {
+            return skeleton.portalCell(last);
         }
         BlockPos center = skeleton.centerOf(last);
         BlockPos floor = projectToStandableFloor(center);
@@ -488,19 +542,51 @@ public final class PathPlan {
     // ---------------------------------------------------------------------------------------------------
 
     /**
-     * The skeleton index in {@code [lo, hi]} whose level-0 region coords equal {@code floor}'s region, or
+     * The skeleton index in {@code [lo, hi]} whose {@code (region[, fragment])} the bot occupies, or
      * {@code committedIndex} (unchanged) if none match — a forward-only search (the bot only advances).
+     *
+     * <p>Center-model plan: matches on level-0 region coords and returns the first such index (the original
+     * behaviour, byte-for-byte). Fragment-model plan (HPA-FRAGMENTS.md §S4): prefers the step whose
+     * {@code (region, fragment)} both equal the bot's — so two steps sharing a region but not a fragment (an
+     * intra-region mine edge) are distinguished — and falls back to the first region-only match if no step
+     * matches the bot's fragment (the nearest-centroid signal is approximate; falling back to region-only is
+     * never worse than the center model and never stalls forward progress).
      */
-    private int forwardIndexOf(BlockPos floor, int lo, int hi) {
+    private int forwardIndexOf(BlockPos floor, int botFrag, int lo, int hi) {
         final int frx = RegionAddress.regionX(floor.getX(), 0);
         final int fry = RegionAddress.regionY(floor.getY(), 0, minY);
         final int frz = RegionAddress.regionZ(floor.getZ(), 0);
+        final boolean fragModel = skeleton.isFragmentModel();
+        int regionFallback = committedIndex;
+        boolean haveRegion = false;
         for (int i = lo; i <= hi; i++) {
             if (skeleton.rx(i) == frx && skeleton.ry(i) == fry && skeleton.rz(i) == frz) {
-                return i;
+                if (!fragModel || skeleton.fragmentId(i) == botFrag) {
+                    return i; // exact (region[, fragment]) match
+                }
+                if (!haveRegion) { // remember the first region-only match as the fallback
+                    regionFallback = i;
+                    haveRegion = true;
+                }
             }
         }
-        return committedIndex;
+        return haveRegion ? regionFallback : committedIndex;
+    }
+
+    /**
+     * The fragment of the bot's current level-0 region the world floor cell {@code floor} sits in (the
+     * fragment-model commit key, HPA-FRAGMENTS.md §S4). Lazily ensures the leaf is built and delegates to
+     * {@link RegionPathfinder#fragmentOf} with the reused {@link #fragScratchA}/{@link #fragScratchB} buffers,
+     * so the per-tick resolution allocates nothing. {@code 0} for a uniform/collapsed/unbuilt region (its
+     * single synthetic fragment). Only called for fragment-model skeletons.
+     */
+    private int botFragmentAt(BlockPos floor) {
+        final int rx = RegionAddress.regionX(floor.getX(), 0);
+        final int ry = RegionAddress.regionY(floor.getY(), 0, minY);
+        final int rz = RegionAddress.regionZ(floor.getZ(), 0);
+        regionGrid.ensureLeaf(rx, ry, rz);
+        return RegionPathfinder.fragmentOf(regionGrid, rx, ry, rz,
+                floor.getX(), floor.getY(), floor.getZ(), fragScratchA, fragScratchB);
     }
 
     /**

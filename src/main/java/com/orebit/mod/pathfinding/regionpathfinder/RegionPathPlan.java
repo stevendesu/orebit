@@ -39,6 +39,31 @@ public final class RegionPathPlan {
     private final int[] rys;
     private final int[] rzs;
 
+    /**
+     * Per-step <b>fragment id</b> under the HPA* fragment model (HPA-FRAGMENTS.md §2, §S3): which 6-connected
+     * occupiable component of {@code rxs/rys/rzs[i]} this step commits to (uniform/collapsed regions ⇒ the
+     * single synthetic fragment {@code 0}). {@code null} for a center-model plan (the
+     * {@link com.orebit.mod.worldmodel.hpa.RegionGrid#HPA_FRAGMENTS}{@code == false} branch + the deferred-S5
+     * coarse branch), where there is exactly one node per region.
+     */
+    private final int[] frags;
+
+    /**
+     * Per-step <b>portal cell</b> — the world-block boundary cell where this step is entered from the previous
+     * one (the matched-footprint overlap center for a portal edge, the target fragment's interior rep for an
+     * intra-region mine edge, or the region face center for a uniform transit). It is the reachable
+     * occupiable target the {@link com.orebit.mod.pathfinding.PathPlan} sliding-window driver aims at (S4),
+     * replacing the geometric {@link #centerOf} projection that landed on buried/mid-air cells (the two bugs
+     * HPA-FRAGMENTS.md §6 fixes). {@link #NO_PORTAL} on the start step (index 0, no incoming edge) and on every
+     * step of a center-model plan ({@code portalX == null}).
+     */
+    private final int[] portalX;
+    private final int[] portalY;
+    private final int[] portalZ;
+
+    /** Sentinel in {@link #portalX} for a step with no portal cell (the start step, or a center-model plan). */
+    public static final int NO_PORTAL = Integer.MIN_VALUE;
+
     /** The dimension floor, needed to recover world-Y centers from region {@code ry} (overworld −64). */
     private final int minY;
 
@@ -74,8 +99,42 @@ public final class RegionPathPlan {
             this.rys = rys;
             this.rzs = rzs;
         }
+        this.frags = null;          // center-model plan: one node per region, no fragments / portals
+        this.portalX = null;
+        this.portalY = null;
+        this.portalZ = null;
         this.minY = minY;
         this.reachedGoalRegion = reachedGoalRegion;
+    }
+
+    /**
+     * Build the immutable <b>fragment-model</b> skeleton (HPA-FRAGMENTS.md §S3): the same level-0 region coords
+     * plus, per step, the committed {@code fragmentId} and the {@code portalCell} it is entered through. All
+     * seven arrays are parallel and trimmed to {@code size}; the caller hands over freshly-sized arrays it does
+     * not retain. Portal coords of {@link #NO_PORTAL} mark a step with no incoming edge (the start step).
+     */
+    public RegionPathPlan(int[] rxs, int[] rys, int[] rzs, int[] frags,
+                          int[] portalX, int[] portalY, int[] portalZ,
+                          int size, int minY, boolean reachedGoalRegion) {
+        this.rxs = trim(rxs, size);
+        this.rys = trim(rys, size);
+        this.rzs = trim(rzs, size);
+        this.frags = trim(frags, size);
+        this.portalX = trim(portalX, size);
+        this.portalY = trim(portalY, size);
+        this.portalZ = trim(portalZ, size);
+        this.minY = minY;
+        this.reachedGoalRegion = reachedGoalRegion;
+    }
+
+    /** Trim {@code a} to exactly {@code size} (returns it unchanged when already that length). */
+    private static int[] trim(int[] a, int size) {
+        if (a.length == size) {
+            return a;
+        }
+        int[] t = new int[size];
+        System.arraycopy(a, 0, t, 0, size);
+        return t;
     }
 
     /** Number of skeleton regions (0 for an empty/failed plan). */
@@ -106,6 +165,35 @@ public final class RegionPathPlan {
     /** Level-0 region Z of skeleton step {@code i}. */
     public int rz(int i) {
         return rzs[i];
+    }
+
+    /** {@code true} iff this is a fragment-model plan (carries per-step {@code fragmentId} + {@code portalCell}). */
+    public boolean isFragmentModel() {
+        return frags != null;
+    }
+
+    /**
+     * The committed fragment id of skeleton step {@code i} (HPA-FRAGMENTS.md §2): which 6-connected occupiable
+     * component of region {@code i} the path passes through. Always {@code 0} for a center-model plan (one node
+     * per region) and for uniform/collapsed regions (a single synthetic fragment).
+     */
+    public int fragmentId(int i) {
+        return frags == null ? 0 : frags[i];
+    }
+
+    /** Whether step {@code i} has a portal cell (false on the start step and on every center-model step). */
+    public boolean hasPortal(int i) {
+        return portalX != null && portalX[i] != NO_PORTAL;
+    }
+
+    /**
+     * The world-block <b>portal cell</b> step {@code i} is entered through (HPA-FRAGMENTS.md §6) — a reachable
+     * occupiable boundary cell, the fragment-model replacement for the geometric {@link #centerOf} projection.
+     * {@code null} when {@link #hasPortal(int)} is false (the start step / a center-model plan); the driver
+     * falls back to {@link #centerOf} there.
+     */
+    public BlockPos portalCell(int i) {
+        return hasPortal(i) ? new BlockPos(portalX[i], portalY[i], portalZ[i]) : null;
     }
 
     /**
