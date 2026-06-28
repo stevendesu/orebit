@@ -68,6 +68,14 @@ public class AllyBotEntity extends FakePlayerEntity {
     private static final double STUCK_SPEED_SQR = 0.0016;
     /** Consecutive stuck ticks before the diagnostic dumps the surrounding blocks (≈1s). */
     private static final int STUCK_DUMP_TICKS = 20;
+    /**
+     * Upward {@code deltaMovement.y} (blocks/tick) the swim follower drives when the planned cell is ABOVE the
+     * bot. Deliberately strong + fixed (not the proportional descent rate): a proportional climb decays to
+     * ~nothing near the target and the water-surface buoyancy equilibrium swallows a small velocity outright
+     * (measured stall: dy=0.16 → vy=0.047 → the bot floated pinned at the waterline, never clearing the last
+     * cell). 0.30 reliably breaks the surface float and clears a one-block lip; descent stays gentle.
+     */
+    private static final double SWIM_CLIMB_VY = 0.30;
 
     /**
      * The bot's planner capabilities + throwaway block now come from the owner config (PRD §10 Phase 1a):
@@ -504,7 +512,20 @@ public class AllyBotEntity extends FakePlayerEntity {
             this.setJumping(false);
             this.yya = 0.0f;
             double dyTarget = wp.getY() - this.getY();
-            double vy = Math.max(-0.20, Math.min(0.20, dyTarget * 0.3)); // proportional, clamped swim rate
+            // Vertical authority is ASYMMETRIC. A proportional rate decays to ~nothing as it nears the target,
+            // and at the water SURFACE the buoyancy float-equilibrium swallows a small velocity entirely —
+            // observed stall: dy=0.16 → vy=0.047 → botY pinned, the bot never climbs the last bit onto the
+            // next cell / out of the water. So drive a STRONG fixed climb whenever we need to go up (enough to
+            // break the surface float and clear a block lip); only the DESCENT is gently proportional, and a
+            // tiny dead-band holds depth without jitter.
+            double vy;
+            if (dyTarget > 0.05) {
+                vy = SWIM_CLIMB_VY;                          // climb hard (surface break / clear the lip)
+            } else if (dyTarget < -0.05) {
+                vy = Math.max(-0.20, dyTarget * 0.3);        // descend gently (proportional)
+            } else {
+                vy = 0.0;                                    // at depth — hold
+            }
             Vec3 dm = this.getDeltaMovement();
             this.setDeltaMovement(dm.x, vy, dm.z);
             if (DEBUG_PATH) {
