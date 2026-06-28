@@ -87,6 +87,15 @@ public final class CostPyramid {
         int[] rx, ry, rz;        // region coords per row (planning never unpacks the key)
         byte[] face;             // 12 buckets/row, FLATTENED: face[row*12 + dir*6 + f] (dir ENTER=0/EXIT=1)
         boolean[] built;         // faces actually computed (vs interned default placeholder)
+        /**
+         * Per-row connectivity record for the HPA* <b>fragment model</b> (HPA-FRAGMENTS.md §5), stored
+         * ALONGSIDE the center-model {@link #face} buckets — never replacing them (the center path is kept
+         * intact for {@link RegionGrid#HPA_FRAGMENTS}{@code == false}). {@code null} until the row's leaf is
+         * built under the fragment path; lazily materialized by {@link CostPyramid#ensureFragments} and filled
+         * by {@link FragmentLeafComputer}. Parallel to the row arrays (favour-cpu-over-ram §14: one small
+         * convenient object per built region rather than re-deriving the flood on every read).
+         */
+        RegionFragments[] frags;
         int count;
 
         Level() {
@@ -101,6 +110,7 @@ public final class CostPyramid {
             rz = new int[INITIAL_ROW_CAP];
             face = new byte[INITIAL_ROW_CAP * SLOTS_PER_ROW];
             built = new boolean[INITIAL_ROW_CAP];
+            frags = new RegionFragments[INITIAL_ROW_CAP];
         }
 
         /** Row for {@code (cx,cy,cz)} keyed by {@code k}, creating it (faces=INF, !built) if absent. */
@@ -149,6 +159,7 @@ public final class CostPyramid {
             rz = Arrays.copyOf(rz, cap);
             face = Arrays.copyOf(face, cap * SLOTS_PER_ROW);
             built = Arrays.copyOf(built, cap);
+            frags = Arrays.copyOf(frags, cap);
         }
 
         private void growMap() {
@@ -284,5 +295,73 @@ public final class CostPyramid {
     public int rowCount(int level) {
         Level l = levels[level];
         return l == null ? 0 : l.count;
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Fragment-model store (HPA-FRAGMENTS.md §5) — stored ALONGSIDE the center-model face buckets, gated
+    // by RegionGrid.HPA_FRAGMENTS. With the flag OFF none of this is ever written or read; the center path
+    // above is byte-for-byte unchanged.
+    // ---------------------------------------------------------------------------------------------------
+
+    /**
+     * The per-row {@link RegionFragments} record, lazily materializing it on first use of this row so
+     * {@link FragmentLeafComputer} can fill it in place (no per-leaf throwaway copy). The row must already be
+     * interned ({@link #rowFor}). Mirrors the face-bucket store's "intern then write" shape.
+     */
+    public RegionFragments ensureFragments(int level, int row) {
+        Level l = levels[level];
+        RegionFragments rf = l.frags[row];
+        if (rf == null) {
+            rf = new RegionFragments();
+            l.frags[row] = rf;
+        }
+        return rf;
+    }
+
+    /**
+     * The per-row connectivity record, or {@code null} if this row has no fragment record yet (never built
+     * under the fragment path). The region A* (S3) reads footprints/kind through this object;
+     * {@link RegionGrid} applies the optimistic default-on-miss policy.
+     */
+    public RegionFragments fragmentRecord(int level, int row) {
+        return levels[level].frags[row];
+    }
+
+    /**
+     * Region kind ({@link RegionFragments#KIND_MIXED}/{@code KIND_SOLID}/{@code KIND_AIR}/{@code KIND_WATER})
+     * of a built row. A {@code null}/absent record reads as the optimistic {@link RegionFragments#KIND_AIR}
+     * (free-traverse) — NPE safety; the real default-on-miss lives in {@link RegionGrid}.
+     */
+    public int kind(int level, int row) {
+        RegionFragments rf = levels[level].frags[row];
+        return rf == null ? RegionFragments.KIND_AIR : rf.kind();
+    }
+
+    /** Mean SOLID-cell hardness nibble (the mine-edge cost scale); 0 for an absent record. */
+    public int avgHardness(int level, int row) {
+        RegionFragments rf = levels[level].frags[row];
+        return rf == null ? 0 : rf.avgSolidHardness();
+    }
+
+    /** Passable-cell fraction nibble (the collapsed/uniform crossing cost scale); 15 (open) for an absent record. */
+    public int passFrac(int level, int row) {
+        RegionFragments rf = levels[level].frags[row];
+        return rf == null ? 15 : rf.passFrac();
+    }
+
+    /** Number of fragment records on this row (0 ⇒ uniform/collapsed mass, or an absent record). */
+    public int fragments(int level, int row) {
+        RegionFragments rf = levels[level].frags[row];
+        return rf == null ? 0 : rf.fragmentCount();
+    }
+
+    /**
+     * The packed 2D-bbox footprint of {@code frag} on {@code face} (0..5), or {@link RegionFragments#NO_FACE}
+     * if the fragment does not touch that face (or the record is absent). Decode with the
+     * {@code RegionFragments.footprintMin/Max U/V} statics.
+     */
+    public int faceFootprint(int level, int row, int frag, int face) {
+        RegionFragments rf = levels[level].frags[row];
+        return rf == null ? RegionFragments.NO_FACE : rf.footprint(frag, face);
     }
 }

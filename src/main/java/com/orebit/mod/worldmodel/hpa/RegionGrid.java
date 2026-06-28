@@ -47,6 +47,20 @@ import net.minecraft.server.level.ServerLevel;
  */
 public final class RegionGrid {
 
+    /**
+     * Master A/B switch for the HPA* <b>fragment model</b> (HPA-FRAGMENTS.md): the connectivity-aware region
+     * tier ({@link RegionFragments} / {@link FragmentBuilder} / {@link FragmentLeafComputer}) that replaces
+     * the single-center-node model ({@link LeafCostComputer}'s six face→center buckets).
+     *
+     * <p><b>Default {@code false} ⇒ byte-for-byte the current center-model behaviour, zero regression.</b>
+     * When {@code true}, the leaf build + region reads select the fragment path. The center-model path is
+     * never deleted; the user flips this in-game to A/B the two models (HPA-FRAGMENTS.md §S6).
+     *
+     * <p>At S1 this flag has no live consumer yet (the fragment computer is additive and unwired); it is
+     * read by the S2 store wiring ({@link #ensureLeaf} / {@link #faceCost}) and beyond.
+     */
+    public static boolean HPA_FRAGMENTS = false;
+
     /** One grid per dimension, interned by level (mirrors {@link NavStore}'s {@code BY_LEVEL}). */
     private static final Map<ServerLevel, RegionGrid> BY_LEVEL = new ConcurrentHashMap<>();
 
@@ -91,6 +105,25 @@ public final class RegionGrid {
         this.minY = LevelBounds.minY(level);
     }
 
+    /**
+     * Headless test seam (HPA-FRAGMENTS.md §S3): a grid with <b>no backing {@link ServerLevel}</b> and an
+     * explicit {@code minY}, so the fragment-model region A* can be exercised over a hand-seeded
+     * {@link CostPyramid} (seed via {@link #pyramid()} + {@link CostPyramid#rowFor}/{@code ensureFragments}/
+     * {@code setBuilt}) without standing up a live level under the Knot test classloader (which is impossible —
+     * see {@code HpaMilestoneTest}). With a {@code null} level {@link #ensureLeaf} cannot build from the
+     * {@link NavStore} and is a no-op for any row not pre-seeded (the planner then reads the §6 optimistic
+     * default for that region). <b>Not used in production</b> (the loader always interns via {@link #of}).
+     */
+    public static RegionGrid headless(int minY) {
+        return new RegionGrid(minY);
+    }
+
+    private RegionGrid(int minY) {
+        this.level = null;
+        this.pyramid = new CostPyramid();
+        this.minY = minY;
+    }
+
     /** The dimension's cost store (for the maintenance hook — {@link PyramidMerger} / {@code HpaMaintenance}). */
     public CostPyramid pyramid() {
         return pyramid;
@@ -129,13 +162,29 @@ public final class RegionGrid {
         if (row != -1 && pyramid.isBuilt(0, row)) {
             return; // already computed
         }
+        // Headless test seam ({@link #headless}): with no backing level there is no NavStore to build from,
+        // so a not-pre-seeded row stays unbuilt and the planner reads the §6 optimistic default. In
+        // production `level` is never null, so this guard never fires (zero regression, both flag states).
+        if (level == null) {
+            return;
+        }
         // Only build if the chunk's nav data is resident and this vertical section exists; otherwise leave
-        // the node unbuilt (faceCost falls back to the §6 default).
+        // the node unbuilt (faceCost / fragment reads fall back to the §6 default).
         NavSection[] column = NavStore.get(level, NavStore.key(rx, rz));
         if (column == null || ry < 0 || ry >= column.length || column[ry] == null) {
             return;
         }
-        // LeafCostComputer takes (level, rx, rz, ryLevel0, pyramid) — note the rz/ry argument ORDER.
+        if (HPA_FRAGMENTS) {
+            // Fragment model (HPA-FRAGMENTS.md §3, §5): flood-fill the section's connectivity into the row's
+            // RegionFragments record, stored alongside the (now-unused) center buckets. No A* per face.
+            int r = pyramid.rowFor(0, rx, ry, rz);
+            RegionFragments rf = pyramid.ensureFragments(0, r);
+            FragmentLeafComputer.computeLeaf(column[ry], rf);
+            pyramid.setBuilt(0, r, true);
+            return;
+        }
+        // Center model (default): LeafCostComputer takes (level, rx, rz, ryLevel0, pyramid) — note the
+        // rz/ry argument ORDER.
         LeafCostComputer.computeLeaf(level, rx, rz, ry, pyramid);
     }
 
@@ -181,5 +230,80 @@ public final class RegionGrid {
         int sideInLeaves = 1 << level; // side / LEAF_SIZE = (LEAF_SIZE << level) / LEAF_SIZE
         float ticks = LeafCostComputer.AIR_TRANSIT_TICKS * sideInLeaves;
         return CostCodec.dequantize(CostCodec.quantize(ticks));
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Fragment-model reads (HPA-FRAGMENTS.md §2, §5) — the chokepoint the region A* (S3) reads when
+    // HPA_FRAGMENTS is on. Each applies the SAME optimistic default-on-miss policy as faceCost: an
+    // interned-but-unbuilt (or never-touched) node reads as a uniform AIR region — the cheapest, most
+    // permissive kind — so the region heuristic stays admissible and never refuses a real route through
+    // unexplored terrain (the live nav grid refines it on approach, §6). With HPA_FRAGMENTS off these are
+    // simply never called; the center-model faceCost path above is unchanged.
+    // ---------------------------------------------------------------------------------------------------
+
+    /**
+     * The {@link RegionFragments} kind of node {@code (level, rx, ry, rz)}, or the optimistic
+     * {@link RegionFragments#KIND_AIR} for an unbuilt/unloaded node (free-traverse default-on-miss).
+     */
+    public int kind(int level, int rx, int ry, int rz) {
+        int row = pyramid.rowIfPresent(level, rx, ry, rz);
+        if (row != -1 && pyramid.isBuilt(level, row)) {
+            return pyramid.kind(level, row);
+        }
+        return RegionFragments.KIND_AIR;
+    }
+
+    /** Mean SOLID-cell hardness nibble (the mine-edge cost scale); 0 (softest) default-on-miss. */
+    public int avgHardness(int level, int rx, int ry, int rz) {
+        int row = pyramid.rowIfPresent(level, rx, ry, rz);
+        if (row != -1 && pyramid.isBuilt(level, row)) {
+            return pyramid.avgHardness(level, row);
+        }
+        return 0;
+    }
+
+    /** Passable-cell fraction nibble (collapsed/uniform crossing cost scale); 15 (fully open) default-on-miss. */
+    public int passFrac(int level, int rx, int ry, int rz) {
+        int row = pyramid.rowIfPresent(level, rx, ry, rz);
+        if (row != -1 && pyramid.isBuilt(level, row)) {
+            return pyramid.passFrac(level, row);
+        }
+        return 15;
+    }
+
+    /** Number of fragment records on this node; 0 (uniform mass) default-on-miss. */
+    public int fragments(int level, int rx, int ry, int rz) {
+        int row = pyramid.rowIfPresent(level, rx, ry, rz);
+        if (row != -1 && pyramid.isBuilt(level, row)) {
+            return pyramid.fragments(level, row);
+        }
+        return 0;
+    }
+
+    /**
+     * The packed 2D-bbox footprint of {@code frag} on {@code face} of node {@code (level, rx, ry, rz)}, or
+     * {@link RegionFragments#NO_FACE} if the fragment does not touch that face / the node is unbuilt. Decode
+     * with the {@code RegionFragments.footprintMin/Max U/V} statics.
+     */
+    public int faceFootprint(int level, int rx, int ry, int rz, int frag, int face) {
+        int row = pyramid.rowIfPresent(level, rx, ry, rz);
+        if (row != -1 && pyramid.isBuilt(level, row)) {
+            return pyramid.faceFootprint(level, row, frag, face);
+        }
+        return RegionFragments.NO_FACE;
+    }
+
+    /**
+     * The built {@link RegionFragments} record of node {@code (level, rx, ry, rz)}, or {@code null} if the
+     * node is unbuilt/unloaded — the object accessor the region A* uses to iterate a node's fragments without
+     * a per-field call. The caller treats {@code null} as the optimistic uniform-AIR default (the per-field
+     * accessors above bake that in).
+     */
+    public RegionFragments fragmentRecord(int level, int rx, int ry, int rz) {
+        int row = pyramid.rowIfPresent(level, rx, ry, rz);
+        if (row != -1 && pyramid.isBuilt(level, row)) {
+            return pyramid.fragmentRecord(level, row);
+        }
+        return null;
     }
 }
