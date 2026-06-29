@@ -67,6 +67,15 @@ public final class RegionPathPlan {
     /** The dimension floor, needed to recover world-Y centers from region {@code ry} (overworld −64). */
     private final int minY;
 
+    /**
+     * The region-pyramid <b>level</b> these coords are at (HPA-CASCADE.md §9, S6.1): {@code 0} = leaves (the
+     * level the {@link com.orebit.mod.pathfinding.PathPlan} block-window driver consumes), {@code >0} = a coarse
+     * skeleton in the nested cascade. {@link #centerOf} resolves the world center through {@link RegionAddress}
+     * at this level; portal cells are already world coords. L0 plans (the only kind before the cascade) keep
+     * {@code level == 0}, so their behaviour is unchanged.
+     */
+    private final int level;
+
     /** Whether the skeleton's last region is the actual goal region (vs a refined leading segment end). */
     private final boolean reachedGoalRegion;
 
@@ -83,6 +92,16 @@ public final class RegionPathPlan {
      * @param reachedGoalRegion whether the last entry is the true goal region
      */
     public RegionPathPlan(int[] rxs, int[] rys, int[] rzs, int size, int minY, boolean reachedGoalRegion) {
+        this(rxs, rys, rzs, size, minY, 0, reachedGoalRegion);
+    }
+
+    /**
+     * As {@link #RegionPathPlan(int[], int[], int[], int, int, boolean)} with an explicit pyramid {@code level}
+     * (HPA-CASCADE.md §9): a coarse center-model skeleton carries its level so {@link #centerOf} resolves the
+     * right-sized world center. The pre-cascade level-0 ctor delegates here with {@code level == 0}.
+     */
+    public RegionPathPlan(int[] rxs, int[] rys, int[] rzs, int size, int minY, int level,
+                          boolean reachedGoalRegion) {
         // Trim to the valid prefix so size()/indexing is exact and the plan is truly immutable.
         if (rxs.length != size) {
             int[] tx = new int[size];
@@ -104,6 +123,7 @@ public final class RegionPathPlan {
         this.portalY = null;
         this.portalZ = null;
         this.minY = minY;
+        this.level = level;
         this.reachedGoalRegion = reachedGoalRegion;
     }
 
@@ -116,6 +136,18 @@ public final class RegionPathPlan {
     public RegionPathPlan(int[] rxs, int[] rys, int[] rzs, int[] frags,
                           int[] portalX, int[] portalY, int[] portalZ,
                           int size, int minY, boolean reachedGoalRegion) {
+        this(rxs, rys, rzs, frags, portalX, portalY, portalZ, size, minY, 0, reachedGoalRegion);
+    }
+
+    /**
+     * As {@link #RegionPathPlan(int[], int[], int[], int[], int[], int[], int[], int, int, boolean)} with an
+     * explicit pyramid {@code level} (HPA-CASCADE.md §9, S6.1): a coarse cascade skeleton carries its level so
+     * {@link #centerOf} resolves the level-sized world center. The pre-cascade level-0 ctor delegates here with
+     * {@code level == 0}.
+     */
+    public RegionPathPlan(int[] rxs, int[] rys, int[] rzs, int[] frags,
+                          int[] portalX, int[] portalY, int[] portalZ,
+                          int size, int minY, int level, boolean reachedGoalRegion) {
         this.rxs = trim(rxs, size);
         this.rys = trim(rys, size);
         this.rzs = trim(rzs, size);
@@ -124,6 +156,7 @@ public final class RegionPathPlan {
         this.portalY = trim(portalY, size);
         this.portalZ = trim(portalZ, size);
         this.minY = minY;
+        this.level = level;
         this.reachedGoalRegion = reachedGoalRegion;
     }
 
@@ -150,6 +183,11 @@ public final class RegionPathPlan {
     /** Whether the final skeleton region is the true goal region (vs the end of a refined leading segment). */
     public boolean reachedGoalRegion() {
         return reachedGoalRegion;
+    }
+
+    /** The region-pyramid level these coords are at ({@code 0} = leaves; {@code >0} = a coarse cascade skeleton). */
+    public int level() {
+        return level;
     }
 
     /** Level-0 region X of skeleton step {@code i}. */
@@ -197,14 +235,15 @@ public final class RegionPathPlan {
     }
 
     /**
-     * The world-block center of skeleton region {@code i} (level 0). Materializes a {@link BlockPos} from
-     * {@link RegionAddress}'s level-0 center math; the driver projects this to a standable floor cell to use
-     * it as a windowed block target (HPA-IMPLEMENTATION.md §9).
+     * The world-block center of skeleton region {@code i} at this plan's {@link #level()}. Materializes a
+     * {@link BlockPos} from {@link RegionAddress}'s level-aware center math; the driver projects this to a
+     * standable floor cell to use it as a windowed block target (HPA-IMPLEMENTATION.md §9). For a level-0 plan
+     * (the only kind the block-window driver consumes) this is the leaf center, exactly as before.
      */
     public BlockPos centerOf(int i) {
-        int cx = RegionAddress.centerX(0, rxs[i]);
-        int cy = RegionAddress.centerY(0, rys[i], minY);
-        int cz = RegionAddress.centerZ(0, rzs[i]);
+        int cx = RegionAddress.centerX(level, rxs[i]);
+        int cy = RegionAddress.centerY(level, rys[i], minY);
+        int cz = RegionAddress.centerZ(level, rzs[i]);
         return new BlockPos(cx, cy, cz);
     }
 }

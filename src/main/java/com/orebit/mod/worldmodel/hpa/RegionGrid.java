@@ -61,6 +61,22 @@ public final class RegionGrid {
      */
     public static boolean HPA_FRAGMENTS = true;
 
+    /**
+     * A/B switch for the region-tier <b>stateful nested-skeleton cascade</b> (HPA-CASCADE.md, the "S6" arc):
+     * the {@link com.orebit.mod.pathfinding.regionpathfinder.HierarchicalRegionPlan} stack of per-level
+     * skeletons that replaces the shipped two-tier coarse shortcut
+     * ({@link com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder#planWithin} chained up the pyramid
+     * vs. a single coarse level + L0 near refine).
+     *
+     * <p><b>Default {@code false} ⇒ the shipped two-tier branch, byte-for-byte, zero regression.</b> When
+     * {@code true}, {@link com.orebit.mod.pathfinding.PathPlan} sources its level-0 skeleton from the cascade
+     * (which re-plans only the level whose window the bot exited, pre-routes medium obstacles, and slides/
+     * collapses the top level for million-block reach). Requires {@link #HPA_FRAGMENTS} (the cascade is built on
+     * the fragment model). The user flips this in-game to A/B the two coarse strategies (HPA-CASCADE.md §12); the
+     * two-tier is deleted only after the in-game verify passes.
+     */
+    public static boolean HIERARCHICAL_CASCADE = false;
+
     /** One grid per dimension, interned by level (mirrors {@link NavStore}'s {@code BY_LEVEL}). */
     private static final Map<ServerLevel, RegionGrid> BY_LEVEL = new ConcurrentHashMap<>();
 

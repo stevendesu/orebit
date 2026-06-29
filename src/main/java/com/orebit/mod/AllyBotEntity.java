@@ -306,7 +306,11 @@ public class AllyBotEntity extends FakePlayerEntity {
         // route, change its mind, take another, go back"). [Coarse S5 note: a >LEVEL0 skeleton may need region
         // refinement of its FAR, unresolved tail as the bot approaches — never the committed near end.]
         boolean newRegionGoal = pathPlan == null || !pathPlan.sameGoalRegion(goalFloor);
-        boolean skeletonInvalid = pathPlan != null && pathPlan.status() == PathStatus.BLOCKED;
+        // A BLOCKED status forces a full skeleton rebuild ONLY for the two-tier/direct path. The cascade
+        // (HPA-CASCADE.md §6) repairs a blocked hop in place — escalating up its level stack in repairStep —
+        // without throwing away the whole nested plan, so it must not trigger the rebuild here.
+        boolean skeletonInvalid = pathPlan != null && !pathPlan.isCascade()
+                && pathPlan.status() == PathStatus.BLOCKED;
         if (pathPlan == null || newRegionGoal || skeletonInvalid) {
             if (newRegionGoal) {
                 // New destination region → the learned dead-ends no longer apply; start the repair fresh.
@@ -510,6 +514,17 @@ public class AllyBotEntity extends FakePlayerEntity {
     private void repairStep() {
         if (pathPlan == null || navGaveUp) return;
         final PathStatus status = pathPlan.status();
+        if (pathPlan.isCascade()) {
+            // Cascade repair (HPA-CASCADE.md §6): a BLOCKED hop is blacklisted + escalated up the level stack
+            // IN PLACE by the plan itself (which owns its per-level blacklists — no bot-side blacklist needed).
+            // It re-derives the L0 skeleton on success; only a hard exhaustion (no route at any level) gives up.
+            if (status == PathStatus.BLOCKED && !pathPlan.repairBlocked()) {
+                giveUp();
+            } else if (status == PathStatus.FAILED) {
+                giveUp();
+            }
+            return;
+        }
         if (status == PathStatus.BLOCKED) {
             // The window's block search couldn't leave the bot's region toward the next skeleton step.
             if (pathPlan.blockedHop(hopScratch)) {

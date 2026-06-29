@@ -7,6 +7,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
+import com.orebit.mod.pathfinding.regionpathfinder.HierarchicalRegionPlan;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionEdgeBlacklist;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
@@ -156,7 +157,20 @@ public final class PathPlan {
     private final int goalRX, goalRY, goalRZ;
 
     // ---- skeleton + window state ---------------------------------------------------------------------
-    private final RegionPathPlan skeleton;
+    /**
+     * The level-0 region skeleton the block window drives. Built once by {@link RegionPathfinder#plan} (the
+     * shipped two-tier / direct path), OR — when {@link RegionGrid#HIERARCHICAL_CASCADE} is on — sourced from
+     * {@link #hier} and <b>swapped</b> whenever the cascade re-derives a fresh L0 segment (HPA-CASCADE.md §S6.5).
+     * Non-final for that swap; all the window/commit/target readers below treat it as the current skeleton.
+     */
+    private RegionPathPlan skeleton;
+    /**
+     * The region-tier nested-skeleton cascade ({@code null} unless {@link RegionGrid#HIERARCHICAL_CASCADE}). When
+     * present it is the smarter, self-refreshing <b>source</b> of {@link #skeleton}: {@link #onBotMoved} steps it
+     * first and, on an L0 change, swaps {@link #skeleton} + resets the block window. The block-window driving
+     * below is otherwise unchanged (HPA-CASCADE.md §9).
+     */
+    private final HierarchicalRegionPlan hier;
     /** Index into the skeleton of the window's leading (start) region. */
     private int windowStart;
     /** Furthest skeleton index the bot has committed to (HPA-IMPLEMENTATION.md §9, the wiggle anchor). */
@@ -175,6 +189,8 @@ public final class PathPlan {
      */
     private final int[] fragScratchA = new int[3];
     private final int[] fragScratchB = new int[3];
+    /** Reused 2-long scratch for the cascade's blocked-hop repair ({@link #repairBlocked}); no per-repair alloc. */
+    private final long[] repairHopScratch = new long[2];
 
     // ---- active block plan ---------------------------------------------------------------------------
     private BlockPathPlan blockPlan;
@@ -264,7 +280,16 @@ public final class PathPlan {
         this.goalRY = RegionAddress.regionY(goalFloor.getY(), 0, minY);
         this.goalRZ = RegionAddress.regionZ(goalFloor.getZ(), 0);
 
-        this.skeleton = RegionPathfinder.plan(level, regionGrid, startFloor, goalFloor, caps, blacklist);
+        // Region tier: the nested cascade (flag on) re-derives its L0 segment as the bot moves; the shipped
+        // two-tier / direct path (flag off) plans a single skeleton once. Both yield the same kind of L0
+        // RegionPathPlan, so everything below is identical (HPA-CASCADE.md §9, S6.5).
+        if (RegionGrid.HIERARCHICAL_CASCADE) {
+            this.hier = HierarchicalRegionPlan.build(regionGrid, minY, startFloor, goalFloor, caps);
+            this.skeleton = hier.l0Skeleton();
+        } else {
+            this.hier = null;
+            this.skeleton = RegionPathfinder.plan(level, regionGrid, startFloor, goalFloor, caps, blacklist);
+        }
         this.windowStart = 0;
         this.committedIndex = 0;
 
@@ -469,6 +494,14 @@ public final class PathPlan {
             return;
         }
 
+        // Cascade step (HPA-CASCADE.md §5, S6.5): advance the per-level commits and re-derive only the suffix the
+        // bot exited. When the L0 segment changed, swap it in and reset the block window from the bot's region;
+        // otherwise fall through to the existing block-window slide over the unchanged skeleton. No-op (hier ==
+        // null) when the cascade flag is off — the two-tier/direct path is unchanged.
+        if (hier != null && stepCascade()) {
+            return;
+        }
+
         // Came WITHIN REPLAN_NEAR_TARGET of the window target → COMMIT to its step and slide the window, even if
         // the bot is not yet physically inside the target's region. Committing on APPROACH (not exact arrival)
         // (a) breaks the boundary-straddle bob — a portal sits 1 cell into the next region, which the block
@@ -541,6 +574,36 @@ public final class PathPlan {
         if (blockPlan == null) {
             replanBlock();
         }
+    }
+
+    /**
+     * One step of the region-tier cascade (HPA-CASCADE.md §5): advance the per-level commits and re-derive only
+     * the suffix the bot exited. Returns {@code true} (and {@link #onBotMoved} stops) when the level-0 skeleton
+     * changed — we swap it in, reset the block window from the bot's region, and replan the block path; or when
+     * the cascade ran out of route (→ FAILED). Returns {@code false} when L0 is unchanged, so the caller proceeds
+     * with the normal block-window slide over the same skeleton. Only called when {@link #hier} is present.
+     */
+    private boolean stepCascade() {
+        if (!hier.onBotMoved(botFloor)) {
+            return false; // still within every level's window — slide the block window over the unchanged L0
+        }
+        this.skeleton = hier.l0Skeleton();
+        if (skeleton == null || skeleton.isEmpty()) {
+            this.blockPlan = null;
+            this.status = PathStatus.FAILED;
+            return true;
+        }
+        resetWindow();
+        replanBlock();
+        return true;
+    }
+
+    /** Reset the sliding window + debounce to the head of a freshly-swapped skeleton (cascade L0 change). */
+    private void resetWindow() {
+        this.windowStart = 0;
+        this.committedIndex = 0;
+        this.debounceIndex = -1;
+        this.debounceTicks = 0;
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -664,6 +727,41 @@ public final class PathPlan {
                 skeleton.fragmentId(from));
         out[1] = RegionPathfinder.fragmentNodeKey(skeleton.rx(to), skeleton.ry(to), skeleton.rz(to),
                 skeleton.fragmentId(to));
+        return true;
+    }
+
+    /** Whether this plan is driven by the nested-skeleton cascade (HPA-CASCADE.md) vs the shipped two-tier path. */
+    public boolean isCascade() {
+        return hier != null;
+    }
+
+    /**
+     * Cascade online repair (HPA-CASCADE.md §6, S6.5): the driver is {@link PathStatus#BLOCKED}, so feed the bot's
+     * current L0 skeleton hop ({@link #blockedHop}) to the cascade, which blacklists it and <b>escalates up the
+     * hierarchy</b> — re-planning each level until one routes around the dead crossing. On success the repaired L0
+     * skeleton is swapped in and the block window reset; returns {@code true} (a route remains). Returns
+     * {@code false} (and sets FAILED) when there is no hop to blame or every level is exhausted — the bot then
+     * gives up. The cascade owns its per-level blacklists, so unlike the two-tier path this needs no bot-side
+     * {@link RegionEdgeBlacklist}. Only meaningful when {@link #isCascade()} (a no-op {@code false} otherwise).
+     */
+    public boolean repairBlocked() {
+        if (hier == null || !blockedHop(repairHopScratch)) {
+            return false;
+        }
+        if (!hier.onBlocked(repairHopScratch[0], repairHopScratch[1], botFloor)) {
+            this.skeleton = null;
+            this.blockPlan = null;
+            this.status = PathStatus.FAILED;
+            return false;
+        }
+        this.skeleton = hier.l0Skeleton();
+        if (skeleton == null || skeleton.isEmpty()) {
+            this.blockPlan = null;
+            this.status = PathStatus.FAILED;
+            return false;
+        }
+        resetWindow();
+        replanBlock();
         return true;
     }
 
