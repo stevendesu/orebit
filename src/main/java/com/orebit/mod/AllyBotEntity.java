@@ -8,8 +8,9 @@ import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
+import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
-import com.orebit.mod.pathfinding.blockpathfinder.MovementRegistry;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.config.Config;
@@ -40,7 +41,7 @@ import net.minecraft.world.phys.Vec3;
  * owner just outside the bot's loaded radius), it falls back to the old straight-line steer so it
  * never freezes.
  */
-public class AllyBotEntity extends FakePlayerEntity {
+public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     private final Player owner;
 
@@ -74,29 +75,6 @@ public class AllyBotEntity extends FakePlayerEntity {
     private static final double STUCK_SPEED_SQR = 0.0016;
     /** Consecutive stuck ticks before the diagnostic dumps the surrounding blocks (≈1s). */
     private static final int STUCK_DUMP_TICKS = 20;
-    /**
-     * Upward {@code deltaMovement.y} (blocks/tick) the swim follower drives when the planned cell is ABOVE the
-     * bot. Deliberately strong + fixed (not the proportional descent rate): a proportional climb decays to
-     * ~nothing near the target and the water-surface buoyancy equilibrium swallows a small velocity outright
-     * (measured stall: dy=0.16 → vy=0.047 → the bot floated pinned at the waterline, never clearing the last
-     * cell). 0.30 reliably breaks the surface float and clears a one-block lip; descent stays gentle.
-     */
-    private static final double SWIM_CLIMB_VY = 0.30;
-
-    /**
-     * Mid-air horizontal homing gain for a {@code Fall} step. The planner models a fall as a straight
-     * vertical drop ({@link com.orebit.mod.pathfinding.blockpathfinder.movements.Fall} scans the cardinal
-     * column straight down), but a bot that walks off a ledge at full speed carries horizontal momentum and
-     * arcs — overshooting the planned landing cell by a block or more, so it "slips" off its route. Minecraft
-     * grants aerial steering authority (a player drop-controls off ladders the same way), so we don't model
-     * the parabola; instead each airborne tick we set horizontal velocity toward the landing column centre at
-     * {@code (offset × GAIN)} clamped to {@link #FALL_HOMING_MAX}. This both pulls the bot over the target
-     * column and overwrites (bleeds) the overshoot momentum, so the real drop matches the planner's vertical
-     * assumption. As the bot nears centre the offset → 0, so velocity decays smoothly with no over-correction.
-     */
-    private static final double FALL_HOMING_GAIN = 0.5;
-    /** Per-tick horizontal speed cap while drop-controlling a {@code Fall} (blocks/tick) — see {@link #FALL_HOMING_GAIN}. */
-    private static final double FALL_HOMING_MAX = 0.15;
 
     /**
      * The bot's planner capabilities + throwaway block now come from the owner config (PRD §10 Phase 1a):
@@ -536,6 +514,7 @@ public class AllyBotEntity extends FakePlayerEntity {
             return;
         }
         repairCooldown = REPAIR_COOLDOWN;
+        chat("[bot] path blocked — invalidating a region crossing and rerouting.");
         if (!pathPlan.repairBlocked()) {
             giveUp();
         }
@@ -621,24 +600,24 @@ public class AllyBotEntity extends FakePlayerEntity {
         return file.getAbsolutePath();
     }
 
-    /** Steer toward the current waypoint, advancing by block occupancy and jumping over rises. */
+    /**
+     * Steer toward the current waypoint, advancing the cursor by block occupancy and delegating each step's
+     * special inputs to its {@link com.orebit.mod.pathfinding.blockpathfinder.Movement} (the cold {@code
+     * reached}/{@code editsReadyNow}/{@code steer} hooks — MOVEMENT-DESIGN.md §1). The follower owns only the
+     * generic plumbing: advance the cursor, apply each step's folded edits once, and the stuck backstop +
+     * diagnostic. Per-move behaviour (the swim vertical climb, the fall column-homing, the Ascend/Pillar jump,
+     * the swim cursor tolerance, Pillar's airborne edit timing) lives on the move classes via {@link
+     * BotSteering}, so adding a capability never touches this method.
+     */
     private void steerAlongPath() {
-        // Advance to the furthest waypoint whose block the bot's feet currently occupy. Waypoints ARE
-        // blocks and so are the bot's feet ({@link #blockPosition()}), so this is block-exact — no
-        // distance epsilon. Because the comparison includes Y, the feet block can only equal the next
-        // step once the bot has actually climbed onto it, so a stacked staircase can't be skipped;
-        // scanning from the end also absorbs any overshoot.
-        BlockPos foot = this.blockPosition();
+        // Advance to the furthest waypoint the bot has reached. Waypoints ARE blocks and so are the bot's feet
+        // ({@link #blockPosition()}), so the default test is block-exact (Movement.reached); a swim move
+        // loosens it vertically for a buoyancy-bobbing bot. Because the match includes Y, the feet block only
+        // equals the next step once the bot has actually climbed onto it (a stacked staircase can't be
+        // skipped); scanning from the end absorbs any overshoot.
         for (int j = path.size() - 1; j >= waypointIndex; j--) {
             BlockPos w = path.waypoint(j);
-            boolean swimStep = path.movement(j) == MovementRegistry.SWIM
-                    || path.movement(j) == MovementRegistry.SPRINT_SWIM;
-            // While swimming the bot's Y bobs with buoyancy, so an exact 3-D block match can stall the
-            // cursor; for a swim step match horizontally with a ±1 vertical tolerance instead.
-            boolean reached = swimStep
-                    ? (foot.getX() == w.getX() && foot.getZ() == w.getZ() && Math.abs(foot.getY() - w.getY()) <= 1)
-                    : foot.equals(w);
-            if (reached) {
+            if (path.movement(j).reached(this, w.getX(), w.getY(), w.getZ())) {
                 waypointIndex = j + 1;
                 break;
             }
@@ -648,104 +627,34 @@ public class AllyBotEntity extends FakePlayerEntity {
             return;
         }
 
-        // Apply this step's folded break/place edits once, the moment it becomes the current step: the
-        // bot is standing at the previous waypoint and the cells to clear/fill are right in front, so the
-        // route is made physically walkable before the bot tries to move into it. PILLAR is the exception:
-        // its footing is placed in the bot's OWN feet cell, so it must wait until the bot has jumped clear
-        // of that cell (airborne) — otherwise the block would be set inside the bot.
-        boolean pillar = path.movement(waypointIndex) == MovementRegistry.PILLAR;
+        Movement movement = path.movement(waypointIndex);
+        BlockPos wp = path.waypoint(waypointIndex);
+
+        // Apply this step's folded break/place edits once, the moment the move says they're due: the generic
+        // case clears/fills the cells in front before the bot moves into them (the bot is standing at the
+        // previous waypoint, the cells are right ahead). Pillar defers until the bot is airborne
+        // (Movement.editsReadyNow), since its footing lands in the bot's OWN feet cell.
         StepEdits edits = path.edits(waypointIndex);
-        if (edits != null && waypointIndex != lastEditedIndex
-                && (!pillar || !EntityState.onGround(this))) {
+        if (edits != null && waypointIndex != lastEditedIndex && movement.editsReadyNow(this)) {
             lastEditedIndex = waypointIndex;
             applyEdits(edits);
         }
 
-        BlockPos wp = path.waypoint(waypointIndex);
-        double ddx = (wp.getX() + 0.5) - this.getX();
-        double ddz = (wp.getZ() + 0.5) - this.getZ();
+        // Per-move steering: face + drive toward the waypoint, plus whatever special inputs the move needs
+        // (jump, mid-air homing, direct swim vertical velocity). All callbacks go through this entity's
+        // BotSteering implementation below.
+        movement.steer(this, wp.getX(), wp.getY(), wp.getZ());
 
-        float yaw = (float) (Math.toDegrees(Math.atan2(-ddx, ddz)));
-        this.setYRot(yaw);
-        this.setYBodyRot(yaw);
-        this.setYHeadRot(yaw);
-        this.zza = 1.0f;
-
-        // Swim vertical control — by DIRECT velocity, not the `yya` input. In water the movement input is
-        // weak: getInputVector NORMALIZES (xxa,yya,zza) and scales by the small water speed, so with zza=1 a
-        // yya=-1 yields only ~-0.02/tick downward — and prone sprint-swim is near-neutral buoyancy, so that
-        // tiny push is cancelled and the bot just hovers (it never descended to a submerged target). Instead
-        // drive deltaMovement.y straight toward the target depth, clamped to a swim rate: zza+yaw still propel
-        // horizontally, and aiStep's drag leaves the set velocity essentially intact, so the bot reliably
-        // sinks/rises to track the planned cell. Normal (surface) swim uses the same tracking — it converges
-        // on the surface cell and self-corrects against the gentle sink.
-        boolean normalSwim = path.movement(waypointIndex) == MovementRegistry.SWIM;
-        boolean sprintSwim = path.movement(waypointIndex) == MovementRegistry.SPRINT_SWIM;
-        if (normalSwim || sprintSwim) {
-            this.setSprinting(sprintSwim); // submerged + sprinting → vanilla prone sprint-swim (5.612 b/s)
-            this.setJumping(false);
-            this.yya = 0.0f;
-            double dyTarget = wp.getY() - this.getY();
-            // Vertical authority is ASYMMETRIC. A proportional rate decays to ~nothing as it nears the target,
-            // and at the water SURFACE the buoyancy float-equilibrium swallows a small velocity entirely —
-            // observed stall: dy=0.16 → vy=0.047 → botY pinned, the bot never climbs the last bit onto the
-            // next cell / out of the water. So drive a STRONG fixed climb whenever we need to go up (enough to
-            // break the surface float and clear a block lip); only the DESCENT is gently proportional, and a
-            // tiny dead-band holds depth without jitter.
-            double vy;
-            if (dyTarget > 0.05) {
-                vy = SWIM_CLIMB_VY;                          // climb hard (surface break / clear the lip)
-            } else if (dyTarget < -0.05) {
-                vy = Math.max(-0.20, dyTarget * 0.3);        // descend gently (proportional)
-            } else {
-                vy = 0.0;                                    // at depth — hold
-            }
-            Vec3 dm = this.getDeltaMovement();
-            this.setDeltaMovement(dm.x, vy, dm.z);
-            if (Debug.ENABLED) {
-                OrebitCommon.LOGGER.info("[Orebit] swim {} target={} botY={} dy={} inWater={} swimming={} vy->{}",
-                        sprintSwim ? "SPRINT" : "normal", compact(wp), String.format("%.2f", this.getY()),
-                        String.format("%.2f", dyTarget), this.isInWater(), this.isSwimming(),
-                        String.format("%.3f", vy));
-            }
-        }
-
-        // Fall control — drop STRAIGHT down the planned column instead of arcing off the lip. The planner
-        // models a multi-block Fall as a vertical drop, but walking off an edge at full speed carries
-        // horizontal momentum, so the bot overshoots the planned landing cell and slips off-route. We have
-        // full aerial authority (we drive deltaMovement directly, as for swim), so while airborne we home
-        // the bot onto the landing column centre at a clamped rate — this pulls it over the target column and
-        // bleeds the overshoot. zza is zeroed so the forward walk input doesn't re-add horizontal speed.
-        boolean fall = path.movement(waypointIndex) == MovementRegistry.FALL;
-        if (fall && !EntityState.onGround(this)) {
-            double cx = (wp.getX() + 0.5) - this.getX();
-            double cz = (wp.getZ() + 0.5) - this.getZ();
-            double vx = Math.max(-FALL_HOMING_MAX, Math.min(FALL_HOMING_MAX, cx * FALL_HOMING_GAIN));
-            double vz = Math.max(-FALL_HOMING_MAX, Math.min(FALL_HOMING_MAX, cz * FALL_HOMING_GAIN));
-            Vec3 dm = this.getDeltaMovement();
-            this.setDeltaMovement(vx, dm.y, vz);
-            this.zza = 0.0f;
-        }
-
-        // Jump only when the step the planner chose is an Ascend (a real jump-up onto a full block,
-        // head-clearance already verified). A Traverse step-assist (slab/stair/snow lip) is auto-stepped
-        // by vanilla movement and must NOT jump, or the bot launches over low steps. Stuck is the
-        // backstop for physical hitches the planner can't see.
-        // Jump on an Ascend (jump-up onto a full block) or a Pillar (jump-and-place straight up); both
-        // need the bot off the ground. A Traverse step-assist must NOT jump (vanilla auto-steps it).
-        boolean ascend = path.movement(waypointIndex) == MovementRegistry.ASCEND;
+        // Generic stuck backstop + diagnostic (cross-cutting, not per-move): when the bot grinds in place on
+        // the ground a jump frees most physical hitches the planner can't see, and persistent grinding dumps
+        // the surrounding column (live solidity, which the floor-centric 2-bit grid can't represent — a CLEAR
+        // cell guarantees only 2 air blocks, a jump-up needs ~3). Ascend/Pillar jump deterministically in
+        // their own steer; this is the catch-all for every other move (a Traverse step-assist must NOT jump,
+        // and doesn't here — vanilla auto-steps it and the bot isn't stuck).
         Vec3 velocity = this.getDeltaMovement();
         boolean stuck = velocity.horizontalDistanceSqr() < STUCK_SPEED_SQR;
-        if ((ascend || pillar || stuck) && EntityState.onGround(this)) {
-            this.jumpFromGround();
-        }
-
-        // Stuck-on-a-step diagnostic: when the bot grinds in place against the current target for a
-        // while, dump the ACTUAL block solidity (live world, not the coarse grid) for the bot's column
-        // and the target's column — this reveals jump head-clearance, which the floor-centric 2-bit
-        // grid can't represent (a CLEAR cell guarantees only 2 air blocks above the floor; a jump-up
-        // needs ~3). Logged once per stuck episode.
         if (stuck && EntityState.onGround(this)) {
+            this.jumpFromGround();
             if (++stuckTicks == STUCK_DUMP_TICKS && Debug.ENABLED) dumpStuck(wp);
         } else {
             stuckTicks = 0;
@@ -830,10 +739,7 @@ public class AllyBotEntity extends FakePlayerEntity {
 
     /** Original straight-at-the-owner steer, used when nav data for the route isn't built yet. */
     private void steerStraight(double dx, double dz) {
-        float yaw = (float) (Math.toDegrees(Math.atan2(-dx, dz)));
-        this.setYRot(yaw);
-        this.setYBodyRot(yaw);
-        this.setYHeadRot(yaw);
+        faceHorizontally(dx, dz);
         this.zza = 1.0f;
 
         Vec3 velocity = this.getDeltaMovement();
@@ -842,4 +748,43 @@ public class AllyBotEntity extends FakePlayerEntity {
             this.jumpFromGround();
         }
     }
+
+    // ---- BotSteering seam (the cold per-tick ops the Movement steer hooks call back through) ----------
+    // Implemented against this bot's ServerPlayer ops; exposes only primitives so the movements/ package
+    // stays MC-type-free (see BotSteering). Cold (tick rate), so virtual dispatch through the interface is
+    // fine — the no-polymorphism rule is hot-path-only.
+
+    @Override public double x() { return this.getX(); }
+    @Override public double y() { return this.getY(); }
+    @Override public double z() { return this.getZ(); }
+
+    @Override public int footX() { return this.blockPosition().getX(); }
+    @Override public int footY() { return this.blockPosition().getY(); }
+    @Override public int footZ() { return this.blockPosition().getZ(); }
+
+    /** Via the {@link EntityState} adapter (the accessor name drifts across versions) — see {@link BotSteering#grounded}. */
+    @Override public boolean grounded() { return EntityState.onGround(this); }
+
+    @Override public double velX() { return this.getDeltaMovement().x; }
+    @Override public double velY() { return this.getDeltaMovement().y; }
+    @Override public double velZ() { return this.getDeltaMovement().z; }
+
+    @Override public void setVelocity(double vx, double vy, double vz) { this.setDeltaMovement(vx, vy, vz); }
+
+    @Override
+    public void faceHorizontally(double dx, double dz) {
+        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        this.setYRot(yaw);
+        this.setYBodyRot(yaw);
+        this.setYHeadRot(yaw);
+    }
+
+    @Override public void setForward(float zza) { this.zza = zza; }
+    @Override public void setVerticalInput(float yya) { this.yya = yya; }
+
+    // setSprinting(boolean) is satisfied by the inherited public LivingEntity method.
+    /** Widen the inherited protected {@code setJumping} to public so it satisfies the {@link BotSteering} seam. */
+    @Override public void setJumping(boolean jumping) { super.setJumping(jumping); }
+
+    @Override public void jump() { this.jumpFromGround(); }
 }

@@ -1,5 +1,6 @@
 package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
+import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
@@ -52,6 +53,16 @@ public final class Swim implements Movement {
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
+    /**
+     * Upward velocity (blocks/tick) the swim steer drives when the planned cell is ABOVE the bot. Deliberately
+     * strong + fixed (not the proportional descent rate): a proportional climb decays to ~nothing near the
+     * target and the water-surface buoyancy equilibrium swallows a small velocity outright (measured stall:
+     * dy=0.16 → vy=0.047 → the bot floated pinned at the waterline, never clearing the last cell). 0.30
+     * reliably breaks the surface float and clears a one-block lip; descent stays gentle. Shared with {@link
+     * SprintSwim}.
+     */
+    static final double CLIMB_VY = 0.30;
+
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
         int feetY = y + 1;
@@ -76,5 +87,51 @@ public final class Swim implements Movement {
                 // else open air above the surface: keep scanning down.
             }
         }
+    }
+
+    @Override
+    public boolean reached(BotSteering b, int wx, int wy, int wz) {
+        return reachedSwim(b, wx, wy, wz);
+    }
+
+    @Override
+    public void steer(BotSteering b, int wx, int wy, int wz) {
+        steerSwim(b, wx, wy, wz, false);
+    }
+
+    /**
+     * Swim cursor-advance test (shared with {@link SprintSwim}): a floating bot's Y bobs with buoyancy, so an
+     * exact 3-D block match can stall the cursor — match horizontally with a ±1 vertical tolerance instead.
+     */
+    static boolean reachedSwim(BotSteering b, int wx, int wy, int wz) {
+        return b.footX() == wx && b.footZ() == wz && Math.abs(b.footY() - wy) <= 1;
+    }
+
+    /**
+     * Swim steering, shared by normal {@link Swim} ({@code sprint=false}) and {@link SprintSwim}
+     * ({@code sprint=true}). Vertical control is by DIRECT velocity, not the {@code yya} input: in water the
+     * movement input is weak (it's normalized and scaled by the small water speed, so a {@code yya=-1} yields
+     * only ~-0.02/tick), and near-neutral buoyancy cancels that, so the bot just hovers. Driving
+     * {@code deltaMovement.y} straight toward the target depth (clamped to a swim rate) makes it reliably
+     * sink/rise to track the planned cell while {@code zza}+yaw propel it horizontally. Authority is
+     * ASYMMETRIC: a STRONG fixed climb ({@link #CLIMB_VY}) is needed to break the surface float and clear a
+     * lip, while the descent is gently proportional; a dead-band holds depth without jitter.
+     */
+    static void steerSwim(BotSteering b, int wx, int wy, int wz, boolean sprint) {
+        b.faceHorizontally((wx + 0.5) - b.x(), (wz + 0.5) - b.z());
+        b.setForward(1.0f);
+        b.setSprinting(sprint); // submerged + sprinting → vanilla prone sprint-swim (5.612 b/s)
+        b.setJumping(false);
+        b.setVerticalInput(0.0f);
+        double dyTarget = wy - b.y();
+        double vy;
+        if (dyTarget > 0.05) {
+            vy = CLIMB_VY;                              // climb hard (surface break / clear the lip)
+        } else if (dyTarget < -0.05) {
+            vy = Math.max(-0.20, dyTarget * 0.3);       // descend gently (proportional)
+        } else {
+            vy = 0.0;                                   // at depth — hold
+        }
+        b.setVelocity(b.velX(), vy, b.velZ());
     }
 }

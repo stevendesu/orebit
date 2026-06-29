@@ -2,6 +2,7 @@ package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
@@ -151,5 +152,24 @@ public final class Pillar implements Movement {
 
         int dy = Axes.stepY(Axes.AXIS_Y, +1) * j; // = j
         out.accept(x, y + dy, z, j * COST + e.extraCost(), e);
+    }
+
+    /**
+     * Pillar's footing is placed in the bot's OWN feet cell, so it must wait until the bot has jumped clear
+     * (airborne) — placing it while still standing there would set a block inside the bot.
+     */
+    @Override
+    public boolean editsReadyNow(BotSteering b) {
+        return !b.grounded();
+    }
+
+    /**
+     * Walk-in-place and jump straight up when on the ground (jump-and-place): the bot leaves its feet cell so
+     * {@link #editsReadyNow} can then fold the footing under it. Deterministic, like {@link Ascend}.
+     */
+    @Override
+    public void steer(BotSteering b, int wx, int wy, int wz) {
+        Movement.super.steer(b, wx, wy, wz); // face + full forward
+        if (b.grounded()) b.jump();
     }
 }
