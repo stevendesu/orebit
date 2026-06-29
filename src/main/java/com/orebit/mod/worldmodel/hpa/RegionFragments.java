@@ -169,4 +169,28 @@ public final class RegionFragments {
     public static int packFootprint(int minU, int maxU, int minV, int maxV) {
         return ((minU & 0xF) << 12) | ((maxU & 0xF) << 8) | ((minV & 0xF) << 4) | (maxV & 0xF);
     }
+
+    /**
+     * A cheap content hash over everything the record carries (kind, header nibbles, and every active
+     * fragment's faceMask + per-face footprint). Used by {@link PyramidMerger#mergeUpFragments} for the
+     * design's "stop the moment a level's output is unchanged" damping (HPA-FRAGMENTS.md §6.5): if a parent's
+     * recompute leaves its signature identical, nothing above it can change, so the walk stops. Order-stable and
+     * allocation-free.
+     */
+    public long contentSignature() {
+        long h = 1125899906842597L; // FNV-ish seed
+        h = h * 31 + kind;
+        h = h * 31 + avgSolidHardness;
+        h = h * 31 + passFrac;
+        h = h * 31 + fragmentCount;
+        h = h * 31 + (collapsed ? 1 : 0);
+        for (int frag = 0; frag < fragmentCount; frag++) {
+            h = h * 31 + (faceMask[frag] & 0x3F);
+            int base = frag * 6;
+            for (int f = 0; f < 6; f++) {
+                h = h * 31 + footprint[base + f];
+            }
+        }
+        return h;
+    }
 }
