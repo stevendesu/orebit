@@ -3,6 +3,9 @@ package com.orebit.mod;
 import com.mojang.authlib.GameProfile;
 import com.orebit.mod.pathfinding.PathDebugRenderer;
 import com.orebit.mod.pathfinding.PathPlan;
+import com.orebit.mod.pathfinding.PathStatus;
+import com.orebit.mod.pathfinding.regionpathfinder.RegionEdgeBlacklist;
+import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
@@ -13,6 +16,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.config.Config;
 import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.platform.BotInventory;
+import com.orebit.mod.platform.CommandFeedback;
 import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.Replaceable;
 import com.orebit.mod.platform.WorldEdits;
@@ -39,14 +43,13 @@ import net.minecraft.world.phys.Vec3;
  */
 public class AllyBotEntity extends FakePlayerEntity {
 
-    /**
-     * Debug toggle: draw the bot's planned path as particles (END_ROD line, FLAME = current target)
-     * and log each plan (size, first/last waypoint, goal). Non-final so it can be flipped at runtime
-     * (e.g. via a debugger or future command); default on while the pathfinder is being validated.
-     */
-    public static boolean DEBUG_PATH = true;
-
     private final Player owner;
+
+    // ---- chat-progress de-dup state (Debug.ENABLED): only post when one of these changes ---------
+    private int lastChatStep = Integer.MIN_VALUE;
+    private PathStatus lastChatStatus;
+    private boolean lastChatPartial;
+    private PathPlan.TargetKind lastChatKind;
 
     // ---- Follow / path-steering tuning -------------------------------------------------------
     /** Stop moving once this close to the owner (blocks, horizontal). */
@@ -58,10 +61,11 @@ public class AllyBotEntity extends FakePlayerEntity {
      */
     private static final double ARRIVE_Y = 2.5;
     /**
-     * Safety re-plan interval (ticks). We normally replan only when the owner steps to a new block
-     * (see {@link #lastGoalCell}); this is the backstop so a static owner still picks up terrain edits
-     * (the demo refresh) within a second or two. Kept long so a stationary bot replans rarely — which
-     * also keeps the debug path stable so its particles don't ghost.
+     * BLOCK-level window-refresh interval (ticks) — the period at which the committed skeleton's current
+     * window re-searches its block path even without a region-boundary commit, so a terrain edit under the
+     * window is picked up within a second or two. This is NOT a skeleton rebuild (the region skeleton is
+     * committed until the goal changes region or a hop is proven BLOCKED — see {@link #driveToward}); kept
+     * long so a stationary bot re-searches rarely, which also keeps the debug path stable.
      */
     private static final int REPLAN_TICKS = 40;
     /** Below this squared horizontal speed while trying to move, treat the bot as stuck → jump. */
@@ -76,6 +80,21 @@ public class AllyBotEntity extends FakePlayerEntity {
      * cell). 0.30 reliably breaks the surface float and clears a one-block lip; descent stays gentle.
      */
     private static final double SWIM_CLIMB_VY = 0.30;
+
+    /**
+     * Mid-air horizontal homing gain for a {@code Fall} step. The planner models a fall as a straight
+     * vertical drop ({@link com.orebit.mod.pathfinding.blockpathfinder.movements.Fall} scans the cardinal
+     * column straight down), but a bot that walks off a ledge at full speed carries horizontal momentum and
+     * arcs — overshooting the planned landing cell by a block or more, so it "slips" off its route. Minecraft
+     * grants aerial steering authority (a player drop-controls off ladders the same way), so we don't model
+     * the parabola; instead each airborne tick we set horizontal velocity toward the landing column centre at
+     * {@code (offset × GAIN)} clamped to {@link #FALL_HOMING_MAX}. This both pulls the bot over the target
+     * column and overwrites (bleeds) the overshoot momentum, so the real drop matches the planner's vertical
+     * assumption. As the bot nears centre the offset → 0, so velocity decays smoothly with no over-correction.
+     */
+    private static final double FALL_HOMING_GAIN = 0.5;
+    /** Per-tick horizontal speed cap while drop-controlling a {@code Fall} (blocks/tick) — see {@link #FALL_HOMING_GAIN}. */
+    private static final double FALL_HOMING_MAX = 0.15;
 
     /**
      * The bot's planner capabilities + throwaway block now come from the owner config (PRD §10 Phase 1a):
@@ -145,12 +164,20 @@ public class AllyBotEntity extends FakePlayerEntity {
 
     private BlockPathPlan path;
     private int waypointIndex;
-    private int replanCooldown;
+    private int blockRefreshTicks; // countdown to the next BLOCK-level window refresh (NOT a skeleton rebuild)
     private int stuckTicks;         // consecutive ticks grinding in place; drives the stuck diagnostic
     private int lastEditedIndex = -1; // last step whose break/place edits were applied (apply once per step)
-    private BlockPos lastGoalCell;  // owner floor cell the current path was planned to; replan when it moves
     private boolean loggedHasPath;  // dedupe the path/no-path diagnostic so it logs only on change
     private boolean loggedPlanError; // log a two-tier replan exception only once (then degrade silently)
+
+    // ---- region-tier online repair (the "recover when stuck" half of the stuck arc) ------------------
+    /** Region crossings proven unrealizable for this bot's caps; the region A* routes around them. Accumulates
+     *  across the stuck episode, cleared when the goal cell changes (see {@link #driveToward}). */
+    private final RegionEdgeBlacklist regionBlacklist = new RegionEdgeBlacklist();
+    /** Reused 2-long scratch for {@link PathPlan#blockedHop} (no per-replan alloc). */
+    private final long[] hopScratch = new long[2];
+    /** Set once the region tier can find NO route avoiding the blacklist — the bot holds + tells the owner. */
+    private boolean navGaveUp;
 
     public AllyBotEntity(MinecraftServer server, ServerLevel world, GameProfile profile, Player owner) {
         super(server, world, profile);
@@ -268,26 +295,41 @@ public class AllyBotEntity extends FakePlayerEntity {
             return true;
         }
 
-        // Replan when the goal moves to a new block, the driver is exhausted, or the safety interval elapses.
-        // Holding a stable path while the goal stands still stops the debug particles from ghosting.
-        // ("Exhausted" is now driver-level: the windowed block plan is spent AND the region driver reports it
-        // is not COMPLETE — the sliding window owns advancing through intermediate windows, so we no longer
-        // rebuild the whole two-tier plan just because one window's block path ran out.)
-        boolean exhausted = (pathPlan == null)
-                || (path == null && !pathPlan.isComplete())
-                || (path != null && waypointIndex >= path.size() && !pathPlan.isComplete());
-        if (exhausted || !goalFloor.equals(lastGoalCell) || --replanCooldown <= 0) {
+        // COMMIT TO THE SKELETON. The region skeleton is a valid S1→…→Sn route to the goal; we follow it by
+        // SLIDING THE WINDOW and replanning only at the BLOCK level as the bot crosses region boundaries.
+        // We REBUILD the skeleton (a region replan) only when there is genuinely a new region problem to
+        // solve: there's no plan yet, the goal entered a NEW region (a step within the same region keeps the
+        // skeleton — the final window tracks the live goal cell), or the committed skeleton was proven invalid
+        // (BLOCKED — the block tier couldn't realize a window; the online repair then blacklists the dead hop
+        // and reroutes). Recomputing the skeleton as the bot MOVES (the old per-boundary / 40-tick full
+        // replan) let near-equal-cost region routes flip-flop, so the bot oscillated mid-route ("start one
+        // route, change its mind, take another, go back"). [Coarse S5 note: a >LEVEL0 skeleton may need region
+        // refinement of its FAR, unresolved tail as the bot approaches — never the committed near end.]
+        boolean newRegionGoal = pathPlan == null || !pathPlan.sameGoalRegion(goalFloor);
+        boolean skeletonInvalid = pathPlan != null && pathPlan.status() == PathStatus.BLOCKED;
+        if (pathPlan == null || newRegionGoal || skeletonInvalid) {
+            if (newRegionGoal) {
+                // New destination region → the learned dead-ends no longer apply; start the repair fresh.
+                regionBlacklist.clear();
+                navGaveUp = false;
+            }
             replan(goalFloor);
-            lastGoalCell = goalFloor;
-            replanCooldown = REPLAN_TICKS;
-        } else if (pathPlan != null) {
-            // Per-tick driver hook (HPA-IMPLEMENTATION.md §10): report the bot's current floor cell so the
-            // sliding window can COMMIT into the next region (the wiggle rule) and replan that window's block
-            // path. blockPosition().below() is the bot's floor cell (the same cell convention as replan's
-            // startFloor). Then refresh `path` to whatever block plan the driver now exposes; when the driver
-            // swapped in a NEW BlockPathPlan instance (window advanced / re-planned), restart the follower at
-            // its head so steerAlongPath/applyEdits don't index a stale waypoint/edit cursor.
+            blockRefreshTicks = REPLAN_TICKS;
+        } else {
+            // Per-tick driver hook (HPA-IMPLEMENTATION.md §10): report the bot's floor cell so the sliding
+            // window can COMMIT into the next region (the wiggle rule) and replan THAT window's block path.
             pathPlan.onBotMoved(this.blockPosition().below());
+            // Block-level refresh (NOT a skeleton rebuild): when the current block path is consumed but the
+            // route isn't COMPLETE, re-search the window toward the SAME target so the bot keeps inching along
+            // a committed partial; also do it periodically so a terrain edit under the window is picked up.
+            boolean consumed = path != null && waypointIndex >= path.size() && !pathPlan.isComplete();
+            if (consumed || --blockRefreshTicks <= 0) {
+                pathPlan.refreshWindow();
+                blockRefreshTicks = REPLAN_TICKS;
+            }
+            // Refresh `path` to whatever block plan the driver now exposes; when it swapped in a NEW
+            // BlockPathPlan (window advanced / re-searched), restart the follower at its head so
+            // steerAlongPath/applyEdits don't index a stale waypoint/edit cursor.
             BlockPathPlan now = pathPlan.currentBlockPlan();
             if (now != lastBlockPlanRef) {
                 this.path = now;
@@ -296,18 +338,88 @@ public class AllyBotEntity extends FakePlayerEntity {
                 this.lastEditedIndex = -1;
             }
         }
+        // Region repair, every tick (cheap status check): a BLOCKED window — wherever it surfaced — gets its
+        // dead skeleton hop blacklisted now, so the NEXT tick's `skeletonInvalid` reroute already avoids it
+        // (one useful region replan, not a wasted same-skeleton rebuild first). Give-up lives here too.
+        repairStep();
 
         if (path != null && waypointIndex < path.size()) {
             steerAlongPath();
+        } else if (navGaveUp || (pathPlan != null && pathPlan.status() == PathStatus.BLOCKED)) {
+            // HOLD when we either gave up OR a committed-skeleton window is momentarily BLOCKED (the region
+            // repair reroutes next tick). Do NOT straight-line here: that ignores the planner and could walk
+            // the bot off the very ledge the guard refused (the irreversible yeet). Straight-line stays only
+            // for the genuinely off-grid case below (no plan / no built ground under the owner).
+            this.zza = 0.0f;
         } else {
             steerStraight(dx, dz); // no nav data here — fall back to straight-line follow
         }
 
-        if (DEBUG_PATH && path != null) {
+        if (Debug.ENABLED && path != null) {
             PathDebugRenderer.render((ServerLevel) Worlds.of(this), path, waypointIndex,
                     this.getX(), this.getY(), this.getZ());
         }
+        if (Debug.ENABLED && pathPlan != null) {
+            // Macro overlay: region skeleton + portal cells, to SEE the HPA plan vs the local block path
+            // (and catch buried portal targets — the §6 bug — as blue particles inside rock).
+            PathDebugRenderer.renderSkeleton((ServerLevel) Worlds.of(this), pathPlan);
+        }
+        announceProgress();
         return false;
+    }
+
+    /**
+     * Post the bot's high-level progress to the owner's chat (Debug.ENABLED) — one message per state change, not
+     * per tick: which skeleton step it's heading to, whether it's on a best-effort PARTIAL, blocked, or
+     * arrived. Lets you follow a long route in freecam without tailing the console. Never throws onto the tick.
+     */
+    private void announceProgress() {
+        if (!Debug.ENABLED || pathPlan == null || owner == null) {
+            return;
+        }
+        final PathStatus status = pathPlan.status();
+        final int step = pathPlan.windowTargetStepIndex();
+        final boolean partial = pathPlan.isPartialPlan();
+        final PathPlan.TargetKind kind = pathPlan.windowTargetKind();
+        if (step == lastChatStep && status == lastChatStatus && partial == lastChatPartial
+                && kind == lastChatKind) {
+            return; // nothing changed
+        }
+        lastChatStep = step;
+        lastChatStatus = status;
+        lastChatPartial = partial;
+        lastChatKind = kind;
+
+        final RegionPathPlan sk = pathPlan.skeletonPlan();
+        final String where = (sk == null || sk.isEmpty() || step < 0 || step >= sk.size())
+                ? "?"
+                : "S" + step + "/" + (sk.size() - 1) + " (" + sk.rx(step) + "," + sk.ry(step) + "," + sk.rz(step) + ")";
+        // Why this target was chosen (only the non-default cases are worth surfacing) — see PathPlan.TargetKind.
+        final String how;
+        switch (kind) {
+            case EXTENDED: how = " [extended down — falling to landing]"; break;
+            case SNAPPED:  how = " [target adjusted → standable]"; break;
+            case CENTER:   how = " [no portal — aiming region center]"; break;
+            default:       how = ""; break; // GOAL / PORTAL — the normal cases, no annotation
+        }
+        final String msg;
+        switch (status) {
+            case COMPLETE: msg = "arrived"; break;
+            case BLOCKED:  msg = "blocked — no path to " + where; break;
+            case FAILED:   msg = "failed — no route"; break;
+            default:       msg = (partial ? "partial path toward " : "moving to ") + where + how; break;
+        }
+        chat("[bot] " + msg);
+    }
+
+    /** Send one line to the owner's chat (reusing the version-portable {@link CommandFeedback}); swallow any
+     *  error so debug chatter can never break the server tick. */
+    private void chat(String message) {
+        try {
+            CommandFeedback.sendTo(owner, message);
+        } catch (Throwable ignored) {
+            // never let progress chatter crash the tick
+        }
     }
 
     /**
@@ -334,7 +446,7 @@ public class AllyBotEntity extends FakePlayerEntity {
         // tier is hardened.
         try {
             this.pathPlan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, caps(),
-                    inventoryFeasibility());
+                    inventoryFeasibility(), regionBlacklist);
             this.path = pathPlan.currentBlockPlan();
         } catch (Throwable t) {
             if (!loggedPlanError) {
@@ -350,7 +462,7 @@ public class AllyBotEntity extends FakePlayerEntity {
         this.lastEditedIndex = -1;
 
         boolean hasPath = path != null && path.size() > 0;
-        if (DEBUG_PATH) {
+        if (Debug.ENABLED) {
             // Verbose per-plan trace while debugging: the full waypoint list shows exactly which cells
             // A* produced (e.g. whether a stacked staircase step is present or skipped).
             if (hasPath) {
@@ -380,6 +492,43 @@ public class AllyBotEntity extends FakePlayerEntity {
     }
 
     /**
+     * The region-tier online repair, run every tick after the driver updates (the "recover when stuck" half of
+     * the stuck arc). The irreversibility guard already stops the bot yeeting off a one-way ledge; this is what
+     * gets it UNSTUCK — whenever the driver reports {@link PathStatus#BLOCKED}, the block tier just proved it
+     * can't realize the committed skeleton's current hop for this bot's caps (e.g. the only way to the next
+     * region is a drop a no-place bot can't reverse). We blacklist that region→region crossing ({@link
+     * PathPlan#blockedHop}) so the next {@code skeletonInvalid} reroute in {@link #driveToward} routes around
+     * it — the large walk-around that only the region tier can find cheaply (a block-tier detour that long
+     * would flood the node cap, which is why this lives at the region level). The trigger is IMMEDIATE: with
+     * server render distance ≫ the 3-region window, chunks load long before the path reaches them, so a BLOCKED
+     * is a real dead-end, never a transient unbuilt cell.
+     *
+     * <p>When no onward hop exists to blame ({@link PathStatus#FAILED} = the region A* found no route at all,
+     * or the bot is in the goal region but can't reach the goal cell) the bot has exhausted its options: it
+     * sets {@link #navGaveUp} (→ HOLD, no blind straight-line) and tells the owner once. A new goal clears it.
+     */
+    private void repairStep() {
+        if (pathPlan == null || navGaveUp) return;
+        final PathStatus status = pathPlan.status();
+        if (status == PathStatus.BLOCKED) {
+            // The window's block search couldn't leave the bot's region toward the next skeleton step.
+            if (pathPlan.blockedHop(hopScratch)) {
+                regionBlacklist.add(hopScratch[0], hopScratch[1]); // dedups; next replan reroutes
+            } else {
+                giveUp(); // BLOCKED in the goal's own region with no onward hop — can't reach the goal cell
+            }
+        } else if (status == PathStatus.FAILED && regionBlacklist.size() > 0) {
+            // We blacklisted our way to "no route remains" — every crossing the bot trusts is exhausted.
+            giveUp();
+        }
+    }
+
+    private void giveUp() {
+        navGaveUp = true;
+        chat("I can't find a way to reach you.");
+    }
+
+    /**
      * One-shot diagnostic ({@code /bot trace}): run the <b>full two-tier HPA* path</b> the way {@code /bot
      * come} does, then trace the <b>first window's block-A*</b> to a file — <i>with</i> its HPA*-derived
      * corridor, so cuboids, macro-ops, and the goal-forced-cost premium are all ACTIVE. (The old trace ran a
@@ -405,10 +554,12 @@ public class AllyBotEntity extends FakePlayerEntity {
         // of the dump); the first window's target + corridor are what we then trace.
         BlockPos target = null;
         RegionBound corridor = null;
+        String skeletonDump = null;
         try {
             PathPlan plan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, caps, inv);
             target = plan.currentWindowTarget();
             corridor = plan.currentCorridor();
+            skeletonDump = plan.describeSkeleton(); // the HPA region plan that produced this window target
         } catch (Throwable t) {
             return "trace FAILED: two-tier plan threw " + t;
         }
@@ -425,15 +576,20 @@ public class AllyBotEntity extends FakePlayerEntity {
                 w.write("Orebit A* trace  start=" + startFloor + "  goal=" + goalFloor + "  caps=" + caps
                         + "  (HPA* produced NO window — falling back to raw block-A*, no corridor)\n");
             }
+            if (skeletonDump != null) {
+                w.write("\n" + skeletonDump + "\n\n"); // the region skeleton behind this window target
+            }
             w.write("legend: 'E <seq> <x> <y> <z> g=<g> f=<f> via=<move|start>' = one expansion (pop), in"
                     + " order;  '  C <move> <x> <y> <z> cost=<c> <OK|worse|corridor>' = a candidate it"
                     + " emitted (OK=relaxed onto the open set, worse=not an improvement).\n\n");
             BlockPathfinder.TRACE_OUT = w;
             BlockPathfinder.TRACE = true;
             BlockPathfinder.LOG_TIMING = false; // the trace IS the record; skip the one-line summary
+            // Match the live driver: UNCONFINED search (confineBound=null) with the cuboid GROWTH cap
+            // (cuboidBound=corridor) so macros/forced-cost are active but the trace isn't walled to a corridor.
             BlockPathPlan plan = haveWindow
-                    ? BlockPathfinder.findPath(new NavGridView(level), startFloor, target, caps, corridor, inv)
-                    : BlockPathfinder.findPath(new NavGridView(level), startFloor, goalFloor, caps, null, inv);
+                    ? BlockPathfinder.findPath(new NavGridView(level), startFloor, target, caps, null, corridor, inv)
+                    : BlockPathfinder.findPath(new NavGridView(level), startFloor, goalFloor, caps, null, null, inv);
             BlockPathfinder.TRACE = false;
             w.write("\nRESULT: " + (plan == null ? "FAIL (null)" : plan.size() + "wp cost=" + plan.cost())
                     + "\n");
@@ -528,12 +684,29 @@ public class AllyBotEntity extends FakePlayerEntity {
             }
             Vec3 dm = this.getDeltaMovement();
             this.setDeltaMovement(dm.x, vy, dm.z);
-            if (DEBUG_PATH) {
+            if (Debug.ENABLED) {
                 OrebitCommon.LOGGER.info("[Orebit] swim {} target={} botY={} dy={} inWater={} swimming={} vy->{}",
                         sprintSwim ? "SPRINT" : "normal", compact(wp), String.format("%.2f", this.getY()),
                         String.format("%.2f", dyTarget), this.isInWater(), this.isSwimming(),
                         String.format("%.3f", vy));
             }
+        }
+
+        // Fall control — drop STRAIGHT down the planned column instead of arcing off the lip. The planner
+        // models a multi-block Fall as a vertical drop, but walking off an edge at full speed carries
+        // horizontal momentum, so the bot overshoots the planned landing cell and slips off-route. We have
+        // full aerial authority (we drive deltaMovement directly, as for swim), so while airborne we home
+        // the bot onto the landing column centre at a clamped rate — this pulls it over the target column and
+        // bleeds the overshoot. zza is zeroed so the forward walk input doesn't re-add horizontal speed.
+        boolean fall = path.movement(waypointIndex) == MovementRegistry.FALL;
+        if (fall && !EntityState.onGround(this)) {
+            double cx = (wp.getX() + 0.5) - this.getX();
+            double cz = (wp.getZ() + 0.5) - this.getZ();
+            double vx = Math.max(-FALL_HOMING_MAX, Math.min(FALL_HOMING_MAX, cx * FALL_HOMING_GAIN));
+            double vz = Math.max(-FALL_HOMING_MAX, Math.min(FALL_HOMING_MAX, cz * FALL_HOMING_GAIN));
+            Vec3 dm = this.getDeltaMovement();
+            this.setDeltaMovement(vx, dm.y, vz);
+            this.zza = 0.0f;
         }
 
         // Jump only when the step the planner chose is an Ascend (a real jump-up onto a full block,
@@ -555,7 +728,7 @@ public class AllyBotEntity extends FakePlayerEntity {
         // grid can't represent (a CLEAR cell guarantees only 2 air blocks above the floor; a jump-up
         // needs ~3). Logged once per stuck episode.
         if (stuck && EntityState.onGround(this)) {
-            if (++stuckTicks == STUCK_DUMP_TICKS && DEBUG_PATH) dumpStuck(wp);
+            if (++stuckTicks == STUCK_DUMP_TICKS && Debug.ENABLED) dumpStuck(wp);
         } else {
             stuckTicks = 0;
         }

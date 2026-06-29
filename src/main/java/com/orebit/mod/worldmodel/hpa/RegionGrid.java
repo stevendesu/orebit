@@ -59,7 +59,7 @@ public final class RegionGrid {
      * <p>At S1 this flag has no live consumer yet (the fragment computer is additive and unwired); it is
      * read by the S2 store wiring ({@link #ensureLeaf} / {@link #faceCost}) and beyond.
      */
-    public static boolean HPA_FRAGMENTS = false;
+    public static boolean HPA_FRAGMENTS = true;
 
     /** One grid per dimension, interned by level (mirrors {@link NavStore}'s {@code BY_LEVEL}). */
     private static final Map<ServerLevel, RegionGrid> BY_LEVEL = new ConcurrentHashMap<>();
@@ -162,14 +162,30 @@ public final class RegionGrid {
         if (row != -1 && pyramid.isBuilt(0, row)) {
             return; // already computed
         }
-        // Headless test seam ({@link #headless}): with no backing level there is no NavStore to build from,
-        // so a not-pre-seeded row stays unbuilt and the planner reads the §6 optimistic default. In
-        // production `level` is never null, so this guard never fires (zero regression, both flag states).
+        rebuildLeaf(rx, ry, rz);
+    }
+
+    /**
+     * <b>Force</b>-(re)build leaf {@code (rx,ry,rz)} from the current {@link NavStore} section, honoring
+     * {@link #HPA_FRAGMENTS} — <b>ignoring any existing built flag</b>. This is the recompute seam for
+     * {@link com.orebit.mod.worldmodel.hpa.HpaMaintenance}: a chunk's nav being (re)built, or a leaf marked
+     * dirty by a block change, must recompute the leaf <i>under the active model</i>. (The lazy
+     * {@link #ensureLeaf} is just this behind an already-built short-circuit.) No-op if the section isn't
+     * resident (the node stays unbuilt → the planner reads the §6 optimistic default).
+     *
+     * <p><b>Why this exists:</b> the maintenance/eager-build path previously always ran the center-model
+     * {@link LeafCostComputer} and marked the row built — so with {@code HPA_FRAGMENTS} on it poisoned the row
+     * with a center build and <i>no</i> {@link RegionFragments} record; {@code ensureLeaf} then saw "built" and
+     * skipped, leaving {@link #kind} reading the default AIR forever (a flat, free, straight-through skeleton).
+     */
+    public void rebuildLeaf(int rx, int ry, int rz) {
+        // Headless test seam ({@link #headless}): with no backing level there is no NavStore to build from, so
+        // a not-pre-seeded row stays unbuilt and the planner reads the §6 optimistic default.
         if (level == null) {
             return;
         }
-        // Only build if the chunk's nav data is resident and this vertical section exists; otherwise leave
-        // the node unbuilt (faceCost / fragment reads fall back to the §6 default).
+        // Only build if the chunk's nav data is resident and this vertical section exists; otherwise leave the
+        // node unbuilt (faceCost / fragment reads fall back to the §6 default).
         NavSection[] column = NavStore.get(level, NavStore.key(rx, rz));
         if (column == null || ry < 0 || ry >= column.length || column[ry] == null) {
             return;

@@ -17,6 +17,7 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 
+import com.orebit.mod.Debug;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
@@ -87,7 +88,7 @@ public class PathfinderBenchmark {
         }
         // The per-search INFO logging would dominate timing and flood the run — silence it.
         BlockPathfinder.LOG_TIMING = false;
-        BlockPathfinder.DEBUG = false;
+        Debug.ENABLED = false;
 
         switch (scenario) {
             case "TOWER":

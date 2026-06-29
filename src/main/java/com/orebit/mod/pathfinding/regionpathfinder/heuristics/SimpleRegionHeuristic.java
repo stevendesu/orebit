@@ -1,7 +1,7 @@
 package com.orebit.mod.pathfinding.regionpathfinder.heuristics;
 
 import com.orebit.mod.pathfinding.regionpathfinder.RegionHeuristic;
-import com.orebit.mod.worldmodel.hpa.CostCodec;
+import com.orebit.mod.worldmodel.hpa.LeafCostComputer;
 
 /**
  * The ratified default region-tier heuristic: Euclidean distance between region centers, in region units,
@@ -10,16 +10,20 @@ import com.orebit.mod.worldmodel.hpa.CostCodec;
  *
  * <p>Operates on <b>level-0 region coordinates</b>. The distance is the straight-line (Euclidean) span
  * between the two regions measured in <b>region units</b> (one unit = one level-0 region cell, i.e. one
- * {@code LEAF_SIZE}=16-block cube per side), multiplied by {@link #MIN_COST_PER_REGION} — the cheapest a
- * single region can ever cost to cross.
+ * {@code LEAF_SIZE}=16-block cube per side), multiplied by {@link #COST_PER_REGION} — the realistic cost of
+ * one straight walk across a single region.
  *
- * <p><b>Why it is admissible (PRD §7.4):</b> any real path from the candidate region to the goal region
- * must traverse at least as many regions as the straight-line region distance, and each traversed region
- * costs <i>at least</i> {@link #MIN_COST_PER_REGION} (the dequantized value of the cheapest cost bucket,
- * {@code CostCodec.dequantize(0)}). So {@code distance · MIN_COST_PER_REGION} can never over-estimate the
- * true remaining cost — the heuristic is an admissible lower bound, and the region A* stays optimal. The
- * Euclidean (not Manhattan/Chebyshev) form keeps it a conservative under-estimate even when diagonal
- * region-to-region moves are not directly available.
+ * <p><b>Why a realistic per-region cost, not the absolute floor (weighted A*):</b> the strictly-admissible
+ * floor is the cheapest a single boundary crossing can <i>ever</i> cost ({@code CostCodec.dequantize(0)} = 1
+ * tick — two perfectly-overlapping portal footprints). Using it made the heuristic ~16–96× weaker than real
+ * per-region cost, so the region A* degenerated to a Dijkstra <b>flood</b> and exhausted its expansion budget
+ * a fraction of the way to a far goal (the long-range {@code plan: NONE} bug). We instead scale by
+ * {@link #COST_PER_REGION} — the cost of one straight <b>walk across</b> a region ({@code AIR_TRANSIT_TICKS} =
+ * 16, the same unit the per-block walk edge cost uses), the realistic cheapest <i>meaningful</i> crossing.
+ * This is mildly <b>inadmissible</b> (a rare footprint-coincident crossing can be cheaper), so the macro route
+ * may be slightly suboptimal — acceptable by design: region costs are <b>ordinal</b> and the block tier is the
+ * source of truth, refining the real moves within each window. The Euclidean (not Manhattan/Chebyshev) region
+ * distance keeps the estimate conservative where diagonal region moves are unavailable.
  *
  * <p><b>Hot path (house style):</b> pure allocation-free arithmetic — three int subtractions, a
  * {@link Math#sqrt} of the squared distance, one multiply. Returns {@code 0} exactly when the candidate
@@ -31,19 +35,20 @@ import com.orebit.mod.worldmodel.hpa.CostCodec;
 public final class SimpleRegionHeuristic implements RegionHeuristic {
 
     /**
-     * The cheapest a single region can cost to cross — the dequantized value of cost bucket {@code 0}
-     * ({@link CostCodec#dequantize(int) CostCodec.dequantize(0)} = {@link CostCodec#BASE_TICKS}). Using the
-     * floor (not an average) is what guarantees admissibility: no region ever costs less than this.
+     * The realistic cheapest cost to cross one region — one straight <b>walk across</b> a leaf
+     * ({@link LeafCostComputer#AIR_TRANSIT_TICKS} = 16 ticks, the per-block walk cost × the 16-block side). This
+     * is the heuristic scale: strong enough to guide the region A* near-straight to the goal (no Dijkstra
+     * flood), at the cost of mild inadmissibility vs the absolute 1-tick floor — see the class doc.
      */
-    public static final float MIN_COST_PER_REGION = CostCodec.dequantize(0);
+    public static final float COST_PER_REGION = LeafCostComputer.AIR_TRANSIT_TICKS;
 
     @Override
     public float estimate(int rx, int ry, int rz, int gx, int gy, int gz) {
         int dx = gx - rx;
         int dy = gy - ry;
         int dz = gz - rz;
-        // 0 at goal (dx=dy=dz=0 → sqrt(0)=0), admissible everywhere else.
+        // 0 at goal (dx=dy=dz=0 → sqrt(0)=0).
         float distRegions = (float) Math.sqrt((double) (dx * dx + dy * dy + dz * dz));
-        return distRegions * MIN_COST_PER_REGION;
+        return distRegions * COST_PER_REGION;
     }
 }

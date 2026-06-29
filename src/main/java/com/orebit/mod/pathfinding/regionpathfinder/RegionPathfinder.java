@@ -2,6 +2,9 @@ package com.orebit.mod.pathfinding.regionpathfinder;
 
 import java.util.Arrays;
 
+import com.orebit.mod.Debug;
+import com.orebit.mod.OrebitCommon;
+import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.regionpathfinder.heuristics.SimpleRegionHeuristic;
 import com.orebit.mod.worldmodel.hpa.CostCodec;
 import com.orebit.mod.worldmodel.hpa.CostPyramid;
@@ -143,6 +146,15 @@ public final class RegionPathfinder {
      */
     private static final int WALL_MINE_BLOCKS = 4;
 
+    /**
+     * Per-excess-block penalty for a vertical region transit a {@code !canPlace} bot cannot realize — a drop
+     * deeper than {@code safeFall} (a cliff it would take fall damage on) or a rise it cannot pillar. Dear
+     * enough (≈ a place/mine per block) that the region A* prefers a <b>gradual</b> route — one that spreads its
+     * climb/descent horizontally into small per-transit {@code |dy|} — over a single big-{@code |dy|} cliff/wall
+     * the block tier would dead-end on. Ordinal, S5-tunable.
+     */
+    private static final float UNSAFE_VERTICAL_PENALTY = 16f;
+
     /** Sentinel for "no portal cell" in the SoA portal arrays (the start node). */
     private static final int NO_PORTAL = RegionPathPlan.NO_PORTAL;
 
@@ -161,7 +173,18 @@ public final class RegionPathfinder {
      *         expansion budget. An empty/1-element plan is returned for the trivial same-region case.
      */
     public static RegionPathPlan plan(ServerLevel level, RegionGrid grid, BlockPos startFloor,
-                                      BlockPos goalFloor) {
+                                      BlockPos goalFloor, BotCaps caps) {
+        return plan(level, grid, startFloor, goalFloor, caps, null);
+    }
+
+    /**
+     * As {@link #plan(ServerLevel, RegionGrid, BlockPos, BlockPos, BotCaps)}, additionally honouring a {@link
+     * RegionEdgeBlacklist} of region→region crossings the block tier has proven unrealizable for these caps:
+     * the fragment A* skips any blacklisted edge, so it returns the <b>next-best</b> route (the walk-around).
+     * {@code null} = no blacklist (the historical behaviour; used by {@code /bot trace} and the tests).
+     */
+    public static RegionPathPlan plan(ServerLevel level, RegionGrid grid, BlockPos startFloor,
+                                      BlockPos goalFloor, BotCaps caps, RegionEdgeBlacklist blacklist) {
         final int minY = grid.minY();
 
         final int srx = RegionAddress.regionX(startFloor.getX(), 0);
@@ -175,7 +198,8 @@ public final class RegionPathfinder {
         // Fragment model (HPA-FRAGMENTS.md §S3): node = (region, fragment); edges derived, not stored. It owns
         // its own trivial / scale-guard handling because "same region" is no longer "same node".
         if (RegionGrid.HPA_FRAGMENTS) {
-            return planFragments(grid, minY, startFloor, goalFloor, srx, sry, srz, grx, gry, grz);
+            return planFragments(grid, minY, startFloor, goalFloor, srx, sry, srz, grx, gry, grz,
+                    caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), blacklist);
         }
 
         // Trivial: start and goal in the same level-0 region.
@@ -368,7 +392,9 @@ public final class RegionPathfinder {
      */
     private static RegionPathPlan planFragments(RegionGrid grid, int minY, BlockPos startFloor,
                                                 BlockPos goalFloor, int srx, int sry, int srz,
-                                                int grx, int gry, int grz) {
+                                                int grx, int gry, int grz,
+                                                boolean canBreak, boolean canPlace, int safeFall,
+                                                RegionEdgeBlacklist blacklist) {
         grid.ensureLeaf(srx, sry, srz);
         grid.ensureLeaf(grx, gry, grz);
         final int startFrag = nearestFragment(grid, srx, sry, srz, startFloor);
@@ -388,7 +414,8 @@ public final class RegionPathfinder {
             return planCoarseRefined(grid, minY, srx, sry, srz, grx, gry, grz);
         }
 
-        return planLevel0Fragments(grid, minY, srx, sry, srz, startFrag, grx, gry, grz, goalFrag, true);
+        return planLevel0Fragments(grid, minY, srx, sry, srz, startFrag, grx, gry, grz, goalFrag, true,
+                canBreak, canPlace, safeFall, blacklist);
     }
 
     /**
@@ -396,11 +423,21 @@ public final class RegionPathfinder {
      * (footprint-overlap on a shared face), intra-region mine edges (to sibling fragments), and uniform-kind
      * transit edges (into SOLID/AIR/WATER/collapsed neighbours) — HPA-FRAGMENTS.md §2. Terminates on the
      * specific {@code (goal region, goalFrag)} node so a sealed goal is forced through its mine edge.
+     *
+     * <p>When {@code canBreak} is false (a no-break bot), <b>every mining-based edge is dropped</b>: intra-region
+     * sibling digs, the non-overlapping-footprint "mine to the nearest fragment" fallback, and transits into a
+     * uniform SOLID neighbour. Only real walkable connectivity remains — overlapping-footprint portals plus
+     * AIR/WATER/unbuilt transits — so the graph is <b>no longer guaranteed connected</b> and the search can
+     * legitimately FAIL (the goal sits behind rock the bot cannot remove). This is the fix for a no-break bot
+     * being routed at unmineable rock and then thrashing when the block tier can't dig (the {@code noBreakCap}
+     * dead-end).
      */
     private static RegionPathPlan planLevel0Fragments(RegionGrid grid, int minY,
                                                       int srx, int sry, int srz, int startFrag,
                                                       int grx, int gry, int grz, int goalFrag,
-                                                      boolean reachedGoalRegion) {
+                                                      boolean reachedGoalRegion,
+                                                      boolean canBreak, boolean canPlace, int safeFall,
+                                                      RegionEdgeBlacklist blacklist) {
         final Nodes nodes = SEARCH.get();
         nodes.reset();
 
@@ -419,6 +456,9 @@ public final class RegionPathfinder {
 
         int expansions = 0;
         int reachedRow = -1;
+        boolean budgetHit = false;
+        int bestRow = startRow;       // closest-to-goal node seen (min heuristic) — for the FAIL diagnostic
+        float bestH = Float.MAX_VALUE;
 
         while (nodes.heapSize > 0) {
             int current = nodes.pop();
@@ -430,7 +470,9 @@ public final class RegionPathfinder {
                 reachedRow = current;
                 break;
             }
-            if (++expansions > MAX_REGION_EXPANSIONS) break;
+            final float hCur = nodes.f[current] - nodes.g[current];
+            if (hCur < bestH) { bestH = hCur; bestRow = current; }
+            if (++expansions > MAX_REGION_EXPANSIONS) { budgetHit = true; break; }
 
             grid.ensureLeaf(crx, cry, crz);
             final RegionFragments rfN = grid.fragmentRecord(0, crx, cry, crz);
@@ -439,13 +481,14 @@ public final class RegionPathfinder {
             final float gCur = nodes.g[current];
 
             // (A) Intra-region MINE edges to sibling fragments (dig through the wall) — MIXED, ≥2 fragments.
-            if (!uniformN && countN > 1) {
+            // Dropped entirely for a no-break bot: it cannot dig between two disconnected pockets of a region.
+            if (canBreak && !uniformN && countN > 1) {
                 for (int fragC = 0; fragC < countN; fragC++) {
                     if (fragC == fragA) continue;
                     float edge = mineCost(rfN, fragA, fragC, minY, crx, cry, crz, wa, wb, wc);
                     // wb now holds fragC's centroid (its interior rep) — the mine-edge portal target.
                     relaxFrag(nodes, current, gCur, edge, crx, cry, crz, fragC,
-                            wb[0], wb[1], wb[2], grx, gry, grz);
+                            wb[0], wb[1], wb[2], grx, gry, grz, blacklist);
                 }
             }
 
@@ -464,17 +507,30 @@ public final class RegionPathfinder {
                 footprintCenterWorld(minY, crx, cry, crz, f, packedA, wa);
 
                 if (isUniformNode(rfM)) {
+                    // A uniform SOLID neighbour is reachable only by mining → impassable for a no-break bot
+                    // (an unbuilt/AIR/WATER neighbour is still a real walk/fall/swim, so those remain).
+                    if (!canBreak && rfM != null && rfM.kind() == RegionFragments.KIND_SOLID) continue;
+                    // Symmetric caps-correctness for a no-PLACE bot: a uniform-AIR neighbour is a floorless
+                    // shaft, and a no-place bot cannot pillar, so the ONLY way it can enter one is by FALLING
+                    // straight DOWN into it (face 2 = −Y, neighbour below). An upward (face 3) or sideways
+                    // crossing into open air is physically impossible for it — so drop those edges, exactly as
+                    // the no-break/solid rule above drops mine edges. This stops the region tier routing a
+                    // no-place bot UP through the open cave void (the lip-ascent flood); it then finds a
+                    // walkable ramp instead. (A place-capable bot keeps the dear PILLAR cost and may climb.)
+                    if (!canPlace && rfM != null && rfM.kind() == RegionFragments.KIND_AIR && f != 2) continue;
                     // Uniform / collapsed / unbuilt neighbour: a single transit edge into its fragment 0.
-                    float edge = uniformTransitCost(rfM, f);
+                    float edge = uniformTransitCost(rfM, f, canPlace, safeFall);
                     footprintCenterWorld(minY, mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
                     relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
-                            wb[0], wb[1], wb[2], grx, gry, grz);
+                            wb[0], wb[1], wb[2], grx, gry, grz, blacklist);
                     continue;
                 }
 
                 // MIXED neighbour: portal edge to every fragment whose footprint OVERLAPS ours on the shared
-                // face; if none overlaps, a mine edge to the nearest touching fragment (or its fragment 0 if it
-                // is solid at this face) — keeping the graph fully connected (§2, no FAIL).
+                // face (a real walkable opening, always allowed); if none overlaps, a mine edge to the nearest
+                // touching fragment (or its fragment 0 if solid at this face) — keeping the graph fully
+                // connected (§2, no FAIL). The mine fallback is gated on canBreak below: a no-break bot only
+                // gets the overlapping-portal edges, so a face with no real opening is simply impassable.
                 boolean emitted = false;
                 int bestFrag = -1;
                 long bestDist = Long.MAX_VALUE;
@@ -484,36 +540,47 @@ public final class RegionPathfinder {
                     int packedB = rfM.footprint(fb, oppF);
                     footprintCenterWorld(minY, mrx, mry, mrz, oppF, packedB, wb);
                     if (footprintsOverlap(packedA, packedB)) {
-                        float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2]);
+                        float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall);
                         relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, fb,
-                                wb[0], wb[1], wb[2], grx, gry, grz);
+                                wb[0], wb[1], wb[2], grx, gry, grz, blacklist);
                         emitted = true;
                     } else {
                         long d = Math.abs(wb[0] - wa[0]) + Math.abs(wb[1] - wa[1]) + Math.abs(wb[2] - wa[2]);
                         if (d < bestDist) { bestDist = d; bestFrag = fb; }
                     }
                 }
-                if (!emitted) {
+                if (!emitted && canBreak) {
                     float hardFactor = hardnessFactor(rfM.avgSolidHardness());
                     if (bestFrag != -1) {
                         int packedB = rfM.footprint(bestFrag, oppF);
                         footprintCenterWorld(minY, mrx, mry, mrz, oppF, packedB, wb);
-                        float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2])
+                        float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall)
                                 + WALL_MINE_BLOCKS * MINE_PER_BLOCK * hardFactor;
                         relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, bestFrag,
-                                wb[0], wb[1], wb[2], grx, gry, grz);
+                                wb[0], wb[1], wb[2], grx, gry, grz, blacklist);
                     } else {
                         // Neighbour is MIXED but solid at this face → mine straight in to its fragment 0.
                         footprintCenterWorld(minY, mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
                         float edge = LEAF * MINE_PER_BLOCK * hardFactor;
                         relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
-                                wb[0], wb[1], wb[2], grx, gry, grz);
+                                wb[0], wb[1], wb[2], grx, gry, grz, blacklist);
                     }
                 }
             }
         }
 
         if (reachedRow == -1) {
+            if (Debug.ENABLED) {
+                final int cheb = Math.max(Math.abs(grx - srx),
+                        Math.max(Math.abs(gry - sry), Math.abs(grz - srz)));
+                OrebitCommon.LOGGER.info("[Orebit] region plan FAIL start=({},{},{}) goal=({},{},{}) cheb={}regions"
+                        + " — {} after {} expansions; closest region=({},{},{}) h={} (heuristic {} ticks/region);"
+                        + " heapLeft={}",
+                        srx, sry, srz, grx, gry, grz, cheb,
+                        budgetHit ? "HIT EXPANSION BUDGET" : "heap drained (disconnected?)", expansions,
+                        nodes.x[bestRow], nodes.y[bestRow], nodes.z[bestRow], bestH,
+                        SimpleRegionHeuristic.COST_PER_REGION, nodes.heapSize);
+            }
             return null;
         }
         return reconstructFragments(nodes, startRow, reachedRow, minY, reachedGoalRegion);
@@ -521,14 +588,22 @@ public final class RegionPathfinder {
 
     /**
      * Relax the edge into {@code (mrx,mry,mrz,mFrag)} via {@code curRow}. The edge cost is floored at
-     * {@link #WALK_PER_BLOCK} so every boundary crossing costs ≥ one tick — keeping the per-region heuristic
-     * (≥ {@code MIN_COST_PER_REGION} per region) an admissible lower bound even for perfectly-aligned portals.
+     * {@link #WALK_PER_BLOCK} so every boundary crossing costs ≥ one tick — so g grows monotonically even for
+     * perfectly-aligned portals (and for the free unbuilt transit), keeping the search well-ordered.
      */
     private static void relaxFrag(Nodes nodes, int curRow, float gCur, float edge,
                                   int mrx, int mry, int mrz, int mFrag,
-                                  int px, int py, int pz, int grx, int gry, int grz) {
-        float tentative = gCur + Math.max(edge, WALK_PER_BLOCK);
+                                  int px, int py, int pz, int grx, int gry, int grz,
+                                  RegionEdgeBlacklist blacklist) {
         long k = fragmentKey(mrx, mry, mrz, mFrag);
+        // Online repair (RegionEdgeBlacklist): skip a crossing the block tier proved unrealizable for these
+        // caps, so the region A* routes around it (the walk-around) instead of re-offering the dead end.
+        if (blacklist != null
+                && blacklist.contains(fragmentKey(nodes.x[curRow], nodes.y[curRow], nodes.z[curRow],
+                        nodes.frag[curRow]), k)) {
+            return;
+        }
+        float tentative = gCur + Math.max(edge, WALK_PER_BLOCK);
         int row = nodes.intern(k, mrx, mry, mrz, mFrag);
         if (tentative >= nodes.g[row]) return; // new rows start at +inf → first visit admitted
         nodes.g[row] = tentative;
@@ -584,6 +659,15 @@ public final class RegionPathfinder {
         return RegionAddress.packLevelKey(rx, ry, rz) ^ ((long) (frag & 0x3F) << 50);
     }
 
+    /**
+     * The {@code (region, fragment)} node key for an arbitrary caller — the public face of {@link
+     * #fragmentKey} so {@link com.orebit.mod.pathfinding.PathPlan} can name a skeleton hop's endpoints when
+     * feeding a blocked crossing to a {@link RegionEdgeBlacklist}. Pure; matches the keys the fragment A* uses.
+     */
+    public static long fragmentNodeKey(int rx, int ry, int rz, int frag) {
+        return fragmentKey(rx, ry, rz, frag);
+    }
+
     /** A node with no real fragment records: a {@code null}/unbuilt record, a uniform kind, or collapsed mass. */
     private static boolean isUniformNode(RegionFragments rf) {
         return rf == null || rf.isUniform() || rf.fragmentCount() == 0;
@@ -605,10 +689,32 @@ public final class RegionPathfinder {
      * The §2.2 walk cost between two openings: octile over the horizontal offset × {@link #WALK_PER_BLOCK},
      * plus the directional Δy term — dear {@link #PILLAR_PER_BLOCK} going up, cheap {@link #FALL_PER_BLOCK}
      * going down (the air-chute asymmetry, recovered from geometry rather than stored buckets).
+     *
+     * <p><b>Caps-honest:</b> {@code |dy|} is the footprint Y-gap across this transit. A bot that {@code
+     * !canPlace} cannot pillar up a wall, and can only safely drop {@code safeFall} blocks; a gap beyond that
+     * is a cliff/wall it cannot realize, so it gets {@link #UNSAFE_VERTICAL_PENALTY} per excess block. A
+     * gradual route spreads its rise/drop horizontally (small {@code |dy|} per transit, no penalty) and so is
+     * preferred over a single big-{@code |dy|} cliff the block tier would dead-end on.
      */
-    private static float walkCost(int dx, int dy, int dz) {
+    private static float walkCost(int dx, int dy, int dz, boolean canPlace, int safeFall) {
         float c = octile(dx, dz) * WALK_PER_BLOCK;
-        c += (dy > 0) ? dy * PILLAR_PER_BLOCK : (-dy) * FALL_PER_BLOCK;
+        if (dy > 0) {
+            c += dy * PILLAR_PER_BLOCK;
+            // No-place bot can't pillar a wall taller than a step — a big net rise must be existing terrain
+            // (gradual stairs ⇒ small dy); penalize the excess so the search prefers the gradual route.
+            if (!canPlace && dy > safeFall) {
+                c += (dy - safeFall) * UNSAFE_VERTICAL_PENALTY;
+            }
+        } else if (dy < 0) {
+            final int drop = -dy;
+            c += drop * FALL_PER_BLOCK;
+            // Damage cost for a fall past the safe window — applies to EVERY bot (falling needs no placing,
+            // unlike a wall-climb), so it biases the region A* toward gradual descents (small per-transit drop)
+            // over cliffs, matching the block tier's Fall cost-not-blocker model. Not gated on canPlace.
+            if (drop > safeFall) {
+                c += (drop - safeFall) * UNSAFE_VERTICAL_PENALTY;
+            }
+        }
         return c;
     }
 
@@ -636,17 +742,27 @@ public final class RegionPathfinder {
      *   <li><b>WATER</b> → symmetric swim ({@link LeafCostComputer#WATER_TRANSIT_TICKS}).</li>
      *   <li><b>collapsed MIXED</b> → passability-weighted mass: {@code airWalk·passFrac + solidMine·(1−passFrac)}.</li>
      * </ul>
-     * A {@code null}/unbuilt record reads as the optimistic AIR default.
+     * A {@code null}/unbuilt (unloaded) record is <b>FREE</b> — perfectly optimistic, distinct from a genuine
+     * built {@link RegionFragments#KIND_AIR KIND_AIR} region (which keeps the directional pillar/fall chute).
      */
-    private static float uniformTransitCost(RegionFragments rfM, int f) {
-        if (rfM != null && rfM.kind() == RegionFragments.KIND_MIXED) {
+    private static float uniformTransitCost(RegionFragments rfM, int f, boolean canPlace, int safeFall) {
+        // UNBUILT / unloaded (null record): we don't know what's there, so assume the best possible — free
+        // passage (a "teleporter" through the unknown). Returning ~0 keeps g flat across unloaded space, so the
+        // region A* degenerates to greedy-best-first and BEELINES at the goal instead of flooding the expansion
+        // budget (the long-range plan:NONE bug). The relaxFrag WALK floor still charges ~1 tick/region, so ties
+        // resolve toward the shorter optimistic route. Chunks load on approach → the leaf builds → a replan
+        // corrects to the real terrain (§6 online optimism). NOTE: this is deliberately MORE optimistic than a
+        // built all-air region below — unknown ≠ known-air; known air really does cost a pillar to climb.
+        if (rfM == null) {
+            return 0f;
+        }
+        if (rfM.kind() == RegionFragments.KIND_MIXED) {
             // Collapsed mass (count == 0): more air ⇒ cheaper to cross.
             float passFrac = rfM.passFrac() / 15f;
             float solidMine = LEAF * MINE_PER_BLOCK * hardnessFactor(rfM.avgSolidHardness());
             return LEAF * WALK_PER_BLOCK * passFrac + solidMine * (1f - passFrac);
         }
-        int kind = rfM == null ? RegionFragments.KIND_AIR : rfM.kind();
-        switch (kind) {
+        switch (rfM.kind()) {
             case RegionFragments.KIND_SOLID:
                 return LEAF * MINE_PER_BLOCK * hardnessFactor(rfM.avgSolidHardness());
             case RegionFragments.KIND_WATER:
@@ -654,7 +770,17 @@ public final class RegionPathfinder {
             case RegionFragments.KIND_AIR:
             default:
                 // Face 2 = −Y exit (falling out the bottom) is the only cheap air motion; all else is dear.
-                return (f == 2) ? LEAF * FALL_PER_BLOCK : LEAF * PILLAR_PER_BLOCK;
+                // But a uniform-AIR region is a full LEAF-tall shaft: a no-place bot falling through it drops
+                // LEAF blocks, unsafe past safeFall, so even the down-chute is penalized for it (prefer a
+                // gradual MIXED descent with real floors over a free-fall shaft).
+                if (f == 2) {
+                    float fall = LEAF * FALL_PER_BLOCK;
+                    if (!canPlace && LEAF > safeFall) {
+                        fall += (LEAF - safeFall) * UNSAFE_VERTICAL_PENALTY;
+                    }
+                    return fall;
+                }
+                return LEAF * PILLAR_PER_BLOCK;
         }
     }
 
