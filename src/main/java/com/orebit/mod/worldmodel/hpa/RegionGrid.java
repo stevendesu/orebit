@@ -20,15 +20,15 @@ import net.minecraft.server.level.ServerLevel;
  * <b>single chokepoint</b> through which the region A* ({@code RegionPathfinder},
  * HPA-IMPLEMENTATION.md §8) reads a node's face costs. It hides two policies from the planner:
  * <ul>
- *   <li><b>Lazy build</b> ({@link #ensureLeaf}): a level-0 node is computed (via {@link LeafCostComputer})
- *       only when its backing chunk is actually loaded in {@link NavStore} and the node is not yet built;
- *       otherwise the node is left unbuilt and the default is used. The planner calls {@code ensureLeaf}
- *       before reading a leaf's faces.</li>
- *   <li><b>Optimistic admissible default</b> ({@link #faceCost}, HPA-IMPLEMENTATION.md §6): a planner read
- *       of a node that is interned-but-{@code !built} (no nav data / unloaded) returns
- *       {@code AIR_TRANSIT_TICKS · (side / LEAF_SIZE)} — a free-walk-across estimate scaled by the node's
- *       side. Optimism is required: an over-estimate would make the region heuristic inadmissible and could
- *       refuse a real route; the live nav grid refines the cost on approach (§6).</li>
+ *   <li><b>Lazy build</b> ({@link #ensureLeaf}): a level-0 node's {@link RegionFragments} record is computed
+ *       (via {@link FragmentLeafComputer}) only when its backing chunk is actually loaded in {@link NavStore}
+ *       and the node is not yet built; otherwise the node is left unbuilt and the default is used. The planner
+ *       calls {@code ensureLeaf} before reading a leaf's fragments.</li>
+ *   <li><b>Optimistic admissible default</b> (the fragment reads {@link #kind}/{@link #fragmentRecord},
+ *       HPA-FRAGMENTS.md §6): a planner read of a node that is interned-but-{@code !built} (no nav data /
+ *       unloaded) returns a uniform AIR region — the cheapest, most permissive kind. Optimism is required: a
+ *       pessimistic default would make the region heuristic inadmissible and could refuse a real route; the
+ *       live nav grid refines it on approach (§6).</li>
  * </ul>
  *
  * <h2>Cache</h2>
@@ -38,44 +38,14 @@ import net.minecraft.server.level.ServerLevel;
  * grid is created on first {@link #of} and lives until {@link #drop}/{@link #clear} (level/server unload).
  *
  * <h2>House style (HPA-IMPLEMENTATION.md §14)</h2>
- * The planner's hot read path ({@link #faceCost}) allocates nothing: it interns/looks up a row in the
- * {@link CostPyramid}'s open-addressed {@code long}→row map (no boxing) and returns a {@code float}. The
- * {@code minY} floor is resolved once at construction through the {@link LevelBounds} platform seam, never
- * inlined into the loop. {@code RegionGrid} holds no per-search state, so it is safe to share across
- * concurrent reads of distinct rows; the lazy {@link #ensureLeaf} build runs single-threaded on the
- * tick/planner thread (as {@link LeafCostComputer} requires).
+ * The planner's hot read path (the fragment accessors) allocates nothing: it interns/looks up a row in the
+ * {@link CostPyramid}'s open-addressed {@code long}→row map (no boxing) and returns the resident
+ * {@link RegionFragments} record. The {@code minY} floor is resolved once at construction through the
+ * {@link LevelBounds} platform seam, never inlined into the loop. {@code RegionGrid} holds no per-search state,
+ * so it is safe to share across concurrent reads of distinct rows; the lazy {@link #ensureLeaf} build runs
+ * single-threaded on the tick/planner thread.
  */
 public final class RegionGrid {
-
-    /**
-     * Master A/B switch for the HPA* <b>fragment model</b> (HPA-FRAGMENTS.md): the connectivity-aware region
-     * tier ({@link RegionFragments} / {@link FragmentBuilder} / {@link FragmentLeafComputer}) that replaces
-     * the single-center-node model ({@link LeafCostComputer}'s six face→center buckets).
-     *
-     * <p><b>Default {@code false} ⇒ byte-for-byte the current center-model behaviour, zero regression.</b>
-     * When {@code true}, the leaf build + region reads select the fragment path. The center-model path is
-     * never deleted; the user flips this in-game to A/B the two models (HPA-FRAGMENTS.md §S6).
-     *
-     * <p>At S1 this flag has no live consumer yet (the fragment computer is additive and unwired); it is
-     * read by the S2 store wiring ({@link #ensureLeaf} / {@link #faceCost}) and beyond.
-     */
-    public static boolean HPA_FRAGMENTS = true;
-
-    /**
-     * A/B switch for the region-tier <b>stateful nested-skeleton cascade</b> (HPA-CASCADE.md, the "S6" arc):
-     * the {@link com.orebit.mod.pathfinding.regionpathfinder.HierarchicalRegionPlan} stack of per-level
-     * skeletons that replaces the shipped two-tier coarse shortcut
-     * ({@link com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder#planWithin} chained up the pyramid
-     * vs. a single coarse level + L0 near refine).
-     *
-     * <p><b>Default {@code false} ⇒ the shipped two-tier branch, byte-for-byte, zero regression.</b> When
-     * {@code true}, {@link com.orebit.mod.pathfinding.PathPlan} sources its level-0 skeleton from the cascade
-     * (which re-plans only the level whose window the bot exited, pre-routes medium obstacles, and slides/
-     * collapses the top level for million-block reach). Requires {@link #HPA_FRAGMENTS} (the cascade is built on
-     * the fragment model). The user flips this in-game to A/B the two coarse strategies (HPA-CASCADE.md §12); the
-     * two-tier is deleted only after the in-game verify passes.
-     */
-    public static boolean HIERARCHICAL_CASCADE = false;
 
     /** One grid per dimension, interned by level (mirrors {@link NavStore}'s {@code BY_LEVEL}). */
     private static final Map<ServerLevel, RegionGrid> BY_LEVEL = new ConcurrentHashMap<>();
@@ -162,11 +132,11 @@ public final class RegionGrid {
     /**
      * Ensure the level-0 leaf at region coords {@code (rx, ry, rz)} is built, computing it lazily.
      *
-     * <p>If the node is already built (its faces were computed), this is a no-op. Otherwise, if the backing
+     * <p>If the node is already built (its fragments were computed), this is a no-op. Otherwise, if the backing
      * chunk is loaded in {@link NavStore} <b>and</b> the {@code ry}-indexed 16³ section exists,
-     * {@link LeafCostComputer#computeLeaf} fills the node's six face→center costs and marks it built. If the
-     * chunk/section is not loaded, the node is left unbuilt — the planner then reads the optimistic
-     * admissible default from {@link #faceCost} (HPA-IMPLEMENTATION.md §6). Cheaply rejects already-built
+     * {@link FragmentLeafComputer#computeLeaf} floods the node's {@link RegionFragments} record and marks it
+     * built. If the chunk/section is not loaded, the node is left unbuilt — the planner then reads the
+     * optimistic admissible default (a uniform AIR region, HPA-FRAGMENTS.md §6). Cheaply rejects already-built
      * nodes via {@link CostPyramid#rowIfPresent} (no intern) before doing any {@link NavStore} lookup.
      *
      * @param rx level-0 region X (== chunk X; world {@code wx >> 4})
@@ -182,17 +152,12 @@ public final class RegionGrid {
     }
 
     /**
-     * <b>Force</b>-(re)build leaf {@code (rx,ry,rz)} from the current {@link NavStore} section, honoring
-     * {@link #HPA_FRAGMENTS} — <b>ignoring any existing built flag</b>. This is the recompute seam for
+     * <b>Force</b>-(re)build leaf {@code (rx,ry,rz)}'s {@link RegionFragments} record from the current
+     * {@link NavStore} section — <b>ignoring any existing built flag</b>. This is the recompute seam for
      * {@link com.orebit.mod.worldmodel.hpa.HpaMaintenance}: a chunk's nav being (re)built, or a leaf marked
-     * dirty by a block change, must recompute the leaf <i>under the active model</i>. (The lazy
-     * {@link #ensureLeaf} is just this behind an already-built short-circuit.) No-op if the section isn't
-     * resident (the node stays unbuilt → the planner reads the §6 optimistic default).
-     *
-     * <p><b>Why this exists:</b> the maintenance/eager-build path previously always ran the center-model
-     * {@link LeafCostComputer} and marked the row built — so with {@code HPA_FRAGMENTS} on it poisoned the row
-     * with a center build and <i>no</i> {@link RegionFragments} record; {@code ensureLeaf} then saw "built" and
-     * skipped, leaving {@link #kind} reading the default AIR forever (a flat, free, straight-through skeleton).
+     * dirty by a block change, must recompute the leaf. (The lazy {@link #ensureLeaf} is just this behind an
+     * already-built short-circuit.) No-op if the section isn't resident (the node stays unbuilt → the planner
+     * reads the §6 optimistic default).
      */
     public void rebuildLeaf(int rx, int ry, int rz) {
         // Headless test seam ({@link #headless}): with no backing level there is no NavStore to build from, so
@@ -201,28 +166,21 @@ public final class RegionGrid {
             return;
         }
         // Only build if the chunk's nav data is resident and this vertical section exists; otherwise leave the
-        // node unbuilt (faceCost / fragment reads fall back to the §6 default).
+        // node unbuilt (fragment reads fall back to the §6 default).
         NavSection[] column = NavStore.get(level, NavStore.key(rx, rz));
         if (column == null || ry < 0 || ry >= column.length || column[ry] == null) {
             return;
         }
-        if (HPA_FRAGMENTS) {
-            // Fragment model (HPA-FRAGMENTS.md §3, §5): flood-fill the section's connectivity into the row's
-            // RegionFragments record, stored alongside the (now-unused) center buckets. No A* per face.
-            int r = pyramid.rowFor(0, rx, ry, rz);
-            RegionFragments rf = pyramid.ensureFragments(0, r);
-            FragmentLeafComputer.computeLeaf(column[ry], rf);
-            pyramid.setBuilt(0, r, true);
-            return;
-        }
-        // Center model (default): LeafCostComputer takes (level, rx, rz, ryLevel0, pyramid) — note the
-        // rz/ry argument ORDER.
-        LeafCostComputer.computeLeaf(level, rx, rz, ry, pyramid);
+        // Flood-fill the section's connectivity into the row's RegionFragments record (HPA-FRAGMENTS.md §3, §5).
+        int r = pyramid.rowFor(0, rx, ry, rz);
+        RegionFragments rf = pyramid.ensureFragments(0, r);
+        FragmentLeafComputer.computeLeaf(column[ry], rf);
+        pyramid.setBuilt(0, r, true);
     }
 
     /**
-     * Ensure the <b>coarse</b> node at {@code (level>0, rx, ry, rz)} is built under the fragment model
-     * (HPA-FRAGMENTS.md §S5) — the region-A* read seam for a level the coarse scale-guard branch touches.
+     * Ensure the <b>coarse</b> node at {@code (level>0, rx, ry, rz)} is built — the region-A* read seam for a
+     * level the cascade touches (HPA-FRAGMENTS.md §S5).
      *
      * <p>Already-built ⇒ no-op. Otherwise recompute it <b>from its direct children</b> via
      * {@link PyramidMerger#combineFragments} (a single level — no recursion, so bounded at 8/4 child reads).
@@ -230,13 +188,11 @@ public final class RegionGrid {
      * walks {@link PyramidMerger#mergeUpFragments} to the root), so every coarse ancestor of loaded terrain is
      * already built and this is the no-op fast path; this opportunistic build is the belt-and-suspenders for a
      * node whose children exist but whose parent was never merged, and the on-demand path for the headless
-     * tests. A node with no built child stays unbuilt ⇒ the planner reads the §6 optimistic default.
-     *
-     * <p>No-op for {@code level <= 0} (use {@link #ensureLeaf}) and under the center model
-     * ({@code !HPA_FRAGMENTS}, where the coarse branch reads face buckets via {@link PyramidMerger#mergeLevel}).
+     * tests. A node with no built child stays unbuilt ⇒ the planner reads the §6 optimistic default. No-op for
+     * {@code level <= 0} (use {@link #ensureLeaf}).
      */
     public void ensureLevel(int level, int rx, int ry, int rz) {
-        if (level <= 0 || !HPA_FRAGMENTS) {
+        if (level <= 0) {
             return;
         }
         int row = pyramid.rowIfPresent(level, rx, ry, rz);
@@ -248,56 +204,10 @@ public final class RegionGrid {
     }
 
     // ---------------------------------------------------------------------------------------------------
-    // Face-cost query — the single chokepoint (3d default policy)
-    // ---------------------------------------------------------------------------------------------------
-
-    /**
-     * The dequantized tick cost of moving between {@code face} (0..5, canonical {@link RegionAddress} order)
-     * and the center of node {@code (level, rx, ry, rz)} in direction {@code dir} ({@link CostPyramid#ENTER}
-     * face→center, {@link CostPyramid#EXIT} center→face) — the <b>single chokepoint</b> the region A* reads.
-     * The direction matters because vertical air travel is asymmetric (cheap to fall in, expensive to pillar
-     * out); a region crossing sums one node's {@code EXIT} half and the neighbour's {@code ENTER} half.
-     *
-     * <p>Returns the built cost if the node was actually computed; otherwise the optimistic admissible
-     * default (HPA-IMPLEMENTATION.md §6): {@code AIR_TRANSIT_TICKS · (side / LEAF_SIZE)}, i.e. a free walk
-     * across the node, scaled by its side — direction-agnostic, since an unexplored node's terrain is unknown
-     * and optimism must hold both ways to keep the heuristic admissible.
-     *
-     * <p>Allocation-free: a single {@link CostPyramid#rowIfPresent} probe (no intern, no boxing) plus a
-     * dequantize, or the arithmetic default.
-     */
-    public float faceCost(int level, int rx, int ry, int rz, int face, int dir) {
-        int row = pyramid.rowIfPresent(level, rx, ry, rz);
-        if (row != -1 && pyramid.isBuilt(level, row)) {
-            // A built coarse node can still carry BUCKET_INF on a face no bordering child built up
-            // (PyramidMerger §7): treat that as "unknown → use the optimistic default", NOT impassable.
-            // Leaf faces are never BUCKET_INF (LeafCostComputer §5), so level-0 reads never hit this.
-            if (pyramid.faceBucket(level, row, face, dir) != CostCodec.BUCKET_INF) {
-                return pyramid.faceCost(level, row, face, dir);
-            }
-        }
-        return defaultFaceCost(level);
-    }
-
-    /**
-     * The optimistic admissible default face cost at {@code level} (HPA-IMPLEMENTATION.md §6):
-     * {@code AIR_TRANSIT_TICKS · (side / LEAF_SIZE)}. At level 0 this is {@code AIR_TRANSIT_TICKS} (one leaf
-     * side); higher levels scale by the node's side in leaf-units. Quantize-then-dequantize so the default
-     * lives on the same bucket lattice as stored costs (matches §6: {@code dequantize(quantize(...))}).
-     */
-    private static float defaultFaceCost(int level) {
-        int sideInLeaves = 1 << level; // side / LEAF_SIZE = (LEAF_SIZE << level) / LEAF_SIZE
-        float ticks = LeafCostComputer.AIR_TRANSIT_TICKS * sideInLeaves;
-        return CostCodec.dequantize(CostCodec.quantize(ticks));
-    }
-
-    // ---------------------------------------------------------------------------------------------------
-    // Fragment-model reads (HPA-FRAGMENTS.md §2, §5) — the chokepoint the region A* (S3) reads when
-    // HPA_FRAGMENTS is on. Each applies the SAME optimistic default-on-miss policy as faceCost: an
-    // interned-but-unbuilt (or never-touched) node reads as a uniform AIR region — the cheapest, most
-    // permissive kind — so the region heuristic stays admissible and never refuses a real route through
-    // unexplored terrain (the live nav grid refines it on approach, §6). With HPA_FRAGMENTS off these are
-    // simply never called; the center-model faceCost path above is unchanged.
+    // Fragment-model reads (HPA-FRAGMENTS.md §2, §5) — the chokepoint the region A* reads. Each applies an
+    // optimistic default-on-miss policy: an interned-but-unbuilt (or never-touched) node reads as a uniform AIR
+    // region — the cheapest, most permissive kind — so the region heuristic stays admissible and never refuses a
+    // real route through unexplored terrain (the live nav grid refines it on approach, §6).
     // ---------------------------------------------------------------------------------------------------
 
     /**

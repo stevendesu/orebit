@@ -53,7 +53,7 @@ import net.minecraft.world.level.chunk.PalettedContainer;
  * <h2>Why the region-tier path itself is deferred ({@link Disabled @Disabled})</h2>
  * The region tier ({@link RegionGrid#of}, {@link com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder
  * RegionPathfinder}{@code .plan}, {@link com.orebit.mod.pathfinding.PathPlan PathPlan},
- * {@link LeafCostComputer#computeLeaf}) is welded to a live {@code ServerLevel}: {@code RegionGrid} interns
+ * {@link FragmentLeafComputer#computeLeaf}) is welded to a live {@code ServerLevel}: {@code RegionGrid} interns
  * by {@code ServerLevel}, reads {@code minY} through {@link com.orebit.mod.platform.LevelBounds LevelBounds},
  * and lazily builds leaves from {@link NavStore#get(net.minecraft.server.level.ServerLevel, long)}. A
  * {@code ServerLevel} cannot be stood up under the headless fabric-loader-junit Knot classloader (the
@@ -264,7 +264,7 @@ public class HpaMilestoneTest {
      * {@code RegionGrid rg = RegionGrid.of(level)}; {@code PathPlan pp = new PathPlan(level, rg, start, goal,
      * CAPS)}; assert {@code RegionPathfinder.plan} returns a non-empty skeleton, that the summed per-window
      * block-A* node counts beat the flat 10k cap, and that {@code pp} reaches the goal. Blocked headless:
-     * {@link RegionGrid#of} interns by {@code ServerLevel}, {@link LeafCostComputer#computeLeaf} reads
+     * {@link RegionGrid#of} interns by {@code ServerLevel}, {@link FragmentLeafComputer#computeLeaf} reads
      * {@code minY} via {@link com.orebit.mod.platform.LevelBounds LevelBounds} and pulls sections from
      * {@link NavStore}, and {@code RegionPathfinder.plan(ServerLevel, ...)} drives lazy leaf builds — none of
      * which can run without a live {@code ServerLevel} under the Knot test classloader. Enable once a

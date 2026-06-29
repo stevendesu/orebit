@@ -29,7 +29,7 @@ import net.minecraft.world.level.block.state.BlockState;
  * debounced, budgeted pass.
  *
  * <h2>Why debounce (the key difference from {@code NavGridUpdater})</h2>
- * Re-running a leaf's six bounded mini-pathfinds ({@link LeafCostComputer#computeLeaf}) is far heavier than
+ * Re-running a leaf's connectivity flood ({@link FragmentLeafComputer#computeLeaf}) is far heavier than
  * a single {@code patchCell}. A bulk edit (TNT, a fill command, worldgen) can fire hundreds of changes into
  * the same leaf in one tick; recomputing per block would be wasteful and could spike the frame budget. So
  * {@link #onBlockChanged} does almost nothing — it adds the leaf's per-level packed key
@@ -50,8 +50,9 @@ import net.minecraft.world.level.block.state.BlockState;
  *       it will build fresh on first plan). Otherwise computes the change's level-0 leaf address from the
  *       world position + the dimension floor and adds it to that level's dirty set.</li>
  *   <li><b>{@link #flush}</b> — drains up to {@link #MAX_LEAVES_PER_TICK} dirty leaves: for each,
- *       {@link LeafCostComputer#computeLeaf} re-fills its six faces, then {@link PyramidMerger#mergeUp}
- *       re-merges its ancestors (O(levels)). Leaves whose backing chunk has since unloaded are quietly
+ *       {@link FragmentLeafComputer#computeLeaf} re-floods its fragment record, then
+ *       {@link PyramidMerger#mergeUpFragments} re-merges its ancestors (O(levels)). Leaves whose backing chunk
+ *       has since unloaded are quietly
  *       dropped (the leaf computer no-ops them; the planner falls back to the §6 default). Remaining dirty
  *       leaves stay queued for the next tick.</li>
  * </ol>
@@ -127,8 +128,8 @@ public final class HpaMaintenance {
      * Build the HPA* leaves for a chunk whose nav data was just built and stored in {@link NavStore} — called
      * from the {@link com.orebit.mod.worldmodel.pathing.ChunkNavLoader ChunkNavLoader} build step, on the tick
      * thread, bounded by that loader's own per-tick chunk budget. For each resident 16³ section in the
-     * column it computes the leaf's six face→center costs ({@link LeafCostComputer}) and re-merges its
-     * ancestors ({@link PyramidMerger#mergeUp}). Ensures the dimension's {@link RegionGrid} exists, so the
+     * column it floods the leaf's fragment record ({@link FragmentLeafComputer}) and re-merges its
+     * ancestors ({@link PyramidMerger#mergeUpFragments}). Ensures the dimension's {@link RegionGrid} exists, so the
      * pyramid starts filling as the world is explored even before the first plan.
      *
      * <p>Cost: bounded by {@code ChunkNavLoader.MAX_BUILDS_PER_TICK}. Most sections are uniform air/solid and
@@ -156,21 +157,13 @@ public final class HpaMaintenance {
      */
     private static void buildLeafSafe(ServerLevel level, CostPyramid pyramid, int rx, int ry, int rz) {
         try {
-            // Honor the active model: under HPA_FRAGMENTS this builds the RegionFragments record (NOT the
-            // center-model faces). Going through RegionGrid.rebuildLeaf keeps the model dispatch in ONE place;
-            // calling LeafCostComputer directly here is what poisoned fragment rows (built, but no fragment
-            // record → kind reads default AIR → a flat free skeleton). It force-recomputes (ignores the built
-            // flag), which is exactly the dirty-leaf / chunk-(re)built contract.
+            // Rebuild the leaf's RegionFragments record. Going through RegionGrid.rebuildLeaf keeps the build in
+            // ONE place; it force-recomputes (ignores the built flag) — the dirty-leaf / chunk-(re)built contract.
             RegionGrid.of(level).rebuildLeaf(rx, ry, rz);
-            // Ancestor roll-up keeps the coarse pyramid live as leaves (re)build. Each model rolls up its own
-            // representation (HPA-FRAGMENTS.md §6.5 / §S5): the fragment merge recomputes each ancestor's
-            // RegionFragments from its children (mergeUpFragments); the center model recomputes face buckets
-            // (mergeUp). Both walk parent→root, O(levels), early-out when a level's output is unchanged.
-            if (RegionGrid.HPA_FRAGMENTS) {
-                PyramidMerger.mergeUpFragments(pyramid, rx, ry, rz);
-            } else {
-                PyramidMerger.mergeUp(pyramid, rx, ry, rz);
-            }
+            // Ancestor roll-up keeps the coarse fragment pyramid live as leaves (re)build (HPA-FRAGMENTS.md §6.5 /
+            // §S5): mergeUpFragments recomputes each ancestor's RegionFragments from its children, walking
+            // parent→root, O(levels), early-out when a level's output is unchanged.
+            PyramidMerger.mergeUpFragments(pyramid, rx, ry, rz);
         } catch (Throwable t) {
             long n = ++buildFailures;
             if (n == 1 || n % 256 == 0) {
@@ -217,11 +210,12 @@ public final class HpaMaintenance {
     // ---------------------------------------------------------------------------------------------------
 
     /**
-     * Drain up to {@link #MAX_LEAVES_PER_TICK} dirty leaves for {@code level}, recomputing each leaf's six
-     * faces ({@link LeafCostComputer#computeLeaf}) and re-merging its ancestors ({@link PyramidMerger#mergeUp}).
-     * Call once per level per tick from the existing {@code onWorldTickEnd} cadence (wired in
-     * {@link com.orebit.mod.OrebitCommon#init}, alongside {@code ChunkNavLoader}'s drain). No-op if nothing is
-     * dirty in this dimension. Runs on the tick thread (as {@link LeafCostComputer} requires); the concurrent
+     * Drain up to {@link #MAX_LEAVES_PER_TICK} dirty leaves for {@code level}, re-flooding each leaf's fragment
+     * record ({@link FragmentLeafComputer#computeLeaf}) and re-merging its ancestors
+     * ({@link PyramidMerger#mergeUpFragments}). Call once per level per tick from the existing
+     * {@code onWorldTickEnd} cadence (wired in {@link com.orebit.mod.OrebitCommon#init}, alongside
+     * {@code ChunkNavLoader}'s drain). No-op if nothing is dirty in this dimension. Runs on the tick thread; the
+     * concurrent
      * dirty set lets off-thread worldgen keep marking leaves while this drains.
      *
      * <p>The debounce is the dirty set itself: a leaf hit N times since the last flush is recomputed once.

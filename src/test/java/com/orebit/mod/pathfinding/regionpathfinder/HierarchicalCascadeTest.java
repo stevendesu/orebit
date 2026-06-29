@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -37,16 +36,8 @@ public class HierarchicalCascadeTest {
     private static final BotCaps CAPS = BotCaps.BREAK_PLACE;
 
     @BeforeEach
-    void enableCascade() {
-        RegionGrid.HPA_FRAGMENTS = true;       // the cascade is built on the fragment model
-        RegionGrid.HIERARCHICAL_CASCADE = true;
-        grid = RegionGrid.headless(0);          // minY = 0
-    }
-
-    @AfterEach
-    void resetFlags() {
-        RegionGrid.HIERARCHICAL_CASCADE = false; // do not leak to other tests (flag default OFF)
-        RegionGrid.HPA_FRAGMENTS = false;
+    void setUp() {
+        grid = RegionGrid.headless(0); // minY = 0
     }
 
     /** A goal ~1000 blocks +X (cap-safe top level 2). */

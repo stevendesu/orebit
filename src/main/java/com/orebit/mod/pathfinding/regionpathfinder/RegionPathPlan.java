@@ -42,9 +42,9 @@ public final class RegionPathPlan {
     /**
      * Per-step <b>fragment id</b> under the HPA* fragment model (HPA-FRAGMENTS.md §2, §S3): which 6-connected
      * occupiable component of {@code rxs/rys/rzs[i]} this step commits to (uniform/collapsed regions ⇒ the
-     * single synthetic fragment {@code 0}). {@code null} for a center-model plan (the
-     * {@link com.orebit.mod.worldmodel.hpa.RegionGrid#HPA_FRAGMENTS}{@code == false} branch + the deferred-S5
-     * coarse branch), where there is exactly one node per region.
+     * single synthetic fragment {@code 0}). {@code null} only for a bare-coords plan built via the legacy
+     * coords-only constructor (no per-step fragment/portal); every plan the region tier produces today is a
+     * fragment-model plan.
      */
     private final int[] frags;
 
@@ -55,7 +55,7 @@ public final class RegionPathPlan {
      * occupiable target the {@link com.orebit.mod.pathfinding.PathPlan} sliding-window driver aims at (S4),
      * replacing the geometric {@link #centerOf} projection that landed on buried/mid-air cells (the two bugs
      * HPA-FRAGMENTS.md §6 fixes). {@link #NO_PORTAL} on the start step (index 0, no incoming edge) and on every
-     * step of a center-model plan ({@code portalX == null}).
+     * step of a bare-coords plan ({@code portalX == null}).
      */
     private final int[] portalX;
     private final int[] portalY;

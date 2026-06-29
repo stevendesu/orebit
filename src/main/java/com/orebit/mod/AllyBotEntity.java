@@ -4,7 +4,6 @@ import com.mojang.authlib.GameProfile;
 import com.orebit.mod.pathfinding.PathDebugRenderer;
 import com.orebit.mod.pathfinding.PathPlan;
 import com.orebit.mod.pathfinding.PathStatus;
-import com.orebit.mod.pathfinding.regionpathfinder.RegionEdgeBlacklist;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
@@ -174,11 +173,6 @@ public class AllyBotEntity extends FakePlayerEntity {
     private boolean loggedPlanError; // log a two-tier replan exception only once (then degrade silently)
 
     // ---- region-tier online repair (the "recover when stuck" half of the stuck arc) ------------------
-    /** Region crossings proven unrealizable for this bot's caps; the region A* routes around them. Accumulates
-     *  across the stuck episode, cleared when the goal cell changes (see {@link #driveToward}). */
-    private final RegionEdgeBlacklist regionBlacklist = new RegionEdgeBlacklist();
-    /** Reused 2-long scratch for {@link PathPlan#blockedHop} (no per-replan alloc). */
-    private final long[] hopScratch = new long[2];
     /**
      * Throttle for the cascade's in-place BLOCKED repair ({@link #repairStep}): ticks remaining before the next
      * {@link PathPlan#repairBlocked} attempt. A repair re-derives the L0 skeleton + runs a full windowed block
@@ -316,15 +310,12 @@ public class AllyBotEntity extends FakePlayerEntity {
         // route, change its mind, take another, go back"). [Coarse S5 note: a >LEVEL0 skeleton may need region
         // refinement of its FAR, unresolved tail as the bot approaches — never the committed near end.]
         boolean newRegionGoal = pathPlan == null || !pathPlan.sameGoalRegion(goalFloor);
-        // A BLOCKED status forces a full skeleton rebuild ONLY for the two-tier/direct path. The cascade
-        // (HPA-CASCADE.md §6) repairs a blocked hop in place — escalating up its level stack in repairStep —
-        // without throwing away the whole nested plan, so it must not trigger the rebuild here.
-        boolean skeletonInvalid = pathPlan != null && !pathPlan.isCascade()
-                && pathPlan.status() == PathStatus.BLOCKED;
-        if (pathPlan == null || newRegionGoal || skeletonInvalid) {
+        // A BLOCKED status does NOT force a full rebuild: the cascade (HPA-CASCADE.md §6) repairs a blocked hop
+        // in place — escalating up its level stack in repairStep — without discarding the whole nested plan. A
+        // full rebuild fires only on no-plan or a new goal region.
+        if (pathPlan == null || newRegionGoal) {
             if (newRegionGoal) {
                 // New destination region → the learned dead-ends no longer apply; start the repair fresh.
-                regionBlacklist.clear();
                 navGaveUp = false;
             }
             replan(goalFloor);
@@ -460,7 +451,7 @@ public class AllyBotEntity extends FakePlayerEntity {
         // tier is hardened.
         try {
             this.pathPlan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, caps(),
-                    inventoryFeasibility(), regionBlacklist);
+                    inventoryFeasibility());
             this.path = pathPlan.currentBlockPlan();
         } catch (Throwable t) {
             if (!loggedPlanError) {
@@ -524,42 +515,28 @@ public class AllyBotEntity extends FakePlayerEntity {
     private void repairStep() {
         if (pathPlan == null || navGaveUp) return;
         final PathStatus status = pathPlan.status();
-        if (pathPlan.isCascade()) {
-            // Cascade repair (HPA-CASCADE.md §6): a BLOCKED hop is blacklisted + escalated up the level stack
-            // IN PLACE by the plan itself (which owns its per-level blacklists — no bot-side blacklist needed).
-            // It re-derives the L0 skeleton on success; only a hard exhaustion (no route at any level) gives up.
-            if (status == PathStatus.FAILED) {
-                giveUp();
-                return;
-            }
-            if (status != PathStatus.BLOCKED) {
-                repairCooldown = 0; // route is fine — reset the throttle
-                return;
-            }
-            // THROTTLE: a repair re-derives the L0 skeleton AND runs a full windowed block search (up to
-            // MAX_EXPANSIONS ≈ a whole tick of work). Doing that every tick while stuck floods the console with
-            // 10001-node searches and the chat with re-derived-target churn (and blows the tick budget). Cap it
-            // to once per REPAIR_COOLDOWN ticks: attempt a repair, then follow whatever route it found for a few
-            // ticks before trying again. (A genuine give-up still comes from repairBlocked returning false.)
-            if (repairCooldown > 0) {
-                repairCooldown--;
-                return;
-            }
-            repairCooldown = REPAIR_COOLDOWN;
-            if (!pathPlan.repairBlocked()) {
-                giveUp();
-            }
+        // Cascade repair (HPA-CASCADE.md §6): a BLOCKED hop is blacklisted + escalated up the level stack IN
+        // PLACE by the plan itself (which owns its per-level blacklists). It re-derives the L0 skeleton on
+        // success; only a hard exhaustion (no route at any level) gives up.
+        if (status == PathStatus.FAILED) {
+            giveUp();
             return;
         }
-        if (status == PathStatus.BLOCKED) {
-            // The window's block search couldn't leave the bot's region toward the next skeleton step.
-            if (pathPlan.blockedHop(hopScratch)) {
-                regionBlacklist.add(hopScratch[0], hopScratch[1]); // dedups; next replan reroutes
-            } else {
-                giveUp(); // BLOCKED in the goal's own region with no onward hop — can't reach the goal cell
-            }
-        } else if (status == PathStatus.FAILED && regionBlacklist.size() > 0) {
-            // We blacklisted our way to "no route remains" — every crossing the bot trusts is exhausted.
+        if (status != PathStatus.BLOCKED) {
+            repairCooldown = 0; // route is fine — reset the throttle
+            return;
+        }
+        // THROTTLE: a repair re-derives the L0 skeleton AND runs a full windowed block search (up to
+        // MAX_EXPANSIONS ≈ a whole tick of work). Doing that every tick while stuck floods the console with
+        // 10001-node searches and the chat with re-derived-target churn (and blows the tick budget). Cap it to
+        // once per REPAIR_COOLDOWN ticks: attempt a repair, then follow whatever route it found for a few ticks
+        // before trying again. (A genuine give-up still comes from repairBlocked returning false.)
+        if (repairCooldown > 0) {
+            repairCooldown--;
+            return;
+        }
+        repairCooldown = REPAIR_COOLDOWN;
+        if (!pathPlan.repairBlocked()) {
             giveUp();
         }
     }
