@@ -2,12 +2,14 @@ package com.orebit.mod.pathfinding.regionpathfinder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.worldmodel.hpa.CostPyramid;
 import com.orebit.mod.worldmodel.hpa.FragmentBuilder;
 import com.orebit.mod.worldmodel.hpa.RegionFragments;
@@ -74,6 +76,17 @@ public class RegionPathfinderFragmentTest {
         pyr.setBuilt(0, row, true);
     }
 
+    /**
+     * Seed a level-0 region as fully-solid rock (a built, uniform {@code KIND_SOLID} node). Used to <b>seal</b>
+     * a cave with known rock on all sides so the region A* cannot escape through a neighbour cheaply. An
+     * <i>unbuilt</i> neighbour reads as FREE optimistic passage (unloaded = "assume traversable, correct on
+     * approach"), so a cave must be sealed with explicitly-built solid neighbours to test that the intra-region
+     * mine edge is the chosen route.
+     */
+    private void seedSolid(int rx, int ry, int rz) {
+        seed(rx, ry, rz, new boolean[CELLS], new boolean[CELLS]); // all-false masks → uniform SOLID
+    }
+
     /** A 2-tall tunnel spanning all X at the given Z band and feet Y (touches both ±X faces). */
     private static void carveTunnelX(boolean[] passable, boolean[] standable, int zLo, int zHi, int feetY) {
         for (int x = 0; x < G; x++) {
@@ -94,10 +107,17 @@ public class RegionPathfinderFragmentTest {
         boolean[] standable = new boolean[CELLS];
         // Two tunnels in ONE region, vertically separated by solid: lower feet y=2, upper feet y=10. They are
         // distinct fragments; the cheap route between them is the intra-region mine edge (a ~8-block dig),
-        // far below any out-and-back air detour through a neighbour, so the A* must take the mine edge.
+        // far below mining out-and-back through a sealing-rock neighbour, so the A* must take the mine edge.
         carveTunnelX(passable, standable, 0, G - 1, 2);
         carveTunnelX(passable, standable, 0, G - 1, 10);
         seed(0, 0, 0, passable, standable);
+        // SEAL with built solid rock on all six sides. The tunnels span the full region, so both fragments
+        // reach the four horizontal faces; without a sealing neighbour the A* would escape into a FREE unbuilt
+        // (unloaded) neighbour and re-enter the upper pocket for nothing (a 3-step plan), never taking the mine
+        // edge. Real underground caves are surrounded by LOADED solid rock — model that explicitly here.
+        seedSolid(1, 0, 0); seedSolid(-1, 0, 0);
+        seedSolid(0, 0, 1); seedSolid(0, 0, -1);
+        seedSolid(0, 1, 0); seedSolid(0, -1, 0);
 
         // Sanity: the seed really produced two fragments (else the test would be vacuous).
         RegionFragments rf = grid.fragmentRecord(0, 0, 0, 0);
@@ -106,7 +126,7 @@ public class RegionPathfinderFragmentTest {
 
         BlockPos start = new BlockPos(8, 2, 8);    // standing in the lower tunnel
         BlockPos goal = new BlockPos(8, 10, 8);    // standing in the upper tunnel
-        RegionPathPlan plan = RegionPathfinder.plan(null, grid, start, goal);
+        RegionPathPlan plan = RegionPathfinder.plan(null, grid, start, goal, BotCaps.BREAK_PLACE);
 
         assertNotNull(plan, "sealed cave must NOT FAIL — it routes through an intra-region mine edge");
         assertTrue(plan.isFragmentModel(), "fragment-flag plan carries fragment ids");
@@ -146,7 +166,7 @@ public class RegionPathfinderFragmentTest {
 
         BlockPos start = new BlockPos(8, 1, 8);    // in region A's tunnel
         BlockPos goal = new BlockPos(24, 1, 8);    // x=24 → region B; y=1 → the LOW (open) fragment
-        RegionPathPlan plan = RegionPathfinder.plan(null, grid, start, goal);
+        RegionPathPlan plan = RegionPathfinder.plan(null, grid, start, goal, BotCaps.BREAK_PLACE);
 
         assertNotNull(plan, "an open portal must route, not FAIL");
         assertTrue(plan.isFragmentModel());
@@ -161,5 +181,53 @@ public class RegionPathfinderFragmentTest {
         assertTrue(portal.getY() <= 5,
                 "portal must be the LOW open opening (Y≈1..2), not the high misaligned one; got y=" + portal.getY());
         assertEquals(16, portal.getX(), "portal is on region B's −X boundary plane (world x = 16)");
+    }
+
+    // ===================================================================================================
+    // No-break bot — mining edges are dropped: a mine-only connection is impassable (FAIL), but a genuine
+    // walkable portal still routes. Guards the fix for a no-break bot routed at unmineable rock then thrashing.
+    // ===================================================================================================
+    @Test
+    void sealedCave_noBreakBot_failsRatherThanRoutingThroughRock() {
+        boolean[] passable = new boolean[CELLS];
+        boolean[] standable = new boolean[CELLS];
+        carveTunnelX(passable, standable, 0, G - 1, 2);   // lower pocket
+        carveTunnelX(passable, standable, 0, G - 1, 10);  // upper pocket — only reachable by mining
+        seed(0, 0, 0, passable, standable);
+        seedSolid(1, 0, 0); seedSolid(-1, 0, 0);          // sealed in known rock on all sides
+        seedSolid(0, 0, 1); seedSolid(0, 0, -1);
+        seedSolid(0, 1, 0); seedSolid(0, -1, 0);
+
+        BlockPos start = new BlockPos(8, 2, 8);
+        BlockPos goal = new BlockPos(8, 10, 8);
+        // DEFAULT caps = canBreak false. The only connection between the pockets is a mine edge, which is now
+        // dropped, so there is NO route — the region A* must FAIL rather than promise a dig the bot can't do.
+        RegionPathPlan plan = RegionPathfinder.plan(null, grid, start, goal, BotCaps.DEFAULT);
+        assertNull(plan, "a no-break bot cannot dig between the two pockets → the region A* must FAIL, not "
+                + "route through unmineable rock (the noBreakCap thrash bug)");
+    }
+
+    @Test
+    void twoFragmentRegion_noBreakBot_stillRoutesOpenPortal() {
+        // Same open-portal layout as twoFragmentRegion_routesThroughOpenPortal, but with a no-break bot: a real
+        // walkable opening (overlapping footprints) is NOT a mine edge, so it must still route.
+        boolean[] aPass = new boolean[CELLS];
+        boolean[] aStand = new boolean[CELLS];
+        carveTunnelX(aPass, aStand, 0, G - 1, 1);
+        seed(0, 0, 0, aPass, aStand);
+        boolean[] bPass = new boolean[CELLS];
+        boolean[] bStand = new boolean[CELLS];
+        carveTunnelX(bPass, bStand, 0, G - 1, 1);
+        carveTunnelX(bPass, bStand, 0, G - 1, 10);
+        seed(1, 0, 0, bPass, bStand);
+
+        BlockPos start = new BlockPos(8, 1, 8);
+        BlockPos goal = new BlockPos(24, 1, 8);
+        RegionPathPlan plan = RegionPathfinder.plan(null, grid, start, goal, BotCaps.DEFAULT);
+
+        assertNotNull(plan, "a no-break bot must still route through a genuine open portal (walk, not mine)");
+        int last = plan.size() - 1;
+        assertEquals(1, plan.rx(last), "the path ends in region B via the open portal");
+        assertEquals(0, plan.fragmentId(last), "it commits to the LOW (open) fragment, reached by walking");
     }
 }

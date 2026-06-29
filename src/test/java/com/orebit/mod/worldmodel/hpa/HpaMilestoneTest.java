@@ -10,6 +10,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
+import com.orebit.mod.Debug;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
@@ -84,6 +85,14 @@ public class HpaMilestoneTest {
     /** Break + place (the in-game test bot's caps): the pillar is only solvable by placing. */
     private static final BotCaps CAPS = BotCaps.BREAK_PLACE;
 
+    /**
+     * Node-count ceiling for the pillar regression guard ({@link #pillar_singleFlatSearch_solvesBounded}):
+     * well under the {@code BotCaps.DEFAULT_MAX_NODES} (10k) budget, but comfortably above the observed
+     * straight-up cost (~688 nodes) so ordinary cost/heuristic tuning doesn't trip it. A regression to the old
+     * horizontal cone flood would spike the expansion count toward the 10k budget and blow this guard.
+     */
+    private static final int PILLAR_FLOOD_GUARD_NODES = 2000;
+
     private static boolean bootstrapped = false;
 
     @BeforeAll
@@ -96,7 +105,7 @@ public class HpaMilestoneTest {
         // §13: keep timing ON so the per-window node counts print (the before/after signal). The flat-search
         // failure path also logs its expansion count + "FAIL-budget".
         BlockPathfinder.LOG_TIMING = true;
-        BlockPathfinder.DEBUG = false; // the failure dump is noisy and not what we measure here
+        Debug.ENABLED = false; // the failure dump is noisy and not what we measure here
     }
 
     // ===================================================================================================
@@ -176,25 +185,33 @@ public class HpaMilestoneTest {
     // ===================================================================================================
 
     /**
-     * The 30-up open-air pillar (HPA-IMPLEMENTATION.md §13, scenario 2; the {@code PathfinderBenchmark} TOWER
-     * case). A single flat block-A* fans horizontally hunting a non-existent cheaper ramp and burns its
-     * budget — the heuristic under-estimates the forced placements (BlockPathfinder's own caveat), so the
-     * search over-explores and returns {@code null}. We assert it does NOT cleanly solve in one flat shot.
+     * Regression guard for the 30-up open-air pillar (HPA-IMPLEMENTATION.md §13, scenario 2; the {@code
+     * PathfinderBenchmark} TOWER case). This <b>used to be the flood case</b>: a single flat block-A* fanned
+     * horizontally hunting a non-existent cheaper ramp and burned its node budget (the octile heuristic is
+     * blind to the per-block place cost of building straight up), returning only a partial. The <b>place-cost
+     * model + the {@code Pillar} macro-move + the forced-cost heuristic</b> fixed that — the search now
+     * places-as-it-climbs within the one search and goes essentially straight up. We lock that in: a single
+     * flat search REACHES the top in a small, bounded node count (observed ~688, vs the 10k budget), so the
+     * horizontal-cone flood can never silently return.
      */
     @Test
-    void pillar_singleFlatSearch_floods() {
+    void pillar_singleFlatSearch_solvesBounded() {
         NavGridView grid = view(flatFieldChunks());
         BlockPos start = new BlockPos(8, 0, 8);
         BlockPos goal = new BlockPos(8, PILLAR_HEIGHT, 8);
 
         System.out.println("[HpaMilestone] pillar: single flat block-A* " + PILLAR_HEIGHT + " up ...");
         BlockPathPlan flat = BlockPathfinder.findPath(grid, start, goal, CAPS);
+        final int nodes = BlockPathfinder.LAST_EXPANSIONS;
 
-        // The flood case: the budget is exhausted before the pillar tops out, so a single flat search does
-        // NOT reach the goal (it returns a partial part-way up — the bot would pillar that far, then replan).
-        assertFalse(reachesGoal(flat, goal), "the " + PILLAR_HEIGHT + "-up open-air pillar is the known flood "
-                + "case: a single flat block-A* should NOT reach the top in one budget; got "
-                + (flat == null ? "null" : flat.size() + "wp"));
+        // Fixed: a single flat search now climbs straight to the top (no horizontal cone flood).
+        assertTrue(reachesGoal(flat, goal), "the " + PILLAR_HEIGHT + "-up pillar should now solve in one flat "
+                + "search (place-cost + Pillar move + forced-cost heuristic); got "
+                + (flat == null ? "null" : flat.size() + "wp") + " in " + nodes + " nodes");
+        // Bounded: well under the budget — a regression to the old flood would spike toward 10k.
+        assertTrue(nodes < PILLAR_FLOOD_GUARD_NODES, "the pillar solved but expanded " + nodes + " nodes (≥ "
+                + PILLAR_FLOOD_GUARD_NODES + " flood guard): the straight-up search regressed toward the "
+                + "horizontal cone flood");
     }
 
     /**

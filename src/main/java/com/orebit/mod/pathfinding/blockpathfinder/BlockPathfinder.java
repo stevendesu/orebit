@@ -5,6 +5,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import com.orebit.mod.Debug;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Axes;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.GoalForcedCost;
@@ -43,13 +44,6 @@ public final class BlockPathfinder {
     private BlockPathfinder() {}
 
     /**
-     * When true, a failed search logs WHY (closest approach + what each movement offered from the
-     * dead-end) — the diagnostic for "plan: none". Mirrors {@code AllyBotEntity.DEBUG_PATH}; flip both off
-     * to silence. Only runs on failure (rare, and throttled by the caller's replan cadence).
-     */
-    public static boolean DEBUG = true;
-
-    /**
      * When true, every search logs how long it took, how many nodes it expanded, and the derived ns/node
      * — the empirical data for sizing {@link #MAX_EXPANSIONS}. One INFO line per pathfind, so flip off once
      * you've collected data. Caveats when reading it: the first few are JIT-cold (ignore), break/place
@@ -64,6 +58,14 @@ public final class BlockPathfinder {
      * timing log. Set at every return; one static write per search, no hot-loop cost. Temporary diagnostic.
      */
     public static int LAST_EXPANSIONS;
+
+    /**
+     * Whether the most-recently-finished {@link #findPath} returned a <b>PARTIAL</b> (best-effort, budget-
+     * exhausted) path rather than a full route to the target — the same instrumentation-seam style as
+     * {@link #LAST_EXPANSIONS}, read by the driver to surface "taking a partial path" progress. {@code false}
+     * for a full FOUND path or a null FAIL.
+     */
+    public static boolean LAST_WAS_PARTIAL;
 
     /**
      * Step-by-step search trace sink — when non-null AND {@link #TRACE} is on, every node expansion and every
@@ -117,6 +119,22 @@ public final class BlockPathfinder {
      * floods rarer and the partial paths better, but they COMPOSE with this net rather than replace it.
      */
     public static boolean PARTIAL_PATH = true;
+
+    /**
+     * Irreversibility guard for PARTIAL paths — <b>ON.</b> A budget-exhausted partial walks the bot to a
+     * closest-approach cell <i>off</i> the region skeleton (the search never reached the window target, so the
+     * region tier never vouched for that cell). If getting there crosses an <b>irreversible</b> move — a drop
+     * deeper than the bot can climb back without placing ({@code drop &gt; jumpHeight && !canPlace}: a {@code
+     * Fall}/{@code MineDown} a no-place bot can't undo) — committing it can ratchet the bot into a one-way trap
+     * it then can't leave (the deep cave-descent stranding: ~48 blocks of one-way falls toward a portal that
+     * turned out block-unreachable). So a partial is truncated to the <b>last cell before its first irreversible
+     * move</b>; if that makes no real progress the partial is suppressed and the bot stays put — never the
+     * Baritone "drop into a 1×2 hole and give up." A FULL path to the window target is exempt (reaching the
+     * target lands the bot ON the skeleton, which vouches downstream), and a {@code canPlace} bot is exempt
+     * entirely (it can always pillar back out, so nothing is irreversible for it). Composes with {@link
+     * #PARTIAL_PATH}: it only ever <i>shortens</i> a partial, never creates one.
+     */
+    public static boolean IRREVERSIBLE_GUARD = true;
 
     /**
      * Master switch for macro-movement collapse (MACRO-IMPLEMENTATION.md §8.3) — <b>ON by default</b>. When
@@ -470,8 +488,25 @@ public final class BlockPathfinder {
     public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
                                          BotCaps caps, RegionBound bound,
                                          MovementContext.InventoryView inventory) {
+        // Confinement and the cuboid growth-cap default to the SAME bound (the historical corridor double-duty).
+        return findPath(grid, startFloor, goalFloor, caps, bound, bound, inventory);
+    }
+
+    /**
+     * As above, but with the search <b>confinement</b> ({@code confineBound}) decoupled from the cuboid
+     * <b>growth cap</b> ({@code cuboidBound}). {@code confineBound == null} runs an UNCONFINED full-grid search
+     * — the region tier's sliding-window targets are near (~3 regions), so distance + the node budget bound it
+     * without a corridor, and removing the corridor lets the block-A* take the REAL route to the target even
+     * when it must wander a few regions off the coarse skeleton (the skeleton is a hint, not a cage). A non-null
+     * {@code cuboidBound} still caps macro-cuboid growth so a flat world can't grow one unbounded. Passing the
+     * two equal reproduces the old corridor behaviour; both {@code null} = unbounded + no macros (bench/trace).
+     */
+    public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
+                                         BotCaps caps, RegionBound confineBound, RegionBound cuboidBound,
+                                         MovementContext.InventoryView inventory) {
         final long t0 = System.nanoTime();
         LAST_EXPANSIONS = 0; // reset the instrumentation seam (covers the early no-start-ground return)
+        LAST_WAS_PARTIAL = false;
         final int sx = startFloor.getX(), sy = startFloor.getY(), sz = startFloor.getZ();
         final int gx = goalFloor.getX(), gy = goalFloor.getY(), gz = goalFloor.getZ();
 
@@ -491,12 +526,14 @@ public final class BlockPathfinder {
         ctx.setInventory(inventory); // null in the historical / headless / trace paths (caps-only gates)
         final long startKey = BlockPos.asLong(sx, sy, sz);
 
-        // Macro-movement collapse (MACRO-IMPLEMENTATION.md §8): a corridor-bounded search builds a per-search
-        // cuboid view over the SAME PathEdits the movements read, wires it + the goal onto the context, and
-        // probes the goal's faces once for the admissible forced-build heuristic premium (§7). An unbounded
-        // search (bound == null, e.g. /bot trace) gets no view → the movements emit plain micro steps.
-        final NavGridCuboidsView cuboids = (MACRO_MOVES && bound != null)
-                ? new NavGridCuboidsView(grid, ctx.pathEdits(), bound) : null;
+        // Macro-movement collapse (MACRO-IMPLEMENTATION.md §8): builds a per-search cuboid view over the SAME
+        // PathEdits the movements read (capped by cuboidBound so a flat world can't grow one unbounded), wires
+        // it + the goal onto the context, and probes the goal's faces once for the admissible forced-build
+        // heuristic premium (§7). A null cuboidBound (bench / raw trace) gets no view → plain micro steps. NOTE
+        // cuboidBound is independent of confineBound: an UNCONFINED search (confineBound == null) still gets
+        // capped macros.
+        final NavGridCuboidsView cuboids = (MACRO_MOVES && cuboidBound != null)
+                ? new NavGridCuboidsView(grid, ctx.pathEdits(), cuboidBound) : null;
         // Primary travel axis P (Option B, CUBOID-PERF-OPTIONS.md): the dominant start→goal approach axis, so
         // only the movements travelling P extract a cuboid per node (the other axes take their micro step) —
         // pinning per-node extraction to one axis instead of up to three. argmax(|dx|,|dy|,|dz|) with tie-break
@@ -514,7 +551,7 @@ public final class BlockPathfinder {
         final EditPool editPool = EDIT_POOL.get();
         editPool.reset();
         final float hWeight = caps.greedyWeight() >= 1.0f ? caps.greedyWeight() : BotCaps.DEFAULT_GREEDY_WEIGHT;
-        Relaxer relaxer = new Relaxer(nodes, editPool, sx, sy, sz, gx, gy, gz, bound, forced, hWeight);
+        Relaxer relaxer = new Relaxer(nodes, editPool, sx, sy, sz, gx, gy, gz, confineBound, forced, hWeight);
 
         int startRow = nodes.intern(startKey, sx, sy, sz);
         nodes.g[startRow] = 0f;
@@ -576,7 +613,7 @@ public final class BlockPathfinder {
         LAST_EXPANSIONS = expansions; // instrumentation seam — the just-finished search's node count
 
         if (reachedRow == -1) {
-            if (DEBUG) explainFailure(ctx, sx, sy, sz, gx, gy, gz, expansions, budgetHit, bestX, bestY, bestZ, bound);
+            if (Debug.ENABLED) explainFailure(ctx, sx, sy, sz, gx, gy, gz, expansions, budgetHit, bestX, bestY, bestZ, confineBound);
             // Partial-path return: when the BUDGET (not connectivity) stopped the search and it made real
             // progress toward the goal, return the path to the closest-approach node so the bot moves forward
             // and replans from there — converging on a goal a single bounded search can't reach in one shot.
@@ -584,10 +621,21 @@ public final class BlockPathfinder {
             // reach, so moving there and replanning would just re-fail (and keeps the FAIL signal visible).
             if (PARTIAL_PATH && budgetHit && bestRow != startRow
                     && (relaxer.h(sx, sy, sz) - bestH) > PARTIAL_MIN_PROGRESS) {
-                BlockPathPlan partial = reconstruct(nodes, startRow, bestRow);
-                if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
-                        "PARTIAL-" + partial.size() + "wp", sx, sy, sz, gx, gy, gz);
-                return partial;
+                // Irreversibility guard: don't commit a partial past a move the bot can't undo (§IRREVERSIBLE_GUARD).
+                // Truncate to the last cell before the first unclimbable drop, then re-check that the (shorter)
+                // commit still makes real progress — if not, suppress the partial entirely (the bot stays put).
+                int commitRow = IRREVERSIBLE_GUARD ? lastReversibleRow(nodes, startRow, bestRow, caps) : bestRow;
+                if (commitRow != startRow) {
+                    float commitH = relaxer.h(nodes.x[commitRow], nodes.y[commitRow], nodes.z[commitRow]);
+                    if ((relaxer.h(sx, sy, sz) - commitH) > PARTIAL_MIN_PROGRESS) {
+                        BlockPathPlan partial = reconstruct(nodes, startRow, commitRow);
+                        LAST_WAS_PARTIAL = true;
+                        if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
+                                "PARTIAL-" + partial.size() + "wp" + (commitRow != bestRow ? "-irrev" : ""),
+                                sx, sy, sz, gx, gy, gz);
+                        return partial;
+                    }
+                }
             }
             if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
                     budgetHit ? "FAIL-budget" : "FAIL-exhausted", sx, sy, sz, gx, gy, gz);
@@ -834,6 +882,36 @@ public final class BlockPathfinder {
             if (MovementContext.risksEdit(ctx.flagsAt(x, y, z))) sb.append('r');
         }
         OrebitCommon.LOGGER.info("[Orebit]   {} ({},{}):{}", label, x, z, sb);
+    }
+
+    /**
+     * The furthest node along the partial path {@code start → best} the bot can reach WITHOUT crossing an
+     * irreversible move — the irreversibility guard's commit point ({@link #IRREVERSIBLE_GUARD}). A move is
+     * irreversible when it drops the bot further than it can climb back unaided: {@code drop > jumpHeight}
+     * (one jump regains at most {@code jumpHeight}) and the bot {@code !canPlace} (so it can't pillar back up).
+     * Returns {@code startRow} when the very first edge is irreversible (⇒ suppress the partial, stay put), or
+     * {@code bestRow} when the whole partial is reversible (or the bot can place, so nothing is irreversible).
+     *
+     * <p>Cold path: one walk per budget-exhausted partial, never on the search hot loop. The {@code drop} is
+     * read per A* edge from the stored node Ys; a macro Fall/MineDown carries its full collapsed drop, so it is
+     * correctly seen as one big irreversible edge and the commit stops before it (not mid-drop).
+     */
+    private static int lastReversibleRow(Nodes nodes, int startRow, int bestRow, BotCaps caps) {
+        if (caps.canPlace()) return bestRow; // a placing bot can always pillar back out — nothing is one-way
+        // Collect the start→best chain forward, then walk to the first unclimbable drop.
+        List<Integer> rows = new ArrayList<>();
+        for (int n = bestRow; n != -1; n = nodes.parent[n]) {
+            rows.add(n);
+            if (n == startRow) break;
+        }
+        Collections.reverse(rows);
+        final int jump = caps.jumpHeight();
+        for (int i = 1; i < rows.size(); i++) {
+            int p = rows.get(i - 1), n = rows.get(i);
+            int drop = nodes.y[p] - nodes.y[n]; // > 0 = this edge descended
+            if (drop > jump) return p;          // stop just before the first drop the bot can't climb back
+        }
+        return bestRow; // whole partial is reversible
     }
 
     private static BlockPathPlan reconstruct(Nodes nodes, int startRow, int reachedRow) {

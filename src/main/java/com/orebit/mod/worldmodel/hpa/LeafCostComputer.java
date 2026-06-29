@@ -2,6 +2,7 @@ package com.orebit.mod.worldmodel.hpa;
 
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.orebit.mod.Debug;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
@@ -327,9 +328,9 @@ public final class LeafCostComputer {
         // Stand position for the center rep (floorCell.above()), in world coords.
         final BlockPos centerStand = standWorld(ox, oy, oz, centerRep);
 
-        final boolean saveDbg = BlockPathfinder.DEBUG;
+        final boolean saveDbg = Debug.ENABLED;
         final boolean saveTim = BlockPathfinder.LOG_TIMING;
-        BlockPathfinder.DEBUG = false;
+        Debug.ENABLED = false;
         BlockPathfinder.LOG_TIMING = false;
         try {
             for (int f = 0; f < 6; f++) {
@@ -355,7 +356,7 @@ public final class LeafCostComputer {
                 pyramid.setFaceBoth(0, row, f, CostCodec.quantize(ticks));
             }
         } finally {
-            BlockPathfinder.DEBUG = saveDbg;
+            Debug.ENABLED = saveDbg;
             BlockPathfinder.LOG_TIMING = saveTim;
         }
         pyramid.setBuilt(0, row, true);

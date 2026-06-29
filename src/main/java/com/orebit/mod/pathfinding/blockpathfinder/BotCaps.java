@@ -22,8 +22,18 @@ package com.orebit.mod.pathfinding.blockpathfinder;
 public record BotCaps(
         /** Max blocks a single jump gains (Ascend / step-up). */
         int jumpHeight,
-        /** Max blocks the bot may drop without harm (Fall) before the move is rejected. */
+        /** Max blocks the bot may drop with <b>no</b> harm (Fall) — the free-fall threshold (vanilla 3). */
         int safeFallDistance,
+        /**
+         * The deepest drop the bot will take <b>at all</b> ({@code ≥ safeFallDistance}). Between
+         * {@code safeFallDistance} and this, {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Fall
+         * Fall} still emits the candidate but charges a <b>damage penalty</b> — fall damage is a COST, not a
+         * blocker: the bot takes a hurtful drop when the alternative is a long detour, but prefers a damage-free
+         * route. A drop deeper than this is rejected (it would deal unacceptable / lethal damage). A
+         * damage-immune bot (no health system, feather-falling) sets {@code safeFallDistance == maxFallDistance}
+         * (both large) so there is no penalty zone and it falls freely.
+         */
+        int maxFallDistance,
         /** May mine soft blocks in the way (BreakThrough — Tier 3). */
         boolean canBreak,
         /** May place throwaway blocks (Pillar / Bridge — Tier 3). */
@@ -55,6 +65,24 @@ public record BotCaps(
     /** Default node-expansion ceiling — the historical {@code BlockPathfinder.MAX_EXPANSIONS}. */
     public static final int DEFAULT_MAX_NODES = 10000;
 
+    /**
+     * Default deepest drop the bot will take (with a damage penalty above {@link #DEFAULT_SAFE_FALL}). 16 keeps
+     * a full-health bot alive (fall damage ≈ depth−3 ⇒ ~13 at 16, survivable) while letting it descend a cave
+     * whose only route has 4–6 block drops. Tunable; a future health-aware cap can shrink it when the bot is hurt.
+     */
+    public static final int DEFAULT_MAX_FALL = 16;
+
+    /** Default free-fall (no-damage) threshold — vanilla's 3 blocks. */
+    public static final int DEFAULT_SAFE_FALL = 3;
+
+    /**
+     * Fall distance for a <b>damage-immune</b> bot ({@code takesDamage == false}): set BOTH
+     * {@link #safeFallDistance} and {@link #maxFallDistance} to this so every drop is free and none is capped
+     * (no damage penalty, no rejection — it falls to the first landing however deep). Sized to the tallest
+     * world column so the {@code Fall} scan still terminates (it also breaks at the first unbuilt cell).
+     */
+    public static final int IMMUNE_FALL = 4096;
+
     /** Default heuristic weight — the historical {@code BlockPathfinder.H_WEIGHT} (greedy). */
     public static final float DEFAULT_GREEDY_WEIGHT = 2.0f;
 
@@ -64,7 +92,8 @@ public record BotCaps(
      * false).
      */
     public static final BotCaps DEFAULT = new BotCaps(
-            1, 3, false, false, UNBREAKABLE, DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
+            1, DEFAULT_SAFE_FALL, DEFAULT_MAX_FALL, false, false, UNBREAKABLE,
+            DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
 
     /**
      * The Tier 1 default plus break + place enabled — the test/headless config that proves break/place
@@ -74,5 +103,6 @@ public record BotCaps(
      * caps now come from {@link com.orebit.mod.config.Config}).
      */
     public static final BotCaps BREAK_PLACE = new BotCaps(
-            1, 3, true, true, UNBREAKABLE, DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
+            1, DEFAULT_SAFE_FALL, DEFAULT_MAX_FALL, true, true, UNBREAKABLE,
+            DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
 }
