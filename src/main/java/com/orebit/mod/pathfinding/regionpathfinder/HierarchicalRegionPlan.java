@@ -108,11 +108,16 @@ public final class HierarchicalRegionPlan {
 
     /**
      * The current skeleton at {@code level} (or {@code null} if above {@link #topLevel} / unbuilt) — exposed for
-     * the headless cascade tests to assert selective re-plan (which levels' skeleton identity changed) and stack
-     * consistency. Not used in production.
+     * the headless cascade tests (selective re-plan / stack consistency) and the debug stack dump
+     * ({@link com.orebit.mod.pathfinding.PathPlan#describeSkeleton}).
      */
-    RegionPathPlan skeletonAt(int level) {
+    public RegionPathPlan skeletonAt(int level) {
         return (level < 0 || level > topLevel) ? null : levels[level].skeleton;
+    }
+
+    /** The committed cursor at {@code level} (how far along that level's skeleton the bot has committed) — debug. */
+    public int committedAt(int level) {
+        return (level < 0 || level > topLevel) ? -1 : levels[level].committedIndex;
     }
 
     /**

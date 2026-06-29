@@ -406,8 +406,21 @@ public final class NavBlock {
     public static boolean toolRequired(long d)  { return (d & TOOLREQ_BIT) != 0; }
     /** Static: the block can be waterlogged (a bucket-clutch on it is absorbed). */
     public static boolean isWaterloggable(long d) { return (d & WLOGABLE_BIT) != 0; }
-    /** Derived: there is water in this cell right now (waterlogged or a water block). */
+    /**
+     * Derived: water is present in this cell right now — a water source/flow <b>or</b> a <b>waterlogged
+     * solid</b> (a waterlogged fence/stair has a water fluid state). This is the "would water flow if I edit
+     * here" / fire-out / no-spawn concept; it is <b>NOT</b> "can the bot swim here" — a waterlogged fence holds
+     * water but you cannot move through it. For swimming use {@link #isSwimmableWater}.
+     */
     public static boolean isWaterloggedNow(long d) { return fluid(d) == FLUID_WATER; }
+    /**
+     * Derived: a full <b>water cell the bot can swim through</b> — water fluid AND no collision (empty shape).
+     * The single source of truth for "swimmable" (the swim movements' {@code MovementContext.water} delegates
+     * here). Distinct from {@link #isWaterloggedNow}: a waterlogged solid has water fluid but a collision shape,
+     * so it is occupiable-as-water {@code false} (you can't float through a fence). Plants in water (kelp,
+     * seagrass — empty shape, water fluid) ARE swimmable. Lava (fluid 3) is never swimmable.
+     */
+    public static boolean isSwimmableWater(long d) { return fluid(d) == FLUID_WATER && isPassable(d); }
     /** True if nothing collides here (air/plant/fluid). */
     public static boolean isPassable(long d) { return shape(d) == SHAPE_EMPTY; }
 

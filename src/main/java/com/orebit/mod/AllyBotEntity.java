@@ -68,6 +68,9 @@ public class AllyBotEntity extends FakePlayerEntity {
      * long so a stationary bot re-searches rarely, which also keeps the debug path stable.
      */
     private static final int REPLAN_TICKS = 40;
+    /** Ticks between cascade BLOCKED-repair attempts ({@link #repairStep}) — keeps the heavy re-search off the
+     *  per-tick path while the bot follows the last repaired route. */
+    private static final int REPAIR_COOLDOWN = 10;
     /** Below this squared horizontal speed while trying to move, treat the bot as stuck → jump. */
     private static final double STUCK_SPEED_SQR = 0.0016;
     /** Consecutive stuck ticks before the diagnostic dumps the surrounding blocks (≈1s). */
@@ -176,6 +179,13 @@ public class AllyBotEntity extends FakePlayerEntity {
     private final RegionEdgeBlacklist regionBlacklist = new RegionEdgeBlacklist();
     /** Reused 2-long scratch for {@link PathPlan#blockedHop} (no per-replan alloc). */
     private final long[] hopScratch = new long[2];
+    /**
+     * Throttle for the cascade's in-place BLOCKED repair ({@link #repairStep}): ticks remaining before the next
+     * {@link PathPlan#repairBlocked} attempt. A repair re-derives the L0 skeleton + runs a full windowed block
+     * search (~a tick of work), so it must NOT run every tick while stuck — that floods the console/chat and the
+     * tick budget. Reset to {@link #REPAIR_COOLDOWN} on each attempt, cleared when the route recovers.
+     */
+    private int repairCooldown;
     /** Set once the region tier can find NO route avoiding the blacklist — the bot holds + tells the owner. */
     private boolean navGaveUp;
 
@@ -518,9 +528,25 @@ public class AllyBotEntity extends FakePlayerEntity {
             // Cascade repair (HPA-CASCADE.md §6): a BLOCKED hop is blacklisted + escalated up the level stack
             // IN PLACE by the plan itself (which owns its per-level blacklists — no bot-side blacklist needed).
             // It re-derives the L0 skeleton on success; only a hard exhaustion (no route at any level) gives up.
-            if (status == PathStatus.BLOCKED && !pathPlan.repairBlocked()) {
+            if (status == PathStatus.FAILED) {
                 giveUp();
-            } else if (status == PathStatus.FAILED) {
+                return;
+            }
+            if (status != PathStatus.BLOCKED) {
+                repairCooldown = 0; // route is fine — reset the throttle
+                return;
+            }
+            // THROTTLE: a repair re-derives the L0 skeleton AND runs a full windowed block search (up to
+            // MAX_EXPANSIONS ≈ a whole tick of work). Doing that every tick while stuck floods the console with
+            // 10001-node searches and the chat with re-derived-target churn (and blows the tick budget). Cap it
+            // to once per REPAIR_COOLDOWN ticks: attempt a repair, then follow whatever route it found for a few
+            // ticks before trying again. (A genuine give-up still comes from repairBlocked returning false.)
+            if (repairCooldown > 0) {
+                repairCooldown--;
+                return;
+            }
+            repairCooldown = REPAIR_COOLDOWN;
+            if (!pathPlan.repairBlocked()) {
                 giveUp();
             }
             return;
