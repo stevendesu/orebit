@@ -1,5 +1,6 @@
 package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
+import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
@@ -85,5 +86,15 @@ public final class SprintSwim implements Movement {
         if (ctx.built(x, y, z) && ctx.water(x, y, z)) {
             out.accept(x, y - 1, z, COST);
         }
+    }
+
+    @Override
+    public boolean reached(BotSteering b, int wx, int wy, int wz) {
+        return Swim.reachedSwim(b, wx, wy, wz);
+    }
+
+    @Override
+    public void steer(BotSteering b, int wx, int wy, int wz) {
+        Swim.steerSwim(b, wx, wy, wz, true); // submerged + sprinting → vanilla prone sprint-swim
     }
 }
