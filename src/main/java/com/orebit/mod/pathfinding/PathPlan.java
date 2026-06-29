@@ -391,6 +391,35 @@ public final class PathPlan {
                 .append("  window=[").append(windowStart).append("..").append(windowLast())
                 .append("]  goalRegion=(").append(goalRX).append(',').append(goalRY).append(',').append(goalRZ)
                 .append(")  reachedGoal=").append(skeleton.reachedGoalRegion());
+        // Cascade stack (HPA-CASCADE.md): when the nested-skeleton cascade drives this plan, dump every coarse
+        // level above L0 — its skeleton, the committed cursor (*), and each cell's portal/center probe — so the
+        // L1/L2 macro route + which regions are built/standable/water is legible (the L0 detail follows below).
+        if (hier != null) {
+            sb.append("\n  CASCADE top=L").append(hier.topLevel())
+                    .append(hier.isFailed() ? " FAILED" : "");
+            for (int L = hier.topLevel(); L >= 1; L--) {
+                final RegionPathPlan sk = hier.skeletonAt(L);
+                if (sk == null) {
+                    sb.append("\n  L").append(L).append(": (none)");
+                    continue;
+                }
+                sb.append("\n  L").append(L).append(' ').append(sk.size()).append(" steps committed=")
+                        .append(hier.committedAt(L)).append(" reachedGoal=").append(sk.reachedGoalRegion());
+                for (int i = 0; i < sk.size(); i++) {
+                    sb.append("\n    L").append(L).append('.').append(i)
+                            .append(i == hier.committedAt(L) ? "*" : " ")
+                            .append(" region=(").append(sk.rx(i)).append(',').append(sk.ry(i)).append(',')
+                            .append(sk.rz(i)).append(") frag=").append(sk.fragmentId(i));
+                    if (sk.hasPortal(i)) {
+                        final BlockPos p = sk.portalCell(i);
+                        sb.append(" portal=").append(compactPos(p)).append(probe(grid, p));
+                    }
+                    final BlockPos cc = sk.centerOf(i);
+                    sb.append(" center=").append(compactPos(cc)).append(probe(grid, cc));
+                }
+            }
+            sb.append("\n  L0 (driven):");
+        }
         final int last = windowLast();
         // The step windowTarget() actually aims at: the farthest window portal that's non-buried, else (all
         // buried) the farthest portal (it gets snapped). Mark THAT, not just windowLast — the two differ when
@@ -451,6 +480,15 @@ public final class PathPlan {
             final boolean feet = NavBlock.isPassable(grid.descriptorAt(x, y + 1, z));
             final boolean head = NavBlock.isPassable(grid.descriptorAt(x, y + 2, z));
             return (feet && head) ? "[stand]" : "[buried]";
+        }
+        // Swimmable water is an occupiable target — distinguish it from dry mid-air so a [water] portal is
+        // legible as REACHABLE in the dump (vs an [air-no-floor] cell that needs a climb intent to target). A
+        // waterlogged solid (water fluid but a collision shape) is NOT swimmable → it falls through to [SOLID].
+        if (NavBlock.isSwimmableWater(d)) {
+            return "[water]";
+        }
+        if (NavBlock.isLava(d)) {
+            return "[LAVA]";
         }
         return NavBlock.isPassable(d) ? "[air-no-floor]" : "[SOLID]";
     }
@@ -969,20 +1007,31 @@ public final class PathPlan {
 
     /**
      * Whether {@code p} is directly usable as a block-A* target. A real <b>standable</b> floor (with headroom)
-     * always is; a bare <b>passable</b> (air) cell is usable only when {@code airOK} (we intend to climb up to
-     * it); an <b>unbuilt</b> cell counts as usable (optimistic frontier — the block tier resolves real geometry
-     * on approach). Buried-in-rock and (when {@code !airOK}) mid-air cells are NOT usable → the caller snaps.
+     * always is; a <b>water</b> cell always is (the bot can swim there — no floor or capability needed); a bare
+     * <b>passable</b> (air) cell is usable only when {@code airOK} (we intend to climb up to it); an
+     * <b>unbuilt</b> cell counts as usable (optimistic frontier — the block tier resolves real geometry on
+     * approach). Buried-in-rock and (when {@code !airOK}) dry mid-air cells are NOT usable → the caller snaps.
      */
     private boolean isUsableTarget(NavGridView grid, BlockPos p, boolean airOK) {
         final int x = p.getX(), y = p.getY(), z = p.getZ();
         if (!grid.built(x, y, z)) {
             return true;
         }
-        if (NavBlock.isStandable(grid.descriptorAt(x, y, z))
-                && NavBlock.isPassable(grid.descriptorAt(x, y + 1, z))) {
+        final long desc = grid.descriptorAt(x, y, z);
+        if (NavBlock.isStandable(desc) && NavBlock.isPassable(grid.descriptorAt(x, y + 1, z))) {
             return true;
         }
-        return airOK && NavBlock.isPassable(grid.descriptorAt(x, y, z));
+        // A swimmable WATER cell is occupiable — every bot can swim (no place/break/climb needed), so an
+        // underwater opening (passable but not standable, i.e. "air-no-floor" under the surface) is a perfectly
+        // good target, NOT a mid-air cell to reject. Without this the window target snapped down to the seafloor
+        // (or flooded the center fallback), making the block tier dive/flood instead of swimming to the portal.
+        // SWIMMABLE water specifically (full water + no collision), not merely "water present" — a waterlogged
+        // solid (water fluid but a collision shape, e.g. a waterlogged fence) is an obstacle you can't float
+        // through, so it must NOT count as a target.
+        if (NavBlock.isSwimmableWater(desc)) {
+            return true;
+        }
+        return airOK && NavBlock.isPassable(desc);
     }
 
     /**

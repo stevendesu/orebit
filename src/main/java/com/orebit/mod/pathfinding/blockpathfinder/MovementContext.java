@@ -390,9 +390,9 @@ public final class MovementContext {
 
     /** {@link #water(int, int, int)} on an already-read descriptor (read-once form). */
     public boolean water(long d) {
-        // FLUID_WATER == 1 (low fluid bit set, high/lava bit clear) AND no collision (empty shape) — a full
-        // water cell the bot can float in, not a waterlogged solid.
-        return NavBlock.fluid(d) == 1 && NavBlock.isPassable(d);
+        // Swimmable = full water cell, no collision (not a waterlogged solid). Single source of truth in
+        // NavBlock so the swim movements and the region-tier window-target agree on what "water" means.
+        return NavBlock.isSwimmableWater(d);
     }
 
     /**
