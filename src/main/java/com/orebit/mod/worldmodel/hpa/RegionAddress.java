@@ -49,6 +49,29 @@ public final class RegionAddress {
     /** Dimension root (~6 octree + ~17 quadtree levels); coords/levels are clamped here. */
     public static final int MAX_LEVEL = 22;
 
+    /**
+     * Highest level the <b>fragment pyramid</b> is rolled up to / the region A* will plan at (HPA-FRAGMENTS.md
+     * §S5). There is deliberately <b>no single world-root node</b>: once a level's cap-safe search reaches any
+     * practical goal, higher levels are dead weight (storage + merge work) — a level-{@value} quadtree cell is
+     * {@code 16<<6 = 1024} blocks, and a cap-safe ~45-cell search there spans ~46k blocks; goals beyond that are
+     * handled by clamping the top-level search goal toward them and re-planning on approach, never by a taller
+     * pyramid. Caps {@code mergeUpFragments} and the planner's level selection.
+     */
+    public static final int MAX_COARSE_LEVEL = 6;
+
+    /**
+     * The number of distinct vertical region indices ({@code ry}) at {@code level}, from the padded dimension
+     * extent ({@link #PAD_HEIGHT} = 512 blocks ⇒ 32 leaf sections): {@code max(1, 32 >> level)} —
+     * {@code 32,16,8,4,2,1,1,…}, pinning to 1 at/above {@link #OCTREE_TOP} (the quadtree slab). Used by the
+     * planner to size a cap-safe search box per level (a search's worst-case node count scales with the
+     * horizontal area × this vertical depth). Conservative (the padded 32 ≥ any real dimension's section count),
+     * so the cap-safety bound holds in every dimension.
+     */
+    public static int verticalRegions(int level) {
+        int v = (PAD_HEIGHT >> LEAF_BITS) >> level; // (512/16) >> level = 32 >> level
+        return v < 1 ? 1 : v;
+    }
+
     private RegionAddress() {}
 
     // ---------------------------------------------------------------------------------------------------

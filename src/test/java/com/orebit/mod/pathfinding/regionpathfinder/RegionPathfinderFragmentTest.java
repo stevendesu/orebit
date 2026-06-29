@@ -254,6 +254,30 @@ public class RegionPathfinderFragmentTest {
     }
 
     @Test
+    void capSafe_levelSelection_boxNeverExceedsTheBackstop() {
+        // The whole point of the cap-safe level rule: a search confined to ±maxCheb(L) per horizontal axis
+        // explores at most (2·maxCheb+1)² × vert(L) cells, which MUST stay under the hard expansion backstop —
+        // so an area flood can never reach the cap. Assert the invariant at every selectable level.
+        for (int L = 0; L <= com.orebit.mod.worldmodel.hpa.RegionAddress.MAX_COARSE_LEVEL; L++) {
+            int m = RegionPathfinder.maxChebAtLevel(L);
+            int vert = com.orebit.mod.worldmodel.hpa.RegionAddress.verticalRegions(L);
+            long box = (long) (2 * m + 1) * (2 * m + 1) * vert;
+            assertTrue(box <= RegionPathfinder.MAX_REGION_EXPANSIONS,
+                    "level " + L + " cap-safe box " + box + " must be ≤ backstop "
+                            + RegionPathfinder.MAX_REGION_EXPANSIONS);
+            assertTrue(m >= 1, "every level must allow at least a 1-cell search");
+        }
+        // And the selector picks a cap-safe level for a sample of distances (near → very far).
+        for (int d : new int[] {1, 8, 50, 300, 5000, 200000}) {
+            int L = RegionPathfinder.chooseCapSafeLevel(0, 0, 0, d, 0, 0);
+            int chebL = (d >> L);
+            assertTrue(L <= com.orebit.mod.worldmodel.hpa.RegionAddress.MAX_COARSE_LEVEL);
+            assertTrue(chebL <= RegionPathfinder.maxChebAtLevel(L) || L == com.orebit.mod.worldmodel.hpa.RegionAddress.MAX_COARSE_LEVEL,
+                    "distance " + d + " → level " + L + " must be cap-safe (or the clamped top level)");
+        }
+    }
+
+    @Test
     void coarseBranch_diagonalLongRange_progressesBothAxes() {
         // A diagonal long-range goal: the refined near segment should advance in BOTH +X and +Z.
         BlockPos start = new BlockPos(8, 4, 8);
