@@ -10,8 +10,8 @@ import net.minecraft.core.BlockPos;
  * The HPA* region-tier <b>stateful nested-skeleton cascade</b> (HPA-CASCADE.md, the "S6" arc) — a stack of
  * per-level region skeletons, one per pyramid level {@code L = topLevel … 0}, each navigating within the window
  * handed down from the level above. It is the source of the level-0 skeleton the
- * {@link com.orebit.mod.pathfinding.PathPlan} block-window driver consumes, replacing the shipped <b>two-tier
- * shortcut</b> ({@link RegionPathfinder#planCoarseRefinedFragments}, retained as the flag-off A/B fallback).
+ * {@link com.orebit.mod.pathfinding.PathPlan} block-window driver consumes. (It replaced an earlier two-tier
+ * shortcut — one coarse level + one L0 near refine — now deleted.)
  *
  * <h2>Why a cascade (HPA-CASCADE.md §1)</h2>
  * The two-tier branch plans one coarse level + one L0 near refine, re-searched from scratch every replan. That

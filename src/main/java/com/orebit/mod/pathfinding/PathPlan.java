@@ -8,7 +8,6 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.regionpathfinder.HierarchicalRegionPlan;
-import com.orebit.mod.pathfinding.regionpathfinder.RegionEdgeBlacklist;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
@@ -58,17 +57,14 @@ import net.minecraft.server.level.ServerLevel;
  * {@code new NavGridView(level)} — not a bounded view, because the window already bounds the search by
  * keeping the target only ~3 regions away.
  *
- * <h2>Fragment model (HPA-FRAGMENTS.md §6, §S4 — flag-gated by {@link RegionGrid#HPA_FRAGMENTS})</h2>
- * When the region tier runs the connectivity-aware <b>fragment</b> model, {@link RegionPathfinder#plan}
- * returns a {@link RegionPathPlan#isFragmentModel() fragment-model} skeleton whose steps are
+ * <h2>Fragment model (HPA-FRAGMENTS.md §6, §S4)</h2>
+ * The region tier is the connectivity-aware <b>fragment</b> model: the skeleton's steps are
  * {@code (region, fragment)} nodes carrying a per-step <b>portal cell</b> (the reachable on-face boundary cell
- * the path enters the step's region through). The driver then changes in exactly two places — both no-ops when
- * the skeleton is a center-model plan (flag off, or the deferred-S5 coarse branch), so the center path stays
- * byte-for-byte unchanged:
+ * the path enters the step's region through). Two places use it:
  * <ul>
  *   <li><b>Window target</b> ({@link #windowTarget()}): the far step's {@link RegionPathPlan#portalCell portal
- *       cell} — a real occupiable cell — replaces the {@code center → projectToStandableFloor} projection that
- *       landed on buried/mid-air cells in carved terrain (the §6 "buried target" bug).</li>
+ *       cell} — a real occupiable cell — instead of a {@code center → projectToStandableFloor} projection that
+ *       would land on buried/mid-air cells in carved terrain (the §6 "buried target" bug).</li>
  *   <li><b>Commit key</b> ({@link #forwardIndexOf}): the bot's current skeleton step is matched on
  *       {@code (region, fragment)} (its fragment resolved alloc-free via {@link RegionPathfinder#fragmentOf}),
  *       so an <i>intra-region mine edge</i> (two skeleton steps sharing a region but not a fragment) is
@@ -145,30 +141,22 @@ public final class PathPlan {
      * headless callers), leaving the gates in their historical caps-only mode.
      */
     private final MovementContext.InventoryView inventory;
-    /**
-     * Region→region crossings the block tier proved unrealizable for this bot's caps (HPA online repair). The
-     * region A* skips them so the skeleton routes <i>around</i> a dead-end hop (the big walk-around) instead of
-     * re-offering it every replan. {@code null} for headless / {@code /bot trace} callers (no repair). Owned by
-     * the bot (survives replans, cleared on goal change); see {@link RegionEdgeBlacklist} and {@link #blockedHop}.
-     */
-    private final RegionEdgeBlacklist blacklist;
     private final int minY;
     /** The goal's level-0 region coords (so we can test "goal in window" by index). */
     private final int goalRX, goalRY, goalRZ;
 
     // ---- skeleton + window state ---------------------------------------------------------------------
     /**
-     * The level-0 region skeleton the block window drives. Built once by {@link RegionPathfinder#plan} (the
-     * shipped two-tier / direct path), OR — when {@link RegionGrid#HIERARCHICAL_CASCADE} is on — sourced from
-     * {@link #hier} and <b>swapped</b> whenever the cascade re-derives a fresh L0 segment (HPA-CASCADE.md §S6.5).
-     * Non-final for that swap; all the window/commit/target readers below treat it as the current skeleton.
+     * The level-0 region skeleton the block window drives — sourced from {@link #hier} and <b>swapped</b>
+     * whenever the cascade re-derives a fresh L0 segment (HPA-CASCADE.md §5). Non-final for that swap; all the
+     * window/commit/target readers below treat it as the current skeleton.
      */
     private RegionPathPlan skeleton;
     /**
-     * The region-tier nested-skeleton cascade ({@code null} unless {@link RegionGrid#HIERARCHICAL_CASCADE}). When
-     * present it is the smarter, self-refreshing <b>source</b> of {@link #skeleton}: {@link #onBotMoved} steps it
-     * first and, on an L0 change, swaps {@link #skeleton} + resets the block window. The block-window driving
-     * below is otherwise unchanged (HPA-CASCADE.md §9).
+     * The region-tier nested-skeleton cascade (HPA-CASCADE.md) — the self-refreshing <b>source</b> of
+     * {@link #skeleton}: {@link #onBotMoved} steps it first and, on an L0 change, swaps {@link #skeleton} +
+     * resets the block window; {@link #repairBlocked} drives its blocked-hop escalation. It owns the per-level
+     * blacklists, so PathPlan keeps none of its own.
      */
     private final HierarchicalRegionPlan hier;
     /** Index into the skeleton of the window's leading (start) region. */
@@ -255,24 +243,11 @@ public final class PathPlan {
      */
     public PathPlan(ServerLevel level, RegionGrid regionGrid, BlockPos startFloor, BlockPos goalFloor,
                     BotCaps caps, MovementContext.InventoryView inventory) {
-        this(level, regionGrid, startFloor, goalFloor, caps, inventory, null);
-    }
-
-    /**
-     * As {@link #PathPlan(ServerLevel, RegionGrid, BlockPos, BlockPos, BotCaps, MovementContext.InventoryView)},
-     * additionally honouring a {@link RegionEdgeBlacklist} of region crossings the block tier has proven
-     * unrealizable for these caps: the region A* routes around them. The bot threads the SAME blacklist into
-     * every replan (it accumulates across the stuck episode, cleared on goal change) and reads {@link
-     * #blockedHop} to grow it. {@code null} = no repair (the historical behaviour).
-     */
-    public PathPlan(ServerLevel level, RegionGrid regionGrid, BlockPos startFloor, BlockPos goalFloor,
-                    BotCaps caps, MovementContext.InventoryView inventory, RegionEdgeBlacklist blacklist) {
         this.level = level;
         this.regionGrid = regionGrid;
         this.goalFloor = goalFloor;
         this.caps = caps;
         this.inventory = inventory;
-        this.blacklist = blacklist;
         this.minY = regionGrid.minY();
         this.botFloor = startFloor;
 
@@ -280,16 +255,10 @@ public final class PathPlan {
         this.goalRY = RegionAddress.regionY(goalFloor.getY(), 0, minY);
         this.goalRZ = RegionAddress.regionZ(goalFloor.getZ(), 0);
 
-        // Region tier: the nested cascade (flag on) re-derives its L0 segment as the bot moves; the shipped
-        // two-tier / direct path (flag off) plans a single skeleton once. Both yield the same kind of L0
-        // RegionPathPlan, so everything below is identical (HPA-CASCADE.md §9, S6.5).
-        if (RegionGrid.HIERARCHICAL_CASCADE) {
-            this.hier = HierarchicalRegionPlan.build(regionGrid, minY, startFloor, goalFloor, caps);
-            this.skeleton = hier.l0Skeleton();
-        } else {
-            this.hier = null;
-            this.skeleton = RegionPathfinder.plan(level, regionGrid, startFloor, goalFloor, caps, blacklist);
-        }
+        // Region tier: the nested-skeleton cascade (HPA-CASCADE.md) re-derives its L0 segment as the bot moves
+        // and owns its per-level blacklists; PathPlan just drives the L0 segment it hands back.
+        this.hier = HierarchicalRegionPlan.build(regionGrid, minY, startFloor, goalFloor, caps);
+        this.skeleton = hier.l0Skeleton();
         this.windowStart = 0;
         this.committedIndex = 0;
 
@@ -532,11 +501,10 @@ public final class PathPlan {
             return;
         }
 
-        // Cascade step (HPA-CASCADE.md §5, S6.5): advance the per-level commits and re-derive only the suffix the
-        // bot exited. When the L0 segment changed, swap it in and reset the block window from the bot's region;
-        // otherwise fall through to the existing block-window slide over the unchanged skeleton. No-op (hier ==
-        // null) when the cascade flag is off — the two-tier/direct path is unchanged.
-        if (hier != null && stepCascade()) {
+        // Cascade step (HPA-CASCADE.md §5): advance the per-level commits and re-derive only the suffix the bot
+        // exited. When the L0 segment changed, swap it in and reset the block window from the bot's region;
+        // otherwise fall through to the block-window slide over the unchanged skeleton.
+        if (stepCascade()) {
             return;
         }
 
@@ -746,8 +714,8 @@ public final class PathPlan {
     }
 
     /**
-     * The onward skeleton crossing the bot is stuck on — {@code windowStart → windowStart+1} — for the online
-     * repair ({@link RegionEdgeBlacklist}). When the bot is {@link PathStatus#BLOCKED} the block tier couldn't
+     * The onward skeleton crossing the bot is stuck on — {@code windowStart → windowStart+1} — for the cascade's
+     * online repair ({@link #repairBlocked}). When the bot is {@link PathStatus#BLOCKED} the block tier couldn't
      * leave the bot's committed region ({@code windowStart}, the window's leading step) toward the next
      * skeleton step, so <i>that</i> hop is the unrealizable one; the bot blacklists it and the next region
      * replan routes around it. Using {@code windowStart} (not a hardcoded 0) makes this correct whether the
@@ -768,22 +736,16 @@ public final class PathPlan {
         return true;
     }
 
-    /** Whether this plan is driven by the nested-skeleton cascade (HPA-CASCADE.md) vs the shipped two-tier path. */
-    public boolean isCascade() {
-        return hier != null;
-    }
-
     /**
-     * Cascade online repair (HPA-CASCADE.md §6, S6.5): the driver is {@link PathStatus#BLOCKED}, so feed the bot's
+     * Cascade online repair (HPA-CASCADE.md §6): the driver is {@link PathStatus#BLOCKED}, so feed the bot's
      * current L0 skeleton hop ({@link #blockedHop}) to the cascade, which blacklists it and <b>escalates up the
      * hierarchy</b> — re-planning each level until one routes around the dead crossing. On success the repaired L0
      * skeleton is swapped in and the block window reset; returns {@code true} (a route remains). Returns
      * {@code false} (and sets FAILED) when there is no hop to blame or every level is exhausted — the bot then
-     * gives up. The cascade owns its per-level blacklists, so unlike the two-tier path this needs no bot-side
-     * {@link RegionEdgeBlacklist}. Only meaningful when {@link #isCascade()} (a no-op {@code false} otherwise).
+     * gives up. The cascade owns its per-level blacklists.
      */
     public boolean repairBlocked() {
-        if (hier == null || !blockedHop(repairHopScratch)) {
+        if (!blockedHop(repairHopScratch)) {
             return false;
         }
         if (!hier.onBlocked(repairHopScratch[0], repairHopScratch[1], botFloor)) {
