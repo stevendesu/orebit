@@ -1,5 +1,6 @@
 package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
+import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
@@ -83,5 +84,16 @@ public final class Ascend implements Movement {
             ctx.requireBodyClear(e, nx, uy, nz, dstFlags);
             if (e.valid()) out.accept(nx, uy, nz, COST + e.extraCost(), e);
         }
+    }
+
+    /**
+     * Walk toward the step and jump when on the ground — an Ascend is "walk forward while jumping" onto a
+     * full block one up (head-clearance already verified by {@link #candidates}). The jump is deterministic
+     * (always, not only when stuck): the bot must leave the ground to gain the block.
+     */
+    @Override
+    public void steer(BotSteering b, int wx, int wy, int wz) {
+        Movement.super.steer(b, wx, wy, wz); // face + full forward
+        if (b.grounded()) b.jump();
     }
 }
