@@ -104,6 +104,25 @@ public final class RegionPathfinder {
     /** How many leading coarse cells to refine to level 0 in the lazy branch (the near segment). */
     public static final int REFINE_LEAD_CELLS = 3;
 
+    /**
+     * Cap-safe search-box budget (HPA-FRAGMENTS.md §S5 / cap-safety). The planner picks the FINEST region level
+     * whose start→goal box (horizontal area × vertical depth) fits within this many nodes, so a per-level
+     * fragment A* cannot flood the {@link #MAX_REGION_EXPANSIONS} backstop by area. Sized well under the backstop
+     * (~2.4×) to absorb A* detours/walk-arounds (which explore outside the start→goal box) and the
+     * {@code (region,fragment)} node multiplier. Replaces the old fixed {@link #LEVEL0_DIRECT_CAP} /
+     * {@link #COARSE_TARGET_CELLS} magic on the fragment path (those remain only for the legacy center model).
+     */
+    public static final int CAP_SAFE_NODES = 8192;
+
+    /**
+     * Whether a <b>budget-hit</b> region search returns the best-so-far PARTIAL skeleton (toward the goal)
+     * instead of {@code null} — the region analog of the block tier's partial-path / Baritone best-so-far. The
+     * cap-safe level selection makes a flood rare; this makes the rare one (a maze-detour flood the box-bound
+     * can't prevent) graceful: the bot makes progress and re-plans, rather than giving up. A genuine heap-drain
+     * (disconnected for these caps) still returns {@code null} — that is a real no-route, not a budget hit.
+     */
+    public static boolean REGION_PARTIAL_ON_BUDGET = true;
+
     /** The ratified admissible heuristic (Euclidean region centers × min-cost-per-region). Strategy, not switch. */
     private static final RegionHeuristic HEURISTIC = new SimpleRegionHeuristic();
 
@@ -404,78 +423,126 @@ public final class RegionPathfinder {
             return new RegionPathPlan(rx, ry, rz, fr, px, py, pz, 1, minY, true);
         }
 
-        int cheb = Math.max(Math.abs(grx - srx), Math.max(Math.abs(gry - sry), Math.abs(grz - srz)));
-        if (cheb > LEVEL0_DIRECT_CAP) {
-            return planCoarseRefinedFragments(grid, minY, startFloor, goalFloor,
-                    srx, sry, srz, startFrag, grx, gry, grz, goalFrag,
+        // Cap-safe level selection (HPA-FRAGMENTS.md §S5): the FINEST level whose start→goal box fits the
+        // node budget. L==0 is the direct branch (a full level-0 skeleton to the goal); L>0 plans coarse + a
+        // cap-safe near refine. This replaces the old fixed LEVEL0_DIRECT_CAP threshold and makes every
+        // per-level search bounded by construction (an area flood can't reach the MAX_REGION_EXPANSIONS cap).
+        final int L = chooseCapSafeLevel(srx, sry, srz, grx, gry, grz);
+        if (L == 0) {
+            return planLevelFragments(0, grid, minY, srx, sry, srz, startFrag, grx, gry, grz, goalFrag, true,
                     canBreak, canPlace, safeFall, blacklist);
         }
-
-        return planLevelFragments(0, grid, minY, srx, sry, srz, startFrag, grx, gry, grz, goalFrag, true,
+        return planCoarseRefinedFragments(L, grid, minY, startFloor, goalFloor,
+                srx, sry, srz, startFrag, grx, gry, grz, goalFrag,
                 canBreak, canPlace, safeFall, blacklist);
     }
 
+    // ---------------------------------------------------------------------------------------------------
+    // Cap-safe level selection (HPA-FRAGMENTS.md §S5) — pick the finest level whose search box fits the budget
+    // ---------------------------------------------------------------------------------------------------
+
     /**
-     * Fragment coarse scale-guard branch (HPA-FRAGMENTS.md §S5): for goals beyond {@link #LEVEL0_DIRECT_CAP},
-     * plan over the <b>rolled-up coarse fragment pyramid</b> instead of the legacy center model. Steps:
+     * The cap-safe one-axis Chebyshev radius at {@code level}: {@code ½·√(CAP_SAFE_NODES / verticalRegions(L))}.
+     * A search confined to ±this many cells per horizontal axis explores at most {@code (2·r)² × vert ≤
+     * CAP_SAFE_NODES} cells — so it cannot flood the {@link #MAX_REGION_EXPANSIONS} backstop by area. At the
+     * quadtree levels ({@code vert==1}) this is {@code ½·√CAP_SAFE_NODES}; lower (octree) levels shrink it by
+     * the vertical depth.
+     */
+    static int maxChebAtLevel(int level) {
+        double r = Math.sqrt((double) CAP_SAFE_NODES / RegionAddress.verticalRegions(level)) / 2.0;
+        int ri = (int) Math.floor(r);
+        return ri < 1 ? 1 : ri;
+    }
+
+    /** Start→goal Chebyshev distance in level-{@code level} regions (vertical pinned to 0 above OCTREE_TOP). */
+    private static int chebAtLevel(int level, int srx, int sry, int srz, int grx, int gry, int grz) {
+        int sLx = srx >> level, sLz = srz >> level;
+        int gLx = grx >> level, gLz = grz >> level;
+        int sLy = (level >= RegionAddress.OCTREE_TOP) ? 0 : (sry >> level);
+        int gLy = (level >= RegionAddress.OCTREE_TOP) ? 0 : (gry >> level);
+        return Math.max(Math.abs(gLx - sLx), Math.max(Math.abs(gLy - sLy), Math.abs(gLz - sLz)));
+    }
+
+    /**
+     * The finest level whose start→goal box is cap-safe (Chebyshev ≤ {@link #maxChebAtLevel}); capped at
+     * {@link RegionAddress#MAX_COARSE_LEVEL} (no world root). For a goal beyond even that level's cap-safe reach
+     * the search goal is clamped toward it ({@link #planCoarseRefinedFragments}) and the bot re-plans on
+     * approach — the pyramid is never made taller.
+     */
+    static int chooseCapSafeLevel(int srx, int sry, int srz, int grx, int gry, int grz) {
+        for (int L = 0; L < RegionAddress.MAX_COARSE_LEVEL; L++) {
+            if (chebAtLevel(L, srx, sry, srz, grx, gry, grz) <= maxChebAtLevel(L)) {
+                return L;
+            }
+        }
+        return RegionAddress.MAX_COARSE_LEVEL;
+    }
+
+    /**
+     * Fragment coarse scale-guard branch (HPA-FRAGMENTS.md §S5): for a goal too far for a cap-safe level-0
+     * search, plan over the <b>rolled-up coarse fragment pyramid</b> at the {@code level} chosen by
+     * {@link #chooseCapSafeLevel} (instead of the legacy center model). Steps:
      * <ol>
-     *   <li>Pick the coarsest level {@code L} whose start→goal Chebyshev distance ≤ {@link #COARSE_TARGET_CELLS}
-     *       (so the coarse A* itself stays small).</li>
-     *   <li>Run a level-{@code L} fragment A* ({@link #planLevelFragments}) over the merged coarse fragments —
-     *       the same derived edge costs (portal / mine / uniform transit, caps + air-exclusion rules) the
-     *       level-0 search uses, just at the coarse span. This picks the macro route around walls/ravines.</li>
+     *   <li>Run a level-{@code level} fragment A* ({@link #planLevelFragments}) over the merged coarse fragments
+     *       — the same derived edge costs (portal / mine / uniform transit, caps + air-exclusion rules) the
+     *       level-0 search uses, just at the coarse span. The goal is clamped to the cap-safe radius (binds only
+     *       at the capped top level for a very far goal). This picks the macro route around walls/ravines.</li>
      *   <li>Project the coarse skeleton's leading segment ({@link #REFINE_LEAD_CELLS} cells out) to a level-0
-     *       sub-goal and refine the <b>near</b> segment to a level-0 fragment skeleton ({@code reachedGoalRegion
-     *       = false}); the driver walks that and re-invokes {@link #plan} as the bot nears its end (refine the
-     *       <i>far</i> tail on approach, never the committed near end).</li>
+     *       sub-goal — clamped to the cap-safe level-0 radius — and refine the <b>near</b> segment to a level-0
+     *       fragment skeleton ({@code reachedGoalRegion = false}); the driver walks that and re-invokes
+     *       {@link #plan} as the bot nears its end (refine the far tail on approach, never the committed near
+     *       end).</li>
      * </ol>
      * Robust to an unbuilt (unloaded) far field: the coarse A* reads the §6 optimistic default for un-merged
      * nodes and beelines, so it always yields a near sub-goal toward the goal; chunks load on approach and the
-     * replan sharpens. Falls back to a direct level-0 fragment plan, then the center-model coarse refine.
+     * replan sharpens. Falls back to a direct level-0 fragment plan, then (break+place bots only) the
+     * center-model coarse refine.
+     *
+     * <p><b>Note (HPA-FRAGMENTS.md §S5 follow-up):</b> this is a <i>two-tier</i> shortcut (one coarse level +
+     * the level-0 near refine), not the full nested-skeleton cascade (L→L−1→…→0 with a sliding window cached per
+     * level). It is cap-safe and functional; a medium-scale obstacle between the L0 horizon and the coarse cell
+     * is discovered on approach (walk-then-reroute) rather than pre-routed. The stateful nested cascade is the
+     * documented next step.
      */
-    private static RegionPathPlan planCoarseRefinedFragments(RegionGrid grid, int minY,
+    private static RegionPathPlan planCoarseRefinedFragments(int level, RegionGrid grid, int minY,
                                                              BlockPos startFloor, BlockPos goalFloor,
                                                              int srx, int sry, int srz, int startFrag,
                                                              int grx, int gry, int grz, int goalFrag,
                                                              boolean canBreak, boolean canPlace, int safeFall,
                                                              RegionEdgeBlacklist blacklist) {
-        // (1) Coarsest level whose distance is within the coarse target.
-        int level = 1;
-        while (level < RegionAddress.MAX_LEVEL) {
-            int sLx = srx >> level, sLz = srz >> level, gLx = grx >> level, gLz = grz >> level;
-            int sLy = (level >= RegionAddress.OCTREE_TOP) ? 0 : (sry >> level);
-            int gLy = (level >= RegionAddress.OCTREE_TOP) ? 0 : (gry >> level);
-            int chebL = Math.max(Math.abs(gLx - sLx), Math.max(Math.abs(gLy - sLy), Math.abs(gLz - sLz)));
-            if (chebL <= COARSE_TARGET_CELLS) break;
-            level++;
-        }
-
-        // (2) Coarse fragment A* at level L (start/goal fragments resolved at the coarse level).
+        // (1) Coarse fragment A* at the chosen level. The goal is CLAMPED to the cap-safe radius (only binds at
+        // the capped top level for a very far goal); reachedGoalRegion iff the true goal region was kept.
+        final int mL = maxChebAtLevel(level);
         final int sLx = srx >> level, sLz = srz >> level;
         final int sLy = (level >= RegionAddress.OCTREE_TOP) ? 0 : (sry >> level);
-        final int gLx = grx >> level, gLz = grz >> level;
-        final int gLy = (level >= RegionAddress.OCTREE_TOP) ? 0 : (gry >> level);
+        final int gLxRaw = grx >> level, gLzRaw = grz >> level;
+        final int gLyRaw = (level >= RegionAddress.OCTREE_TOP) ? 0 : (gry >> level);
+        final int gLx = stepToward(sLx, gLxRaw, mL);
+        final int gLy = stepToward(sLy, gLyRaw, mL);
+        final int gLz = stepToward(sLz, gLzRaw, mL);
+        final boolean reached = (gLx == gLxRaw && gLy == gLyRaw && gLz == gLzRaw);
         ensureNode(grid, level, sLx, sLy, sLz);
         ensureNode(grid, level, gLx, gLy, gLz);
         final int sLfrag = nearestFragment(grid, level, sLx, sLy, sLz, startFloor);
         final int gLfrag = nearestFragment(grid, level, gLx, gLy, gLz, goalFloor);
         final RegionPathPlan coarse = planLevelFragments(level, grid, minY, sLx, sLy, sLz, sLfrag,
-                gLx, gLy, gLz, gLfrag, true, canBreak, canPlace, safeFall, null /* no blacklist at coarse */);
+                gLx, gLy, gLz, gLfrag, reached, canBreak, canPlace, safeFall, null /* no blacklist at coarse */);
 
-        // (3) Derive a level-0 sub-goal from the coarse lead segment, refine the near segment to level 0.
+        // (2) Project the coarse lead cell to a level-0 sub-goal, CLAMPED to the cap-safe L0 radius so the near
+        // refine itself can't flood, then refine the near segment to level 0.
         final BlockPos subGoal = coarseSubGoal(coarse, level, minY);
         if (subGoal != null) {
-            final int s0x = RegionAddress.regionX(subGoal.getX(), 0);
-            // Above the octree→quadtree transition the coarse cell is one 512-block slab, so its center Y is a
-            // meaningless mid-slab value (~y=192). Don't pull the near segment toward it — the vertical detail
-            // comes from the level-0 refine on approach. Aim the sub-goal at the bot's CURRENT elevation band
-            // (sry) and let the leaf search find the real surface; below the transition the coarse Y is real.
-            final int s0y = (level >= RegionAddress.OCTREE_TOP) ? sry : RegionAddress.regionY(subGoal.getY(), 0, minY);
-            final int s0z = RegionAddress.regionZ(subGoal.getZ(), 0);
+            final int m0 = maxChebAtLevel(0);
+            // Horizontal: follow the coarse route (the lead cell), clamped to the cap-safe L0 radius.
+            final int s0x = stepToward(srx, RegionAddress.regionX(subGoal.getX(), 0), m0);
+            final int s0z = stepToward(srz, RegionAddress.regionZ(subGoal.getZ(), 0), m0);
+            // Vertical: aim at the GOAL's real elevation (clamped), NOT the coarse cell center — a coarse cell is
+            // up to 256+ blocks tall, so its center Y is a mid-cell artifact that would wrongly pull the bot up
+            // or down. The L0 leaf search resolves the actual surface; replan on approach tracks any descent.
+            final int s0y = stepToward(sry, gry, m0);
             if (s0x != srx || s0y != sry || s0z != srz) { // a real onward segment (not back into the start region)
                 ensureNode(grid, 0, s0x, s0y, s0z);
-                final int syw = (level >= RegionAddress.OCTREE_TOP) ? (sry << RegionAddress.LEAF_BITS) + minY + 8
-                                                                    : subGoal.getY();
+                final int syw = minY + (s0y << RegionAddress.LEAF_BITS) + 8; // mid of the chosen L0 region
                 final int subFrag = nearestFragment(grid, 0, s0x, s0y, s0z,
                         new BlockPos(subGoal.getX(), syw, subGoal.getZ()));
                 final RegionPathPlan near = planLevelFragments(0, grid, minY, srx, sry, srz, startFrag,
@@ -698,6 +765,12 @@ public final class RegionPathfinder {
                         budgetHit ? "HIT EXPANSION BUDGET" : "heap drained (disconnected?)", expansions,
                         nodes.x[bestRow], nodes.y[bestRow], nodes.z[bestRow], bestH,
                         SimpleRegionHeuristic.COST_PER_REGION, nodes.heapSize);
+            }
+            // Best-so-far PARTIAL on a BUDGET hit (a maze-detour flood that the cap-safe box-bound can't fully
+            // prevent): return the skeleton to the closest-to-goal node so the bot makes progress and re-plans,
+            // instead of giving up. A heap-drain (no budgetHit) is a genuine no-route for these caps → null.
+            if (budgetHit && REGION_PARTIAL_ON_BUDGET && bestRow != startRow) {
+                return reconstructFragments(nodes, startRow, bestRow, minY, false);
             }
             return null;
         }

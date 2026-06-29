@@ -284,7 +284,8 @@ public final class PyramidMerger {
     public static void mergeUpFragments(CostPyramid p, int level0Rx, int level0Ry, int level0Rz) {
         int childLevel = 0;
         int crx = level0Rx, cry = level0Ry, crz = level0Rz;
-        while (childLevel < RegionAddress.MAX_LEVEL) {
+        // Roll up only to MAX_COARSE_LEVEL — no world-root node (HPA-FRAGMENTS.md §S5; RegionAddress).
+        while (childLevel < RegionAddress.MAX_COARSE_LEVEL) {
             int parentLevel = childLevel + 1;
             int prx = RegionAddress.parentRX(crx);
             int prz = RegionAddress.parentRZ(crz);
