@@ -204,6 +204,33 @@ public final class RegionGrid {
         LeafCostComputer.computeLeaf(level, rx, rz, ry, pyramid);
     }
 
+    /**
+     * Ensure the <b>coarse</b> node at {@code (level>0, rx, ry, rz)} is built under the fragment model
+     * (HPA-FRAGMENTS.md §S5) — the region-A* read seam for a level the coarse scale-guard branch touches.
+     *
+     * <p>Already-built ⇒ no-op. Otherwise recompute it <b>from its direct children</b> via
+     * {@link PyramidMerger#combineFragments} (a single level — no recursion, so bounded at 8/4 child reads).
+     * In production the fragment pyramid is kept built bottom-up by {@link HpaMaintenance} (every leaf (re)build
+     * walks {@link PyramidMerger#mergeUpFragments} to the root), so every coarse ancestor of loaded terrain is
+     * already built and this is the no-op fast path; this opportunistic build is the belt-and-suspenders for a
+     * node whose children exist but whose parent was never merged, and the on-demand path for the headless
+     * tests. A node with no built child stays unbuilt ⇒ the planner reads the §6 optimistic default.
+     *
+     * <p>No-op for {@code level <= 0} (use {@link #ensureLeaf}) and under the center model
+     * ({@code !HPA_FRAGMENTS}, where the coarse branch reads face buckets via {@link PyramidMerger#mergeLevel}).
+     */
+    public void ensureLevel(int level, int rx, int ry, int rz) {
+        if (level <= 0 || !HPA_FRAGMENTS) {
+            return;
+        }
+        int row = pyramid.rowIfPresent(level, rx, ry, rz);
+        if (row != -1 && pyramid.isBuilt(level, row)) {
+            return; // already merged (the maintenance-built fast path)
+        }
+        row = pyramid.rowFor(level, rx, ry, rz);
+        PyramidMerger.combineFragments(pyramid, level, row, rx, ry, rz);
+    }
+
     // ---------------------------------------------------------------------------------------------------
     // Face-cost query — the single chokepoint (3d default policy)
     // ---------------------------------------------------------------------------------------------------
