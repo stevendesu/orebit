@@ -18,20 +18,19 @@ import com.orebit.mod.worldmodel.pathing.NavSection;
  * and the Σ-hardness over SOLID cells (the mine-edge cost scale). It then hands the masks + tallies to
  * {@link FragmentBuilder#build} at {@code G = 16}.
  *
- * <h2>Drops vs {@link LeafCostComputer}</h2>
- * The bounded per-face mini-pathfind <b>and</b> all stored face costs are gone (HPA-FRAGMENTS.md §2.2: costs
- * are derived at query time, not stored) — replaced by a single flood fill (~13 µs/leaf, net faster than the
- * ~60 µs/leaf bounded-A* baseline).
+ * <h2>Cost model</h2>
+ * No per-cell costs are computed or stored — edge costs are derived at query time from the fragment footprints
+ * + universal constants ({@link LeafCostComputer}, HPA-FRAGMENTS.md §2.2). The leaf build is a single flood
+ * fill (~13 µs/leaf).
  *
  * <h2>Wiring</h2>
- * <b>Not yet wired</b> into {@link CostPyramid}/{@link RegionGrid} — that is S2, gated by
- * {@link RegionGrid#HPA_FRAGMENTS}. This class is purely additive at S1: it builds a {@link RegionFragments}
- * from a {@link NavSection} and touches no working code path.
+ * The leaf build seam: {@link RegionGrid#rebuildLeaf}/{@link RegionGrid#ensureLeaf} call {@link #computeLeaf}
+ * to (re)flood a leaf's {@link RegionFragments} record from its {@link NavSection}, and {@link PyramidMerger}
+ * rolls those up to the coarse levels.
  *
  * <h2>House style</h2>
- * Static-only, mirroring {@link LeafCostComputer}. The per-call mask buffers are flat thread-local scratch
- * reused across leaves (no per-cell allocation); the result is written into a caller-owned
- * {@link RegionFragments}.
+ * Static-only. The per-call mask buffers are flat thread-local scratch reused across leaves (no per-cell
+ * allocation); the result is written into a caller-owned {@link RegionFragments}.
  */
 public final class FragmentLeafComputer {
 

@@ -10,9 +10,9 @@ import java.util.Arrays;
  * costs as a stack of per-level {@link Level} tables. A node is addressed by {@code (level, rx, ry, rz)}
  * (see {@link RegionAddress}); each level has its <b>own keyspace and own open-addressed
  * {@code long}→row map</b> (key = {@link RegionAddress#packLevelKey}), so the same {@code (rx,ry,rz)} at two
- * levels never collide. A row stores the node's six face→center costs (PRD §6.5: each face holds the
- * half-traversal cost from that face to the node center; the boundary between two siblings is the implicit
- * sum of the two facing halves — we store the half, never an edge).
+ * levels never collide. A row stores the node's connectivity {@link RegionFragments} record (HPA-FRAGMENTS.md
+ * §5: the 6-connected occupiable components + their per-face footprints; edge costs are derived at query, §2.2,
+ * not stored).
  *
  * <p><b>Storage layout (struct-of-arrays, no per-node objects).</b> Per level:
  * <ul>
@@ -21,13 +21,10 @@ import java.util.Arrays;
  *       {@link com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder}'s {@code Nodes} table;</li>
  *   <li>parallel {@code int[] rx/ry/rz} of each row's region coords, so a planner reading a node's center
  *       never has to unpack the key;</li>
- *   <li>{@code byte[] face} — <b>twelve</b> buckets per row: six faces × two directions ({@link #ENTER}
- *       face→center, {@link #EXIT} center→face), FLATTENED ({@code face[row*12 + dir*6 + f]}); one
- *       {@code byte} each (12 B/node), <b>not</b> bit-packed in RAM (favour-cpu-over-ram — the nibble
- *       packing of {@link CostCodec} is only the on-disk form, §11, where it is 6 B/node). The two
- *       directions exist because a single per-face scalar can't express the asymmetry of vertical air travel
- *       (fall in cheap, pillar out expensive) — see {@link #ENTER};</li>
- *   <li>{@code boolean[] built} — whether a node's faces were actually computed (a real leaf/merge) vs an
+ *   <li>{@code RegionFragments[] frags} — the per-row connectivity record (lazily materialized by
+ *       {@link #ensureFragments}, filled by {@link FragmentLeafComputer} at a leaf or {@link PyramidMerger}'s
+ *       roll-up at a coarse level);</li>
+ *   <li>{@code boolean[] built} — whether a node's fragments were actually computed (a real leaf/merge) vs an
  *       interned-but-default placeholder. The planner returns an optimistic admissible default (§6) for a
  *       node that is interned-but-{@code !built}.</li>
  * </ul>
@@ -37,32 +34,14 @@ import java.util.Arrays;
  * the slot hash is the murmur3 64-bit finalizer copied verbatim from the block tier. Levels are lazily
  * allocated: {@code levels[]} is sized {@code MAX_LEVEL+1} and a {@link Level} is created on first touch.
  *
- * <p>New rows initialize all six faces to {@link CostCodec#BUCKET_INF} and {@code built = false}. INF is the
- * void/out-of-world sentinel; a real leaf never emits it (everything is mineable — §5).
+ * <p>New rows initialize {@code frags = null} and {@code built = false} (the planner reads the §6 optimistic
+ * default for an interned-but-unbuilt node).
  *
- * <p>This class owns only the store + intern/get/put primitives. The merge driver
- * ({@link PyramidMerger}), leaf computation ({@link LeafCostComputer}), and default-on-miss policy
- * ({@code RegionGrid}) live in their own files and call through this API.
+ * <p>This class owns only the store + intern/get/put primitives. The roll-up driver ({@link PyramidMerger}),
+ * leaf computation ({@link FragmentLeafComputer}), and default-on-miss policy ({@code RegionGrid}) live in
+ * their own files and call through this API.
  */
 public final class CostPyramid {
-
-    /** Six faces per node (canonical face order — see {@link RegionAddress}). */
-    private static final int FACES = 6;
-
-    /**
-     * Two directions stored PER FACE: {@link #ENTER} (face→center, going INTO the region through that face)
-     * and {@link #EXIT} (center→face, going OUT through it). A single scalar can't express the directional
-     * asymmetry of vertical air travel — falling IN through the top is cheap, pillaring OUT through it is
-     * expensive — and because a boundary crossing sums two facing halves, one scalar forces up- and
-     * down-crossings to be equal. For symmetric terrain (the A*-computed mixed leaves, and uniform water/
-     * stone) enter == exit (the inverse walk costs the same), so they are simply set together via
-     * {@link #setFaceBoth} — no second computation. Only the all-air leaf sets them apart.
-     */
-    public static final int ENTER = 0;
-    public static final int EXIT = 1;
-    private static final int DIRS = 2;
-    /** Stored values per row: 6 faces × 2 directions = 12 (one {@code byte} each — RAM is cheap, §14). */
-    private static final int SLOTS_PER_ROW = FACES * DIRS;
 
     /** Initial per-level map capacity (power of two); grows by doubling at 3/4 load. */
     private static final int INITIAL_MAP_CAP = 256;
@@ -85,15 +64,12 @@ public final class CostPyramid {
 
         // ---- row table (append-only; row index is stable) ----
         int[] rx, ry, rz;        // region coords per row (planning never unpacks the key)
-        byte[] face;             // 12 buckets/row, FLATTENED: face[row*12 + dir*6 + f] (dir ENTER=0/EXIT=1)
-        boolean[] built;         // faces actually computed (vs interned default placeholder)
+        boolean[] built;         // fragments actually computed (vs interned default placeholder)
         /**
-         * Per-row connectivity record for the HPA* <b>fragment model</b> (HPA-FRAGMENTS.md §5), stored
-         * ALONGSIDE the center-model {@link #face} buckets — never replacing them (the center path is kept
-         * intact for {@link RegionGrid#HPA_FRAGMENTS}{@code == false}). {@code null} until the row's leaf is
-         * built under the fragment path; lazily materialized by {@link CostPyramid#ensureFragments} and filled
-         * by {@link FragmentLeafComputer}. Parallel to the row arrays (favour-cpu-over-ram §14: one small
-         * convenient object per built region rather than re-deriving the flood on every read).
+         * Per-row connectivity record for the HPA* fragment model (HPA-FRAGMENTS.md §5). {@code null} until the
+         * row's leaf is built; lazily materialized by {@link CostPyramid#ensureFragments} and filled by
+         * {@link FragmentLeafComputer}. Parallel to the row arrays (favour-cpu-over-ram §14: one small convenient
+         * object per built region rather than re-deriving the flood on every read).
          */
         RegionFragments[] frags;
         int count;
@@ -108,7 +84,6 @@ public final class CostPyramid {
             rx = new int[INITIAL_ROW_CAP];
             ry = new int[INITIAL_ROW_CAP];
             rz = new int[INITIAL_ROW_CAP];
-            face = new byte[INITIAL_ROW_CAP * SLOTS_PER_ROW];
             built = new boolean[INITIAL_ROW_CAP];
             frags = new RegionFragments[INITIAL_ROW_CAP];
         }
@@ -145,9 +120,8 @@ public final class CostPyramid {
             int n = count;
             if (n == rx.length) growRows();
             rx[n] = cx; ry[n] = cy; rz[n] = cz;
-            int base = n * SLOTS_PER_ROW;
-            for (int s = 0; s < SLOTS_PER_ROW; s++) face[base + s] = (byte) CostCodec.BUCKET_INF;
             built[n] = false;
+            frags[n] = null;
             count = n + 1;
             return n;
         }
@@ -157,7 +131,6 @@ public final class CostPyramid {
             rx = Arrays.copyOf(rx, cap);
             ry = Arrays.copyOf(ry, cap);
             rz = Arrays.copyOf(rz, cap);
-            face = Arrays.copyOf(face, cap * SLOTS_PER_ROW);
             built = Arrays.copyOf(built, cap);
             frags = Arrays.copyOf(frags, cap);
         }
@@ -229,33 +202,6 @@ public final class CostPyramid {
         Level l = levels[level];
         if (l == null) return -1;
         return l.rowIfPresent(RegionAddress.packLevelKey(rx, ry, rz));
-    }
-
-    /** The raw bucket ({@code 0..15}) of {@code face} (0..5) in direction {@code dir} ({@link #ENTER}/{@link #EXIT}). */
-    public int faceBucket(int level, int row, int face, int dir) {
-        return levels[level].face[row * SLOTS_PER_ROW + dir * FACES + face] & 0xFF;
-    }
-
-    /** Set the bucket ({@code 0..15}) of {@code face} (0..5) in direction {@code dir} ({@link #ENTER}/{@link #EXIT}). */
-    public void setFaceBucket(int level, int row, int face, int dir, int bucket) {
-        levels[level].face[row * SLOTS_PER_ROW + dir * FACES + face] = (byte) bucket;
-    }
-
-    /**
-     * Set BOTH directions of {@code face} (0..5) to the same {@code bucket} — the symmetric case (A*-computed
-     * mixed leaves, uniform water/stone, defaults). The asymmetric all-air leaf uses {@link #setFaceBucket}
-     * per direction instead.
-     */
-    public void setFaceBoth(int level, int row, int face, int bucket) {
-        byte[] f = levels[level].face;
-        int base = row * SLOTS_PER_ROW;
-        f[base + ENTER * FACES + face] = (byte) bucket;
-        f[base + EXIT * FACES + face] = (byte) bucket;
-    }
-
-    /** Dequantized tick cost of {@code face} (0..5) in direction {@code dir} ({@link CostCodec#dequantize}). */
-    public float faceCost(int level, int row, int face, int dir) {
-        return CostCodec.dequantize(levels[level].face[row * SLOTS_PER_ROW + dir * FACES + face] & 0xFF);
     }
 
     /**
