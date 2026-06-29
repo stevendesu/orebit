@@ -2,6 +2,7 @@ package com.orebit.mod.platform;
 
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.chat.TextComponent;
+import net.minecraft.world.entity.player.Player;
 
 /**
  * Sends a one-line reply to a command source — the thin version-divergent primitive behind the common
@@ -18,5 +19,11 @@ public final class CommandFeedback {
 
     public static void send(CommandSourceStack source, String message) {
         source.sendSuccess(new TextComponent(message), false);
+    }
+
+    /** Direct chat line to a player (bot progress chatter). 1.17 has no {@code Entity.sendSystemMessage};
+     *  {@code displayClientMessage} is the era's player-message primitive (not gamerule-gated). */
+    public static void sendTo(Player player, String message) {
+        player.displayClientMessage(new TextComponent(message), false);
     }
 }

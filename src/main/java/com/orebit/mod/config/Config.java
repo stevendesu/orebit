@@ -80,9 +80,15 @@ public record Config(
      * never on the hot path.
      */
     public BotCaps toBotCaps() {
+        // takesDamage == false ⇒ an invulnerable bot: every drop is free at any depth, so safeFall == maxFall ==
+        // a world-height cap (no damage penalty, no rejection). A mortal bot uses the conservative defaults
+        // (free to 3, damage-costed up to 16). (Future: a health-aware maxFall for a mortal bot at low health.)
+        final int safeFall = takesDamage ? BotCaps.DEFAULT_SAFE_FALL : BotCaps.IMMUNE_FALL;
+        final int maxFall = takesDamage ? BotCaps.DEFAULT_MAX_FALL : BotCaps.IMMUNE_FALL;
         return new BotCaps(
                 /* jumpHeight       */ 1,
-                /* safeFallDistance */ 3,
+                /* safeFallDistance */ safeFall,
+                /* maxFallDistance  */ maxFall,
                 /* canBreak         */ canMine,
                 /* canPlace         */ canPlace,
                 /* maxBreakHardness */ maxHardness,

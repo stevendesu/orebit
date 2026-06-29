@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import com.orebit.mod.Debug;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
@@ -42,7 +43,7 @@ class MacroPillarTest {
             bootstrapped = true;
         }
         BlockPathfinder.LOG_TIMING = false;
-        BlockPathfinder.DEBUG = false;
+        Debug.ENABLED = false;
     }
 
     @Test

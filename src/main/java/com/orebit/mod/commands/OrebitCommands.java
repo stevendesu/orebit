@@ -31,9 +31,11 @@ public final class OrebitCommands {
             new FollowCommand(),
             new StayCommand(),
             new ComeCommand(),
+            new GotoCommand(),
             new HereCommand(),
             new TraceCommand(),
-            new ConfigCommand());
+            new ConfigCommand(),
+            new DebugCommand());
 
     /** Subscribe to the seam's command-registration hook; called from {@code OrebitCommon.init}. */
     public static void register(PlatformEvents events) {

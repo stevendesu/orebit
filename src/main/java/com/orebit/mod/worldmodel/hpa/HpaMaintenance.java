@@ -156,8 +156,17 @@ public final class HpaMaintenance {
      */
     private static void buildLeafSafe(ServerLevel level, CostPyramid pyramid, int rx, int ry, int rz) {
         try {
-            LeafCostComputer.computeLeaf(level, rx, rz, ry, pyramid);
-            PyramidMerger.mergeUp(pyramid, rx, ry, rz);
+            // Honor the active model: under HPA_FRAGMENTS this builds the RegionFragments record (NOT the
+            // center-model faces). Going through RegionGrid.rebuildLeaf keeps the model dispatch in ONE place;
+            // calling LeafCostComputer directly here is what poisoned fragment rows (built, but no fragment
+            // record → kind reads default AIR → a flat free skeleton). It force-recomputes (ignores the built
+            // flag), which is exactly the dirty-leaf / chunk-(re)built contract.
+            RegionGrid.of(level).rebuildLeaf(rx, ry, rz);
+            // Ancestor roll-up is the center-model pyramid; the fragment pyramid merge is S5-deferred, and the
+            // direct branch reads only leaves, so skip mergeUp under the fragment model.
+            if (!RegionGrid.HPA_FRAGMENTS) {
+                PyramidMerger.mergeUp(pyramid, rx, ry, rz);
+            }
         } catch (Throwable t) {
             long n = ++buildFailures;
             if (n == 1 || n % 256 == 0) {
