@@ -479,6 +479,54 @@ public final class RegionPathfinder {
     }
 
     /**
+     * Plan a <b>windowed</b> level-{@code level} fragment skeleton from the bot toward a handed-down sub-goal —
+     * the per-level search the {@link HierarchicalRegionPlan} cascade invokes at every level of its stack
+     * (HPA-CASCADE.md §S6.2). This lifts the clamp + {@link #planLevelFragments} call that already lived inside
+     * {@link #planCoarseRefinedFragments} so the cascade and the (retained, flag-off) two-tier branch share one
+     * windowed-search primitive.
+     *
+     * <p>The {@code subGoalWorld} is converted to level-{@code level} region coords and <b>clamped to
+     * {@link #maxChebAtLevel}</b> of the bot's cell, so even a far hand-down stays cap-safe by construction
+     * (HPA-CASCADE.md §4, §8). {@code reachedGoalRegion} is set iff that clamped cell is the {@code realGoal}'s
+     * own cell at this level — so a skeleton flags goal-reached only when it genuinely ends at the true goal
+     * region (an intermediate near segment correctly reports {@code false}). The start/goal fragments are
+     * resolved by nearest centroid, exactly as {@link #plan} does for the leaf.
+     *
+     * @param level        the pyramid level to plan at (0 = leaves)
+     * @param botFloor      the bot's world floor cell (the search start, mapped to this level)
+     * @param subGoalWorld  the world sub-goal handed down from the level above (clamped here)
+     * @param realGoal      the navigation's true goal cell (only used to set {@code reachedGoalRegion})
+     * @param blacklist     this level's forbidden crossings (may be {@code null})
+     * @return the level-tagged fragment skeleton, or {@code null} if no route within the budget/caps
+     */
+    public static RegionPathPlan planWithin(int level, RegionGrid grid, int minY,
+                                            BlockPos botFloor, BlockPos subGoalWorld, BlockPos realGoal,
+                                            BotCaps caps, RegionEdgeBlacklist blacklist) {
+        final int sx = RegionAddress.regionX(botFloor.getX(), level);
+        final int sz = RegionAddress.regionZ(botFloor.getZ(), level);
+        final int sy = RegionAddress.regionY(botFloor.getY(), level, minY);
+
+        // Clamp the sub-goal to the cap-safe radius of the bot's cell (binds only for a far hand-down / the
+        // capped top level); a clamped search ends at a waypoint the cascade slides toward on the next exit.
+        final int m = maxChebAtLevel(level);
+        final int gx = stepToward(sx, RegionAddress.regionX(subGoalWorld.getX(), level), m);
+        final int gz = stepToward(sz, RegionAddress.regionZ(subGoalWorld.getZ(), level), m);
+        final int gy = stepToward(sy, RegionAddress.regionY(subGoalWorld.getY(), level, minY), m);
+
+        final boolean reached = gx == RegionAddress.regionX(realGoal.getX(), level)
+                && gz == RegionAddress.regionZ(realGoal.getZ(), level)
+                && gy == RegionAddress.regionY(realGoal.getY(), level, minY);
+
+        ensureNode(grid, level, sx, sy, sz);
+        ensureNode(grid, level, gx, gy, gz);
+        final int sFrag = nearestFragment(grid, level, sx, sy, sz, botFloor);
+        final int gFrag = nearestFragment(grid, level, gx, gy, gz, subGoalWorld);
+
+        return planLevelFragments(level, grid, minY, sx, sy, sz, sFrag, gx, gy, gz, gFrag, reached,
+                caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), blacklist);
+    }
+
+    /**
      * Fragment coarse scale-guard branch (HPA-FRAGMENTS.md §S5): for a goal too far for a cap-safe level-0
      * search, plan over the <b>rolled-up coarse fragment pyramid</b> at the {@code level} chosen by
      * {@link #chooseCapSafeLevel} (instead of the legacy center model). Steps:
@@ -770,11 +818,11 @@ public final class RegionPathfinder {
             // prevent): return the skeleton to the closest-to-goal node so the bot makes progress and re-plans,
             // instead of giving up. A heap-drain (no budgetHit) is a genuine no-route for these caps → null.
             if (budgetHit && REGION_PARTIAL_ON_BUDGET && bestRow != startRow) {
-                return reconstructFragments(nodes, startRow, bestRow, minY, false);
+                return reconstructFragments(nodes, startRow, bestRow, minY, level, false);
             }
             return null;
         }
-        return reconstructFragments(nodes, startRow, reachedRow, minY, reachedGoalRegion);
+        return reconstructFragments(nodes, startRow, reachedRow, minY, level, reachedGoalRegion);
     }
 
     /**
@@ -812,7 +860,7 @@ public final class RegionPathfinder {
      * + portal cell per step in travel order (the fragment-model {@link #reconstruct}).
      */
     private static RegionPathPlan reconstructFragments(Nodes nodes, int startRow, int reachedRow, int minY,
-                                                       boolean reachedGoalRegion) {
+                                                       int level, boolean reachedGoalRegion) {
         int len = 0;
         for (int n = reachedRow; n != -1; n = nodes.parent[n]) {
             len++;
@@ -832,7 +880,7 @@ public final class RegionPathfinder {
             i--;
             if (n == startRow) break;
         }
-        return new RegionPathPlan(rxs, rys, rzs, frags, px, py, pz, len, minY, reachedGoalRegion);
+        return new RegionPathPlan(rxs, rys, rzs, frags, px, py, pz, len, minY, level, reachedGoalRegion);
     }
 
     // ---------------------------------------------------------------------------------------------------
