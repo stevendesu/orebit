@@ -58,7 +58,7 @@ import net.minecraft.server.level.ServerLevel;
  * When {@link RegionGrid#HPA_FRAGMENTS} is on, the abstract node is {@code (region, fragment)} — one node per
  * 6-connected occupiable component of a region (usually 1; a handful in caves; a single synthetic fragment
  * {@code 0} for a uniform SOLID/AIR/WATER or over-cap collapsed region). The search (see
- * {@link #planLevel0Fragments}) reads connectivity through {@link RegionGrid}'s fragment accessors instead of
+ * {@link #planLevelFragments}) reads connectivity through {@link RegionGrid}'s fragment accessors instead of
  * the face buckets, and <b>derives every edge cost</b> from geometry + universal constants (no stored cost
  * buckets — HPA-FRAGMENTS.md §2.2):
  * <ul>
@@ -71,9 +71,10 @@ import net.minecraft.server.level.ServerLevel;
  *       swim), or collapsed (passability-weighted mass) neighbour — folding in the leaf fast paths.</li>
  * </ul>
  * The graph is therefore always fully connected (a sealed region routes through an expensive mine edge — no
- * disconnected FAIL). The <b>center-model</b> direct branch (flag off) is byte-for-byte unchanged. S5 (pyramid
- * fragment merge / roll-up) is not built; the coarse scale-guard branch stays center-model/optimistic even
- * under the flag (noted at its call site).
+ * disconnected FAIL). The <b>center-model</b> direct branch (flag off) is byte-for-byte unchanged. The coarse
+ * scale-guard branch (S5) also runs the fragment model now: {@link #planLevelFragments} is level-parameterized
+ * and plans over the rolled-up coarse fragment pyramid ({@link com.orebit.mod.worldmodel.hpa.PyramidMerger}),
+ * then refines the near segment to level 0 ({@link #planCoarseRefinedFragments}).
  */
 public final class RegionPathfinder {
 
@@ -133,12 +134,6 @@ public final class RegionPathfinder {
 
     /** The hardness nibble at which the mine cost is unscaled (stone) — see {@link FragmentBuilder}. */
     public static final int STONE_REF_NIBBLE = FragmentBuilder.STONE_HARDNESS_NIBBLE;             // 4
-
-    /**
-     * Default intra-region mine span (blocks) when the two fragments' footprint-derived centroids coincide or
-     * sit on the same boundary — the §2.2 "~half-region span". Keeps a same-region dig from reading as free.
-     */
-    private static final int HALF_REGION = LEAF / 2;                                              // 8
 
     /**
      * Wall thickness (blocks) charged for a non-overlapping inter-region opening reached by mining (the
@@ -385,10 +380,11 @@ public final class RegionPathfinder {
      * circuits the same-region-same-fragment case, applies the scale guard, and otherwise runs the level-0
      * fragment A*.
      *
-     * <p><b>Coarse branch (S5 deferred):</b> beyond {@link #LEVEL0_DIRECT_CAP} this falls back to the
-     * center-model {@link #planCoarseRefined} — the pyramid fragment merge ({@code PyramidMerger}, §7) that
-     * would roll fragments up to coarse levels is not built, so the long-reach branch stays center-model/
-     * optimistic for now. The milestone exercises the direct branch.
+     * <p><b>Coarse branch (S5):</b> beyond {@link #LEVEL0_DIRECT_CAP} this delegates to
+     * {@link #planCoarseRefinedFragments} — a fragment A* over the rolled-up coarse pyramid
+     * ({@link com.orebit.mod.worldmodel.hpa.PyramidMerger}) picks the macro route, then the near segment is
+     * refined to a level-0 fragment skeleton (the driver re-invokes on approach). The milestone exercises the
+     * direct branch.
      */
     private static RegionPathPlan planFragments(RegionGrid grid, int minY, BlockPos startFloor,
                                                 BlockPos goalFloor, int srx, int sry, int srz,
@@ -397,8 +393,8 @@ public final class RegionPathfinder {
                                                 RegionEdgeBlacklist blacklist) {
         grid.ensureLeaf(srx, sry, srz);
         grid.ensureLeaf(grx, gry, grz);
-        final int startFrag = nearestFragment(grid, srx, sry, srz, startFloor);
-        final int goalFrag = nearestFragment(grid, grx, gry, grz, goalFloor);
+        final int startFrag = nearestFragment(grid, 0, srx, sry, srz, startFloor);
+        final int goalFrag = nearestFragment(grid, 0, grx, gry, grz, goalFloor);
 
         // Trivial: same region AND same fragment ⇒ a one-step plan (no portal). Different fragments in the
         // same region is NOT trivial — it must route through an intra-region mine edge (run the A*).
@@ -410,19 +406,131 @@ public final class RegionPathfinder {
 
         int cheb = Math.max(Math.abs(grx - srx), Math.max(Math.abs(gry - sry), Math.abs(grz - srz)));
         if (cheb > LEVEL0_DIRECT_CAP) {
-            // S5 deferred: no fragment roll-up yet → the long-reach branch is center-model/optimistic.
-            return planCoarseRefined(grid, minY, srx, sry, srz, grx, gry, grz);
+            return planCoarseRefinedFragments(grid, minY, startFloor, goalFloor,
+                    srx, sry, srz, startFrag, grx, gry, grz, goalFrag,
+                    canBreak, canPlace, safeFall, blacklist);
         }
 
-        return planLevel0Fragments(grid, minY, srx, sry, srz, startFrag, grx, gry, grz, goalFrag, true,
+        return planLevelFragments(0, grid, minY, srx, sry, srz, startFrag, grx, gry, grz, goalFrag, true,
                 canBreak, canPlace, safeFall, blacklist);
     }
 
     /**
-     * Level-0 fragment A* over {@code (region, fragment)} nodes. Expands each node into derived portal edges
-     * (footprint-overlap on a shared face), intra-region mine edges (to sibling fragments), and uniform-kind
-     * transit edges (into SOLID/AIR/WATER/collapsed neighbours) — HPA-FRAGMENTS.md §2. Terminates on the
-     * specific {@code (goal region, goalFrag)} node so a sealed goal is forced through its mine edge.
+     * Fragment coarse scale-guard branch (HPA-FRAGMENTS.md §S5): for goals beyond {@link #LEVEL0_DIRECT_CAP},
+     * plan over the <b>rolled-up coarse fragment pyramid</b> instead of the legacy center model. Steps:
+     * <ol>
+     *   <li>Pick the coarsest level {@code L} whose start→goal Chebyshev distance ≤ {@link #COARSE_TARGET_CELLS}
+     *       (so the coarse A* itself stays small).</li>
+     *   <li>Run a level-{@code L} fragment A* ({@link #planLevelFragments}) over the merged coarse fragments —
+     *       the same derived edge costs (portal / mine / uniform transit, caps + air-exclusion rules) the
+     *       level-0 search uses, just at the coarse span. This picks the macro route around walls/ravines.</li>
+     *   <li>Project the coarse skeleton's leading segment ({@link #REFINE_LEAD_CELLS} cells out) to a level-0
+     *       sub-goal and refine the <b>near</b> segment to a level-0 fragment skeleton ({@code reachedGoalRegion
+     *       = false}); the driver walks that and re-invokes {@link #plan} as the bot nears its end (refine the
+     *       <i>far</i> tail on approach, never the committed near end).</li>
+     * </ol>
+     * Robust to an unbuilt (unloaded) far field: the coarse A* reads the §6 optimistic default for un-merged
+     * nodes and beelines, so it always yields a near sub-goal toward the goal; chunks load on approach and the
+     * replan sharpens. Falls back to a direct level-0 fragment plan, then the center-model coarse refine.
+     */
+    private static RegionPathPlan planCoarseRefinedFragments(RegionGrid grid, int minY,
+                                                             BlockPos startFloor, BlockPos goalFloor,
+                                                             int srx, int sry, int srz, int startFrag,
+                                                             int grx, int gry, int grz, int goalFrag,
+                                                             boolean canBreak, boolean canPlace, int safeFall,
+                                                             RegionEdgeBlacklist blacklist) {
+        // (1) Coarsest level whose distance is within the coarse target.
+        int level = 1;
+        while (level < RegionAddress.MAX_LEVEL) {
+            int sLx = srx >> level, sLz = srz >> level, gLx = grx >> level, gLz = grz >> level;
+            int sLy = (level >= RegionAddress.OCTREE_TOP) ? 0 : (sry >> level);
+            int gLy = (level >= RegionAddress.OCTREE_TOP) ? 0 : (gry >> level);
+            int chebL = Math.max(Math.abs(gLx - sLx), Math.max(Math.abs(gLy - sLy), Math.abs(gLz - sLz)));
+            if (chebL <= COARSE_TARGET_CELLS) break;
+            level++;
+        }
+
+        // (2) Coarse fragment A* at level L (start/goal fragments resolved at the coarse level).
+        final int sLx = srx >> level, sLz = srz >> level;
+        final int sLy = (level >= RegionAddress.OCTREE_TOP) ? 0 : (sry >> level);
+        final int gLx = grx >> level, gLz = grz >> level;
+        final int gLy = (level >= RegionAddress.OCTREE_TOP) ? 0 : (gry >> level);
+        ensureNode(grid, level, sLx, sLy, sLz);
+        ensureNode(grid, level, gLx, gLy, gLz);
+        final int sLfrag = nearestFragment(grid, level, sLx, sLy, sLz, startFloor);
+        final int gLfrag = nearestFragment(grid, level, gLx, gLy, gLz, goalFloor);
+        final RegionPathPlan coarse = planLevelFragments(level, grid, minY, sLx, sLy, sLz, sLfrag,
+                gLx, gLy, gLz, gLfrag, true, canBreak, canPlace, safeFall, null /* no blacklist at coarse */);
+
+        // (3) Derive a level-0 sub-goal from the coarse lead segment, refine the near segment to level 0.
+        final BlockPos subGoal = coarseSubGoal(coarse, level, minY);
+        if (subGoal != null) {
+            final int s0x = RegionAddress.regionX(subGoal.getX(), 0);
+            // Above the octree→quadtree transition the coarse cell is one 512-block slab, so its center Y is a
+            // meaningless mid-slab value (~y=192). Don't pull the near segment toward it — the vertical detail
+            // comes from the level-0 refine on approach. Aim the sub-goal at the bot's CURRENT elevation band
+            // (sry) and let the leaf search find the real surface; below the transition the coarse Y is real.
+            final int s0y = (level >= RegionAddress.OCTREE_TOP) ? sry : RegionAddress.regionY(subGoal.getY(), 0, minY);
+            final int s0z = RegionAddress.regionZ(subGoal.getZ(), 0);
+            if (s0x != srx || s0y != sry || s0z != srz) { // a real onward segment (not back into the start region)
+                ensureNode(grid, 0, s0x, s0y, s0z);
+                final int syw = (level >= RegionAddress.OCTREE_TOP) ? (sry << RegionAddress.LEAF_BITS) + minY + 8
+                                                                    : subGoal.getY();
+                final int subFrag = nearestFragment(grid, 0, s0x, s0y, s0z,
+                        new BlockPos(subGoal.getX(), syw, subGoal.getZ()));
+                final RegionPathPlan near = planLevelFragments(0, grid, minY, srx, sry, srz, startFrag,
+                        s0x, s0y, s0z, subFrag, false, canBreak, canPlace, safeFall, blacklist);
+                if (near != null && near.size() > 1) {
+                    return near;
+                }
+            }
+        }
+
+        // Fallback 1: a direct level-0 fragment plan straight at the goal (caps-honest; may hit the budget).
+        final RegionPathPlan direct = planLevelFragments(0, grid, minY, srx, sry, srz, startFrag,
+                grx, gry, grz, goalFrag, true, canBreak, canPlace, safeFall, blacklist);
+        if (direct != null) {
+            return direct;
+        }
+        // Fallback 2: the center model is caps-BLIND (it routes through rock / up walls regardless of caps), so
+        // only use it when the bot can realize any route (break + place). For a no-break/no-place bot, returning
+        // null is the honest "no route" — it gives up gracefully instead of thrashing on a dig it cannot do (the
+        // noBreakCap dead-end the fragment model exists to avoid).
+        if (canBreak && canPlace) {
+            return planCoarseRefined(grid, minY, srx, sry, srz, grx, gry, grz);
+        }
+        return null;
+    }
+
+    /**
+     * The level-0 world sub-goal for the near-segment refinement: the portal cell (or, lacking one, the region
+     * center) of the coarse skeleton's {@link #REFINE_LEAD_CELLS}-th cell (clamped to the skeleton tail). The
+     * coarse plan carries its <b>level-{@code coarseLevel}</b> coords + world portal cells, so the center is
+     * taken via {@link RegionAddress} at that level (NOT {@link RegionPathPlan#centerOf}, which is level-0).
+     * {@code null} when the coarse plan is empty/trivial (caller falls back to the direct level-0 plan).
+     */
+    private static BlockPos coarseSubGoal(RegionPathPlan coarse, int coarseLevel, int minY) {
+        if (coarse == null || coarse.size() <= 1) {
+            return null;
+        }
+        int k = Math.min(REFINE_LEAD_CELLS, coarse.size() - 1);
+        BlockPos portal = coarse.portalCell(k);
+        if (portal != null) {
+            return portal;
+        }
+        return new BlockPos(RegionAddress.centerX(coarseLevel, coarse.rx(k)),
+                RegionAddress.centerY(coarseLevel, coarse.ry(k), minY),
+                RegionAddress.centerZ(coarseLevel, coarse.rz(k)));
+    }
+
+    /**
+     * Fragment A* over {@code (region, fragment)} nodes at an arbitrary {@code level} (0 = leaves, the direct
+     * branch; {@code >0} = the rolled-up coarse pyramid, the scale-guard branch). All geometry/cost is
+     * level-aware (region span {@link RegionAddress#sideOf}, footprint world-projection, octree/quadtree
+     * vertical) so the identical edge model applies at every resolution. Expands each node into derived portal
+     * edges (footprint-overlap on a shared face), intra-region mine edges (to sibling fragments), and
+     * uniform-kind transit edges (into SOLID/AIR/WATER/collapsed neighbours) — HPA-FRAGMENTS.md §2. Terminates
+     * on the specific {@code (goal region, goalFrag)} node so a sealed goal is forced through its mine edge.
      *
      * <p>When {@code canBreak} is false (a no-break bot), <b>every mining-based edge is dropped</b>: intra-region
      * sibling digs, the non-overlapping-footprint "mine to the nearest fragment" fallback, and transits into a
@@ -432,7 +540,7 @@ public final class RegionPathfinder {
      * being routed at unmineable rock and then thrashing when the block tier can't dig (the {@code noBreakCap}
      * dead-end).
      */
-    private static RegionPathPlan planLevel0Fragments(RegionGrid grid, int minY,
+    private static RegionPathPlan planLevelFragments(int level, RegionGrid grid, int minY,
                                                       int srx, int sry, int srz, int startFrag,
                                                       int grx, int gry, int grz, int goalFrag,
                                                       boolean reachedGoalRegion,
@@ -441,14 +549,20 @@ public final class RegionPathfinder {
         final Nodes nodes = SEARCH.get();
         nodes.reset();
 
-        // Per-search world-coord scratch (allocated once per plan, reused every edge — no per-edge alloc).
-        final int[] wa = new int[3]; // our (fragA) boundary-opening center
-        final int[] wb = new int[3]; // neighbour (fragB) boundary-opening center / centroid
-        final int[] wc = new int[3]; // scratch for centroid accumulation
+        // Per-search world-coord scratch, reused from the ThreadLocal state (no per-plan/per-edge alloc).
+        final int[] wa = nodes.wa; // our (fragA) boundary-opening center
+        final int[] wb = nodes.wb; // neighbour (fragB) boundary-opening center / centroid
+        final int[] wc = nodes.wc; // scratch for centroid accumulation
+
+        // Heuristic scale: SimpleRegionHeuristic is calibrated per LEVEL-0 region (COST_PER_REGION = one leaf
+        // walk). At level L the derived edge costs scale with sideOf(L) = LEAF<<L, so scale h the same (×2^L)
+        // to keep g and h in the same units — otherwise the coarse search is ~2^L under-guided and floods loaded
+        // terrain (the level-0 Dijkstra-flood failure mode, re-expressed at coarse resolution). Level 0 ⇒ ×1.
+        final float hScale = 1 << level;
 
         final int startRow = nodes.intern(fragmentKey(srx, sry, srz, startFrag), srx, sry, srz, startFrag);
         nodes.g[startRow] = 0f;
-        nodes.f[startRow] = HEURISTIC.estimate(srx, sry, srz, grx, gry, grz);
+        nodes.f[startRow] = HEURISTIC.estimate(srx, sry, srz, grx, gry, grz) * hScale;
         nodes.portalX[startRow] = NO_PORTAL;
         nodes.portalY[startRow] = NO_PORTAL;
         nodes.portalZ[startRow] = NO_PORTAL;
@@ -474,8 +588,8 @@ public final class RegionPathfinder {
             if (hCur < bestH) { bestH = hCur; bestRow = current; }
             if (++expansions > MAX_REGION_EXPANSIONS) { budgetHit = true; break; }
 
-            grid.ensureLeaf(crx, cry, crz);
-            final RegionFragments rfN = grid.fragmentRecord(0, crx, cry, crz);
+            ensureNode(grid, level, crx, cry, crz);
+            final RegionFragments rfN = grid.fragmentRecord(level, crx, cry, crz);
             final boolean uniformN = isUniformNode(rfN);
             final int countN = uniformN ? 1 : rfN.fragmentCount();
             final float gCur = nodes.g[current];
@@ -485,26 +599,30 @@ public final class RegionPathfinder {
             if (canBreak && !uniformN && countN > 1) {
                 for (int fragC = 0; fragC < countN; fragC++) {
                     if (fragC == fragA) continue;
-                    float edge = mineCost(rfN, fragA, fragC, minY, crx, cry, crz, wa, wb, wc);
+                    float edge = mineCost(level, rfN, fragA, fragC, minY, crx, cry, crz, wa, wb, wc);
                     // wb now holds fragC's centroid (its interior rep) — the mine-edge portal target.
                     relaxFrag(nodes, current, gCur, edge, crx, cry, crz, fragC,
-                            wb[0], wb[1], wb[2], grx, gry, grz, blacklist);
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
                 }
             }
 
             // (B) Inter-region edges across each face fragA reaches (a uniform node reaches all six).
             for (int f = 0; f < 6; f++) {
                 if (!uniformN && !rfN.touchesFace(fragA, f)) continue;
+                // Above the octree→quadtree transition the vertical extent is ONE padded slab spanning the whole
+                // dimension, so there is no ±Y neighbour region (ry is pinned to 0 — RegionAddress.regionY).
+                // Skip the vertical faces there; neighborRY would otherwise key a phantom ry=±1 region.
+                if (level >= RegionAddress.OCTREE_TOP && (f == 2 || f == 3)) continue;
                 final int mrx = RegionAddress.neighborRX(crx, f);
                 final int mry = RegionAddress.neighborRY(cry, f);
                 final int mrz = RegionAddress.neighborRZ(crz, f);
-                grid.ensureLeaf(mrx, mry, mrz);
-                final RegionFragments rfM = grid.fragmentRecord(0, mrx, mry, mrz);
+                ensureNode(grid, level, mrx, mry, mrz);
+                final RegionFragments rfM = grid.fragmentRecord(level, mrx, mry, mrz);
                 final int oppF = RegionAddress.opposite(f);
 
                 // Our opening center on face f (full-face for a uniform node).
                 final int packedA = uniformN ? RegionFragments.NO_FACE : rfN.footprint(fragA, f);
-                footprintCenterWorld(minY, crx, cry, crz, f, packedA, wa);
+                footprintCenterWorld(level, minY,crx, cry, crz, f, packedA, wa);
 
                 if (isUniformNode(rfM)) {
                     // A uniform SOLID neighbour is reachable only by mining → impassable for a no-break bot
@@ -519,10 +637,10 @@ public final class RegionPathfinder {
                     // walkable ramp instead. (A place-capable bot keeps the dear PILLAR cost and may climb.)
                     if (!canPlace && rfM != null && rfM.kind() == RegionFragments.KIND_AIR && f != 2) continue;
                     // Uniform / collapsed / unbuilt neighbour: a single transit edge into its fragment 0.
-                    float edge = uniformTransitCost(rfM, f, canPlace, safeFall);
-                    footprintCenterWorld(minY, mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
+                    float edge = uniformTransitCost(level, rfM, f, canPlace, safeFall);
+                    footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
                     relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
-                            wb[0], wb[1], wb[2], grx, gry, grz, blacklist);
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
                     continue;
                 }
 
@@ -538,11 +656,11 @@ public final class RegionPathfinder {
                 for (int fb = 0; fb < countM; fb++) {
                     if (!rfM.touchesFace(fb, oppF)) continue;
                     int packedB = rfM.footprint(fb, oppF);
-                    footprintCenterWorld(minY, mrx, mry, mrz, oppF, packedB, wb);
+                    footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, packedB, wb);
                     if (footprintsOverlap(packedA, packedB)) {
                         float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall);
                         relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, fb,
-                                wb[0], wb[1], wb[2], grx, gry, grz, blacklist);
+                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
                         emitted = true;
                     } else {
                         long d = Math.abs(wb[0] - wa[0]) + Math.abs(wb[1] - wa[1]) + Math.abs(wb[2] - wa[2]);
@@ -553,17 +671,17 @@ public final class RegionPathfinder {
                     float hardFactor = hardnessFactor(rfM.avgSolidHardness());
                     if (bestFrag != -1) {
                         int packedB = rfM.footprint(bestFrag, oppF);
-                        footprintCenterWorld(minY, mrx, mry, mrz, oppF, packedB, wb);
+                        footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, packedB, wb);
                         float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall)
                                 + WALL_MINE_BLOCKS * MINE_PER_BLOCK * hardFactor;
                         relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, bestFrag,
-                                wb[0], wb[1], wb[2], grx, gry, grz, blacklist);
+                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
                     } else {
                         // Neighbour is MIXED but solid at this face → mine straight in to its fragment 0.
-                        footprintCenterWorld(minY, mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
-                        float edge = LEAF * MINE_PER_BLOCK * hardFactor;
+                        footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
+                        float edge = RegionAddress.sideOf(level) * MINE_PER_BLOCK * hardFactor;
                         relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
-                                wb[0], wb[1], wb[2], grx, gry, grz, blacklist);
+                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
                     }
                 }
             }
@@ -594,7 +712,7 @@ public final class RegionPathfinder {
     private static void relaxFrag(Nodes nodes, int curRow, float gCur, float edge,
                                   int mrx, int mry, int mrz, int mFrag,
                                   int px, int py, int pz, int grx, int gry, int grz,
-                                  RegionEdgeBlacklist blacklist) {
+                                  float hScale, RegionEdgeBlacklist blacklist) {
         long k = fragmentKey(mrx, mry, mrz, mFrag);
         // Online repair (RegionEdgeBlacklist): skip a crossing the block tier proved unrealizable for these
         // caps, so the region A* routes around it (the walk-around) instead of re-offering the dead end.
@@ -607,7 +725,7 @@ public final class RegionPathfinder {
         int row = nodes.intern(k, mrx, mry, mrz, mFrag);
         if (tentative >= nodes.g[row]) return; // new rows start at +inf → first visit admitted
         nodes.g[row] = tentative;
-        nodes.f[row] = tentative + HEURISTIC.estimate(mrx, mry, mrz, grx, gry, grz);
+        nodes.f[row] = tentative + HEURISTIC.estimate(mrx, mry, mrz, grx, gry, grz) * hScale;
         nodes.parent[row] = curRow;
         nodes.frag[row] = mFrag;
         nodes.portalX[row] = px;
@@ -720,16 +838,16 @@ public final class RegionPathfinder {
 
     /**
      * Cost of an intra-region mine edge between two fragments (§2.2): the Manhattan span between their
-     * footprint-derived centroids (floored at {@link #HALF_REGION} — interior fragments share no face, so their
-     * centroid is the region center) × {@link #MINE_PER_BLOCK} × the hardness scale. Fills {@code centC} with
+     * footprint-derived centroids (floored at {@code sideOf(level)/2} — interior fragments share no face, so
+     * their centroid is the region center) × {@link #MINE_PER_BLOCK} × the hardness scale. Fills {@code centC} with
      * fragC's centroid (the mine-edge portal target). {@code centA}/{@code centC}/{@code tmp} are caller scratch.
      */
-    private static float mineCost(RegionFragments rf, int fragA, int fragC, int minY, int rx, int ry, int rz,
-                                  int[] centA, int[] centC, int[] tmp) {
-        fragmentCentroidWorld(rf, fragA, minY, rx, ry, rz, centA, tmp);
-        fragmentCentroidWorld(rf, fragC, minY, rx, ry, rz, centC, tmp);
+    private static float mineCost(int level, RegionFragments rf, int fragA, int fragC, int minY,
+                                  int rx, int ry, int rz, int[] centA, int[] centC, int[] tmp) {
+        fragmentCentroidWorld(level, rf, fragA, minY, rx, ry, rz, centA, tmp);
+        fragmentCentroidWorld(level, rf, fragC, minY, rx, ry, rz, centC, tmp);
         int span = Math.abs(centA[0] - centC[0]) + Math.abs(centA[1] - centC[1]) + Math.abs(centA[2] - centC[2]);
-        span = Math.max(span, HALF_REGION);
+        span = Math.max(span, RegionAddress.sideOf(level) / 2); // half-region span scales with the level
         return span * MINE_PER_BLOCK * hardnessFactor(rf.avgSolidHardness());
     }
 
@@ -745,7 +863,7 @@ public final class RegionPathfinder {
      * A {@code null}/unbuilt (unloaded) record is <b>FREE</b> — perfectly optimistic, distinct from a genuine
      * built {@link RegionFragments#KIND_AIR KIND_AIR} region (which keeps the directional pillar/fall chute).
      */
-    private static float uniformTransitCost(RegionFragments rfM, int f, boolean canPlace, int safeFall) {
+    private static float uniformTransitCost(int level, RegionFragments rfM, int f, boolean canPlace, int safeFall) {
         // UNBUILT / unloaded (null record): we don't know what's there, so assume the best possible — free
         // passage (a "teleporter" through the unknown). Returning ~0 keeps g flat across unloaded space, so the
         // region A* degenerates to greedy-best-first and BEELINES at the goal instead of flooding the expansion
@@ -756,31 +874,35 @@ public final class RegionPathfinder {
         if (rfM == null) {
             return 0f;
         }
+        // Spans scale with the level: a transit / mine-across covers the node's full side (sideH); an air shaft
+        // is the node's full vertical extent (sideH in the octree, the PAD_HEIGHT slab in the quadtree).
+        final int sideH = RegionAddress.sideOf(level);
+        final int vExtent = (level < RegionAddress.OCTREE_TOP) ? sideH : RegionAddress.PAD_HEIGHT;
         if (rfM.kind() == RegionFragments.KIND_MIXED) {
             // Collapsed mass (count == 0): more air ⇒ cheaper to cross.
             float passFrac = rfM.passFrac() / 15f;
-            float solidMine = LEAF * MINE_PER_BLOCK * hardnessFactor(rfM.avgSolidHardness());
-            return LEAF * WALK_PER_BLOCK * passFrac + solidMine * (1f - passFrac);
+            float solidMine = sideH * MINE_PER_BLOCK * hardnessFactor(rfM.avgSolidHardness());
+            return sideH * WALK_PER_BLOCK * passFrac + solidMine * (1f - passFrac);
         }
         switch (rfM.kind()) {
             case RegionFragments.KIND_SOLID:
-                return LEAF * MINE_PER_BLOCK * hardnessFactor(rfM.avgSolidHardness());
+                return sideH * MINE_PER_BLOCK * hardnessFactor(rfM.avgSolidHardness());
             case RegionFragments.KIND_WATER:
                 return LeafCostComputer.WATER_TRANSIT_TICKS;
             case RegionFragments.KIND_AIR:
             default:
                 // Face 2 = −Y exit (falling out the bottom) is the only cheap air motion; all else is dear.
-                // But a uniform-AIR region is a full LEAF-tall shaft: a no-place bot falling through it drops
-                // LEAF blocks, unsafe past safeFall, so even the down-chute is penalized for it (prefer a
+                // A uniform-AIR region is a full vExtent-tall shaft: a no-place bot falling through it drops
+                // vExtent blocks, unsafe past safeFall, so even the down-chute is penalized for it (prefer a
                 // gradual MIXED descent with real floors over a free-fall shaft).
                 if (f == 2) {
-                    float fall = LEAF * FALL_PER_BLOCK;
-                    if (!canPlace && LEAF > safeFall) {
-                        fall += (LEAF - safeFall) * UNSAFE_VERTICAL_PENALTY;
+                    float fall = vExtent * FALL_PER_BLOCK;
+                    if (!canPlace && vExtent > safeFall) {
+                        fall += (vExtent - safeFall) * UNSAFE_VERTICAL_PENALTY;
                     }
                     return fall;
                 }
-                return LEAF * PILLAR_PER_BLOCK;
+                return vExtent * PILLAR_PER_BLOCK;
         }
     }
 
@@ -809,26 +931,36 @@ public final class RegionPathfinder {
      * face center). Per-face in-face axes follow {@link RegionFragments}: ±X → (Y,Z), ±Y → (X,Z), ±Z → (X,Y).
      * Writes {@code out[0..2] = wx,wy,wz}.
      */
-    private static void footprintCenterWorld(int minY, int rx, int ry, int rz, int face, int packed, int[] out) {
+    private static void footprintCenterWorld(int level, int minY, int rx, int ry, int rz, int face, int packed,
+                                             int[] out) {
         int minU, maxU, minV, maxV;
         if (packed == RegionFragments.NO_FACE) {
-            minU = 0; maxU = LEAF - 1; minV = 0; maxV = LEAF - 1;
+            minU = 0; maxU = 15; minV = 0; maxV = 15;          // footprints are always 16-bucket face-relative
         } else {
             minU = RegionFragments.footprintMinU(packed); maxU = RegionFragments.footprintMaxU(packed);
             minV = RegionFragments.footprintMinV(packed); maxV = RegionFragments.footprintMaxV(packed);
         }
-        int cu = (minU + maxU) >> 1;
-        int cv = (minV + maxV) >> 1;
-        int ox = rx << RegionAddress.LEAF_BITS;
-        int oy = minY + (ry << RegionAddress.LEAF_BITS);
-        int oz = rz << RegionAddress.LEAF_BITS;
+        final int cu = (minU + maxU) >> 1;
+        final int cv = (minV + maxV) >> 1;
+        // Level-aware: a bucket (0..15) maps to a world offset = bucket × (side / 16). Horizontal side doubles
+        // per level (hScale = 1<<level); the vertical extent is the same in the octree but pins to the
+        // PAD_HEIGHT slab in the quadtree (level ≥ OCTREE_TOP, ry == 0).
+        final int shift = RegionAddress.shift(level);
+        final int sideH = 1 << shift;
+        final int hScale = 1 << level;
+        final boolean octree = level < RegionAddress.OCTREE_TOP;
+        final int vExtent = octree ? sideH : RegionAddress.PAD_HEIGHT;
+        final int vScale = vExtent >> 4;
+        final int ox = rx << shift;
+        final int oy = octree ? (minY + (ry << shift)) : minY;
+        final int oz = rz << shift;
         switch (face) {
-            case 0: out[0] = ox;            out[1] = oy + cu;     out[2] = oz + cv;     break; // -X: u=Y v=Z
-            case 1: out[0] = ox + LEAF - 1; out[1] = oy + cu;     out[2] = oz + cv;     break; // +X
-            case 2: out[0] = ox + cu;       out[1] = oy;          out[2] = oz + cv;     break; // -Y: u=X v=Z
-            case 3: out[0] = ox + cu;       out[1] = oy + LEAF - 1; out[2] = oz + cv;   break; // +Y
-            case 4: out[0] = ox + cu;       out[1] = oy + cv;     out[2] = oz;          break; // -Z: u=X v=Y
-            default: out[0] = ox + cu;      out[1] = oy + cv;     out[2] = oz + LEAF - 1; break; // +Z
+            case 0: out[0] = ox;             out[1] = oy + cu * vScale; out[2] = oz + cv * hScale; break; // -X u=Y v=Z
+            case 1: out[0] = ox + sideH - 1; out[1] = oy + cu * vScale; out[2] = oz + cv * hScale; break; // +X
+            case 2: out[0] = ox + cu * hScale; out[1] = oy;             out[2] = oz + cv * hScale; break; // -Y u=X v=Z
+            case 3: out[0] = ox + cu * hScale; out[1] = oy + vExtent-1; out[2] = oz + cv * hScale; break; // +Y
+            case 4: out[0] = ox + cu * hScale; out[1] = oy + cv * vScale; out[2] = oz;             break; // -Z u=X v=Y
+            default:out[0] = ox + cu * hScale; out[1] = oy + cv * vScale; out[2] = oz + sideH - 1; break; // +Z
         }
     }
 
@@ -837,21 +969,21 @@ public final class RegionPathfinder {
      * interior fragment that reaches no face — the region center. Writes {@code out[0..2]}; {@code tmp} is
      * caller scratch for the per-face center.
      */
-    private static void fragmentCentroidWorld(RegionFragments rf, int frag, int minY, int rx, int ry, int rz,
-                                              int[] out, int[] tmp) {
+    private static void fragmentCentroidWorld(int level, RegionFragments rf, int frag, int minY,
+                                              int rx, int ry, int rz, int[] out, int[] tmp) {
         long sx = 0, sy = 0, sz = 0;
         int n = 0;
         for (int f = 0; f < 6; f++) {
             if (rf.touchesFace(frag, f)) {
-                footprintCenterWorld(minY, rx, ry, rz, f, rf.footprint(frag, f), tmp);
+                footprintCenterWorld(level, minY, rx, ry, rz, f, rf.footprint(frag, f), tmp);
                 sx += tmp[0]; sy += tmp[1]; sz += tmp[2];
                 n++;
             }
         }
         if (n == 0) {
-            out[0] = (rx << RegionAddress.LEAF_BITS) + LEAF / 2;
-            out[1] = minY + (ry << RegionAddress.LEAF_BITS) + LEAF / 2;
-            out[2] = (rz << RegionAddress.LEAF_BITS) + LEAF / 2;
+            out[0] = RegionAddress.centerX(level, rx);
+            out[1] = RegionAddress.centerY(level, ry, minY);
+            out[2] = RegionAddress.centerZ(level, rz);
         } else {
             out[0] = (int) (sx / n);
             out[1] = (int) (sy / n);
@@ -864,9 +996,18 @@ public final class RegionPathfinder {
      * (Manhattan) — the search's start/goal fragment. {@code 0} for a uniform/collapsed/unbuilt region (its
      * single synthetic fragment). Cold (called twice per {@link #plan}); a few small scratch arrays are fine.
      */
-    private static int nearestFragment(RegionGrid grid, int rx, int ry, int rz, BlockPos floor) {
-        return fragmentOf(grid, rx, ry, rz, floor.getX(), floor.getY(), floor.getZ(),
+    private static int nearestFragment(RegionGrid grid, int level, int rx, int ry, int rz, BlockPos floor) {
+        return fragmentOfLevel(grid, level, rx, ry, rz, floor.getX(), floor.getY(), floor.getZ(),
                 new int[3], new int[3]);
+    }
+
+    /** Ensure the node {@code (level, rx,ry,rz)} is built: leaf build at level 0, fragment merge above. */
+    private static void ensureNode(RegionGrid grid, int level, int rx, int ry, int rz) {
+        if (level == 0) {
+            grid.ensureLeaf(rx, ry, rz);
+        } else {
+            grid.ensureLevel(level, rx, ry, rz);
+        }
     }
 
     /**
@@ -880,12 +1021,23 @@ public final class RegionPathfinder {
      */
     public static int fragmentOf(RegionGrid grid, int rx, int ry, int rz,
                                  int fx, int fy, int fz, int[] cent, int[] tmp) {
-        RegionFragments rf = grid.fragmentRecord(0, rx, ry, rz);
+        return fragmentOfLevel(grid, 0, rx, ry, rz, fx, fy, fz, cent, tmp);
+    }
+
+    /**
+     * Level-aware {@link #fragmentOf}: the fragment of node {@code (level, rx,ry,rz)} whose centroid is nearest
+     * the world cell {@code (fx,fy,fz)}. {@code 0} for a uniform/collapsed/unbuilt node. The coarse scale-guard
+     * branch resolves the start/goal fragment at the coarse level through this; the public level-0 face is the
+     * driver's per-tick membership probe.
+     */
+    private static int fragmentOfLevel(RegionGrid grid, int level, int rx, int ry, int rz,
+                                       int fx, int fy, int fz, int[] cent, int[] tmp) {
+        RegionFragments rf = grid.fragmentRecord(level, rx, ry, rz);
         if (isUniformNode(rf)) return 0;
         int best = 0;
         long bestD = Long.MAX_VALUE;
         for (int f = 0; f < rf.fragmentCount(); f++) {
-            fragmentCentroidWorld(rf, f, grid.minY(), rx, ry, rz, cent, tmp);
+            fragmentCentroidWorld(level, rf, f, grid.minY(), rx, ry, rz, cent, tmp);
             long d = Math.abs(cent[0] - fx) + Math.abs(cent[1] - fy) + Math.abs(cent[2] - fz);
             if (d < bestD) { bestD = d; best = f; }
         }
@@ -926,6 +1078,11 @@ public final class RegionPathfinder {
         float[] heapG;
         int heapSize;
         float poppedF;          // f snapshot of the last pop() — the caller's staleness test
+
+        // ---- reusable per-search world-coord scratch (hoisted out of planLevelFragments; no per-plan alloc) ----
+        final int[] wa = new int[3];
+        final int[] wb = new int[3];
+        final int[] wc = new int[3];
 
         Nodes(int nodeHint, int mapCap) {
             key = new long[nodeHint];

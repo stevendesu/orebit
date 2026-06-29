@@ -162,9 +162,13 @@ public final class HpaMaintenance {
             // record → kind reads default AIR → a flat free skeleton). It force-recomputes (ignores the built
             // flag), which is exactly the dirty-leaf / chunk-(re)built contract.
             RegionGrid.of(level).rebuildLeaf(rx, ry, rz);
-            // Ancestor roll-up is the center-model pyramid; the fragment pyramid merge is S5-deferred, and the
-            // direct branch reads only leaves, so skip mergeUp under the fragment model.
-            if (!RegionGrid.HPA_FRAGMENTS) {
+            // Ancestor roll-up keeps the coarse pyramid live as leaves (re)build. Each model rolls up its own
+            // representation (HPA-FRAGMENTS.md §6.5 / §S5): the fragment merge recomputes each ancestor's
+            // RegionFragments from its children (mergeUpFragments); the center model recomputes face buckets
+            // (mergeUp). Both walk parent→root, O(levels), early-out when a level's output is unchanged.
+            if (RegionGrid.HPA_FRAGMENTS) {
+                PyramidMerger.mergeUpFragments(pyramid, rx, ry, rz);
+            } else {
                 PyramidMerger.mergeUp(pyramid, rx, ry, rz);
             }
         } catch (Throwable t) {

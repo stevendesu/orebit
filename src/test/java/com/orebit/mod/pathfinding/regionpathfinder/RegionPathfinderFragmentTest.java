@@ -230,4 +230,40 @@ public class RegionPathfinderFragmentTest {
         assertEquals(1, plan.rx(last), "the path ends in region B via the open portal");
         assertEquals(0, plan.fragmentId(last), "it commits to the LOW (open) fragment, reached by walking");
     }
+
+    // ===================================================================================================
+    // Coarse scale-guard branch (S5) — a goal beyond LEVEL0_DIRECT_CAP (256 regions) must plan over the
+    // rolled-up coarse fragment pyramid and return a refined level-0 NEAR segment that progresses toward the
+    // goal (never null, never a stuck same-region stub). Nothing is seeded, so the far field is the §6
+    // optimistic default and the coarse A* beelines — this is exactly the long-range "travel then refine"
+    // path. It exercises the merge (ensureLevel → combineFragments) + the level-parameterized fragment A*.
+    // ===================================================================================================
+    @Test
+    void coarseBranch_longRange_returnsProgressingNearSegment() {
+        // Region (0,0,0) → region (300,0,0): Chebyshev 300 > LEVEL0_DIRECT_CAP (256) ⇒ the coarse branch.
+        BlockPos start = new BlockPos(8, 4, 8);
+        BlockPos goal = new BlockPos(300 * 16 + 8, 4, 8);
+        RegionPathPlan plan = RegionPathfinder.plan(null, grid, start, goal, BotCaps.BREAK_PLACE);
+
+        assertNotNull(plan, "the coarse branch must return a near segment, not null, for a long-range goal");
+        assertTrue(plan.size() > 1, "the near segment must be a real onward route, not a same-region stub");
+        assertTrue(plan.isFragmentModel(), "coarse refinement returns a fragment-model level-0 near segment");
+        assertEquals(0, plan.rx(0), "the near segment starts at the bot's region");
+        assertTrue(plan.rx(plan.size() - 1) > plan.rx(0),
+                "the near segment progresses toward the +X goal (rx grows)");
+    }
+
+    @Test
+    void coarseBranch_diagonalLongRange_progressesBothAxes() {
+        // A diagonal long-range goal: the refined near segment should advance in BOTH +X and +Z.
+        BlockPos start = new BlockPos(8, 4, 8);
+        BlockPos goal = new BlockPos(300 * 16 + 8, 4, 280 * 16 + 8);
+        RegionPathPlan plan = RegionPathfinder.plan(null, grid, start, goal, BotCaps.BREAK_PLACE);
+
+        assertNotNull(plan, "diagonal long-range goal must route");
+        assertTrue(plan.size() > 1);
+        int last = plan.size() - 1;
+        assertTrue(plan.rx(last) > plan.rx(0) || plan.rz(last) > plan.rz(0),
+                "the near segment progresses toward the +X/+Z goal");
+    }
 }
