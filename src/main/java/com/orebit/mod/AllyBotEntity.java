@@ -18,6 +18,7 @@ import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.platform.BotInventory;
 import com.orebit.mod.platform.CommandFeedback;
 import com.orebit.mod.platform.EntityState;
+import com.orebit.mod.platform.MoveReport;
 import com.orebit.mod.platform.Replaceable;
 import com.orebit.mod.platform.WorldEdits;
 import com.orebit.mod.platform.Worlds;
@@ -216,14 +217,31 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     @Override
     public void tick() {
-        // Drive the player tick directly: baseTick() + a single aiStep() with our inputs set first.
-        // (The previous super.tick() already ran aiStep(), so steering followed by a second aiStep()
-        // double-stepped physics each tick — see HANDOFF. baseTick/aiStep are stable across versions.)
-        this.baseTick();
+        // Tick the bot as a real player: forge its movement inputs, then run the FULL vanilla player tick.
+        // super.tick() (via FakePlayerEntity) is ServerPlayer's housekeeping — i-frame countdown, container +
+        // advancement sync, attribute updates, block-break progress, the now-harmless client-load timeout (we
+        // mark the connection loaded at spawn). doTick() is Player.tick() — physics/aiStep + updatePlayerPose +
+        // food/air. super.tick() runs NO physics, so this is housekeeping + one physics step, never a
+        // double-step. Inputs must be set before doTick(). Running BOTH (instead of the old hand-rolled
+        // baseTick()+aiStep()) is what makes the bot feel like a player and stops us re-implementing player
+        // effects (pose, i-frames, …) one at a time. Survival systems are gated by the config flags below +
+        // the decreaseAirSupply/causeFoodExhaustion overrides (defaults: invulnerable / no hunger / no breath).
+        final Vec3 posBefore = this.position(); // captured pre-movement for the forged move report (below)
         this.setNoGravity(false);
+        // Mortality: drive BOTH invulnerability flags from survival.takesDamage. The entity-level flag is the
+        // usual gate, but a fake player can also carry the ABILITIES-level flag (spawned into a creative world
+        // before we force survival, or a force-gamemode server), and that one blocks damage independently — so
+        // keep them in lockstep. Re-sync abilities only when it actually flips (avoids per-tick packet churn).
+        final boolean immune = !ConfigLoader.config().takesDamage();
+        this.setInvulnerable(immune);
+        if (this.getAbilities().invulnerable != immune) {
+            this.getAbilities().invulnerable = immune;
+            this.onUpdateAbilities();
+        }
 
         if (owner == this) {
-            this.aiStep();
+            super.tick();
+            this.doTick();
             return;
         }
 
@@ -245,7 +263,13 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                 driveToward(owner.getX(), owner.getY(), owner.getZ(), owner.blockPosition().below());
         }
 
-        this.aiStep();
+        super.tick(); // ServerPlayer housekeeping (i-frames, containers, advancements, attributes, …)
+        this.doTick(); // Player.tick physics + pose + survival
+        // Forge the per-tick move report a real client's move packet would drive: feeds getKnownMovement() for
+        // movement-based block damage (sweet berry / cactus / magma / powder snow) and applies player fall
+        // damage (doCheckFallDamage). Uses the bot's ACTUAL movement this tick. No-op pre-26.
+        final Vec3 moved = this.position().subtract(posBefore);
+        MoveReport.after(this, moved.x, moved.y, moved.z, EntityState.onGround(this));
     }
 
     /** STAY: stop in place and face the owner. */
@@ -787,4 +811,31 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     @Override public void setJumping(boolean jumping) { super.setJumping(jumping); }
 
     @Override public void jump() { this.jumpFromGround(); }
+
+    // ---- Survival gating (the bot runs the full vanilla player tick via doTick — see tick()) ----------
+    // Two of the now-live survival systems are gated by their config flags by intercepting vanilla's own
+    // decrement hooks, so when a flag is ON the bot uses the real vanilla machinery unchanged. Damage is
+    // gated separately by setInvulnerable(!takesDamage) in tick() (Entity.setInvulnerable is stable across
+    // versions; overriding hurt() is not — it split into hurtServer/hurtClient at 1.21.5).
+
+    /**
+     * Breath: suppress air loss when {@code survival.needsBreath} is off (the default) so the bot never drowns
+     * and its bubbles stay full; when on, defer to vanilla. {@code decreaseAirSupply} is the per-tick hook
+     * {@code LivingEntity.baseTick} calls while submerged.
+     */
+    @Override
+    protected int decreaseAirSupply(int air) {
+        return ConfigLoader.config().needsBreath() ? super.decreaseAirSupply(air) : air;
+    }
+
+    /**
+     * Hunger: drop exhaustion accumulation when {@code survival.hunger} is off (the default) so food never
+     * depletes — which also keeps it above the sprint floor (vanilla cancels sprint below ~6), so the bot can
+     * always sprint / sprint-swim. When on, defer to vanilla. {@code causeFoodExhaustion} is the single entry
+     * point every activity (walking, sprinting, jumping) routes food cost through.
+     */
+    @Override
+    public void causeFoodExhaustion(float amount) {
+        if (ConfigLoader.config().hunger()) super.causeFoodExhaustion(amount);
+    }
 }
