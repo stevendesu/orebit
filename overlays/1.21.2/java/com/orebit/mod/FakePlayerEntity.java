@@ -33,9 +33,11 @@ public class FakePlayerEntity extends ServerPlayer {
 
     @Override
     public void tick() {
-        super.baseTick();
-        this.setNoGravity(false);
-        this.aiStep();
+        // Run the full vanilla ServerPlayer tick (i-frame countdown, container/advancement sync, attributes,
+        // block-break progress, ...). A seam for shared fake-player tick logic; AllyBotEntity forges its inputs
+        // around super.tick() + doTick(). The old baseTick()+aiStep() hand-roll predated the bot being a real
+        // PlayerList member (placeNewPlayer) — running the full player tick is safe now.
+        super.tick();
     }
 
     /**
