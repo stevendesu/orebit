@@ -106,8 +106,7 @@ player chat → `PromptBuilder` → `LLMInterface` → `LLMBackend` (local Ollam
 ## Gotchas / known issues (in REAL code)
 
 - `OrebitCommon`/`Orebit` ran a `benchmarkMe()` on every player JOIN in the old prototype — verify it's gone before shipping.
-- `AllyBotEntity.tick()` likely **double-calls `tickMovement()`** and recomputes yaw redundantly.
-- `FakePlayerEntity.tick()` **skips `ServerPlayerEntity.tick()`** — an unaudited set of player tick side-effects is dropped.
+- **(RESOLVED s38)** The bot now runs the **full vanilla player tick**: `FakePlayerEntity.tick()` is a `super.tick()` pass-through, and `AllyBotEntity.tick()` = forge inputs → `super.tick()` (ServerPlayer housekeeping) → `doTick()` (Player physics + pose + survival) → `MoveReport.after()`. No more skipped-`ServerPlayer.tick` whack-a-mole or double-aiStep. Survival flags (`survival.takesDamage`/`hunger`/`needsBreath`) enforced at runtime; `platform/ClientLoad` (1.21.11+ permanent-invuln fix) + `platform/MoveReport` (26+ fall/movement-damage) are new overlay seams. (At this writing the survival pass is UNCOMMITTED — see `HANDOFF.md`.)
 - `NavSectionBuilder` holds a **public static, non-thread-safe `BlockState[]` scratch** buffer; it also reflects into `PalettedContainer` internals — the most version-fragile code in the project.
 - `ChunkNavLoader` builds NavSection[] then **discards it** — the worldmodel pipeline stores no data yet.
 - `ProxyNavigationEntity` **self-spawns into the world in its constructor** — latent bug; unused.

@@ -120,7 +120,8 @@ public final class Swim implements Movement {
     static void steerSwim(BotSteering b, int wx, int wy, int wz, boolean sprint) {
         b.faceHorizontally((wx + 0.5) - b.x(), (wz + 0.5) - b.z());
         b.setForward(1.0f);
-        b.setSprinting(sprint); // submerged + sprinting → vanilla prone sprint-swim (5.612 b/s)
+        b.setSprinting(sprint); // submerged + sprinting → vanilla prone sprint-swim (5.612 b/s); the vanilla
+                                // player tick (doTick → updatePlayerPose) then adopts the prone swimming pose
         b.setJumping(false);
         b.setVerticalInput(0.0f);
         double dyTarget = wy - b.y();
