@@ -60,14 +60,34 @@ public interface Movement {
     }
 
     /**
-     * Drive the bot's per-tick movement inputs toward waypoint {@code (wx,wy,wz)}. Default is the generic
-     * walk: face the waypoint centre and apply full forward input; vanilla physics handles step-assist,
-     * descent, and gravity. Overrides add a move's special inputs (a real jump, mid-air homing, direct
-     * swim vertical velocity). The follower applies a generic stuck-jump backstop AFTER this, so a move's
-     * {@code steer} need only contribute its <i>deterministic</i> inputs.
+     * Drive the bot's per-tick movement <i>inputs</i> to track the planned {@link SteerView trajectory} — the
+     * execution counterpart to {@link #candidates}. Default is the generic medium-aware locomotion ({@link
+     * SteerControl#drive}): on land the line-tracking walk (face a look-ahead pursuit point + hold forward),
+     * in water the horizontal swim drive — so a ground move still submerged on its way out of water keeps
+     * steering toward the exit. Overrides add a move's extra inputs (hold jump for a climb, the sprint flag
+     * for a sprint-swim, re-centre for a vertical move). Vertical movement in water — diving, rising, climbing
+     * out — is NOT here: it's a single cross-cutting "hold space to rise / hold shift to sink toward the
+     * planned depth" rule in the follower, applied to every move uniformly. The follower also runs the generic
+     * stuck/off-track recovery AFTER this, so a move's {@code steer} need only contribute its inputs.
      */
-    default void steer(BotSteering b, int wx, int wy, int wz) {
-        b.faceHorizontally((wx + 0.5) - b.x(), (wz + 0.5) - b.z());
-        b.setForward(1.0f);
+    default void steer(BotSteering b, SteerView path) {
+        SteerControl.drive(b, path);
+    }
+
+    /**
+     * Whether this move holds the bot in the prone {@code Pose.SWIMMING} (the sprint-swim / crawl pose). The
+     * follower uses it to pin such a move slightly <i>below</i> the water surface: a prone hitbox is only
+     * ~0.6 blocks tall, so the water-rise deadband — sized for the 1.8-tall standing pose — lets a gentle
+     * buoyant float lift the whole short hitbox clear of the water for a tick. Vanilla then drops the prone
+     * pose (its continuation rule needs {@code isInWater()}), the plan reseeds STANDING, and the fast
+     * sprint-swim degrades to the slow surface Swim. Keeping some of the hitbox submerged prevents that breach.
+     *
+     * <p>Default {@code false} (a standing/land move rides at the planned depth — the tall hitbox never
+     * breaches). Only the prone-mode water moves ({@link com.orebit.mod.pathfinding.blockpathfinder.movements.SprintSwim},
+     * {@link com.orebit.mod.pathfinding.blockpathfinder.movements.StartSprintSwim}) override it; {@code Surface}
+     * deliberately does NOT (it is leaving the water, and must be allowed to rise out).
+     */
+    default boolean keepsSubmerged() {
+        return false;
     }
 }

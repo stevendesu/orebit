@@ -4,6 +4,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 
 /**
  * Ordinary (non-sprint) swimming — Minecraft's <b>Swim</b> (MOVEMENT-DESIGN.md, Tier 1 water). The slow
@@ -53,18 +55,24 @@ public final class Swim implements Movement {
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
-    /**
-     * Upward velocity (blocks/tick) the swim steer drives when the planned cell is ABOVE the bot. Deliberately
-     * strong + fixed (not the proportional descent rate): a proportional climb decays to ~nothing near the
-     * target and the water-surface buoyancy equilibrium swallows a small velocity outright (measured stall:
-     * dy=0.16 → vy=0.047 → the bot floated pinned at the waterline, never clearing the last cell). 0.30
-     * reliably breaks the surface float and clears a one-block lip; descent stays gentle. Shared with {@link
-     * SprintSwim}.
-     */
-    static final double CLIMB_VY = 0.30;
-
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
+        if (ctx.mode() != MovementContext.MODE_STANDING) return; // upright surface paddle — STANDING pose
+
+        // Domination prune: wherever a sprint-swim can be INITIATED from this cell (the StartSprintSwim gate),
+        // the prone StartSprintSwim->SprintSwim branch strictly dominates the slow surface Swim — it is cheaper
+        // per block (3.56 vs 9.09) and reaches everywhere Swim can (SprintSwim there + Surface up). Offering Swim
+        // there only lets the greedy/inadmissible search race down the slow branch (Swim lowers h at once, while
+        // the in-place StartSprintSwim doesn't) and, once committed, never reconsider — the "arrived, floating at
+        // the surface, moved away before it sank" case that plans slow Swim instead of diving. Suppressing Swim
+        // forces the dive. It stays available where initiation is impossible: entering from a dry bank (feet not
+        // yet wet) and strictly-1-deep water (solid floor, open-air head) — mirrors StartSprintSwim.candidates.
+        if (ctx.built(x, y + 1, z) && ctx.water(x, y + 1, z)) {                    // feet in water
+            boolean twoDeep = ctx.built(x, y + 2, z) && ctx.water(x, y + 2, z);    // head water → prone in place
+            boolean deepBelow = ctx.built(x, y, z) && ctx.water(x, y, z);          // water below → dive to prone
+            if (twoDeep || deepBelow) return;
+        }
+
         int feetY = y + 1;
         for (int[] d : CARDINALS) {
             int nx = x + d[0];
@@ -94,45 +102,30 @@ public final class Swim implements Movement {
         return reachedSwim(b, wx, wy, wz);
     }
 
+    /**
+     * Surface swim: look at the planned cell in 3-D and hold forward ({@link SteerControl#swimTowards}) — the
+     * bot swims where it looks. Not sprinting; the prone 1×1 pose is {@link SprintSwim}. Rising/surfacing/
+     * exiting onto a bank is the follower's cross-cutting "hold jump while submerged and below target" rule.
+     */
     @Override
-    public void steer(BotSteering b, int wx, int wy, int wz) {
-        steerSwim(b, wx, wy, wz, false);
+    public void steer(BotSteering b, SteerView path) {
+        SteerControl.swimTowards(b, path);
     }
 
     /**
-     * Swim cursor-advance test (shared with {@link SprintSwim}): a floating bot's Y bobs with buoyancy, so an
-     * exact 3-D block match can stall the cursor — match horizontally with a ±1 vertical tolerance instead.
+     * Vertical reach tolerance for the swim cursor (blocks of continuous Y). Kept under 1 so a vertical dive's
+     * stacked waypoints (1 block apart) can't both be "reached" at once — that was the {@code ±1} block
+     * tolerance's "drop two cells at a time" leapfrog — while still wide enough to absorb the buoyancy bob.
+     */
+    static final double REACHED_Y = 0.6;
+
+    /**
+     * Swim cursor-advance test (shared with {@link SprintSwim}): horizontal cell match plus the bot's
+     * <i>continuous</i> feet Y within {@link #REACHED_Y} of the held swim depth (feet on top of the floor cell,
+     * i.e. world {@code wy + 1}). Using continuous Y rather than the old ±1 <i>block</i> tolerance keeps a
+     * dive advancing one waypoint at a time instead of leapfrogging the column.
      */
     static boolean reachedSwim(BotSteering b, int wx, int wy, int wz) {
-        return b.footX() == wx && b.footZ() == wz && Math.abs(b.footY() - wy) <= 1;
-    }
-
-    /**
-     * Swim steering, shared by normal {@link Swim} ({@code sprint=false}) and {@link SprintSwim}
-     * ({@code sprint=true}). Vertical control is by DIRECT velocity, not the {@code yya} input: in water the
-     * movement input is weak (it's normalized and scaled by the small water speed, so a {@code yya=-1} yields
-     * only ~-0.02/tick), and near-neutral buoyancy cancels that, so the bot just hovers. Driving
-     * {@code deltaMovement.y} straight toward the target depth (clamped to a swim rate) makes it reliably
-     * sink/rise to track the planned cell while {@code zza}+yaw propel it horizontally. Authority is
-     * ASYMMETRIC: a STRONG fixed climb ({@link #CLIMB_VY}) is needed to break the surface float and clear a
-     * lip, while the descent is gently proportional; a dead-band holds depth without jitter.
-     */
-    static void steerSwim(BotSteering b, int wx, int wy, int wz, boolean sprint) {
-        b.faceHorizontally((wx + 0.5) - b.x(), (wz + 0.5) - b.z());
-        b.setForward(1.0f);
-        b.setSprinting(sprint); // submerged + sprinting → vanilla prone sprint-swim (5.612 b/s); the vanilla
-                                // player tick (doTick → updatePlayerPose) then adopts the prone swimming pose
-        b.setJumping(false);
-        b.setVerticalInput(0.0f);
-        double dyTarget = wy - b.y();
-        double vy;
-        if (dyTarget > 0.05) {
-            vy = CLIMB_VY;                              // climb hard (surface break / clear the lip)
-        } else if (dyTarget < -0.05) {
-            vy = Math.max(-0.20, dyTarget * 0.3);       // descend gently (proportional)
-        } else {
-            vy = 0.0;                                   // at depth — hold
-        }
-        b.setVelocity(b.velX(), vy, b.velZ());
+        return b.footX() == wx && b.footZ() == wz && Math.abs(b.y() - (wy + 1.0)) < REACHED_Y;
     }
 }

@@ -5,6 +5,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 
 /**
  * Jump up one block onto a cardinal-adjacent floor cell that's a full step up (MOVEMENT-DESIGN.md §2,
@@ -47,6 +49,7 @@ public final class Ascend implements Movement {
 
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
+        if (ctx.mode() != MovementContext.MODE_STANDING) return; // jump-up — only while upright
         if (ctx.caps().jumpHeight() < 1) return;
         int uy = y + 1;
 
@@ -87,13 +90,15 @@ public final class Ascend implements Movement {
     }
 
     /**
-     * Walk toward the step and jump when on the ground — an Ascend is "walk forward while jumping" onto a
-     * full block one up (head-clearance already verified by {@link #candidates}). The jump is deterministic
-     * (always, not only when stuck): the bot must leave the ground to gain the block.
+     * Walk toward the step while holding jump — an Ascend is "walk forward while jumping" onto a full block
+     * one up (head-clearance already verified by {@link #candidates}). Holding the jump <i>input</i> (not a
+     * one-shot ground impulse) means vanilla jumps onto the step when grounded and, when this Ascend is the
+     * move that leaves a body of water, swims the bot up and out — the same input doing the right thing in
+     * both media, so an underwater ledge needs no special case.
      */
     @Override
-    public void steer(BotSteering b, int wx, int wy, int wz) {
-        Movement.super.steer(b, wx, wy, wz); // face + full forward
-        if (b.grounded()) b.jump();
+    public void steer(BotSteering b, SteerView path) {
+        SteerControl.steerTowards(b, path);
+        b.setJumping(true);
     }
 }

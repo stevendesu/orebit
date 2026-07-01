@@ -40,12 +40,12 @@ public interface BotSteering {
      */
     boolean grounded();
 
-    double velX();
-    double velY();
-    double velZ();
-
-    /** Overwrite the bot's velocity ({@code deltaMovement}) — used for the direct swim/fall vertical control. */
-    void setVelocity(double x, double y, double z);
+    /**
+     * Whether the bot is in water (vanilla {@code isInWater}). The follower uses it for the cross-cutting
+     * water rule: while submerged and below the planned depth, hold {@link #setJumping jump} so vanilla
+     * buoyancy swims the bot up — the input-based way it rises, surfaces, and climbs out onto a bank.
+     */
+    boolean inWater();
 
     /** Aim the body + head yaw along a horizontal delta (folds the {@code atan2} the follower used to repeat). */
     void faceHorizontally(double dx, double dz);
@@ -53,13 +53,21 @@ public interface BotSteering {
     /** Set the forward movement input ({@code zza}); {@code 1} = full ahead, {@code 0} = none. */
     void setForward(float zza);
 
-    /** Set the vertical movement input ({@code yya}); zeroed by swim, which drives velocity directly instead. */
-    void setVerticalInput(float yya);
-
     void setSprinting(boolean sprinting);
 
+    /**
+     * Hold/release the jump input. Vanilla {@code aiStep} turns a held jump into a ground jump on land and a
+     * buoyant swim-UP in water (and a no-op in the air), so this single input is how every climb works in both
+     * media — an Ascend/Pillar step, and the follower's water-rise.
+     */
     void setJumping(boolean jumping);
 
-    /** Discrete ground jump ({@code jumpFromGround}) — an Ascend/Pillar climb or the stuck backstop. */
-    void jump();
+    /**
+     * Sink in water — the descend half of the water vertical control, the effect of <b>holding shift</b>.
+     * Vanilla applies the rise half ({@code jumpInLiquid}, {@code +0.04}) from the shared {@code LivingEntity}
+     * tick (so {@link #setJumping} works), but the sink half ({@code LocalPlayer.goDownInWater}, {@code -0.04})
+     * lives in the CLIENT tick a headless bot doesn't run — so the bot replicates it: subtract the same
+     * {@code 0.04} from its vertical velocity. Called per tick by the follower while above the planned depth.
+     */
+    void sinkInWater();
 }
