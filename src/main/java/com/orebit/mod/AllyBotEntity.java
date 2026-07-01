@@ -11,6 +11,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
+import com.orebit.mod.pathfinding.blockpathfinder.PhaseRunner;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
@@ -29,6 +31,7 @@ import com.orebit.mod.worldmodel.pathing.NavGridView;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
@@ -197,11 +200,30 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     /** Floor cell the current block plan/window started from — the first segment's start (waypoints are
      *  start-exclusive, so the segment before waypoint 0 begins here). Refreshed on replan / window swap. */
     private BlockPos planStartFloor;
+    /**
+     * The floor cell of the last <b>completed</b> waypoint — the bot's last SETTLED stand position, updated only
+     * when a move's {@link Movement#reached} fires (see {@link #steerAlongPath}). The driver's region commit /
+     * replan runs off THIS, not the live {@link #blockPosition()}: a move in progress passes transiently through
+     * cells it hasn't finished into (a pillar's jump apex is momentarily "floor+1" with the footing not yet
+     * placed), and committing/replanning on that phantom position rebuilt the plan mid-move — discarding the
+     * in-flight pillar before it placed, which stranded the bot in a MineDown↔Pillar loop at region boundaries.
+     * Anchoring the commit to completed waypoints means we only ever replan from a cell the bot actually reached
+     * (with that move's edits already applied) — the synchronous form of the assumed-post-move position a future
+     * background planner will require. The stall/off-track recovery re-anchors this to the live cell (its escape
+     * hatch — a move that never completes is exactly when we DO want to bail and re-search from where we're stuck).
+     */
+    private BlockPos settledFloor;
     /** Reusable {@link SteerView} re-pointed at the current segment each tick (no per-tick allocation). */
     private final SegmentCursor cursor = new SegmentCursor();
     private int offTrackTicks;  // consecutive ticks the bot is off the planned segment (slip detection)
     private int stallTicks;     // consecutive airborne/underwater no-progress ticks (a jump can't fix these)
     private int recoverCooldown; // throttle between forced re-searches after an off-track/stall recovery
+
+    // ---- Stage-2 phase-model execution (converted moves only; others keep the steer + one-shot-edit path) ----
+    /** Runs the current step's {@link MovePlan} when its move provides one (Pillar today); reactive geometry. */
+    private final PhaseRunner phaseRunner = new PhaseRunner();
+    /** The waypoint index the active plan was built for; a change rebuilds the plan for the new step (-1 = none). */
+    private int activePlanStep = -1;
 
     // ---- swim-pose transition diagnostic (Debug.VERBOSE) — see logSwimTransition() -------------------
     // Vanilla drops the prone Pose.SWIMMING the instant a tick sees !(isSprinting() && isInWater()), and can
@@ -246,6 +268,22 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.setXRot(pitch);      // up/down looking
     }
 
+    /** Aim the head (yaw + pitch) at the centre of world cell {@code (x,y,z)} — the "look at what you interact
+     *  with" a player does when placing (mirrors {@link BotMining}'s mining look). For a pillar footing directly
+     *  below, this is a straight-down look. */
+    private void lookAtCell(int x, int y, int z) {
+        double dx = x + 0.5 - this.getX();
+        double dy = y + 0.5 - this.getEyeY();
+        double dz = z + 0.5 - this.getZ();
+        double distXZ = Math.sqrt(dx * dx + dz * dz);
+        float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        float pitch = (float) Math.toDegrees(-Math.atan2(dy, distXZ));
+        this.setYRot(yaw);
+        this.setYBodyRot(yaw);
+        this.setYHeadRot(yaw);
+        this.setXRot(pitch);
+    }
+
     // ---- Command-driven mode control (the /bot commands call these) --------------------------
 
     /** The bot's current behaviour mode. */
@@ -287,6 +325,8 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.pathPlan = null;
         this.path = null;
         this.lastBlockPlanRef = null;
+        this.activePlanStep = -1;
+        this.phaseRunner.clear();
     }
 
     @Override
@@ -420,27 +460,36 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             replan(goalFloor);
             blockRefreshTicks = REPLAN_TICKS;
         } else {
-            // Per-tick driver hook (HPA-IMPLEMENTATION.md §10): report the bot's floor cell so the sliding
-            // window can COMMIT into the next region (the wiggle rule) and replan THAT window's block path.
-            pathPlan.onBotMoved(this.blockPosition().below(), currentStartMode());
-            // Block-level refresh (NOT a skeleton rebuild): when the current block path is consumed but the
-            // route isn't COMPLETE, re-search the window toward the SAME target so the bot keeps inching along
-            // a committed partial; also do it periodically so a terrain edit under the window is picked up.
-            boolean consumed = path != null && waypointIndex >= path.size() && !pathPlan.isComplete();
-            if (consumed || --blockRefreshTicks <= 0) {
-                pathPlan.refreshWindow();
-                blockRefreshTicks = REPLAN_TICKS;
-            }
-            // Refresh `path` to whatever block plan the driver now exposes; when it swapped in a NEW
-            // BlockPathPlan (window advanced / re-searched), restart the follower at its head so
-            // steerAlongPath/applyEdits don't index a stale waypoint/edit cursor.
-            BlockPathPlan now = pathPlan.currentBlockPlan();
-            if (now != lastBlockPlanRef) {
-                this.path = now;
-                this.lastBlockPlanRef = now;
-                this.waypointIndex = 0;
-                this.lastEditedIndex = -1;
-                this.planStartFloor = this.blockPosition().below(); // new window begins at the bot's cell
+            // FORWARD-LOOKING / boundary-gated replan (the synchronous form of the background-planner model):
+            // only commit / refresh / swap the block plan when the bot is physically SETTLED at its last
+            // completed waypoint (blockPosition == settledFloor) — NEVER mid-move. A lagging replan from a cell
+            // the bot has already moved past is wrong for any move you can't undo: a horizontal Traverse can't
+            // "fall sideways" back to the block it left. Gating on the boundary means we only (re)generate and
+            // start following a plan from a cell whose realized position we are actually AT, with that move's
+            // edits already applied — so the plan the follower switches to always matches where the bot really
+            // is (realized == the plan source). The eventual background planner generates the NEXT segment from
+            // the PREDICTED post-move cell while still en route and switches at this same boundary; that needs
+            // modelling the in-flight PathEdits, which lands with the background-thread work. The timer counts
+            // every tick; only the ACTION waits for a boundary. The stall/off-track recovery re-anchors
+            // settledFloor to the live cell, so a move that never completes still reaches a boundary and
+            // re-searches (the escape hatch).
+            if (blockRefreshTicks > 0) blockRefreshTicks--;
+            if (settledFloor != null && this.blockPosition().below().equals(settledFloor)) {
+                pathPlan.onBotMoved(settledFloor, currentStartMode());
+                boolean consumed = path != null && waypointIndex >= path.size() && !pathPlan.isComplete();
+                if (consumed || blockRefreshTicks <= 0) {
+                    pathPlan.refreshWindow();
+                    blockRefreshTicks = REPLAN_TICKS;
+                }
+                BlockPathPlan now = pathPlan.currentBlockPlan();
+                if (now != lastBlockPlanRef) {
+                    this.path = now;
+                    this.lastBlockPlanRef = now;
+                    this.waypointIndex = 0;
+                    this.lastEditedIndex = -1;
+                    this.activePlanStep = -1; // rebuild the phase plan for the new window's first step
+                    this.planStartFloor = settledFloor; // follower anchor == the search source (both settledFloor)
+                }
             }
         }
         // Region repair, every tick (cheap status check): a BLOCKED window — wherever it surfaced — gets its
@@ -565,7 +614,9 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.lastBlockPlanRef = this.path;
         this.waypointIndex = 0;
         this.lastEditedIndex = -1;
+        this.activePlanStep = -1; // rebuild any phase plan for the new plan's first step
         this.planStartFloor = startFloor; // first segment begins at the bot's current floor cell
+        this.settledFloor = startFloor;   // the commit/replan anchor starts at the fresh plan's start cell
 
         boolean hasPath = path != null && path.size() > 0;
         if (Debug.ENABLED) {
@@ -743,6 +794,10 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             BlockPos w = path.waypoint(j);
             if (path.movement(j).reached(this, w.getX(), w.getY(), w.getZ())) {
                 waypointIndex = j + 1;
+                // A move just COMPLETED — this is the settled stand cell the driver commits/replans off (its
+                // edits are now applied). Advancing the anchor only here is what keeps a mid-move transient from
+                // triggering a boundary replan (see settledFloor). w is the stand position; below() = its floor.
+                this.settledFloor = w.below();
                 break;
             }
         }
@@ -754,14 +809,18 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         Movement movement = path.movement(waypointIndex);
         BlockPos wp = path.waypoint(waypointIndex);
 
-        // Apply this step's folded break/place edits once, the moment the move says they're due: the generic
-        // case clears/fills the cells in front before the bot moves into them (the bot is standing at the
-        // previous waypoint, the cells are right ahead). Pillar defers until the bot is airborne
-        // (Movement.editsReadyNow), since its footing lands in the bot's OWN feet cell.
-        StepEdits edits = path.edits(waypointIndex);
-        if (edits != null && waypointIndex != lastEditedIndex && movement.editsReadyNow(this)) {
-            lastEditedIndex = waypointIndex;
-            applyEdits(edits);
+        // Build (once per step) this move's phase-model plan, if it has one. A change of waypoint (a new step, or
+        // a window swap that reset the cursor) rebuilds it and resets the runner. The plan is written in the
+        // search-native FLOOR cells; waypoints are floor.above() (stand positions), so the floor is one below.
+        if (waypointIndex != activePlanStep) {
+            activePlanStep = waypointIndex;
+            BlockPos toFloor = wp.below();
+            BlockPos fromFloor = (waypointIndex == 0)
+                    ? (planStartFloor != null ? planStartFloor : this.blockPosition().below())
+                    : path.waypoint(waypointIndex - 1).below();
+            MovePlan mp = movement.plan(fromFloor.getX(), fromFloor.getY(), fromFloor.getZ(),
+                    toFloor.getX(), toFloor.getY(), toFloor.getZ());
+            if (mp != null) phaseRunner.begin(mp); else phaseRunner.clear();
         }
 
         // Build the SEGMENT the move tracks: from the previous waypoint (or the window/plan start for the
@@ -774,11 +833,20 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         BlockPos next = (waypointIndex + 1 < path.size()) ? path.waypoint(waypointIndex + 1) : null;
         cursor.set(segStart, wp, next);
 
-        // Per-move steering: track the planned LINE toward the waypoint (look + forward), plus whatever extra
-        // inputs the move needs (hold jump for a climb, the sprint flag). All callbacks go through this
-        // entity's BotSteering implementation below.
-        movement.steer(this, cursor);
-        this.steeredThisTick = true;                            // a steer ran → sprint was re-asserted if this is a sprint move
+        // Execute the step. A CONVERTED move (has a phase plan) reconciles its geometry against the LIVE world
+        // each tick — breaking/placing reactively via the PhaseRunner, no one-shot applyEdits, so a missed edit
+        // self-heals. An UNCONVERTED move keeps the original path: apply its folded edits once, then steer.
+        if (phaseRunner.active()) {
+            phaseRunner.run(this, cursor);
+        } else {
+            StepEdits edits = path.edits(waypointIndex);
+            if (edits != null && waypointIndex != lastEditedIndex && movement.editsReadyNow(this)) {
+                lastEditedIndex = waypointIndex;
+                applyEdits(edits);
+            }
+            movement.steer(this, cursor);
+        }
+        this.steeredThisTick = true;                            // a step ran → sprint re-asserted if a sprint move
         this.lastSteerMove = movement.getClass().getSimpleName(); // (swim-pose diagnostic; Debug.VERBOSE)
 
         // Cross-cutting WATER RULE — the vertical control for EVERY move, exactly what a player presses: in
@@ -825,6 +893,10 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             recoverCooldown--;
         } else if (offTrackTicks >= OFF_TRACK_TICKS || stallTicks >= STALL_TICKS) {
             blockRefreshTicks = 0; // re-search the window from the bot's actual cell next tick (driveToward)
+            // Recovery escape hatch: the bot has genuinely slipped/stalled off-plan (a move that won't complete),
+            // so re-anchor the driver to its LIVE cell — this is exactly the case where we DO want to bail on the
+            // unfinished move and re-plan from where we're actually stuck, overriding the settled-waypoint gate.
+            this.settledFloor = this.blockPosition().below();
             offTrackTicks = 0;
             stallTicks = 0;
             recoverCooldown = RECOVER_COOLDOWN;
@@ -1042,6 +1114,47 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     /** Widen the inherited protected {@code setJumping} to public so it satisfies the {@link BotSteering} seam.
      *  Held true, vanilla {@code aiStep} jumps on land and swims up in water — the one climb mechanism. */
     @Override public void setJumping(boolean jumping) { super.setJumping(jumping); }
+
+    // ---- Live-world geometry + block actions (the reconcile seam a MovePlan drives through) -----------
+
+    /** Live movement-blocking test: the cell has a non-empty collision shape (air/water/plants read clear).
+     *  Reads the live level so it reflects the bot's own just-made breaks/places (unlike the cached nav grid). */
+    @Override
+    public boolean solidAt(int x, int y, int z) {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        BlockPos p = new BlockPos(x, y, z);
+        return !level.getBlockState(p).getCollisionShape(level, p).isEmpty();
+    }
+
+    @Override
+    public boolean airAt(int x, int y, int z) {
+        return !solidAt(x, y, z);
+    }
+
+    /** Route a break request to the timed {@link BotMining} actuator (equip/face/swing/real-time/drops). */
+    @Override
+    public void mine(int x, int y, int z) {
+        mining.request(new BlockPos(x, y, z));
+    }
+
+    /** Place a footing block server-side (carried block when {@code placement.consumesBlocks}, else conjured);
+     *  the placement half of the reconcile seam, mirroring {@link #applyEdits}'s place path for a single cell. */
+    @Override
+    public void place(int x, int y, int z) {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        BlockPos p = new BlockPos(x, y, z);
+        if (!Replaceable.isReplaceable(level.getBlockState(p))) return;
+        lookAtCell(x, y, z); // look at what we place — for a pillar footing that's straight down, like a player
+        Config cfg = ConfigLoader.config();
+        if (cfg.consumesBlocks()) {
+            Block block = new BotInventory(this).consumeOnePlaceable();
+            if (block == null) return; // out of blocks — the next tick / replan nets it
+            WorldEdits.placeBlock(level, p, block.defaultBlockState());
+        } else {
+            WorldEdits.placeBlock(level, p, placeBlock()); // conjured, infinite supply
+        }
+        this.swing(InteractionHand.MAIN_HAND);
+    }
 
     // ---- Survival gating (the bot runs the full vanilla player tick via doTick — see tick()) ----------
     // Two of the now-live survival systems are gated by their config flags by intercepting vanilla's own

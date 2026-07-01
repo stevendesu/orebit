@@ -589,6 +589,13 @@ public final class BlockPathfinder {
         nodes.f[startRow] = relaxer.h(sx, sy, sz);
         nodes.push(startRow);
 
+        // Root-node diagnostic (LOG_TIMING-gated, so it fires only for the driver's window searches, not the
+        // region tier's leaf-cost mini-searches): enumerate the start cell's candidates with each move's g, the
+        // heuristic decomposed into octile + forced-build premium, and f = g + h — so WHY a first move is chosen
+        // (e.g. a MineDown out-scoring a Pillar, or a 0 premium far below the goal) is legible. Passive sink, so
+        // the open set is untouched.
+        if (LOG_TIMING) logRoot(ctx, relaxer, forced, sx, sy, sz, startMode, hWeight, gx, gy, gz);
+
         int expansions = 0;
         int reachedRow = -1;
         // Closest approach (min heuristic among closed nodes) + why the search stopped — the diagnostic
@@ -977,6 +984,89 @@ public final class BlockPathfinder {
             if (drop > jump) return p;          // stop just before the first drop the bot can't climb back
         }
         return bestRow; // whole partial is reversible
+    }
+
+    /**
+     * Root-node candidate breakdown (LOG_TIMING) — see the call site. Enumerates the start cell's emitted moves,
+     * each with its per-step {@code g}, the heuristic decomposed into weighted-octile + forced-build premium, and
+     * {@code f = g + h}, so a chosen first move is explained (does a MineDown really out-score a Pillar; is the
+     * premium 0 far below the goal). Passive: it never relaxes, so the search is unaffected.
+     */
+    private static void logRoot(MovementContext ctx, Relaxer relaxer, GoalForcedCost.Forced forced,
+                                int sx, int sy, int sz, int startMode, float hWeight, int gx, int gy, int gz) {
+        ctx.setMode(startMode); // match the real root expansion's mode so the emitted candidates are the same set
+        final float sOct = octile(sx, sy, sz, gx, gy, gz, hWeight);
+        final float sPrem = GoalForcedCost.premium(forced, sx, sy, sz, gx, gy, gz);
+        final StringBuilder sb = new StringBuilder();
+        sb.append("[Orebit] ROOT (").append(sx).append(',').append(sy).append(',').append(sz)
+                .append(") mode=").append(startMode).append(" -> goal(").append(gx).append(',').append(gy)
+                .append(',').append(gz).append(") W=").append(String.format("%.2f", hWeight))
+                .append("  startH=").append(String.format("%.1f", relaxer.h(sx, sy, sz)))
+                .append(" [oct=").append(String.format("%.1f", sOct))
+                .append(" prem=").append(String.format("%.1f", sPrem)).append(']');
+        // Column probe: the built-status + classification of the cells directly above the bot. Pillar/Ascend
+        // gate on the footing cell (y+1, openForPlace) and the head cell (y+3); if any reads UNBUILT they emit
+        // nothing — the "no up-move at a section boundary" signature we're hunting. S=standable .=passable
+        // #=blocked, (p)=openForPlace.
+        sb.append("\n  col:");
+        for (int dy = 0; dy <= 4; dy++) {
+            final int yy = sy + dy;
+            sb.append(" y").append(yy).append('=');
+            if (!ctx.built(sx, yy, sz)) { sb.append("UNBUILT"); continue; }
+            final long d = ctx.descriptorAt(sx, yy, sz);
+            sb.append(ctx.standable(d) ? "S" : (ctx.passable(d) ? "." : "#"));
+            if (ctx.openForPlace(d)) sb.append("(p)");
+        }
+        final RootSink sink = new RootSink(relaxer, forced, hWeight, gx, gy, gz, sb);
+        for (Movement m : MovementRegistry.TIER1) {
+            sink.move = m.getClass().getSimpleName();
+            m.candidates(ctx, sx, sy, sz, sink);
+        }
+        OrebitCommon.LOGGER.info(sb.toString());
+    }
+
+    /** Passive {@link CandidateSink} for {@link #logRoot}: appends each emitted candidate's g / h-decomposition /
+     *  f to a buffer without relaxing anything (the open set is untouched). */
+    private static final class RootSink implements CandidateSink {
+        private final Relaxer relaxer;
+        private final GoalForcedCost.Forced forced;
+        private final float hWeight;
+        private final int gx, gy, gz;
+        private final StringBuilder sb;
+        private String move = "?";
+
+        RootSink(Relaxer relaxer, GoalForcedCost.Forced forced, float hWeight, int gx, int gy, int gz,
+                 StringBuilder sb) {
+            this.relaxer = relaxer;
+            this.forced = forced;
+            this.hWeight = hWeight;
+            this.gx = gx; this.gy = gy; this.gz = gz;
+            this.sb = sb;
+        }
+
+        @Override
+        public void accept(int x, int y, int z, float cost, EditScratch edits) {
+            log(x, y, z, cost, edits, -1);
+        }
+
+        @Override
+        public void accept(int x, int y, int z, float cost, EditScratch edits, int mode) {
+            log(x, y, z, cost, edits, mode);
+        }
+
+        private void log(int x, int y, int z, float cost, EditScratch edits, int mode) {
+            final float oct = octile(x, y, z, gx, gy, gz, hWeight);
+            final float prem = GoalForcedCost.premium(forced, x, y, z, gx, gy, gz);
+            final float h = relaxer.h(x, y, z);
+            sb.append("\n  ").append(move).append(" ->(").append(x).append(',').append(y).append(',').append(z)
+                    .append(") g=").append(String.format("%.1f", cost))
+                    .append(" h=").append(String.format("%.1f", h))
+                    .append(" [oct=").append(String.format("%.1f", oct))
+                    .append(" prem=").append(String.format("%.1f", prem)).append("] f=")
+                    .append(String.format("%.1f", cost + h));
+            if (edits != null) sb.append(" +edits");
+            if (mode >= 0) sb.append(" mode=").append(mode);
+        }
     }
 
     private static BlockPathPlan reconstruct(Nodes nodes, int startRow, int reachedRow) {
