@@ -48,6 +48,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     private final Player owner;
 
+    /** The bot's "hands" for breaking blocks — real tool + vanilla timing + drops (replaces instant edits).
+     *  Requested per tick by the follower and actuated once per tick from {@link #tick} (see {@link BotMining}). */
+    private final BotMining mining;
+    /** {@code /bot mine <pos>} Stage-1 test target: while non-null, requested each tick until it's mined. */
+    private BlockPos debugMineTarget;
+
     // ---- chat-progress de-dup state (Debug.ENABLED): only post when one of these changes ---------
     private int lastChatStep = Integer.MIN_VALUE;
     private PathStatus lastChatStatus;
@@ -221,6 +227,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     public AllyBotEntity(MinecraftServer server, ServerLevel world, GameProfile profile, Player owner) {
         super(server, world, profile);
         this.owner = owner;
+        this.mining = new BotMining(this);
     }
 
     public void lookAtPlayer(Player player) {
@@ -258,6 +265,17 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.mode = Mode.COME;
         this.comeTarget = summonCell.immutable();
         clearPlan();
+    }
+
+    /**
+     * {@code /bot mine <pos>} — Stage-1 verification of the timed {@link BotMining} actuator: stop in place and
+     * dig one block with the real tool, animation, tick-cost, and drops, so the "hands" can be confirmed in-game
+     * before the movement reconcile (Stage 2) drives them. Puts the bot in {@link Mode#STAY} so it stands and
+     * mines instead of pathing.
+     */
+    public void debugMineAt(BlockPos pos) {
+        setMode(Mode.STAY);
+        this.debugMineTarget = pos.immutable();
     }
 
     /**
@@ -309,6 +327,18 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.steeredThisTick = false;       // reset the swim-pose diagnostic snapshot for this tick
         this.heldWaterJumpThisTick = false; // (set below in steerAlongPath; read post-doTick in logSwimTransition)
 
+        // Stage-1 mining test hook: while a /bot mine target is set, request it each tick until it's gone, then
+        // report and clear. (Stage 2 replaces this debug field with each Movement's reconcile driving the break.)
+        final ServerLevel level = (ServerLevel) Worlds.of(this);
+        if (debugMineTarget != null) {
+            if (level.getBlockState(debugMineTarget).isAir()) {
+                chat("[bot] mined " + compact(debugMineTarget));
+                debugMineTarget = null;
+            } else {
+                mining.request(debugMineTarget);
+            }
+        }
+
         switch (mode) {
             case STAY -> holdPosition();
             case COME -> {
@@ -333,6 +363,10 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // Read the prone-pose state AFTER doTick (vanilla's updateSwimming ran inside it, from THIS tick's
         // inputs + resulting position), so a PRONE->STAND flip is dumped with the state that caused it.
         if (Debug.VERBOSE) logSwimTransition();
+
+        // Actuate the "hands": drive any requested block break one tick (real tool + timing + drops). Runs after
+        // doTick so the break reflects this tick's inputs/position; a no-op when nothing was requested this tick.
+        mining.tick(level);
     }
 
     /** STAY: stop in place and face the owner. */
