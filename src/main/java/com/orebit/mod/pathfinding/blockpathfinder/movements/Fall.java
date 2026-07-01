@@ -4,6 +4,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 
 /**
  * Drop more than one block off a cardinal edge to the first solid landing below (MOVEMENT-DESIGN.md §2,
@@ -47,25 +49,11 @@ public final class Fall implements Movement {
      */
     public static final float DAMAGE_PER_BLOCK = 10f;
 
-    /**
-     * Mid-air horizontal homing gain while drop-controlling a fall. {@link #candidates} models a fall as a
-     * straight vertical drop (it scans the cardinal column straight down), but a bot that walks off a ledge at
-     * full speed carries horizontal momentum and arcs — overshooting the planned landing cell by a block or
-     * more, so it "slips" off-route. Minecraft grants aerial steering authority (a player drop-controls off a
-     * ledge the same way), so the steer doesn't model the parabola; instead each airborne tick it sets
-     * horizontal velocity toward the landing column centre at {@code offset × GAIN} clamped to {@link
-     * #HOMING_MAX}. This both pulls the bot over the target column and overwrites (bleeds) the overshoot
-     * momentum, so the real drop matches the planner's vertical assumption; as the bot nears centre the offset
-     * → 0, so velocity decays smoothly with no over-correction.
-     */
-    private static final double HOMING_GAIN = 0.5;
-    /** Per-tick horizontal speed cap while drop-controlling a fall (blocks/tick) — see {@link #HOMING_GAIN}. */
-    private static final double HOMING_MAX = 0.15;
-
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
+        if (ctx.mode() != MovementContext.MODE_STANDING) return; // walk off a ledge — only while upright
         // Scan to the bot's MAX fall (not just the safe one): drops past safeFall are allowed at a damage cost,
         // so a route that needs a hurtful drop isn't a dead end — it's just dearer than a gentle one.
         final int safeFall = ctx.caps().safeFallDistance();
@@ -112,21 +100,18 @@ public final class Fall implements Movement {
     }
 
     /**
-     * Drop STRAIGHT down the planned column instead of arcing off the lip. On the ground (about to step off, or
-     * just landed) this is the generic walk. Once airborne we have full aerial authority (the follower drives
-     * velocity directly), so we home the bot onto the landing column centre at a clamped rate and zero the
-     * forward input so the walk doesn't re-add horizontal speed — see {@link #HOMING_GAIN}.
+     * Walk off the lip, then steer onto the landing column while airborne. On the ground this is the generic
+     * line-tracking walk toward the landing; once airborne it re-centres on the landing column via the
+     * forward input (Minecraft's aerial control is weak, so this is a gentle correction, not a teleported
+     * velocity — a player drop-controls off a ledge the same way). {@link #candidates} models a fall as a
+     * straight vertical drop, and this keeps the real drop near that column.
      */
     @Override
-    public void steer(BotSteering b, int wx, int wy, int wz) {
-        Movement.super.steer(b, wx, wy, wz); // face + full forward (also covers the on-ground step-off/landing)
-        if (!b.grounded()) {
-            double cx = (wx + 0.5) - b.x();
-            double cz = (wz + 0.5) - b.z();
-            double vx = Math.max(-HOMING_MAX, Math.min(HOMING_MAX, cx * HOMING_GAIN));
-            double vz = Math.max(-HOMING_MAX, Math.min(HOMING_MAX, cz * HOMING_GAIN));
-            b.setVelocity(vx, b.velY(), vz);
-            b.setForward(0.0f);
+    public void steer(BotSteering b, SteerView path) {
+        if (b.grounded()) {
+            SteerControl.steerTowards(b, path);
+        } else {
+            SteerControl.recenterOnTarget(b, path);
         }
     }
 }

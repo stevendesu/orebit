@@ -266,6 +266,7 @@ public final class BlockPathfinder {
         float[] g, f;
         int[] parent;          // predecessor row, -1 at the start
         int[] move;            // MovementRegistry.TIER1 index, -1 at the start
+        int[] mode;            // movement mode at this node (MovementContext.MODE_STANDING / MODE_PRONE)
         StepEdits[] edits;     // edit-set on the edge into this row (null when the move breaks/places nothing)
         int count;
 
@@ -295,6 +296,7 @@ public final class BlockPathfinder {
             f = new float[nodeHint];
             parent = new int[nodeHint];
             move = new int[nodeHint];
+            mode = new int[nodeHint];
             edits = new StepEdits[nodeHint];
             mapKey = new long[mapCap];
             mapRow = new int[mapCap];
@@ -319,13 +321,14 @@ public final class BlockPathfinder {
             Arrays.fill(mapRow, -1);
         }
 
-        /** Row for {@code key}, creating it (with {@code g=+inf}, unlinked) if absent. One probe. */
-        int intern(long k, int cx, int cy, int cz) {
+        /** Row for {@code key} (which encodes {@code cmode}), creating it (with {@code g=+inf}, unlinked) if
+         *  absent. The key carries the mode, so the same cell in two modes hashes to two distinct rows. */
+        int intern(long k, int cx, int cy, int cz, int cmode) {
             int slot = slotFor(k, mapMask);
             for (;;) {
                 int row = mapRow[slot];
                 if (row == -1) {
-                    row = newRow(k, cx, cy, cz);
+                    row = newRow(k, cx, cy, cz, cmode);
                     mapKey[slot] = k;
                     mapRow[slot] = row;
                     if (++mapSize >= mapGrowAt) growMap();
@@ -336,11 +339,12 @@ public final class BlockPathfinder {
             }
         }
 
-        private int newRow(long k, int cx, int cy, int cz) {
+        private int newRow(long k, int cx, int cy, int cz, int cmode) {
             int n = count;
             if (n == key.length) growNodes();
             key[n] = k;
             x[n] = cx; y[n] = cy; z[n] = cz;
+            mode[n] = cmode;
             g[n] = Float.POSITIVE_INFINITY;
             f[n] = Float.POSITIVE_INFINITY;
             parent[n] = -1;
@@ -406,6 +410,7 @@ public final class BlockPathfinder {
             f = Arrays.copyOf(f, cap);
             parent = Arrays.copyOf(parent, cap);
             move = Arrays.copyOf(move, cap);
+            mode = Arrays.copyOf(mode, cap);
             edits = Arrays.copyOf(edits, cap);
         }
 
@@ -504,6 +509,24 @@ public final class BlockPathfinder {
     public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
                                          BotCaps caps, RegionBound confineBound, RegionBound cuboidBound,
                                          MovementContext.InventoryView inventory) {
+        return findPath(grid, startFloor, goalFloor, caps, confineBound, cuboidBound, inventory, MODE_AUTO);
+    }
+
+    /** {@link #findPath} start-mode override sentinel: derive the start mode from the start cell's geometry
+     *  (2-deep water ⇒ {@code MODE_PRONE}, else {@code MODE_STANDING}). Pass an explicit
+     *  {@link MovementContext#MODE_STANDING}/{@link MovementContext#MODE_PRONE} to override — the live driver
+     *  passes the bot's ACTUAL pose ({@code isSwimming()} ⇒ PRONE) so a replan mid-sprint-swim doesn't lose the
+     *  prone state and try to re-initiate (which a bob to 1-deep would otherwise trigger, or worse, get stuck). */
+    public static final int MODE_AUTO = -1;
+
+    /**
+     * As above, but with an explicit {@code startModeOverride}: when {@code >= 0} it is used as the start
+     * node's mode instead of the geometry-derived one ({@link #MODE_AUTO} = derive). The live two-tier driver
+     * threads the bot's real pose here; the headless/region-cost/trace callers pass {@code MODE_AUTO}.
+     */
+    public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
+                                         BotCaps caps, RegionBound confineBound, RegionBound cuboidBound,
+                                         MovementContext.InventoryView inventory, int startModeOverride) {
         final long t0 = System.nanoTime();
         LAST_EXPANSIONS = 0; // reset the instrumentation seam (covers the early no-start-ground return)
         LAST_WAS_PARTIAL = false;
@@ -524,7 +547,15 @@ public final class BlockPathfinder {
 
         final MovementContext ctx = new MovementContext(grid, caps);
         ctx.setInventory(inventory); // null in the historical / headless / trace paths (caps-only gates)
-        final long startKey = BlockPos.asLong(sx, sy, sz);
+        // Start mode: the caller's explicit override wins (the live driver passes the bot's real pose, so a
+        // replan mid-sprint-swim stays PRONE instead of re-deriving STANDING from a bob and re-initiating).
+        // MODE_AUTO falls back to geometry: PRONE only if the start cell is 2-deep water (feet + head water),
+        // where the bot would already be submerged-swimming; otherwise STANDING.
+        final int startMode = startModeOverride >= 0 ? startModeOverride
+                : ((ctx.built(sx, sy + 1, sz) && ctx.water(sx, sy + 1, sz)
+                        && ctx.built(sx, sy + 2, sz) && ctx.water(sx, sy + 2, sz))
+                    ? MovementContext.MODE_PRONE : MovementContext.MODE_STANDING);
+        final long startKey = key(sx, sy, sz, startMode);
 
         // Macro-movement collapse (MACRO-IMPLEMENTATION.md §8): builds a per-search cuboid view over the SAME
         // PathEdits the movements read (capped by cuboidBound so a flat world can't grow one unbounded), wires
@@ -553,7 +584,7 @@ public final class BlockPathfinder {
         final float hWeight = caps.greedyWeight() >= 1.0f ? caps.greedyWeight() : BotCaps.DEFAULT_GREEDY_WEIGHT;
         Relaxer relaxer = new Relaxer(nodes, editPool, sx, sy, sz, gx, gy, gz, confineBound, forced, hWeight);
 
-        int startRow = nodes.intern(startKey, sx, sy, sz);
+        int startRow = nodes.intern(startKey, sx, sy, sz, startMode);
         nodes.g[startRow] = 0f;
         nodes.f[startRow] = relaxer.h(sx, sy, sz);
         nodes.push(startRow);
@@ -603,6 +634,9 @@ public final class BlockPathfinder {
 
             relaxer.current = current;
             relaxer.currentG = nodes.g[current];
+            int curMode = nodes.mode[current];
+            relaxer.currentMode = curMode; // default dest mode for ordinary (mode-preserving) accepts
+            ctx.setMode(curMode);          // surfaced to each movement's candidates() for mode-gating
             List<Movement> tier1 = MovementRegistry.TIER1;
             for (int mi = 0, mn = tier1.size(); mi < mn; mi++) {
                 relaxer.move = mi;
@@ -680,6 +714,7 @@ public final class BlockPathfinder {
 
         int current;        // row being expanded
         float currentG;     // its g (read once per expansion, not per candidate)
+        int currentMode;    // its mode (read once per expansion) — the default dest mode for a plain accept
         int move;           // MovementRegistry.TIER1 index currently emitting candidates
         boolean anyEdits;   // has any edge carried break/place edits? (gates the per-pop diff rebuild)
 
@@ -726,8 +761,19 @@ public final class BlockPathfinder {
                     + GoalForcedCost.premium(forced, x, y, z, gx, gy, gz);
         }
 
+        /** Mode-preserving accept (every ordinary move): the destination keeps the expanding node's mode. */
         @Override
         public void accept(int nx, int ny, int nz, float cost, EditScratch scratch) {
+            relax(nx, ny, nz, currentMode, cost, scratch);
+        }
+
+        /** Mode-transition accept (StartSprintSwim / Surface): the destination lands in {@code destMode}. */
+        @Override
+        public void accept(int nx, int ny, int nz, float cost, EditScratch scratch, int destMode) {
+            relax(nx, ny, nz, destMode, cost, scratch);
+        }
+
+        private void relax(int nx, int ny, int nz, int destMode, float cost, EditScratch scratch) {
             // Corridor confinement (HPA-IMPLEMENTATION.md §9): never relax a candidate outside the window's
             // box. This is the single choke point through which every discovered cell passes, so one check
             // here confines the whole search without touching any movement. The start cell is interned
@@ -737,8 +783,8 @@ public final class BlockPathfinder {
                 return;
             }
             float tentative = currentG + cost;
-            long nKey = BlockPos.asLong(nx, ny, nz);
-            int row = nodes.intern(nKey, nx, ny, nz);
+            long nKey = key(nx, ny, nz, destMode);     // mode is part of the identity → distinct row per mode
+            int row = nodes.intern(nKey, nx, ny, nz, destMode);
             if (tentative >= nodes.g[row]) { // new rows start at +inf, so this also admits first visits
                 if (TRACE) traceCand(nx, ny, nz, cost, "worse");
                 return;
@@ -773,6 +819,25 @@ public final class BlockPathfinder {
 
     private static boolean isGoal(int x, int y, int z, int gx, int gy, int gz) {
         return Math.abs(x - gx) <= 1 && Math.abs(z - gz) <= 1 && Math.abs(y - gy) <= 2;
+    }
+
+    /** Bias added to Y before packing it into {@link #key} so the (often-negative) world Y lands in the
+     *  unsigned 10-bit field. Covers the full vanilla Y range (−64..320 ⊂ −512..511). */
+    private static final int Y_BIAS = 512;
+
+    /**
+     * Pack {@code (x,y,z,mode)} into the open-addressed map's 64-bit identity key. The node table stores
+     * x/y/z/mode in parallel arrays, so this key is ONLY a hash identity — never decoded back to coordinates.
+     * Layout: x in 26 bits | z in 26 bits | (y + {@link #Y_BIAS}) in 10 bits | mode in 2 bits = 64. 26-bit
+     * x/z covers the world border (±33M); the biased 10-bit y covers all vanilla Y. Collision-free, so the
+     * same cell in two modes maps to two distinct keys (hence two rows), which is the whole point of the
+     * {@code (x,y,z,mode)} node.
+     */
+    private static long key(int x, int y, int z, int mode) {
+        return ((long) (x & 0x3FFFFFF) << 38)
+             | ((long) (z & 0x3FFFFFF) << 12)
+             | ((long) ((y + Y_BIAS) & 0x3FF) << 2)
+             | (mode & 0x3);
     }
 
     /**
@@ -948,7 +1013,8 @@ public final class BlockPathfinder {
 
             if (j <= 1) {
                 // Single waypoint (the historical behaviour): floor cell's top = the bot's stand position.
-                waypoints.add(BlockPos.of(nodes.key[n]).above());
+                // Read coords from the node arrays (the key now packs mode and no longer round-trips to a pos).
+                waypoints.add(new BlockPos(nx, ny + 1, nz));
                 moves.add(move);
                 // Copy out of the per-search arena: these edits ride home in the BlockPathPlan and are
                 // replayed by the follower over many ticks, while later searches reuse the arena slots.

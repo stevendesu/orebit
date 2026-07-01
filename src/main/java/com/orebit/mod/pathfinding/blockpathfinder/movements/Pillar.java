@@ -7,6 +7,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Axes;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Cuboid;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.MacroJump;
@@ -71,6 +73,7 @@ public final class Pillar implements Movement {
 
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
+        if (ctx.mode() != MovementContext.MODE_STANDING) return; // jump-and-place — only while upright
         BotCaps caps = ctx.caps();
         if (!caps.canPlace() || caps.jumpHeight() < 1) return;
 
@@ -164,12 +167,15 @@ public final class Pillar implements Movement {
     }
 
     /**
-     * Walk-in-place and jump straight up when on the ground (jump-and-place): the bot leaves its feet cell so
-     * {@link #editsReadyNow} can then fold the footing under it. Deterministic, like {@link Ascend}.
+     * Jump straight up in place while staying centred on the column: re-centre on the column every tick (so a
+     * jump-bump or residual momentum can't carry the bot sideways — the fix for the "pillar up a few, then
+     * drift sideways, then resume" wander) and hold the jump input. The held jump leaves the feet cell so
+     * {@link #editsReadyNow} can fold the footing under it, and it climbs a flooded shaft for free (jump =
+     * swim-up in water). Re-centre, not a forward shove, because there is no horizontal target to walk to.
      */
     @Override
-    public void steer(BotSteering b, int wx, int wy, int wz) {
-        Movement.super.steer(b, wx, wy, wz); // face + full forward
-        if (b.grounded()) b.jump();
+    public void steer(BotSteering b, SteerView path) {
+        SteerControl.recenterOnTarget(b, path);
+        b.setJumping(true);
     }
 }

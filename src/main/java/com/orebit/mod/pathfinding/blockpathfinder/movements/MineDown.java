@@ -2,10 +2,13 @@ package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Axes;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Cuboid;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.MacroJump;
@@ -59,6 +62,7 @@ public final class MineDown implements Movement {
 
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
+        if (ctx.mode() != MovementContext.MODE_STANDING) return; // dig-down-in-place — only while upright
         if (!ctx.caps().canBreak()) return;
 
         int dy = y - 1; // destination floor one below
@@ -114,5 +118,15 @@ public final class MineDown implements Movement {
 
         int dz = Axes.stepY(Axes.AXIS_Y, -1) * J; // = -J (the Y delta of a straight-down jump)
         out.accept(x, y + dz, z, J * COST + e.extraCost(), e);
+    }
+
+    /**
+     * Stay centred on the shaft column while digging down: face the column and apply forward input only
+     * proportional to any horizontal drift, so the bot recentres before each break-and-drop instead of
+     * walking off the shaft. Gravity does the descent; no jump.
+     */
+    @Override
+    public void steer(BotSteering b, SteerView path) {
+        SteerControl.recenterOnTarget(b, path);
     }
 }

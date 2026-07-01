@@ -12,6 +12,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.config.Config;
 import com.orebit.mod.config.ConfigLoader;
@@ -51,6 +53,8 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private PathStatus lastChatStatus;
     private boolean lastChatPartial;
     private PathPlan.TargetKind lastChatKind;
+    /** Last (waypoint|movement|medium) announced by {@code /bot debug verbose} — dedups it to one line per change. */
+    private String lastVerbose;
 
     // ---- Follow / path-steering tuning -------------------------------------------------------
     /** Stop moving once this close to the owner (blocks, horizontal). */
@@ -72,10 +76,42 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     /** Ticks between cascade BLOCKED-repair attempts ({@link #repairStep}) — keeps the heavy re-search off the
      *  per-tick path while the bot follows the last repaired route. */
     private static final int REPAIR_COOLDOWN = 10;
-    /** Below this squared horizontal speed while trying to move, treat the bot as stuck → jump. */
+    /** Below this squared speed while trying to move, treat the bot as stuck (horizontal on the ground →
+     *  jump; full-3D off the ground/underwater → a stall the jump can't fix → recover). */
     private static final double STUCK_SPEED_SQR = 0.0016;
     /** Consecutive stuck ticks before the diagnostic dumps the surrounding blocks (≈1s). */
     private static final int STUCK_DUMP_TICKS = 20;
+    /** Cross-track distance (blocks) off the planned segment that counts as a genuine slip off the line. */
+    private static final double OFF_TRACK_DIST = 1.6;
+    /** Consecutive off-track ticks before forcing a re-search from the bot's actual cell (≈0.6s). */
+    private static final int OFF_TRACK_TICKS = 12;
+    /** Consecutive airborne/underwater stall ticks (no 3-D progress, jump useless) before recovering (≈2s). */
+    private static final int STALL_TICKS = 40;
+    /** Ticks to wait after a recovery before the off-track/stall detector can fire again (throttle). */
+    private static final int RECOVER_COOLDOWN = 20;
+    /** Dead-band (blocks) under the planned depth within which the water-rise rule stops holding jump — keeps
+     *  a surfaced bot from chattering jump on/off right at its target depth. */
+    private static final double WATER_RISE_DEADBAND = 0.2;
+    /**
+     * How far (blocks) below the planned depth the follower rides a prone-mode move ({@link
+     * Movement#keepsSubmerged}). The prone sprint-swim hitbox is only ~0.6 tall, so at a surface-level planned
+     * depth the {@link #WATER_RISE_DEADBAND} up-slack would float the whole hitbox clear of the water and drop
+     * the pose. Sinking the target ~0.5 keeps the hitbox wet (so vanilla's {@code isInWater()} continuation
+     * rule holds) while staying under {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Swim#REACHED_Y}
+     * (0.6) so the swim cursor still advances. Standing water moves ride at the plain depth (bias 0).
+     */
+    private static final double SUBMERGE_BIAS = 0.5;
+
+    /**
+     * The bot's movement mode to seed the planner's start node with — its REAL pose: vanilla {@code
+     * isSwimming()} (the prone {@code Pose.SWIMMING}) ⇒ {@link MovementContext#MODE_PRONE}, so a replan that
+     * fires mid-sprint-swim keeps the prone state instead of re-deriving STANDING from a buoyancy bob and
+     * re-initiating (or, in genuine 1-deep water, getting stuck unable to re-initiate). When the bot is not
+     * swimming, {@link BlockPathfinder#MODE_AUTO} lets the search derive the mode from the start geometry.
+     */
+    private int currentStartMode() {
+        return this.isSwimming() ? MovementContext.MODE_PRONE : BlockPathfinder.MODE_AUTO;
+    }
 
     /**
      * The bot's planner capabilities + throwaway block now come from the owner config (PRD §10 Phase 1a):
@@ -150,6 +186,26 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private int lastEditedIndex = -1; // last step whose break/place edits were applied (apply once per step)
     private boolean loggedHasPath;  // dedupe the path/no-path diagnostic so it logs only on change
     private boolean loggedPlanError; // log a two-tier replan exception only once (then degrade silently)
+
+    // ---- closed-loop trajectory tracking (the follower steers along the planned LINE, not a point) ----
+    /** Floor cell the current block plan/window started from — the first segment's start (waypoints are
+     *  start-exclusive, so the segment before waypoint 0 begins here). Refreshed on replan / window swap. */
+    private BlockPos planStartFloor;
+    /** Reusable {@link SteerView} re-pointed at the current segment each tick (no per-tick allocation). */
+    private final SegmentCursor cursor = new SegmentCursor();
+    private int offTrackTicks;  // consecutive ticks the bot is off the planned segment (slip detection)
+    private int stallTicks;     // consecutive airborne/underwater no-progress ticks (a jump can't fix these)
+    private int recoverCooldown; // throttle between forced re-searches after an off-track/stall recovery
+
+    // ---- swim-pose transition diagnostic (Debug.VERBOSE) — see logSwimTransition() -------------------
+    // Vanilla drops the prone Pose.SWIMMING the instant a tick sees !(isSprinting() && isInWater()), and can
+    // only re-enter it while isUnderWater() (eyes submerged). To find WHICH link breaks mid-crossing we snapshot
+    // the two per-tick inputs the follower controls (was a steer run? was buoyancy-jump held?) and dump them the
+    // moment isSwimming() flips, alongside the vanilla state — so PRONE->STAND names its own cause.
+    private boolean wasSwimming;           // isSwimming() at the end of the previous tick (edge detector)
+    private boolean steeredThisTick;       // a Movement.steer ran (false on a consumed-window early return → no sprint re-assert)
+    private boolean heldWaterJumpThisTick; // the water-rise rule held jump this tick (buoyancy → possible surface breach)
+    private String lastSteerMove = "-";    // simple name of the Movement whose steer ran this tick
 
     // ---- region-tier online repair (the "recover when stuck" half of the stuck arc) ------------------
     /**
@@ -246,9 +302,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         }
 
         this.xxa = 0.0f;
-        this.yya = this.isInWater() ? 1.0f : 0.0f;
+        this.yya = 0.0f;          // no idle float-up: a swimming step drives its vertical via velocity, and
+                                  // an idle/holding bot in water should hold, not auto-rise (was isInWater?1:0)
         this.setJumping(false);   // discrete land jumps use jumpFromGround(); swim following re-enables this
         this.setSprinting(false); // ditto — buoyancy + sprint-swim are refined per-step in steerAlongPath
+        this.steeredThisTick = false;       // reset the swim-pose diagnostic snapshot for this tick
+        this.heldWaterJumpThisTick = false; // (set below in steerAlongPath; read post-doTick in logSwimTransition)
 
         switch (mode) {
             case STAY -> holdPosition();
@@ -270,6 +329,10 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // damage (doCheckFallDamage). Uses the bot's ACTUAL movement this tick. No-op pre-26.
         final Vec3 moved = this.position().subtract(posBefore);
         MoveReport.after(this, moved.x, moved.y, moved.z, EntityState.onGround(this));
+
+        // Read the prone-pose state AFTER doTick (vanilla's updateSwimming ran inside it, from THIS tick's
+        // inputs + resulting position), so a PRONE->STAND flip is dumped with the state that caused it.
+        if (Debug.VERBOSE) logSwimTransition();
     }
 
     /** STAY: stop in place and face the owner. */
@@ -325,7 +388,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         } else {
             // Per-tick driver hook (HPA-IMPLEMENTATION.md §10): report the bot's floor cell so the sliding
             // window can COMMIT into the next region (the wiggle rule) and replan THAT window's block path.
-            pathPlan.onBotMoved(this.blockPosition().below());
+            pathPlan.onBotMoved(this.blockPosition().below(), currentStartMode());
             // Block-level refresh (NOT a skeleton rebuild): when the current block path is consumed but the
             // route isn't COMPLETE, re-search the window toward the SAME target so the bot keeps inching along
             // a committed partial; also do it periodically so a terrain edit under the window is picked up.
@@ -343,6 +406,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                 this.lastBlockPlanRef = now;
                 this.waypointIndex = 0;
                 this.lastEditedIndex = -1;
+                this.planStartFloor = this.blockPosition().below(); // new window begins at the bot's cell
             }
         }
         // Region repair, every tick (cheap status check): a BLOCKED window — wherever it surfaced — gets its
@@ -453,7 +517,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // tier is hardened.
         try {
             this.pathPlan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, caps(),
-                    inventoryFeasibility());
+                    inventoryFeasibility(), currentStartMode());
             this.path = pathPlan.currentBlockPlan();
         } catch (Throwable t) {
             if (!loggedPlanError) {
@@ -467,6 +531,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.lastBlockPlanRef = this.path;
         this.waypointIndex = 0;
         this.lastEditedIndex = -1;
+        this.planStartFloor = startFloor; // first segment begins at the bot's current floor cell
 
         boolean hasPath = path != null && path.size() > 0;
         if (Debug.ENABLED) {
@@ -625,13 +690,14 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     }
 
     /**
-     * Steer toward the current waypoint, advancing the cursor by block occupancy and delegating each step's
-     * special inputs to its {@link com.orebit.mod.pathfinding.blockpathfinder.Movement} (the cold {@code
+     * Steer along the current path SEGMENT, advancing the waypoint cursor by block occupancy and delegating
+     * each step's inputs to its {@link com.orebit.mod.pathfinding.blockpathfinder.Movement} (the cold {@code
      * reached}/{@code editsReadyNow}/{@code steer} hooks — MOVEMENT-DESIGN.md §1). The follower owns only the
-     * generic plumbing: advance the cursor, apply each step's folded edits once, and the stuck backstop +
-     * diagnostic. Per-move behaviour (the swim vertical climb, the fall column-homing, the Ascend/Pillar jump,
-     * the swim cursor tolerance, Pillar's airborne edit timing) lives on the move classes via {@link
-     * BotSteering}, so adding a capability never touches this method.
+     * generic plumbing: advance the cursor, apply each step's folded edits once, hand the move a {@link
+     * SteerView} over the current segment, and run the cross-cutting slip/stall recovery. Per-move behaviour
+     * (the swim velocity track, the Fall/Pillar airborne column-homing, the Ascend/Pillar jump, the swim
+     * cursor tolerance, Pillar's airborne edit timing) lives on the move classes via {@link BotSteering} +
+     * {@link SteerControl}, so adding a capability never touches this method.
      */
     private void steerAlongPath() {
         // Advance to the furthest waypoint the bot has reached. Waypoints ARE blocks and so are the bot's feet
@@ -664,25 +730,103 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             applyEdits(edits);
         }
 
-        // Per-move steering: face + drive toward the waypoint, plus whatever special inputs the move needs
-        // (jump, mid-air homing, direct swim vertical velocity). All callbacks go through this entity's
-        // BotSteering implementation below.
-        movement.steer(this, wp.getX(), wp.getY(), wp.getZ());
+        // Build the SEGMENT the move tracks: from the previous waypoint (or the window/plan start for the
+        // first step — waypoints are start-exclusive) to the current target, plus a one-step look-ahead so
+        // the controller can ease momentum into a turn. The cursor is reused (no per-tick allocation) and
+        // converts to the feet-target frame the controller expects (block-centre xz, floor-cell-top y).
+        BlockPos segStart = (waypointIndex == 0)
+                ? (planStartFloor != null ? planStartFloor : this.blockPosition().below())
+                : path.waypoint(waypointIndex - 1);
+        BlockPos next = (waypointIndex + 1 < path.size()) ? path.waypoint(waypointIndex + 1) : null;
+        cursor.set(segStart, wp, next);
 
-        // Generic stuck backstop + diagnostic (cross-cutting, not per-move): when the bot grinds in place on
-        // the ground a jump frees most physical hitches the planner can't see, and persistent grinding dumps
-        // the surrounding column (live solidity, which the floor-centric 2-bit grid can't represent — a CLEAR
-        // cell guarantees only 2 air blocks, a jump-up needs ~3). Ascend/Pillar jump deterministically in
-        // their own steer; this is the catch-all for every other move (a Traverse step-assist must NOT jump,
-        // and doesn't here — vanilla auto-steps it and the bot isn't stuck).
+        // Per-move steering: track the planned LINE toward the waypoint (look + forward), plus whatever extra
+        // inputs the move needs (hold jump for a climb, the sprint flag). All callbacks go through this
+        // entity's BotSteering implementation below.
+        movement.steer(this, cursor);
+        this.steeredThisTick = true;                            // a steer ran → sprint was re-asserted if this is a sprint move
+        this.lastSteerMove = movement.getClass().getSimpleName(); // (swim-pose diagnostic; Debug.VERBOSE)
+
+        // Cross-cutting WATER RULE — the vertical control for EVERY move, exactly what a player presses: in
+        // water, hold SPACE to rise toward the planned depth, hold SHIFT to sink toward it. This one rule (not
+        // per-move code) is how the bot dives to a submerged hole, holds depth, surfaces, and climbs out onto a
+        // bank — for a Swim/SprintSwim, a StartSprintSwim dive, or a Traverse leaving water. The up half is
+        // vanilla's jumpInLiquid (setJumping); the down half is goDownInWater (sinkInWater), which a headless
+        // bot must replicate since the client tick that normally runs it is absent. The dead-band stops chatter.
+        if (this.isInWater()) {
+            // A prone-mode move (sprint-swim) rides pinned a bit under the surface so its short 0.6-tall hitbox
+            // never floats fully clear of the water — otherwise vanilla drops the prone pose and the plan
+            // degrades to the slow Swim (the diagnosed surface-breach). Standing water moves ride at plain depth.
+            double depth = cursor.ty() - (movement.keepsSubmerged() ? SUBMERGE_BIAS : 0.0);
+            if (this.getY() < depth - WATER_RISE_DEADBAND) {
+                this.setJumping(true);   // below the planned depth → rise (hold space)
+                this.heldWaterJumpThisTick = true; // (swim-pose diagnostic: buoyancy that can breach the surface)
+            } else if (this.getY() > depth + WATER_RISE_DEADBAND) {
+                this.sinkInWater();      // above the planned depth → sink (hold shift) — the dive the bot lacked
+            }
+        }
+
+        if (Debug.VERBOSE) logVerbose(movement, wp);
+
+        // Generic recovery (cross-cutting, not per-move) — DETECT a slip / stall the planner can't see and
+        // HANDLE it. On the ground, holding jump frees most physical hitches (and persistent grinding dumps
+        // the surrounding column, which the floor-centric 2-bit grid can't represent). Off the ground / in
+        // water a jump can't help, so a no-progress stall forces a re-search; likewise a sustained drift off
+        // the planned line. The old backstop only jumped when grounded, so airborne/underwater stalls never
+        // recovered.
         Vec3 velocity = this.getDeltaMovement();
-        boolean stuck = velocity.horizontalDistanceSqr() < STUCK_SPEED_SQR;
-        if (stuck && EntityState.onGround(this)) {
-            this.jumpFromGround();
+        boolean grounded = EntityState.onGround(this);
+        if (velocity.horizontalDistanceSqr() < STUCK_SPEED_SQR && grounded) {
+            this.setJumping(true);
             if (++stuckTicks == STUCK_DUMP_TICKS && Debug.ENABLED) dumpStuck(wp);
         } else {
             stuckTicks = 0;
         }
+
+        // Slip detection: count consecutive ticks the bot is off the planned segment (a transient bob won't
+        // trip it). Stall detection: no 3-D progress while airborne/underwater (a jump can't help there).
+        offTrackTicks = (SteerControl.crossTrack(this, cursor) > OFF_TRACK_DIST) ? offTrackTicks + 1 : 0;
+        stallTicks = (!grounded && velocity.lengthSqr() < STUCK_SPEED_SQR) ? stallTicks + 1 : 0;
+        if (recoverCooldown > 0) {
+            recoverCooldown--;
+        } else if (offTrackTicks >= OFF_TRACK_TICKS || stallTicks >= STALL_TICKS) {
+            blockRefreshTicks = 0; // re-search the window from the bot's actual cell next tick (driveToward)
+            offTrackTicks = 0;
+            stallTicks = 0;
+            recoverCooldown = RECOVER_COOLDOWN;
+        }
+    }
+
+    /**
+     * Reusable {@link SteerView} the follower re-points at the current segment each tick — start → target,
+     * plus a one-step look-ahead. Converts floor-cell {@link BlockPos}es to the controller's feet-target
+     * world frame: block centre horizontally ({@code +0.5}), top face of the floor cell vertically
+     * ({@code +1.0}, the world Y a bot standing on that cell has its feet at). Mutable + reused, so no
+     * per-tick garbage; the MC {@link BlockPos} type stays on this side of the MC-free {@link SteerView} seam.
+     */
+    private static final class SegmentCursor implements SteerView {
+        private double sx, sy, sz, tx, ty, tz, nx, ny, nz;
+        private boolean hasNext;
+
+        void set(BlockPos start, BlockPos target, BlockPos next) {
+            sx = start.getX() + 0.5; sy = start.getY() + 1.0; sz = start.getZ() + 0.5;
+            tx = target.getX() + 0.5; ty = target.getY() + 1.0; tz = target.getZ() + 0.5;
+            hasNext = next != null;
+            if (hasNext) {
+                nx = next.getX() + 0.5; ny = next.getY() + 1.0; nz = next.getZ() + 0.5;
+            }
+        }
+
+        @Override public double sx() { return sx; }
+        @Override public double sy() { return sy; }
+        @Override public double sz() { return sz; }
+        @Override public double tx() { return tx; }
+        @Override public double ty() { return ty; }
+        @Override public double tz() { return tz; }
+        @Override public boolean hasNext() { return hasNext; }
+        @Override public double nx() { return nx; }
+        @Override public double ny() { return ny; }
+        @Override public double nz() { return nz; }
     }
 
     /**
@@ -730,6 +874,55 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     // ---- Debug log formatting ----------------------------------------------------------------
 
+    /**
+     * {@code /bot debug verbose}: announce which {@link Movement} the bot is executing, toward which cell, and
+     * in which medium — one line per change (not per tick), to the owner's chat and the log. This is the
+     * diagnostic for "is the bot actually swimming, or is it trying to Ascend in water?": the medium flips to
+     * {@code water} the moment it submerges, and the move name says exactly which strategy is driving.
+     */
+    private void logVerbose(Movement movement, BlockPos wp) {
+        String move = movement.getClass().getSimpleName();
+        String medium = isInWater() ? "water" : (EntityState.onGround(this) ? "ground" : "air");
+        String key = waypointIndex + "|" + move + "|" + medium;
+        if (key.equals(lastVerbose)) return;
+        lastVerbose = key;
+        chat("[bot] " + move + " → " + compact(wp) + " (" + medium + ")");
+        OrebitCommon.LOGGER.info("[Orebit] exec {} -> {} ({}) feetY={} targetY={}",
+                move, compact(wp), medium, String.format("%.2f", getY()),
+                String.format("%.2f", wp.getY() + 1.0));
+    }
+
+    /**
+     * {@code /bot debug verbose}: dump the bot's swim state the moment the prone {@code Pose.SWIMMING} flips
+     * (either direction) — the diagnostic for "why does the bot drop sprint-swim mid-crossing?". Vanilla's
+     * continuation rule keeps the pose only while {@code isSprinting() && isInWater()} and can re-enter it only
+     * while {@code isUnderWater()}, so a {@code PRONE->STAND} line names its own cause:
+     * <ul>
+     *   <li>{@code sprinting=false} (usually with {@code steered=false}, {@code wp=n/n}) → a one-tick sprint drop:
+     *       the window was consumed and {@link #steerAlongPath} early-returned without re-asserting sprint.</li>
+     *   <li>{@code inWater=false} with {@code y} above the surface and a positive {@code vy}, {@code heldJump=true}
+     *       → a buoyancy breach: the water-rise rule launched the bot clear of the water for a tick.</li>
+     * </ul>
+     * Read post-{@code doTick} (see {@link #tick}), so the state is the one vanilla's {@code updateSwimming} just
+     * decided from. One line per flip (not per tick); never throws onto the tick.
+     */
+    private void logSwimTransition() {
+        boolean now = this.isSwimming();
+        if (now != wasSwimming) {
+            Vec3 v = this.getDeltaMovement();
+            String edge = now ? "STAND->PRONE" : "PRONE->STAND";
+            OrebitCommon.LOGGER.info("[Orebit] swim {} sprint={} inWater={} underWater={} onGround={} "
+                            + "y={} vy={} move={} steered={} heldJump={} wp={}/{}",
+                    edge, isSprinting(), isInWater(), isUnderWater(), EntityState.onGround(this),
+                    String.format("%.2f", getY()), String.format("%.3f", v.y), lastSteerMove,
+                    steeredThisTick, heldWaterJumpThisTick, waypointIndex, path != null ? path.size() : -1);
+            chat("[bot] swim " + edge + " sprint=" + isSprinting() + " inWater=" + isInWater()
+                    + " underWater=" + isUnderWater() + " vy=" + String.format("%.3f", v.y)
+                    + " move=" + lastSteerMove + " steered=" + steeredThisTick);
+        }
+        wasSwimming = now;
+    }
+
     private void dumpStuck(BlockPos wp) {
         ServerLevel level = (ServerLevel) Worlds.of(this);
         BlockPos foot = this.blockPosition();
@@ -769,7 +962,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         Vec3 velocity = this.getDeltaMovement();
         boolean stuck = velocity.horizontalDistanceSqr() < STUCK_SPEED_SQR;
         if (stuck && EntityState.onGround(this)) {
-            this.jumpFromGround();
+            this.setJumping(true);
         }
     }
 
@@ -789,11 +982,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     /** Via the {@link EntityState} adapter (the accessor name drifts across versions) — see {@link BotSteering#grounded}. */
     @Override public boolean grounded() { return EntityState.onGround(this); }
 
-    @Override public double velX() { return this.getDeltaMovement().x; }
-    @Override public double velY() { return this.getDeltaMovement().y; }
-    @Override public double velZ() { return this.getDeltaMovement().z; }
-
-    @Override public void setVelocity(double vx, double vy, double vz) { this.setDeltaMovement(vx, vy, vz); }
+    @Override public boolean inWater() { return this.isInWater(); }
 
     @Override
     public void faceHorizontally(double dx, double dz) {
@@ -803,14 +992,22 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.setYHeadRot(yaw);
     }
 
+    /**
+     * Sink in water — replicate vanilla {@code LocalPlayer.goDownInWater()} (the effect of holding shift),
+     * which the headless bot's missing client tick would otherwise run: subtract {@code 0.04} from the
+     * vertical velocity, the exact counterpart to {@code jumpInLiquid}'s {@code +0.04} rise.
+     */
+    @Override
+    public void sinkInWater() {
+        this.setDeltaMovement(this.getDeltaMovement().subtract(0.0, 0.04, 0.0));
+    }
+
     @Override public void setForward(float zza) { this.zza = zza; }
-    @Override public void setVerticalInput(float yya) { this.yya = yya; }
 
     // setSprinting(boolean) is satisfied by the inherited public LivingEntity method.
-    /** Widen the inherited protected {@code setJumping} to public so it satisfies the {@link BotSteering} seam. */
+    /** Widen the inherited protected {@code setJumping} to public so it satisfies the {@link BotSteering} seam.
+     *  Held true, vanilla {@code aiStep} jumps on land and swims up in water — the one climb mechanism. */
     @Override public void setJumping(boolean jumping) { super.setJumping(jumping); }
-
-    @Override public void jump() { this.jumpFromGround(); }
 
     // ---- Survival gating (the bot runs the full vanilla player tick via doTick — see tick()) ----------
     // Two of the now-live survival systems are gated by their config flags by intercepting vanilla's own
