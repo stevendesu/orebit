@@ -149,6 +149,34 @@ public final class BotInventory {
         return bestSlot;
     }
 
+    /**
+     * Put the fastest HOTBAR tool for {@code state} into the bot's main hand — the "equip your pickaxe before you
+     * dig" step the live mining actuator ({@link com.orebit.mod.BotMining}) runs each tick before reading destroy
+     * progress, so the bot mines with (and visibly holds) the right tool at the right speed. Scans the hotbar
+     * (slots 0..8 — the ones a player can hold) and, only when a slot is <i>strictly</i> faster than what's
+     * already held (no thrash on ties), <b>swaps</b> that tool into the hand and the held item into the tool's
+     * old slot. The swap uses only the cross-version-stable item verbs ({@code getMainHandItem} /
+     * {@code setItemInHand} / {@code getItem} / {@code setItem}) rather than the {@code Inventory.selected} field,
+     * which went private in 26.x — so this stays in core with no overlay, at the cost of rearranging two hotbar
+     * slots instead of scrolling the selection (invisible for a bot; it settles after the first swap of a given
+     * block type). A better tool sitting in the backpack is left there — a future refinement (the planner's
+     * feasibility cap already scans all slots for cost, so at worst the real dig is a touch slower than planned
+     * and the reactive loop just spends the extra ticks).
+     */
+    public void selectBestHotbarTool(BlockState state) {
+        ItemStack held = bot.getMainHandItem();
+        float bestSpeed = held.getDestroySpeed(state);
+        int bestSlot = -1;
+        for (int i = 0; i <= 8; i++) {
+            float sp = inv.getItem(i).getDestroySpeed(state);
+            if (sp > bestSpeed) { bestSpeed = sp; bestSlot = i; }
+        }
+        if (bestSlot < 0) return; // nothing in the hotbar beats what's already held
+        ItemStack tool = inv.getItem(bestSlot);
+        bot.setItemInHand(InteractionHand.MAIN_HAND, tool); // hold the faster tool
+        inv.setItem(bestSlot, held);                        // and leave what we held in the tool's old slot
+    }
+
     // ---- Per-pathfind feasibility snapshot (the cheap Baritone-style cap) --------------------------
 
     /**
