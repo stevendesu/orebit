@@ -90,4 +90,19 @@ public interface Movement {
     default boolean keepsSubmerged() {
         return false;
     }
+
+    /**
+     * Build this move's declarative execution {@link MovePlan} for the step from floor cell {@code (fx,fy,fz)}
+     * to {@code (tx,ty,tz)} — the reconcile-based counterpart to {@link #steer}, where the move states the
+     * geometry it needs (break/place) and the phase ordering, and the follower's {@link PhaseRunner} establishes
+     * that geometry against the LIVE world each tick (so a missed break/place self-heals). Built once when the
+     * step begins.
+     *
+     * <p>Default {@code null} — the move has no plan and the follower drives it the old way ({@link #steer} plus
+     * the follower's one-shot edit application). Moves are converted to the phase model one at a time (Pillar
+     * first); an unconverted move is untouched.
+     */
+    default MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+        return null;
+    }
 }

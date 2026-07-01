@@ -5,6 +5,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.regionpathfinder.HierarchicalRegionPlan;
@@ -725,6 +726,45 @@ public final class PathPlan {
                 startMode);
         this.lastPlanPartial = blockPlan != null && BlockPathfinder.LAST_WAS_PARTIAL;
         this.status = (blockPlan != null) ? PathStatus.RUNNING : PathStatus.BLOCKED;
+        if (Debug.ENABLED && blockPlan != null) {
+            logBlockPlan();
+        }
+    }
+
+    /**
+     * Dump the returned block plan's SHAPE — the first ~10 steps as {@code move d(dx,dy,dz) -> floor [brk/plc]},
+     * plus the total cost and whether it's a best-effort PARTIAL. The per-step delta makes a pathological route
+     * legible at a glance: a plan that goes DOWN then back UP (a MineDown that undoes a Pillar) shows as
+     * {@code d(0,-1,0)} followed by {@code d(0,+1,0)} — the signature we're hunting. Cold (one dump per replan,
+     * under {@link Debug#ENABLED}); reads the plan in place, no allocation beyond the string.
+     */
+    private void logBlockPlan() {
+        final StringBuilder sb = new StringBuilder();
+        sb.append("[Orebit] block plan ").append(blockPlan.size()).append("wp cost=")
+                .append(String.format("%.1f", blockPlan.cost()))
+                .append(lastPlanPartial ? " PARTIAL" : " FULL")
+                .append(" from ").append(compactPos(botFloor)).append(':');
+        BlockPos prev = botFloor;
+        final int lim = Math.min(blockPlan.size(), 10);
+        for (int i = 0; i < lim; i++) {
+            final BlockPos floor = blockPlan.waypoint(i).below(); // waypoint = floor.above() (the stand position)
+            final int dx = floor.getX() - prev.getX();
+            final int dy = floor.getY() - prev.getY();
+            final int dz = floor.getZ() - prev.getZ();
+            sb.append("\n  ").append(i).append(' ')
+                    .append(blockPlan.movement(i).getClass().getSimpleName())
+                    .append(" d(").append(dx).append(',').append(dy).append(',').append(dz).append(") ->")
+                    .append(compactPos(floor));
+            final StepEdits e = blockPlan.edits(i);
+            if (e != null && (e.breakCount() > 0 || e.placeCount() > 0)) {
+                sb.append(" [brk=").append(e.breakCount()).append(" plc=").append(e.placeCount()).append(']');
+            }
+            prev = floor;
+        }
+        if (blockPlan.size() > lim) {
+            sb.append("\n  ... +").append(blockPlan.size() - lim).append(" more");
+        }
+        OrebitCommon.LOGGER.info(sb.toString());
     }
 
     /** Whether the current window's block plan is a best-effort PARTIAL (didn't reach the window target). */
