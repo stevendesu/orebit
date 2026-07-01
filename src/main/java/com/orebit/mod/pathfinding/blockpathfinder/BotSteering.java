@@ -70,4 +70,28 @@ public interface BotSteering {
      * {@code 0.04} from its vertical velocity. Called per tick by the follower while above the planned depth.
      */
     void sinkInWater();
+
+    // ---- Live-world geometry + block actions (the reconcile seam a MovePlan drives through) -----------
+    // A phase plan re-checks the LIVE world each tick and establishes its required geometry, so these read the
+    // current level (not the nav grid) and act as a player does. Primitives only, so movements + the runner
+    // stay MC-free and headless-testable; the entity layer backs them with real reads / the mining + placing
+    // actuators.
+
+    /** Whether the world cell {@code (x,y,z)} is currently a solid (movement-blocking) block — the live test a
+     *  {@code Need.AIR} requirement clears (mine while true) and a {@code Need.FOOTING} requirement wants (place
+     *  while false). Reads the live level, so it reflects the bot's own just-made breaks/places. */
+    boolean solidAt(int x, int y, int z);
+
+    /** Whether the world cell {@code (x,y,z)} is currently passable (air / non-blocking) — the complement of
+     *  {@link #solidAt} exposed for guards/plans that read positively. */
+    boolean airAt(int x, int y, int z);
+
+    /** Ask to mine the block at {@code (x,y,z)} this tick — routed to the timed {@link com.orebit.mod.BotMining}
+     *  actuator (equip tool, face, swing, real destroy time, drops). Reactive: call it every tick the cell must
+     *  go; stopping the calls aborts the break. */
+    void mine(int x, int y, int z);
+
+    /** Place a footing block at {@code (x,y,z)} — the bot's configured/conjured or carried block, server-side,
+     *  the instant a {@code Need.FOOTING} is unmet and the cell is placeable. */
+    void place(int x, int y, int z);
 }

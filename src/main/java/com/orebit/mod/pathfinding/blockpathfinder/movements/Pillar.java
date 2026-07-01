@@ -6,6 +6,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
+import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
@@ -177,5 +178,50 @@ public final class Pillar implements Movement {
     public void steer(BotSteering b, SteerView path) {
         SteerControl.recenterOnTarget(b, path);
         b.setJumping(true);
+    }
+
+    /**
+     * "Reached" only once the bot is actually STANDING on the new footing (grounded at the destination cell) —
+     * not while it passes the destination Y airborne at the jump apex. The default block-exact test would fire
+     * mid-jump and advance the waypoint before the apex placement completes; requiring {@code grounded} keeps
+     * the step alive until the footing is placed and landed on (the natural place-at-apex, then settle order).
+     */
+    @Override
+    public boolean reached(BotSteering b, int wx, int wy, int wz) {
+        return b.grounded() && b.footX() == wx && b.footY() == wy && b.footZ() == wz;
+    }
+
+    /**
+     * The phase-model execution plan (Stage 2 — the first move converted from the {@code steer} + one-shot-edit
+     * path to a live-geometry reconcile). Pillar is <b>JUMP &rarr; PLACE &rarr; LAND</b>: rise off the from-floor
+     * {@code (fx,fy,fz)}, place the footing in the vacated cell {@code (fx,fy+1,fz)} once airborne over it, and
+     * settle onto it. Break/place are declared as needs and established against the LIVE world each tick, so a
+     * missed head-clear or footing self-heals; the ordering (place only after airborne) rides the phase order,
+     * and the regression guard restarts the climb if a placement never took and the bot fell back.
+     */
+    @Override
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+        final double startFeetY = fy + 1.0;        // feet world Y standing on the from-floor
+        final int landedFeetBlockY = fy + 2;       // feet BLOCK Y once standing on the placed footing (fy+1)
+        MovePlan plan = new MovePlan();
+        // Fell back to (or below) the start with no height gained → the footing never took; re-attempt.
+        plan.resetWhen(b -> b.grounded() && b.y() < startFeetY + 0.5);
+        // JUMP: clear the takeoff head cell if it's solid, then recenter + hold jump until the feet have
+        // CLEARED the footing cell (world Y >= fy+2, the cell's top) — so the footing is placed BENEATH the bot
+        // at the apex, like a real player, not inside itself the instant it leaves the ground.
+        plan.phase("jump")
+                .need(MovePlan.Need.AIR, fx, fy + 3, fz)
+                .drive((b, v) -> { SteerControl.recenterOnTarget(b, v); b.setJumping(true); })
+                .advanceWhen(b -> b.y() >= fy + 2.0);
+        // PLACE: airborne over the vacated cell — place the footing there; advance once it's solid.
+        plan.phase("place")
+                .need(MovePlan.Need.FOOTING, fx, fy + 1, fz)
+                .drive(SteerControl::recenterOnTarget)
+                .advanceWhen(b -> b.solidAt(fx, fy + 1, fz));
+        // LAND: settle straight down onto the new footing; complete once standing on it.
+        plan.phase("land")
+                .drive(SteerControl::recenterOnTarget)
+                .done(b -> b.grounded() && b.footY() == landedFeetBlockY);
+        return plan;
     }
 }

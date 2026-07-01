@@ -42,6 +42,11 @@ public class SteerControlTest {
         @Override public void setSprinting(boolean s) { sprinting = s; }
         @Override public void setJumping(boolean j) { jumping = j; }
         @Override public void sinkInWater() { sank = true; }
+        // Reconcile seam — unused by the pure-geometry SteerControl tests, stubbed to satisfy the interface.
+        @Override public boolean solidAt(int x, int y, int z) { return false; }
+        @Override public boolean airAt(int x, int y, int z) { return true; }
+        @Override public void mine(int x, int y, int z) { }
+        @Override public void place(int x, int y, int z) { }
     }
 
     /** A segment in feet-target world coordinates (no cell conversion — that's the follower's job). */
