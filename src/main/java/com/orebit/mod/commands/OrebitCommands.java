@@ -32,6 +32,7 @@ public final class OrebitCommands {
             new StayCommand(),
             new ComeCommand(),
             new GotoCommand(),
+            new MineCommand(),
             new HereCommand(),
             new TraceCommand(),
             new ConfigCommand(),
