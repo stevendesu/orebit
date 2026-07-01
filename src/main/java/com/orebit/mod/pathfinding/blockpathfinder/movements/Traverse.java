@@ -72,6 +72,7 @@ public final class Traverse implements Movement {
 
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
+        if (ctx.mode() != MovementContext.MODE_STANDING) return; // a ground walk — only while upright
         for (int[] d : CARDINALS) {
             int nx = x + d[0];
             int nz = z + d[1];

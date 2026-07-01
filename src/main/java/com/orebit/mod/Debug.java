@@ -21,4 +21,13 @@ public final class Debug {
 
     /** When true, the bot emits its runtime path/region/window logs, particle overlay, and chat progress. */
     public static boolean ENABLED = false;
+
+    /**
+     * When true, the follower announces which {@link com.orebit.mod.pathfinding.blockpathfinder.Movement} it
+     * is executing, toward which cell, and in which medium (ground/water/air) — one line per change, to the
+     * owner's chat and the log (see {@code AllyBotEntity.logVerbose}). Flipped by {@code /bot debug verbose}.
+     * Independent of {@link #ENABLED}: this is the targeted "what is the bot actually doing right now" trace
+     * (e.g. confirming an underwater step is a Swim, not a stuck Ascend), without the full path/region firehose.
+     */
+    public static boolean VERBOSE = false;
 }

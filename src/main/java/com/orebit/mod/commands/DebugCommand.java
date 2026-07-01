@@ -21,12 +21,23 @@ public final class DebugCommand implements BotCommand {
         bot.then(Commands.literal("debug")
                 .then(Commands.literal("on").executes(ctx -> set(ctx.getSource(), true)))
                 .then(Commands.literal("off").executes(ctx -> set(ctx.getSource(), false)))
+                .then(Commands.literal("verbose")
+                        .then(Commands.literal("on").executes(ctx -> setVerbose(ctx.getSource(), true)))
+                        .then(Commands.literal("off").executes(ctx -> setVerbose(ctx.getSource(), false)))
+                        .executes(ctx -> setVerbose(ctx.getSource(), !Debug.VERBOSE)))
                 .executes(ctx -> set(ctx.getSource(), !Debug.ENABLED)));
     }
 
     private static int set(CommandSourceStack source, boolean on) {
         Debug.ENABLED = on;
         CommandFeedback.send(source, "Bot debug " + (on ? "ON" : "OFF") + ".");
+        return 1;
+    }
+
+    private static int setVerbose(CommandSourceStack source, boolean on) {
+        Debug.VERBOSE = on;
+        CommandFeedback.send(source, "Bot debug verbose " + (on ? "ON" : "OFF")
+                + (on ? " — announcing the executing movement + medium per change." : "."));
         return 1;
     }
 }

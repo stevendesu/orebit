@@ -187,6 +187,11 @@ public final class PathPlan {
     private PathStatus status;
     /** The bot's last reported floor cell (the block-A* start for the next replan). */
     private BlockPos botFloor;
+    /** The bot's current movement mode ({@link BlockPathfinder#MODE_AUTO} = derive from geometry, else the
+     *  live pose STANDING/PRONE) — threaded into every windowed search so a replan mid-sprint-swim keeps the
+     *  prone state instead of re-deriving STANDING from a buoyancy bob and re-initiating. Updated per tick by
+     *  {@link #onBotMoved}. */
+    private int startMode = BlockPathfinder.MODE_AUTO;
     /**
      * The current window's block target + corridor (set by {@link #replanBlock}), exposed via
      * {@link #currentWindowTarget()} / {@link #currentCorridor()} so {@code /bot trace} can re-run the SAME
@@ -243,6 +248,16 @@ public final class PathPlan {
      */
     public PathPlan(ServerLevel level, RegionGrid regionGrid, BlockPos startFloor, BlockPos goalFloor,
                     BotCaps caps, MovementContext.InventoryView inventory) {
+        this(level, regionGrid, startFloor, goalFloor, caps, inventory, BlockPathfinder.MODE_AUTO);
+    }
+
+    /**
+     * As above, additionally seeding the bot's initial movement mode ({@code startMode}: STANDING/PRONE, or
+     * {@link BlockPathfinder#MODE_AUTO} to derive from start geometry) so the very first window search already
+     * matches the bot's pose. Subsequent searches use the per-tick pose from {@link #onBotMoved}.
+     */
+    public PathPlan(ServerLevel level, RegionGrid regionGrid, BlockPos startFloor, BlockPos goalFloor,
+                    BotCaps caps, MovementContext.InventoryView inventory, int startMode) {
         this.level = level;
         this.regionGrid = regionGrid;
         this.goalFloor = goalFloor;
@@ -250,6 +265,7 @@ public final class PathPlan {
         this.inventory = inventory;
         this.minY = regionGrid.minY();
         this.botFloor = startFloor;
+        this.startMode = startMode;
 
         this.goalRX = RegionAddress.regionX(goalFloor.getX(), 0);
         this.goalRY = RegionAddress.regionY(goalFloor.getY(), 0, minY);
@@ -487,8 +503,9 @@ public final class PathPlan {
      * {@link PathStatus#COMPLETE} when the real goal tolerance is met. A transient dip back to an earlier
      * region neither retreats {@code committedIndex} nor replans.
      */
-    public void onBotMoved(BlockPos botFloor) {
+    public void onBotMoved(BlockPos botFloor, int startMode) {
         this.botFloor = botFloor;
+        this.startMode = startMode; // the bot's live pose, used by the next windowed search (keeps PRONE while swimming)
 
         if (status == PathStatus.COMPLETE || status == PathStatus.FAILED || skeleton == null) {
             return;
@@ -702,8 +719,10 @@ public final class PathPlan {
                     target.getX(), target.getY(), target.getZ(), target.equals(goalFloor), cuboidCap);
         }
 
-        // confineBound = null (unconfined), cuboidBound = the growth cap.
-        this.blockPlan = BlockPathfinder.findPath(grid, botFloor, target, caps, null, cuboidCap, inventory);
+        // confineBound = null (unconfined), cuboidBound = the growth cap. startMode = the bot's live pose (so a
+        // replan mid-sprint-swim stays PRONE instead of re-deriving STANDING from a bob and re-initiating).
+        this.blockPlan = BlockPathfinder.findPath(grid, botFloor, target, caps, null, cuboidCap, inventory,
+                startMode);
         this.lastPlanPartial = blockPlan != null && BlockPathfinder.LAST_WAS_PARTIAL;
         this.status = (blockPlan != null) ? PathStatus.RUNNING : PathStatus.BLOCKED;
     }

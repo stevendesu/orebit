@@ -9,6 +9,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.movements.Fall;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.MineDown;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Pillar;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.SprintSwim;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.StartSprintSwim;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.Surface;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Swim;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse;
 
@@ -31,13 +33,18 @@ public final class MovementRegistry {
     public static final Movement MINE_DOWN = new MineDown();
     public static final Movement SWIM = new Swim();
     public static final Movement SPRINT_SWIM = new SprintSwim();
+    public static final Movement START_SPRINT_SWIM = new StartSprintSwim();
+    public static final Movement SURFACE = new Surface();
 
     /**
      * Tier 1 (ground + water): walk + step-assist, diagonal walk, jump-up-1, step-down-1, safe drop, the
-     * vertical-in-place pair pillar-up / mine-down, and the water pair normal-swim / sprint-swim.
-     * Pillar/MineDown self-gate on place/break caps; the swim moves self-gate on the presence of water (a
-     * dry world never emits them), so a walk-only bot on land still gets only the plain ground moves.
+     * vertical-in-place pair pillar-up / mine-down, the water pair normal-swim / sprint-swim, and the
+     * pose-transition pair start-sprint-swim / surface (STANDING↔PRONE, the stateful sprint-swim rule).
+     * Every move self-gates: the ground moves on {@code MODE_STANDING}, the sprint-swim + surface on
+     * {@code MODE_PRONE}, Pillar/MineDown on place/break caps, the swim moves on the presence of water — so a
+     * walk-only bot on dry land still gets only the plain ground moves and never changes pose.
      */
     public static final List<Movement> TIER1 =
-            List.of(TRAVERSE, DIAGONAL, ASCEND, DESCEND, FALL, PILLAR, MINE_DOWN, SWIM, SPRINT_SWIM);
+            List.of(TRAVERSE, DIAGONAL, ASCEND, DESCEND, FALL, PILLAR, MINE_DOWN, SWIM, SPRINT_SWIM,
+                    START_SPRINT_SWIM, SURFACE);
 }

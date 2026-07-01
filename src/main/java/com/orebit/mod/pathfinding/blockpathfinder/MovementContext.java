@@ -42,6 +42,29 @@ public final class MovementContext {
      */
     public static final int UNBREAKABLE_HARDNESS = 255;
 
+    // ---- Movement MODE — the hitbox/pose state carried in the search node key (x,y,z,mode) -------------
+    // A small dimension so the same cell visited in a different pose is a DISTINCT search row: it lets the
+    // search model state moves whose legal continuations depend on how you arrived (sprint-swim must
+    // INITIATE in 2-deep water, then RETAINS the prone pose through 1-deep). A movement gates on the current
+    // node's mode via {@link #mode()}; the transition moves (StartSprintSwim / Surface) emit a destination in
+    // a new mode via the mode-carrying CandidateSink.accept overloads.
+    //
+    // There are only TWO modes because vanilla has only two relevant POSES: standing and prone. Vanilla has
+    // NO separate "crawl" pose — going prone under a 1-tall ceiling on land uses the SAME Pose.SWIMMING
+    // (0.6-tall hitbox) as sprint-swimming. So a single PRONE mode covers both sprint-swim and (future)
+    // crawl; whether a PRONE node behaves as swim or crawl is decided by the cell's water-ness at expansion
+    // time (geometry), NOT a second mode bit. The key reserves 2 bits, leaving room if a third pose ever
+    // proves necessary.
+
+    /** Upright (1.8-tall hitbox) — the default/start mode; all ground moves + surface Swim live here. */
+    public static final int MODE_STANDING = 0;
+    /**
+     * Prone (0.6-tall, {@code Pose.SWIMMING}) — entered via StartSprintSwim (2-deep water) or, later,
+     * StartCrawl (low ceiling). In water it's sprint-swim; on land in a 1-tall gap it's crawl — same pose,
+     * the medium is read from geometry. Left via Surface/StandUp back to {@link #MODE_STANDING}.
+     */
+    public static final int MODE_PRONE = 1;
+
     // ---- Break / place cost model (REAL TICKS — PRD §10 Phase 1d, physically-derived-costs) ------------
     // The whole search cost unit is real game ticks (20 = 1 s); break and place costs are the actual time
     // (and, for place, the inventory value) the bot spends, NOT tuned magic numbers. Break cost is the
@@ -121,6 +144,13 @@ public final class MovementContext {
     /** A reusable {@link Cuboid} a macro movement fills via {@link #cuboids()} — no per-candidate allocation. */
     private final Cuboid cuboidScratch = new Cuboid();
 
+    /**
+     * The mode of the node currently being expanded (one of {@link #MODE_STANDING}/{@code MODE_SWIMMING}/
+     * {@code MODE_CRAWLING}). Set by {@link BlockPathfinder} per expansion (like the relaxer's current g),
+     * read by a movement's {@code candidates} to gate itself. Defaults to {@link #MODE_STANDING}.
+     */
+    private int currentMode = MODE_STANDING;
+
     public MovementContext(NavGridView grid, BotCaps caps) {
         this.grid = grid;
         this.caps = caps;
@@ -153,6 +183,16 @@ public final class MovementContext {
      */
     public int macroAxis() {
         return macroAxis;
+    }
+
+    /** The mode of the node being expanded — a movement gates on this (see {@link #MODE_STANDING} etc.). */
+    public int mode() {
+        return currentMode;
+    }
+
+    /** Set the current node's mode before its expansion (called by {@link BlockPathfinder} per popped node). */
+    public void setMode(int mode) {
+        this.currentMode = mode;
     }
 
     /** Goal X (absolute world block coord) — a macro jump never overshoots it. */

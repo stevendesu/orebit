@@ -28,4 +28,24 @@ public interface CandidateSink {
     default void accept(int x, int y, int z, float cost) {
         accept(x, y, z, cost, null);
     }
+
+    /**
+     * Accept a destination in an explicit movement <b>mode</b> ({@link MovementContext#MODE_STANDING} or
+     * {@link MovementContext#MODE_PRONE}) — the search keys nodes by {@code (x,y,z,mode)}, so this lands on a
+     * distinct row from the same cell in another mode. Only the mode-TRANSITION moves use these (e.g.
+     * {@code StartSprintSwim} STANDING→PRONE, {@code Surface} PRONE→STANDING); every ordinary move calls the
+     * plain {@link #accept(int,int,int,float,EditScratch)} overloads, which preserve the current node's mode.
+     *
+     * <p>This is a {@code default} (delegating to the mode-agnostic overload) so {@link CandidateSink} keeps a
+     * single abstract method and stays usable as a lambda — the real search relaxer overrides it to honour the
+     * mode, while diagnostic/probe sinks (which never expand transition edges meaningfully) just ignore it.
+     */
+    default void accept(int x, int y, int z, float cost, EditScratch edits, int mode) {
+        accept(x, y, z, cost, edits);
+    }
+
+    /** Accept a mode-transition destination that carries no break/place edits. */
+    default void accept(int x, int y, int z, float cost, int mode) {
+        accept(x, y, z, cost, null, mode);
+    }
 }

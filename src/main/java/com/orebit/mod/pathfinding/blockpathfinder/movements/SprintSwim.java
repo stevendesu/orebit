@@ -4,6 +4,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 
 /**
  * Fast prone swimming — Minecraft's <b>Sprint Swim</b> (MOVEMENT-DESIGN.md, Tier 1 water). At
@@ -17,9 +19,12 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  * moving you may <i>continue</i> sprint-swimming through <b>1-deep</b> water. That is a movement-state rule,
  * exactly like Crawl (a requirement to start that then unlocks otherwise-illegal moves). The block A* nodes
  * carry no such mode bit yet, so <b>v1 approximates</b>: a sprint-swim edge is offered wherever the
- * destination is submerged (feet AND head in water for a horizontal step; water at the new feet for a
- * vertical one), which is exactly the 2-deep "initiable" state — the common deep-water case. The precise
- * rule is deferred to a stateful refinement:
+ * destination is submerged (water at the new feet for a vertical step; for a horizontal step, water feet plus
+ * a head that is water OR — only when the bot is already submerged here — a solid block, so it threads a
+ * <b>1-tall underwater gap</b> prone, the {@code 1×1}-hole-in-a-wall case). An open-air head stays the upright
+ * surface {@link Swim}. Requiring the source to be submerged for the solid-head gap is the geometric stand-in
+ * for "already prone-swimming" — the continuation-in-1-deep state. The precise rule is deferred to a stateful
+ * refinement:
  * <ul>
  *   <li><b>Reserved NavGrid bit.</b> The TraversalGrid short has a spare flag bit; baking "this water cell
  *       has water above it" (i.e. 2-deep / sprint-initiable) into it at chunk-build time turns the
@@ -60,18 +65,21 @@ public final class SprintSwim implements Movement {
 
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
-        // Only sprint-swim from a water position: the bot's current feet cell must hold water. (A surface
-        // node's feet are water too, so a dive-down from the surface is offered; a land node generates
-        // nothing.) The precise 2-deep initiation rule is approximated here — see the class doc.
+        // Sprint-swim only continues in the PRONE mode — entered via StartSprintSwim in 2-deep water. Because
+        // the search carries that mode in the node key, "already prone" is now an exact fact, not a geometric
+        // guess: the bot RETAINS the 0.6-tall hitbox through 1-deep water and 1-tall gaps (the move-state rule
+        // the old `submerged` hack only half-modelled).
+        if (ctx.mode() != MovementContext.MODE_PRONE) return;
+        // A PRONE node is in water by construction; guard the feet-water read defensively.
         if (!ctx.built(x, y + 1, z) || !ctx.water(x, y + 1, z)) return;
 
-        // Horizontal, fully submerged: destination feet AND head in water. A destination with an air head is
-        // a surface step (the slow Swim's), so the two moves partition the horizontal cases cleanly.
+        // Horizontal: a prone step just needs water at the DESTINATION FEET. The cell above may be water
+        // (2-deep), solid (a 1-tall underwater gap — a 1×1 hole in a wall, threaded prone), or air (skimming
+        // the surface prone) — all fit the 0.6-tall hitbox, so there is no head-clearance requirement.
         for (int[] d : CARDINALS) {
             int nx = x + d[0];
             int nz = z + d[1];
-            if (!ctx.built(nx, y + 1, nz)) continue;
-            if (ctx.water(nx, y + 1, nz) && ctx.water(nx, y + 2, nz)) {
+            if (ctx.built(nx, y + 1, nz) && ctx.water(nx, y + 1, nz)) {
                 out.accept(nx, y, nz, COST);
             }
         }
@@ -93,8 +101,23 @@ public final class SprintSwim implements Movement {
         return Swim.reachedSwim(b, wx, wy, wz);
     }
 
+    /**
+     * Look at the planned cell in 3-D and swim forward ({@link SteerControl#swimTowards}), sprinting — so
+     * vanilla adopts the prone sprint-swim (fast, and the 0.6-tall pose that threads a 1×1 hole), and the bot
+     * dives/climbs by looking down/up. Surfacing and the final climb out onto a bank are assisted by the
+     * follower's "hold jump while submerged and below target" rule.
+     */
     @Override
-    public void steer(BotSteering b, int wx, int wy, int wz) {
-        Swim.steerSwim(b, wx, wy, wz, true); // submerged + sprinting → vanilla prone sprint-swim
+    public void steer(BotSteering b, SteerView path) {
+        SteerControl.swimTowards(b, path);
+        b.setSprinting(true);
+    }
+
+    /** Prone pose — the follower pins it under the surface so the short hitbox never breaches (see {@link
+     *  Movement#keepsSubmerged}). Without this, a surface-skimming sprint-swim floats out of the water and
+     *  drops the pose, degrading to the slow {@link Swim}. */
+    @Override
+    public boolean keepsSubmerged() {
+        return true;
     }
 }
