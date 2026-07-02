@@ -1,3 +1,7 @@
+*Historical plan doc — this arc is DONE (config + `BotCaps` + real-inventory feasibility + the mining tick
+model landed; mining is now executed timed-and-vanilla by `BotMining`). Kept for rationale; PRD §10 holds
+current status.*
+
 # Agency Layer — the next arc (phase boundary: navigation → agency)
 
 > Ratified with Steve at the end of the partial-path session (2026-06-26). The **navigation foundation is

@@ -162,4 +162,6 @@ the one-time cost of building its cuboids. The next chapter is clawing that back
 extracting only as much box as the jump actually needs (the escape rule already
 caps the jump short, so most of the tall box we build goes unused), and skipping
 the bookkeeping for edits that sit *behind* the bot where they can't affect a
-forward jump. The cone is gone. Now we make what's left cheap.
+forward jump. The cone is gone. Now we make what's left cheap — and that hunt,
+where the ideas stop being obviously right and start needing a referee, is
+[the next chapter](measure_everything.md).

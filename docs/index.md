@@ -9,7 +9,7 @@ search bar in the top-right.
 ## Installation
 
 Looking to install Orebit on your own server? Check out our
-[Installation Guide](./getting-started/installation).
+[Installation Guide](./getting_started/installation.md).
 
 ## Contributing
 
@@ -63,8 +63,9 @@ outshine Baritone:
    completely by generating an alternate representation of the world that's
    optimized specifically for pathfinding
  * Rather than the simple but hardly-useful 2 bits per chunk representation of
-   distant locations, I build a much larger (roughly 30kb) region tree for each
-   chunk, enabling hierarchical pathfinding and efficient block search
+   distant locations, I build a compact [region-level cost model](./worldmodel.md#region-level)
+   of the world, enabling truly hierarchical pathfinding — plans that reach
+   thousands of blocks — and, eventually, efficient block search
 
 The end result is faster and more accurate block search and pathfinding over
 significantly larger distances.

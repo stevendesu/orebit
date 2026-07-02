@@ -166,7 +166,8 @@ reduced-fall-damage bit (`softLanding`) — both real facts the planner needs, a
 SlimeBounce are built.
 
 **Facts already present that movements reuse** (no new bits needed): `shape`/`topY` (step-assist,
-stair, slab half-steps), `faces` (place-against, parkour landing sturdiness), `climbable` (ladder/
+stair, slab half-steps), ~~`faces`~~ (REMOVED — the sturdy-faces mask cost half the navtype table and
+nothing read it; place-against is the `PLACEABLE_NEIGHBOR` NavFlags bit now), `climbable` (ladder/
 vine/scaffold), `fluid` (swim/lava), `surface` slow/slippery (cost + ice handling), `gravity`
 (cascade risk), `damaging` (hazard cost), `replaceable`+`faces` (bridge/pillar), `hardness`/`tool`/
 `toolRequired` (break cost), `openable` (door/gate/trapdoor toggle folded into Traverse),
@@ -208,6 +209,18 @@ enabled — then widen as movements land.
 - **Powder snow**: freeze-hazard interplay with `caps` (leather boots) — defer with the movement.
 
 ## 7. Status & build order
+
+> **Status update (2026-07).** Everything below through step 5 is BUILT, plus most of the "THEN" list.
+> `MovementRegistry.TIER1` is now 13 movements: Traverse, Diagonal, Ascend, Descend, Fall, Pillar,
+> MineDown, **Climb** (ladder/vine/scaffold, up+down), **Parkour** (1–4-gap, edit-free by rule), Swim,
+> SprintSwim, StartSprintSwim, Surface (the stateful pose transitions — mode is in the node key, the §1
+> "movement-state" answer). Break/place are folded edits carried by `StepEdits`/`PathEdits` exactly as
+> step 4 planned; mining is timed vanilla (`BotMining`); portal entry is follower-level
+> (`NetherPortalIndex` + portal-seek/ENTER), not an `EnterPortal` movement yet. Execution grew a layer
+> this doc predates: multi-phase moves (Pillar, Parkour) declare a guard-based `MovePlan` consumed by
+> `PhaseRunner`; the rest steer via the per-movement `steer` hook. Still open from below: Crawl,
+> SlimeBounce, PowderSnow, `softLanding`/`bouncy` facts, Tier 4. The sections below are kept as the
+> design rationale + the original build order.
 
 **DONE + runtime-verified (session 15).** Tier 1: `Movement` / `MovementContext` / `CandidateSink` /
 `BotCaps` / `MovementRegistry` + **Traverse** (step-assist) / **Ascend** (real head-clearance via

@@ -25,21 +25,23 @@ world efficiently (the **world model**) and moving through it intelligently (the
 
 ## 2. Current state (honest baseline)
 
-Orebit is today a **documentation-first codebase**: ~177 Java files, of which only
-~30 contain runnable logic; the rest are Javadoc-only design stubs. Two largely
-disjoint things exist:
+> **Updated 2026-07.** The 2026-06 baseline below described a broken pipeline; that phase is over.
 
-1. **A working prototype** — the root `com.orebit.mod` package (`AllyBotEntity`, a
-   faked `ServerPlayerEntity`, follows the owner via imperative `tick()` math) plus
-   a **real `worldmodel/` data layer** (`NavBlock`, `TraversalClass`/`TraversalGrid`,
-   the `Region`/`Portal` structures, object pools).
-2. **An elaborate stubbed architecture** — `pathfinding/`, `ai/`, `tasks/`,
-   `integration/` (LLM), `memory/`, etc. — that nothing running actually uses.
+The navigation stack described by this PRD is now **built and runtime-verified**: the
+world-model pipeline is live (`NavSectionBuilder.classifyInto` → `ChunkNavLoader` →
+`NavStore`, patched incrementally by `NavGridUpdater`), the block tier
+(`pathfinding/blockpathfinder/` — 13 movements, folded edits, macro cuboids, the
+goal-forced-cost premium, partial paths with the irreversibility guard) and the region
+tier (`worldmodel/hpa/` fragments + `regionpathfinder/` stateful nested-skeleton
+cascade) both run in-game, and the follower executes plans reactively (MovePlan/
+PhaseRunner phases, timed `BotMining`, nether-portal follow, full vanilla player tick
+with config-gated survival). See §10.A for the completed inventory.
 
-Critically, **the world-model pipeline is broken at its only integration point**:
-`NavSectionBuilder.build()` is an inert benchmark and `ChunkNavLoader` discards the
-`NavSection[]` it builds. So even a finished pathfinder would have no data. Fixing
-this is Phase 1.
+What remains **stub-only** is the agent brain above navigation: `ai/`, `tasks/`,
+`integration/` (LLM), `memory/`, `relationships/`, `behavior/`, plus the resource
+octree (§6.4) and persistence (§6.6). The bot today is a capable follower/goto agent
+(`/bot come|follow|goto`, plus the single-block `/bot mine` actuator check), not yet a
+tasked helper.
 
 ## 3. Scope
 
@@ -267,6 +269,14 @@ Two-tier, lazy, hierarchical A\*.
   Dimension portals are an `EnterPortal` movement (§7.2), not a region-boundary face.
   Produces a `BlockPathPlan`.
 
+> **Evolution note (2026-07):** the sliding-window model below was built, then refined in place.
+> The single-center-node representation became per-region **fragments** (HPA-FRAGMENTS.md), the flat
+> skeleton became the **stateful nested-skeleton cascade** (HPA-CASCADE.md — `HierarchicalRegionPlan`,
+> one windowed plan per pyramid level, re-planned only at the level whose window the bot exited, with
+> per-level blacklist repair), and the window target is a **standable portal/representative cell**, not
+> the raw region center (the mid-air-center bug). The description below remains correct as the model's
+> rationale and its level-0 behavior.
+
 **The ratified region→block execution model: a sliding window (no portal/entry points).**
 The region skeleton gives the *sequence* of regions to pass through; the block tier does
 the actual moving, but never over the whole route at once. Instead:
@@ -301,11 +311,15 @@ Adopt the proven movement set from **[Baritone](https://github.com/cabaletta/bar
 **extensible** via a `Movement` interface (Strategy pattern) so new types can be
 registered later.
 
-**Core movements (from Baritone):** Traverse (walk/sprint), Ascend, Descend,
-Diagonal, Pillar (up), Downward (down), Fall (multi-block), Parkour (gap jump).
-**Orebit additions:** **EnterPortal** (Nether/End/region transition).
-**Planned/extensible (not Baritone):** Swim, Crawl (1-tall gaps via trapdoor/sneak),
-wall-clutch, boat/minecart — added later through the same interface.
+**Built (13, `MovementRegistry.TIER1`):** Traverse, Diagonal, Ascend, Descend, Fall,
+Pillar, MineDown, Climb (ladder/vine/scaffold, both directions), Parkour, Swim,
+SprintSwim, StartSprintSwim, Surface (the last two are the stateful STANDING↔PRONE
+pose transitions — mode is part of the node key). Nether-portal travel is handled
+above the vocabulary today (`NetherPortalIndex` + the follower's portal-seek/ENTER
+states), not as an `EnterPortal` movement; cross-dimension *routing* (region-tier
+portal edges) is still ahead.
+**Planned/extensible:** Crawl (1-tall gaps via trapdoor/sneak), wall-clutch,
+boat/minecart — added later through the same interface.
 
 **Interactions are folded into movements, not separate ops.** Breaking, placing,
 and **toggling doors/gates/trapdoors** don't change position, so they are *part of*
@@ -366,10 +380,14 @@ Adopt Baritone's **tick-based** model (its strongest part; ours was unspecified)
 
 ### 7.4 Heuristics
 
-- **Block-level: admissible** (Manhattan / Euclidean / octile `diagonal·√2 + straight`
-  / directional). **Orebit can stay admissible — and thus optimal locally — because
-  the region tier handles scale;** Baritone must use inadmissible weighting precisely
-  because it is flat. This is a real advantage of the hierarchy.
+- **Block-level (as built): weighted, not admissible.** The "stay admissible because
+  the hierarchy handles scale" bet did not survive contact — even windowed searches
+  drowned in equal-cost route ties (see `docs/Optimizations/fewer_nodes.md`). The
+  shipped heuristic is symmetric 3D octile × `greedyWeight` (config, default 2.0),
+  plus a tiny straight-line tie-break, plus the **admissible `GoalForcedCost`
+  premium** (cheapest-goal-face forced build/dig cost, far-face excluded with the
+  vertical build face exempt). Partial-path + the irreversibility guard are the
+  safety net weighting requires.
 - **Region-level:** Simple (Euclidean centers), PortalCount, VerticalityPenalty,
   TagAware, ExplorationBias.
 - **Cross-dimension:** overworld-frame conversion (§6.5).
@@ -477,7 +495,8 @@ inventory snapshot (old Phase 4 cost half) → **Phase 1**; the resource octree 
 
 ### B. Forward build order — the current plan (dependency-ordered)
 
-**Phase 1 — Agency layer.** ← **START HERE.** Capability config → inventory → tool use (+ block placement from
+**Phase 1 — Agency layer.** ✅ **DONE** (config + `BotCaps` + real-inventory feasibility snapshot +
+mining tick model; mining is now executed timed-and-vanilla by `BotMining`). Capability config → inventory → tool use (+ block placement from
 inventory) → **tick-based costs** (Baritone-style: break time derived from the tool, place cost incl. the
 consumed block). Makes the pathfinder's costs real (today they're arbitrary magic numbers) and is the keystone
 the useful commands depend on. The hard design decision is **consumables-along-path** — a finite, depleting
@@ -486,7 +505,8 @@ block/tool budget vs the alloc-free hot path. Detail + the per-rung seams: **`in
 **Phase 2 — Far-goal / exploration robustness + HPA\* driver bugs.** ← the next arc. Several distinct
 HPA*-tier issues surfaced during the Phase-1 cross-version smoke test (2026-06-26), in rough priority:
 
-1. **First-load / mass-chunk-gen tick stall (DO FIRST — perf).** On a fresh-world join the server ticks
+1. ✅ **FIXED** (leaf-cost recompute was the culprit; walk-only baseline + uniform solid/water fast-paths
+   took it ~2500→60 µs/leaf). Kept for the record: **First-load / mass-chunk-gen tick stall (DO FIRST — perf).** On a fresh-world join the server ticks
    **~1 tick/sec for ~the first minute** while chunks generate. **Prime suspect: HPA\* leaf-cost recompute.**
    `LeafCostComputer` computes a leaf's 6 face→center costs by running **up to 6 full `BlockPathfinder.findPath`
    searches per level-0 leaf** (face-rep → center, `BotCaps.BREAK_PLACE`); `HpaMaintenance.flush` drains
@@ -500,7 +520,8 @@ HPA*-tier issues surfaced during the Phase-1 cross-version smoke test (2026-06-2
    `jcmd` attach → `jfr print --events jdk.ExecutionSample | grep com.orebit`, or the Spark mod; recipe in
    `HANDOFF.md`).
 
-2. **Window-target lands in mid-air (the "random pillaring" bug — diagnosed this session).** The sliding-window
+2. ✅ **FIXED** (window targets are now standable portal/representative cells — the raw-center fallback is
+   gone; swim additionally un-walls water). Kept for the record: **Window-target lands in mid-air (the "random pillaring" bug — diagnosed this session).** The sliding-window
    driver aims block-A* at the far region's **center**, projected to ground by `PathPlan.projectToStandableFloor`
    — but that projection scans only the **single center column**, confined to that region's **own 16-tall band**,
    and on miss **falls back to the raw geometric center** (a mid-air point, `PathPlan.windowTarget()` line ~451).
@@ -528,9 +549,11 @@ weight on a greedy A* that already shows pathologies past ~3 regions (30–40 bl
 worse search blow-ups. **Prefer fixing the projection (#2) over growing the window**; revisit window size only if
 the projection fix proves insufficient.
 
-**Phase 3 — Pathfinding completeness.** More move types (each a `Movement`: DiagonalAscend, Parkour, Swim,
-Crawl); **portal / cross-dimension traversal** (cross-dimension skeleton stitching + the §6.5 8:1 Nether frame
-in the region heuristic); **background-threading** the search (removes the ~11 ms tick hitches seen during
+**Phase 3 — Pathfinding completeness.** PARTIALLY DONE: Swim (the full sprint-swim mode family), Climb,
+and Parkour are built (§7.2), and **owner-portal following** works (nether portal index + portal-seek/ENTER +
+cross-dimension FOLLOW). Still open: Crawl / DiagonalAscend / wall-clutch; true cross-dimension *routing*
+(cross-dimension skeleton stitching + the §6.5 8:1 Nether frame in the region heuristic);
+**background-threading** the search (removes the ~11 ms tick hitches seen during
 multi-replan climbs; requires making the search thread-safe first). Incremental and independent.
 
 **Phase 4 — Resource layer + useful commands.** The sparse **resource octree** / `RegionMetadata` counts
