@@ -85,7 +85,17 @@ public final class Ascend implements Movement {
             // the HEADROOM bit can't prove are read and — when allowed — folded into a break-set (dig up).
             if (!srcClear) e.requireAir(x, y + 3, z);
             ctx.requireBodyClear(e, nx, uy, nz, dstFlags);
-            if (e.valid()) out.accept(nx, uy, nz, COST + e.extraCost(), e);
+            if (e.valid()) {
+                // Slow-FLOOR surcharge on the landing (soul sand / honey — same rule as Traverse/Diagonal;
+                // a floor this move PLACES reads as the conjured full cube, never slow) plus the
+                // pass-through hazard/through-slow surcharge for the landing body cells (zero-read when the
+                // dest flag bits are clear). The source y+3 takeoff cell is clearance-only — not a body
+                // cell the bot lingers in — and is left unpriced.
+                float cost = COST
+                        + (ctx.isSlow(dstDesc) ? Traverse.SLOW_SURCHARGE : 0f)
+                        + ctx.bodyTransitCost(dstFlags, nx, uy, nz);
+                out.accept(nx, uy, nz, cost + e.extraCost(), e);
+            }
         }
     }
 

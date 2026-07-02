@@ -45,7 +45,8 @@ public final class Descend implements Movement {
             int packed = ctx.packedAt(nx, dy, nz);
             if (packed == MovementContext.UNBUILT) continue;
 
-            boolean dstStandable = ctx.standable(ctx.descriptorOf(nx, dy, nz, packed));
+            long dstDesc = ctx.descriptorOf(nx, dy, nz, packed);
+            boolean dstStandable = ctx.standable(dstDesc);
             int flags = MovementContext.flagsOf(packed);
             EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
             // Footing: step onto the block below, or BUILD A STEP DOWN — place a throwaway floor one down
@@ -58,7 +59,16 @@ public final class Descend implements Movement {
                 e.requireAir(nx, y + 1, nz); // transit feet / new head
                 e.requireAir(nx, y, nz);     // new feet
             }
-            if (e.valid()) out.accept(nx, dy, nz, COST + e.extraCost(), e);
+            if (e.valid()) {
+                // Slow-FLOOR surcharge on the landing (same rule as Traverse/Diagonal; a PLACED step-down
+                // floor reads as the conjured cube, never slow) plus the pass-through hazard/through-slow
+                // surcharge for the landing body cells (nx, y-1's body = y, y+1 — the transit), zero-read
+                // when the dest flag bits are clear. The step-off head cell (y+2) is clearance-only.
+                float cost = COST
+                        + (ctx.isSlow(dstDesc) ? Traverse.SLOW_SURCHARGE : 0f)
+                        + ctx.bodyTransitCost(flags, nx, dy, nz);
+                out.accept(nx, dy, nz, cost + e.extraCost(), e);
+            }
         }
     }
 }

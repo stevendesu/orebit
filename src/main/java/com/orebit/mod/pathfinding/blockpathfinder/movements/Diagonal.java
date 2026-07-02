@@ -56,11 +56,24 @@ public final class Diagonal implements Movement {
                 continue;
             }
 
-            // Both corner columns' body cells must be clear, or the diagonal clips a wall corner.
-            if (!ctx.passable(nx, y + 1, z) || !ctx.passable(nx, y + 2, z)) continue;
-            if (!ctx.passable(x, y + 1, nz) || !ctx.passable(x, y + 2, nz)) continue;
+            // Both corner columns' body cells must be clear, or the diagonal clips a wall corner. Read
+            // each corner descriptor ONCE (the old boolean passable(x,y,z) form did the same read) so the
+            // pass-through hazard/slow surcharge below reuses it — the body clips both corner columns, so a
+            // fire / web / bush corner is priced like a transited cell (conservative: a corner brush is
+            // charged the full per-cell rate).
+            long c1 = ctx.descriptorAt(nx, y + 1, z);
+            if (!ctx.passable(c1)) continue;
+            long c2 = ctx.descriptorAt(nx, y + 2, z);
+            if (!ctx.passable(c2)) continue;
+            long c3 = ctx.descriptorAt(x, y + 1, nz);
+            if (!ctx.passable(c3)) continue;
+            long c4 = ctx.descriptorAt(x, y + 2, nz);
+            if (!ctx.passable(c4)) continue;
 
-            float cost = ctx.isSlow(dstDesc) ? COST + Traverse.SLOW_SURCHARGE : COST;
+            float cost = (ctx.isSlow(dstDesc) ? COST + Traverse.SLOW_SURCHARGE : COST)
+                    + ctx.bodyTransitCost(flags, nx, y, nz) // destination body, via the resident flag bits
+                    + ctx.cellTransitCost(c1) + ctx.cellTransitCost(c2)
+                    + ctx.cellTransitCost(c3) + ctx.cellTransitCost(c4);
             out.accept(nx, y, nz, cost);
         }
     }

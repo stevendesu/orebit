@@ -35,8 +35,10 @@ import net.minecraft.world.level.block.state.BlockState;
  *   <li>{@code maxNodes  = pathing.maxNodes}, {@code greedyWeight = pathing.greedyWeight}.</li>
  * </ul>
  * {@code jumpHeight}/{@code safeFallDistance} stay at the Tier 1 defaults (1 / 3) — they are not yet owner
- * knobs (they arrive with the move-completeness arc). Survival flags + the consume/tick model are NOT in
- * {@code BotCaps}: they drive the follower's body setup and the (future) tick-cost model, not move
+ * knobs (they arrive with the move-completeness arc). {@code survival.takesDamage} rides into {@code
+ * BotCaps.takesDamage} because the planner prices damage-as-cost (the fall window and the pass-through
+ * hazard surcharge are caps-honest: an immune bot pays neither); the remaining survival flags + the
+ * consume/tick model drive the follower's body setup and the (future) tick-cost model, not move
  * generation, so they live on {@code Config} and are read directly by their consumers.
  */
 public record Config(
@@ -89,6 +91,7 @@ public record Config(
                 /* jumpHeight       */ 1,
                 /* safeFallDistance */ safeFall,
                 /* maxFallDistance  */ maxFall,
+                /* takesDamage      */ takesDamage,
                 /* canBreak         */ canMine,
                 /* canPlace         */ canPlace,
                 /* maxBreakHardness */ maxHardness,

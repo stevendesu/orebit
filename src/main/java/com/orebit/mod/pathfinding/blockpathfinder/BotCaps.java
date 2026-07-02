@@ -34,6 +34,16 @@ public record BotCaps(
          * (both large) so there is no penalty zone and it falls freely.
          */
         int maxFallDistance,
+        /**
+         * Whether the bot can be hurt at all ({@code survival.takesDamage}) — the caps-honest damage signal
+         * the cost layer reads. When {@code false} every damage-as-cost term is zero: the {@link
+         * com.orebit.mod.pathfinding.blockpathfinder.MovementContext#bodyTransitCost pass-through hazard
+         * surcharge} (fire / berry bush / powder snow in the body path) is not charged, mirroring how an
+         * immune bot's fall window ({@code safeFallDistance == maxFallDistance == }{@link #IMMUNE_FALL})
+         * already zeroes the {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Fall} damage
+         * penalty. SLOW costs are NOT gated on this — physics slows an immune bot just the same.
+         */
+        boolean takesDamage,
         /** May mine soft blocks in the way (BreakThrough — Tier 3). */
         boolean canBreak,
         /** May place throwaway blocks (Pillar / Bridge — Tier 3). */
@@ -89,10 +99,12 @@ public record BotCaps(
     /**
      * Walk + jump 1, no break/place, conservative 3-block safe fall — the Tier 1 default. Carries the
      * default search params (10k nodes, weight 2.0) and an unbreakable cap (moot with {@code canBreak}
-     * false).
+     * false). {@code takesDamage} is {@code true} for consistency with the mortal fall window this preset
+     * already carries (safe 3 / max 16 charges the Fall damage penalty), so both presets price damage as
+     * cost; an immune profile comes from config ({@code survival.takesDamage=false}), not these constants.
      */
     public static final BotCaps DEFAULT = new BotCaps(
-            1, DEFAULT_SAFE_FALL, DEFAULT_MAX_FALL, false, false, UNBREAKABLE,
+            1, DEFAULT_SAFE_FALL, DEFAULT_MAX_FALL, true, false, false, UNBREAKABLE,
             DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
 
     /**
@@ -103,6 +115,6 @@ public record BotCaps(
      * caps now come from {@link com.orebit.mod.config.Config}).
      */
     public static final BotCaps BREAK_PLACE = new BotCaps(
-            1, DEFAULT_SAFE_FALL, DEFAULT_MAX_FALL, true, true, UNBREAKABLE,
+            1, DEFAULT_SAFE_FALL, DEFAULT_MAX_FALL, true, true, true, UNBREAKABLE,
             DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
 }

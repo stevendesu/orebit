@@ -3,10 +3,12 @@ package com.orebit.mod.pathfinding.blockpathfinder;
 import java.util.List;
 
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Ascend;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.Climb;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Descend;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Diagonal;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Fall;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.MineDown;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Pillar;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.SprintSwim;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.StartSprintSwim;
@@ -35,16 +37,26 @@ public final class MovementRegistry {
     public static final Movement SPRINT_SWIM = new SprintSwim();
     public static final Movement START_SPRINT_SWIM = new StartSprintSwim();
     public static final Movement SURFACE = new Surface();
+    public static final Movement CLIMB = new Climb();
+    public static final Movement PARKOUR = new Parkour();
 
     /**
      * Tier 1 (ground + water): walk + step-assist, diagonal walk, jump-up-1, step-down-1, safe drop, the
-     * vertical-in-place pair pillar-up / mine-down, the water pair normal-swim / sprint-swim, and the
-     * pose-transition pair start-sprint-swim / surface (STANDING↔PRONE, the stateful sprint-swim rule).
+     * vertical-in-place pair pillar-up / mine-down, the water pair normal-swim / sprint-swim, the
+     * pose-transition pair start-sprint-swim / surface (STANDING↔PRONE, the stateful sprint-swim rule),
+     * ladder/vine climb, and the gap jump (parkour).
      * Every move self-gates: the ground moves on {@code MODE_STANDING}, the sprint-swim + surface on
-     * {@code MODE_PRONE}, Pillar/MineDown on place/break caps, the swim moves on the presence of water — so a
-     * walk-only bot on dry land still gets only the plain ground moves and never changes pose.
+     * {@code MODE_PRONE}, Pillar/MineDown on place/break caps, the swim moves on the presence of water, the
+     * climb on a climbable feet/neighbour cell — so a walk-only bot on dry land still gets only the plain
+     * ground moves and never changes pose.
+     *
+     * <p><b>Order matters on cost ties only</b>: relaxation rejects non-strict improvements, so the
+     * earlier-listed movement wins an equal-g destination. New movements are appended at the END so the
+     * verified moves keep tie priority (Climb's grab ties Traverse's flat step at {@code FLAT_COST}; the
+     * plain walk should win the tie); {@code nodes.move[]} stores the per-search list index and is never
+     * persisted, so appending is unconditionally safe.
      */
     public static final List<Movement> TIER1 =
             List.of(TRAVERSE, DIAGONAL, ASCEND, DESCEND, FALL, PILLAR, MINE_DOWN, SWIM, SPRINT_SWIM,
-                    START_SPRINT_SWIM, SURFACE);
+                    START_SPRINT_SWIM, SURFACE, CLIMB, PARKOUR);
 }

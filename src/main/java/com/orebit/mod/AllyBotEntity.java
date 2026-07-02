@@ -20,6 +20,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.config.Config;
 import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.platform.BotInventory;
+import com.orebit.mod.platform.ClientLoad;
 import com.orebit.mod.platform.CommandFeedback;
 import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.MoveReport;
@@ -27,12 +28,15 @@ import com.orebit.mod.platform.Replaceable;
 import com.orebit.mod.platform.WorldEdits;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
+import com.orebit.mod.worldmodel.pathing.NetherPortalIndex;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
@@ -96,6 +100,14 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private static final int OFF_TRACK_TICKS = 12;
     /** Consecutive airborne/underwater stall ticks (no 3-D progress, jump useless) before recovering (≈2s). */
     private static final int STALL_TICKS = 40;
+    /** Consecutive GROUNDED no-progress ticks (the held-jump backstop isn't freeing it) before the same
+     *  escape hatch as off-track/stall fires (≈1.5s). Covers the grind the other two arms can't see: a
+     *  parkour jump that came up short and landed in the gap is grounded (the stall arm needs
+     *  {@code !grounded}), roughly under the planned line (the off-track arm is horizontal-only), and not
+     *  at a settled waypoint (the boundary-gated refresh never runs) — previously a permanent grind unless
+     *  the gap was 1 deep (the only case holding jump self-heals). Longer than {@link #STUCK_DUMP_TICKS}
+     *  so the diagnostic dump still fires first. */
+    private static final int GROUNDED_STALL_TICKS = 30;
     /** Ticks to wait after a recovery before the off-track/stall detector can fire again (throttle). */
     private static final int RECOVER_COOLDOWN = 20;
     /** Dead-band (blocks) under the planned depth within which the water-rise rule stops holding jump — keeps
@@ -110,6 +122,37 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      * (0.6) so the swim cursor still advances. Standing water moves ride at the plain depth (bias 0).
      */
     private static final double SUBMERGE_BIAS = 0.5;
+
+    // ---- Nether-portal follow (owner changed dimension while the bot is in FOLLOW/COME) ---------------
+    /** Horizontal distance (blocks) from the portal cell centre at which pathing hands off to the ENTER
+     *  terminal state (face the portal + walk straight in). Slightly under {@link #ARRIVE_DIST} so the
+     *  handoff also fires when {@link #driveToward} declares arrival first (its 2.5-block tolerance stops
+     *  the bot adjacent to the portal, never inside it — hence a dedicated terminal state). */
+    private static final double PORTAL_ENTER_DIST = 2.0;
+    /** Ticks one ENTER attempt runs before it is declared failed. Must comfortably exceed the survival
+     *  portal wait: {@code Player.getPortalWaitTime()} is ~80 ticks in survival but ~1 tick while
+     *  abilities-invulnerable — and the bot's abilities flag tracks {@code survival.takesDamage} (see
+     *  {@link #tick}), so with damage ON the bot stands the full 80 ticks before vanilla teleports it. */
+    private static final int PORTAL_ENTER_TIMEOUT_TICKS = 200;
+    /** Back-off walk (ticks) away from the portal after a timed-out attempt, before the single retry
+     *  re-queries the index and re-approaches (covers a portal broken while the bot ground against it). */
+    private static final int PORTAL_BACKOFF_TICKS = 15;
+
+    /** The level the bot ended the previous tick in — a difference detected post-{@code doTick} means a
+     *  COMPLETED teleport (vanilla's portal process runs inside the player tick). Null until first tick. */
+    private Level lastLevel;
+    /** Bottom NETHER_PORTAL cell of the column the bot is heading into (null = none chosen yet). Targeting
+     *  the BOTTOM cell makes the pathing goal floor ({@code portalTarget.below()}) the standable obsidian
+     *  frame base rather than another intangible portal cell. */
+    private BlockPos portalTarget;
+    /** ENTER terminal state: face the portal column, walk in, then stand still — path steering suppressed
+     *  (like the STAY hold) while vanilla's portal process ticks the wait inside the bot's own baseTick. */
+    private boolean enteringPortal;
+    private int portalEnterTicks;    // ticks spent in the current ENTER attempt (timeout counter)
+    private int portalBackoffTicks;  // remaining back-off walk ticks between a timeout and the retry
+    private int portalEnterRetries;  // attempts consumed after the first (one retry, then give up)
+    private boolean portalSeekAnnounced; // one "heading for the portal" chat line per seek
+    private boolean portalSeekGaveUp;    // no known portal / entry failed → hold + one chat line
 
     /**
      * The bot's movement mode to seed the planner's start node with — its REAL pose: vanilla {@code
@@ -296,6 +339,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.mode = mode;
         this.comeTarget = null;
         clearPlan();
+        resetPortalSeek(); // a fresh command restarts (and re-announces) any cross-dimension seek
     }
 
     /** {@code /bot come}: path once to {@code summonCell} (the caller's feet block), then hold there. */
@@ -303,6 +347,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.mode = Mode.COME;
         this.comeTarget = summonCell.immutable();
         clearPlan();
+        resetPortalSeek();
     }
 
     /**
@@ -385,20 +430,41 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                 // Summon to a fixed cell; once there, settle into STAY (distinct from FOLLOW, which
                 // would keep chasing). comeTarget can't be null in COME, but guard defensively.
                 if (comeTarget == null) { setMode(Mode.STAY); holdPosition(); break; }
+                // Cross-dimension guard: comeTarget's coordinates were captured in the CALLER's level, so
+                // while the owner is elsewhere the bot follows them through a portal instead of pathing to
+                // a cell that means nothing in this level.
+                if (followThroughPortal()) break;
                 double tx = comeTarget.getX() + 0.5, ty = comeTarget.getY(), tz = comeTarget.getZ() + 0.5;
                 if (driveToward(tx, ty, tz, comeTarget.below())) setMode(Mode.STAY); // arrived
             }
-            default -> // FOLLOW
-                driveToward(owner.getX(), owner.getY(), owner.getZ(), owner.blockPosition().below());
+            default -> { // FOLLOW
+                if (!followThroughPortal()) {
+                    driveToward(owner.getX(), owner.getY(), owner.getZ(), owner.blockPosition().below());
+                }
+            }
         }
 
         super.tick(); // ServerPlayer housekeeping (i-frames, containers, advancements, attributes, …)
         this.doTick(); // Player.tick physics + pose + survival
+
+        // Completed-teleport detection: vanilla's portal process (and any other dimension change) runs
+        // inside the player tick above, so a level change is visible HERE first — re-anchor everything
+        // per-level and re-arm the 1.21.11+ client-loaded gate before anything reads the stale state.
+        final boolean levelChanged = Worlds.of(this) != lastLevel;
+        if (levelChanged) {
+            if (lastLevel != null) onLevelChanged();
+            lastLevel = Worlds.of(this);
+        }
+
         // Forge the per-tick move report a real client's move packet would drive: feeds getKnownMovement() for
         // movement-based block damage (sweet berry / cactus / magma / powder snow) and applies player fall
         // damage (doCheckFallDamage). Uses the bot's ACTUAL movement this tick. No-op pre-26.
-        final Vec3 moved = this.position().subtract(posBefore);
-        MoveReport.after(this, moved.x, moved.y, moved.z, EntityState.onGround(this));
+        // SKIPPED on the teleport tick: posBefore is a pre-teleport position in the OLD level, so the delta
+        // would be a nonsense cross-dimension "move" and could forge lethal fall damage out of thin air.
+        if (!levelChanged) {
+            final Vec3 moved = this.position().subtract(posBefore);
+            MoveReport.after(this, moved.x, moved.y, moved.z, EntityState.onGround(this));
+        }
 
         // Read the prone-pose state AFTER doTick (vanilla's updateSwimming ran inside it, from THIS tick's
         // inputs + resulting position), so a PRONE->STAND flip is dumped with the state that caused it.
@@ -406,7 +472,9 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
         // Actuate the "hands": drive any requested block break one tick (real tool + timing + drops). Runs after
         // doTick so the break reflects this tick's inputs/position; a no-op when nothing was requested this tick.
-        mining.tick(level);
+        // Skipped on the teleport tick — `level` above is the pre-teleport level, and any in-flight break
+        // request belongs to it.
+        if (!levelChanged) mining.tick(level);
     }
 
     /** STAY: stop in place and face the owner. */
@@ -414,6 +482,154 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.zza = 0.0f;
         clearPlan();
         lookAtPlayer(owner);
+    }
+
+    // ---- Nether-portal follow ------------------------------------------------------------------------
+
+    /**
+     * Re-anchor after a COMPLETED dimension change (detected post-{@code doTick} in {@link #tick}). The
+     * active plan, its settled/start anchors, and any give-up/portal-seek state all belong to the OLD
+     * level; NavStore/RegionGrid are per-{@code ServerLevel}, so once these are dropped the next replan
+     * transparently plans in the new level (its nav data fills in over a few ticks — a short visible
+     * pause, not a failure). {@code ClientLoad.markLoaded} is re-armed because a respawn-style teleport
+     * resets {@code connection.hasClientLoaded()} on 1.21.11+, and a clientless bot never re-sends the
+     * signal — without this it would go permanently invulnerable again (same fix as spawn; see BotManager).
+     */
+    private void onLevelChanged() {
+        clearPlan();
+        this.settledFloor = null;
+        this.planStartFloor = null;
+        this.navGaveUp = false;
+        resetPortalSeek();
+        ClientLoad.markLoaded(this);
+    }
+
+    /**
+     * FOLLOW/COME cross-dimension guard. When the owner is in another level, the normal goal is
+     * meaningless in the bot's level — instead the bot seeks the nearest KNOWN nether portal and walks
+     * in (vanilla teleports it; {@link #onLevelChanged} re-anchors on arrival). Level equality is
+     * re-evaluated every tick, so an owner returning to the bot's dimension aborts the seek mid-route
+     * and normal behaviour resumes immediately.
+     *
+     * @return {@code true} if the owner is elsewhere and the portal-follow consumed this tick.
+     */
+    private boolean followThroughPortal() {
+        if (Worlds.of(owner) == Worlds.of(this)) {
+            if (portalTarget != null || enteringPortal || portalSeekGaveUp || portalSeekAnnounced) {
+                resetPortalSeek(); // owner came back — abandon the seek and resume normal FOLLOW/COME
+            }
+            return false;
+        }
+        portalSeekTick();
+        return true;
+    }
+
+    /**
+     * One portal-seek tick: pick the nearest known portal (once), path to it with the normal two-tier
+     * driver, and hand off to the {@link #enterPortalTick ENTER} terminal state on approach. No known
+     * portal → one chat line + hold (the {@link #navGaveUp}-style hold: no blind straight-line walking).
+     */
+    private void portalSeekTick() {
+        if (portalSeekGaveUp) { // hold; cleared when the owner returns, the mode changes, or we teleport
+            this.zza = 0.0f;
+            return;
+        }
+        if (enteringPortal) {
+            enterPortalTick();
+            return;
+        }
+
+        final ServerLevel level = (ServerLevel) Worlds.of(this);
+        if (portalTarget == null) {
+            BlockPos p = NetherPortalIndex.nearest(level, this.blockPosition());
+            if (p == null) {
+                portalSeekGaveUp = true;
+                this.zza = 0.0f;
+                chat("I don't know a portal to follow you through.");
+                return;
+            }
+            // Descend to the BOTTOM portal cell of the column so the pathing goal floor (below it) is the
+            // standable obsidian frame base. Live-world read (cold, a few cells, once per seek).
+            BlockPos below = p.below();
+            while (NavBlock.isPortal(NavBlock.descriptorFor(level.getBlockState(below)))) {
+                p = below;
+                below = p.below();
+            }
+            portalTarget = p.immutable();
+            if (!portalSeekAnnounced) {
+                portalSeekAnnounced = true;
+                chat("You left this world — heading for the portal at " + compact(portalTarget) + ".");
+            }
+        }
+
+        // Path to the portal. isGoal tolerance (±1 xz / ±2 y) and ARRIVE_DIST both stop the bot ADJACENT
+        // to the portal, so arrival (or proximity) switches to the dedicated ENTER state below.
+        boolean arrived = driveToward(portalTarget.getX() + 0.5, portalTarget.getY(),
+                portalTarget.getZ() + 0.5, portalTarget.below());
+        double dx = portalTarget.getX() + 0.5 - getX();
+        double dy = portalTarget.getY() - getY();
+        double dz = portalTarget.getZ() + 0.5 - getZ();
+        if (arrived || (dx * dx + dz * dz <= PORTAL_ENTER_DIST * PORTAL_ENTER_DIST
+                && Math.abs(dy) <= ARRIVE_Y)) {
+            enteringPortal = true;
+            portalEnterTicks = 0;
+            clearPlan(); // ENTER suppresses replan/steer (like the STAY hold): face + walk-in only
+        }
+    }
+
+    /**
+     * The ENTER terminal state: face the portal cell centre and walk forward until the feet occupy the
+     * portal column, then stand still — no jump, no steering — and let vanilla do everything
+     * ({@code NetherPortalBlock.entityInside} marks the entity, the portal process ticks its wait inside
+     * the bot's own {@code baseTick}, then the dimension-change path runs; its client packets are absorbed
+     * by FakeClientConnection). One attempt runs {@link #PORTAL_ENTER_TIMEOUT_TICKS}; the first timeout
+     * backs off {@link #PORTAL_BACKOFF_TICKS} and retries once from a fresh index query (the portal may
+     * have broken while we ground against it); the second gives up with a chat line.
+     */
+    private void enterPortalTick() {
+        // Retry back-off: step away from the portal for a moment, then re-approach from scratch.
+        if (portalBackoffTicks > 0) {
+            portalBackoffTicks--;
+            faceHorizontally(getX() - (portalTarget.getX() + 0.5), getZ() - (portalTarget.getZ() + 0.5));
+            this.zza = 1.0f;
+            if (portalBackoffTicks == 0) {
+                enteringPortal = false;
+                portalTarget = null; // re-query nearest on the retry; portalEnterRetries stays consumed
+            }
+            return;
+        }
+
+        portalEnterTicks++;
+        if (footX() == portalTarget.getX() && footZ() == portalTarget.getZ()) {
+            this.zza = 0.0f; // inside the portal column: stand still while the portal process ticks
+        } else {
+            faceHorizontally(portalTarget.getX() + 0.5 - getX(), portalTarget.getZ() + 0.5 - getZ());
+            this.zza = 1.0f; // walk straight in
+        }
+
+        if (portalEnterTicks >= PORTAL_ENTER_TIMEOUT_TICKS) {
+            if (portalEnterRetries == 0) {
+                portalEnterRetries = 1;
+                portalEnterTicks = 0;
+                portalBackoffTicks = PORTAL_BACKOFF_TICKS;
+            } else {
+                enteringPortal = false;
+                portalSeekGaveUp = true;
+                this.zza = 0.0f;
+                chat("I couldn't get through the portal.");
+            }
+        }
+    }
+
+    /** Drop all portal-seek/ENTER state (owner returned, mode changed, or the teleport completed). */
+    private void resetPortalSeek() {
+        portalTarget = null;
+        enteringPortal = false;
+        portalEnterTicks = 0;
+        portalBackoffTicks = 0;
+        portalEnterRetries = 0;
+        portalSeekAnnounced = false;
+        portalSeekGaveUp = false;
     }
 
     /**
@@ -876,9 +1092,13 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // water a jump can't help, so a no-progress stall forces a re-search; likewise a sustained drift off
         // the planned line. The old backstop only jumped when grounded, so airborne/underwater stalls never
         // recovered.
+        // A timed break in progress is NOT a stall: a phase holding on an AIR need is legitimately grounded
+        // and stationary for the whole vanilla mining time, so the jump-free would misfire (vanilla's
+        // destroy progress is 5x slower off the ground) and the grounded-stall arm below would burn a window
+        // re-search every RECOVER_COOLDOWN ticks until a hard block finally breaks.
         Vec3 velocity = this.getDeltaMovement();
         boolean grounded = EntityState.onGround(this);
-        if (velocity.horizontalDistanceSqr() < STUCK_SPEED_SQR && grounded) {
+        if (velocity.horizontalDistanceSqr() < STUCK_SPEED_SQR && grounded && !mining.busy()) {
             this.setJumping(true);
             if (++stuckTicks == STUCK_DUMP_TICKS && Debug.ENABLED) dumpStuck(wp);
         } else {
@@ -887,11 +1107,14 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
         // Slip detection: count consecutive ticks the bot is off the planned segment (a transient bob won't
         // trip it). Stall detection: no 3-D progress while airborne/underwater (a jump can't help there).
+        // Grounded-stall detection rides the stuckTicks counter above: grounded + on-line + no progress —
+        // the case the first two arms are blind to (a missed parkour jump grinding at the bottom of the gap).
         offTrackTicks = (SteerControl.crossTrack(this, cursor) > OFF_TRACK_DIST) ? offTrackTicks + 1 : 0;
         stallTicks = (!grounded && velocity.lengthSqr() < STUCK_SPEED_SQR) ? stallTicks + 1 : 0;
         if (recoverCooldown > 0) {
             recoverCooldown--;
-        } else if (offTrackTicks >= OFF_TRACK_TICKS || stallTicks >= STALL_TICKS) {
+        } else if (offTrackTicks >= OFF_TRACK_TICKS || stallTicks >= STALL_TICKS
+                || stuckTicks >= GROUNDED_STALL_TICKS) {
             blockRefreshTicks = 0; // re-search the window from the bot's actual cell next tick (driveToward)
             // Recovery escape hatch: the bot has genuinely slipped/stalled off-plan (a move that won't complete),
             // so re-anchor the driver to its LIVE cell — this is exactly the case where we DO want to bail on the
@@ -899,6 +1122,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             this.settledFloor = this.blockPosition().below();
             offTrackTicks = 0;
             stallTicks = 0;
+            stuckTicks = 0;
             recoverCooldown = RECOVER_COOLDOWN;
         }
     }

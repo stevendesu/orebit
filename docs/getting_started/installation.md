@@ -3,11 +3,14 @@
 Orebit is a mod for MineCraft **1.17.1+**. It is compatible with all newer
 versions of the game.
 
-Orebit requires either [Forge](https://files.minecraftforge.net/net/minecraftforge/forge/)
-or [Fabric](https://fabricmc.net/use/installer/) prior to version 1.21.
+Orebit requires a mod loader:
 
-For installing on versions later than 1.21, you must use either
-[NeoForge](https://neoforged.net/) or [Fabric](https://fabricmc.net/use/installer/).
+ * [Fabric](https://fabricmc.net/use/installer/) is supported on **every** version.
+ * [Forge](https://files.minecraftforge.net/net/minecraftforge/forge/) is supported
+   from 1.17.1 through the 1.21.x line.
+ * [NeoForge](https://neoforged.net/) is supported from 1.21 through the 1.21.x line.
+ * Minecraft **26.x** is currently **Fabric only** (Forge/NeoForge builds will follow
+   when the toolchain supports them).
 
 ## Installing Orebit
 

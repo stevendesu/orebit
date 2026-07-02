@@ -42,9 +42,11 @@ start. Out-of-range or unparseable individual values are clamped/defaulted with 
 | `survival.hunger` | boolean | `false` | Bot has a hunger bar that depletes. | `survival.hunger=true` |
 | `survival.needsBreath` | boolean | `false` | Bot needs air underwater (can drown). | `survival.needsBreath=true` |
 
-> Note: the survival flags are recorded on `Config` but are **not yet wired into the follower body** in
-> Phase 1 (they drive the future survival/body setup). They are first-class config so a later rung consumes
-> them without a format change.
+> Note (updated): the survival flags are now **wired at runtime** — the bot runs the full vanilla player
+> tick in SURVIVAL, with `takesDamage` driving both invulnerability flags, `needsBreath` gating
+> `decreaseAirSupply`, and `hunger` gating `causeFoodExhaustion`. `takesDamage` also rides into
+> `BotCaps.takesDamage` so the planner prices damage (the fall window + the pass-through hazard
+> surcharge are caps-honest: an immune bot pays neither).
 
 ### `placement.*` — may the bot place blocks, and what does it place?
 
@@ -81,12 +83,15 @@ threads per search:
 - `canBreak = mining.canMine`, `maxBreakHardness = mining.maxHardness`
 - `canPlace = placement.canPlace`
 - `maxNodes = pathing.maxNodes`, `greedyWeight = pathing.greedyWeight`
-- `jumpHeight = 1`, `safeFallDistance = 3` (Tier-1 fixed; not yet owner knobs — they arrive with the
-  move-completeness arc).
+- `jumpHeight = 1` (fixed; not yet an owner knob)
+- `takesDamage = survival.takesDamage`, which also derives the fall window: a mortal bot gets the
+  default safe/max fall distances, an immune bot gets unlimited (`IMMUNE_FALL` — every drop free).
 
-The survival flags, `consumesBlocks`/`consumesTools`, and the tick model are **not** in `BotCaps`: they drive
-the follower body and the mining-tick model (`MiningModel`), not move generation, so their consumers read
-`Config`/`ConfigLoader` directly.
+`consumesBlocks`/`consumesTools`, the tick model, and the `hunger`/`needsBreath` flags are **not** in
+`BotCaps`: they drive the follower body and the mining-tick model (`MiningModel`), not move generation, so
+their consumers read `Config`/`ConfigLoader` directly. The exception is `survival.takesDamage`, which DOES
+ride into `BotCaps.takesDamage` — the planner prices damage as cost (fall window, pass-through hazard
+surcharge), so mortality is a move-generation fact too.
 
 ## How changes are picked up (restart vs. hot-reload)
 

@@ -54,6 +54,21 @@ import net.minecraft.world.level.chunk.PalettedContainer;
  *       the wall FRAGMENTS the air Y-columns either side of it (now bounded by the wall on X → narrow
  *       boxes), so the per-search region cache misses far more as the search weaves up and across. The
  *       realistic worst case.
+ *   <li><b>SHORT</b> — the COLD-START guard. A trivially easy flat walk (start {@code (8,0,8)} → goal
+ *       {@code (36,0,8)}, 28 blocks straight along X, ~30-60 expansions). Unlike every scenario above, the
+ *       measured op constructs a FRESH {@link NavGridView} (over chunks prebuilt once at trial setup) and
+ *       then searches — exactly the per-search setup production pays on every replan. Flooding searches
+ *       amortize cold-start (ThreadLocal scratch touch, chunk-cache arrays, cuboid/goal-premium context
+ *       inside {@code findPath}) down to ~400-700 ns/node; the real common-case ~30-node search pays
+ *       thousands of ns/node because setup can't amortize. Any change that makes per-search
+ *       construction/allocation heavier shows up HERE and nowhere else.
+ *   <li><b>MULTI</b> — the PERSISTED-STRUCTURES guard. One op = FOUR consecutive searches alternating
+ *       short, long, short, long (the SHORT walk and the UPOVER_OPEN up-and-over, both over the shared
+ *       flat-world chunks), each search over its own fresh {@link NavGridView} — mirroring production,
+ *       which replans every ~2s with a new view but keeps ThreadLocal scratch (Nodes rows / EditPool arena)
+ *       and any FUTURE cross-search persistent structures warm. A future "persist base cuboids across
+ *       searches" change must show its win here; a persistence bug (stale data leaking across searches)
+ *       shows here as a wrong-cost/wrong-time anomaly relative to SHORT + UPOVER_OPEN measured alone.
  * </ul>
  *
  * <p>Run: {@code ./gradlew :<ver>:jmh -Pbench=PathfinderBenchmark -Pprof=gc,stack} (JDK 21 on the active
@@ -69,13 +84,21 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 @Fork(2) // overridden to forks(0) by BenchmarkRunnerTest (must stay in the bootstrapped-MC JVM)
 public class PathfinderBenchmark {
 
-    @Param({"TOWER", "OPEN", "UPOVER_OPEN", "UPOVER_WALL"})
+    @Param({"TOWER", "OPEN", "UPOVER_OPEN", "UPOVER_WALL", "SHORT", "MULTI"})
     private String scenario;
 
     private NavGridView grid;
     private BlockPos start;
     private BlockPos goal;
     private RegionBound corridor; // non-null for the macro scenarios → exercises the cuboid-collapse path
+
+    /** Dispatch kind precomputed at setup so the measured op branches on an int, not a String switch. */
+    private static final int KIND_PREBUILT = 0, KIND_SHORT = 1, KIND_MULTI = 2;
+    private int kind = KIND_PREBUILT;
+
+    /** SHORT/MULTI only: the chunk map prebuilt ONCE at trial setup; the measured op wraps it in a fresh
+     *  {@link NavGridView} per search (the per-search construction cost production pays on every replan). */
+    private ConcurrentHashMap<Long, NavSection[]> freshChunks;
 
     private static boolean bootstrapped = false;
 
@@ -115,8 +138,48 @@ public class PathfinderBenchmark {
                 goal = UPOVER_GOAL;
                 corridor = UPOVER_CORRIDOR;
                 break;
+            case "SHORT":
+                kind = KIND_SHORT;
+                freshChunks = buildFlatChunks();
+                sanityDryRun();
+                break;
+            case "MULTI":
+                kind = KIND_MULTI;
+                freshChunks = buildFlatChunks();
+                sanityDryRun();
+                break;
             default:
                 throw new IllegalArgumentException("unknown scenario: " + scenario);
+        }
+    }
+
+    /**
+     * Setup-time (NOT measured) shape check for the fresh-view scenarios: the SHORT leg must actually FIND
+     * with a small expansion count (a beeline ~30-60 pops — if it floods, the scenario no longer measures
+     * cold-start and the whole guard is void), and the MULTI long leg (UPOVER_OPEN geometry) must FIND too.
+     * Prints {@link BlockPathfinder#LAST_EXPANSIONS} so the run log records the scenario shape.
+     */
+    private void sanityDryRun() {
+        var shortPlan = BlockPathfinder.findPath(new NavGridView(0, freshChunks),
+                SHORT_START, SHORT_GOAL, BotCaps.BREAK_PLACE, null);
+        int shortExpansions = BlockPathfinder.LAST_EXPANSIONS;
+        System.out.println("[PathfinderBenchmark] " + scenario + " sanity: SHORT leg found="
+                + (shortPlan != null) + " expansions=" + shortExpansions);
+        if (shortPlan == null) {
+            throw new IllegalStateException("SHORT leg did not find a path — fixture broken");
+        }
+        if (shortExpansions > 200) {
+            throw new IllegalStateException("SHORT leg expanded " + shortExpansions
+                    + " nodes (expected ~30-60) — no longer a cold-start guard");
+        }
+        if (kind == KIND_MULTI) {
+            var longPlan = BlockPathfinder.findPath(new NavGridView(0, freshChunks),
+                    UPOVER_START, UPOVER_GOAL, BotCaps.BREAK_PLACE, UPOVER_CORRIDOR);
+            System.out.println("[PathfinderBenchmark] MULTI sanity: LONG leg found="
+                    + (longPlan != null) + " expansions=" + BlockPathfinder.LAST_EXPANSIONS);
+            if (longPlan == null) {
+                throw new IllegalStateException("MULTI long leg did not find a path — fixture broken");
+            }
         }
     }
 
@@ -128,6 +191,13 @@ public class PathfinderBenchmark {
     static final BlockPos UPOVER_START = new BlockPos(8, 0, 8);
     static final BlockPos UPOVER_GOAL = new BlockPos(23, 30, 23);
     static final RegionBound UPOVER_CORRIDOR = new RegionBound(2, 29, 0, 33, 2, 29);
+
+    // --- SHORT geometry: a 28-block flat standable walk straight along X (dy=dz=0), well inside the
+    //     flat world's built chunks (x 36 is chunk 2 of the -4..4 span). The tie-break beelines, so the
+    //     search pops ~1 node per block plus takeoff probes — the trivial common-case search whose cost
+    //     is DOMINATED by per-search setup, which is exactly what the scenario is for.
+    static final BlockPos SHORT_START = new BlockPos(8, 0, 8);
+    static final BlockPos SHORT_GOAL = new BlockPos(36, 0, 8);
 
     /** The X-plane the UPOVER_WALL barrier sits on (between start x=8 and goal x=23, inside the corridor). */
     static final int WALL_X = 15;
@@ -143,6 +213,15 @@ public class PathfinderBenchmark {
      * ground + one air {@link NavSection}; the fixture is two classified sections, not 324.
      */
     static NavGridView buildFlatWorld() {
+        return new NavGridView(0, buildFlatChunks()); // minY=0, synthetic (no live level)
+    }
+
+    /**
+     * The flat world's raw chunk map (see {@link #buildFlatWorld}) — split out so the fresh-view scenarios
+     * (SHORT/MULTI) can prebuild the chunks ONCE at trial setup and pay only the {@link NavGridView}
+     * wrapper (the true per-search cost) inside the measured op.
+     */
+    static ConcurrentHashMap<Long, NavSection[]> buildFlatChunks() {
         BlockState air = Blocks.AIR.defaultBlockState();
         BlockState stone = Blocks.STONE.defaultBlockState();
 
@@ -173,7 +252,7 @@ public class PathfinderBenchmark {
                 chunks.put(NavStore.key(cx, cz), column);
             }
         }
-        return new NavGridView(0, chunks); // minY=0, synthetic (no live level)
+        return chunks;
     }
 
     /**
@@ -263,6 +342,28 @@ public class PathfinderBenchmark {
     public void findPath(Blackhole bh) {
         // BREAK_PLACE: the up-and-over / tower goals are only solvable by placing (pillaring) — DEFAULT can't
         // and would trivially fail. Matches the in-game test bot's capability.
-        bh.consume(BlockPathfinder.findPath(grid, start, goal, BotCaps.BREAK_PLACE, corridor));
+        switch (kind) {
+            case KIND_SHORT:
+                // Fresh NavGridView INSIDE the op: the per-search construction (chunk-cache arrays + the
+                // cuboid/goal-premium context findPath builds internally) is the point of the measurement.
+                bh.consume(BlockPathfinder.findPath(new NavGridView(0, freshChunks),
+                        SHORT_START, SHORT_GOAL, BotCaps.BREAK_PLACE, null));
+                break;
+            case KIND_MULTI:
+                // Four consecutive searches — short, long, short, long — each over its OWN fresh view
+                // (production replans ~every 2s with a new view), all in one invocation so ThreadLocal
+                // scratch and any future cross-search persistent structures run warm across searches.
+                bh.consume(BlockPathfinder.findPath(new NavGridView(0, freshChunks),
+                        SHORT_START, SHORT_GOAL, BotCaps.BREAK_PLACE, null));
+                bh.consume(BlockPathfinder.findPath(new NavGridView(0, freshChunks),
+                        UPOVER_START, UPOVER_GOAL, BotCaps.BREAK_PLACE, UPOVER_CORRIDOR));
+                bh.consume(BlockPathfinder.findPath(new NavGridView(0, freshChunks),
+                        SHORT_START, SHORT_GOAL, BotCaps.BREAK_PLACE, null));
+                bh.consume(BlockPathfinder.findPath(new NavGridView(0, freshChunks),
+                        UPOVER_START, UPOVER_GOAL, BotCaps.BREAK_PLACE, UPOVER_CORRIDOR));
+                break;
+            default:
+                bh.consume(BlockPathfinder.findPath(grid, start, goal, BotCaps.BREAK_PLACE, corridor));
+        }
     }
 }

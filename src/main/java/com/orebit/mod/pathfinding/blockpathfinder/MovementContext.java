@@ -436,6 +436,30 @@ public final class MovementContext {
     }
 
     /**
+     * Whether {@code d} is a climbable block (ladder / scaffolding / the vine family — the {@link
+     * NavBlock#isClimbable CLIMB} fingerprint bit) on an already-read descriptor (read-once form; the
+     * climb move reads every cell exactly once via {@link #packedAt}/{@link #descriptorOf}). Note the two
+     * climbable shapes diverge: ladder/scaffolding classify {@code SHAPE_OTHER} (tall non-empty collision)
+     * — NOT {@link #passable}, NOT {@link #standable}, and read as <i>blocked</i> by the resident HEADROOM
+     * bit — while vines are empty-shape and passable. Climb predicates must therefore never go through
+     * {@link #requireBodyClear} (it would fold a break of the ladder itself); they read cells directly
+     * against {@link #passableOrClimbable}.
+     */
+    public boolean isClimbable(long d) {
+        return NavBlock.isClimbable(d);
+    }
+
+    /**
+     * Body-cell test along a climb column, on an already-read descriptor (read-once form): the bot's feet
+     * or head can occupy this cell while climbing — genuinely clear ({@link #passable}) <b>or</b> itself
+     * climbable (the ladder/vine holds the body). The one predicate that unifies the wall-shaped
+     * (ladder/scaffolding) and empty-shaped (vine) climbables.
+     */
+    public boolean passableOrClimbable(long d) {
+        return passable(d) || NavBlock.isClimbable(d);
+    }
+
+    /**
      * Can the bot stand on top of this cell? True for any solid-topped shape (full / slab / stair /
      * layer / low partial) that isn't a fluid and isn't damaging (lava, magma, cactus, fire). Excludes
      * {@link NavBlock#SHAPE_OTHER} (fences/walls/panes — you don't get a clean footing on those) and
@@ -468,6 +492,91 @@ public final class MovementContext {
     /** {@link #isSlow(int, int, int)} on an already-read descriptor (read-once form). */
     public boolean isSlow(long d) {
         return NavBlock.surface(d) == 1; // SURFACE_SLOW
+    }
+
+    // ---- Pass-through hazard + through-slow costs (per body cell transited) -------------------
+    // Two per-cell g-side surcharges for PASSABLE cells the bot's body moves through, both keyed off the
+    // precomputed NavFlags prefilter bits so the common (hazard-free) candidate pays ONE bit test and zero
+    // extra grid reads; the exact per-cell magnitude is resolved from the two body descriptors only when a
+    // prefilter bit is set (rare). Caps-honest like Fall's damage penalty: the DAMAGE term is zero for an
+    // invulnerable bot; the SLOW terms apply to everyone (physics slows an immune bot just the same).
+
+    /**
+     * Ticks charged per damaging-but-passable body cell transited (fire, soul fire, sweet berry bush,
+     * wither rose, powder snow — lava is unreachable: never {@link #passable}). Derivation, on the {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Fall} precedent of ~10 ticks per point of
+     * damage ({@code DAMAGE_PER_BLOCK}): crossing one fire cell at walk speed is ~4.6 ticks of contact
+     * (≥1 contact hit) plus the residual on-fire burn once out (several seconds at 1 dmg/s) ≈ 4 damage,
+     * so {@code 4 × 10 = 40} ticks ≈ 8.6 walk-blocks of detour per fire cell — the planner strongly
+     * prefers a few blocks of detour over walking through fire. One constant for the whole damaging set
+     * (the descriptor has a single damaging bit): a berry bush / powder snow cell is over-charged relative
+     * to its real ~0.5–1 damage, which is the safe direction (route around when a comparable route exists).
+     */
+    public static final float DAMAGE_TRANSIT_COST = 40f;
+
+    /**
+     * Ticks added per HEAVY through-slow body cell ({@link NavBlock#TRANSIT_HEAVY} — cobweb). A cobweb
+     * cuts movement to ~5% of walk speed, so traversing one webbed block takes {@code FLAT_COST / 0.05 ≈
+     * 92.7} ticks; the surcharge is that minus the base walk already charged ({@code ≈ 92.7 − 4.6 = 88},
+     * i.e. {@code FLAT_COST × (1/0.05 − 1)}). Large enough (~19 walk-blocks) that the planner mines or
+     * routes around a web unless it is genuinely the only way.
+     */
+    public static final float WEB_TRANSIT_COST =
+            com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse.FLAT_COST * (1f / 0.05f - 1f);
+
+    /**
+     * Ticks added per LIGHT through-slow body cell ({@link NavBlock#TRANSIT_LIGHT} — sweet berry bush,
+     * powder snow, ~0.75× speed): {@code FLAT_COST × (1/0.75 − 1) ≈ 1.54} ticks. Small — a mild nudge that
+     * charges an invulnerable bot too (the damage surcharge above prices the bush's pricks separately,
+     * only for a mortal bot).
+     */
+    public static final float LIGHT_TRANSIT_COST =
+            com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse.FLAT_COST * (1f / 0.75f - 1f);
+
+    /**
+     * The pass-through surcharge (ticks) for the two body cells above floor {@code (fx,fy,fz)}, gated by
+     * the cell's already-read {@link NavFlags} bitmask {@code flags} — the g-side price of walking a body
+     * through fire / a berry bush / powder snow (damage, mortal bots only) or a cobweb / bush / powder
+     * snow (through-slow, every bot). Fast path: neither prefilter bit set (or the hazard bit set on an
+     * invulnerable bot with no slow bit) → {@code 0f} with ZERO grid reads — the common case for every
+     * candidate everywhere. Only when a bit fires are the two body descriptors read (path-edit-aware, so a
+     * planned break of the hazard clears the charge) and priced per cell via {@link #cellTransitCost}.
+     *
+     * <p>Boundary: the prefilter bits are computed within-section (air-optimistic near a section's top
+     * face), so a hazard just across a face can occasionally go uncharged — acceptable for a cost term
+     * (never a correctness gate). Solid damaging blocks (cactus / magma / campfire) in the body space also
+     * set the hazard bit, but {@link #cellTransitCost} charges only passable cells, so a folded BREAK of
+     * such a block is priced by its mining ticks alone.
+     *
+     * <p>The swim family deliberately does not consult this: a swimmable cell ({@link
+     * NavBlock#isSwimmableWater}: water fluid + empty shape) can never be damaging — fire cannot coexist
+     * with water, a waterlogged campfire is extinguished, and the solid damaging blocks fail the
+     * empty-shape test — and no through-slow block is a water cell.
+     */
+    public float bodyTransitCost(int flags, int fx, int fy, int fz) {
+        boolean hazard = NavFlags.clearableHazard(flags) && caps.takesDamage();
+        if (!hazard && !NavFlags.slowTransit(flags)) return 0f;
+        return cellTransitCost(descriptorAt(fx, fy + 1, fz))
+                + cellTransitCost(descriptorAt(fx, fy + 2, fz));
+    }
+
+    /**
+     * The pass-through surcharge (ticks) for ONE already-read body-cell descriptor — the per-cell form for
+     * movements that read the transited cells themselves ({@code Fall}'s drop column, {@code Diagonal}'s
+     * corner columns), where no flags prefilter applies. {@link #DAMAGE_TRANSIT_COST} for a
+     * damaging-but-passable cell when the bot {@link BotCaps#takesDamage takes damage}, plus the
+     * through-slow term ({@link #WEB_TRANSIT_COST} / {@link #LIGHT_TRANSIT_COST}) for every bot. Pure bit
+     * tests on the descriptor — no reads, no allocation.
+     */
+    public float cellTransitCost(long d) {
+        float c = 0f;
+        if (caps.takesDamage() && NavBlock.isDamaging(d) && NavBlock.isPassable(d)) {
+            c += DAMAGE_TRANSIT_COST;
+        }
+        int t = NavBlock.transitSlow(d);
+        if (t == NavBlock.TRANSIT_HEAVY) c += WEB_TRANSIT_COST;
+        else if (t == NavBlock.TRANSIT_LIGHT) c += LIGHT_TRANSIT_COST;
+        return c;
     }
 
     // ---- Break / place (MOVEMENT-DESIGN.md §1, decision 1) ------------------------------------
