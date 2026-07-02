@@ -2,6 +2,7 @@ package com.orebit.mod.worldmodel.pathing;
 
 import com.orebit.mod.platform.BlockChangeEvents;
 import com.orebit.mod.platform.LevelBounds;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -37,6 +38,20 @@ public final class NavGridUpdater {
         NavSection section = sections[sectionIndex];
         if (section == null) return;
 
-        NavSectionBuilder.patchCell(section, pos.getX() & 15, pos.getY() & 15, pos.getZ() & 15, newState);
+        final int lx = pos.getX() & 15, ly = pos.getY() & 15, lz = pos.getZ() & 15;
+
+        // Nether-portal index maintenance (NetherPortalIndex incremental feed). Read the cell's OLD navtype
+        // BEFORE patching (the patch overwrites it): a portal patched out is removed, a portal patched in is
+        // added. Two descriptor bit-tests per block change — the index mutates only when a portal actually
+        // toggles (vanishingly rare), and this path is per-block-change, never per-A*-node.
+        boolean wasPortal = NavBlock.isPortal(
+                NavBlock.descriptor((short) section.getTraversalGrid().navtype(lx, ly, lz)));
+        boolean nowPortal = NavBlock.isPortal(NavBlock.descriptorFor(newState));
+        if (wasPortal != nowPortal) {
+            if (nowPortal) NetherPortalIndex.add(server, pos.getX(), pos.getY(), pos.getZ());
+            else NetherPortalIndex.removeCell(server, pos.getX(), pos.getY(), pos.getZ());
+        }
+
+        NavSectionBuilder.patchCell(section, lx, ly, lz, newState);
     }
 }

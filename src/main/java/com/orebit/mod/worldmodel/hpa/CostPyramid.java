@@ -244,9 +244,9 @@ public final class CostPyramid {
     }
 
     // ---------------------------------------------------------------------------------------------------
-    // Fragment-model store (HPA-FRAGMENTS.md §5) — stored ALONGSIDE the center-model face buckets, gated
-    // by RegionGrid.HPA_FRAGMENTS. With the flag OFF none of this is ever written or read; the center path
-    // above is byte-for-byte unchanged.
+    // Fragment-model store (HPA-FRAGMENTS.md §5). The fragment model is now the ONLY model: the
+    // center-model face buckets and the RegionGrid.HPA_FRAGMENTS dispatch flag were deleted in the
+    // s36 cleanup, so this store is written and read unconditionally.
     // ---------------------------------------------------------------------------------------------------
 
     /**

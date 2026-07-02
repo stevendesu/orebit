@@ -2,6 +2,7 @@ package com.orebit.mod.worldmodel.pathing;
 
 import java.lang.reflect.Field;
 import java.util.Arrays;
+import java.util.function.IntConsumer;
 
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.platform.SectionPalette;
@@ -150,6 +151,15 @@ public final class NavSectionBuilder {
      * <p>The origin must be aligned to a 16×16×16 chunk-section boundary.
      */
     public static NavSection build(LevelChunkSection section, BlockPos origin) {
+        return build(section, origin, null);
+    }
+
+    /**
+     * As {@link #build(LevelChunkSection, BlockPos)}, additionally reporting the section-local cell index
+     * ({@code (y<<8)|(z<<4)|x}) of every nether-portal cell to {@code portalCells} (nullable) — the
+     * full-section discovery feed for {@link NetherPortalIndex}. A null section is all air, so no portals.
+     */
+    public static NavSection build(LevelChunkSection section, BlockPos origin, IntConsumer portalCells) {
         NavSection navSection = NavSection.create(origin);
         if (section == null) {
             // Pre-1.18, an empty section is NULL in the chunk's section array; 1.18+ always allocates a
@@ -158,7 +168,8 @@ public final class NavSectionBuilder {
             // empty section ticked). Guard lives in core — harmless on 1.18+ where it never triggers.
             classifyAir(navSection.getTraversalGrid());
         } else {
-            classifyInto(section.getStates(), Sections.hasOnlyAir(section), navSection.getTraversalGrid());
+            classifyInto(section.getStates(), Sections.hasOnlyAir(section),
+                    navSection.getTraversalGrid(), portalCells);
         }
         return navSection;
     }
@@ -168,6 +179,18 @@ public final class NavSectionBuilder {
      * exercised headless without constructing a {@link LevelChunkSection}.
      */
     public static void classifyInto(PalettedContainer<BlockState> states, boolean onlyAir, TraversalGrid grid) {
+        classifyInto(states, onlyAir, grid, null);
+    }
+
+    /**
+     * As {@link #classifyInto(PalettedContainer, boolean, TraversalGrid)}, additionally reporting the
+     * section-local cell index ({@code (y<<8)|(z<<4)|x}) of every nether-portal cell to {@code portalCells}
+     * (nullable). <b>Fast-path constraint:</b> when the palette holds no portal (the overwhelming case),
+     * the extra cost is exactly one bit-test per palette entry — the 4096-cell collection pass runs ONLY
+     * when a portal entry is actually present. Air-only sections skip everything.
+     */
+    public static void classifyInto(PalettedContainer<BlockState> states, boolean onlyAir, TraversalGrid grid,
+                                    IntConsumer portalCells) {
         final int[] slotScratch = SLOT_SCRATCH.get();
         final long[] descScratch = DESC_SCRATCH.get();
 
@@ -182,13 +205,23 @@ public final class NavSectionBuilder {
         BlockState[] palette = SectionPalette.read(states, slotScratch);
         int[] slotToNavtype = new int[palette.length];
         long[] slotToDesc = new long[palette.length];
+        boolean anyPortal = false;
         for (int s = 0; s < palette.length; s++) {
             short navtype = NavBlock.navtypeFor(palette[s]);
             slotToNavtype[s] = navtype & 0xFFFF;
             slotToDesc[s] = NavBlock.descriptor(navtype);
+            anyPortal |= NavBlock.isPortal(slotToDesc[s]); // the one-bit-test-per-palette-entry gate
         }
         for (int i = 0; i < 4096; i++) {
             descScratch[i] = slotToDesc[slotScratch[i]];
+        }
+
+        // Portal collection: gated on the palette actually containing one (portals are vanishingly rare),
+        // so the per-cell pass never taxes the normal classify path.
+        if (portalCells != null && anyPortal) {
+            for (int i = 0; i < 4096; i++) {
+                if (NavBlock.isPortal(descScratch[i])) portalCells.accept(i);
+            }
         }
 
         for (int y = 0; y < NavSection.SIZE; y++) {

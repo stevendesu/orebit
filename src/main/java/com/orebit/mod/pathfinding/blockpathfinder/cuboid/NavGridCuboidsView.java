@@ -270,19 +270,57 @@ public final class NavGridCuboidsView {
     /**
      * The packed-{@code BlockPos.asLong} position of some current-path edit (PLACED or BROKEN) inside the
      * inclusive sub-box {@code [lx..hx] × [ly..hy] × [lz..hz]} (already the box ∩ edits intersection), or
-     * {@link #NO_EDIT}. {@link PathEdits#kindAt(int, int, int)} additionally bbox-rejects with six int
-     * compares before any hash, so this is cheap and the intersection is tiny.
+     * {@link #NO_EDIT}.
+     *
+     * <p><b>Adaptive: scans whichever side is smaller — the volume or the edit list.</b> Both strategies
+     * return the SAME edit, so the choice is pure mechanics:
+     * <ul>
+     *   <li><b>Volume scan</b> ({@code y}-outer / {@code z}-middle / {@code x}-inner, first hit wins): one
+     *       {@link PathEdits#kindAt(int, int, int)} hash probe per cell. Cheap when the intersection is a
+     *       few cells (a pillar column clipped forward — the TOWER shape).</li>
+     *   <li><b>Edit-list walk</b> ({@link PathEdits#editAt}, dense, no hashing): O(editCount) regardless of
+     *       the intersection's size. Cheap when the intersection is large (a wide dig fan — the
+     *       UPOVER_WALL shape, where the per-pass volume sweep dominated the whole search's CPU).</li>
+     * </ul>
+     * The volume scan's first hit in {@code (y,z,x)} order IS the in-box edit lexicographically minimal by
+     * {@code (y,z,x)}, and the list walk selects exactly that minimum — so the two branches are
+     * byte-identical in result (the shrink's greedy trim sequence depends on WHICH edit is returned), and
+     * the {@code volume <= editCount} pick is a pure cost model, never a behavior switch.
      */
     private long findEditInside(int lx, int hx, int ly, int hy, int lz, int hz) {
-        for (int y = ly; y <= hy; y++) {
-            for (int z = lz; z <= hz; z++) {
-                for (int x = lx; x <= hx; x++) {
-                    if (pathEdits.kindAt(x, y, z) != PathEdits.NONE) {
-                        return BlockPos.asLong(x, y, z);
+        int n = pathEdits.editCount();
+        long volume = (long) (hx - lx + 1) * (hy - ly + 1) * (hz - lz + 1);
+        if (volume <= n) {
+            // Small intersection: the classic first-hit sweep (identical to the pre-list implementation).
+            for (int y = ly; y <= hy; y++) {
+                for (int z = lz; z <= hz; z++) {
+                    for (int x = lx; x <= hx; x++) {
+                        if (pathEdits.kindAt(x, y, z) != PathEdits.NONE) {
+                            return BlockPos.asLong(x, y, z);
+                        }
                     }
                 }
             }
+            return NO_EDIT;
         }
-        return NO_EDIT;
+        // Large intersection: walk the dense edit list, keeping the (y,z,x)-lexicographic minimum in-box hit.
+        // "Have a best yet" is a separate flag, NOT `best == NO_EDIT`: Long.MIN_VALUE is itself a legal
+        // packed BlockPos (x=-33554432, y=0, z=0), so the sentinel comparison could mistake a real best
+        // for "unset" and let a later edit clobber the true minimum.
+        boolean have = false;
+        long best = NO_EDIT;
+        int by = 0, bz = 0, bx = 0;
+        for (int i = 0; i < n; i++) {
+            long p = pathEdits.editAt(i);
+            int x = BlockPos.getX(p), y = BlockPos.getY(p), z = BlockPos.getZ(p);
+            if (x < lx || x > hx || y < ly || y > hy || z < lz || z > hz) continue;
+            if (!have
+                    || y < by
+                    || (y == by && (z < bz || (z == bz && x < bx)))) {
+                have = true;
+                best = p; by = y; bz = z; bx = x;
+            }
+        }
+        return best;
     }
 }

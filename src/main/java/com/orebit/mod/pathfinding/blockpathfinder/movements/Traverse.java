@@ -40,7 +40,11 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  * micro checks ({@link EditScratch#requireFloor} under each cell, {@link MovementContext#requireBodyClear}
  * for each cell's body) at step {@code k = 1..J}; the first failing step clamps {@code J} (conservative —
  * an under-jump is always safe, a plain A* step fills the gap). The single emitted candidate costs
- * {@code J × FLAT_COST + e.extraCost()} — exactly the {@code N × per-step} of MACRO-MOVEMENTS §3b.
+ * {@code J × per-step + Σ per-cell pass-through surcharge + e.extraCost()} — exactly the {@code N ×
+ * per-step} of MACRO-MOVEMENTS §3b (the slow-FLOOR term rides the per-step cost, uniform over the run by
+ * cuboid construction, so a collapsed soul-sand run charges the surcharge for EVERY cell; the body
+ * hazard/through-slow term is accumulated per cell off the flags read the per-cell risky-edit check
+ * already makes).
  *
  * <p>The macro emit is gated on {@link BlockPathfinder#MACRO_MOVES} <b>and</b> {@code ctx.cuboids() != null}.
  * When the flag is off or no cuboids view is present (legacy / unbounded search), the flat-walk case emits
@@ -103,11 +107,13 @@ public final class Traverse implements Movement {
                     }
                     // Macro produced nothing (J<1 with no valid step) — try step-assist/bridge below.
                 } else {
-                    // Legacy micro emit — byte-for-byte the pre-macro flat-walk single step.
+                    // Legacy micro emit — the pre-macro flat-walk single step, plus the pass-through
+                    // hazard/slow surcharge for the destination body (zero-read when the flag bits are clear).
                     EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
                     ctx.requireBodyClear(e, nx, y, nz, flags);
                     if (e.valid()) {
-                        out.accept(nx, y, nz, cost(ctx, pd) + e.extraCost(), e);
+                        out.accept(nx, y, nz,
+                                cost(ctx, pd) + ctx.bodyTransitCost(flags, nx, y, nz) + e.extraCost(), e);
                         continue; // already have footing here; don't also step-assist/bridge this column
                     }
                 }
@@ -124,7 +130,8 @@ public final class Traverse implements Movement {
                     EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
                     ctx.requireBodyClear(e, nx, uy, nz, flags);
                     if (e.valid()) {
-                        out.accept(nx, uy, nz, cost(ctx, pud) + e.extraCost(), e);
+                        out.accept(nx, uy, nz,
+                                cost(ctx, pud) + ctx.bodyTransitCost(flags, nx, uy, nz) + e.extraCost(), e);
                         continue;
                     }
                 }
@@ -140,7 +147,8 @@ public final class Traverse implements Movement {
                 e.requireFloor(nx, y, nz);
                 ctx.requireBodyClear(e, nx, y, nz, flags);
                 if (e.valid()) {
-                    out.accept(nx, y, nz, cost(ctx, pd) + e.extraCost(), e);
+                    out.accept(nx, y, nz,
+                            cost(ctx, pd) + ctx.bodyTransitCost(flags, nx, y, nz) + e.extraCost(), e);
                 }
             }
         }
@@ -171,22 +179,33 @@ public final class Traverse implements Movement {
 
         // Jump length, bounded by the box edge (HARD), goal projection (HARD), and the cost-normalised
         // escape-hedge (NON-NEGOTIABLE 2). MacroJump divides the orthogonal face by the move cost — never
-        // dropped. The bound is measured from the first destination cell along the same (axis, sign).
+        // dropped. The bound is measured from the first destination cell along the same (axis, sign). The
+        // per-step cost handed to the hedge includes the FIRST cell's pass-through hazard/slow surcharge:
+        // the floor navtype (and so the slow-floor term in cost()) is uniform over the run by cuboid
+        // construction, and a run that starts in fire/webs gets a dearer per-step estimate → a SHORTER jump
+        // (the conservative direction — it can only tighten the hedge, never sail past a cheap exit).
         float moveCost = cost(ctx, pd);
-        int j = MacroJump.steps(box, nx, y, nz, axis, sign, moveCost, ctx.goalX(), ctx.goalY(), ctx.goalZ());
+        float startTransit = ctx.bodyTransitCost(startFlags, nx, y, nz);
+        int j = MacroJump.steps(box, nx, y, nz, axis, sign, moveCost + startTransit,
+                ctx.goalX(), ctx.goalY(), ctx.goalZ());
 
         // Fold the J per-step requirements into one edit-set, re-running the SAME micro checks the flat walk
         // uses at each step. risksEdit gate is taken from the FIRST destination cell's flags (its body space
-        // is the run's leading edge); a uniform run shares its hazard classification by construction.
+        // is the run's leading edge); a uniform run shares its hazard classification by construction. The
+        // pass-through surcharge is accumulated PER CELL (body cells may differ along the run even when the
+        // floor is uniform — fire sits on some of it), reusing the flags read the risky-edit check already
+        // makes, so the collapsed run charges exactly what J micro steps would.
         EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(startFlags));
         int valid = 0;
+        float transit = 0f;
         for (int k = 1; k <= j; k++) {
             int cx = x + Axes.stepX(axis, sign) * k;
             int cz = z + Axes.stepZ(axis, sign) * k;
             // Re-evaluate RISKY_EDIT per cell (the start cell k==1 was gated by reset above): don't fold a
             // body break/footing place at a cell whose edit risks a fluid/gravity cascade just because the
             // run's leading edge was safe — the micro move re-checks per node. Clamp the run before it.
-            if (k > 1 && MovementContext.risksEdit(ctx.flagsAt(cx, y, cz))) { valid = k - 1; break; }
+            int cellFlags = k == 1 ? startFlags : ctx.flagsAt(cx, y, cz);
+            if (k > 1 && MovementContext.risksEdit(cellFlags)) { valid = k - 1; break; }
             // Footing under the k-th cell (already standable for a flat run; placeable fallback for a bridge
             // cell that crept into the run), then the two body cells above it. Same vocabulary as the micro
             // move's requireBodyClear, but read per cell so each step's headroom is verified.
@@ -201,6 +220,8 @@ public final class Traverse implements Movement {
                 valid = k - 1;
                 break;
             }
+            // Charge the surcharge only for a step that stayed valid (a clamped step's cells are not walked).
+            transit += k == 1 ? startTransit : ctx.bodyTransitCost(cellFlags, cx, y, cz);
             valid = k;
         }
         if (valid < 1) {
@@ -221,7 +242,7 @@ public final class Traverse implements Movement {
 
         int dx = Axes.stepX(axis, sign) * valid;
         int dz = Axes.stepZ(axis, sign) * valid;
-        out.accept(x + dx, y, z + dz, valid * moveCost + e.extraCost(), e);
+        out.accept(x + dx, y, z + dz, valid * moveCost + transit + e.extraCost(), e);
         return true;
     }
 
