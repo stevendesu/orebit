@@ -20,7 +20,11 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  * <p>The landing must be {@link MovementContext#standable} (so it never "lands" in lava/cactus — those
  * aren't standable) and the whole drop column, plus the step-off transit, must be {@link
  * MovementContext#passable}. The highest reachable landing wins (shortest, safest drop). Fall folds no
- * edits (you can't usefully break/place mid-drop), so it never consults {@code RISKY_EDIT}.
+ * edits (you can't usefully break/place mid-drop), so it never consults {@code RISKY_EDIT}. Every cell the
+ * drop transits (the step-off body and the whole column down to the landing feet/head) is additionally
+ * priced per cell via {@link MovementContext#cellTransitCost}/{@link MovementContext#bodyTransitCost} —
+ * dropping through fire / a berry bush costs a mortal bot the damage surcharge, and a cobweb / powder-snow
+ * column charges the through-slow term to every bot (both cost, never a blocker).
  */
 public final class Fall implements Movement {
 
@@ -79,16 +83,27 @@ public final class Fall implements Movement {
                 if (packed == MovementContext.UNBUILT) break;        // unknown below — don't path into it
                 if (!ctx.standable(ctx.descriptorOf(nx, fy, nz, packed))) continue; // still air; keep falling
 
-                // Landing found: confirm the drop column (down to the new feet) is clear.
+                // Landing found: confirm the drop column (down to the new feet) is clear, pricing each
+                // transited cell as it is read (read-once: the same descriptor answers passable AND the
+                // pass-through hazard/through-slow surcharge — falling through fire / a web / a berry bush
+                // is a per-cell cost, not a blocker; the loop spans the landing body too, so a hazardous
+                // landing pocket is charged). The column cells fy+1..y sit BELOW the step-off body
+                // (nx, y+1..y+2), which is priced separately off the flags already read — no double count.
                 boolean clear = true;
+                float transit = 0f;
                 for (int k = fy + 1; k <= y; k++) {
-                    if (!ctx.passable(nx, k, nz)) { clear = false; break; }
+                    long cd = ctx.descriptorAt(nx, k, nz);
+                    if (!ctx.passable(cd)) { clear = false; break; }
+                    transit += ctx.cellTransitCost(cd);
                 }
                 if (clear) {
                     int depth = y - fy;
                     // Base walk-off + per-block fall time, plus a damage penalty for every block past the safe
-                    // window (depth > safeFall) — the cost-not-blocker model.
-                    float cost = BASE_COST + depth * PER_BLOCK;
+                    // window (depth > safeFall) — the cost-not-blocker model — plus the per-cell pass-through
+                    // surcharges: the drop column (above) and the step-off body cells (nx, y+1..y+2, the two
+                    // cells the flags at (nx,y,nz) describe; zero-read when the bits are clear).
+                    float cost = BASE_COST + depth * PER_BLOCK
+                            + transit + ctx.bodyTransitCost(flags, nx, y, nz);
                     if (depth > safeFall) {
                         cost += (depth - safeFall) * DAMAGE_PER_BLOCK;
                     }

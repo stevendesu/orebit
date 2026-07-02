@@ -91,7 +91,8 @@ public final class PyramidMerger {
     private static int minusFace(int axis) { return axis == 0 ? 0 : (axis == 1 ? 4 : 2); }
 
     // ---------------------------------------------------------------------------------------------------
-    // Fragment drivers (parallel to the center mergeUp / mergeLevel, dispatched by RegionGrid.HPA_FRAGMENTS)
+    // Fragment drivers (the fragment model is the only model — the center mergeUp/mergeLevel and the
+    // RegionGrid.HPA_FRAGMENTS dispatch flag were deleted in the s36 cleanup)
     // ---------------------------------------------------------------------------------------------------
 
     /**

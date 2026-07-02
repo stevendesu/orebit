@@ -2,20 +2,21 @@
 
 The world model is how Orebit perceives Minecraft efficiently enough to plan over
 millions of blocks without slowing the game. It has two resolutions: a **recomputed
-fine layer** (per-block nav data, near the bot) and a **persisted coarse layer**
-(regions + navigation graph, the whole explored world).
+fine layer** (per-block nav data, near the bot) and a **coarse region layer** (a
+fixed-grid cost pyramid spanning the explored world).
 
 ## Block-Level
 
 To rapidly evaluate what movements are possible from a block, we precompute a
-**NavBlock** — a behavioral fingerprint of a block state.
+**NavBlock** — a behavioral fingerprint of a block state, packed into a single
+64-bit `long`.
 
 > **Note:** an earlier design stored a fixed 8-bit bitfield per block (stand
 > height / headroom / slow / hardness). That has been **superseded**: the property
-> set pathfinding actually needs (height, solid faces, climbable, fluid, gravity,
-> damaging, slowing, replaceable, hardness, best tool, tool-required, directional,
-> waterloggable, openable) is far larger than 8–16 bits, so we use an **index into a
-> property table** instead of inlining the data.
+> set pathfinding actually needs (height, shape, climbable, fluid, gravity,
+> damaging, slowing, replaceable, hardness, best tool, tool-required, openable,
+> portal) is far larger than 8–16 bits, so we pack it into a 64-bit descriptor and
+> store an **index into a descriptor table** per cell instead of inlining the data.
 
 Key decisions:
 
@@ -23,36 +24,80 @@ Key decisions:
   north-facing stairs can be ascended from the south but not the north; growth stages
   change whether you can walk through or stand on a block. Keying on the block alone
   loses this.
-- **A NavBlock is a compact index into a table of full property objects.** Behavioral
-  dedup collapses Minecraft's ~28,000 block states into a much smaller set of distinct
-  fingerprints (most cube orientations are identical), so the index fits in a `short`.
-  The most pathing-relevant structural bits (directional / waterlogged / orientation)
-  may be encoded inline in the index for branch-free access.
-- **Storage: palette + packed indices** (the same scheme Minecraft uses for blocks) —
-  a small per-section palette of distinct NavBlocks plus packed indices on disk,
-  **expanded to a flat array in memory** for O(1) lookup.
+- **The packed `long` is simultaneously the data and the dedup key.** Two block states
+  that pack to the same bits behave identically to the pathfinder, so they *are* the
+  same **navtype**. That behavioral dedup collapses Minecraft's ~28,000 block states
+  into a few hundred distinct fingerprints (measured: **~590**), so the index fits
+  comfortably in a `short` and the whole descriptor table is a few kilobytes — small
+  enough to live in L1 cache. Every question the planner asks ("is this damaging?",
+  "how slow is walking through it?", "is it climbable?", "is it a portal?") is one
+  array read and a shift-and-mask. The full story of the fingerprint — including the
+  speculative field that cost half the table — is in
+  [Block Fingerprints](Optimizations/block_fingerprints.md).
+- **The grid entry is one `short` per cell**, holding *both* resolutions the planner
+  reads: the low **10 bits** are the navtype index (1024 possible — ~1.7× headroom
+  over the measured count), and the high **6 bits** are precomputed
+  *neighbour-property flags* — walkable headroom above the floor, "editing here could
+  release a fluid or drop gravel on you", "there's a walk-through hazard in the body
+  space", "there's a solid face to place a block against". These are the multi-cell
+  facts the movement code would otherwise re-derive on every search expansion;
+  computing them once at build time turns them into a single masked array access.
 
 This per-block nav data is **recomputed when a chunk loads** (deterministic, sub-ms
-per chunk) rather than saved to disk. Uniform sections (≈60% are all-air) are
-classified once and filled, not scanned.
+per chunk) rather than saved to disk, and patched in place when a block changes.
+Uniform sections (≈60% are all-air) are classified once and filled, not scanned.
 
 ## Region-Level
 
-Above the block layer, the world is divided into a **fixed cubic grid** (an octree),
+Above the block layer, the world is divided into a **fixed cubic grid** of
+16×16×16-block regions (an implicit octree — parents are simply the 2×2×2 group of
+their children),
 not semantic flood-filled regions. A fixed grid makes block→region assignment trivial
-(coordinate math), makes block place/break updates O(1), and gives clean parent =
-merge-of-8-children aggregation. Two persisted structures live on this grid:
+(coordinate math), makes block place/break updates O(1), and gives a clean
+merge-of-children aggregation up the pyramid.
 
-- **Resource octree** — per region, a sparse log₂-count histogram over ~64 tracked
-  resource classes (ores, logs, beds, chests, crops, plus "hint" classes). Counts roll
-  up the octree, so "find the nearest diamonds" ascends until a super-region contains
-  them, then descends into the densest children, then scans the nav grid for the exact
-  vein.
-- **HPA\* graph** — per region, a **face-to-center traversal cost** (4-bit log scale)
-  used for long-distance hierarchical pathfinding. Because every block in Minecraft is
-  *technically* traversable (you can always mine through), this stores **cost, not
-  connectivity**. Portals (Nether/End/region) are stored as **local edges** on the
-  sections that contain them.
+The core design commitment: **store cost, not connectivity.** In Minecraft every
+block is *technically* traversable — you can always mine through — so the region
+lattice is never "disconnected"; the only honest question is *how expensive* a
+crossing is. Storing costs also sidesteps the classic hierarchical-pathfinding
+maintenance trap: precomputed *entrances* (border-crossing transition nodes) can be
+created, split, or merged by any single block edit, while a cost is just a scalar
+recomputed from the region when the region changes.
 
-Together these add an estimated **~6–8% per dimension** to save-file size — within the
-target. The fine nav grid is free (recomputed); only the coarse layer is persisted.
+What each region stores:
+
+- **Fragments** — the region's occupiable space, as its 6-connected components
+  (usually one; a handful in cave systems), each recording which of the region's
+  faces it reaches. Two cells in the same fragment are cheaply walkable; different
+  fragments mean an expensive dig between them. Regions with no occupiable space at
+  all collapse to one of three uniform kinds — **solid** (mine through, cost from
+  average hardness), **air** (a one-way chute: falling in is cheap, pillaring out
+  is dear), or **water** (a symmetric swim).
+- **Costs on a 4-bit log scale** — crossing costs are derived from the fragment
+  record and quantized to a nibble that spans roughly three orders of magnitude
+  (a walk to mining through obsidian), which is all the fidelity the coarse tier
+  needs; the recomputed block layer supplies exactness on approach.
+- **A pyramid of coarser levels** — parent regions merge their children's fragments,
+  so the same machinery plans at 16, 32, 64… blocks per cell, and a route across
+  tens of thousands of blocks is a short search at a high level.
+
+Regions whose chunks aren't loaded yet default to **optimistically cheap** — the
+planner assumes unexplored terrain is crossable and lets the fine layer correct it
+on approach. (The alternative — assuming the worst — could refuse a route that
+actually exists.)
+
+Two more pieces round out the layer:
+
+- **Portals as local facts.** A Nether portal is indexed in the chunk that contains
+  it, not in a global portal table (technical players build tens of thousands). The
+  bot uses the index to follow its owner across dimensions: find the nearest known
+  portal, path to it, walk in.
+- **Resource octree** *(planned)* — per region, a sparse count histogram over tracked
+  resource classes (ores, logs, chests, crops), rolled up the same pyramid, so "find
+  the nearest diamonds" ascends until a super-region contains some, then descends
+  into the densest children. This is the piece that will back commands like *mine
+  diamonds*; it isn't built yet.
+
+The fine nav grid costs no disk at all (recomputed). The coarse layer is designed to
+persist within a **~6–8% per dimension** budget of save-file size; today it is
+rebuilt lazily as chunks load, and persistence lands with the resource layer.

@@ -74,6 +74,14 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *   35      1   toolRequired
  *   36      1   waterloggable (static: has the WATERLOGGED property — bucket-clutch fails)
  *   37–40   4   precomputed predicate bits (standable / breakable / open-for-place / collision) — see {@link #withDerived}
+ *   41–42   2   transit     through-slow class for PASSABLE cells the body moves through:
+ *                           0 none / 1 light (sweet berry bush, powder snow ~0.75×) / 2 heavy (cobweb ~0.05×).
+ *                           Distinct from the {@code surface} slow field (bits 18–19), which prices standing
+ *                           ON a slow floor (soul sand / honey); this prices moving THROUGH a slowing cell.
+ *   43      1   portal      nether-portal interior cell — a base identity field (like climbable), NOT a
+ *                           derived predicate. Splits NETHER_PORTAL out of the generic "intangible
+ *                           unbreakable" navtype so the portal index / portal-follow can recognise it.
+ *                           v1 leaves walker passability untouched (a path can still graze a portal).
  * </pre>
  */
 public final class NavBlock {
@@ -108,6 +116,14 @@ public final class NavBlock {
     private static final int SURFACE_NONE = 0, SURFACE_SLOW = 1, SURFACE_SLIPPERY = 2;
     private static final int OPEN_NONE = 0, OPEN_DOOR = 1, OPEN_TRAPDOOR = 2, OPEN_GATE = 3;
 
+    // ---- Transit-slow class (2 bits, 41–42): moving THROUGH a passable cell is slowed ---------
+    /** No through-slow: the cell doesn't impede a body moving through it. */
+    public static final int TRANSIT_NONE  = 0;
+    /** Mild through-slow (~0.75× speed): sweet berry bush, powder snow. */
+    public static final int TRANSIT_LIGHT = 1;
+    /** Severe through-slow (~0.05× speed): cobweb — near-stops the body, planner should route/mine around. */
+    public static final int TRANSIT_HEAVY = 2;
+
     // ---- Bit field shifts/masks --------------------------------------------------------------
     // Bits 8–13 are FREE (formerly a 6-bit sturdy-faces mask, reclaimed — it was unread by pathfinding
     // and cost ~half the navtype table, almost all of it stair facings; see the block-fingerprints doc).
@@ -124,6 +140,8 @@ public final class NavBlock {
     private static final int TOOL_SHIFT  = 32, TOOL_MASK  = 0x07;
     private static final long TOOLREQ_BIT  = 1L << 35;
     private static final long WLOGABLE_BIT = 1L << 36;
+    private static final int TRANSIT_SHIFT = 41, TRANSIT_MASK = 0x03; // bits 37–40 are the derived predicates
+    private static final long PORTAL_BIT   = 1L << 43;                // nether-portal cell (base field, not derived)
 
     // ---- Precomputed predicate bits (37+) ----------------------------------------------------
     // Each is a PURE function of the fields above, so it adds ZERO navtypes (a function of existing bits
@@ -247,6 +265,10 @@ public final class NavBlock {
         d |= (long) (tool.ordinal() & TOOL_MASK) << TOOL_SHIFT;
         if (toolRequired)                     d |= TOOLREQ_BIT;
         if (state.hasProperty(BlockStateProperties.WATERLOGGED)) d |= WLOGABLE_BIT;
+        d |= (long) (transitSlow(block) & TRANSIT_MASK) << TRANSIT_SHIFT;
+        // Blocks.NETHER_PORTAL exists under that name on every supported version (1.17.1→26.x), so no
+        // platform adapter is needed — matching the direct Blocks.* references throughout this method.
+        if (block == Blocks.NETHER_PORTAL)    d |= PORTAL_BIT;
         return withDerived(d);
     }
 
@@ -325,11 +347,25 @@ public final class NavBlock {
                 || block == Blocks.COBWEB;
     }
 
+    /**
+     * Through-slow class for a body cell (the {@code transit} field, bits 41–42) — a PASSABLE cell that
+     * slows an entity moving through it, priced by the movement layer per transited cell. Distinct from
+     * {@link #isSlow} (a slow FLOOR you stand on). Cobweb is heavy (~0.05× speed — near a wall for a
+     * planner without shears); sweet berry bush and powder snow are light (~0.75×; both also carry the
+     * damaging bit — the bush pricks, powder snow freezes — priced separately by the movement layer).
+     */
+    private static int transitSlow(Block block) {
+        if (block == Blocks.COBWEB) return TRANSIT_HEAVY;
+        if (block == Blocks.SWEET_BERRY_BUSH || block == Blocks.POWDER_SNOW) return TRANSIT_LIGHT;
+        return TRANSIT_NONE;
+    }
+
     private static boolean isDamaging(Block block) {
         return block == Blocks.LAVA || block == Blocks.FIRE || block == Blocks.SOUL_FIRE
                 || block == Blocks.CAMPFIRE || block == Blocks.SOUL_CAMPFIRE
                 || block == Blocks.MAGMA_BLOCK || block == Blocks.CACTUS
-                || block == Blocks.SWEET_BERRY_BUSH || block == Blocks.WITHER_ROSE;
+                || block == Blocks.SWEET_BERRY_BUSH || block == Blocks.WITHER_ROSE
+                || block == Blocks.POWDER_SNOW; // freezing damage while inside (1.17+, the support floor)
     }
 
     private static Tool bestTool(BlockState state) {
@@ -406,6 +442,21 @@ public final class NavBlock {
     public static boolean toolRequired(long d)  { return (d & TOOLREQ_BIT) != 0; }
     /** Static: the block can be waterlogged (a bucket-clutch on it is absorbed). */
     public static boolean isWaterloggable(long d) { return (d & WLOGABLE_BIT) != 0; }
+    /**
+     * Through-slow class ({@link #TRANSIT_NONE} / {@link #TRANSIT_LIGHT} / {@link #TRANSIT_HEAVY}) — how
+     * severely this cell slows a body moving THROUGH it (cobweb / berry bush / powder snow). Only ever
+     * non-zero on passable cells; the floor-surface slow lives in {@link #surface}.
+     */
+    public static int transitSlow(long d)  { return (int) (d >>> TRANSIT_SHIFT) & TRANSIT_MASK; }
+    /**
+     * Nether-portal interior cell. Consumed by the portal discovery index
+     * ({@code worldmodel.pathing.NetherPortalIndex}) and the follower's portal-follow terminal state —
+     * never by the A* movements: portal cells classify {@link #SHAPE_EMPTY} (passable) and v1 deliberately
+     * leaves walker passability untouched, so a walking path can still graze a portal and accidentally
+     * teleport the bot; a follow-up may subtract {@code isPortal} from walker passability once
+     * portal-following exists to recover from it.
+     */
+    public static boolean isPortal(long d) { return (d & PORTAL_BIT) != 0; }
     /**
      * Derived: water is present in this cell right now — a water source/flow <b>or</b> a <b>waterlogged
      * solid</b> (a waterlogged fence/stair has a water fluid state). This is the "would water flow if I edit

@@ -41,6 +41,25 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *       staircase work → over-estimate → inadmissible). This conservatively under-credits the diagonal —
  *       accepting some residual flood there — but it is provably admissible and degenerates to plain A* where
  *       it adds nothing. <b>When unsure, UNDER-credit.</b></li>
+ *   <li><b>Far-face exclusion (the one deliberate carve-out from strict min-over-faces):</b> the goal face
+ *       whose stand cell lies on the FAR side of the goal along the dominant start→goal approach axis is
+ *       EXCLUDED from the probe — from both the standable short-circuit and the min-premium candidate set.
+ *       Rationale: the bot cannot approach from that face without first paying to pass the goal, so letting
+ *       a cheap (or standable — premium-zeroing) far face into the min systematically UNDER-states the real
+ *       forced approach cost. The canonical failure: a goal one block under a ledge, approached from below —
+ *       the standable cell ABOVE the goal short-circuits the premium to 0 and the ground flood returns. The
+ *       exclusion can over-charge the rare route that genuinely loops around behind the goal (a strict
+ *       lower bound over ALL approaches would keep the face), so it is mildly inadmissible in that corner —
+ *       accepted deliberately: the search already runs {@code greedyWeight ≥ 1} (non-admissible by design),
+ *       and under-valuing forced dig/pillar work at the goal is the flood this class exists to kill. When
+ *       start == goal on the dominant axis (all deltas zero), no face is excluded. <b>The vertical build
+ *       face {@code (Y,+1)} is EXEMPT from the exclusion:</b> a goal floating over air forces a
+ *       pillar-up-from-below regardless of which side the start is on — a bot approaching from above falls
+ *       PAST the unsupported goal to the ground and must pillar back up — so excluding it (goal
+ *       predominantly BELOW the start) would zero the very premium this class supplies and re-open the
+ *       ground flood under the goal. Its standable short-circuit is likewise kept: a standable cell
+ *       directly below the goal means standing on it occupies the goal, a genuinely cheap approach from
+ *       either side.</li>
  * </ul>
  *
  * <h2>Wiring</h2>
@@ -160,7 +179,22 @@ public final class GoalForcedCost {
      * (build up AND dig over) naturally credits only the CHEAPER single axis — never the sum (MACRO-MOVEMENTS
      * §4 conservative rule). When in doubt, this under-credits.
      *
+     * <p><b>Far-face exclusion:</b> the face whose stand cell lies on the far side of the goal along the
+     * dominant start→goal axis (argmax of {@code |goal − start|} per axis, tie-break X &gt; Z &gt; Y — the
+     * same deterministic order as {@code BlockPathfinder.primaryAxis}) is skipped entirely: it is the one
+     * face the bot can only reach AFTER passing the goal, so admitting it — into the standable short-circuit
+     * OR the min — understates the premium (see the class doc). Zero delta on the dominant axis (start ==
+     * goal on every axis) excludes nothing. The vertical build face {@code (Y,+1)} is never excluded, even
+     * when it is the far face (goal predominantly below the start): a floating goal forces the pillar-up
+     * from either side — from above the bot falls past the unsupported goal and must climb back — so
+     * dropping it would null the anti-flood premium (see the class doc). Computed here, once per search —
+     * cost is irrelevant off the per-node hot path.
+     *
      * @param cuboids         the per-search cuboid query seam (cache + PathEdits overlay)
+     * @param sx              search-start X (absolute world block coord) — fixes the dominant approach axis
+     *                        for the far-face exclusion; never read per node
+     * @param sy              search-start Y
+     * @param sz              search-start Z
      * @param gx              goal X (absolute world block coord)
      * @param gy              goal Y
      * @param gz              goal Z
@@ -171,12 +205,23 @@ public final class GoalForcedCost {
      *                        has no {@code InventoryView} (headless / trace / tests)
      * @param out             filled in place with the cheapest forced approach (or "no correction")
      */
-    public static void probe(NavGridCuboidsView cuboids, int gx, int gy, int gz, BotCaps caps,
-            float pillarPlaceCost, Forced out) {
+    public static void probe(NavGridCuboidsView cuboids, int sx, int sy, int sz, int gx, int gy, int gz,
+            BotCaps caps, float pillarPlaceCost, Forced out) {
         out.clear();
         if (cuboids == null) {
             return; // no macro view → no correction (legacy / unbounded search)
         }
+
+        // Far-face exclusion: the dominant start→goal axis (argmax |delta|, tie-break X > Z > Y — same
+        // deterministic order as BlockPathfinder.primaryAxis) and the SIGNED delta along it. The excluded
+        // face is the one travelling AGAINST the approach (sign == -signum(domDelta)): its stand cell sits at
+        // goal + signum(domDelta)·unit, past the goal from the start's side. domDelta == 0 ⇒ all deltas are
+        // 0 (argmax) ⇒ no exclusion. Once per search — not the per-node hot path.
+        int domAxis = Axes.AXIS_X;
+        int domDelta = gx - sx;
+        if (Math.abs(gz - sz) > Math.abs(domDelta)) { domAxis = Axes.AXIS_Z; domDelta = gz - sz; }
+        if (Math.abs(gy - sy) > Math.abs(domDelta)) { domAxis = Axes.AXIS_Y; domDelta = gy - sy; }
+        final int farSign = -Integer.signum(domDelta); // 0 = exclude nothing
 
         // The six axis-aligned approach directions, as (axis, sign). For each, the goal is entered by
         // travelling (axis, sign): the adjacent cell sits one step BACK along that direction, i.e. at
@@ -186,6 +231,15 @@ public final class GoalForcedCost {
 
         for (int axis = Axes.AXIS_X; axis <= Axes.AXIS_Z; axis++) {
             for (int sign = -1; sign <= 1; sign += 2) {
+                // Far face: only approachable after passing the goal — excluded from the standable
+                // short-circuit AND the min-premium candidates (see the method/class doc). The vertical
+                // BUILD face (Y,+1) is exempt: a floating goal forces a pillar-up-from-below no matter
+                // which side the start is on (from above the bot falls PAST the unsupported goal), so
+                // excluding it when the goal lies below the start would null the anti-flood premium.
+                if (farSign != 0 && axis == domAxis && sign == farSign
+                        && !(axis == Axes.AXIS_Y && sign > 0)) {
+                    continue;
+                }
                 int dx = Axes.stepX(axis, sign);
                 int dy = Axes.stepY(axis, sign);
                 int dz = Axes.stepZ(axis, sign);

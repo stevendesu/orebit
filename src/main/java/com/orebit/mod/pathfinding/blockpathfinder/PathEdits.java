@@ -47,6 +47,15 @@ public final class PathEdits {
     private int size;
     private int growAt = INITIAL_CAPACITY * 3 / 4;
 
+    // Insertion-order list of every edited cell (packed BlockPos), parallel to the table — the DENSE
+    // iteration seam. A consumer that needs "which edits lie inside this box" (the cuboid edit-shrink)
+    // iterates these {@code size} entries directly instead of hash-probing every cell of its scan volume
+    // (which on a tall pillar column was O(volume) murmur probes per shrink pass — ~9% of TOWER search CPU).
+    // No duplicates by construction: an entry is appended only when {@link #markIfAbsent} claims an empty
+    // slot (first-seen-wins already dedups). Capacity mirrors the table's (grown in lockstep; the table
+    // grows at 3/4 load so the list never overflows first). reset() just zeroes {@code size}.
+    private long[] editList = new long[INITIAL_CAPACITY];
+
     // Inclusive axis-aligned bounding box of every edited cell currently in the table — the cheap reject the
     // per-cell {@link #kindAt(int, int, int)} read uses BEFORE hashing. A search's edits cluster in a tiny
     // region (a pillar is one column; a dug step is a few cells), yet each expanded node reads ~100 cells
@@ -81,6 +90,16 @@ public final class PathEdits {
     public int editMaxX() { return maxX; }
     public int editMaxY() { return maxY; }
     public int editMaxZ() { return maxZ; }
+
+    /** Number of edited cells — the bound for {@link #editAt} iteration. */
+    public int editCount() { return size; }
+
+    /**
+     * The {@code i}-th edited cell (packed {@code BlockPos.asLong}), in insertion order, {@code 0 <= i <
+     * editCount()}. Every listed cell has a non-{@link #NONE} kind (the list is fed only when a cell is
+     * first claimed), so an "is any edit inside this box" consumer needs no per-entry {@link #kindAt} call.
+     */
+    public long editAt(int i) { return editList[i]; }
 
     /** Fold one edge's edits in (first-seen-wins; call while walking node → start). */
     public void add(StepEdits se) {
@@ -122,6 +141,7 @@ public final class PathEdits {
             if (k == NONE) {                  // empty → claim it
                 keys[slot] = pos;
                 kinds[slot] = kind;
+                editList[size] = pos;         // dense iteration list — first claim only, so no duplicates
                 int cx = BlockPos.getX(pos), cy = BlockPos.getY(pos), cz = BlockPos.getZ(pos);
                 if (cx < minX) minX = cx;
                 if (cx > maxX) maxX = cx;
@@ -155,6 +175,7 @@ public final class PathEdits {
         int cap = oldKeys.length << 1;
         keys = new long[cap];
         kinds = new byte[cap];
+        editList = Arrays.copyOf(editList, cap); // lockstep with the table so the append never overflows
         mask = cap - 1;
         growAt = cap * 3 / 4;
         for (int i = 0; i < oldKinds.length; i++) {

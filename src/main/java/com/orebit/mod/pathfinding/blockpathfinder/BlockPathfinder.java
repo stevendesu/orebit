@@ -573,7 +573,12 @@ public final class BlockPathfinder {
         final int macroAxis = primaryAxis(sx, sy, sz, gx, gy, gz);
         ctx.setMacro(cuboids, gx, gy, gz, macroAxis);
         final GoalForcedCost.Forced forced = new GoalForcedCost.Forced();
-        GoalForcedCost.probe(cuboids, gx, gy, gz, caps, ctx.pillarPlaceCost(), forced);
+        // Start coords let the probe exclude the goal face on the FAR side of the goal along the dominant
+        // start→goal axis (only approachable after passing the goal — a standable far face would zero the
+        // premium and re-open the ground flood). The probe re-derives the dominant axis itself (same
+        // argmax + X>Z>Y tie-break as primaryAxis above) rather than taking macroAxis, keeping the two
+        // consumers' semantics independent.
+        GoalForcedCost.probe(cuboids, sx, sy, sz, gx, gy, gz, caps, ctx.pillarPlaceCost(), forced);
 
         // Reuse this thread's search state (sized to its high-water mark), wiped to empty — so a steady
         // stream of replans allocates nothing here. First call on a thread pays the initial 512/1024 sizing.

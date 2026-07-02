@@ -57,7 +57,12 @@ public final class ChunkNavLoader {
             Long k;
             while (built < MAX_BUILDS_PER_TICK && (k = queue.poll()) != null) {
                 ChunkAccess chunk = level.getChunk(NavStore.keyX(k), NavStore.keyZ(k));
-                NavStore.put(level, k, ChunkNavBuilder.buildAllSections(level, chunk));
+                // Nether-portal discovery rides the build: the classifier collects portal cells (palette-
+                // gated — free for the no-portal chunk) and the chunk's index entry is replaced wholesale
+                // beside its nav sections, so a rebuild is idempotent and a portal-less rebuild self-cleans.
+                NetherPortalIndex.CellBuffer portals = new NetherPortalIndex.CellBuffer();
+                NavStore.put(level, k, ChunkNavBuilder.buildAllSections(level, chunk, portals));
+                NetherPortalIndex.record(level, k, portals.toArray());
                 // Eager HPA* region build (HPA-IMPLEMENTATION.md §12): build the region leaves as the chunk's
                 // nav data is built, so the cost pyramid accumulates explored terrain (and survives chunk
                 // unload in RAM — the travel-then-path fix). Bounded by this loader's per-tick chunk budget.
@@ -74,7 +79,10 @@ public final class ChunkNavLoader {
             }
         });
 
-        events.onChunkUnload((level, chunk) ->
-                NavStore.remove(level, NavStore.key(ChunkCoords.x(chunk.getPos()), ChunkCoords.z(chunk.getPos()))));
+        events.onChunkUnload((level, chunk) -> {
+            long key = NavStore.key(ChunkCoords.x(chunk.getPos()), ChunkCoords.z(chunk.getPos()));
+            NavStore.remove(level, key);
+            NetherPortalIndex.remove(level, key); // the portal index lives exactly as long as the nav data
+        });
     }
 }

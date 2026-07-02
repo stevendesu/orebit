@@ -88,7 +88,7 @@ pathing.greedyWeight = 2.0
 | `pathing.maxNodes` | `10000` | How hard the bot searches before giving up on a single plan. Higher finds paths through more tangled terrain but costs more CPU per plan. |
 | `pathing.greedyWeight` | `2.0` | How directly the bot beelines toward its goal. `1.0` finds the shortest possible route but searches slowly; higher values head straight at the goal and plan much faster, at the cost of slightly longer routes. Must be `1.0` or greater. |
 
-### Survival *(reserved)*
+### Survival — is the bot mortal?
 
 ```properties
 survival.takesDamage = false
@@ -96,9 +96,14 @@ survival.hunger      = false
 survival.needsBreath = false
 ```
 
-These describe whether the bot is mortal — taking damage, getting hungry, needing air. They
-are read and validated today but **not yet wired into the bot's behavior**; they're reserved
-for an upcoming release. You can set them now; they simply have no effect yet.
+These decide whether the bot has a body that can be hurt. The bot runs the full vanilla
+player simulation, so when these are on, the mechanics are the real ones — not approximations.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `survival.takesDamage` | `false` | If `true`, the bot takes damage like a player — lava, fire, falls, cactus, mobs. This also changes how it *plans*: a mortal bot pays a steep path cost to walk through fire or a berry bush and treats big drops as expensive, so it routes around hazards an invulnerable bot would stroll through. `false` = invulnerable (hazards still cost it time, never health). |
+| `survival.hunger` | `false` | If `true`, the bot's food bar drains from activity like a player's. If `false`, it never gets hungry (and can always sprint). Note the bot doesn't yet feed itself — a hungry bot is your problem to keep fed. |
+| `survival.needsBreath` | `false` | If `true`, the bot's air depletes underwater and it can drown. If `false`, it can swim submerged indefinitely. |
 
 ## Example configurations
 

@@ -21,7 +21,7 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * damaging floor, fluid — stays in the navtype descriptor, read via {@code descriptorAt}; only the
  * neighbour-derived facts live here.)
  *
- * <h2>The bitmask (5 of 6 bits used; bit 5 reserved)</h2>
+ * <h2>The bitmask (all 6 bits used)</h2>
  * <pre>
  *   bit 0     RISKY_EDIT         breaking/placing in this cell's body space could release a fluid or
  *                                drop a gravity block onto the bot — a BREAK/PLACE gate, NOT a walk gate
@@ -29,16 +29,23 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *                                risksGravityFall: both mean "don't edit here", and the precise
  *                                flood/cascade check happens in the fine layer (descriptorAt) at break
  *                                time, so one prefilter bit suffices.
- *   bit 1     CLEARABLE_HAZARD   a walk-through damaging block in the body space (fire) — adds cost, not
- *                                blocked. (A damaging FLOOR — lava/magma/cactus — is intrinsic to the
- *                                navtype via NavBlock.isDamaging, so it needs no bit.)
+ *   bit 1     CLEARABLE_HAZARD   a walk-through damaging block in the body space (fire, berry bush,
+ *                                powder snow) — adds cost, not blocked. (A damaging FLOOR — lava/magma/
+ *                                cactus — is intrinsic to the navtype via NavBlock.isDamaging, so it needs
+ *                                no bit.) Consumed by MovementContext.bodyTransitCost as the zero-read
+ *                                prefilter for the per-cell damage surcharge; a mortal bot pays per
+ *                                damaging body cell, an invulnerable one pays nothing.
  *   bits 2-3  HEADROOM           walkable vertical clearance above the floor: 0 none / 1 crawl / 2 walk /
  *                                3 jump. A cell counts as clear iff it's passable AND fluid-free, so the
  *                                value matches the walk-passable test the ground movements use (water in
  *                                the body space is NOT clearance for a walker — swim is a later movement).
  *   bit 4     PLACEABLE_NEIGHBOR a solid (non-fluid) face among the six neighbours to bridge a placed
  *                                block against.
- *   bit 5     (reserved)
+ *   bit 5     SLOW_TRANSIT       a through-slow passable block in the body space (cobweb / berry bush /
+ *                                powder snow — NavBlock.transitSlow != 0): moving through costs extra
+ *                                regardless of damage caps (physics slows everyone). Like
+ *                                CLEARABLE_HAZARD it is a prefilter: the movement layer reads the two
+ *                                body descriptors for the exact per-cell magnitude only when it's set.
  * </pre>
  *
  * <h2>Boundary handling — always within-section, no overscan (§8)</h2>
@@ -61,7 +68,7 @@ public final class NavFlags {
     private static final int HEADROOM_SHIFT    = 2;
     public static final int HEADROOM_MASK      = 0x3 << HEADROOM_SHIFT; // bits 2-3
     public static final int PLACEABLE_NEIGHBOR = 1 << 4;
-    // bit 5 reserved
+    public static final int SLOW_TRANSIT       = 1 << 5;
 
     /** Headroom levels — the value of the 2-bit HEADROOM field (not pre-shifted). */
     public static final int HEADROOM_NONE  = 0; // can't even crawl: the cell directly above is blocked
@@ -100,8 +107,14 @@ public final class NavFlags {
         else headroom = HEADROOM_JUMP;
         flags |= headroom << HEADROOM_SHIFT;
 
-        // CLEARABLE_HAZARD: a walk-through damaging block in the body space (e.g. fire).
+        // CLEARABLE_HAZARD: a walk-through damaging block in the body space (e.g. fire, berry bush).
         if (NavBlock.isDamaging(a1) || NavBlock.isDamaging(a2)) flags |= CLEARABLE_HAZARD;
+
+        // SLOW_TRANSIT: a through-slow passable block in the body space (cobweb / berry bush / powder snow).
+        if (NavBlock.transitSlow(a1) != NavBlock.TRANSIT_NONE
+                || NavBlock.transitSlow(a2) != NavBlock.TRANSIT_NONE) {
+            flags |= SLOW_TRANSIT;
+        }
 
         // RISKY_EDIT: an edit in the body space could let a fluid flow in or drop a gravity block.
         //   - gravity above (would fall when disturbed), or a gravity block here/in-the-feet we'd undercut;
@@ -125,6 +138,7 @@ public final class NavFlags {
     public static int headroom(int flags)            { return (flags & HEADROOM_MASK) >>> HEADROOM_SHIFT; }
     public static boolean risksEdit(int flags)       { return (flags & RISKY_EDIT) != 0; }
     public static boolean clearableHazard(int flags) { return (flags & CLEARABLE_HAZARD) != 0; }
+    public static boolean slowTransit(int flags)     { return (flags & SLOW_TRANSIT) != 0; }
     public static boolean placeableNeighbor(int flags) { return (flags & PLACEABLE_NEIGHBOR) != 0; }
 
     // ---- Neighbour scans (carried over from the prior classifier) ----------------------------

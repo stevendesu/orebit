@@ -1,3 +1,5 @@
+*Historical design doc — the A/B flags described here (HPA_FRAGMENTS / HIERARCHICAL_CASCADE) were deleted when the fragment+cascade model became unconditional (s36 cleanup, commit eed70b2). Kept for design rationale; the flag/dispatch mechanics no longer exist.*
+
 # HPA\* Fragments — connectivity-aware region tier
 
 > **Status:** ratified design, not yet implemented. **Supersedes** the center-node model in
