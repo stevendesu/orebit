@@ -1,32 +1,42 @@
-package com.orebit.mod.worldmodel.region;
+package com.orebit.mod.worldmodel.resource;
 
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 
 import net.minecraft.world.level.block.Block;
 
 import com.orebit.mod.platform.BlockLookup;
 
 /**
- * Maps tracked resource blocks to a small set of resource-class indices.
+ * Maps tracked blocks to a stable resource-<b>class</b> id (0..63) and, for the subset worth a
+ * pyramid column, to an <b>indexed column</b> (0..22).
  *
- * <p>Blocks are referenced by registry id (string) and resolved through the block
- * registry, NOT by {@code Blocks.X} constants. This is deliberate for multi-version
- * support: a constant like {@code Blocks.PALE_OAK_LOG} is a *compile* error on a
- * Minecraft version that predates the block, whereas a registry lookup simply
- * resolves to empty and is skipped. The resource-class index for each group is
- * assigned per-registration call regardless of which blocks exist, so the indices
- * are identical across versions and persisted resource data stays compatible.
+ * <p>Rehomed from the deleted semantic {@code region.RegionBlockIndex} (find-mine-resources design,
+ * phase 2). Two deliberately-split concepts:
+ * <ul>
+ *   <li><b>Registry (all 64):</b> every tracked block → a stable class id. The registration ORDER is
+ *       frozen so ids never shift — future persisted resource data stays compatible. Adding more
+ *       block <i>strings</i> to an existing class (e.g. the deepslate ore variants below) does NOT
+ *       shift ids.</li>
+ *   <li><b>Indexed columns (23):</b> the subset that actually gets a pyramid column. The tally,
+ *       storage and query all operate on <i>columns</i>; non-indexed classes map to column −1.</li>
+ * </ul>
+ *
+ * <p>Blocks are referenced by registry id (string) and resolved through the block registry, NOT by
+ * {@code Blocks.X} constants. This is deliberate for multi-version support: a constant like
+ * {@code Blocks.PALE_OAK_LOG} is a *compile* error on a Minecraft version that predates the block,
+ * whereas a registry lookup simply resolves to null and is skipped. The class id for each group is
+ * assigned per-registration call regardless of which blocks exist, so the ids are identical across
+ * versions and persisted resource data stays compatible.
  */
-public final class RegionBlockIndex {
-    public static final int MAX_INDEX = 64;
+public final class ResourceClasses {
+    public static final int MAX_CLASS = 64;
+
+    /** The number of indexed pyramid columns (0..22). */
+    public static final int COLUMN_COUNT = 23;
 
     private static int nextIndex = 0;
-    private static final Map<Block, Integer> BLOCK_TO_INDEX = new HashMap<>();
-    private static final Set<Integer> REGISTERED_INDICES = new HashSet<>();
-    private static final int[] REGISTERED_INDEX_ARRAY;
+    private static final Map<Block, Integer> BLOCK_TO_CLASS = new HashMap<>();
 
     // Resources:
     public static final int LOG            = registerAll(
@@ -35,18 +45,23 @@ public final class RegionBlockIndex {
         "pale_oak_log", "crimson_stem", "warped_stem"
     );
     public static final int STONE          = register("stone");
-    public static final int COAL_ORE       = register("coal_ore");
-    public static final int IRON_ORE       = register("iron_ore");
-    public static final int COPPER_ORE     = register("copper_ore");
+    // Ores register the stone-tier AND deepslate variant under the SAME class (adding strings does
+    // not shift ids). Deepslate ores exist since 1.17 → resolve across the whole 1.17→26.2 range;
+    // on any version lacking one it just skips. NOTE: the ore-in-deepslate is indexed under its ORE
+    // column here; the plain `deepslate` block (below) is a distinct, non-indexed class.
+    public static final int COAL_ORE       = registerAll("coal_ore", "deepslate_coal_ore");
+    public static final int IRON_ORE       = registerAll("iron_ore", "deepslate_iron_ore");
+    public static final int COPPER_ORE     = registerAll("copper_ore", "deepslate_copper_ore");
     public static final int GOLD_ORE       = registerAll(
-        "gold_ore", "nether_gold_ore"
+        "gold_ore", "nether_gold_ore", "deepslate_gold_ore"
     );
-    public static final int REDSTONE_ORE   = register("redstone_ore");
-    public static final int LAPIS_ORE      = register("lapis_ore");
-    public static final int EMERALD_ORE    = register("emerald_ore");
-    public static final int DIAMOND_ORE    = register("diamond_ore");
+    public static final int REDSTONE_ORE   = registerAll("redstone_ore", "deepslate_redstone_ore");
+    public static final int LAPIS_ORE      = registerAll("lapis_ore", "deepslate_lapis_ore");
+    public static final int EMERALD_ORE    = registerAll("emerald_ore", "deepslate_emerald_ore");
+    public static final int DIAMOND_ORE    = registerAll("diamond_ore", "deepslate_diamond_ore");
     public static final int OBSIDIAN       = register("obsidian");
-    public static final int AMETHYST       = register("amethyst_cluster");
+    // The amethyst_cluster is the harvestable; budding_amethyst is the source block worth mining toward.
+    public static final int AMETHYST       = registerAll("amethyst_cluster", "budding_amethyst");
     public static final int NETHER_QUARTZ_ORE = register("nether_quartz_ore");
     public static final int ANCIENT_DEBRIS = register("ancient_debris");
 
@@ -91,6 +106,7 @@ public final class RegionBlockIndex {
     public static final int DRIPSTONE      = registerAll(
         "dripstone_block", "pointed_dripstone"
     );
+    // The plain deepslate block: ubiquitous below y=0 → saturates → NOT indexed (registry-only).
     public static final int DEEPSLATE      = register("deepslate");
     public static final int SANDSTONE      = registerAll(
         "sandstone", "red_sandstone"
@@ -206,12 +222,51 @@ public final class RegionBlockIndex {
     public static final int USER_DEFINED_1  = 62;
     public static final int USER_DEFINED_2  = 63;
 
+    // ===================================================================================================
+    // Indexed-column layer: 23 of the 64 classes get a pyramid column (0..22); the rest map to -1.
+    // ===================================================================================================
+    private static final int[] COLUMN_OF = new int[MAX_CLASS];
+    private static final String[] COLUMN_NAME = new String[COLUMN_COUNT];
+    private static final Map<String, Integer> NAME_TO_COLUMN = new HashMap<>();
+
     static {
-        //noinspection
-        REGISTERED_INDEX_ARRAY = REGISTERED_INDICES.stream().mapToInt(Integer::intValue).toArray();
+        java.util.Arrays.fill(COLUMN_OF, -1);
+
+        // Ores / valuables (columns 0..11).
+        bindColumn(0,  COAL_ORE,          "coal");
+        bindColumn(1,  IRON_ORE,          "iron");
+        bindColumn(2,  COPPER_ORE,        "copper");
+        bindColumn(3,  GOLD_ORE,          "gold");
+        bindColumn(4,  REDSTONE_ORE,      "redstone");
+        bindColumn(5,  LAPIS_ORE,         "lapis");
+        bindColumn(6,  EMERALD_ORE,       "emerald");
+        bindColumn(7,  DIAMOND_ORE,       "diamond");
+        bindColumn(8,  NETHER_QUARTZ_ORE, "quartz");
+        bindColumn(9,  ANCIENT_DEBRIS,    "ancient_debris");
+        bindColumn(10, AMETHYST,          "amethyst");
+        bindColumn(11, OBSIDIAN,          "obsidian");
+
+        // Builder palette (columns 12..22).
+        bindColumn(12, DIORITE,           "diorite");
+        bindColumn(13, GRANITE,           "granite");
+        bindColumn(14, ANDESITE,          "andesite");
+        bindColumn(15, CALCITE,           "calcite");
+        bindColumn(16, TUFF,              "tuff");
+        bindColumn(17, DRIPSTONE,         "dripstone");
+        bindColumn(18, SANDSTONE,         "sandstone");
+        bindColumn(19, BASALT,            "basalt");
+        bindColumn(20, TERRACOTTA,        "terracotta");
+        bindColumn(21, GLOWSTONE,         "glowstone");
+        bindColumn(22, VINES,             "vines");
     }
 
-    private RegionBlockIndex() {}
+    private ResourceClasses() {}
+
+    private static void bindColumn(int column, int classId, String name) {
+        COLUMN_OF[classId] = column;
+        COLUMN_NAME[column] = name;
+        NAME_TO_COLUMN.put(name, column);
+    }
 
     /** Reserves the next resource-class index and binds it to {@code id} if that block exists in this version. */
     private static int register(String id) {
@@ -221,23 +276,47 @@ public final class RegionBlockIndex {
     /** Reserves the next resource-class index and binds it to every {@code id} that exists in this version. */
     private static int registerAll(String... ids) {
         int index = nextIndex++;
-        if (index >= MAX_INDEX) throw new IllegalStateException("Too many blocks registered");
+        if (index >= MAX_CLASS) throw new IllegalStateException("Too many blocks registered");
         for (String id : ids) {
             // Absent on this Minecraft version -> null -> skipped (graceful degradation).
             // BlockLookup hides the registry-id type (Mojang renamed ResourceLocation ->
             // Identifier in 1.21.11), so this stays version-agnostic.
             Block block = BlockLookup.byId("minecraft:" + id);
-            if (block != null) BLOCK_TO_INDEX.put(block, index);
+            if (block != null) BLOCK_TO_CLASS.put(block, index);
         }
-        REGISTERED_INDICES.add(index);
         return index;
     }
 
-    public static int getIndexForBlock(Block block) {
-        return BLOCK_TO_INDEX.getOrDefault(block, -1);
+    /** The stable class id (0..63) for {@code block}, or −1 if the block is not tracked. */
+    public static int classIdForBlock(Block block) {
+        return BLOCK_TO_CLASS.getOrDefault(block, -1);
     }
 
-    public static int[] values() {
-        return REGISTERED_INDEX_ARRAY;
+    /** The indexed pyramid column (0..22) for {@code block}, or −1 if not tracked / not indexed. */
+    public static int columnForBlock(Block block) {
+        int classId = BLOCK_TO_CLASS.getOrDefault(block, -1);
+        return classId < 0 ? -1 : COLUMN_OF[classId];
+    }
+
+    /** The indexed pyramid column (0..22) for a class id, or −1 if that class is not indexed. */
+    public static int columnFor(int classId) {
+        return (classId < 0 || classId >= MAX_CLASS) ? -1 : COLUMN_OF[classId];
+    }
+
+    /** The number of indexed pyramid columns (23). */
+    public static int columnCount() {
+        return COLUMN_COUNT;
+    }
+
+    /** Parse a user token ("diamond", "iron", "andesite") to its column, or −1 if unknown. */
+    public static int columnForName(String name) {
+        if (name == null) return -1;
+        Integer col = NAME_TO_COLUMN.get(name.toLowerCase(java.util.Locale.ROOT));
+        return col == null ? -1 : col;
+    }
+
+    /** The canonical display name of a column (0..22), or null if out of range. */
+    public static String nameOfColumn(int column) {
+        return (column < 0 || column >= COLUMN_COUNT) ? null : COLUMN_NAME[column];
     }
 }
