@@ -188,6 +188,12 @@ public final class ConfigLoader {
             kv(w, ConfigKeys.PATHING_MAX_NODES, d.maxNodes());
             line(w, "# Heuristic greediness weight (>= 1.0). 1.0 = optimal but slow; higher = faster + greedier.");
             kv(w, ConfigKeys.PATHING_GREEDY_WEIGHT, d.greedyWeight());
+            line(w, "# Ticks the bot considers 1 HP of damage to be worth (>= 0) -- the ONE damage-pricing");
+            line(w, "# knob: walking through fire/bushes/powder snow and falling past the safe distance are all");
+            line(w, "# charged this many ticks per HP. 1 HP buys roughly costPerHitpoint / 4.6 blocks of detour");
+            line(w, "# (~22 blocks at the default 100). Raise it for a more self-preserving bot; only matters");
+            line(w, "# when survival.takesDamage=true.");
+            kv(w, ConfigKeys.PATHING_COST_PER_HITPOINT, d.costPerHitpoint());
         } catch (IOException e) {
             OrebitCommon.LOGGER.warn("[Orebit] could not write default config {} — using defaults in memory",
                     file, e);

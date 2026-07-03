@@ -86,4 +86,12 @@ public final class ConfigKeys {
      * beelines (far fewer nodes, paths no longer guaranteed optimal). Default {@code 2.0}.
      */
     public static final String PATHING_GREEDY_WEIGHT = "pathing.greedyWeight";
+    /**
+     * {@code float >= 0} — ticks the bot considers <b>1 HP of damage</b> to be worth: the ONE knob every
+     * damage-as-cost planner term is priced in (hazard-cell transit — fire / berry bush / powder snow —
+     * and fall damage past the safe window). One HP buys {@code costPerHitpoint / 4.633} walk-blocks of
+     * detour (≈ 21.6 at the default {@code 100.0}); raise it for a more self-preserving bot. Only
+     * meaningful when {@code survival.takesDamage} is on (an immune bot's damage terms are zero).
+     */
+    public static final String PATHING_COST_PER_HITPOINT = "pathing.costPerHitpoint";
 }

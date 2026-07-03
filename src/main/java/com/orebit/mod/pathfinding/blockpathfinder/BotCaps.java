@@ -44,6 +44,26 @@ public record BotCaps(
          * penalty. SLOW costs are NOT gated on this — physics slows an immune bot just the same.
          */
         boolean takesDamage,
+        /**
+         * Ticks the planner considers <b>1 HP of damage</b> to be worth ({@code >= 0}) — the ONE currency
+         * every damage-as-cost term is priced in ({@code pathing.costPerHitpoint}). Two consumers today:
+         * the {@link com.orebit.mod.pathfinding.blockpathfinder.MovementContext#cellTransitCost pass-through
+         * hazard surcharge} (1 HP per damaging body cell transited) and the {@link
+         * com.orebit.mod.pathfinding.blockpathfinder.movements.Fall}/{@link
+         * com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour} fall-damage penalty (1 HP per block
+         * dropped past {@link #safeFallDistance}). Meaningful only when {@link #takesDamage} is true (an
+         * immune bot's damage terms are zero regardless).
+         *
+         * <p><b>Break-even intuition:</b> one HP buys {@code costPerHitpoint /}
+         * {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse#FLAT_COST} (≈ 4.633) walk-blocks
+         * of detour — ≈ 21.6 blocks at the default {@code 100}. The old hardcoded 40-ticks-per-hazard-cell
+         * bought only ~9 blocks per cell, so a berry-bush MAZE was rationally plowed through lethally (each
+         * cell's detour share exceeded its 9-block allowance; death itself was never priced). Server admins
+         * raise this for a more self-preserving bot. Successor (ratified, NOT yet built): a cumulative
+         * health-aware damage BUDGET — a per-path HP ledger against remaining hearts — replaces this scalar
+         * conversion; until then this knob is the unified short-term fix.
+         */
+        float costPerHitpoint,
         /** May mine soft blocks in the way (BreakThrough — Tier 3). */
         boolean canBreak,
         /** May place throwaway blocks (Pillar / Bridge — Tier 3). */
@@ -97,15 +117,26 @@ public record BotCaps(
     public static final float DEFAULT_GREEDY_WEIGHT = 2.0f;
 
     /**
+     * Default {@link #costPerHitpoint} (= the {@code pathing.costPerHitpoint} config default): 100 ticks
+     * per HP ⇒ 1 HP buys ≈ 21.6 walk-blocks of detour ({@code 100 / 4.633}). Deliberately well above the
+     * old implicit rates (40 ticks per hazard cell, 10 ticks per excess fall block) so a mortal bot at
+     * defaults is meaningfully self-preserving; an immune bot is unaffected (its damage terms are zero).
+     */
+    public static final float DEFAULT_COST_PER_HITPOINT = 100.0f;
+
+    /**
      * Walk + jump 1, no break/place, conservative 3-block safe fall — the Tier 1 default. Carries the
      * default search params (10k nodes, weight 2.0) and an unbreakable cap (moot with {@code canBreak}
      * false). {@code takesDamage} is {@code true} for consistency with the mortal fall window this preset
      * already carries (safe 3 / max 16 charges the Fall damage penalty), so both presets price damage as
      * cost; an immune profile comes from config ({@code survival.takesDamage=false}), not these constants.
+     * Damage is priced at {@link #DEFAULT_COST_PER_HITPOINT} (= the config default) — note this makes the
+     * presets MORE damage-averse than the pre-unification hardcodes (100 vs 40/hazard-cell and 10/excess
+     * fall block); headless tests/benchmarks that assert damage-priced costs read the caps value.
      */
     public static final BotCaps DEFAULT = new BotCaps(
-            1, DEFAULT_SAFE_FALL, DEFAULT_MAX_FALL, true, false, false, UNBREAKABLE,
-            DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
+            1, DEFAULT_SAFE_FALL, DEFAULT_MAX_FALL, true, DEFAULT_COST_PER_HITPOINT, false, false,
+            UNBREAKABLE, DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
 
     /**
      * The Tier 1 default plus break + place enabled — the test/headless config that proves break/place
@@ -115,6 +146,6 @@ public record BotCaps(
      * caps now come from {@link com.orebit.mod.config.Config}).
      */
     public static final BotCaps BREAK_PLACE = new BotCaps(
-            1, DEFAULT_SAFE_FALL, DEFAULT_MAX_FALL, true, true, true, UNBREAKABLE,
-            DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
+            1, DEFAULT_SAFE_FALL, DEFAULT_MAX_FALL, true, DEFAULT_COST_PER_HITPOINT, true, true,
+            UNBREAKABLE, DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
 }

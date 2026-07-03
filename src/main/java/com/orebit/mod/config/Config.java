@@ -32,7 +32,10 @@ import net.minecraft.world.level.block.state.BlockState;
  * <ul>
  *   <li>{@code canBreak  = mining.canMine}, {@code maxBreakHardness = mining.maxHardness};</li>
  *   <li>{@code canPlace  = placement.canPlace};</li>
- *   <li>{@code maxNodes  = pathing.maxNodes}, {@code greedyWeight = pathing.greedyWeight}.</li>
+ *   <li>{@code maxNodes  = pathing.maxNodes}, {@code greedyWeight = pathing.greedyWeight};</li>
+ *   <li>{@code costPerHitpoint = pathing.costPerHitpoint} — the ONE damage-pricing knob: ticks the
+ *       planner considers 1 HP worth (hazard-cell transit + fall damage past the safe window are both
+ *       priced in it; see {@link BotCaps#costPerHitpoint}).</li>
  * </ul>
  * {@code jumpHeight}/{@code safeFallDistance} stay at the Tier 1 defaults (1 / 3) — they are not yet owner
  * knobs (they arrive with the move-completeness arc). {@code survival.takesDamage} rides into {@code
@@ -60,7 +63,8 @@ public record Config(
         int ticksToMineFlat,
         // ---- pathing ----
         int maxNodes,
-        float greedyWeight) {
+        float greedyWeight,
+        float costPerHitpoint) {
 
     /**
      * The all-defaults configuration — reproduces TODAY's hardcoded follower behaviour exactly (break +
@@ -73,7 +77,8 @@ public record Config(
             /* survival   */ false, false, false,
             /* placement  */ true, false, Blocks.COBBLESTONE, 1.0f, MovementContext.PLACE_BASE_COST,
             /* mining     */ true, false, BotCaps.UNBREAKABLE, true, 0,
-            /* pathing    */ BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT);
+            /* pathing    */ BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT,
+                             BotCaps.DEFAULT_COST_PER_HITPOINT);
 
     /**
      * The capability gate the block-tier A* reads, derived from the placement / mining / pathing knobs
@@ -92,6 +97,7 @@ public record Config(
                 /* safeFallDistance */ safeFall,
                 /* maxFallDistance  */ maxFall,
                 /* takesDamage      */ takesDamage,
+                /* costPerHitpoint  */ costPerHitpoint,
                 /* canBreak         */ canMine,
                 /* canPlace         */ canPlace,
                 /* maxBreakHardness */ maxHardness,
@@ -107,6 +113,12 @@ public record Config(
     // {@link #removalCostWeight} (placement group) is the record's auto-generated accessor: how strongly the
     // planner disfavours placing hard-to-remove blocks (mine-out ticks × weight; 0 disables). Read once per
     // pathfind into the inventory feasibility snapshot — never on the hot path.
+
+    // {@link #costPerHitpoint} (pathing group, auto-generated accessor) is the unified damage price: ticks
+    // the planner considers 1 HP of damage to be worth (>= 0, default 100). Rides into
+    // BotCaps.costPerHitpoint and is read by every damage-as-cost term (hazard-cell transit in
+    // MovementContext.cellTransitCost, fall damage past the safe window in Fall/Parkour). Break-even: 1 HP
+    // buys costPerHitpoint / 4.633 walk-blocks of detour. Only meaningful with survival.takesDamage=true.
 
     // {@link #placeBaseCost} (placement group, auto-generated accessor) is the flat per-placement base cost
     // (ticks) — a behavioral "reluctance to place" penalty, NOT a physical place time (see {@link

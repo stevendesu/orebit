@@ -13,8 +13,10 @@ import net.minecraft.world.level.block.state.BlockState;
  * Keeps the nav grid live by patching it on every block change — the block-update hook that retires the
  * follower's per-replan {@code refreshNavData} rebuild. Registers a {@link BlockChangeEvents.Listener};
  * for a server-side change inside a built section it updates that cell's navtype and recomputes the small
- * within-section neighbourhood via {@link NavSectionBuilder#patchCell} (no palette scan). Changes in
- * chunks we don't track yet are ignored — they build fresh on load.
+ * flag neighbourhood via {@link NavSectionBuilder#patchCell} (no palette scan) — including, across the
+ * vertical seam, the top rows of the section BELOW (whose flags read this section through their upward
+ * overscan) and overscan reads INTO the section above. Changes in chunks we don't track yet are ignored —
+ * they build fresh on load.
  *
  * <p>The trigger is the {@code setBlockState} mixin firing {@link BlockChangeEvents#fire}; until that
  * overlay is wired this listener simply never runs (registering it is harmless).
@@ -52,6 +54,12 @@ public final class NavGridUpdater {
             else NetherPortalIndex.removeCell(server, pos.getX(), pos.getY(), pos.getZ());
         }
 
-        NavSectionBuilder.patchCell(section, lx, ly, lz, newState);
+        // Vertical column neighbours (same chunk, straight out of the NavStore entry): the ABOVE section
+        // feeds the patch's overscan reads (a top-rows recompute must see the blocks over the face); the
+        // BELOW section receives the seam propagation (a bottom-rows change is a flags change for its top
+        // floor cells). Null at the world edges — patchCell treats that as air / skips, matching build.
+        NavSection above = sectionIndex + 1 < sections.length ? sections[sectionIndex + 1] : null;
+        NavSection below = sectionIndex > 0 ? sections[sectionIndex - 1] : null;
+        NavSectionBuilder.patchCell(section, above, below, lx, ly, lz, newState);
     }
 }

@@ -64,10 +64,12 @@ class SlowBlockCostTest {
 
     // Weight-1.0 (optimal) walk-only and dig-capable caps; damage flag irrelevant here (nothing damages).
     private static final BotCaps WALK = new BotCaps(
-            1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true, false, false,
+            1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true,
+            BotCaps.DEFAULT_COST_PER_HITPOINT, false, false,
             BotCaps.UNBREAKABLE, BotCaps.DEFAULT_MAX_NODES, 1.0f);
     private static final BotCaps DIG = new BotCaps(
-            1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true, true, false,
+            1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true,
+            BotCaps.DEFAULT_COST_PER_HITPOINT, true, false,
             BotCaps.UNBREAKABLE, BotCaps.DEFAULT_MAX_NODES, 1.0f);
 
     // ---- (a) slow floor: clean corridor beats an equal-length soul-soil corridor --------------

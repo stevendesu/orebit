@@ -31,6 +31,7 @@ public final class ConfigCommand implements BotCommand {
                     Config c = ConfigLoader.reload(source.getServer());
                     CommandFeedback.send(source, "Orebit config reloaded "
                             + "(maxNodes=" + c.maxNodes() + ", greedyWeight=" + c.greedyWeight()
+                            + ", costPerHitpoint=" + c.costPerHitpoint()
                             + ", canMine=" + c.canMine() + ", canPlace=" + c.canPlace() + ").");
                     return 1;
                 })));

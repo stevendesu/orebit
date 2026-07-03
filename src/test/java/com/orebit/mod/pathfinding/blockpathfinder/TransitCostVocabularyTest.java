@@ -39,11 +39,15 @@ class TransitCostVocabularyTest {
         }
     }
 
+    // Damage priced at the config-default 100 ticks/HP; the damage assertions below read it back off the
+    // caps (the unified knob), so they track the preset default rather than pinning a magic number twice.
     private static final BotCaps MORTAL = new BotCaps(
-            1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true, false, false,
+            1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true,
+            BotCaps.DEFAULT_COST_PER_HITPOINT, false, false,
             BotCaps.UNBREAKABLE, BotCaps.DEFAULT_MAX_NODES, 1.0f);
     private static final BotCaps IMMUNE = new BotCaps(
-            1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, false, false, false,
+            1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, false,
+            BotCaps.DEFAULT_COST_PER_HITPOINT, false, false,
             BotCaps.UNBREAKABLE, BotCaps.DEFAULT_MAX_NODES, 1.0f);
 
     private static long desc(Block block) {
@@ -76,10 +80,11 @@ class TransitCostVocabularyTest {
         MovementContext mortal = new MovementContext(null, MORTAL);
         MovementContext immune = new MovementContext(null, IMMUNE);
 
-        // Fire: damaging + passable, no through-slow — the pure caps-gated damage case.
+        // Fire: damaging + passable, no through-slow — the pure caps-gated damage case, priced as
+        // 1 HP × the caps' unified ticks-per-HP knob.
         long fire = desc(Blocks.FIRE);
-        assertEquals(MovementContext.DAMAGE_TRANSIT_COST, mortal.cellTransitCost(fire), 1e-4f,
-                "a mortal bot pays the damage surcharge per fire cell transited");
+        assertEquals(MORTAL.costPerHitpoint(), mortal.cellTransitCost(fire), 1e-4f,
+                "a mortal bot pays 1 HP × costPerHitpoint per fire cell transited");
         assertEquals(0f, immune.cellTransitCost(fire), 1e-4f,
                 "an invulnerable bot pays NOTHING for a damaging body cell (caps-honest, like Fall)");
 
@@ -91,7 +96,7 @@ class TransitCostVocabularyTest {
 
         // Berry bush: LIGHT through-slow for everyone, plus the damage term only for a mortal bot.
         long bush = desc(Blocks.SWEET_BERRY_BUSH);
-        assertEquals(MovementContext.DAMAGE_TRANSIT_COST + MovementContext.LIGHT_TRANSIT_COST,
+        assertEquals(MORTAL.costPerHitpoint() + MovementContext.LIGHT_TRANSIT_COST,
                 mortal.cellTransitCost(bush), 1e-3f);
         assertEquals(MovementContext.LIGHT_TRANSIT_COST, immune.cellTransitCost(bush), 1e-3f);
 

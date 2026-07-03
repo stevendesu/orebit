@@ -23,7 +23,8 @@ import net.minecraft.server.level.ServerLevel;
  *
  * <h2>Feeds (all cheap / incremental)</h2>
  * <ul>
- *   <li><b>Full-section classify</b>: {@code NavSectionBuilder.classifyInto} detects portals with one
+ *   <li><b>Full-section classify</b>: {@code NavSectionBuilder.classifyNavtypes} (pass 1 of the column
+ *       build; {@code classifyInto} delegates to it) detects portals with one
  *       bit-test per palette entry and collects cell indices only when the palette actually contains one;
  *       {@code ChunkNavLoader} then {@link #record}s the whole chunk's cells at the {@code NavStore.put}
  *       site — a wholesale replace, idempotent on rebuild.</li>

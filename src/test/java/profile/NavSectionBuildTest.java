@@ -69,4 +69,68 @@ public class NavSectionBuildTest {
         assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(g.flags(8, 10, 8)), "open air high above");
         assertFalse(NavFlags.placeableNeighbor(g.flags(8, 10, 8)), "open air high above has no face");
     }
+
+    /**
+     * The vertical-overscan column build (the two-pass form {@code ChunkNavBuilder} runs): classify BOTH
+     * sections' navtypes first, then compute each section's flags with the section above's grid in hand.
+     * Floor cells in a section's top rows must see hazards/solids sitting in the bottom rows of the
+     * section above — the exact geometry the old within-section build left stale-CLEAR (the sweet-berry
+     * seam-maze the bot died in).
+     */
+    @Test
+    void verticalOverscanAtBuildTime() {
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
+
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        BlockState bush = Blocks.SWEET_BERRY_BUSH.defaultBlockState();
+
+        // Section k-1 (below): isolated floor cells in its top rows.
+        PalettedContainer<BlockState> below = newSection();
+        below.getAndSet(8, 15, 8, stone);   // floor A — top row; body y+1 is the above section's ly=0
+        below.getAndSet(10, 14, 10, stone); // floor B — ly=14; body y+2 is the above section's ly=0
+        below.getAndSet(4, 15, 4, stone);   // floor C — headroom probe
+        below.getAndSet(2, 15, 2, stone);   // floor D — control, nothing above
+
+        // Section k (above): the seam-row occupants.
+        PalettedContainer<BlockState> above = newSection();
+        above.getAndSet(8, 0, 8, bush);   // hazard over floor A
+        above.getAndSet(10, 0, 10, bush); // hazard over floor B (two cells up from the floor)
+        above.getAndSet(4, 0, 4, stone);  // solid over floor C
+
+        TraversalGrid belowGrid = new TraversalGrid();
+        TraversalGrid aboveGrid = new TraversalGrid();
+        boolean belowAir = NavSectionBuilder.classifyNavtypes(below, false, belowGrid, null);
+        boolean aboveAir = NavSectionBuilder.classifyNavtypes(above, false, aboveGrid, null);
+        NavSectionBuilder.computeFlags(aboveGrid, aboveAir, null);              // nothing above the top
+        NavSectionBuilder.computeFlags(belowGrid, belowAir, aboveGrid);         // seam overscan under test
+
+        // (1) hazard across the seam sets the prefilter bits on the below section's floor cells.
+        int fA = belowGrid.flags(8, 15, 8);
+        assertTrue(NavFlags.clearableHazard(fA), "bush at above ly=0 = hazard on the ly=15 floor below");
+        assertTrue(NavFlags.slowTransit(fA), "bush at above ly=0 = slow transit on the ly=15 floor below");
+        int fB = belowGrid.flags(10, 14, 10);
+        assertTrue(NavFlags.clearableHazard(fB), "bush two cells over the seam still lands in the body space (ly=14 floor)");
+
+        // (3) HEADROOM at the seam is honest: a solid at above ly=0 blocks the below floor at the feet.
+        assertEquals(NavFlags.HEADROOM_NONE, NavFlags.headroom(belowGrid.flags(4, 15, 4)),
+                "solid across the seam = no headroom on the top-row floor");
+
+        // Control: an untouched top-row floor keeps clean, full-headroom flags.
+        int fD = belowGrid.flags(2, 15, 2);
+        assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(fD), "clear seam column keeps full headroom");
+        assertFalse(NavFlags.clearableHazard(fD), "clear seam column carries no hazard bit");
+
+        // A UNIFORM-AIR section below real blocks: the interior keeps the one-cell fill bypass, but the
+        // overscan-affected top rows are computed individually against the section above.
+        TraversalGrid airBelowGrid = new TraversalGrid();
+        boolean airBelowAir = NavSectionBuilder.classifyNavtypes(null, true, airBelowGrid, null);
+        NavSectionBuilder.computeFlags(airBelowGrid, airBelowAir, aboveGrid);
+        assertEquals(NavFlags.HEADROOM_NONE, NavFlags.headroom(airBelowGrid.flags(4, 15, 4)),
+                "air section's top row still reads the solid across the seam");
+        assertTrue(NavFlags.clearableHazard(airBelowGrid.flags(8, 15, 8)),
+                "air section's top row still reads the hazard across the seam");
+        assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(airBelowGrid.flags(4, 8, 4)),
+                "air section interior keeps the uniform fill");
+    }
 }
