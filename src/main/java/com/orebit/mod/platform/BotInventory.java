@@ -95,6 +95,23 @@ public final class BotInventory {
         return total;
     }
 
+    /**
+     * Total number of items the bot is carrying (summed {@link ItemStack#getCount()} over every slot) — the
+     * scalar the {@code /bot gather} loop diffs across standing-mine ticks to count PICKED-UP resource items
+     * for its quota (find-mine-resources design §7). Version-agnostic: uses only the stable {@code
+     * getContainerSize()}/{@code getItem()}/{@code getCount()} verbs, so it needs no per-resource item table
+     * (mined ore drops a different item than the block, and item registry ids drift across versions). Cold —
+     * called at tick rate for one bot, never on a hot path.
+     */
+    public int totalItemCount() {
+        int total = 0;
+        for (int i = 0, n = inv.getContainerSize(); i < n; i++) {
+            ItemStack s = inv.getItem(i);
+            if (!s.isEmpty()) total += s.getCount();
+        }
+        return total;
+    }
+
     // ---- Mining capability (tool selection) --------------------------------------------------------
 
     /**
