@@ -1,12 +1,56 @@
 # DESIGN — Portal Route Layer (multi-leg routing above PathPlan + the splice primitive)
 
-> **STATUS (2026-07-03): DESIGN RATIFIED-PENDING — nothing implemented.** Still the plan of record for
-> HANDOFF item #9; P0 remains the unverified 8-item fake-player portal checklist (§8.4).
-> **⚠ BIT-ALLOCATION CONFLICT — reconcile before implementing:** this doc widens descriptor bit 43 to a
-> 2-bit PORTAL_KIND spanning **bits 43–44**, but the s43 protected-blocks feature (#13) has since taken
-> **bit 44 for PROTECTED** (`NavBlock.PROTECTED_BIT = 1L << 44`, with derived BREAKABLE=38 /
-> OPEN_PLACE=39 / COLLISION=40 also live). PORTAL_KIND must move to a free bit pair (or encode END_PORTAL
-> differently); audit `NavBlock`'s current bit map first.
+> **STATUS (2026-07-03): DESIGN RATIFIED-PENDING — route layer NOT implemented; the splice primitive it
+> shares HAS shipped (s44).** Still the plan of record for HANDOFF item #9; P0 remains the unverified
+> 8-item fake-player portal checklist (§8.4).
+
+## STATUS — what shipped vs. what's pending (2026-07-03)
+
+**Shipped (s44 — the background-pathfinding arc landed the shared infrastructure this doc depends on):**
+- **The splice primitive** (`§4`) is **live** in `pathfinding/splice/`: `SpliceSeam` (seed → accept → adopt,
+  Chebyshev tolerance) + `EditSnapshot` (latest-wins fold of a plan's unexecuted suffix) + the
+  `findPath(…, baseline, budgetNanos)` params + `PathEdits.addSnapshot` (appended AFTER the cameFrom walk so
+  path edits shadow the baseline). It shipped as **shared infrastructure** for the async planner (Consumer B),
+  exactly as `§4` intended — so the portal route layer (Consumer A) now consumes an existing, tested contract
+  rather than building it. The per-dimension `EditLedger` rule (`§4.4`) remains route-layer work.
+- **`NetherPortalIndex`** (`§5.1` discovery layer) — live, per-dimension, fed by classify + patch + evict.
+- **Portal-seek / ENTER terminal states** in `AllyBotEntity` (`§2`, `§3.2`) — live as FOLLOW infrastructure
+  (the `EnterPortalAction` *extraction* is still pending; today the logic sits in `followThroughPortal`).
+
+**Pending (the route layer proper — none implemented):**
+- `RouteDriver` / `RouteLeg` / `Route` (`§3`, `§8.1`), the multi-leg driver above `PathPlan`.
+- `PortalPairings` observation + canonical keys (`§5.2`).
+- The break-even estimator + margin gate (`§6`).
+- `EnterPortalAction` extraction from `AllyBotEntity` (`§3.2`).
+- The lazy-vs-eager leg-splicing policy (`§4.6`) and the `EditLedger` per-dimension carry (`§4.4`).
+
+**⚠ DESIGN BLOCKER — descriptor-bit conflict (`§7` END_PORTAL widening).** `§7` proposes widening
+`PORTAL_BIT` (bit 43) into a 2-bit `PORTAL_KIND` field spanning **bits 43–44** — but **bit 44 was taken by
+the s43 protected-blocks feature** (`NavBlock.PROTECTED_BIT = 1L << 44`), so that span now collides. Verified
+current `NavBlock` descriptor bit map (read from source):
+
+| bits | field | | bits | field |
+|---|---|---|---|---|
+| 0–4 | topY | | 24–31 | hardness |
+| 5–7 | shape | | 32–34 | tool |
+| **8–13** | **FREE** (reclaimed sturdy-faces mask) | | 35 | toolRequired |
+| 14–15 | openable | | 36 | waterloggable |
+| 16–17 | fluid | | 37 | STANDABLE (derived) |
+| 18–19 | surface | | 38 | BREAKABLE (derived) |
+| 20 | climbable | | 39 | OPEN_PLACE (derived) |
+| 21 | gravity | | 40 | COLLISION (derived) |
+| 22 | damaging | | 41–42 | transit-slow |
+| 23 | replaceable | | 43 | PORTAL (nether only) |
+| | | | 44 | PROTECTED |
+
+**Free bits: 8–13 (a 6-bit hole) and 45–63 (19 contiguous high bits).** Recommended relocation:
+define `PORTAL_KIND` as a fresh **contiguous 2-bit field at bits 45–46** (0 none / 1 nether / 2 end /
+3 end-gateway) and **migrate** the existing bit-43 nether flag into it, so `isPortal(d)` becomes
+`portalKind(d) == 1` (still one mask+compare) and bit 43 is freed. A 2-bit field *cannot* straddle the
+PROTECTED bit, so the original "widen 43–44 in place" plan is dead. Lower-churn alternative: keep bit 43 as
+the nether flag and add a single standalone **END_PORTAL bit at 45** (no contiguous KIND field) — adequate if
+end-gateway (kind 3) is never needed. Either way the `§7` prose that says "bits 44–63 are free" / "widen bit
+43 into bits 43–44" is stale; see the annotations there.
 
 > HANDOFF menu item **#9**, drafted 2026-07-02. Design only — no code in this document is implemented.
 > Companion reading: `internal_docs/PRD.md` §6.5 (portals as local edges, 8:1 only in the heuristic),
@@ -62,6 +106,7 @@ per the CLAUDE.md performance model gets the full design-review + paired-A/B tre
 
 `NavBlock` descriptor: `PORTAL_BIT = 1L << 43` (nether only). Bits **44–63 are free**; navtype count
 ~587 of the 1024 cap — huge headroom for §7's END_PORTAL widening.
+*(see STATUS: bit conflict — bit 44 is now PROTECTED; free bits are 8–13 and 45–63.)*
 
 ---
 
@@ -486,7 +531,8 @@ and a hazard-priced leg that blows the estimate feeds back only if it outright F
 ## 7. END_PORTAL (short — a follow-on, but reserve the bits now)
 
 - **Classification**: today `NavBlock` has NO end-portal identity (only `PORTAL_BIT` = bit 43, tested
-  as `block == Blocks.NETHER_PORTAL`). Bits 44–63 are free and navtypes sit at ~587/1024, so widen
+  as `block == Blocks.NETHER_PORTAL`). *(see STATUS: bit conflict — bit 44 is now PROTECTED; put PORTAL_KIND
+  at bits 45–46, not 43–44.)* Bits 44–63 are free and navtypes sit at ~587/1024, so widen
   bit 43 into a **2-bit PORTAL_KIND field (bits 43–44)**: 0 none / 1 nether / 2 end
   (`Blocks.END_PORTAL`) / 3 end-gateway (`Blocks.END_GATEWAY`, future). `isPortal(d)` (the nether
   test every current consumer means) becomes `kind == 1` — still one mask+compare; add

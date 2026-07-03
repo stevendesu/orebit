@@ -1,8 +1,14 @@
-*Historical design doc — the A/B flags described here (HPA_FRAGMENTS / HIERARCHICAL_CASCADE) were deleted when the fragment+cascade model became unconditional (s36 cleanup, commit eed70b2). Kept for design rationale; the flag/dispatch mechanics no longer exist.*
+*Implemented design — the fragment model described here is now the **only** region-tier node model; it shipped
+unconditional (s36 cleanup, commit eed70b2). The `HPA_FRAGMENTS` A/B flag this doc specifies (§8 slice S6, §9.5,
+§10) was **never wired for an in-game A/B**: the fragment model replaced the old center-node model directly, and
+the flag/dispatch mechanics (plus the `HIERARCHICAL_CASCADE` sibling) no longer exist. The body below is accurate
+to the shipped code — `RegionFragments`, `FragmentLeafComputer`/`FragmentBuilder`, and the fragment-aware
+`RegionPathfinder`/`RegionPathPlan` (per-step `fragmentId` + `portalCell`). Only the S6 flag-gated rollout was not
+executed as written.*
 
 # HPA\* Fragments — connectivity-aware region tier
 
-> **Status:** ratified design, not yet implemented. **Supersedes** the center-node model in
+> **Status:** ratified design, now implemented and unconditional (see the historical note above). **Supersedes** the center-node model in
 > `HPA-IMPLEMENTATION.md` §3a (store), §5 (leaf cost), §6 (defaults), §8 (region A\*), §9 (window/corridor).
 > The fixed cubic-grid implicit-octree addressing (`RegionAddress`), the SoA/alloc-light house style (§14),
 > and the scale-guard coarse branch (§8) are **retained**. Authored on `core`.
@@ -295,8 +301,11 @@ S6 Validation/A-B  (cross-cutting, flag-gated)
   reaches goal; **no A→B bounce**; trials-chamber unchanged (the regression guard).
 - **S5 — Merge (deferred).** UF child→parent fragments. **Accept:** coarse-branch long walk (> `LEVEL0_DIRECT_CAP`)
   still reaches goal; merged costs admissible.
-- **S6 — Validation/A-B.** A `HPA_FRAGMENTS` flag toggling fragment vs center model; in-game cave (mine-up +
-  bounce) + trials-chamber + the canopy case; JMH leaf compute (flood vs current bounded-A\*).
+- **S6 — Validation/A-B** *(design intent, NOT executed as written).* This slice specified a `HPA_FRAGMENTS`
+  flag toggling fragment vs center model for an in-game A/B (cave mine-up + bounce, trials-chamber, canopy; JMH
+  leaf compute flood vs bounded-A\*). In practice the fragment model was cut over **directly** and the center
+  model + flag were deleted (s36); no flag-gated A/B ran. The validation *scenarios* (§10 matrix) remain the
+  behavioural acceptance criteria — they were checked against the unconditional fragment model, not across a flag.
 
 ## 9. Decisions — recommended defaults (confirm before S1)
 

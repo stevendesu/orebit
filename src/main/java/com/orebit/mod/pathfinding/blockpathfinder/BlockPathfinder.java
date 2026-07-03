@@ -184,8 +184,9 @@ public final class BlockPathfinder {
      */
     public static boolean MACRO_MOVES = true;
 
-    // NOTE (E1/E2, 2026-07): a per-pop edit-bbox relevance gate (PERF-DESIGN-edit-bbox-gate.md) was
-    // implemented, measured, and DELETED per protocol: a counter probe put the envelope-disjoint pop
+    // NOTE (E1/E2, 2026-07): a per-pop edit-bbox relevance gate was implemented, measured, and DELETED
+    // per protocol (design doc deleted post-refutation; rationale in PERF-RESULTS-2026-07-03.md §E1/E2):
+    // a counter probe put the envelope-disjoint pop
     // fraction at p = 0.000 in every scenario — the pillar-flood pop stands ON its own placed block, so
     // "edits trail behind the path" is false for every shape the search produces and both gate variants
     // measured FLAT. Any future gate needs per-row/incremental chain bboxes or a recent-edits-only
