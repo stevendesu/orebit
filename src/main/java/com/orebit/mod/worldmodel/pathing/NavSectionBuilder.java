@@ -8,6 +8,7 @@ import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.platform.SectionPalette;
 import com.orebit.mod.platform.Sections;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
+import com.orebit.mod.worldmodel.resource.ResourceClasses;
 
 import net.minecraft.core.IdMap;
 import net.minecraft.util.BitStorage;
@@ -187,8 +188,18 @@ public final class NavSectionBuilder {
      *         the big uniform-air recompute bypass (PRD §6.2).
      */
     public static boolean classifyNavtypes(LevelChunkSection section, TraversalGrid grid, IntConsumer portalCells) {
-        if (section == null) return classifyNavtypes(null, true, grid, portalCells);
-        return classifyNavtypes(section.getStates(), Sections.hasOnlyAir(section), grid, portalCells);
+        return classifyNavtypes(section, grid, portalCells, null);
+    }
+
+    /**
+     * As {@link #classifyNavtypes(LevelChunkSection, TraversalGrid, IntConsumer)}, additionally tallying
+     * indexed-resource block counts into {@code resourceTallyOut} (nullable — see the core overload
+     * {@link #classifyNavtypes(PalettedContainer, boolean, TraversalGrid, IntConsumer, int[])}).
+     */
+    public static boolean classifyNavtypes(LevelChunkSection section, TraversalGrid grid, IntConsumer portalCells,
+                                           int[] resourceTallyOut) {
+        if (section == null) return classifyNavtypes(null, true, grid, portalCells, resourceTallyOut);
+        return classifyNavtypes(section.getStates(), Sections.hasOnlyAir(section), grid, portalCells, resourceTallyOut);
     }
 
     /**
@@ -197,6 +208,20 @@ public final class NavSectionBuilder {
      */
     public static boolean classifyNavtypes(PalettedContainer<BlockState> states, boolean onlyAir,
                                            TraversalGrid grid, IntConsumer portalCells) {
+        return classifyNavtypes(states, onlyAir, grid, portalCells, null);
+    }
+
+    /**
+     * Core classify + optional resource tally. When {@code resourceTallyOut != null} (length
+     * {@link ResourceClasses#COLUMN_COUNT}, caller-owned + pre-zeroed), the palette-decode loop also maps
+     * each palette entry to its indexed resource column and, gated exactly like the portal collection,
+     * runs one extra sequential 4096-cell pass to accumulate per-column raw counts. Resource-free sections
+     * (the common case) pay only one {@code columnForBlock} lookup + compare per palette entry — never the
+     * per-cell pass. A {@code null} tally (headless/benchmark callers) skips resources entirely, so those
+     * paths are byte-identical to before. The hot 4096-cell navtype-resolution loop is untouched.
+     */
+    public static boolean classifyNavtypes(PalettedContainer<BlockState> states, boolean onlyAir,
+                                           TraversalGrid grid, IntConsumer portalCells, int[] resourceTallyOut) {
         if (onlyAir) {
             fillRows(grid, NavBlock.AIR & 0xFFFF, 0, 0, NavSection.SIZE - 1);
             return true;
@@ -210,12 +235,21 @@ public final class NavSectionBuilder {
         BlockState[] palette = SectionPalette.read(states, slotScratch);
         int[] slotToNavtype = new int[palette.length];
         long[] slotToDesc = new long[palette.length];
+        // Per-call slot→resource-column map, allocated only when a tally was requested (same per-build
+        // allocation as slotToNavtype/slotToDesc — this is the cold chunk-build path, not the search hot path).
+        int[] slotToColumn = resourceTallyOut != null ? new int[palette.length] : null;
         boolean anyPortal = false;
+        boolean anyResource = false;
         for (int s = 0; s < palette.length; s++) {
             short navtype = NavBlock.navtypeFor(palette[s]);
             slotToNavtype[s] = navtype & 0xFFFF;
             slotToDesc[s] = NavBlock.descriptor(navtype);
             anyPortal |= NavBlock.isPortal(slotToDesc[s]); // the one-bit-test-per-palette-entry gate
+            if (slotToColumn != null) {
+                int col = ResourceClasses.columnForBlock(palette[s].getBlock());
+                slotToColumn[s] = col;
+                anyResource |= (col >= 0);                 // one compare per palette entry, like anyPortal
+            }
         }
 
         // Portal collection: gated on the palette actually containing one (portals are vanishingly rare),
@@ -223,6 +257,16 @@ public final class NavSectionBuilder {
         if (portalCells != null && anyPortal) {
             for (int i = 0; i < 4096; i++) {
                 if (NavBlock.isPortal(slotToDesc[slotScratch[i]])) portalCells.accept(i);
+            }
+        }
+
+        // Resource tally: gated on the palette actually containing an indexed block (mirrors the portal
+        // gate). One sequential int[] read + gated increment per cell; feeds ChunkNavBuilder's per-section
+        // log₂-encoded tally. The hot navtype-resolution loop below stays untouched.
+        if (resourceTallyOut != null && anyResource) {
+            for (int i = 0; i < 4096; i++) {
+                int c = slotToColumn[slotScratch[i]];
+                if (c >= 0) resourceTallyOut[c]++;
             }
         }
 

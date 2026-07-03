@@ -9,6 +9,8 @@ import com.orebit.mod.platform.BlockChangeEvents;
 import com.orebit.mod.platform.LevelBounds;
 import com.orebit.mod.worldmodel.pathing.NavSection;
 import com.orebit.mod.worldmodel.pathing.NavStore;
+import com.orebit.mod.worldmodel.resource.ResourceMerger;
+import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -141,12 +143,42 @@ public final class HpaMaintenance {
         if (!EAGER_BUILD) return;
         final NavSection[] column = NavStore.get(level, NavStore.key(chunkX, chunkZ));
         if (column == null) return;
-        final CostPyramid pyramid = RegionGrid.of(level).pyramid();
+        final RegionGrid grid = RegionGrid.of(level);
+        final CostPyramid pyramid = grid.pyramid();
+        final ResourcePyramid resources = grid.resourcePyramid();
         for (int ry = 0; ry < column.length; ry++) {
             if (column[ry] == null) continue;
             buildLeafSafe(level, pyramid, chunkX, ry, chunkZ); // note the (rx, rz, ry) order inside
+            // Resource tally (sparse — only sections that actually held ≥1 indexed block have a tally; the
+            // pyramid interns no row for the null/empty common case). Same (rx=chunkX, ry=sectionIndex,
+            // rz=chunkZ) coord convention as the cost pyramid.
+            final byte[] tally = column[ry].resourceTally();
+            if (tally != null) writeResourceTallySafe(resources, chunkX, ry, chunkZ, tally);
         }
     }
+
+    /**
+     * Write a section's level-0 resource tally into the {@link ResourcePyramid} and roll it up, <b>never
+     * throwing</b> onto the tick thread (mirrors {@link #buildLeafSafe}). Only called for a non-null tally,
+     * so no row is ever interned for a resource-free section (the sparsity contract, design §3/§5).
+     */
+    private static void writeResourceTallySafe(ResourcePyramid resources, int rx, int ry, int rz, byte[] tally) {
+        try {
+            int row = resources.rowFor(0, rx, ry, rz);
+            resources.setRow(0, row, tally);
+            resources.setBuilt(0, row, true);
+            ResourceMerger.mergeUpTallies(resources, rx, ry, rz);
+        } catch (Throwable t) {
+            long n = ++resourceFailures;
+            if (n == 1 || n % 256 == 0) {
+                OrebitCommon.LOGGER.error("[Orebit] resource tally write failed at region ({},{},{}) [{} total] — "
+                        + "row skipped (drill-down under-reports there until next build)", rx, ry, rz, n, t);
+            }
+        }
+    }
+
+    /** Count of resource-tally-write failures swallowed by {@link #writeResourceTallySafe} (log throttle). */
+    private static volatile long resourceFailures = 0;
 
     /**
      * Recompute one leaf's faces + re-merge its ancestors, <b>never throwing</b> onto the caller (the server
@@ -183,6 +215,10 @@ public final class HpaMaintenance {
     private static void onBlockChanged(Level level, BlockPos pos, BlockState oldState, BlockState newState) {
         if (!(level instanceof ServerLevel server)) return; // server authority only (mirror NavGridUpdater)
         if (oldState == newState) return;                    // interned states: reference-equal == no change
+
+        // TODO(milestone-1): resource pyramid is load-populated only; block-change re-tally deferred
+        //   (see DESIGN-find-mine-resources.md §8.5). This hook keeps only the COST pyramid live; the
+        //   gather loop tolerates mid-session drift via its on-arrival local section scan.
 
         // No pyramid for this dimension yet → nothing to keep live; it builds fresh on first plan. We must
         // NOT call RegionGrid.of() here (that would create a pyramid for a dimension nobody has planned in,
