@@ -82,6 +82,15 @@ public final class ConfigLoader {
     }
 
     private static void install(Config c) {
+        // Async pathing (DESIGN-background-pathfinding.md §4.4): before mutating the cold shared tables
+        // below (NavBlock.applyProtected splits navtypes; MiningModel.buildTable republishes), wait out any
+        // in-flight background search — the drain-instead-of-volatile choice that keeps the hot read paths
+        // untouched. No-op when async is off / at first load (no executor yet). Bot ticks don't run during
+        // this command's execution (same thread), so nothing new is submitted mid-rebake.
+        if (!com.orebit.mod.pathfinding.async.PlanExecutor.drainIdle(2_000)) {
+            OrebitCommon.LOGGER.warn("[Orebit] config reload: planner pool didn't drain in 2s — "
+                    + "an in-flight search may see mixed old/new tables (one stale plan at worst)");
+        }
         config = c;
         botCaps = c.toBotCaps();
         // Planner-side protected-block awareness: fold mining.protectedBlocks into the NavBlock
@@ -239,6 +248,20 @@ public final class ConfigLoader {
             line(w, "# Hard cap (milliseconds) on that warm-up; it usually stops earlier, once search times");
             line(w, "# plateau. 0 disables the warm-up entirely.");
             kv(w, ConfigKeys.PATHING_WARMUP_BUDGET_MS, d.warmupBudgetMs());
+            line(w, "# Run path searches on background planner threads instead of the server tick thread.");
+            line(w, "# Searches stop costing tick time; plans arrive 1-3 ticks after they're requested (the");
+            line(w, "# bot keeps walking its current plan meanwhile). Requires a server restart to change.");
+            kv(w, ConfigKeys.PATHING_ASYNC, d.asyncPathing());
+            line(w, "# Background planner thread count when pathing.async=true (clamped to your core count");
+            line(w, "# minus 2). All bots share the pool; raise it on a many-bot server to cut search latency,");
+            line(w, "# lower to 1 on a constrained host. Requires a server restart to change.");
+            kv(w, ConfigKeys.PATHING_MAX_THREADS, d.maxThreads());
+            line(w, "# Wall-clock budget (milliseconds) per background path search when pathing.async=true --");
+            line(w, "# the time-based cap that effectively replaces pathing.maxNodes (which remains as a");
+            line(w, "# memory backstop). A search that runs out of budget returns its best partial path; the");
+            line(w, "# bot moves that way and replans. Bigger = escapes bigger dead-ends, longer worst-case");
+            line(w, "# plan latency (the tick itself is never stalled either way).");
+            kv(w, ConfigKeys.PATHING_SEARCH_BUDGET_MS, d.searchBudgetMs());
         } catch (IOException e) {
             OrebitCommon.LOGGER.warn("[Orebit] could not write default config {} — using defaults in memory",
                     file, e);

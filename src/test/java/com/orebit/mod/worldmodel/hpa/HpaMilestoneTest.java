@@ -202,7 +202,7 @@ public class HpaMilestoneTest {
 
         System.out.println("[HpaMilestone] pillar: single flat block-A* " + PILLAR_HEIGHT + " up ...");
         BlockPathPlan flat = BlockPathfinder.findPath(grid, start, goal, CAPS);
-        final int nodes = BlockPathfinder.LAST_EXPANSIONS;
+        final int nodes = BlockPathfinder.lastExpansions();
 
         // Fixed: a single flat search now climbs straight to the top (no horizontal cone flood).
         assertTrue(reachesGoal(flat, goal), "the " + PILLAR_HEIGHT + "-up pillar should now solve in one flat "

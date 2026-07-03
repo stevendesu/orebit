@@ -40,9 +40,9 @@ public final class NavStore {
         return BY_LEVEL.computeIfAbsent(level, l -> new ConcurrentHashMap<>());
     }
 
-    /** Store nav sections for a chunk, recycling any previously-stored sections for that chunk. */
+    /** Store nav sections for a chunk, retiring any previously-stored sections for that chunk. */
     public static void put(ServerLevel level, long chunkKey, NavSection[] sections) {
-        recycle(levelMap(level).put(chunkKey, sections));
+        NavReclaim.retire(levelMap(level).put(chunkKey, sections));
     }
 
     /** The nav sections for a chunk, or {@code null} if not currently built/loaded. */
@@ -61,10 +61,10 @@ public final class NavStore {
         return BY_LEVEL.get(level);
     }
 
-    /** Drop a chunk's nav sections (on unload), returning them to the pool. */
+    /** Drop a chunk's nav sections (on unload), retiring them toward the pool. */
     public static void remove(ServerLevel level, long chunkKey) {
         ConcurrentHashMap<Long, NavSection[]> m = BY_LEVEL.get(level);
-        if (m != null) recycle(m.remove(chunkKey));
+        if (m != null) NavReclaim.retire(m.remove(chunkKey));
     }
 
     /** Number of chunks currently stored for a level (diagnostics). */
@@ -73,18 +73,16 @@ public final class NavStore {
         return m == null ? 0 : m.size();
     }
 
-    /** Drop and recycle every chunk in a level (on level/server unload). */
+    /** Drop and retire every chunk in a level (on level/server unload). */
     public static void clear(ServerLevel level) {
         ConcurrentHashMap<Long, NavSection[]> m = BY_LEVEL.remove(level);
         if (m != null) {
-            for (NavSection[] sections : m.values()) recycle(sections);
+            for (NavSection[] sections : m.values()) NavReclaim.retire(sections);
         }
     }
 
-    private static void recycle(NavSection[] sections) {
-        if (sections == null) return;
-        for (NavSection s : sections) {
-            if (s != null) s.recycle();
-        }
-    }
+    // Displaced sections are NOT recycled inline anymore: a planner-thread search may still hold them
+    // (use-after-recycle would read another chunk's cells). NavReclaim parks them until no in-flight
+    // search predates the retirement, then returns them to NavSectionPool on the tick thread — see
+    // DESIGN-background-pathfinding.md §4.1.
 }

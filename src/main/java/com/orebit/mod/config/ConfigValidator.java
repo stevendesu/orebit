@@ -78,7 +78,12 @@ public final class ConfigValidator {
                 weight(props, ConfigKeys.PATHING_GREEDY_WEIGHT, d.greedyWeight()),
                 weightNonNeg(props, ConfigKeys.PATHING_COST_PER_HITPOINT, d.costPerHitpoint()),
                 bool(props, ConfigKeys.PATHING_WARMUP, d.warmup()),
-                intClamped(props, ConfigKeys.PATHING_WARMUP_BUDGET_MS, d.warmupBudgetMs(), 0, 60_000));
+                intClamped(props, ConfigKeys.PATHING_WARMUP_BUDGET_MS, d.warmupBudgetMs(), 0, 60_000),
+                bool(props, ConfigKeys.PATHING_ASYNC, d.asyncPathing()),
+                // Upper clamps are sanity rails only: maxThreads is re-clamped to [1, cores-2] at pool
+                // start (the host's core count isn't known here), and a >10s search budget is a config typo.
+                intClamped(props, ConfigKeys.PATHING_MAX_THREADS, d.maxThreads(), 1, 64),
+                intClamped(props, ConfigKeys.PATHING_SEARCH_BUDGET_MS, d.searchBudgetMs(), 1, 10_000));
     }
 
     // ---- per-type parse + clamp (each warns through the sink and never throws) ----------------------

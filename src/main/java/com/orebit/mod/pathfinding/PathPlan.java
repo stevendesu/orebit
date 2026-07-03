@@ -3,8 +3,13 @@ package com.orebit.mod.pathfinding;
 import com.orebit.mod.Debug;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
+import com.orebit.mod.pathfinding.async.PlanExecutor;
+import com.orebit.mod.pathfinding.async.PlanHandle;
+import com.orebit.mod.pathfinding.async.SearchRequest;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.splice.SpliceSeam;
 import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
@@ -142,6 +147,38 @@ public final class PathPlan {
      * headless callers), leaving the gates in their historical caps-only mode.
      */
     private final MovementContext.InventoryView inventory;
+    /**
+     * The splice baseline seeded into every windowed search — the not-yet-applied edits of an EARLIER
+     * plan this plan is spliced after (DESIGN-background-pathfinding.md §7). {@code null} for every
+     * non-spliced plan (all existing callers): the search pays one compare per pop and is byte-identical.
+     */
+    private final EditSnapshot baseline;
+    /**
+     * The background planner pool, or {@code null} = synchronous (every headless caller, and live bots
+     * with {@code pathing.async=false} — byte-identical to before). When set, {@link #replanBlock}
+     * SUBMITS instead of computing: the current {@link #blockPlan} stays live while the search runs, and
+     * the result is adopted at the next settled boundary via {@link #pollPending} — seam-acceptance-gated
+     * (DESIGN-background-pathfinding.md §5).
+     */
+    private final PlanExecutor executor;
+    // ---- async in-flight state (all tick-thread-confined; meaningful only when executor != null) ----
+    /** The outstanding search, or {@code null}. At most one per plan (latest-wins: superseders cancel). */
+    private PlanHandle pending;
+    /** The floor cell {@link #pending} was searched FROM — the seam's predicted start. */
+    private BlockPos pendingStart;
+    /** The window target {@link #pending} was searched TOWARD (adoption re-checks it's still current). */
+    private BlockPos pendingTarget;
+    /** Whether {@link #pending} is a P4 pre-plan (predicted future start) vs a boundary replan (started
+     *  from the bot's actual floor). A pre-plan result PARKS until the bot arrives; a replan result whose
+     *  seam rejects resubmits immediately. */
+    private boolean pendingPreplan;
+    // Parked pre-plan result: computed-but-not-yet-adopted (the bot hasn't reached the predicted start).
+    private BlockPathPlan parkedPlan;
+    private boolean parkedPartial;
+    private BlockPos parkedStart;
+    private BlockPos parkedTarget;
+    /** The window target the last pre-plan was attempted for — one attempt per target (churn guard). */
+    private BlockPos preplanAttemptedTarget;
     private final int minY;
     /** The goal's level-0 region coords (so we can test "goal in window" by index). */
     private final int goalRX, goalRY, goalRZ;
@@ -183,7 +220,8 @@ public final class PathPlan {
 
     // ---- active block plan ---------------------------------------------------------------------------
     private BlockPathPlan blockPlan;
-    /** Whether {@link #blockPlan} is a best-effort PARTIAL (set from {@code BlockPathfinder.LAST_WAS_PARTIAL}). */
+    /** Whether {@link #blockPlan} is a best-effort PARTIAL (from {@code BlockPathfinder.lastWasPartial()} /
+     *  the async result). */
     private boolean lastPlanPartial;
     private PathStatus status;
     /** The bot's last reported floor cell (the block-A* start for the next replan). */
@@ -259,6 +297,37 @@ public final class PathPlan {
      */
     public PathPlan(ServerLevel level, RegionGrid regionGrid, BlockPos startFloor, BlockPos goalFloor,
                     BotCaps caps, MovementContext.InventoryView inventory, int startMode) {
+        this(level, regionGrid, startFloor, goalFloor, caps, inventory, startMode, null);
+    }
+
+    /**
+     * As above, additionally seeding every windowed {@link BlockPathfinder#findPath} with a splice
+     * {@code baseline} ({@link EditSnapshot}) — the not-yet-applied edits of an EARLIER plan this plan
+     * will be spliced after (DESIGN-background-pathfinding.md §7). Threaded into ALL of this plan's
+     * window searches (simplest correct form: {@link PathEdits}' bbox reject + latest-wins shadowing
+     * make windows far from the baseline pay only the per-pop no-op). {@code null} = every existing
+     * caller, byte-identical behaviour.
+     */
+    public PathPlan(ServerLevel level, RegionGrid regionGrid, BlockPos startFloor, BlockPos goalFloor,
+                    BotCaps caps, MovementContext.InventoryView inventory, int startMode,
+                    EditSnapshot baseline) {
+        this(level, regionGrid, startFloor, goalFloor, caps, inventory, startMode, baseline, null);
+    }
+
+    /**
+     * As above, additionally handing the plan a background {@code executor}
+     * (DESIGN-background-pathfinding.md §5): non-null = every windowed block search is SUBMITTED to the
+     * planner pool instead of computed on the tick thread, with adoption at the settled boundary,
+     * seam-acceptance-gated. {@code null} = fully synchronous, byte-identical to before (all headless
+     * callers, and live bots with {@code pathing.async=false}). The region tier (cascade build, window
+     * targets, repairs) stays on the tick thread either way — only {@code BlockPathfinder.findPath}
+     * moves off it.
+     */
+    public PathPlan(ServerLevel level, RegionGrid regionGrid, BlockPos startFloor, BlockPos goalFloor,
+                    BotCaps caps, MovementContext.InventoryView inventory, int startMode,
+                    EditSnapshot baseline, PlanExecutor executor) {
+        this.baseline = baseline;
+        this.executor = executor;
         this.level = level;
         this.regionGrid = regionGrid;
         this.goalFloor = goalFloor;
@@ -512,6 +581,13 @@ public final class PathPlan {
             return;
         }
 
+        // Async result drain (DESIGN-background-pathfinding.md §5): the caller only invokes onBotMoved at
+        // a settled boundary, so adopting here IS the boundary-gated adoption the design requires. No-op
+        // when sync or nothing is in flight (one null compare).
+        if (executor != null) {
+            pollPending(botFloor);
+        }
+
         // Goal tolerance check (the block tier reaches the goal within 1 horizontally, 2 vertically —
         // mirror that here so the driver completes exactly when the follower's block plan would).
         if (withinGoalTolerance(botFloor)) {
@@ -701,7 +777,6 @@ public final class PathPlan {
      */
     private void replanBlock() {
         final BlockPos target = windowTarget();
-        final NavGridView grid = new NavGridView(level);
         // No corridor envelope: the block-A* searches the full grid toward the near (~3-region) window target,
         // so it can take the REAL route even when that wanders a few regions off the coarse skeleton (the
         // skeleton is a hint, not a cage — the old corridor's job, capping the pillar flood, is now done by the
@@ -727,15 +802,176 @@ public final class PathPlan {
                     caps.maxNodes(), caps.greedyWeight());
         }
 
+        // ASYNC (DESIGN-background-pathfinding.md §5): submit instead of compute. The current blockPlan
+        // stays live (the follower keeps walking it); the result is adopted at the next settled boundary
+        // by pollPending. Status stays RUNNING while a search is in flight — BLOCKED now means "a search
+        // RETURNED null", never "a search is still running". A pending search toward this same target is
+        // left alone (the 40-tick refresh timer would otherwise churn resubmits); anything else in flight
+        // is superseded (latest-wins).
+        if (executor != null) {
+            if (pending != null && !pending.isDone() && target.equals(pendingTarget)) {
+                // A boundary replan toward this same target is already in flight → skip. An in-flight
+                // PRE-PLAN toward it is also left alone WHILE the current plan is still walkable (the
+                // 40-tick refresh timer would otherwise routinely kill the precompute — review finding;
+                // the seam-reject → replan-from-actual fallback covers a stall that invalidated the
+                // prediction, one round-trip later). Only a genuinely planless bot preempts a pre-plan.
+                if (!pendingPreplan || blockPlan != null) return;
+            }
+            if (blockPlan != null && parkedPlan != null && target.equals(parkedTarget)) {
+                return; // the precomputed result is already parked for this target — arrival adopts it
+            }
+            submit(botFloor, target, cuboidCap, baseline, false);
+            if (status != PathStatus.RUNNING) status = PathStatus.RUNNING;
+            return;
+        }
+
         // confineBound = null (unconfined), cuboidBound = the growth cap. startMode = the bot's live pose (so a
         // replan mid-sprint-swim stays PRONE instead of re-deriving STANDING from a bob and re-initiating).
+        // baseline = the splice seed (null for every non-spliced plan). The grid view is built HERE, below
+        // the async branch — in async mode the worker builds its own background view, so the tick thread
+        // must not pay the per-search view construction twice (SHORT-guard discipline).
+        final NavGridView grid = new NavGridView(level);
         this.blockPlan = BlockPathfinder.findPath(grid, botFloor, target, caps, null, cuboidCap, inventory,
-                startMode);
-        this.lastPlanPartial = blockPlan != null && BlockPathfinder.LAST_WAS_PARTIAL;
+                startMode, baseline);
+        this.lastPlanPartial = blockPlan != null && BlockPathfinder.lastWasPartial();
         this.status = (blockPlan != null) ? PathStatus.RUNNING : PathStatus.BLOCKED;
         if (Debug.ENABLED && blockPlan != null) {
             logBlockPlan();
         }
+    }
+
+    /** Cancel any in-flight search and drop the parked pre-plan (superseded / plan cleared). */
+    private void submit(BlockPos fromFloor, BlockPos target, RegionBound cuboidCap,
+                        EditSnapshot seed, boolean preplan) {
+        if (pending != null) pending.cancel();
+        // A fresh submission supersedes any parked precompute: the parked plan was predicated on the
+        // PREVIOUS plan's end cell and remaining edits, both stale once a new search replaces that plan.
+        // Without this, a stale parked plan could later overwrite the fresh adoption (review finding).
+        if (!preplan) parkedPlan = null;
+        pending = executor.submit(new SearchRequest(level, fromFloor, target, caps, inventory, startMode,
+                cuboidCap, seed, executor.budgetNanos()));
+        pendingStart = fromFloor;
+        pendingTarget = target;
+        pendingPreplan = preplan;
+    }
+
+    /**
+     * Drain the in-flight search if it finished (tick thread). Called from {@link #onBotMoved} — which
+     * the follower only invokes at a settled boundary, so mid-plan adoption is boundary-gated by
+     * construction — and from {@link #pollWhenPlanless}, the planless-bot exception (nothing to un-adopt).
+     * The splice contract's accept+adopt steps (DESIGN-background-pathfinding.md §5/§7):
+     * <ul>
+     *   <li><b>Boundary replan</b> result: adopt if the bot is still within seam tolerance of the cell the
+     *       search started from AND the window target hasn't moved; otherwise resubmit from the actual
+     *       floor (the same recovery the escape hatches use). A {@code null} result = BLOCKED, exactly the
+     *       sync path's semantics.</li>
+     *   <li><b>Pre-plan</b> result (P4): PARK it — the bot hasn't reached the predicted start yet. Each
+     *       boundary visit re-tests the parked seam; on accept it's adopted with no search pause at all,
+     *       on target-change it's dropped (the window moved on).</li>
+     * </ul>
+     */
+    private void pollPending(BlockPos actualFloor) {
+        if (pending != null && pending.isDone()) {
+            PlanHandle done = pending;
+            pending = null;
+            boolean preplan = pendingPreplan;
+            BlockPos from = pendingStart;
+            BlockPos toward = pendingTarget;
+            if (done.wasRejected()) {
+                // Executor hiccup (queue full / worker threw / cancelled-skip) — NOT a search verdict.
+                // Never map to BLOCKED (that blacklists a real skeleton hop — review finding): retry.
+                if (preplan) {
+                    preplanAttemptedTarget = null; // the attempt didn't run; allow another
+                } else {
+                    replanBlock();
+                }
+            } else if (preplan) {
+                if (done.plan() != null) {
+                    parkedPlan = done.plan();
+                    parkedPartial = done.wasPartial();
+                    parkedStart = from;
+                    parkedTarget = toward;
+                }
+                // A failed (null) pre-plan is dropped — and preplanAttemptedTarget stays set, so we don't
+                // re-attempt the same doomed precompute every boundary tick; the boundary replan searches
+                // for real when the bot arrives.
+            } else {
+                SpliceSeam seam = new SpliceSeam(from, startMode, EditSnapshot.EMPTY);
+                if (!seam.accepts(actualFloor) || !toward.equals(windowTargetPos)) {
+                    replanBlock(); // drifted past tolerance / window moved — plan from where we really are
+                } else {
+                    this.blockPlan = done.plan();
+                    this.lastPlanPartial = blockPlan != null && done.wasPartial();
+                    this.status = (blockPlan != null) ? PathStatus.RUNNING : PathStatus.BLOCKED;
+                    if (Debug.ENABLED && blockPlan != null) logBlockPlan();
+                }
+            }
+        }
+        // Parked pre-plan adoption: the no-pause splice. Adopt only when the bot has actually arrived at
+        // the predicted start (seam accept) and the window target is still the parked one.
+        if (parkedPlan != null) {
+            if (!windowTargetPos.equals(parkedTarget)) {
+                parkedPlan = null; // the window moved on while we walked — stale precompute, drop it
+            } else if (new SpliceSeam(parkedStart, startMode, EditSnapshot.EMPTY).accepts(actualFloor)) {
+                this.blockPlan = parkedPlan;
+                this.lastPlanPartial = parkedPartial;
+                this.status = PathStatus.RUNNING;
+                parkedPlan = null;
+                if (Debug.ENABLED) logBlockPlan();
+            }
+        }
+    }
+
+    /**
+     * Whether a {@link #preplan} call would actually submit — the CHEAP gate the follower tests BEFORE
+     * building the pre-plan's arguments ({@code EditSnapshot.fromRemainingSteps} walks + allocates, and
+     * without this gate the sync path would pay that on every settled-boundary tick past the half-window
+     * mark — review finding). One pre-plan attempt per window target: {@code preplanAttemptedTarget}
+     * stops a failed/parked precompute from being re-submitted every boundary tick.
+     */
+    public boolean wantsPreplan() {
+        return executor != null && pending == null && parkedPlan == null
+                && status == PathStatus.RUNNING && skeleton != null && windowTargetPos != null
+                && !windowTargetPos.equals(preplanAttemptedTarget);
+    }
+
+    /**
+     * P4 pre-plan hint (DESIGN-background-pathfinding.md §7), called by the follower when the current
+     * window plan is more than half consumed: precompute the NEXT boundary's search from the plan's
+     * predicted end cell, seeded with the remaining unapplied edits, so arrival splices with no pause.
+     * No-op unless {@link #wantsPreplan} (the follower already gated on it; re-checked for safety) and
+     * the prediction differs from the cell we already planned from (nothing new to compute).
+     */
+    public void preplan(BlockPos predictedFloor, EditSnapshot remainingEdits, int liveMode) {
+        if (!wantsPreplan()) return;
+        if (predictedFloor.equals(botFloor)) return;
+        this.startMode = liveMode; // same per-tick pose refresh onBotMoved does; the search seeds from it
+        preplanAttemptedTarget = windowTargetPos;
+        submit(predictedFloor, windowTargetPos, cuboidCapBox(windowTargetPos), remainingEdits, true);
+    }
+
+    /**
+     * Tick-rate poll for the PLANLESS case (review finding): adoption of a plan when {@link #blockPlan}
+     * is null needs NO settled boundary — there is nothing to un-adopt mid-move, and the sync path built
+     * its first plan from a floating/swimming bot too. Without this, a bot that never settles (treading
+     * water, long fall) could wait forever on its FIRST plan, because {@link #onBotMoved} — the only
+     * other drain — is boundary-gated by the caller. Also refreshes {@link #botFloor} so a
+     * rejected-seam resubmit searches from the bot's LIVE cell, not the stale ctor cell.
+     */
+    public void pollWhenPlanless(BlockPos liveFloor) {
+        if (executor == null || blockPlan != null) return;
+        if (status == PathStatus.COMPLETE || status == PathStatus.FAILED || skeleton == null) return;
+        this.botFloor = liveFloor;
+        pollPending(liveFloor);
+    }
+
+    /** Stop caring about any in-flight search (the owner cleared/replaced this plan). */
+    public void cancelPending() {
+        if (pending != null) {
+            pending.cancel();
+            pending = null;
+        }
+        parkedPlan = null;
     }
 
     /**

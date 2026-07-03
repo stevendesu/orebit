@@ -88,12 +88,26 @@ public final class NavGridView {
     }
 
     /**
+     * Planner-thread seam (DESIGN-background-pathfinding.md §4.2): a view over {@code level}'s LIVE nav
+     * store, but with {@link #descriptorAt}'s live-{@code getBlockState} fallback DISABLED — vanilla chunk
+     * access is not thread-safe, so a background search must never dereference the level. Out-of-built
+     * descriptor probes report AIR instead (passable-but-not-standable), the exact contract the synthetic
+     * views already prove out: the gated reads ({@code packedAt}/{@code built}) already wall the search
+     * into built nav data, so the delta is only the rare ungated probe just past the loaded radius — and
+     * its error direction is "plan less at the frontier", never "plan through phantom terrain".
+     */
+    public static NavGridView background(ServerLevel level) {
+        return new NavGridView(LevelBounds.minY(level), NavStore.chunksOf(level));
+    }
+
+    /**
      * Test / benchmark seam: a view over a synthetic, already-built section map with <b>no live level</b>.
      * Lets a headless JMH benchmark or determinism test (PRD §11) drive the pathfinder over a hand-built
      * grid without standing up a {@link ServerLevel}. Because {@code level} is {@code null}, {@link
-     * #descriptorAt}'s live-{@code getBlockState} fallback must NEVER fire — the caller must keep every cell
-     * the search can probe inside the built map (which is the realistic case anyway: the pathfinder only
-     * plans over loaded terrain). Package-private so it isn't part of the public runtime surface.
+     * #descriptorAt}'s live-{@code getBlockState} fallback never fires (out-of-built probes report AIR) —
+     * the caller keeps every cell the search can probe inside the built map (which is the realistic case
+     * anyway: the pathfinder only plans over loaded terrain). Also the {@link #background} planner-thread
+     * seam's backing ctor. Package-private so it isn't part of the public runtime surface.
      */
     NavGridView(int minY, ConcurrentHashMap<Long, NavSection[]> chunks) {
         this.level = null;

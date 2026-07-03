@@ -5,12 +5,14 @@ import org.slf4j.LoggerFactory;
 
 import com.orebit.mod.commands.OrebitCommands;
 import com.orebit.mod.config.ConfigLoader;
+import com.orebit.mod.pathfinding.async.PlanExecutor;
 import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
 import com.orebit.mod.platform.PlatformEvents;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.HpaMaintenance;
 import com.orebit.mod.worldmodel.pathing.ChunkNavLoader;
 import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
+import com.orebit.mod.worldmodel.pathing.NavReclaim;
 import com.orebit.mod.worldmodel.pathing.NavWarmup;
 
 import net.minecraft.server.level.ServerLevel;
@@ -58,6 +60,23 @@ public final class OrebitCommon {
                 NavWarmup.run(ConfigLoader.config().warmupBudgetMs());
             }
         });
+
+        // Background planner pool (DESIGN-background-pathfinding.md §3): started once, AFTER ConfigLoader::load
+        // (reads pathing.async/maxThreads/searchBudgetMs) and after the warm-up above (JIT is warm before the
+        // first submitted search; each pool thread warms its own ThreadLocal scratch as it starts). When
+        // pathing.async=false this never runs, PlanExecutor.instance() stays null, and every search remains
+        // synchronous on the tick thread — byte-identical to before.
+        events.onServerStarted(server -> {
+            if (ConfigLoader.config().asyncPathing()) {
+                PlanExecutor.start(ConfigLoader.config().maxThreads(), ConfigLoader.config().searchBudgetMs());
+            }
+        });
+
+        // NavSection retirement drain (DESIGN-background-pathfinding.md §4.1): once per level-tick, advance
+        // the reclamation epoch and return retired sections to the pool once no in-flight background search
+        // can still hold them. With async off this degrades to a one-tick recycle deferral (minActiveStamp()
+        // is MAX_VALUE with no executor) — behaviourally invisible, so it is registered unconditionally.
+        events.onWorldTickEnd(level -> NavReclaim.tick(PlanExecutor.minActiveStamp()));
 
         // World-model pipeline (PRD Phase 1): recompute a per-chunk nav grid on load and store it
         // (NavStore), recycling on unload. NavBlock is now a short-indexed packed-long table (the
