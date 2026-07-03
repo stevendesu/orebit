@@ -1,9 +1,12 @@
 package com.orebit.mod.worldmodel.pathing;
 
+import java.util.Arrays;
 import java.util.function.LongConsumer;
 
 import com.orebit.mod.platform.ChunkCoords;
 import com.orebit.mod.platform.LevelBounds;
+import com.orebit.mod.worldmodel.resource.Log2Codec;
+import com.orebit.mod.worldmodel.resource.ResourceClasses;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.chunk.ChunkAccess;
@@ -42,21 +45,30 @@ public final class ChunkNavBuilder {
         int chunkZ = ChunkCoords.z(chunk.getPos());
         LevelChunkSection[] chunkSections = chunk.getSections();
 
-        // Pass 1 — navtypes (+ portal cells) for the whole column.
+        // Reused per-column raw resource-count scratch (zeroed before each section classify). Encoded onto
+        // the NavSection only for resource-bearing sections — off the hot classify loop (design §4).
+        final int cols = ResourceClasses.COLUMN_COUNT;
+        final int[] resourceScratch = new int[cols];
+
+        // Pass 1 — navtypes (+ portal cells + resource tally) for the whole column.
         for (int i = 0; i < chunkSections.length; i++) {
             int sectionY = minY + (i * 16);
             BlockPos origin = new BlockPos(chunkX << 4, sectionY, chunkZ << 4);
             NavSection nav = NavSection.create(origin);
+            Arrays.fill(resourceScratch, 0, cols, 0);
             if (portalCells == null) {
-                allAir[i] = NavSectionBuilder.classifyNavtypes(chunkSections[i], nav.getTraversalGrid(), null);
+                allAir[i] = NavSectionBuilder.classifyNavtypes(chunkSections[i], nav.getTraversalGrid(), null,
+                        resourceScratch);
             } else {
                 final int baseX = chunkX << 4, baseY = sectionY, baseZ = chunkZ << 4;
                 allAir[i] = NavSectionBuilder.classifyNavtypes(chunkSections[i], nav.getTraversalGrid(),
                         cell -> portalCells.accept(NetherPortalIndex.pack(
                                 baseX + (cell & 15),          // section-local index is (y<<8)|(z<<4)|x
                                 baseY + (cell >>> 8),
-                                baseZ + ((cell >>> 4) & 15))));
+                                baseZ + ((cell >>> 4) & 15))),
+                        resourceScratch);
             }
+            attachResourceTally(nav, resourceScratch, cols);
             sections[i] = nav;
         }
 
@@ -76,5 +88,21 @@ public final class ChunkNavBuilder {
         NavSectionBuilder.computeDepth(sections);
 
         return sections;
+    }
+
+    /**
+     * Log₂-encode the raw per-column counts in {@code scratch} onto {@code nav}, allocating the tally byte[]
+     * only for a resource-bearing section (any nonzero column) — a resource-free section stays {@code null}
+     * (the sparsity win). Always sets (null or byte[]), matching the pooled section's reset contract.
+     */
+    private static void attachResourceTally(NavSection nav, int[] scratch, int cols) {
+        byte[] tally = null;
+        for (int c = 0; c < cols; c++) {
+            if (scratch[c] != 0) {
+                if (tally == null) tally = new byte[cols];
+                tally[c] = Log2Codec.encode(scratch[c]);
+            }
+        }
+        nav.setResourceTally(tally);
     }
 }
