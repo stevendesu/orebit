@@ -95,6 +95,9 @@ pathing.greedyWeight     = 2.0
 pathing.costPerHitpoint  = 100.0
 pathing.warmup           = true
 pathing.warmupBudgetMs   = 1500
+pathing.async            = false
+pathing.maxThreads       = 2
+pathing.searchBudgetMs   = 40
 ```
 
 | Key | Default | What it does |
@@ -104,6 +107,9 @@ pathing.warmupBudgetMs   = 1500
 | `pathing.costPerHitpoint` | `100.0` | How many ticks of travel time the bot considers **one hitpoint of damage** to be worth (`>= 0`). This single number prices *all* damage in the planner: walking through fire, berry bushes, or powder snow, and dropping farther than a safe fall — each expected hitpoint costs this many ticks. The intuition: one hitpoint buys roughly `costPerHitpoint / 4.6` blocks of detour, so at the default `100` the bot will walk about 22 blocks out of its way to avoid each point of damage — enough to route around a whole thicket of bushes rather than push through it. Raise it for a more self-preserving bot (it will take long detours and gentle descents); lower it for a daredevil that trades health for time. Only matters when `survival.takesDamage` is `true` — an invulnerable bot ignores damage entirely. |
 | `pathing.warmup` | `true` | Run a short synthetic pathfinder warm-up at server start, before any player can join, so the first *real* path isn't computed by a cold JIT compiler (a one-time ~22 ms tick stall otherwise; ~0.7 ms with the warm-up — [the measurements](Optimizations/depth_nibbles.md)). Costs roughly half a second of startup wall-clock and nothing afterwards. |
 | `pathing.warmupBudgetMs` | `1500` | The hard wall-clock cap, in milliseconds, on that warm-up pass. It usually finishes early (it stops once search times plateau, typically ~400–500 ms); `0` disables the warm-up entirely. |
+| `pathing.async` | `false` | Compute paths on background threads instead of the server tick thread. Searches stop costing tick time entirely; a plan arrives a tick or two after it's requested, and the bot keeps walking its current plan meanwhile (it also pre-computes the next stretch before finishing the current one, so long walks don't pause at plan boundaries). Requires a server restart to change. |
+| `pathing.maxThreads` | `2` | How many background planner threads to run when `pathing.async` is on (clamped to your core count minus two). All bots share the pool — raise it on a server with many bots to keep their plans snappy, lower it to `1` on a constrained host. Trades bot responsiveness against server CPU headroom, like view-distance. Requires a restart to change. |
+| `pathing.searchBudgetMs` | `40` | The wall-clock budget, in milliseconds, for one background path search — with `pathing.async` on, *time* replaces `pathing.maxNodes` as the effective search limit (the node cap remains as a memory backstop). A search that runs out of budget returns its best partial path; the bot moves that way and replans, converging on far goals. Bigger budgets escape bigger dead-ends at the cost of slower worst-case planning — the server tick is never stalled either way. |
 
 ### Survival — is the bot mortal?
 

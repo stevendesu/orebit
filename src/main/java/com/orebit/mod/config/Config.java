@@ -69,7 +69,10 @@ public record Config(
         float greedyWeight,
         float costPerHitpoint,
         boolean warmup,
-        int warmupBudgetMs) {
+        int warmupBudgetMs,
+        boolean asyncPathing,
+        int maxThreads,
+        int searchBudgetMs) {
 
     /**
      * The all-defaults configuration — reproduces TODAY's hardcoded follower behaviour exactly (break +
@@ -84,7 +87,9 @@ public record Config(
             /* mining     */ true, false, BotCaps.UNBREAKABLE, true, 0, 0.0f,
                              ProtectedBlocks.EMPTY, false,
             /* pathing    */ BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT,
-                             BotCaps.DEFAULT_COST_PER_HITPOINT, true, 1500);
+                             BotCaps.DEFAULT_COST_PER_HITPOINT, true, 1500,
+                             /* async off until in-game-soaked; 2 planner threads; 40 ms/search budget */
+                             false, 2, 40);
 
     /**
      * The capability gate the block-tier A* reads, derived from the placement / mining / pathing knobs

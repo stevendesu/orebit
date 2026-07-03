@@ -109,6 +109,19 @@ public final class PathEdits {
     }
 
     /**
+     * Fold a splice {@linkplain EditSnapshot baseline} in — the edits an EARLIER, still-executing plan
+     * will have applied by the time the bot stands here (the splice primitive's seed,
+     * DESIGN-background-pathfinding.md §7). Call AFTER the {@code cameFrom}-chain {@link #add} walk:
+     * first-seen-wins then makes the in-search path's own edits correctly shadow the baseline (the
+     * baseline is the oldest history), the exact mirror of latest-edit-wins along one path.
+     */
+    public void addSnapshot(EditSnapshot s) {
+        if (s == null) return;
+        for (int i = 0, n = s.placeCount(); i < n; i++) markIfAbsent(s.placeAt(i), (byte) PLACED);
+        for (int i = 0, n = s.breakCount(); i < n; i++) markIfAbsent(s.breakAt(i), (byte) BROKEN);
+    }
+
+    /**
      * The planned edit kind at cell {@code (x,y,z)}, or {@link #NONE} — the read-once form the movement
      * layer uses. Rejects cells outside the edits' {@linkplain #minX bounding box} with six int compares
      * before paying the hash + probe of {@link #kindAt(long)}; since a search's edits cluster tightly while

@@ -135,4 +135,29 @@ public final class ConfigKeys {
      * {@code pathing.warmup=false}). Default {@code 1500}.
      */
     public static final String PATHING_WARMUP_BUDGET_MS = "pathing.warmupBudgetMs";
+    /**
+     * {@code boolean} — run path searches on background planner threads instead of the server tick thread
+     * (DESIGN-background-pathfinding.md). The tick thread submits a search and adopts the result at the
+     * same settled boundary plans already swap at; searches stop costing tick time entirely, and the
+     * wall-clock budget below replaces the node cap as the effective search limit. Plans arrive 1–3 ticks
+     * after they're requested (the bot keeps walking its current plan meanwhile). Default {@code false}
+     * (today's synchronous behaviour, byte-identical). Changing it requires a server restart.
+     */
+    public static final String PATHING_ASYNC = "pathing.async";
+    /**
+     * {@code int >= 1} — background planner thread count when {@link #PATHING_ASYNC} is on (clamped to
+     * {@code [1, cores − 2]} at start). Bots share the pool; raise it on a multi-tenant server (many bots)
+     * to cut search tail latency, lower it to 1 on a constrained host. Like view-distance, this trades bot
+     * responsiveness against server CPU headroom. Default {@code 2}. Requires a server restart to change.
+     */
+    public static final String PATHING_MAX_THREADS = "pathing.maxThreads";
+    /**
+     * {@code int >= 1} — wall-clock budget (milliseconds) per background path search when
+     * {@link #PATHING_ASYNC} is on: the time-based cap that replaces {@code pathing.maxNodes} as the
+     * effective limit (the node cap remains as a memory backstop). A search that exhausts the budget
+     * returns its best partial path — the bot moves that way and replans, converging on far goals.
+     * Bigger budgets escape bigger dead-ends at the cost of longer worst-case plan latency (the tick
+     * itself is never stalled either way). Default {@code 40} (~4–10× the node cap's reach, warm).
+     */
+    public static final String PATHING_SEARCH_BUDGET_MS = "pathing.searchBudgetMs";
 }
