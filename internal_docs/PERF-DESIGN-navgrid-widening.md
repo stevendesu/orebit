@@ -11,8 +11,9 @@
 > reserved; (b) encoding shipped as 0–13 exact / 14 = proven-none-in-window / 15 = UNKNOWN→legacy
 > (single-section grids stay UNKNOWN and legacy-scan); (c) all four flags were removed after measurement
 > — maintenance + consumers are unconditional. **Headline 3 (cardinal neighbor class, phase 2) is DEAD
-> as-designed**: it required the edit-bbox gate, which was refuted at p = 0.000
-> (`PERF-DESIGN-edit-bbox-gate.md` STATUS). Results: `PERF-RESULTS-2026-07-03.md` §E3 + ADDENDUM.
+> as-designed**: it required the edit-bbox gate, which was refuted at p = 0.000 (design doc deleted
+> post-refutation; rationale recorded in `PERF-RESULTS-2026-07-03.md` §E1/E2). Results:
+> `PERF-RESULTS-2026-07-03.md` §E3 + ADDENDUM.
 
 **Original status:** DESIGN ONLY — for owner review before any implementation (standing rule 1).
 **Subject:** HANDOFF perf item (d): "NavGrid 16→32 widening — curated ONLY: depth-to-floor-below

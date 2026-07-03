@@ -2,7 +2,15 @@
 
 # HPA\* Cascade — stateful nested per-level skeletons
 
-> **Status:** ratified design, not yet implemented. **Supersedes** the *two-tier coarse branch* of
+> **STATUS (implemented & unconditional).** The cascade shipped and is the **only** region-tier driver —
+> `HierarchicalRegionPlan` (the `LevelPlan[]` stack) is what `PathPlan` consumes today, no flag, no fallback.
+> The `RegionGrid.HIERARCHICAL_CASCADE` gate named in the rollout/validation sections below (§12, §16 S6.6/S6.7)
+> was **deleted in the s36 cleanup along with the two-tier `planCoarseRefinedFragments` fallback** — the cascade
+> was made unconditional directly rather than A/B-tested behind the flag. Read §3–§11 as accurate to the shipped
+> code; §14 instrumentation counters and the §15 tuning decisions are **design guidance, not yet built** (no
+> region-A\* JMH bench, the WINDOW/cap numbers remain reasoned rather than measured). Body unchanged below.
+
+> **Status:** ratified design, now implemented (see the status block above). **Supersedes** the *two-tier coarse branch* of
 > `HPA-FRAGMENTS.md` §S5 (`RegionPathfinder.planCoarseRefinedFragments` — one coarse level + one L0 near
 > refine). Builds directly on the shipped fragment model (HPA-FRAGMENTS §S1–S5) and the cap-safe level
 > machinery (`chooseCapSafeLevel`/`maxChebAtLevel`/`verticalRegions`/`MAX_COARSE_LEVEL`, commit `06079d3`).
