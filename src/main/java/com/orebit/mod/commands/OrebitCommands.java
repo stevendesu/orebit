@@ -28,6 +28,7 @@ public final class OrebitCommands {
 
     /** The registered subcommands of {@code /bot}. Add a class + a line here to grow the surface. */
     private static final List<BotCommand> COMMANDS = List.of(
+            new SpawnCommand(),
             new FollowCommand(),
             new StayCommand(),
             new ComeCommand(),
