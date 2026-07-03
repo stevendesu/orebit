@@ -206,7 +206,7 @@ reusing the reactive executors. New command via the `BotCommand` strategy (one l
 | **PATH** | `driveToward(targetCenter, floor)` each tick; watch `pathPlan.status()`. | `driveToward` returns true → SCAN/MINE; `FAILED` → blacklist region, back to FIND |
 | **SCAN** | on arrival, scan the target section for exact block positions of `column` (direct `getBlockState` over 4096 cells — one section, not a hot path); queue them nearest-first. | queued → MINE |
 | **MINE** | `mining.request(cell)` **every tick** (reactive — BotMining has no done-event); poll `level.getBlockState(cell).isAir()`; on air, check inventory count of the resource item (real ServerPlayer inventory, auto-pickup — see [[agency-inventory-is-real]]). | quota met → RETURN; section exhausted → FIND |
-| **RETURN** | `driveToward(gatherStartPos or owner)`. | arrived → DONE |
+| **RETURN** | `driveToward(gatherStartPos)` — the cell the bot stood on when `/bot gather` was issued (owner-ratified over "owner's position": fixed target, no moving goal). | arrived → DONE |
 | **DONE** | `setMode(STAY)`, chat success. | — |
 
 **Quota is measured in picked-up items**, not blocks mined (ore drops the item; a fortune/deepslate
@@ -259,13 +259,15 @@ path — design-review + the JMH guard per the CLAUDE.md performance protocol. 6
 
 ---
 
-## 10. Open questions for owner
+## 10. Resolved decisions (owner-ratified 2026-07-03)
 
-- **Deepslate:** confirm excluded (saturates) or index it anyway (one column)?
-- **Quota semantics:** "gather 5" = 5 *items in inventory* (my assumption) or 5 *blocks mined*? (Matters
-  with fortune / variant drops.)
-- **RETURN target:** back to where the bot started the gather, or to the owner's current position?
-- **"None found" behavior:** stop and report, or walk-and-scan outward until something turns up (pulls in
-  the unloaded-chunk question early)?
-- **Persistence now or milestone 2?** The "remember yesterday's cave" use case needs it; everything else in
-  this milestone works on live-loaded data.
+- **Deepslate:** EXCLUDED (saturates below y=0; nobody runs short of it). 23-column set stands.
+- **Quota semantics:** counted as **items in inventory** — "gather 5 diamonds" = five diamonds picked up
+  (robust to fortune/variant drops; the natural "come back WITH iron" meaning). Poll `BotInventory` after
+  each break.
+- **RETURN target:** back to **where the bot started the gather** (`gatherStartPos`), not the owner's
+  moving position.
+- **"None found":** **stop and report** ("I don't see any … nearby") and go STAY. Milestone 1 searches
+  only loaded / previously-loaded regions; walk-and-scan prospecting is a later arc (§8.2).
+- **Persistence:** **deferred to milestone 2.** Operate on live-loaded data (rebuild on chunk load, like
+  nav). The "remember yesterday's cave" query waits for the shared pyramid persistence layer (§8.1).
