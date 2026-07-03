@@ -88,11 +88,21 @@ class PassThroughHazardTest {
     private static final BotCaps MORTAL_WALK = new BotCaps(
             1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true,
             BotCaps.DEFAULT_COST_PER_HITPOINT, false, false,
-            BotCaps.UNBREAKABLE, BotCaps.DEFAULT_MAX_NODES, 1.0f);
+            BotCaps.UNBREAKABLE, false, BotCaps.DEFAULT_MAX_NODES, 1.0f);
     private static final BotCaps IMMUNE_WALK = new BotCaps(
             1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, false,
             BotCaps.DEFAULT_COST_PER_HITPOINT, false, false,
-            BotCaps.UNBREAKABLE, BotCaps.DEFAULT_MAX_NODES, 1.0f);
+            BotCaps.UNBREAKABLE, false, BotCaps.DEFAULT_MAX_NODES, 1.0f);
+    /**
+     * MORTAL_WALK plus canBreak — the break-through-hazard bot. maxBreakHardness is pinned to 0 so ONLY
+     * the hardness-0 hazards (fire / a bush) are within its mining cap: the stone maze still confines
+     * (these headless searches run with no MiningModel table, where a stone break would otherwise price
+     * at 0 and open free tunnels through every wall — a tie the test must not depend on).
+     */
+    private static final BotCaps MORTAL_BREAK = new BotCaps(
+            1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true,
+            BotCaps.DEFAULT_COST_PER_HITPOINT, true, false,
+            0, false, BotCaps.DEFAULT_MAX_NODES, 1.0f);
 
     @Test
     void mortalBotDetoursAroundTheFire() {
@@ -126,6 +136,42 @@ class PassThroughHazardTest {
                             + " (4 cells buy ~86 blocks of detour; this detour costs ~40)");
         }
         assertTrue(anyAtZ(plan, 14), "the mortal bot should take the long z=14 detour around the fire maze");
+    }
+
+    @Test
+    void mortalBreakerPunchesThroughTheHazardMazeAndFoldsTheBreaks() {
+        // Break-through-hazard: a mortal bot that MAY break arbitrates punch-out vs transit vs detour by
+        // price. Each fire cell transited intact costs 100 (1 HP × costPerHitpoint); punching it out costs
+        // its real mining ticks (fire is hardness 0 — ~free) folded as a break edit, so the straight line
+        // WITH four folded breaks (~10×4.633 + ~4) beats both the intact line (~446) and the long detour
+        // (~235). The folded break is what makes the route honest: the follower's applyEdits clears the
+        // fire before the bot walks the cell, so nothing is transited intact.
+        BlockPathPlan plan = BlockPathfinder.findPath(buildHazardMaze(), START, GOAL, MORTAL_BREAK);
+
+        assertNotNull(plan, "the straight corridor is open — the breaking bot must reach the goal");
+        assertReachedGoal(plan);
+        assertFalse(anyAtZ(plan, 14),
+                "punching the fires out is far cheaper than the long detour — no z=14 leg");
+        for (int fx : MAZE_FIRE_XS) {
+            assertTrue(contains(plan, fx, 1, 6),
+                    "the breaking bot takes the straight line through the (cleared) fire column at x=" + fx);
+            assertTrue(hasBreakAt(plan, fx, 1, 6),
+                    "the step onto the fire column at x=" + fx + " must FOLD A BREAK of the fire cell — "
+                            + "walking it intact would owe the 100-tick hazard surcharge");
+        }
+    }
+
+    /** Whether any step's folded edit-set breaks exactly cell {@code (x,y,z)}. */
+    private static boolean hasBreakAt(BlockPathPlan plan, int x, int y, int z) {
+        for (int i = 0; i < plan.size(); i++) {
+            var edits = plan.edits(i);
+            if (edits == null) continue;
+            for (int b = 0; b < edits.breakCount(); b++) {
+                BlockPos p = edits.breakPos(b);
+                if (p.getX() == x && p.getY() == y && p.getZ() == z) return true;
+            }
+        }
+        return false;
     }
 
     @Test

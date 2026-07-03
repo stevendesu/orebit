@@ -30,7 +30,8 @@ Key decisions:
   into a few hundred distinct fingerprints (measured: **~590**), so the index fits
   comfortably in a `short` and the whole descriptor table is a few kilobytes — small
   enough to live in L1 cache. Every question the planner asks ("is this damaging?",
-  "how slow is walking through it?", "is it climbable?", "is it a portal?") is one
+  "how slow is walking through it?", "is it climbable?", "is it a portal?", "has the
+  server owner [protected it](world_edits.md#protected-blocks)?") is one
   array read and a shift-and-mask. The full story of the fingerprint — including the
   speculative field that cost half the table — is in
   [Block Fingerprints](Optimizations/block_fingerprints.md).
@@ -42,10 +43,23 @@ Key decisions:
   space", "there's a solid face to place a block against". These are the multi-cell
   facts the movement code would otherwise re-derive on every search expansion;
   computing them once at build time turns them into a single masked array access.
+- **A parallel depth byte per cell** rides beside the `short` grid — two nibbles
+  answering the two *vertical* questions the search asks most: how far down is the
+  first standable floor (consumed by falling moves — one read instead of a downward
+  scan), and how many identical cells sit directly above (consumed by the
+  macro-movement layer's uniform-cuboid proofs). Keeping it a *separate* array —
+  rather than widening the hot `short` — is deliberate: the millions-of-reads path
+  keeps its cache density, and only depth's few consumers touch the second array.
+  The measurements are in [Depth Nibbles](Optimizations/depth_nibbles.md).
 
 This per-block nav data is **recomputed when a chunk loads** (deterministic, sub-ms
-per chunk) rather than saved to disk, and patched in place when a block changes.
-Uniform sections (≈60% are all-air) are classified once and filled, not scanned.
+per chunk) rather than saved to disk, and patched in place when a block changes
+(the depth nibbles repair with a bounded fixpoint walk — at most 15 cells up or down
+one column). Uniform sections (≈60% are all-air) are classified once and filled, not
+scanned. Sections are built by chunk column, and each section's build **overscans
+three rows into the section above**, so the precomputed neighbour flags are exact
+across vertical section seams — a hazard sitting just across the boundary is seen,
+not defaulted to air.
 
 ## Region-Level
 

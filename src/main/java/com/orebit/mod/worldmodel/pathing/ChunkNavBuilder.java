@@ -70,6 +70,11 @@ public final class ChunkNavBuilder {
                     (above == null || allAir[i + 1]) ? null : above.getTraversalGrid());
         }
 
+        // Pass 3 — the depth nibbles (floorGap / runUp), column sweeps over the freshly-classified
+        // navtypes. Feeds Fall's landing fast path and CuboidExtractor's run-chain reads; single-section
+        // producers (classifyInto) skip this, leaving DEPTH_UNKNOWN — readers legacy-scan there.
+        NavSectionBuilder.computeDepth(sections);
+
         return sections;
     }
 }

@@ -138,7 +138,7 @@ class GoalForcedFarFaceTest {
         NavGridCuboidsView cuboids = new NavGridCuboidsView(grid, new PathEdits(), CORRIDOR);
         GoalForcedCost.Forced forced = new GoalForcedCost.Forced();
         GoalForcedCost.probe(cuboids, sx, sy, sz, GX, GY, GZ,
-                BotCaps.BREAK_PLACE, MovementContext.PLACE_BASE_COST, forced);
+                BotCaps.BREAK_PLACE, MovementContext.PLACE_BASE_COST, 0f, forced);
         return forced;
     }
 

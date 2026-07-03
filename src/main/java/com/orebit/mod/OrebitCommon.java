@@ -11,6 +11,7 @@ import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.HpaMaintenance;
 import com.orebit.mod.worldmodel.pathing.ChunkNavLoader;
 import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
+import com.orebit.mod.worldmodel.pathing.NavWarmup;
 
 import net.minecraft.server.level.ServerLevel;
 
@@ -43,6 +44,20 @@ public final class OrebitCommon {
         // (ConfigLoader.reload) so a changed mining-time model takes effect without a restart.
         events.onServerStarted(server -> MiningModel.buildTable(
                 ConfigLoader.config().ticksByHardness(), ConfigLoader.config().ticksToMineFlat()));
+
+        // Boot-time pathfinder JIT warm-up (internal_docs/PERF-DESIGN-warmup-searches.md): ~500 synthetic
+        // searches over a private in-memory fixture so the first REAL search doesn't run interpreted/C1-cold
+        // (~16 ms for a 2-node search — PERF-PROFILE-2026-07.md S1 — landing on a live player tick, since the
+        // bot spawns on join). SYNCHRONOUS on the server thread deliberately: JIT warmth is JVM-global, but
+        // the ThreadLocal search scratch and the unsynchronized NavSectionPool are tick-thread-confined.
+        // Registered AFTER ConfigLoader::load (reads the pathing.warmup keys + the owner's real BotCaps) and
+        // AFTER MiningModel.buildTable (movements price breaks from its table; NavWarmup refuses to run
+        // un-baked). SERVER_STARTED fires before the tick loop serves players, so no real search races it.
+        events.onServerStarted(server -> {
+            if (ConfigLoader.config().warmup()) {
+                NavWarmup.run(ConfigLoader.config().warmupBudgetMs());
+            }
+        });
 
         // World-model pipeline (PRD Phase 1): recompute a per-chunk nav grid on load and store it
         // (NavStore), recycling on unload. NavBlock is now a short-indexed packed-long table (the

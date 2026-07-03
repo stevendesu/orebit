@@ -86,10 +86,14 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *       {@code MovementContext.PLACE_BASE_COST}, so those searches are unchanged; inventory-off uses the
  *       conjured block and the bound is exact.)</li>
  *   <li><b>Dig face</b> (mine sideways/down into the goal): one break step =
- *       {@code MineDown.COST + MiningModel.fastestTicks(descriptor)} — the move plus the mining time of the
- *       <i>best possible</i> tool (the probe has no bot inventory, and the premium must be a LOWER bound, so
- *       it charges the cheapest dig any tool could manage), so {@code perBlockPremium = MineDown.COST +
- *       fastestTicks − octileFloor}.</li>
+ *       {@code MineDown.COST + MiningModel.fastestTicks(descriptor) + digBreakBase} — the move plus the
+ *       mining time of the <i>best possible</i> tool (the probe has no bot inventory, and the premium must
+ *       be a LOWER bound, so it charges the cheapest dig any tool could manage) plus the search's configured
+ *       flat per-break surcharge ({@code mining.breakBaseCost}, from
+ *       {@link MovementContext#breakBaseCost()}; {@code 0} with no {@code InventoryView}). Admissible: every
+ *       real folded break costs {@code ticksFor ≥ fastestTicks} plus the SAME base — the mirror of the
+ *       build face carrying the configured place base. So {@code perBlockPremium = MineDown.COST +
+ *       fastestTicks + digBreakBase − octileFloor}.</li>
  * </ul>
  * The "{@code octileFloor}" (= {@link Traverse#FLAT_COST}, one straight-block heuristic credit, now in ticks)
  * is subtracted because the octile already credits that much per block of straight-line distance, so the EXTRA
@@ -203,10 +207,13 @@ public final class GoalForcedCost {
      *                        premium — an admissible lower bound) from {@link MovementContext#pillarPlaceCost()};
      *                        falls back to the static {@link MovementContext#PLACE_BASE_COST} when the search
      *                        has no {@code InventoryView} (headless / trace / tests)
+     * @param digBreakBase    the per-search flat per-break surcharge ({@code mining.breakBaseCost}) added to
+     *                        the dig-face break step, from {@link MovementContext#breakBaseCost()}; {@code 0}
+     *                        when the search has no {@code InventoryView}, leaving those searches unchanged
      * @param out             filled in place with the cheapest forced approach (or "no correction")
      */
     public static void probe(NavGridCuboidsView cuboids, int sx, int sy, int sz, int gx, int gy, int gz,
-            BotCaps caps, float pillarPlaceCost, Forced out) {
+            BotCaps caps, float pillarPlaceCost, float digBreakBase, Forced out) {
         out.clear();
         if (cuboids == null) {
             return; // no macro view → no correction (legacy / unbounded search)
@@ -288,15 +295,30 @@ public final class GoalForcedCost {
 
                 // (3) Dig face: a solid, breakable cuboid the bot must mine through to reach the goal.
                 //     forcedCost = one break step = MineDown.COST + breakCost(of this substrate).
-                if (caps.canBreak() && NavBlock.isBreakable(desc)) {
+                //     A vanilla-unbreakable substrate (BREAKABLE bit off, hardness sentinel 255) becomes a
+                //     dig face too when the bot opted into mining.allowUnbreakable — priced at the fixed
+                //     stand-in, the same lower bound the real folded break pays. An owner-PROTECTED
+                //     substrate is never a dig face (its BREAKABLE bit is off and the grind arm excludes
+                //     it), matching the unbreakable-wall skip below: conservative, no invented premium.
+                boolean digGeom = NavBlock.isBreakable(desc);
+                boolean grindGeom = !digGeom && caps.allowUnbreakable()
+                        && NavBlock.hasCollision(desc)
+                        && NavBlock.hardness(desc) == MovementContext.UNBREAKABLE_HARDNESS
+                        && !NavBlock.isProtected(desc);
+                if (caps.canBreak() && (digGeom || grindGeom)) {
                     // The forced solid extends AWAY from the goal (the depth the bot must dig through to
                     // reach it from this side) — measure from the face cell in the -sign direction.
                     int extent = box.extentToward(ax, ay, az, axis, -sign); // forced rock depth out from the goal
                     if (extent > 0) {
                         // Real mining time of the BEST possible tool (admissible lower bound — the probe has no
-                        // bot inventory, and over-estimating would refuse the optimal route). Resident-table
-                        // scan, off the per-node hot path (probe runs once per search).
-                        float breakStep = MineDown.COST + MiningModel.fastestTicks(desc);
+                        // bot inventory, and over-estimating would refuse the optimal route) plus the search's
+                        // flat per-break surcharge (every real folded break pays the same base, so the bound
+                        // holds). An unbreakable-grind substrate uses the fixed stand-in instead (the exact
+                        // per-block price breakCost charges — the tables hold only the UNMINEABLE sentinel
+                        // for it). Resident-table scan, off the per-node hot path (probe runs once per search).
+                        float mineTicks = digGeom ? MiningModel.fastestTicks(desc)
+                                : MiningModel.UNBREAKABLE_STANDIN_TICKS;
+                        float breakStep = MineDown.COST + mineTicks + digBreakBase;
                         float premium = breakStep - OCTILE_FLOOR;
                         if (premium > 0f && (!haveBest || premium < bestPremium)) {
                             bestPremium = premium;

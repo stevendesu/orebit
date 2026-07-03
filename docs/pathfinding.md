@@ -41,9 +41,12 @@ Within the current window of the skeleton, A\* runs over the recomputed nav grid
 expanding **movements** (below). This search is the hot path, and it's been through
 several rounds of measured optimization — the
 [hot-path](Optimizations/pathfinding_hot_path.md),
-[fewer-nodes](Optimizations/fewer_nodes.md), and
-[macro-movement](Optimizations/cuboid_macro_movements.md) chapters tell that story in
-full. The load-bearing pieces:
+[fewer-nodes](Optimizations/fewer_nodes.md),
+[macro-movement](Optimizations/cuboid_macro_movements.md), and
+[depth-nibble](Optimizations/depth_nibbles.md) chapters tell that story in full.
+(Even the *first* search after boot is covered: the server warms the pathfinder up on
+synthetic terrain at startup — `pathing.warmup` — so no player pays the JIT compiler's
+one-time ~22 ms bill.) The load-bearing pieces:
 
 - **Weighted search, not provably-optimal search.** The heuristic is 3D octile
   distance scaled by a configurable greed weight (default `2.0`), plus a microscopic
@@ -73,7 +76,8 @@ full. The load-bearing pieces:
 
 Each movement is a small strategy object that knows its geometry, computes its cost
 (in game ticks) for the search, and knows how to steer the bot through itself at
-execution time. The current vocabulary:
+execution time. The current vocabulary — see [Movements](movements.md) for the full
+per-movement reference, with every cost constant and its derivation:
 
 | Movement        | Meaning                                                                    |
 |:----------------|:---------------------------------------------------------------------------|
@@ -85,7 +89,8 @@ execution time. The current vocabulary:
 | Pillar          | Jump and place beneath yourself — straight up in the same column           |
 | MineDown        | Dig the block underfoot and drop one — straight down in the same column    |
 | Climb           | Ascend or descend a ladder, vine, or scaffolding                           |
-| Parkour         | Sprint-jump a gap of open columns to a same-level landing                  |
+| Parkour         | Sprint-jump a gap to a flat (1–3), rising (1–2), or falling (1–4) landing — plus offset landings one cell off the line |
+| DiagonalParkour | The same running jump along a diagonal (gaps 1–2)                          |
 | Swim            | Paddle at the water surface (slow)                                         |
 | Sprint-swim     | Fast prone swimming — the 3D underwater workhorse                          |
 | Start sprint-swim / Surface | The transitions into and out of the prone swimming pose        |
@@ -109,11 +114,20 @@ Breaking blocks, placing blocks, and toggling doors / fence gates / trapdoors ar
 into the movement that needs them, as edits that add cost and validity requirements:
 
 - *Traverse, breaking the block in the way* — costs the real mining time (block
-  hardness against the best tool in the bot's inventory).
+  hardness against the best tool in the bot's inventory), plus a configurable flat
+  surcharge per break (`mining.breakBaseCost` — a "reluctance to edit the world").
 - *Ascend / Pillar, placing a block beneath* — requires a block to place (from the
   bot's real inventory, if the server configures it that way).
+- *Walking through a hazard, or punching it out first* — where a movement's body would
+  pass through a berry bush, cobweb, or fire cell, the planner prices both options at
+  the same node — the pass-through surcharge versus the real break time — and folds
+  whichever is cheaper. A sword-carrying bot cuts the web; a bare-handed one wades.
 - Parkour and Fall, by contrast, are **edit-free by rule**: you can't mine or place
   mid-jump, so a gap that would need it simply isn't a parkour candidate.
+
+The edits themselves execute like a player's — real mining time with the crack
+overlay, real drops and tool wear, and hard refusals for owner-protected blocks; see
+[Breaking & Placing](world_edits.md).
 
 ### Cost model
 
@@ -123,9 +137,14 @@ vanilla's swim speeds; mining cost is the real vanilla mining time for the block
 tool; hazards are *costs, not walls* — a mortal bot pays a stiff surcharge per
 fire or berry-bush cell it would pass through (an invulnerable one doesn't), cobwebs
 charge everyone the slowdown physics imposes, and a fall past the safe distance is
-priced by its damage rather than forbidden, up to the lethal cap. Because every block
+priced by its damage rather than forbidden, up to the lethal cap. All damage shares
+one exchange rate — `pathing.costPerHitpoint`, ticks per hitpoint — so "how much is
+the bot's health worth" is a single number the server owner sets. Because every block
 is *technically* mineable, the engine reasons in cost, never hard "blocked/clear" —
-it just prefers walking down the hall to tunnelling through the wall.
+it just prefers walking down the hall to tunnelling through the wall. (The exceptions
+are deliberate: owner-[protected blocks](world_edits.md#protected-blocks) are never
+broken at any price, and vanilla-unbreakable blocks are walls unless the server opts
+the bot into a two-minute-per-block grind.)
 
 Notably, the **cost of placing a block is behavioral, not physical**: placing is
 near-instant in-game, but a bot that scaffolds at every excuse is obnoxious, so

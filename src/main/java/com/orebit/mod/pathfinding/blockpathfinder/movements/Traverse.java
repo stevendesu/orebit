@@ -108,12 +108,13 @@ public final class Traverse implements Movement {
                     // Macro produced nothing (J<1 with no valid step) — try step-assist/bridge below.
                 } else {
                     // Legacy micro emit — the pre-macro flat-walk single step, plus the pass-through
-                    // hazard/slow surcharge for the destination body (zero-read when the flag bits are clear).
+                    // hazard/slow surcharge for the destination body (zero-read when the flag bits are
+                    // clear; the edit-folding form breaks through a bush/web where that's cheaper).
                     EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
                     ctx.requireBodyClear(e, nx, y, nz, flags);
                     if (e.valid()) {
                         out.accept(nx, y, nz,
-                                cost(ctx, pd) + ctx.bodyTransitCost(flags, nx, y, nz) + e.extraCost(), e);
+                                cost(ctx, pd) + ctx.bodyTransitCost(e, flags, nx, y, nz) + e.extraCost(), e);
                         continue; // already have footing here; don't also step-assist/bridge this column
                     }
                 }
@@ -131,7 +132,7 @@ public final class Traverse implements Movement {
                     ctx.requireBodyClear(e, nx, uy, nz, flags);
                     if (e.valid()) {
                         out.accept(nx, uy, nz,
-                                cost(ctx, pud) + ctx.bodyTransitCost(flags, nx, uy, nz) + e.extraCost(), e);
+                                cost(ctx, pud) + ctx.bodyTransitCost(e, flags, nx, uy, nz) + e.extraCost(), e);
                         continue;
                     }
                 }
@@ -148,7 +149,7 @@ public final class Traverse implements Movement {
                 ctx.requireBodyClear(e, nx, y, nz, flags);
                 if (e.valid()) {
                     out.accept(nx, y, nz,
-                            cost(ctx, pd) + ctx.bodyTransitCost(flags, nx, y, nz) + e.extraCost(), e);
+                            cost(ctx, pd) + ctx.bodyTransitCost(e, flags, nx, y, nz) + e.extraCost(), e);
                 }
             }
         }
@@ -230,8 +231,12 @@ public final class Traverse implements Movement {
                 valid = k - 1;
                 break;
             }
-            // Charge the surcharge only for a step that stayed valid (a clamped step's cells are not walked).
-            transit += k == 1 ? startTransit : ctx.bodyTransitCost(cellFlags, cx, y, cz);
+            // Charge the surcharge only for a step that stayed valid (a clamped step's cells are not
+            // walked). The edit-folding form breaks through a bush/web cell where that's cheaper than
+            // transiting it intact (the fold's cost rides e.extraCost, the transit charge is dropped);
+            // the hedge above kept the non-folding startTransit estimate — conservative, it can only
+            // shorten the jump.
+            transit += ctx.bodyTransitCost(e, cellFlags, cx, y, cz);
             valid = k;
         }
         if (valid < 1) {
@@ -239,14 +244,19 @@ public final class Traverse implements Movement {
         }
         if (valid != j) {
             // The run clamped short of MacroJump's bound: re-fold exactly the valid steps so the emitted
-            // edit-set carries no placement/break from the failed step.
+            // edit-set carries no placement/break from the failed step. The transit accumulator is redone
+            // too — the folding bodyTransitCost records break-throughs on the scratch just reset, and each
+            // re-run cell repeats the identical fold-vs-transit decision it made above (steps 1..valid all
+            // stayed valid, and nothing they read has changed).
             e = ctx.edits().reset(!MovementContext.risksEdit(startFlags));
+            transit = 0f;
             for (int k = 1; k <= valid; k++) {
                 int cx = x + Axes.stepX(axis, sign) * k;
                 int cz = z + Axes.stepZ(axis, sign) * k;
                 e.requireFloor(cx, y, cz);
                 e.requireAir(cx, y + 1, cz);
                 e.requireAir(cx, y + 2, cz);
+                transit += ctx.bodyTransitCost(e, k == 1 ? startFlags : ctx.flagsAt(cx, y, cz), cx, y, cz);
             }
         }
 

@@ -63,10 +63,11 @@ public final class Descend implements Movement {
                 // Slow-FLOOR surcharge on the landing (same rule as Traverse/Diagonal; a PLACED step-down
                 // floor reads as the conjured cube, never slow) plus the pass-through hazard/through-slow
                 // surcharge for the landing body cells (nx, y-1's body = y, y+1 — the transit), zero-read
-                // when the dest flag bits are clear. The step-off head cell (y+2) is clearance-only.
+                // when the dest flag bits are clear; the edit-folding form breaks through a bush/web where
+                // that's cheaper. The step-off head cell (y+2) is clearance-only.
                 float cost = COST
                         + (ctx.isSlow(dstDesc) ? Traverse.SLOW_SURCHARGE : 0f)
-                        + ctx.bodyTransitCost(flags, nx, dy, nz);
+                        + ctx.bodyTransitCost(e, flags, nx, dy, nz);
                 out.accept(nx, dy, nz, cost + e.extraCost(), e);
             }
         }

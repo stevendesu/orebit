@@ -166,6 +166,28 @@ fixing just it would not move S3 meaningfully.
 
 ## 7. Recommendations (ordered by expected impact)
 
+> **OUTCOMES (2026-07-03 — the overnight experiment run, `PERF-RESULTS-2026-07-03.md`):**
+> 1. **EXECUTED + ADOPTED** — `NavWarmup` (default-on `pathing.warmup`): first search 21.8 → 0.67 ms
+>    p50 (32×), boot cost 475 ms. Fixed S1/most-of-S2 exactly as predicted here.
+> 2. **FALSIFIED + REVERTED** — the `Nodes(8192,8192)` eager-size cost pinned SHORT **+4–7%**
+>    (`reset()` fills the map over CAPACITY); EditPool prefill dropped at design time. Needs
+>    lazy-clear/epoch slots before retrying.
+> 3. **EXECUTED + REFUTED** — the per-pop edit-bbox gate measured FLAT and was deleted: the disjoint-pop
+>    fraction is **p = 0.000** in every scenario (pillar pops stand ON their own edits — "edits trail
+>    behind the path" is false for every shape the search produces). The 49% kindAt tax is real but paid
+>    entirely by never-disjoint pops; the predicted ~950→~550 ns/pop did NOT materialize. See
+>    `PERF-DESIGN-edit-bbox-gate.md` STATUS. Salvage candidate: hoist `!pathEdits.isEmpty()` per pop
+>    (~3.6% on edit-free searches, pinned OPEN).
+> 4. **NOT EXECUTED as designed — but the underlying tax was mostly removed by a different lever**: the
+>    E4 runUp depth nibble cut ~75–80% of the extraction bill (TOWER −33.7%, UPOVER −30…−36%, MULTI
+>    −32.3%) without any cross-search persistence. Cuboid/probe persistence remains open, with a much
+>    smaller remaining prize.
+> 5. **NOT EXECUTED** (opportunistic pooling of per-search construction — still open; SHORT's ~455 ns/pop
+>    floor and the 56% NavGridView-init allocation share still stand).
+> The §5 S3 prediction ("if the kindAt tax is gated per-pop: ~950 → ~550") is therefore refuted along
+> with #3. The FLOOD JMH scenario built for these experiments now covers the S3 warm-flood shape this
+> profile had to hand-probe.
+
 1. **Boot-time warm-up search (fixes S1, most of S2 — the actual observed pain).** At server start (or
    first level load), run ~100–150 synthetic searches on a hand-built section map (the
    `PathfinderBenchmark.buildFlatChunks` pattern — no live level needed via `NavGridView.overSections`):

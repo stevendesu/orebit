@@ -21,3 +21,6 @@ They read best in order — each chapter builds on the ones before it:
    into single big jumps, and the two bugs that froze the game.
 8. [Measure Everything](measure_everything.md) — the benchmark protocol, and five
    convincing optimization ideas of which four made things slower.
+9. [Depth Nibbles](depth_nibbles.md) — the next campaign under that protocol: a
+   perfect-sounding gate killed by p = 0.000, two nibbles that erased a third of
+   cuboid-heavy search time, and a 32× fix for the first-search stall.

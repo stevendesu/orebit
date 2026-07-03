@@ -309,7 +309,7 @@ class ParkourLandingsTest {
     /** DEFAULT caps with a custom fall window (everything else identical, incl. search params). */
     private static BotCaps capsWithFallWindow(int safeFall, int maxFall) {
         return new BotCaps(1, safeFall, maxFall, true, BotCaps.DEFAULT_COST_PER_HITPOINT, false, false,
-                BotCaps.UNBREAKABLE, BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT);
+                BotCaps.UNBREAKABLE, false, BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT);
     }
 
     private static int count(BlockPathPlan plan, Object move) {

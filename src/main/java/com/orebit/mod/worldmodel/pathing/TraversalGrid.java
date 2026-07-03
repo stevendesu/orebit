@@ -40,10 +40,26 @@ public class TraversalGrid {
     public static final int NAVTYPE_CAPACITY = NAVTYPE_MASK + 1;
     private static final int FLAGS_MASK = 0x3F; // high 6 bits
 
+    // ---- Depth-nibble side array (E3 floorGap + E4 runUp — PERF-DESIGN-navgrid-widening.md §3,
+    //      PERF-DESIGN-runup-nibble.md). A PARALLEL byte[4096] beside the hot short[] — deliberately NOT a
+    //      widened cell: widening would double the extractor's bulk-scan bytes and halve grid L1 density to
+    //      serve fields read a handful of times per pop. Low nibble = floorGap (distance to the first
+    //      standable cell strictly below, chunk-column-exact); high nibble = runUp (consecutive same-navtype
+    //      cells strictly above). Both saturate at 14; 15 = UNKNOWN (no claim — readers legacy-scan). ----
+
+    /** floorGap/runUp value meaning "proven at least the 14-cell window" (floorGap: proven NONE within it). */
+    public static final int DEPTH_SAT = 14;
+    /** floorGap/runUp value meaning "no claim" — single-section build (no column sweep); readers legacy-scan. */
+    public static final int DEPTH_UNKNOWN = 15;
+    /** A depth byte with both nibbles UNKNOWN — the reset/default fill. */
+    public static final byte DEPTH_UNKNOWN_BYTE = (byte) 0xFF;
+
     private final short[] data = new short[BLOCK_COUNT];
+    private final byte[] depth = new byte[BLOCK_COUNT];
 
     public void reset() {
         Arrays.fill(data, (short) 0); // navtype AIR (0) + no flags; always overwritten on build
+        Arrays.fill(depth, DEPTH_UNKNOWN_BYTE); // no depth claims until a column build/patch writes them
     }
 
     /** The fine {@code NavBlock} navtype index at this cell (low 10 bits) — a single mask, no shift. */
@@ -80,6 +96,43 @@ public class TraversalGrid {
     public void set(int x, int y, int z, int navtype, int flags) {
         data[getLinearIndex(x, y, z)] =
                 (short) (((flags & FLAGS_MASK) << FLAGS_SHIFT) | (navtype & NAVTYPE_MASK));
+    }
+
+    // ---- Depth-nibble reads/writes (see the field comment above; canonical (y<<8)|(z<<4)|x indexing) ----
+
+    /**
+     * The E3 floorGap nibble at this cell: {@code 0..13} = the first standable cell strictly below is at
+     * {@code y - floorGap - 1}; {@link #DEPTH_SAT} = proven none within the 14-cell window;
+     * {@link #DEPTH_UNKNOWN} = no claim (legacy-scan).
+     */
+    public int floorGap(int x, int y, int z) {
+        return depth[getLinearIndex(x, y, z)] & 0xF;
+    }
+
+    /**
+     * The E4 runUp nibble at this cell: {@code 0..13} = exactly that many consecutive same-navtype cells
+     * strictly above; {@link #DEPTH_SAT} = at least 14; {@link #DEPTH_UNKNOWN} = no claim.
+     */
+    public int runUp(int x, int y, int z) {
+        return (depth[getLinearIndex(x, y, z)] >>> 4) & 0xF;
+    }
+
+    /** Write the floorGap nibble, preserving the runUp nibble (builder/patch seam). */
+    public void setFloorGap(int x, int y, int z, int gap) {
+        int i = getLinearIndex(x, y, z);
+        depth[i] = (byte) ((depth[i] & 0xF0) | (gap & 0xF));
+    }
+
+    /** Write the runUp nibble, preserving the floorGap nibble (builder/patch seam). */
+    public void setRunUp(int x, int y, int z, int run) {
+        int i = getLinearIndex(x, y, z);
+        depth[i] = (byte) ((depth[i] & 0x0F) | ((run & 0xF) << 4));
+    }
+
+    /** The raw depth backing array (one byte per cell, same linear indexing as {@link #raw()}) — the
+     *  bulk-scan seam for the cuboid extractor's run-chain reads and the column builder's sweeps. */
+    public byte[] depthRaw() {
+        return depth;
     }
 
     private int getLinearIndex(int x, int y, int z) {

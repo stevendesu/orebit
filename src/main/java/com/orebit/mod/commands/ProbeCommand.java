@@ -81,7 +81,11 @@ public final class ProbeCommand implements BotCommand {
                     + " transitSlow=" + transitName(NavBlock.transitSlow(d))
                     + " climbable=" + NavBlock.isClimbable(d)
                     + " portal=" + NavBlock.isPortal(d)
-                    + " hardness=" + NavBlock.hardness(d));
+                    + " protected=" + NavBlock.isProtected(d)
+                    + " hardness=" + NavBlock.hardness(d)
+                    + " breakable=" + ctx.breakable(d)
+                    + (NavBlock.hasCollision(d) && ctx.breakBlockedReason(d) != null
+                            ? " (blocked: " + ctx.breakBlockedReason(d) + ")" : ""));
             CommandFeedback.send(source, "  flags=0x" + Integer.toHexString(flags)
                     + " headroom=" + headroomName(NavFlags.headroom(flags))
                     + " CLEARABLE_HAZARD=" + NavFlags.clearableHazard(flags)
@@ -102,8 +106,13 @@ public final class ProbeCommand implements BotCommand {
                 + " costPerHitpoint=" + caps.costPerHitpoint()
                 + " canBreak=" + caps.canBreak()
                 + " canPlace=" + caps.canPlace()
+                + " allowUnbreakable=" + caps.allowUnbreakable()
                 + " maxNodes=" + caps.maxNodes()
                 + " greedyWeight=" + caps.greedyWeight());
+        String protectedSpec = ConfigLoader.config().protectedBlocks().spec();
+        if (!protectedSpec.isEmpty()) {
+            CommandFeedback.send(source, "  protectedBlocks: " + protectedSpec);
+        }
     }
 
     /** One body cell's facts + its per-cell pass-through surcharge (what {@code cellTransitCost} charges). */
@@ -113,11 +122,16 @@ public final class ProbeCommand implements BotCommand {
             return "UNBUILT";
         }
         final long d = ctx.descriptorOf(x, y, z, packed);
+        // breakThrough: the "punch the bush/web instead of wading" option's price (mining ticks; the live
+        // search adds mining.breakBaseCost via its inventory snapshot — this caps-only probe shows the
+        // bare-hand time), or "no" when the cell isn't break-through-eligible. The planner folds the break
+        // exactly when this is below cellTransitCost.
         return "navtype=" + TraversalGrid.navtypeOf(packed)
                 + " passable=" + ctx.passable(d)
                 + " damaging=" + NavBlock.isDamaging(d)
                 + " transitSlow=" + transitName(NavBlock.transitSlow(d))
-                + " cellTransitCost=" + ctx.cellTransitCost(d);
+                + " cellTransitCost=" + ctx.cellTransitCost(d)
+                + " breakThrough=" + (ctx.breakableThrough(d) ? String.valueOf(ctx.breakCost(d)) : "no");
     }
 
     private static String transitName(int t) {

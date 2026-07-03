@@ -77,6 +77,16 @@ public record BotCaps(
          */
         int maxBreakHardness,
         /**
+         * May mine <b>vanilla-unbreakable</b> blocks (negative destroy time — bedrock, barriers, end
+         * portal frames, …) at the fixed {@link MiningModel#UNBREAKABLE_STANDIN_TICKS} stand-in cost
+         * ({@code mining.allowUnbreakable}, default {@code false}). Its OWN gate, deliberately NOT
+         * subject to {@link #maxBreakHardness}: the quantized 255 sentinel encodes "destroy time &lt; 0",
+         * which doesn't order against real hardness values, so capping it there would be meaningless.
+         * Protected blocks ({@code mining.protectedBlocks}) always win — protected-unbreakable stays
+         * unmineable even with this on. Meaningful only when {@link #canBreak} is true.
+         */
+        boolean allowUnbreakable,
+        /**
          * A* node-expansion ceiling for a single search ({@code > 0}) — the per-call cost backstop so a
          * long/blocked goal can't stall the tick. Was {@code BlockPathfinder.MAX_EXPANSIONS} (10000).
          */
@@ -136,7 +146,7 @@ public record BotCaps(
      */
     public static final BotCaps DEFAULT = new BotCaps(
             1, DEFAULT_SAFE_FALL, DEFAULT_MAX_FALL, true, DEFAULT_COST_PER_HITPOINT, false, false,
-            UNBREAKABLE, DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
+            UNBREAKABLE, false, DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
 
     /**
      * The Tier 1 default plus break + place enabled — the test/headless config that proves break/place
@@ -147,5 +157,5 @@ public record BotCaps(
      */
     public static final BotCaps BREAK_PLACE = new BotCaps(
             1, DEFAULT_SAFE_FALL, DEFAULT_MAX_FALL, true, DEFAULT_COST_PER_HITPOINT, true, true,
-            UNBREAKABLE, DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
+            UNBREAKABLE, false, DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
 }

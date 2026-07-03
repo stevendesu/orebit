@@ -136,6 +136,30 @@ public final class EditScratch {
         extraCost += ctx.placeCost(x, y, z); // real ticks-to-place (+ inventory premium when consuming) — 1d
     }
 
+    /**
+     * Fold a <b>break-through</b> of a PASSABLE hazard/through-slow body cell (berry bush, cobweb, fire —
+     * cells {@link #requireAir} leaves alone because nothing blocks) at a caller-computed cost — the
+     * "punch the bush and walk through" option. The caller ({@link MovementContext#bodyTransitCost(EditScratch,
+     * int, int, int, int)}) has already gated on {@link MovementContext#breakableThrough} and proven the
+     * break cheaper than transiting the cell intact; {@code cost} is the real mining ticks plus the
+     * {@code mining.breakBaseCost} surcharge, charged here in place of the transit surcharge the cell
+     * would otherwise add. Package-private: only the context's transit vocabulary emits these.
+     */
+    void breakThrough(int x, int y, int z, float cost) {
+        breaks = push(breaks, breakCount, x, y, z);
+        breakCount++;
+        extraCost += cost;
+    }
+
+    /**
+     * Whether this candidate may fold edits at all — {@code reset(false)} (a {@code RISKY_EDIT} floor)
+     * forbids them, and an already-invalid scratch has nothing to gain. The gate the context's
+     * break-through fold checks before recording a break (mirrors {@link #requireAir}'s own gate).
+     */
+    boolean editsAllowed() {
+        return allowEdits && valid;
+    }
+
     /** Whether every required cell was satisfiable (directly or via an allowed break/place). */
     public boolean valid() {
         return valid;

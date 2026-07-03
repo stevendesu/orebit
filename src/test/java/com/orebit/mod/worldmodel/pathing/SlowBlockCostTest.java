@@ -63,14 +63,18 @@ class SlowBlockCostTest {
     }
 
     // Weight-1.0 (optimal) walk-only and dig-capable caps; damage flag irrelevant here (nothing damages).
+    // DIG's maxBreakHardness is pinned to 10 so dirt (quantized hardness 3) stays diggable but the cobweb
+    // (hardness 20) sits outside the break-through fold's cap: these headless searches run with no
+    // MiningModel table, where a web break would price at 0 and punching straight through would beat the
+    // dig-around under test (the same free-break tie the hazard/protected suites pin their caps against).
     private static final BotCaps WALK = new BotCaps(
             1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true,
             BotCaps.DEFAULT_COST_PER_HITPOINT, false, false,
-            BotCaps.UNBREAKABLE, BotCaps.DEFAULT_MAX_NODES, 1.0f);
+            BotCaps.UNBREAKABLE, false, BotCaps.DEFAULT_MAX_NODES, 1.0f);
     private static final BotCaps DIG = new BotCaps(
             1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true,
             BotCaps.DEFAULT_COST_PER_HITPOINT, true, false,
-            BotCaps.UNBREAKABLE, BotCaps.DEFAULT_MAX_NODES, 1.0f);
+            10, false, BotCaps.DEFAULT_MAX_NODES, 1.0f);
 
     // ---- (a) slow floor: clean corridor beats an equal-length soul-soil corridor --------------
 
