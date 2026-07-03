@@ -134,7 +134,7 @@ class DepthIdentityTest {
                 steps.add(sb.toString());
             }
         }
-        return new Result(BlockPathfinder.LAST_EXPANSIONS, BlockPathfinder.LAST_WAS_PARTIAL, plan != null,
+        return new Result(BlockPathfinder.lastExpansions(), BlockPathfinder.lastWasPartial(), plan != null,
                 plan != null ? Float.floatToIntBits(plan.cost()) : 0, steps);
     }
 

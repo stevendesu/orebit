@@ -1,9 +1,16 @@
 # DESIGN — Background-thread pathfinding + time-based cap + pre-plan/splice
 
-> **STATUS (2026-07-03): APPROVED — owner-reviewed same day; implementation started (P0 first).
-> Owner amendment folded in: multi-thread from day one (`pathing.maxThreads` pool, §3.1) — a
-> multi-tenant server (20 players × 1 bot) is the expected deployment, and the NavStore guard is
-> epoch-based reclamation with the tick thread as sole owner/recycler (§4.1).**
+> **STATUS (2026-07-03): IMPLEMENTED (P0–P4, same day) — awaiting OWNER IN-GAME VERIFY, then commit.
+> Owner amendment folded in: multi-thread from day one (`pathing.maxThreads` pool, §3.1); NavStore
+> guard = epoch-based reclamation, tick thread sole owner/recycler (§4.1). Gates: 26.2 compile +
+> chiseledCompileCommon all 28 + 157 tests / 0 failures (20 new). A 32-agent adversarial review
+> confirmed 27 findings — 8 fixed in code (drainIdle counter-pair, parked-plan invalidation,
+> rejected-vs-BLOCKED result kinds, time-mode node backstop [the config node cap otherwise bound
+> BEFORE the 40 ms budget], deadline-test reorder, stale-singleton config gate, wantsPreplan arg
+> gate, planless tick-rate adoption), the rest accepted-by-design and documented in place. JMH A/B
+> (interleaved ×3, full suite, AC power): NEUTRAL — SHORT −0.5% / MULTI −0.2% / FLOOD −0.5% /
+> worst mean CLIFFS +1.4% with sign-flipping pairs; the per-pop additions measure as free.
+> `pathing.async` defaults FALSE; sync path byte-identical.**
 > HANDOFF "NEXT ARC (owner-chosen)". Companion reading: `DESIGN-portal-route-layer.md` §4 (the
 > SpliceSeam contract this arc is consumer B of), `PERF-PROFILE-2026-07.md` (the ns/node numbers the
 > time budget is sized from), the `baritone-pathing-architecture` memory (the model: time-boxed +
@@ -190,16 +197,18 @@ thread, so the pyramid's unsynchronized `intern`/`growMap`/fragment rebuilds kee
 single-thread correctness. (Offloading a heavy fresh cascade build is a possible follow-on; it
 requires pyramid locking and is out of scope. The cascade has measured cheap so far.)
 
-### 4.6 Warm-up moves to the planner thread
+### 4.6 Warm-up: NavWarmup stays on the tick thread; pool threads self-warm (amended at implementation)
 
-`NavWarmup.run` at SERVER_STARTED submits its synthetic searches **through the async pipe** and
-waits for completion (still synchronous boot semantics, same budget knob), split so **every pool
-thread runs a share** (submit `maxThreads` parallel batches; a start latch holds them until all
-threads have one, guaranteeing distribution). This (a) grows EACH planner thread's ThreadLocal
-scratch (JIT warmth is JVM-global, but array growth is per-thread), (b) exercises the
-submit/result protocol before any real search, (c) keeps the tick thread's scratch warm path
-irrelevant (it no longer searches in async mode). Boot cost is unchanged wall-clock or better
-(the batches run in parallel).
+The original plan (route `NavWarmup` through the async pipe so every pool thread runs a share) was
+dropped at implementation: NavWarmup's fixture is built from the **tick-thread-confined
+`NavSectionPool`**, so running it on pool threads would itself create the §4.1 race class it exists
+to avoid, and refactoring it to a pool-free fixture buys almost nothing — JIT warmth is JVM-global
+(the tick-thread warm-up already provides it), so the only per-thread cost is ThreadLocal scratch
+growth (~1 ms, and it happens OFF-tick on a planner thread where latency is free by construction).
+What shipped instead: each pool thread calls `BlockPathfinder.warmThreadScratch()` as it starts
+(sizes its `Nodes`/`EditPool`/instrumentation ThreadLocals), and the pool starts AFTER the
+tick-thread NavWarmup so submitted searches run against warm JIT. The submit/complete pipe needs no
+separate boot exercise — its first use is observable and failure-isolated per request.
 
 ## 5. Async PathPlan — the one seam that changes
 
@@ -279,6 +288,15 @@ Once §5's plumbing exists, pre-planning is a *submit-earlier* policy plus the s
 
 Result: the boundary pause (today: a synchronous window search at every commit) disappears —
 Baritone's "no boundary pause" splice, on our window/boundary machinery.
+
+**Scope note (implementation).** The shipped P4 pre-plans the CURRENT window's next search (the
+periodic refresh / plan-consumed boundary) from the plan's predicted end cell; a pre-plan result
+whose seam rejects (or whose window target moved while walking) is PARKED and re-tested at each
+boundary rather than resubmitted, so a mid-window early result never churns. Pre-computing across a
+window SLIDE (predicting the post-commit window and its target) needs the window machinery to
+expose "target as-if the bot were at X" and is deferred — the adoption guard (`windowTarget`
+unchanged + seam accept) makes the shipped form safe, and the slide case simply falls back to
+today's boundary search.
 
 ## 8. Perf accounting (what the protocol must measure)
 

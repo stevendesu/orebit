@@ -81,7 +81,7 @@ public class ColdStartHarnessTest {
 
         // ---- Timed region: plain nanoTime around the bare findPath calls (no JMH; the JVM is cold by design) ----
         long t1 = timeSearch(first);
-        int firstExpansions = BlockPathfinder.LAST_EXPANSIONS;
+        int firstExpansions = BlockPathfinder.lastExpansions();
         long t2 = timeSearch(second);
         long t3 = timeSearch(third);
 

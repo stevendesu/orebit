@@ -53,19 +53,46 @@ public final class BlockPathfinder {
     public static boolean LOG_TIMING = true;
 
     /**
-     * Node count of the most-recently-finished {@link #findPath} on this thread — an instrumentation seam so
-     * a caller (the HPA* {@code LeafCostComputer}) can attribute per-search expansions without parsing the
-     * timing log. Set at every return; one static write per search, no hot-loop cost. Temporary diagnostic.
+     * Node count of the most-recently-finished {@link #findPath} <b>on this thread</b> — an instrumentation
+     * seam so a caller (the HPA* {@code LeafCostComputer}) can attribute per-search expansions without
+     * parsing the timing log. ThreadLocal, NOT a plain static (DESIGN-background-pathfinding.md §10.6): with
+     * planner-pool threads searching concurrently, a shared static could be overwritten between a caller's
+     * {@code findPath} return and its read — every consumer reads its own thread's just-finished search, so
+     * per-thread storage is exactly the contract. Holder array so per-search sets never box. Read via
+     * {@link #lastExpansions()}.
      */
-    public static int LAST_EXPANSIONS;
+    private static final ThreadLocal<int[]> LAST_EXPANSIONS_TL = ThreadLocal.withInitial(() -> new int[1]);
 
     /**
-     * Whether the most-recently-finished {@link #findPath} returned a <b>PARTIAL</b> (best-effort, budget-
-     * exhausted) path rather than a full route to the target — the same instrumentation-seam style as
-     * {@link #LAST_EXPANSIONS}, read by the driver to surface "taking a partial path" progress. {@code false}
-     * for a full FOUND path or a null FAIL.
+     * Whether this thread's most-recently-finished {@link #findPath} returned a <b>PARTIAL</b> (best-effort,
+     * budget-exhausted) path rather than a full route — same per-thread seam as {@link #lastExpansions()},
+     * read by the driver to surface "taking a partial path" progress. {@code false} for a full FOUND path or
+     * a null FAIL. Read via {@link #lastWasPartial()}.
      */
-    public static boolean LAST_WAS_PARTIAL;
+    private static final ThreadLocal<boolean[]> LAST_PARTIAL_TL = ThreadLocal.withInitial(() -> new boolean[1]);
+
+    /** Node count of this thread's most-recently-finished {@link #findPath}. */
+    public static int lastExpansions() {
+        return LAST_EXPANSIONS_TL.get()[0];
+    }
+
+    /** Whether this thread's most-recently-finished {@link #findPath} returned a best-effort PARTIAL. */
+    public static boolean lastWasPartial() {
+        return LAST_PARTIAL_TL.get()[0];
+    }
+
+    /**
+     * Pre-touch this thread's search scratch ({@code Nodes}/{@code EditPool} ThreadLocals) — the planner
+     * pool's boot warm task (DESIGN-background-pathfinding.md §4.6, amended): JIT warmth is JVM-global (the
+     * tick-thread {@code NavWarmup} provides it), but the scratch arrays are per-thread, so each pool thread
+     * pays its initial sizing here at server start instead of on its first real search. Cold, boot-only.
+     */
+    public static void warmThreadScratch() {
+        SEARCH.get();
+        EDIT_POOL.get();
+        LAST_EXPANSIONS_TL.get();
+        LAST_PARTIAL_TL.get();
+    }
 
     /**
      * Step-by-step search trace sink — when non-null AND {@link #TRACE} is on, every node expansion and every
@@ -84,6 +111,15 @@ public final class BlockPathfinder {
 
     /** Gate for {@link #TRACE_OUT}: emit the step-by-step trace. Off in normal play (the trace is huge + slow). */
     public static boolean TRACE = false;
+
+    /**
+     * The node ceiling of a TIME-capped search ({@code budgetNanos != 0}) — a pure MEMORY backstop
+     * (DESIGN-background-pathfinding.md §6): time is the binding limit by design, so the configured
+     * {@code pathing.maxNodes} (default 10k, which a 40 ms budget would never outlast) is deliberately
+     * NOT consulted in time mode. 256k rows bounds the per-thread Nodes SoA at ~10 MB — the
+     * favour-cpu-over-ram ceiling the design priced per planner thread.
+     */
+    static final int TIME_MODE_NODE_BACKSTOP = 262_144;
 
     private static void trace(String line) {
         java.io.Writer w = TRACE_OUT;
@@ -539,9 +575,48 @@ public final class BlockPathfinder {
     public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
                                          BotCaps caps, RegionBound confineBound, RegionBound cuboidBound,
                                          MovementContext.InventoryView inventory, int startModeOverride) {
+        return findPath(grid, startFloor, goalFloor, caps, confineBound, cuboidBound, inventory,
+                startModeOverride, null);
+    }
+
+    /**
+     * As above, additionally seeding the search with a splice {@code baseline} ({@link EditSnapshot}) —
+     * the not-yet-applied edits of an EARLIER plan this search's result will be spliced after
+     * (DESIGN-background-pathfinding.md §7 / DESIGN-portal-route-layer.md §4.3). The baseline is folded
+     * into the per-pop {@link PathEdits} rebuild AFTER the {@code cameFrom}-chain walk, so the in-search
+     * path's own edits shadow it (latest-wins) and every movement — and the cuboid extractor, which reads
+     * the same {@link PathEdits} — prices the world as it will be at the splice boundary. {@code null}
+     * (every non-spliced caller) is byte-identical to the overload above: one perfectly-predicted compare
+     * per pop, nothing on any per-read path. Deliberately NOT visible to the one-shot
+     * {@link GoalForcedCost#probe} / cuboid-view construction before the loop (heuristic-premium inputs
+     * only — a baseline near the goal skews the premium, never correctness).
+     */
+    public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
+                                         BotCaps caps, RegionBound confineBound, RegionBound cuboidBound,
+                                         MovementContext.InventoryView inventory, int startModeOverride,
+                                         EditSnapshot baseline) {
+        return findPath(grid, startFloor, goalFloor, caps, confineBound, cuboidBound, inventory,
+                startModeOverride, baseline, 0L);
+    }
+
+    /**
+     * As above, additionally bounding the search by <b>wall-clock</b> ({@code budgetNanos > 0}) — the
+     * time-based cap (DESIGN-background-pathfinding.md §6, the Baritone model). The deadline is checked
+     * every 256 pops (one mask+branch per pop, a {@code nanoTime} call 1/256 pops); on expiry the search
+     * takes the exact budget-exhausted path the node cap takes today (best-so-far PARTIAL via
+     * {@code PARTIAL_PATH} + the irreversibility guard, or null). {@code caps.maxNodes} still applies as
+     * the memory backstop, and {@code 0} (every sync/bench/test caller) is byte-identical node-cap-only
+     * behaviour — which keeps benchmarks and unit tests timing-independent (a COMPLETED search under
+     * deadline is identical to an uncapped one; only where a partial truncates is timing-dependent, and
+     * partials are replanned at the next boundary by construction).
+     */
+    public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
+                                         BotCaps caps, RegionBound confineBound, RegionBound cuboidBound,
+                                         MovementContext.InventoryView inventory, int startModeOverride,
+                                         EditSnapshot baseline, long budgetNanos) {
         final long t0 = System.nanoTime();
-        LAST_EXPANSIONS = 0; // reset the instrumentation seam (covers the early no-start-ground return)
-        LAST_WAS_PARTIAL = false;
+        LAST_EXPANSIONS_TL.get()[0] = 0; // reset the instrumentation seam (covers the early no-start-ground return)
+        LAST_PARTIAL_TL.get()[0] = false;
         final int sx = startFloor.getX(), sy = startFloor.getY(), sz = startFloor.getZ();
         final int gx = goalFloor.getX(), gy = goalFloor.getY(), gz = goalFloor.getZ();
 
@@ -554,8 +629,12 @@ public final class BlockPathfinder {
         // Read the configurable search params into search-start locals ONCE — the hot loop's budget test
         // (below) and the heuristic weight (on the Relaxer) then read a local / a final field, not a
         // BotCaps accessor per node. Guarded so a mis-configured caps can never disable the backstop:
-        // a non-positive maxNodes falls back to the historical default.
-        final int maxNodes = caps.maxNodes() > 0 ? caps.maxNodes() : BotCaps.DEFAULT_MAX_NODES;
+        // a non-positive maxNodes falls back to the historical default. In TIME mode (budgetNanos != 0)
+        // the wall clock is the binding limit and the node cap becomes the pure MEMORY backstop — the
+        // config's maxNodes (default 10k ≈ 4–15 ms warm) would otherwise always bind BEFORE a 40 ms
+        // budget, silently reducing the time cap to the node cap (review finding).
+        final int maxNodes = budgetNanos != 0L ? TIME_MODE_NODE_BACKSTOP
+                : (caps.maxNodes() > 0 ? caps.maxNodes() : BotCaps.DEFAULT_MAX_NODES);
 
         final MovementContext ctx = new MovementContext(grid, caps);
         ctx.setInventory(inventory); // null in the historical / headless / trace paths (caps-only gates)
@@ -643,6 +722,14 @@ public final class BlockPathfinder {
                     + (nodes.move[current] < 0 ? "start"
                             : MovementRegistry.TIER1.get(nodes.move[current]).getClass().getSimpleName()));
 
+            // Wall-clock deadline (async searches only; budgetNanos == 0 elsewhere): checked every 256 pops,
+            // with the loop-invariant budgetNanos test FIRST so the sync path pays one register compare per
+            // pop (loop-unswitchable by the JIT) and never evaluates the mask; nanoTime is paid 1/256 pops
+            // on timed searches only. Same budget-exhausted semantics as the node cap below (PARTIAL/null).
+            if (budgetNanos != 0L && (expansions & 255) == 0 && System.nanoTime() - t0 > budgetNanos) {
+                budgetHit = true;
+                break;
+            }
             if (++expansions > maxNodes) { budgetHit = true; break; }
 
             // Rebuild the planned-edit diff for the path to THIS node, so the movements below read the
@@ -656,6 +743,11 @@ public final class BlockPathfinder {
                     pathEdits.add(nodes.edits[n]);
                 }
             }
+            // Splice baseline seed (DESIGN-background-pathfinding.md §7): appended AFTER the chain walk so
+            // the path's own edits shadow it, and OUTSIDE the anyEdits gate — a seeded search must see the
+            // baseline before it has produced any edit of its own. Null (every non-spliced search) = one
+            // perfectly-predicted compare per pop.
+            if (baseline != null) pathEdits.addSnapshot(baseline);
 
             relaxer.current = current;
             relaxer.currentG = nodes.g[current];
@@ -669,7 +761,7 @@ public final class BlockPathfinder {
             }
         }
 
-        LAST_EXPANSIONS = expansions; // instrumentation seam — the just-finished search's node count
+        LAST_EXPANSIONS_TL.get()[0] = expansions; // instrumentation seam — the just-finished search's node count
 
         if (reachedRow == -1) {
             if (Debug.ENABLED) explainFailure(ctx, sx, sy, sz, gx, gy, gz, expansions, budgetHit, bestX, bestY, bestZ, confineBound);
@@ -688,7 +780,7 @@ public final class BlockPathfinder {
                     float commitH = relaxer.h(nodes.x[commitRow], nodes.y[commitRow], nodes.z[commitRow]);
                     if ((relaxer.h(sx, sy, sz) - commitH) > PARTIAL_MIN_PROGRESS) {
                         BlockPathPlan partial = reconstruct(nodes, startRow, commitRow);
-                        LAST_WAS_PARTIAL = true;
+                        LAST_PARTIAL_TL.get()[0] = true;
                         if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
                                 "PARTIAL-" + partial.size() + "wp" + (commitRow != bestRow ? "-irrev" : ""),
                                 sx, sy, sz, gx, gy, gz);

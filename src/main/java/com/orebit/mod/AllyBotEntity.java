@@ -4,6 +4,8 @@ import com.mojang.authlib.GameProfile;
 import com.orebit.mod.pathfinding.PathDebugRenderer;
 import com.orebit.mod.pathfinding.PathPlan;
 import com.orebit.mod.pathfinding.PathStatus;
+import com.orebit.mod.pathfinding.async.PlanExecutor;
+import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
@@ -374,6 +376,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      * again. The next {@link #driveToward} sees a null {@link #pathPlan} and rebuilds for the new goal.
      */
     private void clearPlan() {
+        if (pathPlan != null) pathPlan.cancelPending(); // stop caring about any in-flight background search
         this.pathPlan = null;
         this.path = null;
         this.lastBlockPlanRef = null;
@@ -713,8 +716,42 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                     this.activePlanStep = -1; // rebuild the phase plan for the new window's first step
                     this.planStartFloor = settledFloor; // follower anchor == the search source (both settledFloor)
                 }
+                // Eager pre-plan (DESIGN-background-pathfinding.md §7, async only): once THIS window's plan
+                // is more than half walked, precompute the next boundary's search from the plan's predicted
+                // end cell, seeded with the edits we haven't applied yet (the splice baseline) — so arriving
+                // at the window end adopts a ready plan with no pause. wantsPreplan() is tested FIRST so the
+                // argument construction (a BlockPos + the EditSnapshot fold) is never paid when it can't
+                // submit — in particular never in sync mode and never twice per window target.
+                if (path != null && !path.isEmpty() && waypointIndex > path.size() / 2
+                        && waypointIndex < path.size() && pathPlan.wantsPreplan()) {
+                    pathPlan.preplan(path.waypoint(path.size() - 1).below(),
+                            EditSnapshot.fromRemainingSteps(path, lastEditedIndex + 1),
+                            currentStartMode());
+                }
             }
         }
+        // Planless async adoption (review finding): a bot with NO walkable plan can't wait for the settled
+        // boundary the normal drain rides — it may never settle (treading water, mid-fall), and there is
+        // nothing to un-adopt. Poll at tick rate and, on adoption, run the same swap/anchor mechanics the
+        // boundary block runs — anchored at the bot's LIVE floor, exactly how replan() seeds a fresh plan.
+        if (pathPlan != null && path == null) {
+            BlockPos liveFloor = this.blockPosition().below();
+            pathPlan.pollWhenPlanless(liveFloor);
+            BlockPathPlan adopted = pathPlan.currentBlockPlan();
+            if (adopted != lastBlockPlanRef) {
+                this.path = adopted;
+                this.lastBlockPlanRef = adopted;
+                this.waypointIndex = 0;
+                this.lastEditedIndex = -1;
+                this.activePlanStep = -1;
+                this.planStartFloor = liveFloor;
+                this.settledFloor = liveFloor;
+                this.stuckTicks = 0;
+                this.stallTicks = 0;
+                this.offTrackTicks = 0;
+            }
+        }
+
         // Region repair, every tick (cheap status check): a BLOCKED window — wherever it surfaced — gets its
         // dead skeleton hop blacklisted now, so the NEXT tick's `skeletonInvalid` reroute already avoids it
         // (one useful region replan, not a wasted same-skeleton rebuild first). Give-up lives here too.
@@ -822,8 +859,14 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // straight-line steer below), log once, and keep the game playable. Remove the guard once the region
         // tier is hardened.
         try {
+            if (pathPlan != null) pathPlan.cancelPending(); // the old plan's in-flight search is superseded
+            // Async pathing (pathing.async): hand the plan the planner pool so its window searches run off
+            // the tick thread. Gated on the LIVE config, not just instance() — the pool is a JVM-lifetime
+            // static, so on an integrated server a re-opened world with pathing.async=false would otherwise
+            // silently keep using the previous world's pool (review finding).
+            PlanExecutor executor = ConfigLoader.config().asyncPathing() ? PlanExecutor.instance() : null;
             this.pathPlan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, caps(),
-                    inventoryFeasibility(), currentStartMode());
+                    inventoryFeasibility(), currentStartMode(), null, executor);
             this.path = pathPlan.currentBlockPlan();
         } catch (Throwable t) {
             if (!loggedPlanError) {

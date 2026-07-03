@@ -234,12 +234,12 @@ public class PathfinderBenchmark {
      * Setup-time (NOT measured) shape check for the fresh-view scenarios: the SHORT leg must actually FIND
      * with a small expansion count (a beeline ~30-60 pops — if it floods, the scenario no longer measures
      * cold-start and the whole guard is void), and the MULTI long leg (UPOVER_OPEN geometry) must FIND too.
-     * Prints {@link BlockPathfinder#LAST_EXPANSIONS} so the run log records the scenario shape.
+     * Prints {@link BlockPathfinder#lastExpansions()} so the run log records the scenario shape.
      */
     private void sanityDryRun() {
         var shortPlan = BlockPathfinder.findPath(new NavGridView(0, freshChunks),
                 SHORT_START, SHORT_GOAL, BotCaps.BREAK_PLACE, null);
-        int shortExpansions = BlockPathfinder.LAST_EXPANSIONS;
+        int shortExpansions = BlockPathfinder.lastExpansions();
         System.out.println("[PathfinderBenchmark] " + scenario + " sanity: SHORT leg found="
                 + (shortPlan != null) + " expansions=" + shortExpansions);
         if (shortPlan == null) {
@@ -253,7 +253,7 @@ public class PathfinderBenchmark {
             var longPlan = BlockPathfinder.findPath(new NavGridView(0, freshChunks),
                     UPOVER_START, UPOVER_GOAL, BotCaps.BREAK_PLACE, UPOVER_CORRIDOR);
             System.out.println("[PathfinderBenchmark] MULTI sanity: LONG leg found="
-                    + (longPlan != null) + " expansions=" + BlockPathfinder.LAST_EXPANSIONS);
+                    + (longPlan != null) + " expansions=" + BlockPathfinder.lastExpansions());
             if (longPlan == null) {
                 throw new IllegalStateException("MULTI long leg did not find a path — fixture broken");
             }
@@ -268,7 +268,7 @@ public class PathfinderBenchmark {
      */
     private void cliffsSanityDryRun() {
         var plan = BlockPathfinder.findPath(grid, start, goal, caps, corridor);
-        int expansions = BlockPathfinder.LAST_EXPANSIONS;
+        int expansions = BlockPathfinder.lastExpansions();
         int falls = 0;
         if (plan != null) {
             for (int i = 0; i < plan.size(); i++) {
@@ -276,7 +276,7 @@ public class PathfinderBenchmark {
             }
         }
         System.out.println("[PathfinderBenchmark] CLIFFS sanity: found=" + (plan != null)
-                + " partial=" + BlockPathfinder.LAST_WAS_PARTIAL
+                + " partial=" + BlockPathfinder.lastWasPartial()
                 + " expansions=" + expansions + " fallSteps=" + falls);
         if (plan != null) {
             StringBuilder sb = new StringBuilder("[PathfinderBenchmark] CLIFFS plan:");
@@ -305,9 +305,9 @@ public class PathfinderBenchmark {
      */
     private void floodSanityDryRun() {
         var plan = BlockPathfinder.findPath(grid, start, goal, BotCaps.BREAK_PLACE, corridor);
-        int expansions = BlockPathfinder.LAST_EXPANSIONS;
+        int expansions = BlockPathfinder.lastExpansions();
         System.out.println("[PathfinderBenchmark] FLOOD sanity: expansions=" + expansions
-                + " partial=" + BlockPathfinder.LAST_WAS_PARTIAL + " found=" + (plan != null));
+                + " partial=" + BlockPathfinder.lastWasPartial() + " found=" + (plan != null));
         if (expansions < 9500) {
             throw new IllegalStateException("FLOOD expanded only " + expansions
                     + " nodes (expected a ~10001-pop budget-exhausted flood) — no longer the warm edit-heavy guard");
@@ -641,7 +641,7 @@ public class PathfinderBenchmark {
      */
     private void bridgeSanityDryRun() {
         var plan = BlockPathfinder.findPath(grid, start, goal, caps, corridor);
-        int expansions = BlockPathfinder.LAST_EXPANSIONS;
+        int expansions = BlockPathfinder.lastExpansions();
         int places = 0;
         if (plan != null) {
             for (int i = 0; i < plan.size(); i++) {
@@ -650,12 +650,12 @@ public class PathfinderBenchmark {
             }
         }
         System.out.println("[PathfinderBenchmark] BRIDGE sanity: found=" + (plan != null)
-                + " partial=" + BlockPathfinder.LAST_WAS_PARTIAL
+                + " partial=" + BlockPathfinder.lastWasPartial()
                 + " expansions=" + expansions + " placeEdits=" + places);
         if (plan == null) {
             throw new IllegalStateException("BRIDGE did not find a path — fixture broken");
         }
-        if (BlockPathfinder.LAST_WAS_PARTIAL) {
+        if (BlockPathfinder.lastWasPartial()) {
             throw new IllegalStateException("BRIDGE returned a PARTIAL — no longer the mixed-shape guard");
         }
         if (places < 2) {
@@ -795,7 +795,7 @@ public class PathfinderBenchmark {
             }
         }
         var plan = BlockPathfinder.findPath(grid, start, goal, caps, corridor);
-        int expansions = BlockPathfinder.LAST_EXPANSIONS;
+        int expansions = BlockPathfinder.lastExpansions();
         int places = 0;
         if (plan != null) {
             for (int i = 0; i < plan.size(); i++) {
@@ -804,13 +804,13 @@ public class PathfinderBenchmark {
             }
         }
         System.out.println("[PathfinderBenchmark] SPIRAL sanity: found=" + (plan != null)
-                + " partial=" + BlockPathfinder.LAST_WAS_PARTIAL
+                + " partial=" + BlockPathfinder.lastWasPartial()
                 + " expansions=" + expansions + " placeEdits=" + places
                 + " planSize=" + (plan == null ? 0 : plan.size()));
         if (plan == null) {
             throw new IllegalStateException("SPIRAL did not find a path — fixture broken");
         }
-        if (BlockPathfinder.LAST_WAS_PARTIAL) {
+        if (BlockPathfinder.lastWasPartial()) {
             throw new IllegalStateException("SPIRAL returned a PARTIAL — the stair channel is not climbable");
         }
         if (places > 6) {
