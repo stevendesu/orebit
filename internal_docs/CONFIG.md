@@ -74,6 +74,7 @@ start. Out-of-range or unparseable individual values are clamped/defaulted with 
 |---|---|---|---|---|
 | `pathing.maxNodes` | int `> 0` | `10000` | A\* node-expansion ceiling per search. → `BotCaps.maxNodes`. Higher = can route farther at a slower worst case; lower = bails sooner (partial-path return then walks + replans). | `pathing.maxNodes=20000` |
 | `pathing.greedyWeight` | float `>= 1.0` | `2.0` | Heuristic greediness weight (multiplies the tick-unit octile). `1.0` = admissible/optimal/slow; higher beelines (far fewer nodes, paths no longer guaranteed optimal). → `BotCaps.greedyWeight`. | `pathing.greedyWeight=3.0` |
+| `pathing.costPerHitpoint` | float `>= 0.0` | `100.0` | **The ONE damage-pricing knob**: ticks the planner considers 1 HP of damage to be worth. → `BotCaps.costPerHitpoint`. Every damage-as-cost term is priced in it: the pass-through hazard surcharge (`MovementContext.cellTransitCost` — 1 HP per damaging body cell transited: fire, berry bush, powder snow) and the fall-damage penalty (`Fall`/`Parkour` — 1 HP per block dropped past `safeFallDistance`). **Break-even intuition:** 1 HP buys `costPerHitpoint / 4.633` walk-blocks of detour (≈ 21.6 at the default), so 4 hazard cells justify an ~86-block detour. The pre-unification hardcodes (40/hazard-cell, 10/excess-fall-block) bought only ~9 / ~2 blocks — a bush MAZE was rationally plowed through lethally because cumulative death was never priced. Raise for a more self-preserving bot; only meaningful with `survival.takesDamage=true` (an immune bot's damage terms are zero). Ratified successor (not built): a cumulative health-aware damage *budget* per path. | `pathing.costPerHitpoint=500` |
 
 ## Mapping to `BotCaps`
 
@@ -83,6 +84,8 @@ threads per search:
 - `canBreak = mining.canMine`, `maxBreakHardness = mining.maxHardness`
 - `canPlace = placement.canPlace`
 - `maxNodes = pathing.maxNodes`, `greedyWeight = pathing.greedyWeight`
+- `costPerHitpoint = pathing.costPerHitpoint` — the unified ticks-per-HP damage price every
+  damage-as-cost term reads (hazard transit + fall damage)
 - `jumpHeight = 1` (fixed; not yet an owner knob)
 - `takesDamage = survival.takesDamage`, which also derives the fall window: a mortal bot gets the
   default safe/max fall distances, an immune bot gets unlimited (`IMMUNE_FALL` — every drop free).
@@ -114,6 +117,7 @@ fix, and never failing the load:
 
 - `pathing.maxNodes` clamped to `>= 1`.
 - `pathing.greedyWeight` clamped to `>= 1.0`.
+- `pathing.costPerHitpoint` clamped to `>= 0.0` (the `weightNonNeg` helper).
 - `mining.maxHardness` clamped to `0..255`.
 - `mining.ticksToMineFlat` clamped to `>= 0`.
 - `placement.removalCostWeight` and `placement.placeBaseCost` clamped to `>= 0.0` (the `weightNonNeg` helper).
@@ -126,7 +130,8 @@ fix, and never failing the load:
 
 ```properties
 # A fragile bot that can be killed, mines only soft blocks slowly with real tools,
-# bridges from its own inventory, and beelines harder to save CPU.
+# bridges from its own inventory, beelines harder to save CPU, and treats its
+# hitpoints as very expensive (detours far around hazards and big drops).
 survival.takesDamage=true
 survival.hunger=true
 placement.consumesBlocks=true
@@ -135,4 +140,5 @@ mining.consumesTools=true
 mining.maxHardness=3
 mining.ticksByHardness=true
 pathing.greedyWeight=3.0
+pathing.costPerHitpoint=500
 ```
