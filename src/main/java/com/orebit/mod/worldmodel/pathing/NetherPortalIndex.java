@@ -11,8 +11,8 @@ import net.minecraft.server.level.ServerLevel;
 /**
  * Per-level index of known <b>nether-portal</b> cells — the discovery layer behind the follower's
  * portal-follow (owner changed dimension → bot paths to the nearest known portal and walks in).
- * "NetherPortal" is deliberate: {@code worldmodel.region.Portal} and {@code PathPlan.TargetKind.PORTAL}
- * mean HPA region-boundary openings, a different concept entirely.
+ * "NetherPortal" is deliberate: it avoids collision with {@code PathPlan.TargetKind.PORTAL}, which means
+ * an HPA region-boundary opening — a different concept entirely.
  *
  * <h2>Shape</h2>
  * Mirrors {@link NavStore}'s per-level layout: {@code ServerLevel → ConcurrentHashMap<chunkKey, long[]>}
