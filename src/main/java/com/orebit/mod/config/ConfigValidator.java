@@ -22,6 +22,8 @@ import net.minecraft.world.level.block.Block;
  *       defaulting a non-integer;</li>
  *   <li>{@code pathing.greedyWeight} must be {@code >= 1.0} (below 1 is non-greedy / nonsensical for this
  *       weighted-octile search) → clamp up, defaulting a non-number;</li>
+ *   <li>{@code pathing.costPerHitpoint} must be {@code >= 0} (0 = damage priced at nothing) → clamp up,
+ *       defaulting a non-number;</li>
  *   <li>{@code mining.maxHardness} must be {@code 0..255} (the quantized-hardness range) → clamp;</li>
  *   <li>{@code mining.ticksToMineFlat} must be {@code >= 0} → clamp;</li>
  *   <li>{@code placement.conjuredBlock} must resolve to a real {@link Block} on the running version (via
@@ -68,7 +70,8 @@ public final class ConfigValidator {
                 intClamped(props, ConfigKeys.MINING_TICKS_TO_MINE_FLAT, d.ticksToMineFlat(), 0, Integer.MAX_VALUE),
                 // pathing
                 intClamped(props, ConfigKeys.PATHING_MAX_NODES, d.maxNodes(), 1, Integer.MAX_VALUE),
-                weight(props, ConfigKeys.PATHING_GREEDY_WEIGHT, d.greedyWeight()));
+                weight(props, ConfigKeys.PATHING_GREEDY_WEIGHT, d.greedyWeight()),
+                weightNonNeg(props, ConfigKeys.PATHING_COST_PER_HITPOINT, d.costPerHitpoint()));
     }
 
     // ---- per-type parse + clamp (each warns through the sink and never throws) ----------------------
@@ -114,7 +117,8 @@ public final class ConfigValidator {
 
     /**
      * Like {@link #weight} but clamps to {@code >= 0.0} (0 = disabled / no cost), for the non-negative float
-     * knobs {@code placement.removalCostWeight} and {@code placement.placeBaseCost}.
+     * knobs {@code placement.removalCostWeight}, {@code placement.placeBaseCost}, and
+     * {@code pathing.costPerHitpoint}.
      */
     private float weightNonNeg(Properties props, String key, float def) {
         String raw = props.getProperty(key);

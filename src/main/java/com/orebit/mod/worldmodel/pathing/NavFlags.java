@@ -48,15 +48,34 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *                                body descriptors for the exact per-cell magnitude only when it's set.
  * </pre>
  *
- * <h2>Boundary handling — always within-section, no overscan (§8)</h2>
- * Out-of-section reads resolve to air via {@link #at}, so a block update recomputes flags inside one
- * section only — never reaching into a neighbouring nav grid. The bitmask is therefore exact in a
- * section's interior and air-optimistic within one cell of a face. That is by design: the movement layer
- * treats {@code HEADROOM} as a prefilter (re-verifying via {@code descriptorAt} near faces), and the
- * precise edit-hazard check for {@code RISKY_EDIT} likewise lives in the fine layer at break time — so an
- * optimistic boundary is caught there, not trusted blindly. (The conservative alternating-air/water fluid
- * OOB default §8 specifies lands with the fluid-aware break modifier that consumes the bit; no consumer
- * reads it yet.)
+ * <h2>Boundary handling — vertical (upward) overscan; lateral faces still air-optimistic (§8)</h2>
+ * The scratch handed to {@link #compute} may carry {@link #OVERSCAN_ROWS} extra rows ABOVE the section
+ * ({@code y = 16..18}, indices {@code 4096..}{@link #SCRATCH_SIZE}{@code -1} — the canonical
+ * {@code (y<<8)|(z<<4)|x} formula extends naturally), filled from the section directly above in the same
+ * chunk column. This closes the vertical-seam blindness that made the top ~3 floor rows of every section
+ * carry stale-CLEAR {@code CLEARABLE_HAZARD}/{@code SLOW_TRANSIT} bits (and under-informed
+ * {@code HEADROOM}): those bits are column-local (they read only {@code y+1..y+3}), so with upward
+ * overscan they are now EXACT everywhere — a berry bush at the bottom row of section {@code k} is seen by
+ * the floor cells at the top of section {@code k-1}. Vertical neighbours always share a chunk, so the
+ * above section's data is available at build time with no cross-chunk ordering problem; the world-top
+ * section (and a legacy 4096-length scratch — {@link #at} bounds on {@code desc.length}) resolves the
+ * overscan rows to air, which is correct there.
+ *
+ * <p><b>Still air-optimistic (recorded, deferred):</b>
+ * <ul>
+ *   <li><b>Lateral faces</b> — {@code RISKY_EDIT}'s fluid-flow scan and {@code PLACEABLE_NEIGHBOR} read
+ *       {@code x±1}/{@code z±1}, which cross CHUNKS at a section's side faces; lateral overscan has a real
+ *       cross-chunk build-ordering problem and is a deferred follow-up. Until then a fluid just across a
+ *       side face is not flagged risky (the precise flood/cascade check in the fine layer at break time —
+ *       and the conservative alternating-air/water fluid OOB default §8 specifies — lands with the
+ *       fluid-aware break modifier; no consumer reads the bit yet), and a placeable face just across is
+ *       missed (pessimistic: at worst a legal bridge is not offered).</li>
+ *   <li><b>The downward face</b> — {@code y-1} reads at a section's bottom row ({@code unsupported},
+ *       {@code hasPlaceableNeighbor}'s down face) resolve to air. Both err safe: RISKY_EDIT over-sets
+ *       (a gravity block is assumed unsupported) and PLACEABLE_NEIGHBOR under-sets.</li>
+ * </ul>
+ * The movement layer still treats {@code HEADROOM} as a prefilter (re-verifying via {@code descriptorAt}
+ * near faces), so any residual optimism is caught in the fine layer, not trusted blindly.
  */
 public final class NavFlags {
 
@@ -76,6 +95,16 @@ public final class NavFlags {
     public static final int HEADROOM_WALK  = 2; // 2-tall: normal standing
     public static final int HEADROOM_JUMP  = 3; // 3-tall: room to jump
 
+    // ---- Vertical overscan (the scratch contract with NavSectionBuilder) ----------------------
+    /**
+     * Rows of the section ABOVE appended to the descriptor scratch ({@code y = 16..18}) so top-row flag
+     * computation sees real blocks instead of optimistic air. 3 = the deepest upward read
+     * ({@code compute} reads at most {@code y+3}).
+     */
+    public static final int OVERSCAN_ROWS = 3;
+    /** Length of an overscan-carrying descriptor scratch: 4096 own cells + 3×256 overscan rows. */
+    public static final int SCRATCH_SIZE = 4096 + OVERSCAN_ROWS * 256; // 4864
+
     private static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
 
     // Horizontal neighbours (x,z) for fluid-flow risk.
@@ -84,9 +113,11 @@ public final class NavFlags {
     private static final int[][] SIX = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
 
     /**
-     * Compute the neighbour-property bitmask for one cell. {@code desc} is a section's 4096 packed
-     * descriptors in canonical {@code (y<<8)|(z<<4)|x} order; out-of-section reads resolve to air
-     * (air-optimistic — see boundary handling above).
+     * Compute the neighbour-property bitmask for one cell. {@code desc} is a section's packed descriptors
+     * in canonical {@code (y<<8)|(z<<4)|x} order — either the bare 4096 cells (reads above the section
+     * resolve to air) or a {@link #SCRATCH_SIZE}-length scratch whose rows {@code y = 16..18} hold the
+     * section above's descriptors (vertical overscan; the index formula extends naturally). Reads outside
+     * the scratch — lateral, below, or above the overscan — resolve to air (see boundary handling above).
      */
     public static int compute(long[] desc, int x, int y, int z) {
         long ground = at(desc, x, y, z);
@@ -144,8 +175,12 @@ public final class NavFlags {
     // ---- Neighbour scans (carried over from the prior classifier) ----------------------------
 
     private static long at(long[] desc, int x, int y, int z) {
-        if (x < 0 || y < 0 || z < 0 || x >= 16 || y >= 16 || z >= 16) return AIR_DESC;
-        return desc[(y << 8) | (z << 4) | x];
+        if (x < 0 || y < 0 || z < 0 || x >= 16 || z >= 16) return AIR_DESC;
+        int idx = (y << 8) | (z << 4) | x;
+        // Rows y >= 16 land past 4096: real overscan data in a SCRATCH_SIZE scratch, air in a bare
+        // 4096 one (legacy/world-top). The deepest read is y+3 = 18 < SCRATCH_SIZE/256, so idx never
+        // exceeds a full overscan scratch.
+        return idx < desc.length ? desc[idx] : AIR_DESC;
     }
 
     /** Clear for a walking body: no collision AND no fluid (water/lava block a walker — swim is later). */

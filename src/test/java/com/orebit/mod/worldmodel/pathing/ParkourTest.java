@@ -30,13 +30,15 @@ import net.minecraft.world.level.chunk.PalettedContainer;
  * Headless proof of the {@code Parkour} gap jump: a sealed stone section with a 1-wide corridor at
  * {@code z=8}, two platforms at floor {@code y=5} separated by a {@code g}-wide BOTTOMLESS chasm (air to
  * {@code y=0}; below the grid is unbuilt, so {@code Fall} finds no landing and the jump is the only
- * route for a no-place bot). Positives: {@link BotCaps#DEFAULT} crosses {@code g=1} and {@code g=2} with
- * exactly ONE Parkour waypoint per jump (the multi-cell edge must not be re-expanded); {@link
- * BotCaps#BREAK_PLACE} still picks Parkour over bridging for {@code g=2} (18.6 vs ≈32 ticks). Negatives:
- * a ceiling block over the gap at takeoff-arc height ({@code y+3}), a fence in the gap at node level
- * (SHAPE_OTHER pokes into the transit space), and {@code g=3} with the gap cap at its default 2 all yield
- * no route; raising {@code Parkour.PARKOUR_MAX_GAP} to 3 opens the {@code g=3} jump. Not testable
- * headless: jump kinematics, takeoff-edge tuning, sprint attainment, missed-jump recovery (in-game pass).
+ * route for a no-place bot). Positives: {@link BotCaps#DEFAULT} crosses {@code g=1}, {@code g=2} and —
+ * at the default envelope (flat cap 3, the owner-verified maximum) — {@code g=3}, each as exactly ONE
+ * Parkour waypoint (the multi-cell edge must not be re-expanded); {@link BotCaps#BREAK_PLACE} still
+ * picks Parkour over bridging for {@code g=2} (18.6 vs ≈32 ticks). Negatives: a ceiling block over the
+ * gap at takeoff-arc height ({@code y+3}), a fence in the gap at node level (SHAPE_OTHER pokes into the
+ * transit space), {@code g=3} with the cap lowered to 2 ({@code Parkour.PARKOUR_MAX_GAP} still honored),
+ * and a flat {@code g=4} under ANY flags (no flat 4 row exists — the 4-range belongs to the falling
+ * arcs) all yield no route. Not testable headless: jump kinematics, takeoff-edge tuning, sprint
+ * attainment, missed-jump recovery (in-game pass).
  */
 class ParkourTest {
 
@@ -105,20 +107,41 @@ class ParkourTest {
     }
 
     @Test
-    void threeWideGapIsGatedBehindTheStaticCap() {
+    void threeWideGapIsOpenAtTheDefaultCapAndTheCapIsStillHonored() {
+        // Envelope flip: the flat row's default cap is 3, the owner-verified maximum (was 2).
         NavGridView grid = buildCourse(3, null, null);
         BlockPathPlan plan = BlockPathfinder.findPath(grid, START, goal(3), BotCaps.DEFAULT, CORRIDOR);
-        assertNull(plan, "g=3 must not be offered at the default gap cap of 2");
+        assertNotNull(plan, "g=3 should be offered at the new default flat cap of 3");
+        assertEquals(1, count(plan, MovementRegistry.PARKOUR),
+                "the g=3 jump should still be a single Parkour waypoint");
 
+        // The static knob keeps its exact v1 semantics: lowering it re-closes the 3-gap.
         int saved = Parkour.PARKOUR_MAX_GAP;
-        Parkour.PARKOUR_MAX_GAP = 3;
+        Parkour.PARKOUR_MAX_GAP = 2;
         try {
-            plan = BlockPathfinder.findPath(grid, START, goal(3), BotCaps.DEFAULT, CORRIDOR);
-            assertNotNull(plan, "raising the cap to 3 should open the g=3 jump");
-            assertEquals(1, count(plan, MovementRegistry.PARKOUR),
-                    "the g=3 jump should still be a single Parkour waypoint");
+            assertNull(BlockPathfinder.findPath(grid, START, goal(3), BotCaps.DEFAULT, CORRIDOR),
+                    "lowering the cap to 2 must gate the g=3 jump again");
         } finally {
             Parkour.PARKOUR_MAX_GAP = saved;
+        }
+    }
+
+    @Test
+    void flatFourWideGapIsNeverOffered() {
+        // Equivalent negative to the old default-cap gate: there is NO flat 4 row in any envelope — the
+        // ~3.4-block flat sprint-jump reach doesn't cover it (the 4-range belongs to the falling arcs,
+        // which need a lower landing; this course's landing is at takeoff level over a bottomless chasm).
+        NavGridView grid = buildCourse(4, null, null);
+        assertNull(BlockPathfinder.findPath(grid, START, goal(4), BotCaps.DEFAULT, CORRIDOR),
+                "a flat 4-gap must not be offered by default");
+
+        boolean saved = Parkour.AGGRESSIVE;
+        Parkour.AGGRESSIVE = true;
+        try {
+            assertNull(BlockPathfinder.findPath(grid, START, goal(4), BotCaps.DEFAULT, CORRIDOR),
+                    "flat stays capped at 3 even under AGGRESSIVE — the flag only opens deeper drops");
+        } finally {
+            Parkour.AGGRESSIVE = saved;
         }
     }
 

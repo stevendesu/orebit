@@ -184,6 +184,16 @@ public final class Traverse implements Movement {
         // the floor navtype (and so the slow-floor term in cost()) is uniform over the run by cuboid
         // construction, and a run that starts in fire/webs gets a dearer per-step estimate → a SHORTER jump
         // (the conservative direction — it can only tighten the hedge, never sail past a cheap exit).
+        //
+        // KNOWN WEAKENER (recorded, not fixed): the hedge is sized from the START cell's transit ONLY. A
+        // macro run whose first cell is CLEAN but which crosses hazard cells DOWNSTREAM gets the cheap
+        // per-step estimate → a LONGER jump that swallows those hazard cells into one candidate. They are
+        // still fully PRICED (the per-cell loop below accumulates every cell's surcharge into the emitted
+        // cost — nothing is free), but the search loses the intermediate nodes it would branch away from,
+        // so hazard AVOIDANCE inside a collapsed run is weakened — never zeroed — vs the micro search.
+        // With damage now priced at caps.costPerHitpoint() per cell the swallowed cost is large, so a
+        // swallowed-hazard jump usually loses to a clean alternative anyway; a per-cell hedge re-size is
+        // the proper fix if this ever shows up in traces.
         float moveCost = cost(ctx, pd);
         float startTransit = ctx.bodyTransitCost(startFlags, nx, y, nz);
         int j = MacroJump.steps(box, nx, y, nz, axis, sign, moveCost + startTransit,

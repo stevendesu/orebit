@@ -111,4 +111,55 @@ public class NavFlagsTest {
         assertFalse(NavFlags.placeableNeighbor(f), "open air has no face to place against");
         assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(f), "open air = full headroom");
     }
+
+    /**
+     * The vertical-overscan scratch contract: a {@link NavFlags#SCRATCH_SIZE}-length scratch carries
+     * {@link NavFlags#OVERSCAN_ROWS} rows of the section ABOVE at {@code y = 16..18} (the same
+     * {@code (y<<8)|(z<<4)|x} formula), so TOP-row floor cells see real blocks across the seam; a bare
+     * 4096 scratch keeps the legacy air-optimistic behaviour.
+     */
+    @Test
+    void overscanRowsInformTopRowFlags() {
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
+        AIR = NavBlock.descriptor(NavBlock.AIR);
+
+        // A berry bush just across the seam (the above section's ly=0) is the body cell of the top-row
+        // floor -> hazard + slow bits set, headroom kept (the bush is passable).
+        long[] g = freshOverscanGrid();
+        put(g, 8, 15, 8, state(Blocks.STONE));
+        put(g, 8, 16, 8, state(Blocks.SWEET_BERRY_BUSH));
+        int f = NavFlags.compute(g, 8, 15, 8);
+        assertTrue(NavFlags.clearableHazard(f), "berry bush across the seam = clearable hazard");
+        assertTrue(NavFlags.slowTransit(f), "berry bush across the seam = slow transit");
+        assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(f), "bush is passable, headroom stays");
+
+        // A solid across the seam blocks the top-row floor's headroom outright.
+        g = freshOverscanGrid();
+        put(g, 8, 15, 8, state(Blocks.STONE));
+        put(g, 8, 16, 8, state(Blocks.STONE));
+        assertEquals(NavFlags.HEADROOM_NONE, NavFlags.headroom(NavFlags.compute(g, 8, 15, 8)),
+                "solid across the seam = blocked at feet");
+
+        // Two rows over the seam still lands in the deepest overscan read (y+3 = 18).
+        g = freshOverscanGrid();
+        put(g, 8, 15, 8, state(Blocks.STONE));
+        put(g, 8, 18, 8, state(Blocks.STONE));
+        assertEquals(NavFlags.HEADROOM_WALK, NavFlags.headroom(NavFlags.compute(g, 8, 15, 8)),
+                "solid at the top overscan row caps headroom at WALK");
+
+        // A bare 4096 scratch (no overscan) resolves above-section reads to air — the compat path for
+        // callers without column context.
+        long[] legacy = freshGrid();
+        put(legacy, 8, 15, 8, state(Blocks.STONE));
+        int lf = NavFlags.compute(legacy, 8, 15, 8);
+        assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(lf), "bare scratch stays air-optimistic above");
+        assertFalse(NavFlags.clearableHazard(lf), "bare scratch sees no hazard above the section");
+    }
+
+    private static long[] freshOverscanGrid() {
+        long[] g = new long[NavFlags.SCRATCH_SIZE];
+        Arrays.fill(g, AIR);
+        return g;
+    }
 }

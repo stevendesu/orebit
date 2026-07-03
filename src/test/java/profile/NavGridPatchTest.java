@@ -1,6 +1,8 @@
 package profile;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -64,5 +66,67 @@ public class NavGridPatchTest {
         assertEquals(NavFlags.HEADROOM_NONE, NavFlags.headroom(g.flags(8, 4, 8)), "floor now headroom-blocked");
         // A floor cell far from the change is untouched.
         assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(g.flags(2, 4, 2)), "far floor untouched");
+    }
+
+    /**
+     * Cross-seam patching (the vertical-overscan contract on the incremental path): a block change in a
+     * section's BOTTOM rows is a flags change for the top floor cells of the section BELOW (they read it
+     * through their upward overscan), and a recompute in the TOP rows must read the section ABOVE rather
+     * than wipe seam-derived bits back to air-optimism.
+     */
+    @Test
+    void patchPropagatesAcrossTheVerticalSeam() {
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
+
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        BlockState bush = Blocks.SWEET_BERRY_BUSH.defaultBlockState();
+        BlockState air = Blocks.AIR.defaultBlockState();
+
+        // Column: lower section with a stone floor plane in its TOP row (y=15), upper section all air.
+        PalettedContainer<BlockState> c = newSection();
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                c.getAndSet(x, 15, z, stone);
+            }
+        }
+        NavSection lower = NavSection.create(BlockPos.ZERO);
+        NavSection upper = NavSection.create(new BlockPos(0, 16, 0));
+        boolean lowerAir = NavSectionBuilder.classifyNavtypes(c, false, lower.getTraversalGrid(), null);
+        boolean upperAir = NavSectionBuilder.classifyNavtypes(null, true, upper.getTraversalGrid(), null);
+        NavSectionBuilder.computeFlags(upper.getTraversalGrid(), upperAir, null);
+        NavSectionBuilder.computeFlags(lower.getTraversalGrid(), lowerAir,
+                upperAir ? null : upper.getTraversalGrid()); // air above = null, as ChunkNavBuilder passes it
+        TraversalGrid lg = lower.getTraversalGrid();
+
+        assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(lg.flags(8, 15, 8)), "seam floor open before");
+        assertFalse(NavFlags.clearableHazard(lg.flags(8, 15, 8)), "seam floor clean before");
+
+        // Place a berry bush just across the seam (upper ly=0): the patch must reach DOWN into the
+        // lower section's top-row flags.
+        NavSectionBuilder.patchCell(upper, null, lower, 8, 0, 8, bush);
+        assertEquals(NavBlock.navtypeFor(bush) & 0xFFFF, upper.getTraversalGrid().navtype(8, 0, 8),
+                "changed cell navtype (upper section)");
+        assertTrue(NavFlags.clearableHazard(lg.flags(8, 15, 8)), "below floor now sees the bush hazard");
+        assertTrue(NavFlags.slowTransit(lg.flags(8, 15, 8)), "below floor now sees the bush slow-transit");
+        assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(lg.flags(8, 15, 8)), "bush is passable — headroom kept");
+        assertFalse(NavFlags.clearableHazard(lg.flags(2, 15, 2)), "far seam floor untouched");
+
+        // A recompute in the lower section's TOP rows (a neighbouring block change) must KEEP the
+        // seam-derived hazard bit — its window reads the upper section through the overscan.
+        NavSectionBuilder.patchCell(lower, upper, null, 7, 15, 8, stone);
+        assertTrue(NavFlags.clearableHazard(lg.flags(8, 15, 8)),
+                "own-section recompute near the seam keeps reading the section above");
+
+        // Remove the bush -> the below-section bits clear again.
+        NavSectionBuilder.patchCell(upper, null, lower, 8, 0, 8, air);
+        assertFalse(NavFlags.clearableHazard(lg.flags(8, 15, 8)), "hazard cleared after removal");
+        assertFalse(NavFlags.slowTransit(lg.flags(8, 15, 8)), "slow-transit cleared after removal");
+
+        // Solid across the seam limits the below floor's headroom; removal restores it.
+        NavSectionBuilder.patchCell(upper, null, lower, 8, 0, 8, stone);
+        assertEquals(NavFlags.HEADROOM_NONE, NavFlags.headroom(lg.flags(8, 15, 8)), "solid across the seam");
+        NavSectionBuilder.patchCell(upper, null, lower, 8, 0, 8, air);
+        assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(lg.flags(8, 15, 8)), "headroom restored");
     }
 }
