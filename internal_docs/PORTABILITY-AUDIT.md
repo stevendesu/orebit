@@ -8,6 +8,17 @@
 >
 > Scope = the ~30 files with runnable logic. The ~83% Javadoc-only stubs are excluded
 > (they have no call sites yet; they get the right structure when implemented).
+>
+> **Framing update (post-2026-06-20):** this audit predates the ratified build model. Where it says
+> "Stage C (skeleton)" it assumed a single unified multi-version build. The strategy was since ratified as
+> **Model C — branch-per-toolchain-era** (`internal_docs/BUILD-STRATEGY.md`): a toolless `core` trunk merged
+> into per-era branches, with **Stonecutter + top-level `overlays/` composing versions** live on the
+> **mc-1.21 era** (Fabric + Forge + NeoForge, Architectury Loom) and a **Fabric-only 26.x era** on `main`
+> (pure Fabric Loom, JDK 25 — Architectury Loom can't build unobfuscated 26.1+ yet). The **COLD/HOT
+> call-site classification below is unaffected and still accurate** — it's the durable core of this doc.
+> Only the "Stage C" carry-forward framing changed: the version-selection boundaries it calls for landed as
+> the `platform/` adapters + the `overlays/<era>/` source trees, NOT one monolithic source set (see the
+> annotations in the carry-forward section).
 
 ## Summary
 
@@ -84,9 +95,29 @@ These already live inside the version-coupled entity subclass, so there's no ext
 
 ## Actionable carry-forward into Stage C (skeleton) and later phases
 
-1. **`PlatformEvents` interface** at the loader boundary — the only thing Fabric API touches. (Stage C)
-2. **Stonecutter version source sets** for: the fake-player network/entity stack, `NavSectionBuilder`, the traversal classifiers, and version-divergent mixin method names. (Stage C structure; impls fill in over phases)
-3. **Replace `PalettedContainer` reflection** with an access-widener or versioned accessor mixin — removes the by-Yarn-name fragility. (Phase 1)
-4. **Consolidate hardcoded `Blocks.X`** in `NavBlock`/`TraversalAnalyzer*`/`RegionBlockIndex` into `BlockTags`/behavioral predicates; gate version-absent blocks (`PALE_OAK_*`, `SCULK*`, `SHORT_GRASS` rename) behind Stonecutter. (Phase 1/2/4)
-5. **No access widener exists** — decide deliberately whether to introduce one (for palette internals + entity fields) vs. keep subclass/mixin access. (Stage C)
-6. **1.12.2** is a separate block-layer port (no `PalettedContainer`, numeric IDs+metadata) behind the same selection boundary — the acknowledged hard stretch.
+> **Landed via Model C (see the framing update up top).** "Stage C" was the single-build skeleton this
+> audit assumed; in the ratified model these items landed through the **`core` trunk + per-era branches +
+> `platform/` adapters + `overlays/<era>/` source trees** instead of one unified source set. Status
+> annotations below reflect what actually shipped.
+
+1. **`PlatformEvents` interface** at the loader boundary — the only thing Fabric API touches. **DONE** — it
+   is the common↔loader seam, implemented per loader (`fabric`/`forge`/`neoforge` modules).
+2. **Stonecutter version source sets** for the version-divergent code — **DONE, but as top-level
+   `overlays/<era>/` trees + the `platform/` static adapters, not per-file source sets.** The fake-player
+   stack (`FakePlayerEntity`, `FakeClientConnection`, spawn/packet glue) lives in `overlays/`; the per-cell
+   MC-API divergences became thin `platform/` seams (`BlockLookup`, `ChunkCoords`, `TagLookup`, …) so the
+   hot loops stay in core. `NavSectionBuilder` kept its reflection (see #3) rather than forking per version.
+3. **Replace `PalettedContainer` reflection** with an access-widener or versioned accessor mixin — removes
+   the by-Yarn-name fragility. **NOT done** — `NavSectionBuilder` still reflects into palette internals and
+   remains the most version-fragile code in the repo (CLAUDE.md flags it as such). Still open.
+4. **Consolidate hardcoded `Blocks.X`** in the classifier tables into `BlockTags`/behavioral predicates; gate
+   version-absent blocks behind the overlay/era mechanism. **PARTLY done** — `NavBlock` now keys per-
+   `BlockState` with behavioral/tag queries and version-absent blocks handled via the `platform/` seams
+   (`MineableTags`, `TagLookup`); `TraversalAnalyzer*` were superseded by the packed grid + `NavFlags`.
+   `RegionBlockIndex` remains the old semantic-region model (superseded by the fixed-grid design).
+5. **No access widener exists** — decide deliberately whether to introduce one vs. keep subclass/mixin
+   access. **Still no AW** — the project stayed subclass/reflection-based (a mapping/visibility shift breaks
+   at compile, which the chiseled compile-probe gates catch across all versions).
+6. **1.12.2** is a separate block-layer port (no `PalettedContainer`, numeric IDs+metadata) behind the same
+   selection boundary — the acknowledged hard stretch. **Out of the shipped range** (the mc-1.21 era floors
+   at 1.17.1); still a future era boundary if pursued.
