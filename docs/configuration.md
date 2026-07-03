@@ -36,6 +36,11 @@ back so you can confirm they loaded.) The defaults are chosen so that, out of th
 freshly configured bot behaves exactly as it does with no config at all — change only what
 you want to change.
 
+The one exception is `mining.protectedBlocks`: the reload makes the bot *refuse* to break
+newly-protected blocks immediately, but the planner keeps routing from cached block data
+until a restart (or until the affected chunks naturally rebuild) — see the key's entry
+below.
+
 ## Options
 
 The file is grouped into four sections. Every value below is the default.
@@ -61,11 +66,14 @@ placement.placeBaseCost     = 6.0
 ### Mining — can the bot dig?
 
 ```properties
-mining.canMine         = true
-mining.consumesTools   = false
-mining.maxHardness     = 255
-mining.ticksByHardness = true
-mining.ticksToMineFlat = 0
+mining.canMine          = true
+mining.consumesTools    = false
+mining.maxHardness      = 255
+mining.ticksByHardness  = true
+mining.ticksToMineFlat  = 0
+mining.breakBaseCost    = 0.0
+mining.protectedBlocks  =
+mining.allowUnbreakable = false
 ```
 
 | Key | Default | What it does |
@@ -75,6 +83,9 @@ mining.ticksToMineFlat = 0
 | `mining.maxHardness` | `255` | The hardest block the bot is allowed to mine, on a `0`–`255` scale. `255` means "anything it can break." Lower it to keep a bot out of tough blocks — e.g. a small value lets it clear dirt and wood but not stone. |
 | `mining.ticksByHardness` | `true` | If `true`, harder blocks take realistically longer to mine (and a better tool is faster) — so the bot prefers routes through softer material. If `false`, every block takes the same fixed time (below). |
 | `mining.ticksToMineFlat` | `0` | The fixed time, in game ticks, to mine one block when `ticksByHardness` is `false`. `0` means instant. Ignored when `ticksByHardness` is `true`. |
+| `mining.breakBaseCost` | `0.0` | A flat surcharge (in ticks) added to **every break the planner considers**, on top of the real mining time — the mining-side mirror of `placement.placeBaseCost`. It's a behavioral "reluctance to edit the world": raise it and the bot detours around obstacles (and wades through berry bushes) it would otherwise punch through; at `0` breaks are priced at mining time alone. |
+| `mining.protectedBlocks` | *(empty)* | A comma-separated list of block ids and `#`-prefixed block tags the bot must **never break** — nor destroy by placing over — e.g. `minecraft:chest, #minecraft:beds`. Enforced both when planning (routes go *around* protected blocks) and again at the moment of breaking. Malformed entries warn and are skipped. **Changing this list needs a server restart** to fully apply (the planner caches block classifications); the at-the-moment-of-breaking refusal applies immediately on reload. See [Breaking & Placing](world_edits.md#protected-blocks). |
+| `mining.allowUnbreakable` | `false` | If `true`, the bot may "mine" vanilla-unbreakable blocks (bedrock, barriers, end portal frames — anything with negative destroy time) at a fixed stand-in cost of **2400 ticks (2 minutes) per block**: it stands and grinds the full 2 minutes, then the block breaks. Independent of `mining.maxHardness` (unbreakable is its own axis, not "very hard"); `mining.protectedBlocks` always wins. |
 
 ### Pathfinding — how the bot plans routes
 
@@ -82,6 +93,8 @@ mining.ticksToMineFlat = 0
 pathing.maxNodes         = 10000
 pathing.greedyWeight     = 2.0
 pathing.costPerHitpoint  = 100.0
+pathing.warmup           = true
+pathing.warmupBudgetMs   = 1500
 ```
 
 | Key | Default | What it does |
@@ -89,6 +102,8 @@ pathing.costPerHitpoint  = 100.0
 | `pathing.maxNodes` | `10000` | How hard the bot searches before giving up on a single plan. Higher finds paths through more tangled terrain but costs more CPU per plan. |
 | `pathing.greedyWeight` | `2.0` | How directly the bot beelines toward its goal. `1.0` finds the shortest possible route but searches slowly; higher values head straight at the goal and plan much faster, at the cost of slightly longer routes. Must be `1.0` or greater. |
 | `pathing.costPerHitpoint` | `100.0` | How many ticks of travel time the bot considers **one hitpoint of damage** to be worth (`>= 0`). This single number prices *all* damage in the planner: walking through fire, berry bushes, or powder snow, and dropping farther than a safe fall — each expected hitpoint costs this many ticks. The intuition: one hitpoint buys roughly `costPerHitpoint / 4.6` blocks of detour, so at the default `100` the bot will walk about 22 blocks out of its way to avoid each point of damage — enough to route around a whole thicket of bushes rather than push through it. Raise it for a more self-preserving bot (it will take long detours and gentle descents); lower it for a daredevil that trades health for time. Only matters when `survival.takesDamage` is `true` — an invulnerable bot ignores damage entirely. |
+| `pathing.warmup` | `true` | Run a short synthetic pathfinder warm-up at server start, before any player can join, so the first *real* path isn't computed by a cold JIT compiler (a one-time ~22 ms tick stall otherwise; ~0.7 ms with the warm-up — [the measurements](Optimizations/depth_nibbles.md)). Costs roughly half a second of startup wall-clock and nothing afterwards. |
+| `pathing.warmupBudgetMs` | `1500` | The hard wall-clock cap, in milliseconds, on that warm-up pass. It usually finishes early (it stops once search times plateau, typically ~400–500 ms); `0` disables the warm-up entirely. |
 
 ### Survival — is the bot mortal?
 

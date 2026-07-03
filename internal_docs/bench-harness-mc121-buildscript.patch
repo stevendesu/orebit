@@ -1,0 +1,32 @@
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 1031b69..185c0db 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -91,6 +91,27 @@ tasks.register<Test>("jmh") {
+     if (project.hasProperty("bench")) systemProperty("bench", project.property("bench")!!)
+     if (project.hasProperty("prof")) systemProperty("prof", project.property("prof")!!)
+     if (project.hasProperty("scenario")) systemProperty("scenario", project.property("scenario")!!)
++    if (project.hasProperty("arm")) systemProperty("arm", project.property("arm")!!)
++    testLogging { showStandardStreams = true }
++    outputs.upToDateWhen { false }
++}
++
++// E5 cold-start harness: times the JIT-COLD first pathfinder search in a FRESH test-worker JVM —
++// the number JMH's warmed forks=0 JVM cannot see. ONE measured run per Gradle invocation; forkEvery 1
++// + never-up-to-date guarantee a new worker each time (workers don't persist across builds anyway).
++// Arm: -Pwarmarm=true|false → -Dorebit.bench.warmup (run NavWarmup before the timed search, or not).
++// Gated by -Dcoldstart=true so a normal `test` skips it.
++tasks.register<Test>("coldstart") {
++    group = "verification"
++    description = "Fresh-JVM cold-start pathfinder timing (E5 warm-up experiment)."
++    useJUnitPlatform()
++    testClassesDirs = sourceSets["test"].output.classesDirs
++    classpath = sourceSets["test"].runtimeClasspath
++    filter { includeTestsMatching("com.orebit.mod.worldmodel.pathing.ColdStartHarnessTest") }
++    systemProperty("coldstart", "true")
++    if (project.hasProperty("warmarm")) systemProperty("orebit.bench.warmup", project.property("warmarm")!!)
++    setForkEvery(1)
++    maxParallelForks = 1
+     testLogging { showStandardStreams = true }
+     outputs.upToDateWhen { false }
+ }
