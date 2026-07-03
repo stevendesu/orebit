@@ -82,6 +82,13 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           derived predicate. Splits NETHER_PORTAL out of the generic "intangible
  *                           unbreakable" navtype so the portal index / portal-follow can recognise it.
  *                           v1 leaves walker passability untouched (a path can still graze a portal).
+ *   44      1   protected   owner-protected block ({@code mining.protectedBlocks}) — the bot must NEVER
+ *                           break it. A base identity field applied AFTER static-init by {@link
+ *                           #applyProtected} (the list needs the loaded config + bound datapack tags), so
+ *                           it SPLITS navtypes (a protected chest is a different navtype from an identical
+ *                           unprotected one — deliberate: navtypes conflate blocks, so protected-ness must
+ *                           be part of the fingerprint for the planner to see it). The derived BREAKABLE
+ *                           bit excludes it, so every planner break gate refuses in one bit test.
  * </pre>
  */
 public final class NavBlock {
@@ -142,15 +149,19 @@ public final class NavBlock {
     private static final long WLOGABLE_BIT = 1L << 36;
     private static final int TRANSIT_SHIFT = 41, TRANSIT_MASK = 0x03; // bits 37–40 are the derived predicates
     private static final long PORTAL_BIT   = 1L << 43;                // nether-portal cell (base field, not derived)
+    private static final long PROTECTED_BIT = 1L << 44;               // owner-protected: never break (base field)
 
     // ---- Precomputed predicate bits (37+) ----------------------------------------------------
     // Each is a PURE function of the fields above, so it adds ZERO navtypes (a function of existing bits
     // can't split a dedup class) and turns a multi-branch movement check into one mask-and-test. Computed
     // once per navtype by {@link #deriveBits} at table build, asserted consistent at init.
     private static final long STANDABLE_BIT  = 1L << 37; // stand on top: solid-topped, no fluid, not damaging
-    private static final long BREAKABLE_BIT  = 1L << 38; // mineable geometry: solid, no fluid, not unbreakable
+    private static final long BREAKABLE_BIT  = 1L << 38; // mineable geometry: solid, no fluid, not unbreakable/protected
     private static final long OPEN_PLACE_BIT = 1L << 39; // a placed block could fill it: replaceable/empty, no fluid
     private static final long COLLISION_BIT  = 1L << 40; // has a face to build against: solid, no fluid
+
+    /** All derived predicate bits — stripped before a re-derivation ({@link #applyProtected}). */
+    private static final long DERIVED_MASK = STANDABLE_BIT | BREAKABLE_BIT | OPEN_PLACE_BIT | COLLISION_BIT;
 
     // ---- The tables --------------------------------------------------------------------------
     // descriptor (packed long) -> navtype index, for lossless dedup at build time.
@@ -282,10 +293,13 @@ public final class NavBlock {
         int shape = shape(d);
         boolean solid = shape != SHAPE_EMPTY;
         boolean noFluid = fluid(d) == 0;
-        if (solid && shape != SHAPE_OTHER && noFluid && !isDamaging(d)) d |= STANDABLE_BIT;
-        if (solid && noFluid && hardness(d) != 255)                     d |= BREAKABLE_BIT;
-        if ((isReplaceable(d) || shape == SHAPE_EMPTY) && noFluid)      d |= OPEN_PLACE_BIT;
-        if (solid && noFluid)                                          d |= COLLISION_BIT;
+        if (solid && shape != SHAPE_OTHER && noFluid && !isDamaging(d))      d |= STANDABLE_BIT;
+        if (solid && noFluid && hardness(d) != 255 && !isProtected(d))       d |= BREAKABLE_BIT;
+        // OPEN_PLACE also excludes protected: filling the cell would REPLACE (destroy) its occupant — a
+        // protected bush/grass must not be cleared by a placement any more than by a punch. (Protected
+        // air is a degenerate config nobody should write; it would just make the cell unfillable.)
+        if ((isReplaceable(d) || shape == SHAPE_EMPTY) && noFluid && !isProtected(d)) d |= OPEN_PLACE_BIT;
+        if (solid && noFluid)                                                d |= COLLISION_BIT;
         return d;
     }
 
@@ -300,8 +314,8 @@ public final class NavBlock {
             int shape = shape(d);
             boolean solid = shape != SHAPE_EMPTY, noFluid = fluid(d) == 0;
             boolean standable = solid && shape != SHAPE_OTHER && noFluid && !isDamaging(d);
-            boolean breakable = solid && noFluid && hardness(d) != 255;
-            boolean openPlace = (isReplaceable(d) || shape == SHAPE_EMPTY) && noFluid;
+            boolean breakable = solid && noFluid && hardness(d) != 255 && !isProtected(d);
+            boolean openPlace = (isReplaceable(d) || shape == SHAPE_EMPTY) && noFluid && !isProtected(d);
             boolean collision = solid && noFluid;
             if (isStandable(d) != standable || isBreakable(d) != breakable
                     || isOpenForPlace(d) != openPlace || hasCollision(d) != collision) {
@@ -382,6 +396,57 @@ public final class NavBlock {
         return v < lo ? lo : v > hi ? hi : v;
     }
 
+    // ---- Post-init policy application (cold, once per config load/reload) ---------------------
+
+    /**
+     * Fold the owner's {@code mining.protectedBlocks} list into the classification fingerprint: for every
+     * known {@link BlockState}, set (or clear) the {@link #isProtected PROTECTED} bit according to
+     * {@code isProtected} and re-derive the predicate bits — remapping the state to the matching (existing
+     * or freshly interned) navtype. States whose protected-ness didn't change keep their navtype, so
+     * applying the same list twice is a no-op (returns {@code 0}).
+     *
+     * <p><b>Why post-init, not in {@link #fingerprint}:</b> the list lives in the config, which loads at
+     * server start ({@code ConfigLoader.install}) — potentially AFTER this class's static-init — and tag
+     * entries ({@code #minecraft:beds}) need the datapack tags, which are only bound by server start. So
+     * the base table builds config-blind and this pass patches it; it runs BEFORE any nav grid is built
+     * (chunk nav builds are deferred to the world tick, after server-started), so live grids always hold
+     * post-policy navtypes. On a {@code /bot config reload} that CHANGES the list, the table is re-derived
+     * (this method is fully reversible — un-protected states re-derive back to their base navtype and
+     * remap to it) but already-built grid sections still hold the old navtypes until rebuilt: the caller
+     * warns that a restart (or chunk rebuilds) is needed for the planner to fully see the change. The
+     * execution-side {@code Config.mayBreak} guard applies immediately regardless.
+     *
+     * <p>Splitting is bounded by the list: each protected entry adds at most as many navtypes as its
+     * states had distinct base navtypes (typically a handful per entry against the ~587/1024 measured
+     * headroom). Old navtypes never disappear (grid data may still reference them); a re-protect after an
+     * un-protect re-uses the previously interned protected descriptor. Cold: a full-table pass over ~28k
+     * states, once per config load — never per node, never per tick.
+     *
+     * @return the number of block states whose navtype changed (0 ⇒ nothing to re-see; no staleness)
+     */
+    public static synchronized int applyProtected(java.util.function.Predicate<BlockState> isProtected) {
+        int remapped = 0;
+        for (Map.Entry<BlockState, Short> e : STATE_TO_NAVTYPE.entrySet()) {
+            long current = descriptors[e.getValue() & 0xFFFF];
+            long base = current & ~(DERIVED_MASK | PROTECTED_BIT);
+            long want = withDerived(isProtected.test(e.getKey()) ? base | PROTECTED_BIT : base);
+            if (want != current) {
+                e.setValue(intern(want));
+                remapped++;
+            }
+        }
+        if (navtypeCount > 1024) {
+            // TraversalGrid packs a 10-bit navtype — beyond 1024 grid cells would truncate and
+            // mis-resolve (NavSectionBuilder's static-init raises the same alarm, but it may have run
+            // BEFORE this split). Surface the cause so the owner trims the list.
+            OrebitCommon.LOGGER.error(
+                    "[Orebit] NavBlock: navtype count {} exceeds the 10-bit nav-grid capacity (1024) after "
+                            + "protected-block splitting — grid cells will mis-resolve; trim mining.protectedBlocks",
+                    navtypeCount);
+        }
+        return remapped;
+    }
+
     // ---- Lookup (cold / per-palette-entry) ---------------------------------------------------
 
     /** The navtype index for a block state ({@link #AIR} for unknown states). */
@@ -458,6 +523,15 @@ public final class NavBlock {
      */
     public static boolean isPortal(long d) { return (d & PORTAL_BIT) != 0; }
     /**
+     * Owner-protected block ({@code mining.protectedBlocks}) — the bot must NEVER break it. A base
+     * identity field applied post-init by {@link #applyProtected}. The derived {@link #isBreakable
+     * BREAKABLE} bit already excludes protected cells, so the ordinary solid-break gates need no extra
+     * test; only the gates that do NOT go through BREAKABLE (the passable break-through fold, the
+     * unbreakable-opt-in arm) test this bit explicitly. One mask-and-test on an already-loaded long —
+     * the hot path never touches a registry or the config list.
+     */
+    public static boolean isProtected(long d) { return (d & PROTECTED_BIT) != 0; }
+    /**
      * Derived: water is present in this cell right now — a water source/flow <b>or</b> a <b>waterlogged
      * solid</b> (a waterlogged fence/stair has a water fluid state). This is the "would water flow if I edit
      * here" / fire-out / no-spawn concept; it is <b>NOT</b> "can the bot swim here" — a waterlogged fence holds
@@ -479,9 +553,11 @@ public final class NavBlock {
 
     /** Can the bot stand on top of this cell? Solid-topped, no fluid, not damaging. */
     public static boolean isStandable(long d)    { return (d & STANDABLE_BIT) != 0; }
-    /** Is this cell's geometry mineable? Solid, no fluid, not unbreakable (still gate on the bot's caps). */
+    /** Is this cell's geometry mineable? Solid, no fluid, not unbreakable, not owner-{@link #isProtected
+     *  protected} (still gate on the bot's caps). */
     public static boolean isBreakable(long d)    { return (d & BREAKABLE_BIT) != 0; }
-    /** Could a placed block fill this cell? Replaceable/empty, no fluid (still gate on the bot's caps). */
+    /** Could a placed block fill this cell? Replaceable/empty, no fluid, and not owner-{@link #isProtected
+     *  protected} — filling replaces (destroys) the occupant (still gate on the bot's caps). */
     public static boolean isOpenForPlace(long d) { return (d & OPEN_PLACE_BIT) != 0; }
     /** Does this cell have a solid face to build against? Solid, no fluid. */
     public static boolean hasCollision(long d)   { return (d & COLLISION_BIT) != 0; }

@@ -61,10 +61,15 @@ public record Config(
         int maxHardness,
         boolean ticksByHardness,
         int ticksToMineFlat,
+        float breakBaseCost,
+        ProtectedBlocks protectedBlocks,
+        boolean allowUnbreakable,
         // ---- pathing ----
         int maxNodes,
         float greedyWeight,
-        float costPerHitpoint) {
+        float costPerHitpoint,
+        boolean warmup,
+        int warmupBudgetMs) {
 
     /**
      * The all-defaults configuration — reproduces TODAY's hardcoded follower behaviour exactly (break +
@@ -76,9 +81,10 @@ public record Config(
     public static final Config DEFAULT = new Config(
             /* survival   */ false, false, false,
             /* placement  */ true, false, Blocks.COBBLESTONE, 1.0f, MovementContext.PLACE_BASE_COST,
-            /* mining     */ true, false, BotCaps.UNBREAKABLE, true, 0,
+            /* mining     */ true, false, BotCaps.UNBREAKABLE, true, 0, 0.0f,
+                             ProtectedBlocks.EMPTY, false,
             /* pathing    */ BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT,
-                             BotCaps.DEFAULT_COST_PER_HITPOINT);
+                             BotCaps.DEFAULT_COST_PER_HITPOINT, true, 1500);
 
     /**
      * The capability gate the block-tier A* reads, derived from the placement / mining / pathing knobs
@@ -101,8 +107,30 @@ public record Config(
                 /* canBreak         */ canMine,
                 /* canPlace         */ canPlace,
                 /* maxBreakHardness */ maxHardness,
+                /* allowUnbreakable */ allowUnbreakable,
                 /* maxNodes         */ maxNodes,
                 /* greedyWeight     */ greedyWeight);
+    }
+
+    /**
+     * The <b>execution-side</b> break policy gate — the cold backstop every live break site consults
+     * before actually destroying a block ({@code AllyBotEntity.applyEdits}/{@code place}, {@code
+     * BotMining}): may the bot break a block whose live state is {@code state} and whose live destroy
+     * time (vanilla {@code BlockState.getDestroySpeed(level, pos)}) is {@code destroyTime}? Refuses
+     * <ul>
+     *   <li>any {@link #protectedBlocks mining.protectedBlocks} match — protected ALWAYS wins, and</li>
+     *   <li>a vanilla-unbreakable block ({@code destroyTime < 0}: bedrock, barriers, portal frames, …)
+     *       unless {@link #allowUnbreakable mining.allowUnbreakable} opted in.</li>
+     * </ul>
+     * This mirrors the planner's descriptor-bit gates ({@code MovementContext.breakable}/{@code
+     * breakableThrough} via the PROTECTED bit + {@code BotCaps.allowUnbreakable}) — the planner/executor
+     * parity rule: the planner never folds a break this would refuse, and this still catches the stale-grid
+     * case (a block protected after the grid classified it). Cold — a set lookup + tag tests per actual
+     * world edit, never per node or per tick.
+     */
+    public boolean mayBreak(BlockState state, float destroyTime) {
+        if (destroyTime < 0 && !allowUnbreakable) return false;
+        return protectedBlocks.isEmpty() || !protectedBlocks.matches(state);
     }
 
     /** The default {@link BlockState} the follower places when bridging/pillaring (the conjured block). */
@@ -119,6 +147,35 @@ public record Config(
     // BotCaps.costPerHitpoint and is read by every damage-as-cost term (hazard-cell transit in
     // MovementContext.cellTransitCost, fall damage past the safe window in Fall/Parkour). Break-even: 1 HP
     // buys costPerHitpoint / 4.633 walk-blocks of detour. Only meaningful with survival.takesDamage=true.
+
+    // {@link #breakBaseCost} (mining group, auto-generated accessor) is the flat per-break surcharge (ticks)
+    // added to EVERY break the planner folds — the mining-side mirror of placeBaseCost: a behavioral
+    // "reluctance to edit the world" penalty on top of the real mining time, letting an owner discourage
+    // gratuitous digging/punch-throughs without forbidding them. Rides the inventory feasibility snapshot
+    // (like placeBaseCost/removalCostWeight, never BotCaps/the hot path); default 0.0, so the all-defaults
+    // config prices breaks exactly as before.
+
+    // {@link #protectedBlocks} (mining group, auto-generated accessor) is the parsed mining.protectedBlocks
+    // list — blocks the bot must NEVER break (exact ids + #tags). Two consumers: (1) planner-side it is
+    // folded into the NavBlock classification fingerprint at config install (the PROTECTED descriptor bit,
+    // via NavBlock.applyProtected in ConfigLoader.install) so every A* break gate refuses in one bit test;
+    // (2) execution-side every live break site re-checks the LIVE state through mayBreak() — the backstop
+    // that also covers stale grids. Changing the list at /bot config reload re-derives the table but
+    // already-built nav grids keep old navtypes until rebuilt — a restart fully applies it.
+
+    // {@link #allowUnbreakable} (mining group, auto-generated accessor) opts the bot into mining
+    // vanilla-unbreakable blocks (negative destroy time — bedrock, barriers, end portal frames, ...) at the
+    // fixed MiningModel.UNBREAKABLE_STANDIN_TICKS cost. Rides into BotCaps.allowUnbreakable (a
+    // move-generation fact) AND is read by the executor (BotMining's stand-in grind, mayBreak). Its own
+    // gate — NOT subject to mining.maxHardness (the 255 sentinel doesn't order against real hardness);
+    // mining.protectedBlocks always overrides. Default false = today's behaviour.
+
+    // {@link #warmup} / {@link #warmupBudgetMs} (pathing group, auto-generated accessors) gate the
+    // boot-time synthetic warm-up searches (worldmodel.pathing.NavWarmup, PERF-DESIGN-warmup-searches.md):
+    // ~500 searches over a private in-memory fixture at SERVER_STARTED so the first REAL search doesn't
+    // run JIT-cold (~16 ms). warmup=false is the off-switch; warmupBudgetMs is the hard wall-clock cap on
+    // the pass (default 1500). Boot-only — read once in OrebitCommon's onServerStarted hook, never per
+    // search or per tick.
 
     // {@link #placeBaseCost} (placement group, auto-generated accessor) is the flat per-placement base cost
     // (ticks) — a behavioral "reluctance to place" penalty, NOT a physical place time (see {@link

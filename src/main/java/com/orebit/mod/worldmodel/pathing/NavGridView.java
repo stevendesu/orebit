@@ -201,6 +201,36 @@ public final class NavGridView {
         return section == null ? null : section.getTraversalGrid().raw();
     }
 
+    /**
+     * The E3 floorGap nibble at world cell {@code (x,y,z)} ({@link TraversalGrid#floorGap}), or
+     * {@link TraversalGrid#DEPTH_UNKNOWN} where that chunk's nav data isn't built. Resolution shares the
+     * same per-search chunk cache as {@link #packedAt} — the consumer ({@code Fall}) reads the flags slot of
+     * the same cell immediately before, so this second call is a cache-key compare plus an array index.
+     */
+    public int floorGapAt(int x, int y, int z) {
+        NavSection section = sectionAt(x, y, z);
+        return section == null ? TraversalGrid.DEPTH_UNKNOWN : section.getFloorGap(x & 15, y & 15, z & 15);
+    }
+
+    /**
+     * The E4 runUp nibble at world cell {@code (x,y,z)} ({@link TraversalGrid#runUp}), or
+     * {@link TraversalGrid#DEPTH_UNKNOWN} where unbuilt — the cuboid extractor's stage-2 chain read.
+     */
+    public int runUpAt(int x, int y, int z) {
+        NavSection section = sectionAt(x, y, z);
+        return section == null ? TraversalGrid.DEPTH_UNKNOWN : section.getRunUp(x & 15, y & 15, z & 15);
+    }
+
+    /**
+     * The raw depth backing array ({@link TraversalGrid#depthRaw()}) of the section covering world cell
+     * {@code (x,y,z)}, or {@code null} if unbuilt — the bulk seam beside {@link #sectionRawAt} for the
+     * cuboid extractor's column-mode run reads (same per-search chunk cache, same indexing).
+     */
+    public byte[] depthRawAt(int x, int y, int z) {
+        NavSection section = sectionAt(x, y, z);
+        return section == null ? null : section.getTraversalGrid().depthRaw();
+    }
+
     /** The {@link NavSection} covering world cell {@code (x,y,z)}, or {@code null} if it isn't built. */
     private NavSection sectionAt(int x, int y, int z) {
         int sectionIndex = (y - minY) >> 4;

@@ -148,6 +148,13 @@ public final class BlockPathfinder {
      */
     public static boolean MACRO_MOVES = true;
 
+    // NOTE (E1/E2, 2026-07): a per-pop edit-bbox relevance gate (PERF-DESIGN-edit-bbox-gate.md) was
+    // implemented, measured, and DELETED per protocol: a counter probe put the envelope-disjoint pop
+    // fraction at p = 0.000 in every scenario — the pillar-flood pop stands ON its own placed block, so
+    // "edits trail behind the path" is false for every shape the search produces and both gate variants
+    // measured FLAT. Any future gate needs per-row/incremental chain bboxes or a recent-edits-only
+    // overlay, not a whole-chain bbox. See PERF-RESULTS-2026-07-03.md §E1/E2.
+
     /**
      * Minimum heuristic improvement (how much closer to the goal the closest-approach node is than the start)
      * for a <b>budget-exhausted</b> search to return a PARTIAL path (only when {@link #PARTIAL_PATH}). Below
@@ -203,6 +210,11 @@ public final class BlockPathfinder {
      * reusing one drives the steady state to zero per-search allocation. {@link ThreadLocal}, not a
      * static singleton, so a future off-tick background pathfinding thread gets its own with no contention.
      */
+    // NOTE (E5, 2026-07): the PERF-DESIGN-warmup-searches.md §5 eager-size one-liner (512,1024 → 8192,8192)
+    // was implemented, measured, and REVERTED per protocol: Nodes.reset() clears the map by Arrays.fill
+    // over its CAPACITY, so an eager 8192-slot map costs every flood-free search ~+28 KB of fill —
+    // a confirmed +4-7% on the pinned SHORT guard (13.08/13.48 vs 12.66/12.54 us, interleaved fresh-JVM
+    // pairs). The boot-time NavWarmup flood grows this scratch to high-water on the tick thread anyway.
     private static final ThreadLocal<Nodes> SEARCH = ThreadLocal.withInitial(() -> new Nodes(512, 1024));
 
     /**
@@ -578,7 +590,8 @@ public final class BlockPathfinder {
         // premium and re-open the ground flood). The probe re-derives the dominant axis itself (same
         // argmax + X>Z>Y tie-break as primaryAxis above) rather than taking macroAxis, keeping the two
         // consumers' semantics independent.
-        GoalForcedCost.probe(cuboids, sx, sy, sz, gx, gy, gz, caps, ctx.pillarPlaceCost(), forced);
+        GoalForcedCost.probe(cuboids, sx, sy, sz, gx, gy, gz, caps, ctx.pillarPlaceCost(),
+                ctx.breakBaseCost(), forced);
 
         // Reuse this thread's search state (sized to its high-water mark), wiped to empty — so a steady
         // stream of replans allocates nothing here. First call on a thread pays the initial 512/1024 sizing.

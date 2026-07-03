@@ -215,7 +215,9 @@ public final class BotInventory {
      * {@code caps} supplies the mining-hardness cap + canBreak; {@code consumesBlocks} is the {@code
      * placement.consumesBlocks} config flag (when off, the placeable count is irrelevant — infinite conjured
      * supply); {@code placeBaseCost} is the configured {@code placement.placeBaseCost} flat per-placement base
-     * (ticks) put on the snapshot for {@link MovementContext#placeCost} to read. Returns {@code null} when the
+     * (ticks) put on the snapshot for {@link MovementContext#placeCost} to read; {@code breakBaseCost} is its
+     * mining-side mirror ({@code mining.breakBaseCost}), the flat per-break surcharge {@link
+     * MovementContext#breakCost} adds to every folded break. Returns {@code null} when the
      * {@link MiningModel} table isn't built yet (degrades the planner to its historical caps-only mode rather
      * than risk an NPE).
      *
@@ -228,7 +230,7 @@ public final class BotInventory {
      * premium is 0. Computed ONCE here (cold) into the snapshot scalar {@link MovementContext#placeCost} reads.
      */
     public MovementContext.InventoryView feasibility(BotCaps caps, boolean consumesBlocks,
-            BlockState conjured, float removalWeight, float placeBaseCost) {
+            BlockState conjured, float removalWeight, float placeBaseCost, float breakBaseCost) {
         if (!MiningModel.ready()) return null;
 
         int categories = NavBlock.Tool.values().length;
@@ -246,7 +248,7 @@ public final class BotInventory {
                 bestTierPerCategory, caps.maxBreakHardness(), caps.canBreak());
         float premium = placeRemovalPremium(consumesBlocks, conjured, removalWeight);
         return new MovementContext.InventoryView(
-                mining, consumesBlocks, placeableBlockCount(), premium, placeBaseCost);
+                mining, consumesBlocks, placeableBlockCount(), premium, placeBaseCost, breakBaseCost);
     }
 
     /**

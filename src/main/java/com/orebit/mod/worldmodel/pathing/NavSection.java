@@ -50,6 +50,16 @@ public class NavSection {
         return grid.packed(x, y, z);
     }
 
+    /** The E3 floorGap nibble at this cell (see {@link TraversalGrid#floorGap}). */
+    public int getFloorGap(int x, int y, int z) {
+        return grid.floorGap(x, y, z);
+    }
+
+    /** The E4 runUp nibble at this cell (see {@link TraversalGrid#runUp}). */
+    public int getRunUp(int x, int y, int z) {
+        return grid.runUp(x, y, z);
+    }
+
     public BlockPos getOrigin() {
         return origin;
     }

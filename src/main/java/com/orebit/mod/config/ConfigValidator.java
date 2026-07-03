@@ -28,7 +28,9 @@ import net.minecraft.world.level.block.Block;
  *   <li>{@code mining.ticksToMineFlat} must be {@code >= 0} → clamp;</li>
  *   <li>{@code placement.conjuredBlock} must resolve to a real {@link Block} on the running version (via
  *       the {@link BlockLookup} platform seam) → on a malformed id or an unknown block, warn and fall back
- *       to the default ({@code minecraft:cobblestone}).</li>
+ *       to the default ({@code minecraft:cobblestone});</li>
+ *   <li>{@code mining.protectedBlocks} is parsed per entry ({@link ProtectedBlocks#parse}) — each
+ *       malformed id / tag warns and is skipped individually, the remaining entries still apply.</li>
  * </ul>
  *
  * <p>A smart object, not a static helper bag: one {@code ConfigValidator} carries the warning sink (so the
@@ -68,10 +70,15 @@ public final class ConfigValidator {
                 intClamped(props, ConfigKeys.MINING_MAX_HARDNESS, d.maxHardness(), 0, BotCaps.UNBREAKABLE),
                 bool(props, ConfigKeys.MINING_TICKS_BY_HARDNESS, d.ticksByHardness()),
                 intClamped(props, ConfigKeys.MINING_TICKS_TO_MINE_FLAT, d.ticksToMineFlat(), 0, Integer.MAX_VALUE),
+                weightNonNeg(props, ConfigKeys.MINING_BREAK_BASE_COST, d.breakBaseCost()),
+                protectedBlocks(props, ConfigKeys.MINING_PROTECTED_BLOCKS, d.protectedBlocks()),
+                bool(props, ConfigKeys.MINING_ALLOW_UNBREAKABLE, d.allowUnbreakable()),
                 // pathing
                 intClamped(props, ConfigKeys.PATHING_MAX_NODES, d.maxNodes(), 1, Integer.MAX_VALUE),
                 weight(props, ConfigKeys.PATHING_GREEDY_WEIGHT, d.greedyWeight()),
-                weightNonNeg(props, ConfigKeys.PATHING_COST_PER_HITPOINT, d.costPerHitpoint()));
+                weightNonNeg(props, ConfigKeys.PATHING_COST_PER_HITPOINT, d.costPerHitpoint()),
+                bool(props, ConfigKeys.PATHING_WARMUP, d.warmup()),
+                intClamped(props, ConfigKeys.PATHING_WARMUP_BUDGET_MS, d.warmupBudgetMs(), 0, 60_000));
     }
 
     // ---- per-type parse + clamp (each warns through the sink and never throws) ----------------------
@@ -117,8 +124,8 @@ public final class ConfigValidator {
 
     /**
      * Like {@link #weight} but clamps to {@code >= 0.0} (0 = disabled / no cost), for the non-negative float
-     * knobs {@code placement.removalCostWeight}, {@code placement.placeBaseCost}, and
-     * {@code pathing.costPerHitpoint}.
+     * knobs {@code placement.removalCostWeight}, {@code placement.placeBaseCost},
+     * {@code mining.breakBaseCost}, and {@code pathing.costPerHitpoint}.
      */
     private float weightNonNeg(Properties props, String key, float def) {
         String raw = props.getProperty(key);
@@ -132,6 +139,17 @@ public final class ConfigValidator {
         }
         if (v < 0.0f) { warn.accept(key + "=" + v + " below minimum 0.0 — clamped"); return 0.0f; }
         return v;
+    }
+
+    /**
+     * Parse the {@code mining.protectedBlocks} comma list (block ids + {@code #}-prefixed tags) into a
+     * {@link ProtectedBlocks}. Per the clamp-and-warn rule each malformed / unknown entry warns and is
+     * skipped individually — the rest of the list still applies; an absent key keeps the default.
+     */
+    private ProtectedBlocks protectedBlocks(Properties props, String key, ProtectedBlocks def) {
+        String raw = props.getProperty(key);
+        if (raw == null) return def;
+        return ProtectedBlocks.parse(raw, warn);
     }
 
     private Block block(Properties props, String key, Block def) {

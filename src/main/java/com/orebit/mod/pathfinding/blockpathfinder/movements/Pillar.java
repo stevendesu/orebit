@@ -67,8 +67,9 @@ public final class Pillar implements Movement {
      * Base cost, in <b>ticks</b> = one move step ({@link Traverse#FLAT_COST}) — essentially a jump in place
      * (the jump + settle takes about as long as a walk step). The footing that must be placed first adds its
      * own real place ticks ({@link MovementContext#placeCost}), so a pillar step costs {@code FLAT_COST +
-     * placeCost ≈ 4.6 + 20 ≈ 25} ticks — expensive, so pillaring is chosen only when climbing is actually
-     * wanted, and a single floating block beside the column (a cheaper exit) easily out-competes it.
+     * placeCost ≈ 4.6 + 6 ≈ 10.6} ticks at the default {@code placement.placeBaseCost} — still expensive
+     * enough that pillaring is chosen only when climbing is actually wanted, and a single floating block
+     * beside the column (a cheaper exit) easily out-competes it.
      */
     public static final float COST = Traverse.FLAT_COST;
 
