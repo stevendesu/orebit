@@ -6,6 +6,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
+import com.orebit.mod.worldmodel.pathing.TraversalGrid;
 
 /**
  * Drop more than one block off a cardinal edge to the first solid landing below (MOVEMENT-DESIGN.md §2,
@@ -85,41 +86,71 @@ public final class Fall implements Movement {
                 continue;
             }
 
-            // Scan downward for the first (highest) solid landing within the safe-fall window.
-            for (int fy = y - 2; fy >= y - maxDrop; fy--) {
+            // floorGap fast path (PERF-DESIGN-navgrid-widening.md §4): the resident nibble answers "where
+            // is the first standable cell below" in one read — trusted only when it is maintained (not
+            // UNKNOWN — column-built grids always are; single-section test grids aren't) AND no path edit
+            // can intersect the cells the scan would have read ((nx, y-maxDrop..y-1, nz) — the verify loop
+            // below cell y stays edit-aware either way). The gap is the memoized result of the EXACT scan
+            // predicate (NavBlock.isStandable over the same resident navtypes), so each branch reproduces
+            // the legacy scan's outcome byte-for-byte; UNKNOWN or overlapping edits fall through to the
+            // legacy loop. Measured: FLOOD −5.1% / CLIFFS −4.3% / TOWER −3.4% (PERF-RESULTS-2026-07-03.md).
+            int scanFrom = y - 2;
+            int fg = ctx.floorGapAt(nx, y, nz);
+            if (fg != TraversalGrid.DEPTH_UNKNOWN
+                    && ctx.editsDisjointFromColumn(nx, y - maxDrop, y - 1, nz)) {
+                if (fg == 0) continue; // standable at y-1: the scan's landing always fails verify (§7.2)
+                if (fg < TraversalGrid.DEPTH_SAT) {
+                    int fy = y - 1 - fg;   // the exact first landing the scan would have found
+                    if (fy >= y - maxDrop) {
+                        tryLanding(ctx, out, nx, y, nz, fy, flags, safeFall, hpCost);
+                    }
+                    continue;              // in or out of reach, this cardinal is decided — zero scan reads
+                }
+                // Proven no landing in y-1..y-14: resume the legacy scan below the window.
+                scanFrom = y - (TraversalGrid.DEPTH_SAT + 1);
+            }
+
+            // Scan downward for the first (highest) solid landing within the fall window.
+            for (int fy = scanFrom; fy >= y - maxDrop; fy--) {
                 int packed = ctx.packedAt(nx, fy, nz);
                 if (packed == MovementContext.UNBUILT) break;        // unknown below — don't path into it
                 if (!ctx.standable(ctx.descriptorOf(nx, fy, nz, packed))) continue; // still air; keep falling
-
-                // Landing found: confirm the drop column (down to the new feet) is clear, pricing each
-                // transited cell as it is read (read-once: the same descriptor answers passable AND the
-                // pass-through hazard/through-slow surcharge — falling through fire / a web / a berry bush
-                // is a per-cell cost, not a blocker; the loop spans the landing body too, so a hazardous
-                // landing pocket is charged). The column cells fy+1..y sit BELOW the step-off body
-                // (nx, y+1..y+2), which is priced separately off the flags already read — no double count.
-                boolean clear = true;
-                float transit = 0f;
-                for (int k = fy + 1; k <= y; k++) {
-                    long cd = ctx.descriptorAt(nx, k, nz);
-                    if (!ctx.passable(cd)) { clear = false; break; }
-                    transit += ctx.cellTransitCost(cd);
-                }
-                if (clear) {
-                    int depth = y - fy;
-                    // Base walk-off + per-block fall time, plus a damage penalty for every block past the safe
-                    // window (depth > safeFall) — the cost-not-blocker model — plus the per-cell pass-through
-                    // surcharges: the drop column (above) and the step-off body cells (nx, y+1..y+2, the two
-                    // cells the flags at (nx,y,nz) describe; zero-read when the bits are clear).
-                    float cost = BASE_COST + depth * PER_BLOCK
-                            + transit + ctx.bodyTransitCost(flags, nx, y, nz);
-                    if (depth > safeFall) {
-                        cost += (depth - safeFall) * hpCost; // ≈1 HP per excess block × ticks-per-HP
-                    }
-                    out.accept(nx, fy, nz, cost);
-                }
+                tryLanding(ctx, out, nx, y, nz, fy, flags, safeFall, hpCost);
                 break; // only the highest landing in this column
             }
         }
+    }
+
+    /**
+     * Verify and price a landing at {@code (nx,fy,nz)} for a step-off from level {@code y} — the historical
+     * scan-loop body, split out so the floorGap exact-landing path and the legacy scan share ONE copy
+     * (identical reads, identical costs, identical emit).
+     */
+    private static void tryLanding(MovementContext ctx, CandidateSink out, int nx, int y, int nz,
+                                   int fy, int flags, int safeFall, float hpCost) {
+        // Landing found: confirm the drop column (down to the new feet) is clear, pricing each
+        // transited cell as it is read (read-once: the same descriptor answers passable AND the
+        // pass-through hazard/through-slow surcharge — falling through fire / a web / a berry bush
+        // is a per-cell cost, not a blocker; the loop spans the landing body too, so a hazardous
+        // landing pocket is charged). The column cells fy+1..y sit BELOW the step-off body
+        // (nx, y+1..y+2), which is priced separately off the flags already read — no double count.
+        float transit = 0f;
+        for (int k = fy + 1; k <= y; k++) {
+            long cd = ctx.descriptorAt(nx, k, nz);
+            if (!ctx.passable(cd)) return;
+            transit += ctx.cellTransitCost(cd);
+        }
+        int depth = y - fy;
+        // Base walk-off + per-block fall time, plus a damage penalty for every block past the safe
+        // window (depth > safeFall) — the cost-not-blocker model — plus the per-cell pass-through
+        // surcharges: the drop column (above) and the step-off body cells (nx, y+1..y+2, the two
+        // cells the flags at (nx,y,nz) describe; zero-read when the bits are clear).
+        float cost = BASE_COST + depth * PER_BLOCK
+                + transit + ctx.bodyTransitCost(flags, nx, y, nz);
+        if (depth > safeFall) {
+            cost += (depth - safeFall) * hpCost; // ≈1 HP per excess block × ticks-per-HP
+        }
+        out.accept(nx, fy, nz, cost);
     }
 
     /**

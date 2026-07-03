@@ -61,6 +61,16 @@ public final class CuboidExtractor {
     /** Not instantiable — the extractor is a single static entry point. */
     private CuboidExtractor() {}
 
+    // The extractor's vertical scans are short-circuited by the resident runUp nibble — the per-cell
+    // "consecutive same-navtype cells above" count (PERF-DESIGN-runup-nibble.md): (1) rectUniform's
+    // per-section Y-spans collapse to one bottom-row scan plus a run-chain per column, and (2) the
+    // Y-travel stage-2 UPWARD extension is computed in one slab pass (runSkipUp) instead of one
+    // whole-slab scan per layer. The RESULTING BOX IS BYTE-IDENTICAL (the run memoizes the exact
+    // navtype-equality the legacy compares evaluate, over the same committed navtypes; UNKNOWN — a
+    // single-section grid that never ran computeDepth — falls back to the legacy scan). Measured:
+    // ~75–80% of the extraction bill removed = −30…−36% total search time on cuboid-bearing scenarios
+    // (PERF-RESULTS-2026-07-03.md §E4).
+
     /**
      * Fill {@code out} with the directional maximal cuboid containing {@code (sx,sy,sz)} for {@code travelAxis}
      * (see the class doc for the full contract). Reads committed navtypes only; clips every grow to
@@ -174,6 +184,15 @@ public final class CuboidExtractor {
         // ============================================================================================
 
         int tLo = 0, tHi = 0; // travel-axis extent below / above the start layer
+        if (travelAxis == Axes.AXIS_Y) {
+            // The upward extension in ONE slab pass of run-chain reads (stage 1 proved the start-layer
+            // slab == nav; each column's run-chain proves exactly how many same-navtype layers sit above it,
+            // capped at the corridor top). The min over columns IS the legacy loop's tHi; the legacy loop
+            // below then confirms the stop layer (its next probe fails on the corridor clip or the
+            // run-exhausted cell — one probe, same as legacy's own failing probe). Any UNKNOWN column skips
+            // nothing and the loop runs in full. Downward (tLo) stays legacy — the run field is upward-only.
+            tHi = runSkipUp(grid, sx, sy, sz, bound, aLo, aHi, bLo, bHi);
+        }
         while (slabUniform(grid, sx, sy, sz, travelAxis, a, b, nav, bound, -(tLo + 1), aLo, aHi, bLo, bHi)) {
             tLo++;
         }
@@ -315,11 +334,30 @@ public final class CuboidExtractor {
                     if (raw == null) return false; // unbuilt section — hard wall (== old packedAt == UNBUILT)
                     int xl0 = x & 15;
                     int xl1 = xSecEnd & 15;
-                    for (int yy = y; yy <= ySecEnd; yy++) {
+                    // Column mode: for a tall sub-box (3+ rows), verify each (z,x) column with ONE
+                    // bottom-row navtype read plus a run-chain over the parallel depth bytes, instead of
+                    // scanning every row — same boolean answer (the run memoizes the exact per-cell
+                    // navtype-equality the row scans evaluate), a fraction of the reads. UNKNOWN runs fall
+                    // back to the legacy per-cell scan for that column.
+                    if (ySecEnd - y >= 2) {
+                        byte[] depths = grid.depthRawAt(x, y, z); // same section as `raw`
+                        int span = ySecEnd - y;                   // cells above the bottom row
+                        int yl0 = (y & 15) << 8;
                         for (int zz = z; zz <= zSecEnd; zz++) {
-                            int rowBase = ((yy & 15) << 8) | ((zz & 15) << 4); // (x-local 0) on this zz,yy row
+                            int rowBase = yl0 | ((zz & 15) << 4);
                             for (int xl = xl0; xl <= xl1; xl++) {
-                                if ((raw[rowBase | xl] & TraversalGrid.NAVTYPE_MASK) != nav) return false;
+                                int idx = rowBase | xl;
+                                if ((raw[idx] & TraversalGrid.NAVTYPE_MASK) != nav) return false;
+                                if (!columnRunOk(raw, depths, idx, span, nav)) return false;
+                            }
+                        }
+                    } else {
+                        for (int yy = y; yy <= ySecEnd; yy++) {
+                            for (int zz = z; zz <= zSecEnd; zz++) {
+                                int rowBase = ((yy & 15) << 8) | ((zz & 15) << 4); // (x-local 0) on this row
+                                for (int xl = xl0; xl <= xl1; xl++) {
+                                    if ((raw[rowBase | xl] & TraversalGrid.NAVTYPE_MASK) != nav) return false;
+                                }
                             }
                         }
                     }
@@ -330,6 +368,76 @@ public final class CuboidExtractor {
             y = ySecEnd + 1;
         }
         return true;
+    }
+
+    /**
+     * Run-chain column verify: are the {@code span} cells directly above section-local linear index {@code idx}
+     * (whose own cell the caller just proved {@code == nav}) all of navtype {@code nav}? Chains the runUp
+     * nibble: an exact run shorter than the remainder means the cell past it provably differs (exactly the
+     * failing legacy compare); a saturated run re-anchors 14 cells up (that cell is proven same-navtype);
+     * an {@code UNKNOWN} run falls back to the legacy per-cell scan for the remaining cells. All indices
+     * stay inside the section: {@code span ≤ 15 − (idx>>>8)} by construction, and a saturated re-anchor
+     * only happens when {@code remaining > 14}, i.e. the bottom row is low enough that {@code +14} fits.
+     */
+    private static boolean columnRunOk(short[] raw, byte[] depths, int idx, int span, int nav) {
+        int p = idx;
+        int remaining = span;
+        while (remaining > 0) {
+            int r = (depths[p] >>> 4) & 0xF;
+            if (r == TraversalGrid.DEPTH_UNKNOWN) {
+                for (int q = p + 256, end = p + (remaining << 8); q <= end; q += 256) {
+                    if ((raw[q] & TraversalGrid.NAVTYPE_MASK) != nav) return false;
+                }
+                return true;
+            }
+            if (r >= remaining) return true;
+            if (r < TraversalGrid.DEPTH_SAT) return false; // exact shortfall: cell p + (r+1) rows differs
+            p += TraversalGrid.DEPTH_SAT << 8;             // saturated: proven same 14 up — re-anchor there
+            remaining -= TraversalGrid.DEPTH_SAT;
+        }
+        return true;
+    }
+
+    /**
+     * Y-travel stage-2 upward extension (see the run-chain note atop the class): the number of whole slab
+     * layers above the start layer that are proven uniform-{@code nav} and in-corridor, computed from one
+     * run-chain per slab column (the slab spans world X {@code [sx−aLo..sx+aHi]} × Z
+     * {@code [sz−bLo..sz+bHi]} — travel axis Y means {@code a = X}, {@code b = Z}), capped at the corridor
+     * top. Returns 0 (skip nothing — the caller's legacy loop runs in full) the moment any column's run is
+     * {@code UNKNOWN}. The chain's base cell {@code (x, sy, z) == nav} was proven by stage 1.
+     */
+    private static int runSkipUp(NavGridView grid, int sx, int sy, int sz, RegionBound bound,
+                                 int aLo, int aHi, int bLo, int bHi) {
+        int min = bound.maxY() - sy; // corridor cap: layers above it fail the clip, run or no run
+        if (min <= 0) return 0;
+        for (int zz = sz - bLo; zz <= sz + bHi && min > 0; zz++) {
+            for (int xx = sx - aLo; xx <= sx + aHi; xx++) {
+                int covered = chainRunUp(grid, xx, sy, zz, min);
+                if (covered < 0) return 0; // an UNKNOWN column — no claim, full legacy loop
+                if (covered < min) {
+                    min = covered;
+                    if (min == 0) return 0;
+                }
+            }
+        }
+        return min;
+    }
+
+    /**
+     * Chain the runUp nibble upward from {@code (x,y,z)} (a cell already proven of the target navtype):
+     * the exact count of consecutive same-navtype cells above it, capped at {@code cap}; {@code −1} when
+     * an {@code UNKNOWN} value is met before the cap (no claim). One byte read per ≤14 cells covered.
+     */
+    private static int chainRunUp(NavGridView grid, int x, int y, int z, int cap) {
+        int total = 0;
+        while (true) {
+            int r = grid.runUpAt(x, y + total, z);
+            if (r == TraversalGrid.DEPTH_UNKNOWN) return -1;
+            total += r; // r ≤ 14 here
+            if (total >= cap) return cap;
+            if (r < TraversalGrid.DEPTH_SAT) return total; // exact: the next cell differs
+            // saturated: the cell 14 up is proven same-navtype — chain onward from it
+        }
     }
 
     // ------------------------------------------------------------------------------------------------

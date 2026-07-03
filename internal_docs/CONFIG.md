@@ -67,6 +67,9 @@ start. Out-of-range or unparseable individual values are clamped/defaulted with 
 | `mining.maxHardness` | int `0..255` | `255` | Hardest block the bot may mine (quantized `NavBlock` hardness). `255` = mine anything breakable (today's insta-mine cap); lower values let a weak bot mine only soft blocks. → `BotCaps.maxBreakHardness`, gates `MovementContext.breakable()`. | `mining.maxHardness=3` |
 | `mining.ticksByHardness` | boolean | `true` | Mining time scales with block hardness/tool (the physically-derived tick model) vs. a flat per-block time. | `mining.ticksByHardness=false` |
 | `mining.ticksToMineFlat` | int `>=0` | `0` | Ticks to mine one block when `ticksByHardness=false`. Ignored when `ticksByHardness=true`. `0` = insta-mine (matching today's flat behaviour). | `mining.ticksToMineFlat=20` |
+| `mining.breakBaseCost` | float `>=0` | `0.0` | Flat surcharge (ticks) added to **every break the planner folds**, on top of the real mining time — the mining-side mirror of `placement.placeBaseCost`: a behavioral "reluctance to edit the world" penalty. Raise it to discourage gratuitous digging and hazard punch-throughs (breaking through a berry bush/cobweb instead of wading). Rides the per-pathfind inventory snapshot (`MovementContext.InventoryView.breakBaseCost` → `breakCost()`), never `BotCaps`. | `mining.breakBaseCost=12` |
+| `mining.protectedBlocks` | comma list of block ids + `#`tags | *(empty)* | Blocks the bot must **NEVER break — nor clear/replace with a placement** (filling a cell destroys its occupant, so the `OPEN_PLACE` bit and both live place paths refuse protected occupants too). Entries are exact block ids (`minecraft:chest`) or block tags (`#minecraft:beds`); malformed/unknown entries warn and are skipped individually. Enforced **both sides** (the planner/executor parity rule): planner-side the list is folded into the `NavBlock` classification fingerprint at config install (`NavBlock.applyProtected` sets the PROTECTED descriptor bit, splitting matching states into their own navtypes — the derived BREAKABLE bit excludes them, so `MovementContext.breakable`/`breakableThrough`/MineDown/the `GoalForcedCost` dig face all refuse in one bit test and routes are planned *around* protected blocks); execution-side every live break (`AllyBotEntity.applyEdits`/`place`, `BotMining`) re-checks the LIVE state via `Config.mayBreak` — the immediate hard backstop that also covers stale grids. **Changing this list requires a server restart** (or waiting for chunks to rebuild) for the *planner* to fully see it: protected-ness is baked into cached nav-grid navtypes at classification time; `/bot config reload` re-derives the table + warns, and the execution-side refusal applies immediately. A `#tag` that doesn't exist on the server parses fine and matches nothing. | `mining.protectedBlocks=minecraft:chest, #minecraft:beds, minecraft:diamond_ore` |
+| `mining.allowUnbreakable` | boolean | `false` | Bot may mine **vanilla-unbreakable** blocks (negative destroy time — bedrock, barriers, end portal frame/gateway, command blocks, …; detected by the hardness sign at classification time, never a hardcoded block list) at the fixed stand-in cost `MiningModel.UNBREAKABLE_STANDIN_TICKS` (2400 ticks = 2 min/block — vanilla defines no mining time for these, so the price is policy: ~10× the hardest legit dig with the best tool, break-even ≈ 518 walk-blocks of detour). Both sides honor it: planner (`BotCaps.allowUnbreakable` → `MovementContext.breakable`/`breakableThrough`/`breakCost`, `GoalForcedCost` grind face) and executor (`BotMining` grinds at the same tick rate, then forces the edit past the survival path's own refusal; `Config.mayBreak` gates the legacy `applyEdits` path). **Its own axis**: deliberately *not* subject to `mining.maxHardness` (the 255 sentinel doesn't order against real hardness). `mining.protectedBlocks` **always overrides**. Hot-reloadable (no descriptor bit — rides caps). | `mining.allowUnbreakable=true` |
 
 ### `pathing.*` — the A\* search knobs (carried on `BotCaps` into `BlockPathfinder`)
 
@@ -75,13 +78,16 @@ start. Out-of-range or unparseable individual values are clamped/defaulted with 
 | `pathing.maxNodes` | int `> 0` | `10000` | A\* node-expansion ceiling per search. → `BotCaps.maxNodes`. Higher = can route farther at a slower worst case; lower = bails sooner (partial-path return then walks + replans). | `pathing.maxNodes=20000` |
 | `pathing.greedyWeight` | float `>= 1.0` | `2.0` | Heuristic greediness weight (multiplies the tick-unit octile). `1.0` = admissible/optimal/slow; higher beelines (far fewer nodes, paths no longer guaranteed optimal). → `BotCaps.greedyWeight`. | `pathing.greedyWeight=3.0` |
 | `pathing.costPerHitpoint` | float `>= 0.0` | `100.0` | **The ONE damage-pricing knob**: ticks the planner considers 1 HP of damage to be worth. → `BotCaps.costPerHitpoint`. Every damage-as-cost term is priced in it: the pass-through hazard surcharge (`MovementContext.cellTransitCost` — 1 HP per damaging body cell transited: fire, berry bush, powder snow) and the fall-damage penalty (`Fall`/`Parkour` — 1 HP per block dropped past `safeFallDistance`). **Break-even intuition:** 1 HP buys `costPerHitpoint / 4.633` walk-blocks of detour (≈ 21.6 at the default), so 4 hazard cells justify an ~86-block detour. The pre-unification hardcodes (40/hazard-cell, 10/excess-fall-block) bought only ~9 / ~2 blocks — a bush MAZE was rationally plowed through lethally because cumulative death was never priced. Raise for a more self-preserving bot; only meaningful with `survival.takesDamage=true` (an immune bot's damage terms are zero). Ratified successor (not built): a cumulative health-aware damage *budget* per path. | `pathing.costPerHitpoint=500` |
+| `pathing.warmup` | boolean | `true` | Run a short synthetic pathfinder warm-up at server start (`NavWarmup`, `internal_docs/PERF-DESIGN-warmup-searches.md`): ~250-500 searches over a private in-memory fixture, SYNCHRONOUS in the `SERVER_STARTED` hook (before any player can join), so the bot's FIRST real search doesn't run JIT-cold (a one-time ~16-30 ms tick stall otherwise; measured ~0.7 ms with warm-up, E5 harness). Costs ~0.4-0.6 s of startup wall-clock only — boot-only, zero effect on any search after boot. NOT read into `BotCaps`; read once by `OrebitCommon`'s hook. | `pathing.warmup=false` |
+| `pathing.warmupBudgetMs` | int `>= 0` | `1500` | Hard wall-clock cap (ms) on that warm-up pass; it usually stops earlier (plateau detection on the short-search mean, min 4 / max 8 rounds — typically ~380-530 ms). `0` disables the warm-up entirely. | `pathing.warmupBudgetMs=3000` |
 
 ## Mapping to `BotCaps`
 
 `Config.toBotCaps()` folds the placement / mining / pathing knobs into the capability gate the block-tier A\*
 threads per search:
 
-- `canBreak = mining.canMine`, `maxBreakHardness = mining.maxHardness`
+- `canBreak = mining.canMine`, `maxBreakHardness = mining.maxHardness`,
+  `allowUnbreakable = mining.allowUnbreakable`
 - `canPlace = placement.canPlace`
 - `maxNodes = pathing.maxNodes`, `greedyWeight = pathing.greedyWeight`
 - `costPerHitpoint = pathing.costPerHitpoint` — the unified ticks-per-HP damage price every
@@ -105,6 +111,13 @@ surcharge), so mortality is a move-generation fact too.
   cached `Config` + `BotCaps`, and re-bakes the `MiningModel` tick tables (so a changed `ticksByHardness` /
   `ticksToMineFlat` model takes effect immediately). The command confirms with the new `maxNodes`,
   `greedyWeight`, `canMine`, `canPlace`.
+- **Exception — `mining.protectedBlocks` needs a restart to fully apply:** the list is baked into the
+  `NavBlock` classification fingerprint (the PROTECTED descriptor bit) and nav-grid sections cache the
+  navtypes they were classified with, so grid data built before a list change keeps the old fingerprints
+  until its chunks rebuild. A `/bot config reload` re-derives the table (fresh classifications are
+  correct), logs a staleness warning, and the **execution-side refusal applies immediately** — so a
+  reload is safe, just not planner-complete until restart/rebuild. `mining.allowUnbreakable` has no such
+  caveat (it rides `BotCaps`, not the fingerprint — fully hot-reloadable).
 - **When it takes effect on the bot:** the follower reads the live `ConfigLoader` cache **per replan**
   (`caps()` → `ConfigLoader.botCaps()`, `placeBlock()` → `ConfigLoader.config().conjuredBlockState()`), so a
   reload applies on the bot's **next plan** — no per-tick or per-A\*-node cost (the parse is paid once; the hot
@@ -118,9 +131,13 @@ fix, and never failing the load:
 - `pathing.maxNodes` clamped to `>= 1`.
 - `pathing.greedyWeight` clamped to `>= 1.0`.
 - `pathing.costPerHitpoint` clamped to `>= 0.0` (the `weightNonNeg` helper).
+- `pathing.warmupBudgetMs` clamped to `0..60000`.
 - `mining.maxHardness` clamped to `0..255`.
 - `mining.ticksToMineFlat` clamped to `>= 0`.
-- `placement.removalCostWeight` and `placement.placeBaseCost` clamped to `>= 0.0` (the `weightNonNeg` helper).
+- `placement.removalCostWeight`, `placement.placeBaseCost`, and `mining.breakBaseCost` clamped to `>= 0.0`
+  (the `weightNonNeg` helper).
+- `mining.protectedBlocks` parsed per entry (`ProtectedBlocks.parse`): each malformed id / tag warns and is
+  skipped individually — the remaining entries still apply.
 - Booleans default to their `Config.DEFAULT` value on anything that isn't exactly `true`/`false`.
 - `placement.conjuredBlock` falls back to `minecraft:cobblestone` if it doesn't resolve to a real block on the
   running version.

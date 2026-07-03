@@ -30,7 +30,7 @@ world efficiently (the **world model**) and moving through it intelligently (the
 The navigation stack described by this PRD is now **built and runtime-verified**: the
 world-model pipeline is live (`NavSectionBuilder.classifyInto` → `ChunkNavLoader` →
 `NavStore`, patched incrementally by `NavGridUpdater`), the block tier
-(`pathfinding/blockpathfinder/` — 13 movements, folded edits, macro cuboids, the
+(`pathfinding/blockpathfinder/` — 14 movements, folded edits, macro cuboids, the
 goal-forced-cost premium, partial paths with the irreversibility guard) and the region
 tier (`worldmodel/hpa/` fragments + `regionpathfinder/` stateful nested-skeleton
 cascade) both run in-game, and the follower executes plans reactively (MovePlan/

@@ -255,12 +255,18 @@ public final class MovementContext {
      *       {@code placement.placeBaseCost} knob supplies, used in place of the static {@link #PLACE_BASE_COST}
      *       default by {@link #placeCost}. A behavioral "reluctance to place" penalty, not a physical time (see
      *       {@link #PLACE_BASE_COST}); {@code >= 0}. With no snapshot the static default is used instead.</li>
+     *   <li><b>{@code breakBaseCost}</b> — the configured flat surcharge (ticks) added to <b>every folded
+     *       break</b> ({@code mining.breakBaseCost}, the mining-side mirror of {@code placeBaseCost}): a
+     *       behavioral "reluctance to edit the world" penalty on top of the real mining ticks {@link
+     *       #breakCost} charges, letting an owner discourage gratuitous digging/punching without forbidding
+     *       it. {@code >= 0}, default {@code 0} (and {@code 0} with no snapshot), so the all-defaults and
+     *       headless searches price breaks exactly as before.</li>
      * </ul>
      * A plain record of primitives + the (resident, read-only) {@link MiningModel.Snapshot}; passing it to
      * {@link #setInventory} costs the hot path nothing (the gates do a field load + array index).
      */
     public record InventoryView(MiningModel.Snapshot mining, boolean consumesBlocks, int placeableBlocks,
-            float placeRemovalPremium, float placeBaseCost) { }
+            float placeRemovalPremium, float placeBaseCost, float breakBaseCost) { }
 
     /**
      * Wire the per-pathfind inventory feasibility snapshot (once, after construction, before the search
@@ -348,6 +354,32 @@ public final class MovementContext {
     /** The raw 6-bit {@link NavFlags} bitmask at floor cell {@code (x,y,z)} (0 where unbuilt). */
     public int flagsAt(int x, int y, int z) {
         return grid.flagsAt(x, y, z);
+    }
+
+    /**
+     * The E3 floorGap nibble at cell {@code (x,y,z)} ({@link TraversalGrid#floorGap}) —
+     * {@link TraversalGrid#DEPTH_UNKNOWN} where unbuilt or unmaintained, in which case the caller
+     * legacy-scans. The consumer ({@code Fall}) reads this through the same per-search chunk cache as the
+     * flags slot it just read, so the second resolve is a cache-key compare plus an array index.
+     */
+    public int floorGapAt(int x, int y, int z) {
+        return grid.floorGapAt(x, y, z);
+    }
+
+    /**
+     * Whether the path's speculative edit diff is provably DISJOINT from the vertical column
+     * {@code (x, yLo..yHi, z)} — the E3 nibble's trust gate: the floorGap memoizes COMMITTED state, so it
+     * may replace a scan's reads only when no path edit can intersect the scanned column (a placed block is
+     * a standable landing the nibble can't see; a broken one, a floor it wrongly reports). One empty test
+     * plus at most six compares against the {@link PathEdits} bounding box — over-conservative only (a
+     * false "relevant" costs the caller its legacy scan, never a wrong answer).
+     */
+    public boolean editsDisjointFromColumn(int x, int yLo, int yHi, int z) {
+        PathEdits e = pathEdits;
+        return e.isEmpty()
+                || x < e.editMinX() || x > e.editMaxX()
+                || z < e.editMinZ() || z > e.editMaxZ()
+                || yHi < e.editMinY() || yLo > e.editMaxY();
     }
 
     /** Walkable clearance above the floor encoded in {@code flags} (none/crawl/walk/jump). */
@@ -580,6 +612,83 @@ public final class MovementContext {
     }
 
     /**
+     * The <b>edit-folding</b> form of {@link #bodyTransitCost(int, int, int, int)} for the ground moves
+     * that carry an {@link EditScratch} (Traverse / Ascend / Descend — the moves whose folded edits the
+     * follower's one-shot {@code applyEdits} replays before steering the step): where transiting a
+     * passable hazard / through-slow body cell <i>intact</i> would cost more than <b>punching it out</b>
+     * ({@link #breakableThrough}: real mining ticks + the {@code mining.breakBaseCost} surcharge, via
+     * {@link #breakCost}), a break of that cell is folded onto {@code e} and the transit charge for it is
+     * dropped — the "punch the berry bush / cobweb and walk through" option. This is exact same-node
+     * arbitration, not tuning: both options land the identical search node, cost is the only relaxation
+     * criterion, and a broken cell reads at least as good as the intact one downstream (it becomes air in
+     * the path diff), so folding the cheaper of the two per cell yields the same relaxed g as emitting
+     * both candidates — without a second sink call.
+     *
+     * <p>Same zero-read fast path as the non-folding form: no prefilter bit (or the hazard bit on an
+     * invulnerable bot with no slow bit) → {@code 0f}, no grid reads, no fold — ordinary cells pay the
+     * one predictable branch and nothing else. The fold honours the scratch's {@code RISKY_EDIT} gate
+     * ({@link EditScratch#editsAllowed}): a risky floor transits intact at full price, exactly as before.
+     * Movements that fold no edits by design (Diagonal's corners, Fall's drop column, the airborne
+     * Parkour family — nothing can usefully break mid-flight, and their executors have no break slot)
+     * keep the non-folding form.
+     */
+    public float bodyTransitCost(EditScratch e, int flags, int fx, int fy, int fz) {
+        boolean hazard = NavFlags.clearableHazard(flags) && caps.takesDamage();
+        if (!hazard && !NavFlags.slowTransit(flags)) return 0f;
+        return transitOrBreak(e, fx, fy + 1, fz) + transitOrBreak(e, fx, fy + 2, fz);
+    }
+
+    /**
+     * One body cell of the folding transit read: charge {@link #cellTransitCost} for moving through it
+     * intact, or — when the bot may break through it and that is strictly cheaper — fold the break onto
+     * {@code e} (at {@link #breakCost}: real mining ticks + {@code mining.breakBaseCost}) and charge
+     * nothing here (the break's own cost rides {@link EditScratch#extraCost}). Reached only when a
+     * prefilter bit fired (rare); a zero-transit cell (the common case even then — one hazard cell of the
+     * two) exits on the first compare with no further work.
+     */
+    private float transitOrBreak(EditScratch e, int x, int y, int z) {
+        long d = descriptorAt(x, y, z);
+        float transit = cellTransitCost(d);
+        if (transit <= 0f) return 0f;
+        if (e.editsAllowed() && breakableThrough(d)) {
+            float breakThrough = breakCost(d);
+            if (breakThrough < transit) {
+                e.breakThrough(x, y, z, breakThrough);
+                return 0f;
+            }
+        }
+        return transit;
+    }
+
+    /**
+     * Can the bot clear a <b>passable</b> hazard / through-slow cell by punching it out (the break-through
+     * counterpart to {@link #breakable}, which deliberately requires real collision)? True only for an
+     * empty-shape cell that actually charges a transit surcharge (damaging, or {@link NavBlock#transitSlow}
+     * — a bush / cobweb / powder snow / fire), holds no fluid (water/lava aren't "broken"), when the bot
+     * {@link BotCaps#canBreak may break}, the cell is not owner-{@link NavBlock#isProtected protected}
+     * (never broken), and it is within the bot's {@link BotCaps#maxBreakHardness} cap — or is the
+     * unbreakable sentinel with {@link BotCaps#allowUnbreakable} opted in (its own axis, priced at the
+     * stand-in). No tool gate, matching {@link MiningModel.Snapshot#canMine}'s
+     * stone-bare-hand rule: a missing tool only inflates the mining TIME ({@link #breakCost}), so the
+     * cost comparison in {@link #transitOrBreak} arbitrates it (a bare-handed cobweb dig is ~400 ticks —
+     * dearer than wading through — while a sword cuts it in ~20). Pure bit tests + caps field loads.
+     */
+    public boolean breakableThrough(long d) {
+        if (!caps.canBreak()) return false;
+        if (!NavBlock.isPassable(d) || NavBlock.fluid(d) != 0) return false;
+        if (!NavBlock.isDamaging(d) && NavBlock.transitSlow(d) == NavBlock.TRANSIT_NONE) return false;
+        // Owner-protected cells are never broken — this gate doesn't ride the BREAKABLE bit (passable
+        // cells aren't "breakable geometry"), so the PROTECTED bit is tested explicitly here.
+        if (NavBlock.isProtected(d)) return false;
+        int h = NavBlock.hardness(d);
+        // The unbreakable sentinel is its OWN axis (mining.allowUnbreakable), not ordered against the
+        // maxBreakHardness cap — the stand-in breakCost is so large the transit comparison rejects it in
+        // practice, but the gate stays parity-honest with the executor's grind path.
+        if (h == UNBREAKABLE_HARDNESS) return caps.allowUnbreakable();
+        return h <= caps.maxBreakHardness();
+    }
+
+    /**
      * The pass-through surcharge (ticks) for ONE already-read body-cell descriptor — the per-cell form for
      * movements that read the transited cells themselves ({@code Fall}'s drop column, {@code Diagonal}'s
      * corner columns), where no flags prefilter applies. {@code 1 HP ×} {@link BotCaps#costPerHitpoint}
@@ -617,22 +726,33 @@ public final class MovementContext {
 
     /** {@link #breakable(int, int, int)} on an already-read descriptor (read-once form). */
     public boolean breakable(long d) {
-        // Precomputed geometry (solid, no fluid, not unbreakable) AND the bot may break AND the block is
-        // within the bot's configured mining-hardness cap. The cap is read straight off caps (a field
-        // load), so a movement still pays one comparison, not a derivation.
-        if (!(caps.canBreak()
+        // Precomputed geometry (solid, no fluid, not unbreakable, not owner-PROTECTED — the derived
+        // BREAKABLE bit folds all four) AND the bot may break AND the block is within the bot's configured
+        // mining-hardness cap. The cap is read straight off caps (a field load), so a movement still pays
+        // one comparison, not a derivation. This fast path is byte-identical to the historical gate.
+        if (caps.canBreak()
                 && NavBlock.isBreakable(d)
-                && NavBlock.hardness(d) <= caps.maxBreakHardness())) {
-            return false;
+                && NavBlock.hardness(d) <= caps.maxBreakHardness()) {
+            // Phase 1c tool-feasibility gate: when a live bot supplied an inventory snapshot, additionally
+            // require that the bot actually carries a tool able to mine this block (a tool-required block —
+            // ore, obsidian — is un-minable without the correct tool category; a non-tool-required block is
+            // always mineable bare-handed, only slower). The snapshot read is a field load + a couple of bit
+            // extracts + one array index — no live Inventory access, hot-path safe. With no snapshot
+            // (headless / trace / tests) this stays the historical caps-only gate.
+            InventoryView inv = inventory;
+            return inv == null || inv.mining().canMine(d);
         }
-        // Phase 1c tool-feasibility gate: when a live bot supplied an inventory snapshot, additionally
-        // require that the bot actually carries a tool able to mine this block (a tool-required block — ore,
-        // obsidian — is un-minable without the correct tool category; a non-tool-required block is always
-        // mineable bare-handed, only slower). The snapshot read is a field load + a couple of bit extracts +
-        // one array index — no live Inventory access, hot-path safe. With no snapshot (headless / trace /
-        // tests) this stays the historical caps-only gate, so nothing changes until a bot supplies one.
-        InventoryView inv = inventory;
-        return inv == null || inv.mining().canMine(d);
+        // Slow tail (reached only where the historical gate said NO): the mining.allowUnbreakable opt-in.
+        // A vanilla-unbreakable solid (hardness sentinel 255 — bedrock, barrier, portal frame) fails the
+        // BREAKABLE bit above but may be ground out at the fixed stand-in cost when the owner opted in.
+        // Its OWN axis: deliberately NOT subject to maxBreakHardness (the sentinel doesn't order against
+        // real hardness) and NOT the tool gate (no tool mines bedrock; the stand-in is tool-independent).
+        // PROTECTED always wins. With the flag off (the default) this is one predictable field-load branch
+        // on the already-false path — behaviour unchanged.
+        return caps.allowUnbreakable() && caps.canBreak()
+                && NavBlock.hasCollision(d)
+                && NavBlock.hardness(d) == UNBREAKABLE_HARDNESS
+                && !NavBlock.isProtected(d);
     }
 
     /**
@@ -655,8 +775,9 @@ public final class MovementContext {
         if (!NavBlock.hasCollision(d)) return null; // air / plant / fluid: nothing to break, not a wall
         if (breakable(d)) return null;              // it IS breakable — the dump's 'k' tag already says so
         if (!caps.canBreak()) return "noBreakCap";
+        if (NavBlock.isProtected(d)) return "protected"; // mining.protectedBlocks — never broken
         int h = NavBlock.hardness(d);
-        if (h == UNBREAKABLE_HARDNESS) return "unbreakable";
+        if (h == UNBREAKABLE_HARDNESS) return "unbreakable"; // opt in via mining.allowUnbreakable
         if (h > caps.maxBreakHardness()) return "tooHard(h=" + h + ">cap=" + caps.maxBreakHardness() + ")";
         InventoryView inv = inventory;
         if (inv != null && !inv.mining().canMine(d)) return "noTool";
@@ -720,12 +841,38 @@ public final class MovementContext {
      * worst tool. Pure resident-table read (a field-key shift+mask + array index) — no per-node arithmetic,
      * no live inventory, hot-path safe (HOT-PATH-NO-ALLOC, favour-cpu-over-ram).
      *
-     * <p>The caller ({@link EditScratch#requireAir}) only reaches here after {@link #breakable} has proven the
-     * block mineable, so the table never returns {@link MiningModel#UNMINEABLE} on this path.
+     * <p>Every folded break additionally carries the flat {@code mining.breakBaseCost} surcharge ({@link
+     * InventoryView#breakBaseCost} — the mining-side mirror of the place base cost): a behavioral
+     * "reluctance to edit the world" penalty the owner can raise to discourage gratuitous digging. Default
+     * {@code 0} (and {@code 0} with no snapshot), so nothing changes until the knob is set.
+     *
+     * <p>The callers ({@link EditScratch#requireAir}, the break-through fold) only reach here after {@link
+     * #breakable}/{@link #breakableThrough} has proven the block mineable, so the table never returns
+     * {@link MiningModel#UNMINEABLE} on this path.
      */
     public float breakCost(long d) {
         InventoryView inv = inventory;
-        return inv == null ? MiningModel.bareHandTicks(d) : inv.mining().ticksFor(d);
+        // A vanilla-unbreakable block (reachable only via the mining.allowUnbreakable arm of breakable/
+        // breakableThrough) has NO physical mining time — the resident tables hold the UNMINEABLE sentinel
+        // — so it is priced at the fixed policy stand-in the executor's grind actually spends (parity in
+        // time, not just in permission). One extract + compare, only on the (rare) break-folding path.
+        if (NavBlock.hardness(d) == UNBREAKABLE_HARDNESS) {
+            return MiningModel.UNBREAKABLE_STANDIN_TICKS + (inv != null ? inv.breakBaseCost() : 0f);
+        }
+        return inv == null ? MiningModel.bareHandTicks(d)
+                : inv.mining().ticksFor(d) + inv.breakBaseCost();
+    }
+
+    /**
+     * The configured flat per-break surcharge ({@code mining.breakBaseCost}) alone — {@code 0} with no
+     * snapshot. Read once per search by the {@code GoalForcedCost} dig-face probe so its premium tracks
+     * {@link #breakCost}'s real per-block price while staying an admissible lower bound (real break =
+     * {@code ticksFor ≥ fastestTicks}, plus this same base — mirroring how {@link #pillarPlaceCost}
+     * carries the configured place base). A field load + a branch, never per node.
+     */
+    public float breakBaseCost() {
+        InventoryView inv = inventory;
+        return inv != null ? inv.breakBaseCost() : 0f;
     }
 
     /** Real cost (ticks) to fold one block placement at cell {@code (x,y,z)} in — tick-to-place + premium. */

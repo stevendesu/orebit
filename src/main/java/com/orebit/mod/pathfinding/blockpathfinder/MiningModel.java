@@ -78,6 +78,21 @@ public final class MiningModel {
     public static final short UNMINEABLE = Short.MAX_VALUE;
 
     /**
+     * The fixed stand-in mining time (ticks) for a <b>vanilla-unbreakable</b> block (negative destroy
+     * time — quantized hardness 255: bedrock, barriers, end portal frames, …) when the owner opted in via
+     * {@code mining.allowUnbreakable}. Vanilla defines NO mining time for these (the -1 hardness can't
+     * feed the tick formula), so this is a policy constant, not physics: <b>2400 ticks = 2 minutes</b> per
+     * block. Rationale: an order of magnitude above the hardest legitimate dig with the best tool
+     * (obsidian × diamond pick ≈ 188 ticks) so the planner treats it as an extreme last resort — the
+     * break-even detour is {@code 2400 / 4.633 ≈ 518} walk-blocks — while staying well below the
+     * bare-hand-obsidian worst case (5000 ticks) and short enough that the executor's grind actually
+     * completes in tolerable real time. Used by BOTH sides (parity): the planner's
+     * {@link MovementContext#breakCost} charges it, and the executor's {@code BotMining} accumulates
+     * progress at {@code 1/this} per tick, so the planned cost is the time actually spent.
+     */
+    public static final int UNBREAKABLE_STANDIN_TICKS = 2400;
+
+    /**
      * The resident table: {@code TICKS[navtype][tier]} = mining ticks for that block with that tier of tool.
      * Built once at init by {@link #buildTable()}, then frozen (read-only on the hot path). Sized to the
      * frozen {@link NavBlock#navtypeCount()}.

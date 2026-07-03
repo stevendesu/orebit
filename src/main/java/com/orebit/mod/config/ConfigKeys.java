@@ -77,6 +77,34 @@ public final class ConfigKeys {
      * model). Ignored when ticks-by-hardness is on. Default {@code 0} (insta-mine, matching today).
      */
     public static final String MINING_TICKS_TO_MINE_FLAT = "mining.ticksToMineFlat";
+    /**
+     * {@code float >= 0} — a flat surcharge (in ticks) added to <b>every block break the planner folds</b>,
+     * on top of the real mining time — the mining-side mirror of {@link #PLACEMENT_PLACE_BASE_COST}: a
+     * behavioral "reluctance to edit the world" penalty that biases the bot toward walking/detouring over
+     * digging (and over punching through berry bushes / cobwebs) when comparable routes exist. Raise it to
+     * discourage gratuitous world edits. Default {@code 0.0} (breaks priced at mining time alone).
+     */
+    public static final String MINING_BREAK_BASE_COST = "mining.breakBaseCost";
+    /**
+     * Comma-separated list of block ids and {@code #}-prefixed block tags the bot must <b>NEVER</b> break
+     * — nor clear/replace with a placement — (e.g. {@code minecraft:chest, #minecraft:beds,
+     * minecraft:diamond_ore}). Default empty (nothing protected). Enforced BOTH planner-side (folded into
+     * the NavBlock classification fingerprint as the
+     * PROTECTED descriptor bit, so routes are planned around protected blocks) and execution-side (every
+     * live break re-checks the list — the stale-grid backstop). Malformed entries warn and are skipped.
+     * <b>Changing this list requires a server restart</b> (or waiting for chunks to rebuild) to fully
+     * apply: nav-grid data classified before the change still carries the old fingerprints; the
+     * execution-side refusal applies immediately.
+     */
+    public static final String MINING_PROTECTED_BLOCKS = "mining.protectedBlocks";
+    /**
+     * {@code boolean} — bot may mine <b>vanilla-unbreakable</b> blocks (negative destroy time: bedrock,
+     * barriers, end portal frames, …) at a fixed, very large stand-in time cost. Its own gate (a separate
+     * axis from {@link #MINING_MAX_HARDNESS}, which only ranges over breakable blocks — the unbreakable
+     * sentinel doesn't order against real hardness). {@link #MINING_PROTECTED_BLOCKS} always overrides.
+     * Default {@code false}.
+     */
+    public static final String MINING_ALLOW_UNBREAKABLE = "mining.allowUnbreakable";
 
     // ---- pathing: the A* search knobs (carried on BotCaps into BlockPathfinder) ---------------------
     /** {@code int > 0} — A* node-expansion ceiling per search. Default {@code 10000}. */
@@ -94,4 +122,17 @@ public final class ConfigKeys {
      * meaningful when {@code survival.takesDamage} is on (an immune bot's damage terms are zero).
      */
     public static final String PATHING_COST_PER_HITPOINT = "pathing.costPerHitpoint";
+    /**
+     * {@code boolean} — run a short synthetic pathfinder warm-up at server start (~0.3–1.5 s, before any
+     * player can join) so the first REAL search doesn't run JIT-cold (a one-time ~16 ms tick stall on the
+     * first search after boot otherwise). Costs startup wall-clock only — zero effect on any search after
+     * boot. Default {@code true}.
+     */
+    public static final String PATHING_WARMUP = "pathing.warmup";
+    /**
+     * {@code int >= 0} — hard wall-clock cap (milliseconds) on that warm-up pass; it usually finishes
+     * earlier (it stops once search times plateau). {@code 0} disables the warm-up entirely (same as
+     * {@code pathing.warmup=false}). Default {@code 1500}.
+     */
+    public static final String PATHING_WARMUP_BUDGET_MS = "pathing.warmupBudgetMs";
 }

@@ -40,6 +40,11 @@ public final class NavSectionBuilder {
     private static final ThreadLocal<int[]> SLOT_SCRATCH = ThreadLocal.withInitial(() -> new int[4096]);
     private static final ThreadLocal<long[]> DESC_SCRATCH =
             ThreadLocal.withInitial(() -> new long[NavFlags.SCRATCH_SIZE]);
+    // Per-column state carried across sections by the depth sweeps (computeDepth): 256 columns, index
+    // (z<<4)|x. A holds the value below/above (floorGap / runUp), B the paired fact (standability of the
+    // cell below / navtype of the cell above). Same per-thread pattern as the scratches above.
+    private static final ThreadLocal<int[]> DEPTH_COL_A = ThreadLocal.withInitial(() -> new int[256]);
+    private static final ThreadLocal<int[]> DEPTH_COL_B = ThreadLocal.withInitial(() -> new int[256]);
     private static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
 
     // LEGACY reflection helpers, consumed ONLY by the JMH reference benchmark
@@ -311,6 +316,88 @@ public final class NavSectionBuilder {
     }
 
     /**
+     * <b>Pass 3 of the column build (the floorGap/runUp depth nibbles — PERF-DESIGN-navgrid-widening.md
+     * §2/§3, PERF-DESIGN-runup-nibble.md):</b> fill the parallel depth byte of every cell in the chunk
+     * column. Two single-direction sweeps, each one navtype read + one table/compare + one nibble store
+     * per cell, carrying per-column state across sections:
+     * <ul>
+     *   <li><b>floorGap</b> (ascending) — the §2 recurrence
+     *       {@code gap(y) = standable(y−1) ? 0 : min(gap(y−1)+1, 14)}, seeded {@link TraversalGrid#DEPTH_SAT}
+     *       at the world-bottom cell (nothing below minY is standable; the reader's legacy tail scan below
+     *       minY reads UNBUILT and breaks, reproducing the pre-nibble behaviour exactly).</li>
+     *   <li><b>runUp</b> (descending) —
+     *       {@code run(y) = nav(y+1)==nav(y) ? min(run(y+1)+1, 14) : 0}, seeded 0 at the top of the built
+     *       column (unbuilt above = "differs", the same hard wall the extractor's legacy scan reports).</li>
+     * </ul>
+     * A {@code null} section slot (a chunk shorter than the level column) ends the ascending sweep — every
+     * cell above it keeps {@link TraversalGrid#DEPTH_UNKNOWN} (conservative: readers legacy-scan) — and
+     * resets the descending sweep's state (cells below it read "absent above"). Single-section producers
+     * ({@code classifyInto}, headless tests) never call this, so their grids stay all-UNKNOWN — correctness
+     * by fallback, mirroring the s42 "single-section producers remain air-optimistic" pattern.
+     */
+    public static void computeDepth(NavSection[] sections) {
+        final int[] colA = DEPTH_COL_A.get();
+        final int[] colB = DEPTH_COL_B.get();
+
+        {
+            // Ascending floorGap sweep. colA = gap of the cell below; colB = standability of the cell below
+            // (1/0). The bottom row of the bottom-most built section is the DEPTH_SAT seed.
+            boolean seeded = false;
+            for (int i = 0; i < sections.length; i++) {
+                NavSection s = sections[i];
+                if (s == null) {
+                    if (seeded) break; // hole above built data: everything above keeps UNKNOWN (reset() fill)
+                    continue;          // leading null slots: the first real section below is still the seed
+                }
+                TraversalGrid grid = s.getTraversalGrid();
+                final short[] raw = grid.raw();
+                final byte[] depth = grid.depthRaw();
+                for (int y = 0; y < 16; y++) {
+                    boolean seedRow = !seeded && y == 0;
+                    for (int c = 0; c < 256; c++) {
+                        int idx = (y << 8) | c;
+                        int gap = seedRow ? TraversalGrid.DEPTH_SAT
+                                : (colB[c] != 0 ? 0 : Math.min(colA[c] + 1, TraversalGrid.DEPTH_SAT));
+                        depth[idx] = (byte) ((depth[idx] & 0xF0) | gap);
+                        long d = NavBlock.descriptor((short) (raw[idx] & TraversalGrid.NAVTYPE_MASK));
+                        colA[c] = gap;
+                        colB[c] = NavBlock.isStandable(d) ? 1 : 0;
+                    }
+                    if (seedRow) seeded = true;
+                }
+                seeded = true;
+            }
+        }
+
+        {
+            // Descending runUp sweep. colA = run of the cell above; colB = navtype of the cell above
+            // (-1 sentinel = absent/unbuilt above, which never equals a real navtype).
+            java.util.Arrays.fill(colB, 0, 256, -1);
+            java.util.Arrays.fill(colA, 0, 256, 0);
+            for (int i = sections.length - 1; i >= 0; i--) {
+                NavSection s = sections[i];
+                if (s == null) {
+                    java.util.Arrays.fill(colB, 0, 256, -1); // a hole: cells below it see "absent above"
+                    continue;
+                }
+                TraversalGrid grid = s.getTraversalGrid();
+                final short[] raw = grid.raw();
+                final byte[] depth = grid.depthRaw();
+                for (int y = 15; y >= 0; y--) {
+                    for (int c = 0; c < 256; c++) {
+                        int idx = (y << 8) | c;
+                        int nav = raw[idx] & TraversalGrid.NAVTYPE_MASK;
+                        int run = nav == colB[c] ? Math.min(colA[c] + 1, TraversalGrid.DEPTH_SAT) : 0;
+                        depth[idx] = (byte) ((depth[idx] & 0x0F) | (run << 4));
+                        colA[c] = run;
+                        colB[c] = nav;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * {@link #patchCell(NavSection, NavSection, NavSection, int, int, int, BlockState) patchCell} without
      * vertical neighbours — the headless/test convenience when no chunk column exists. Overscan reads
      * resolve to air and no below-seam propagation happens; the live block-update hook
@@ -372,6 +459,87 @@ public final class NavSectionBuilder {
             final TraversalGrid belowGrid = below.getTraversalGrid();
             fillScratch(desc, belowGrid, grid);
             recomputeWindow(belowGrid, desc, lx, ly + NavSection.SIZE, lz);
+        }
+
+        // ---- Depth-nibble maintenance (floorGap/runUp). A navtype change can flip this cell's
+        //      standability (dirtying the floorGap of ≤15 cells ABOVE it, crossing ≤1 seam into `above` —
+        //      the mirror of the flags pass's write into `below`) and its navtype equality with its
+        //      vertical neighbours (dirtying its own runUp plus ≤15 cells BELOW, ≤1 seam into `below`).
+        //      Both sweeps early-out at the first fixpoint (recomputed == stored); saturation at
+        //      DEPTH_SAT guarantees that within the 15-cell cap on a maintained column. On a never-swept
+        //      (single-section) grid the sweeps write UNKNOWN or exact values only — never a stale claim.
+        //      Measured cost: worst scenario +1.8% ns/patch (PatchStormBenchmark, ~1.4–2.1 µs/patch). ----
+        patchFloorGap(grid, above == null ? null : above.getTraversalGrid(), lx, ly, lz);
+        patchRunUp(grid, above == null ? null : above.getTraversalGrid(),
+                below == null ? null : below.getTraversalGrid(), lx, ly, lz);
+    }
+
+    /** Standability of a grid cell from its resident navtype (the exact predicate the floorGap encodes). */
+    private static boolean standableAt(TraversalGrid g, int x, int y, int z) {
+        return NavBlock.isStandable(NavBlock.descriptor((short) g.navtype(x, y, z)));
+    }
+
+    /**
+     * Upward floorGap recompute after a navtype change at {@code (lx,ly,lz)} (E3 invalidation): re-derive
+     * the cells above from the §2 recurrence, seeded by the changed cell's OWN (unchanged — it depends only
+     * on cells below) stored gap and its NEW standability, stopping at the first fixpoint. {@code aboveGrid}
+     * nullable (world-top/unbuilt: nothing stored there to fix).
+     */
+    private static void patchFloorGap(TraversalGrid grid, TraversalGrid aboveGrid, int lx, int ly, int lz) {
+        boolean prevStand = standableAt(grid, lx, ly, lz);
+        int prevGap = grid.floorGap(lx, ly, lz);
+        for (int step = 1; step <= 15; step++) {
+            int wy = ly + step;
+            TraversalGrid g = wy < NavSection.SIZE ? grid : aboveGrid;
+            if (g == null) return;
+            int cy = wy & 15;
+            int gNew = prevStand ? 0
+                    : (prevGap == TraversalGrid.DEPTH_UNKNOWN ? TraversalGrid.DEPTH_UNKNOWN
+                        : Math.min(prevGap + 1, TraversalGrid.DEPTH_SAT));
+            if (g.floorGap(lx, cy, lz) == gNew) return; // fixpoint — everything above already consistent
+            g.setFloorGap(lx, cy, lz, gNew);
+            prevStand = standableAt(g, lx, cy, lz);
+            prevGap = gNew;
+        }
+    }
+
+    /**
+     * runUp recompute after a navtype change at {@code (lx,ly,lz)} (E4 invalidation): the changed cell's
+     * own run is re-derived from the cell above it (≤1 seam read into {@code aboveGrid}), then the change
+     * propagates DOWNWARD (the inverse footprint of an upward-counting field) with fixpoint early-out,
+     * ≤15 cells, ≤1 seam into {@code belowGrid}. Both neighbours nullable (world edge / unbuilt).
+     */
+    private static void patchRunUp(TraversalGrid grid, TraversalGrid aboveGrid, TraversalGrid belowGrid,
+                                   int lx, int ly, int lz) {
+        int navHere = grid.navtype(lx, ly, lz);
+        int aboveNav = -1, aboveRun = 0; // -1 = absent above (never equals a real navtype)
+        if (ly < NavSection.SIZE - 1) {
+            aboveNav = grid.navtype(lx, ly + 1, lz);
+            aboveRun = grid.runUp(lx, ly + 1, lz);
+        } else if (aboveGrid != null) {
+            aboveNav = aboveGrid.navtype(lx, 0, lz);
+            aboveRun = aboveGrid.runUp(lx, 0, lz);
+        }
+        int prevRun = navHere == aboveNav
+                ? (aboveRun == TraversalGrid.DEPTH_UNKNOWN ? TraversalGrid.DEPTH_UNKNOWN
+                    : Math.min(aboveRun + 1, TraversalGrid.DEPTH_SAT))
+                : 0;
+        grid.setRunUp(lx, ly, lz, prevRun);
+        int prevNav = navHere;
+        for (int step = 1; step <= 15; step++) {
+            int wy = ly - step;
+            TraversalGrid g = wy >= 0 ? grid : belowGrid;
+            if (g == null) return;
+            int cy = wy & 15;
+            int nav = g.navtype(lx, cy, lz);
+            int rNew = nav == prevNav
+                    ? (prevRun == TraversalGrid.DEPTH_UNKNOWN ? TraversalGrid.DEPTH_UNKNOWN
+                        : Math.min(prevRun + 1, TraversalGrid.DEPTH_SAT))
+                    : 0;
+            if (g.runUp(lx, cy, lz) == rNew) return; // fixpoint — everything below already consistent
+            g.setRunUp(lx, cy, lz, rNew);
+            prevNav = nav;
+            prevRun = rNew;
         }
     }
 

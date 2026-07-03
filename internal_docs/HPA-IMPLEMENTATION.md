@@ -1,3 +1,8 @@
+*Historical design doc — the center-node model this doc specifies (§3a store, §5 leaf cost, §8 region A\*)
+was superseded by `HPA-FRAGMENTS.md` and DELETED from the code when the fragment+cascade model became
+unconditional (s36 cleanup). The addressing (`RegionAddress`), SoA house style, and pyramid machinery
+survive. Kept for rationale; don't code against §3a/§5/§8.*
+
 # HPA\* region tier — implementation design (the coherence lock)
 
 > Implementation-level companion to **PRD §6.3–6.5, §7.1, §10 Phase 3**. The PRD is the *what/why*;

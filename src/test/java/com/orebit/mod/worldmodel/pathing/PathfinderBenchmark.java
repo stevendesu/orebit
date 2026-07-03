@@ -21,6 +21,7 @@ import com.orebit.mod.Debug;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.Fall;
 
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
@@ -69,6 +70,11 @@ import net.minecraft.world.level.chunk.PalettedContainer;
  *       and any FUTURE cross-search persistent structures warm. A future "persist base cuboids across
  *       searches" change must show its win here; a persistence bug (stale data leaking across searches)
  *       shows here as a wrong-cost/wrong-time anomaly relative to SHORT + UPOVER_OPEN measured alone.
+ *   <li><b>FLOOD</b> — the WARM EDIT-HEAVY guard (the perf profile's S3 shape, which no other scenario
+ *       reproduces since macro collapse shrank TOWER to ~28 pops): an unreachable goal above the built
+ *       ceiling with NO corridor, so no cuboids/premium exist and the search runs the classic pillar-cone
+ *       flood to budget exhaustion (10001 pops), nearly every pop's chain carrying Pillar edits.
+ *       Sanity-checked at setup to still be budget-exhausted.
  * </ul>
  *
  * <p>Run: {@code ./gradlew :<ver>:jmh -Pbench=PathfinderBenchmark -Pprof=gc,stack} (JDK 21 on the active
@@ -84,13 +90,16 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 @Fork(2) // overridden to forks(0) by BenchmarkRunnerTest (must stay in the bootstrapped-MC JVM)
 public class PathfinderBenchmark {
 
-    @Param({"TOWER", "OPEN", "UPOVER_OPEN", "UPOVER_WALL", "SHORT", "MULTI"})
+    @Param({"TOWER", "OPEN", "UPOVER_OPEN", "UPOVER_WALL", "SHORT", "MULTI", "FLOOD", "CLIFFS",
+            "BRIDGE", "SPIRAL"})
     private String scenario;
 
     private NavGridView grid;
     private BlockPos start;
     private BlockPos goal;
     private RegionBound corridor; // non-null for the macro scenarios → exercises the cuboid-collapse path
+    /** Per-scenario caps: BREAK_PLACE everywhere except CLIFFS, which is walk-only (see its setup note). */
+    private BotCaps caps = BotCaps.BREAK_PLACE;
 
     /** Dispatch kind precomputed at setup so the measured op branches on an int, not a String switch. */
     private static final int KIND_PREBUILT = 0, KIND_SHORT = 1, KIND_MULTI = 2;
@@ -148,6 +157,74 @@ public class PathfinderBenchmark {
                 freshChunks = buildFlatChunks();
                 sanityDryRun();
                 break;
+            case "FLOOD":
+                // The WARM EDIT-HEAVY guard (PERF-PROFILE-2026-07 §2's "WARM FLOOD" probe, promoted): an
+                // UNREACHABLE goal far above the fixture's built ceiling (the shared column ends at y=63;
+                // cells above are unbuilt, so no candidate is ever relaxed there), with NO corridor — no
+                // cuboid view ⇒ no macro collapse, no goal-forced-cost premium. Every column's pillar climb
+                // stalls at the ceiling and the search floods a cone of partial pillars to budget exhaustion
+                // (10001 pops), nearly every pop's chain carrying Pillar place edits — the S3 shape (in-game
+                // warm pillaring) whose per-node cost is dominated by the per-read PathEdits.kindAt tax.
+                // The scenario the per-pop edit gate targets; without it the suite can't see that shape.
+                // (The plain 30-up no-corridor tower is NOT a flood anymore — the current cost model finds
+                // it in ~700 pops — hence the ceiling-unreachable goal + the budget-exhaustion sanity check.)
+                grid = buildFlatWorld();
+                start = new BlockPos(8, 0, 8);
+                goal = new BlockPos(8, 100, 8);
+                corridor = null;
+                floodSanityDryRun();
+                break;
+            case "CLIFFS":
+                // The Fall-heavy guard (PERF-DESIGN-navgrid-widening.md §7.3): descending terraced open
+                // terrain — chunk-aligned 12-block cliffs stepping down toward the goal — so standing pops
+                // ride terrace edges whose cardinals are deep open columns and Fall's per-cardinal down-scan
+                // is the dominant read volume (TOWER macro-collapses to ~28 pops and OPEN is flat, so no
+                // other scenario exercises it). No corridor: pure micro search, no cuboids/premium.
+                // Walk-only + damage-immune caps — see CLIFFS_CAPS for why both matter here.
+                grid = buildCliffsWorld();
+                start = CLIFFS_START;
+                goal = CLIFFS_GOAL;
+                corridor = null;
+                caps = CLIFFS_CAPS;
+                cliffsSanityDryRun();
+                break;
+            case "BRIDGE":
+                // The EDITS-THEN-WALK-AWAY guard (the realistic mixed shape the pure pillar/flood
+                // scenarios never produce): a bottomless 5-wide ravine crosses the whole world a few
+                // blocks past the start, so the search must fold a handful of PLACE edits (bridge it)
+                // and then walk a LONG edit-free stretch to the far goal. Every pop past the bridge
+                // carries the bridge edits in its chain but reads nowhere near them — the envelope-
+                // DISJOINT population the E1 per-pop gate needs (and which the p=0.000 finding said no
+                // existing scenario has). No corridor: pure micro, no macro ray. Caps: place-capable +
+                // walk, break OFF (a break-capable headless bot prices breaks ~0 and would restructure
+                // the shape — the CLIFFS gotcha); the ravine is bottomless (no ground -> nothing below
+                // minY) so falling in is impossible and the 5-gap exceeds flat parkour reach (3) — the
+                // optimal crossing observed is 2 places + a parkour hop over the remaining 3-gap, which
+                // is the mixed shape wanted (probe: 58 pops, 52 edit-bearing, 47 envelope-disjoint).
+                grid = buildBridgeWorld();
+                start = new BlockPos(8, 0, 8);
+                goal = BRIDGE_GOAL;
+                corridor = null;
+                caps = PLACE_ONLY_CAPS;
+                bridgeSanityDryRun();
+                break;
+            case "SPIRAL":
+                // The CONSTRAINED-CUBOIDS guard (the runUp chain's worst case): an enclosed solid tower with a
+                // helical stair channel carved inside it — the walkway turns every few cells and each
+                // step has exactly 3 air above it, so the passable space is a chain of tiny pockets and
+                // no large uniform air cuboid ever exists; the SOLID fill alternates 4 distinct-navtype
+                // materials per Y level, so vertical same-navtype runs in the structure are length 1 and
+                // the runUp nibble can never skip. Goal at the top -> primary axis Y -> the Y-macro
+                // movements probe cuboid extraction at every pop, and every probe degenerates (tiny box,
+                // cache miss). Place-capable (Pillar must be live for Y-cuboid extraction; pillaring is
+                // useless inside the 3-high pockets), break OFF (an insta-miner would tunnel the core).
+                grid = buildSpiralWorld();
+                start = SPIRAL_START;
+                goal = SPIRAL_GOAL;
+                corridor = SPIRAL_CORRIDOR;
+                caps = PLACE_ONLY_CAPS;
+                spiralSanityDryRun();
+                break;
             default:
                 throw new IllegalArgumentException("unknown scenario: " + scenario);
         }
@@ -180,6 +257,60 @@ public class PathfinderBenchmark {
             if (longPlan == null) {
                 throw new IllegalStateException("MULTI long leg did not find a path — fixture broken");
             }
+        }
+    }
+
+    /**
+     * Setup-time (NOT measured) shape check for CLIFFS: the search must FIND a route and that route must
+     * actually descend the terraces by FALLING (several Fall steps) — if a movement/cost change reroutes it
+     * (dig-down staircases, say), the scenario no longer measures Fall's down-scan volume and the guard is
+     * void. Prints expansions + the Fall-step count so the run log records the shape.
+     */
+    private void cliffsSanityDryRun() {
+        var plan = BlockPathfinder.findPath(grid, start, goal, caps, corridor);
+        int expansions = BlockPathfinder.LAST_EXPANSIONS;
+        int falls = 0;
+        if (plan != null) {
+            for (int i = 0; i < plan.size(); i++) {
+                if (plan.movement(i) instanceof Fall) falls++;
+            }
+        }
+        System.out.println("[PathfinderBenchmark] CLIFFS sanity: found=" + (plan != null)
+                + " partial=" + BlockPathfinder.LAST_WAS_PARTIAL
+                + " expansions=" + expansions + " fallSteps=" + falls);
+        if (plan != null) {
+            StringBuilder sb = new StringBuilder("[PathfinderBenchmark] CLIFFS plan:");
+            for (int i = 0; i < plan.size(); i++) {
+                BlockPos wp = plan.waypoint(i);
+                sb.append(' ').append(plan.movement(i).getClass().getSimpleName())
+                        .append('(').append(wp.getX()).append(',').append(wp.getY()).append(',')
+                        .append(wp.getZ()).append(')');
+            }
+            System.out.println(sb);
+        }
+        if (plan == null) {
+            throw new IllegalStateException("CLIFFS did not find a path — fixture broken");
+        }
+        if (falls < 3) {
+            throw new IllegalStateException("CLIFFS path used only " + falls
+                    + " Fall steps (expected the 4 terrace drops) — no longer the Fall-heavy guard");
+        }
+    }
+
+    /**
+     * Setup-time (NOT measured) shape check for FLOOD: the search must actually EXHAUST the expansion
+     * budget (a budget-hit ~10001-pop flood) and run edit-bearing — if a future heuristic/movement change
+     * lets it FIND (or fail early), the scenario no longer measures the warm edit-heavy shape and the
+     * guard is void. Prints the expansion count so the run log records the shape.
+     */
+    private void floodSanityDryRun() {
+        var plan = BlockPathfinder.findPath(grid, start, goal, BotCaps.BREAK_PLACE, corridor);
+        int expansions = BlockPathfinder.LAST_EXPANSIONS;
+        System.out.println("[PathfinderBenchmark] FLOOD sanity: expansions=" + expansions
+                + " partial=" + BlockPathfinder.LAST_WAS_PARTIAL + " found=" + (plan != null));
+        if (expansions < 9500) {
+            throw new IllegalStateException("FLOOD expanded only " + expansions
+                    + " nodes (expected a ~10001-pop budget-exhausted flood) — no longer the warm edit-heavy guard");
         }
     }
 
@@ -236,15 +367,22 @@ public class PathfinderBenchmark {
         NavSection ground = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(groundStates, false, ground.getTraversalGrid());
 
-        // All-air section (the onlyAir shortcut path).
+        // All-air sections (the onlyAir shortcut path). The middle instance is shared by column slots 1+2
+        // (its depth nibbles are uniform there: floorGap saturates ≥15 above the ground and runUp saturates
+        // ≥14 below the built-column top); the TOP slot needs its OWN instance because its runUp grades
+        // 0..14 down from the unbuilt boundary — instance-shared cells must hold identical depth values.
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
                 Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
-        NavSection airSection = NavSection.create(BlockPos.ZERO);
-        NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
+        NavSection airMid = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(airStates, true, airMid.getTraversalGrid());
+        NavSection airTop = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(airStates, true, airTop.getTraversalGrid());
 
         // One shared 4-section column (y 0..63): ground, then three air sections — headroom for a 30-up
-        // goal plus the pillar takeoff probes above it.
-        NavSection[] column = { ground, airSection, airSection, airSection };
+        // goal plus the pillar takeoff probes above it. Depth nibbles (floorGap/runUp) swept column-form,
+        // exactly like the live ChunkNavBuilder pass 3.
+        NavSection[] column = { ground, airMid, airMid, airTop };
+        NavSectionBuilder.computeDepth(column);
 
         ConcurrentHashMap<Long, NavSection[]> chunks = new ConcurrentHashMap<>();
         for (int cx = -4; cx <= 4; cx++) {
@@ -268,6 +406,12 @@ public class PathfinderBenchmark {
      * neighbouring chunk-1 air, which is itself part of why the boxes fragment at the chunk seam.
      */
     static NavGridView buildWalledWorld() {
+        return new NavGridView(0, buildWalledChunks()); // minY=0, synthetic (no live level)
+    }
+
+    /** The walled world's raw chunk map (see {@link #buildWalledWorld}) — the seam DepthIdentityTest uses
+     *  to erase the depth nibbles of a built fixture. */
+    static ConcurrentHashMap<Long, NavSection[]> buildWalledChunks() {
         BlockState air = Blocks.AIR.defaultBlockState();
         BlockState stone = Blocks.STONE.defaultBlockState();
 
@@ -282,12 +426,17 @@ public class PathfinderBenchmark {
         NavSection flatGround = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(groundStates, false, flatGround.getTraversalGrid());
 
+        // Shared air sections — middle slots share one instance, the TOP slot gets its own (its runUp
+        // nibble grades down from the unbuilt boundary; see buildFlatChunks).
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
                 Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
-        NavSection airSection = NavSection.create(BlockPos.ZERO);
-        NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
+        NavSection airMid = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(airStates, true, airMid.getTraversalGrid());
+        NavSection airTop = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(airStates, true, airTop.getTraversalGrid());
 
-        NavSection[] flatColumn = { flatGround, airSection, airSection, airSection }; // y 0..63
+        NavSection[] flatColumn = { flatGround, airMid, airMid, airTop }; // y 0..63
+        NavSectionBuilder.computeDepth(flatColumn);
 
         ConcurrentHashMap<Long, NavSection[]> chunks = new ConcurrentHashMap<>();
         for (int cx = -4; cx <= 4; cx++) {
@@ -331,11 +480,343 @@ public class PathfinderBenchmark {
             NavSection highWall = NavSection.create(BlockPos.ZERO);
             NavSectionBuilder.classifyInto(highStates, false, highWall.getTraversalGrid());
 
-            NavSection[] wallColumn = { lowWall, highWall, airSection, airSection }; // y 0..63
+            NavSection[] wallColumn = { lowWall, highWall, airMid, airTop }; // y 0..63
+            NavSectionBuilder.computeDepth(wallColumn); // shared air slots re-derive identical values
             chunks.put(NavStore.key(wallChunkX, cz), wallColumn);
         }
 
+        return chunks;
+    }
+
+    // --- CLIFFS geometry: chunk-aligned terraces stepping DOWN 12 blocks per chunk toward +X (terrace
+    //     tops at y 48/36/24/12/0), flat in Z. The start stands on the highest plateau, the goal on the
+    //     y=0 plain, so the route must take four 12-block Fall drops (deeper than Descend, inside the
+    //     16-block maxFall window) while every terrace-edge pop's open cardinals cost Fall its full
+    //     down-scan. Spans chunks -4..4 like the flat world so the search never leaves built terrain.
+    static final BlockPos CLIFFS_START = new BlockPos(-24, 48, 8);
+    static final BlockPos CLIFFS_GOAL = new BlockPos(40, 0, 8);
+
+    /**
+     * CLIFFS caps: walk-only (no break/place — the headless MiningModel prices breaks at ~0, so a
+     * break-capable bot digs a free staircase and never Falls) and damage-IMMUNE (safe == max == the
+     * unlimited fall window): a MORTAL bot prices each 12-drop at ~900 ticks of damage the octile can't
+     * see, so the search floods the whole built plateau hunting a gentler way down and dies on the node
+     * budget. Immune, it beelines down the terraces — every edge pop still pays Fall's full down-scan,
+     * which is the read volume this scenario exists to measure.
+     */
+    static final BotCaps CLIFFS_CAPS = new BotCaps(1, BotCaps.IMMUNE_FALL, BotCaps.IMMUNE_FALL, false,
+            BotCaps.DEFAULT_COST_PER_HITPOINT, false, false, BotCaps.UNBREAKABLE, false,
+            BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT);
+
+    /** Terrace top Y for chunk {@code cx}: 48 west of cx=-1, stepping 12 down per chunk to 0 at cx>=2. */
+    private static int cliffTop(int cx) {
+        int t = 2 - cx;              // cx=-1 -> 3, cx=0 -> 2, cx=1 -> 1, cx>=2 -> <=0
+        if (t < 0) t = 0;
+        if (t > 4) t = 4;            // cx<=-2 -> 4 (the 48-high plateau)
+        return 12 * t;
+    }
+
+    /**
+     * The CLIFFS fixture: solid stone from y=0 up to {@code cliffTop(cx)} in every column of the chunk,
+     * air above, per-terrace sections shared across the chunks of that terrace. Column-form depth sweep
+     * per distinct terrace column.
+     */
+    static NavGridView buildCliffsWorld() {
+        return new NavGridView(0, buildCliffsChunks()); // minY=0, synthetic (no live level)
+    }
+
+    /** The cliffs world's raw chunk map (see {@link #buildCliffsWorld}) — the DepthIdentityTest seam. */
+    static ConcurrentHashMap<Long, NavSection[]> buildCliffsChunks() {
+        BlockState air = Blocks.AIR.defaultBlockState();
+        BlockState stone = Blocks.STONE.defaultBlockState();
+
+        ConcurrentHashMap<Long, NavSection[]> chunks = new ConcurrentHashMap<>();
+        java.util.HashMap<Integer, NavSection[]> byTop = new java.util.HashMap<>();
+        for (int cx = -4; cx <= 4; cx++) {
+            int top = cliffTop(cx);
+            NavSection[] column = byTop.computeIfAbsent(top, t -> {
+                NavSection[] col = new NavSection[4]; // y 0..63
+                for (int i = 0; i < 4; i++) {
+                    int baseY = i * 16;
+                    boolean onlyAir = baseY > t;
+                    PalettedContainer<BlockState> states = new PalettedContainer<>(
+                            Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                    if (!onlyAir) {
+                        for (int y = 0; y < 16 && baseY + y <= t; y++) {
+                            for (int x = 0; x < 16; x++) {
+                                for (int z = 0; z < 16; z++) {
+                                    states.set(x, y, z, stone);
+                                }
+                            }
+                        }
+                    }
+                    col[i] = NavSection.create(BlockPos.ZERO);
+                    NavSectionBuilder.classifyInto(states, onlyAir, col[i].getTraversalGrid());
+                }
+                NavSectionBuilder.computeDepth(col);
+                return col;
+            });
+            for (int cz = -4; cz <= 4; cz++) {
+                chunks.put(NavStore.key(cx, cz), column);
+            }
+        }
+        return chunks;
+    }
+
+    // --- BRIDGE geometry: flat stone world (chunks -4..4, ground y=0) with the ground REMOVED for
+    //     world x 14..18 across EVERY z — a bottomless 5-wide ravine (minY=0, so the gap columns have
+    //     nothing below: no landing, no way around). Start (8,0,8) is 6 blocks west of the rim; the
+    //     goal is ~52 blocks past the far rim, so the post-bridge walk dominates the search. The gap
+    //     width (5) exceeds Parkour's flat reach (max gap 3) and the bridge places sit at y=0, so a
+    //     pop at x >= ~25 walks far clear of its own chain's edits (a genuinely edits-behind-the-path
+    //     shape — kept from the retired E1/E2 edit-gate arc as a realistic mixed micro/edit scenario).
+    static final BlockPos BRIDGE_GOAL = new BlockPos(70, 0, 8);
+    static final int BRIDGE_GAP_MIN_X = 14, BRIDGE_GAP_MAX_X = 18;
+
+    /**
+     * BRIDGE/SPIRAL caps: place-capable walker (bridging / pillar-probing live), break OFF — the
+     * headless MiningModel prices breaks at ~0, so a break-capable bot restructures both fixtures
+     * (digs through the ravine rim / tunnels the spiral core) and the scenarios stop measuring what
+     * they exist to measure. Mortal defaults otherwise (no hazards or forced falls in either fixture).
+     */
+    static final BotCaps PLACE_ONLY_CAPS = new BotCaps(1, BotCaps.DEFAULT_SAFE_FALL,
+            BotCaps.DEFAULT_MAX_FALL, true, BotCaps.DEFAULT_COST_PER_HITPOINT, false, true,
+            BotCaps.UNBREAKABLE, false, BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT);
+
+    /**
+     * The BRIDGE fixture: the flat world with the ground plane removed at world x 14..18 (all z).
+     * Chunk cx=0 loses local x 14..15, chunk cx=1 loses local x 0..2; every other chunk shares the
+     * plain flat column. Air sections are shared exactly as in {@link #buildFlatChunks} (the gap
+     * columns' floorGap saturates to proven-none just like the deep-above-ground flat cells, so the
+     * shared instances hold identical depth values).
+     */
+    static NavGridView buildBridgeWorld() {
+        BlockState air = Blocks.AIR.defaultBlockState();
+        BlockState stone = Blocks.STONE.defaultBlockState();
+
+        // Shared air sections (middle slots share one instance; TOP slot its own — see buildFlatChunks).
+        PalettedContainer<BlockState> airStates = new PalettedContainer<>(
+                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+        NavSection airMid = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(airStates, true, airMid.getTraversalGrid());
+        NavSection airTop = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(airStates, true, airTop.getTraversalGrid());
+
+        // Ground-section factory: stone plane at local y=0 minus the gap's local-x span for this chunk.
+        java.util.function.IntFunction<NavSection> groundFor = cx -> {
+            PalettedContainer<BlockState> g = new PalettedContainer<>(
+                    Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+            for (int x = 0; x < 16; x++) {
+                int wx = (cx << 4) + x;
+                if (wx >= BRIDGE_GAP_MIN_X && wx <= BRIDGE_GAP_MAX_X) continue; // the ravine
+                for (int z = 0; z < 16; z++) {
+                    g.set(x, 0, z, stone);
+                }
+            }
+            NavSection s = NavSection.create(BlockPos.ZERO);
+            NavSectionBuilder.classifyInto(g, false, s.getTraversalGrid());
+            return s;
+        };
+
+        ConcurrentHashMap<Long, NavSection[]> chunks = new ConcurrentHashMap<>();
+        java.util.HashMap<Integer, NavSection[]> byCx = new java.util.HashMap<>();
+        for (int cx = -4; cx <= 4; cx++) {
+            NavSection[] column = byCx.computeIfAbsent(cx, c -> {
+                NavSection[] col = { groundFor.apply(c), airMid, airMid, airTop }; // y 0..63
+                NavSectionBuilder.computeDepth(col);
+                return col;
+            });
+            for (int cz = -4; cz <= 4; cz++) {
+                chunks.put(NavStore.key(cx, cz), column);
+            }
+        }
         return new NavGridView(0, chunks); // minY=0, synthetic (no live level)
+    }
+
+    /**
+     * Setup-time (NOT measured) shape check for BRIDGE: the search must FIND the goal, the plan must
+     * actually PLACE a bridge (>= 4 place edits — the 5 gap columns), and it must not have degenerated
+     * into a flood (the whole point is a realistic mixed shape, not budget exhaustion). Prints the
+     * expansion + place counts so the run log records the shape.
+     */
+    private void bridgeSanityDryRun() {
+        var plan = BlockPathfinder.findPath(grid, start, goal, caps, corridor);
+        int expansions = BlockPathfinder.LAST_EXPANSIONS;
+        int places = 0;
+        if (plan != null) {
+            for (int i = 0; i < plan.size(); i++) {
+                var e = plan.edits(i);
+                if (e != null) places += e.placeCount();
+            }
+        }
+        System.out.println("[PathfinderBenchmark] BRIDGE sanity: found=" + (plan != null)
+                + " partial=" + BlockPathfinder.LAST_WAS_PARTIAL
+                + " expansions=" + expansions + " placeEdits=" + places);
+        if (plan == null) {
+            throw new IllegalStateException("BRIDGE did not find a path — fixture broken");
+        }
+        if (BlockPathfinder.LAST_WAS_PARTIAL) {
+            throw new IllegalStateException("BRIDGE returned a PARTIAL — no longer the mixed-shape guard");
+        }
+        if (places < 2) {
+            // The observed optimal crossing is place x14,x15 then PARKOUR the remaining 3-gap (2 places,
+            // not 5) — still exactly the shape the scenario needs (early edits, long edit-free tail).
+            throw new IllegalStateException("BRIDGE plan placed only " + places
+                    + " blocks (expected >=2: the partial bridge + parkour crossing) — no longer the "
+                    + "edits-then-walk-away guard");
+        }
+        if (expansions > 5000) {
+            throw new IllegalStateException("BRIDGE expanded " + expansions
+                    + " nodes — flooding, no longer the realistic mixed-shape guard");
+        }
+    }
+
+    // --- SPIRAL geometry: an enclosed 11x11 solid tower (world x/z 3..13, chunk (0,0)) with a helical
+    //     stair channel carved along the 24-cell perimeter ring x/z in [5..11] (walls at 4/12, solid
+    //     5x5 core at 6..10). Step s stands on ring cell (s % 24) at floorY = 1 + s/2 (rise 1 per 2
+    //     cells) with EXACTLY 3 carved air cells above it; 61 steps climb to floorY 31 (~2.5 loops).
+    //     The solid fill alternates SPIRAL_MATS[y % 4] per Y LEVEL, so every vertical same-navtype run
+    //     in the structure is length 1; the channel's air runs are capped at 3 by the carve. The goal
+    //     pocket is the last step; dy=30 >> dx,dz -> the primary travel axis is Y.
+    static final int SPIRAL_RING_MIN = 5, SPIRAL_RING_MAX = 11;   // ring cells: x or z == 5 or 11
+    static final int SPIRAL_TOWER_MIN = 3, SPIRAL_TOWER_MAX = 13; // solid tower footprint incl. walls
+    static final int SPIRAL_STEPS = 61;                            // last step floorY = 1 + 60/2 = 31
+    static final int SPIRAL_TOP_Y = 35;                            // solid cap above the last pocket (34)
+    static final BlockPos SPIRAL_START = new BlockPos(5, 1, 5);    // ring cell 0, floor y=1
+    static final BlockPos SPIRAL_GOAL = new BlockPos(11, 31, 11);  // ring cell (60 % 24) = 12, floor y=31
+    static final RegionBound SPIRAL_CORRIDOR = new RegionBound(2, 14, 0, 38, 2, 14);
+
+    /** The alternating solid materials — MUST intern to pairwise-distinct navtypes (asserted in the
+     *  sanity dry run): stone (pickaxe 1.5), dirt (shovel 0.5), oak planks (axe 2.0), sandstone
+     *  (pickaxe 0.8). Adjacent Y levels then always differ, so vertical runs are length 1. A METHOD,
+     *  not a static field: a {@code Blocks.*} reference in {@code <clinit>} would run before
+     *  {@code Bootstrap.bootStrap()} (JMH loads the class before {@code setup()}) and blow up. */
+    private static Block[] spiralMats() {
+        return new Block[] { Blocks.STONE, Blocks.DIRT, Blocks.OAK_PLANKS, Blocks.SANDSTONE };
+    }
+
+    /** The 24 perimeter ring cells of the 7x7 walkway, in walk order starting at (5,5) heading +x. */
+    private static int[][] spiralRing() {
+        int[][] ring = new int[24][2];
+        int i = 0;
+        for (int x = 5; x <= 11; x++) ring[i++] = new int[] { x, 5 };   // north edge, 7 cells
+        for (int z = 6; z <= 11; z++) ring[i++] = new int[] { 11, z };  // east edge, 6
+        for (int x = 10; x >= 5; x--) ring[i++] = new int[] { x, 11 };  // south edge, 6
+        for (int z = 10; z >= 6; z--) ring[i++] = new int[] { 5, z };   // west edge, 5
+        return ring;
+    }
+
+    /**
+     * The SPIRAL fixture: the flat world everywhere except chunk (0,0), which holds the tower. The
+     * tower chunk's four sections are all its OWN classified instances (its air-above-tower columns
+     * have a REAL floor at the tower cap, so their floorGap differs from the flat chunks' shared air
+     * sections — instance sharing across different column content would corrupt the depth nibbles).
+     */
+    static NavGridView buildSpiralWorld() {
+        BlockState air = Blocks.AIR.defaultBlockState();
+        BlockState stone = Blocks.STONE.defaultBlockState();
+
+        // The surrounding flat world (shared columns), then overwrite chunk (0,0) with the tower.
+        ConcurrentHashMap<Long, NavSection[]> chunks = buildFlatChunks();
+
+        // Dense per-cell material map for the tower chunk, world y 0..63: start from the flat chunk's
+        // shape (stone ground plane at y=0), add the tower, carve the channel.
+        BlockState[][][] cells = new BlockState[64][16][16]; // [y][z][x], null = air
+        for (int z = 0; z < 16; z++) {
+            for (int x = 0; x < 16; x++) {
+                cells[0][z][x] = stone; // the chunk's own ground plane
+            }
+        }
+        Block[] mats = spiralMats();
+        for (int y = 1; y <= SPIRAL_TOP_Y; y++) {
+            BlockState mat = mats[y % mats.length].defaultBlockState();
+            for (int z = SPIRAL_TOWER_MIN; z <= SPIRAL_TOWER_MAX; z++) {
+                for (int x = SPIRAL_TOWER_MIN; x <= SPIRAL_TOWER_MAX; x++) {
+                    cells[y][z][x] = mat; // solid fill, alternating navtype per Y level
+                }
+            }
+        }
+        int[][] ring = spiralRing();
+        for (int s = 0; s < SPIRAL_STEPS; s++) {
+            int[] cell = ring[s % 24];
+            int floorY = 1 + s / 2;
+            for (int y = floorY + 1; y <= floorY + 3; y++) {
+                cells[y][cell[1]][cell[0]] = null; // carve the 3-high air pocket over the step floor
+            }
+        }
+
+        // Classify the tower chunk's four sections from the dense map.
+        NavSection[] towerColumn = new NavSection[4];
+        for (int sec = 0; sec < 4; sec++) {
+            PalettedContainer<BlockState> states = new PalettedContainer<>(
+                    Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+            boolean onlyAir = true;
+            for (int yl = 0; yl < 16; yl++) {
+                int wy = (sec << 4) + yl;
+                for (int z = 0; z < 16; z++) {
+                    for (int x = 0; x < 16; x++) {
+                        BlockState st = cells[wy][z][x];
+                        if (st != null) {
+                            states.set(x, yl, z, st);
+                            onlyAir = false;
+                        }
+                    }
+                }
+            }
+            towerColumn[sec] = NavSection.create(BlockPos.ZERO);
+            NavSectionBuilder.classifyInto(states, onlyAir, towerColumn[sec].getTraversalGrid());
+        }
+        NavSectionBuilder.computeDepth(towerColumn);
+        chunks.put(NavStore.key(0, 0), towerColumn);
+
+        return new NavGridView(0, chunks); // minY=0, synthetic (no live level)
+    }
+
+    /**
+     * Setup-time (NOT measured) shape checks for SPIRAL: (1) the four alternating materials MUST intern
+     * to pairwise-distinct navtypes (the whole adversarial premise — if two collapse, vertical runs
+     * lengthen and the fixture silently stops being the run-chain's worst case); (2) the search must FIND the top
+     * (not partial); (3) the route must be climbed, not built — a plan full of place edits means the
+     * pockets stopped confining Pillar and the shape drifted. Prints expansions + place count.
+     */
+    private void spiralSanityDryRun() {
+        Block[] mats = spiralMats();
+        for (int i = 0; i < mats.length; i++) {
+            for (int j = i + 1; j < mats.length; j++) {
+                short ni = com.orebit.mod.worldmodel.navblock.NavBlock.navtypeFor(
+                        mats[i].defaultBlockState());
+                short nj = com.orebit.mod.worldmodel.navblock.NavBlock.navtypeFor(
+                        mats[j].defaultBlockState());
+                if (ni == nj) {
+                    throw new IllegalStateException("SPIRAL materials " + mats[i] + " and "
+                            + mats[j] + " intern to the SAME navtype (" + ni
+                            + ") — the alternation is void; pick a different material");
+                }
+            }
+        }
+        var plan = BlockPathfinder.findPath(grid, start, goal, caps, corridor);
+        int expansions = BlockPathfinder.LAST_EXPANSIONS;
+        int places = 0;
+        if (plan != null) {
+            for (int i = 0; i < plan.size(); i++) {
+                var e = plan.edits(i);
+                if (e != null) places += e.placeCount();
+            }
+        }
+        System.out.println("[PathfinderBenchmark] SPIRAL sanity: found=" + (plan != null)
+                + " partial=" + BlockPathfinder.LAST_WAS_PARTIAL
+                + " expansions=" + expansions + " placeEdits=" + places
+                + " planSize=" + (plan == null ? 0 : plan.size()));
+        if (plan == null) {
+            throw new IllegalStateException("SPIRAL did not find a path — fixture broken");
+        }
+        if (BlockPathfinder.LAST_WAS_PARTIAL) {
+            throw new IllegalStateException("SPIRAL returned a PARTIAL — the stair channel is not climbable");
+        }
+        if (places > 6) {
+            throw new IllegalStateException("SPIRAL plan placed " + places
+                    + " blocks — it is building, not climbing; no longer the constrained-cuboids guard");
+        }
     }
 
     @Benchmark
@@ -363,7 +844,7 @@ public class PathfinderBenchmark {
                         UPOVER_START, UPOVER_GOAL, BotCaps.BREAK_PLACE, UPOVER_CORRIDOR));
                 break;
             default:
-                bh.consume(BlockPathfinder.findPath(grid, start, goal, BotCaps.BREAK_PLACE, corridor));
+                bh.consume(BlockPathfinder.findPath(grid, start, goal, caps, corridor));
         }
     }
 }

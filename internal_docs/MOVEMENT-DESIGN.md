@@ -4,6 +4,11 @@
 > runtime-verified (session 15); `/bot` commands built (session 16); break/place is next.** Updated
 > session 16 (2026-06-23). **§1's "three decisions" are the canonical rules** for classifying any new
 > capability (movement kind vs. modifier vs. separate system) — apply them before adding anything.
+>
+> *(Status update 2026-07-03: long since overtaken by events — break/place folding, the swim family,
+> Climb, Parkour + DiagonalParkour (TIER1 = 14), timed mining (`BotMining`), phase-model execution
+> (`MovePlan`/`PhaseRunner`), and the pass-through hazard / break-through cost model are all BUILT.
+> The §1 classification rules remain canonical.)*
 
 ## 1. Framing decision — movement-centric, not block-centric
 

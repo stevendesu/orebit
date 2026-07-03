@@ -205,7 +205,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         Config cfg = ConfigLoader.config();
         return new BotInventory(this).feasibility(
                 caps(), cfg.consumesBlocks(), cfg.conjuredBlockState(), cfg.removalCostWeight(),
-                cfg.placeBaseCost());
+                cfg.placeBaseCost(), cfg.breakBaseCost());
     }
 
     /**
@@ -1205,18 +1205,29 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             BlockPos p = edits.breakPos(i);
             BlockState target = level.getBlockState(p);
             if (target.isAir()) continue;
+            // Execution-side break policy backstop (planner/executor parity, Config.mayBreak): never break
+            // an owner-protected block, nor a vanilla-unbreakable one without mining.allowUnbreakable. The
+            // planner's descriptor-bit gates should never fold such a break; this re-check on the LIVE
+            // state also covers a stale grid (block protected/changed after classification). Skip → the
+            // step stays blocked → the stall/replan loop routes around it.
+            if (!cfg.mayBreak(target, target.getDestroySpeed(level, p))) continue;
             if (inv != null && cfg.consumesTools()) inv.damageBestTool(target); // wear the tool one use
             WorldEdits.breakBlock(level, p);
         }
         for (int i = 0; i < edits.placeCount(); i++) {
             BlockPos p = edits.placePos(i);
             BlockState occupant = level.getBlockState(p);
+            // A protected occupant is never cleared NOR replaced by a placement (filling the cell destroys
+            // it either way) — the planner's OPEN_PLACE bit excludes protected cells, this is the live
+            // backstop. Skip the cell; replan nets it.
+            if (!occupant.isAir() && cfg.protectedBlocks().matches(occupant)) continue;
             if (!Replaceable.isReplaceable(occupant)) {
                 // Same planner/executor vocabulary gap as place(): the search's open-for-place bit is
                 // shape-based, vanilla replaceability is stricter — a soft empty-shape occupant (berry
                 // bush, torch, sapling) must be cleared first or the planned place silently no-ops and
-                // the follower jumps onto a cap that never existed. Clear it like a player would.
-                if (occupant.getDestroySpeed(level, p) < 0) continue; // unbreakable — skip, replan nets it
+                // the follower jumps onto a cap that never existed. Clear it like a player would — unless
+                // the occupant is unbreakable or owner-protected (mayBreak): then skip, replan nets it.
+                if (!cfg.mayBreak(occupant, occupant.getDestroySpeed(level, p))) continue;
                 WorldEdits.breakBlock(level, p);
             }
             if (inv != null && cfg.consumesBlocks()) {
@@ -1395,6 +1406,11 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         ServerLevel level = (ServerLevel) Worlds.of(this);
         BlockPos p = new BlockPos(x, y, z);
         BlockState existing = level.getBlockState(p);
+        Config cfg = ConfigLoader.config();
+        // A protected occupant is never cleared NOR replaced by a placement (filling the cell destroys it
+        // either way) — the planner's OPEN_PLACE bit excludes protected cells; this live backstop also
+        // covers a stale grid. Give up on the cell; the next tick / replan nets it.
+        if (!existing.isAir() && cfg.protectedBlocks().matches(existing)) return;
         if (!Replaceable.isReplaceable(existing)) {
             // Planner/executor vocabulary gap: the search's open-for-place bit is SHAPE-based (an
             // empty-collision cell — sweet berry bush, torch, sapling — is open to place into), but
@@ -1402,12 +1418,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             // no-op, so the bot jumped onto a cap that never existed (the berry-maze hop-over bug). Do
             // what a player does instead: clear the soft occupant, then place. Every empty-shape
             // occupant is soft (hardness ~0), so the clear is effectively free and stays unpriced
-            // planner-side (EditScratch.requireFloor).
-            if (existing.getDestroySpeed(level, p) < 0) return; // unbreakable occupant — give up
+            // planner-side (EditScratch.requireFloor). mayBreak refuses an unbreakable occupant (give
+            // up, replan nets it) AND an owner-protected one (mining.protectedBlocks — never broken).
+            if (!cfg.mayBreak(existing, existing.getDestroySpeed(level, p))) return;
             WorldEdits.breakBlock(level, p);
         }
         lookAtCell(x, y, z); // look at what we place — for a pillar footing that's straight down, like a player
-        Config cfg = ConfigLoader.config();
         if (cfg.consumesBlocks()) {
             Block block = new BotInventory(this).consumeOnePlaceable();
             if (block == null) return; // out of blocks — the next tick / replan nets it

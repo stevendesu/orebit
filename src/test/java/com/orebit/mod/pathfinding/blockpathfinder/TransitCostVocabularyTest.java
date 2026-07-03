@@ -44,11 +44,11 @@ class TransitCostVocabularyTest {
     private static final BotCaps MORTAL = new BotCaps(
             1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true,
             BotCaps.DEFAULT_COST_PER_HITPOINT, false, false,
-            BotCaps.UNBREAKABLE, BotCaps.DEFAULT_MAX_NODES, 1.0f);
+            BotCaps.UNBREAKABLE, false, BotCaps.DEFAULT_MAX_NODES, 1.0f);
     private static final BotCaps IMMUNE = new BotCaps(
             1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, false,
             BotCaps.DEFAULT_COST_PER_HITPOINT, false, false,
-            BotCaps.UNBREAKABLE, BotCaps.DEFAULT_MAX_NODES, 1.0f);
+            BotCaps.UNBREAKABLE, false, BotCaps.DEFAULT_MAX_NODES, 1.0f);
 
     private static long desc(Block block) {
         return NavBlock.descriptorFor(block.defaultBlockState());
@@ -108,6 +108,44 @@ class TransitCostVocabularyTest {
         // Plain clear cells cost nothing for anyone.
         assertEquals(0f, mortal.cellTransitCost(desc(Blocks.AIR)), 1e-4f);
         assertEquals(0f, immune.cellTransitCost(desc(Blocks.AIR)), 1e-4f);
+    }
+
+    @Test
+    void breakableThroughGatesThePunchThroughOption() {
+        // MORTAL plus canBreak — the break-through-hazard caps; and a weak variant capped below cobweb's
+        // quantized hardness (4.0 s × 5 = 20) to pin the maxBreakHardness gate.
+        BotCaps breaker = new BotCaps(
+                1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true,
+                BotCaps.DEFAULT_COST_PER_HITPOINT, true, false,
+                BotCaps.UNBREAKABLE, false, BotCaps.DEFAULT_MAX_NODES, 1.0f);
+        BotCaps weakBreaker = new BotCaps(
+                1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true,
+                BotCaps.DEFAULT_COST_PER_HITPOINT, true, false,
+                10, false, BotCaps.DEFAULT_MAX_NODES, 1.0f);
+        MovementContext canBreak = new MovementContext(null, breaker);
+        MovementContext weak = new MovementContext(null, weakBreaker);
+        MovementContext noBreak = new MovementContext(null, MORTAL);
+
+        // The passable hazard/through-slow set is punch-out-able for a breaking bot...
+        assertTrue(canBreak.breakableThrough(desc(Blocks.SWEET_BERRY_BUSH)));
+        assertTrue(canBreak.breakableThrough(desc(Blocks.COBWEB)));
+        assertTrue(canBreak.breakableThrough(desc(Blocks.FIRE)));
+        assertTrue(canBreak.breakableThrough(desc(Blocks.POWDER_SNOW)));
+        // ... never for a walk-only bot ...
+        assertFalse(noBreak.breakableThrough(desc(Blocks.SWEET_BERRY_BUSH)),
+                "no canBreak cap — the transit surcharge is the only honest price");
+        // ... and the mining-hardness cap still applies (cobweb quantizes to 20 > the weak bot's 10).
+        assertFalse(weak.breakableThrough(desc(Blocks.COBWEB)),
+                "a break-through is still a break — maxBreakHardness gates it");
+        assertTrue(weak.breakableThrough(desc(Blocks.SWEET_BERRY_BUSH)),
+                "a soft (hardness-0) bush stays within the weak bot's cap");
+
+        // Cells that charge no transit — or that aren't break-through material — are excluded: solids are
+        // requireAir's job (real collision), fluids are never "broken", plain air has nothing to clear.
+        assertFalse(canBreak.breakableThrough(desc(Blocks.STONE)),
+                "a solid wall is requireAir's breakable(), not a break-through");
+        assertFalse(canBreak.breakableThrough(desc(Blocks.WATER)), "fluids are swum/avoided, never broken");
+        assertFalse(canBreak.breakableThrough(desc(Blocks.AIR)));
     }
 
     @Test

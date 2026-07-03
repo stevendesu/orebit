@@ -1,6 +1,10 @@
 package com.orebit.mod;
 
+import com.orebit.mod.config.Config;
+import com.orebit.mod.config.ConfigLoader;
+import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
 import com.orebit.mod.platform.BotInventory;
+import com.orebit.mod.platform.WorldEdits;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -85,6 +89,17 @@ public final class BotMining {
             return;
         }
 
+        // Execution-side break policy backstop (planner/executor parity, Config.mayBreak): refuse an
+        // owner-protected block (mining.protectedBlocks) outright, and a vanilla-unbreakable one unless
+        // mining.allowUnbreakable opted in. The planner's descriptor-bit gates should never request such a
+        // break; re-checking the LIVE state here also covers a stale nav grid. Refusal releases the break
+        // (like an un-request), so the follower's stall/replan loop routes around it.
+        Config cfg = ConfigLoader.config();
+        if (!cfg.mayBreak(state, state.getDestroySpeed(level, target))) {
+            stop(level);
+            return;
+        }
+
         // Equip the fastest hotbar tool FIRST so the destroy-progress read (and the visible held item) reflect
         // it, then face + swing like a mining player.
         inv.selectBestHotbarTool(state);
@@ -92,14 +107,27 @@ public final class BotMining {
         bot.swing(InteractionHand.MAIN_HAND);
 
         float per = state.getDestroyProgress(bot, level, target);
-        if (per <= 0.0f) {                  // indestructible for this bot (bedrock / no valid tool) → don't spin
-            stop(level);
-            return;
+        // Vanilla reports zero progress for an unbreakable block (negative destroy time). mayBreak above
+        // already refused it unless mining.allowUnbreakable — so an opted-in bot GRINDS it at the fixed
+        // stand-in rate (the same UNBREAKABLE_STANDIN_TICKS the planner's breakCost charged: parity in
+        // time, not just permission). Without the opt-in per <= 0 can no longer occur here.
+        boolean grind = per <= 0.0f;
+        if (grind) {
+            if (!cfg.allowUnbreakable()) { // defensive: mayBreak should have caught it
+                stop(level);
+                return;
+            }
+            per = 1.0f / MiningModel.UNBREAKABLE_STANDIN_TICKS;
         }
         progress += per;
         if (progress >= 1.0f) {
             level.destroyBlockProgress(bot.getId(), target, -1); // clear cracks
             bot.gameMode.destroyBlock(target);                    // real survival break: drops, XP, tool wear
+            if (grind && !level.getBlockState(target).isAir()) {
+                // The survival break path itself refuses vanilla-unbreakable blocks (that's what makes them
+                // unbreakable) — after the honest grind, force the edit the way the legacy applyEdits does.
+                WorldEdits.breakBlock(level, target);
+            }
             reset();
         } else {
             int stage = (int) (progress * 10.0f);                 // vanilla shows 10 crack stages (0..9)

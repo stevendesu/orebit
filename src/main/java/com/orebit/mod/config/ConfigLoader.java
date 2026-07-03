@@ -12,6 +12,7 @@ import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
 import com.orebit.mod.platform.ConfigDir;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 import net.minecraft.server.MinecraftServer;
 
@@ -83,12 +84,33 @@ public final class ConfigLoader {
     private static void install(Config c) {
         config = c;
         botCaps = c.toBotCaps();
+        // Planner-side protected-block awareness: fold mining.protectedBlocks into the NavBlock
+        // classification fingerprint (the PROTECTED descriptor bit), splitting matching states into
+        // protected navtypes. This is the FIRST active use of NavBlock on a live server, so it triggers
+        // its static-init here — at server-started the block registry AND the datapack tags are both
+        // bound (the same window the MiningModel bake below has always relied on), so #tag entries
+        // resolve. It runs BEFORE any nav grid is built (chunk nav builds are world-tick-deferred), so
+        // grids always classify with post-policy navtypes. Cold: one full-table pass per load/reload.
+        int remapped = NavBlock.applyProtected(state -> c.protectedBlocks().matches(state));
+        if (remapped > 0) {
+            OrebitCommon.LOGGER.info("[Orebit] protected blocks ({}): {} block states re-fingerprinted",
+                    c.protectedBlocks().spec(), remapped);
+        }
         // Re-bake the mining-tick tables if they've already been built (a /bot config reload after server
-        // start) so a changed mining-time model (ticksByHardness / ticksToMineFlat) takes effect immediately.
-        // On the FIRST load the tables aren't built yet — OrebitCommon's onServerStarted builds them right
-        // after this install with the same config — so we skip (ready() is false), avoiding a double bake.
+        // start) so a changed mining-time model (ticksByHardness / ticksToMineFlat) takes effect immediately
+        // — and so the navtype-keyed table covers any navtypes the protected split above just added (the
+        // bake must stay AFTER applyProtected). On the FIRST load the tables aren't built yet —
+        // OrebitCommon's onServerStarted builds them right after this install with the same config — so we
+        // skip (ready() is false), avoiding a double bake.
         if (MiningModel.ready()) {
             MiningModel.buildTable(c.ticksByHardness(), c.ticksToMineFlat());
+            if (remapped > 0) {
+                // ready() == true means this is a RELOAD: nav grids already built still hold the old
+                // navtypes, so the PLANNER won't fully see the list change until chunks rebuild.
+                OrebitCommon.LOGGER.warn("[Orebit] mining.protectedBlocks changed on reload — nav data built "
+                        + "before the change is stale; restart the server (or let chunks rebuild) to fully "
+                        + "apply. The execution-side break refusal is already active.");
+            }
         }
     }
 
@@ -181,6 +203,22 @@ public final class ConfigLoader {
             kv(w, ConfigKeys.MINING_TICKS_BY_HARDNESS, d.ticksByHardness());
             line(w, "# Ticks to mine one block when ticksByHardness=false (0 = insta-mine).");
             kv(w, ConfigKeys.MINING_TICKS_TO_MINE_FLAT, d.ticksToMineFlat());
+            line(w, "# Flat surcharge (in ticks) added to EVERY block break the bot plans, on top of the real");
+            line(w, "# mining time (>= 0) -- the mining-side mirror of placement.placeBaseCost. Raise it to");
+            line(w, "# discourage gratuitous world edits (digging shortcuts, punching through bushes/cobwebs);");
+            line(w, "# 0 (default) prices breaks at mining time alone.");
+            kv(w, ConfigKeys.MINING_BREAK_BASE_COST, d.breakBaseCost());
+            line(w, "# Blocks the bot must NEVER break (or clear/replace by placing): a comma-separated list of block ids and #-prefixed");
+            line(w, "# block tags, e.g.  mining.protectedBlocks=minecraft:chest, #minecraft:beds, minecraft:diamond_ore");
+            line(w, "# Enforced when planning routes AND when actually breaking. Malformed entries are skipped");
+            line(w, "# with a warning. NOTE: changing this list requires a SERVER RESTART (or waiting for chunks");
+            line(w, "# to rebuild) to fully apply -- protected-ness is baked into the cached nav data; the");
+            line(w, "# hard refusal to break applies immediately on /bot config reload.");
+            kv(w, ConfigKeys.MINING_PROTECTED_BLOCKS, d.protectedBlocks().spec());
+            line(w, "# Bot may mine vanilla-UNBREAKABLE blocks (bedrock, barriers, end portal frames, ...) at a");
+            line(w, "# fixed, very large time cost (~2 minutes per block). A separate axis from mining.maxHardness");
+            line(w, "# (which only ranges over breakable blocks); mining.protectedBlocks always overrides.");
+            kv(w, ConfigKeys.MINING_ALLOW_UNBREAKABLE, d.allowUnbreakable());
             line(w, "");
 
             line(w, "# --- pathing: the A* search knobs ---");
@@ -194,6 +232,13 @@ public final class ConfigLoader {
             line(w, "# (~22 blocks at the default 100). Raise it for a more self-preserving bot; only matters");
             line(w, "# when survival.takesDamage=true.");
             kv(w, ConfigKeys.PATHING_COST_PER_HITPOINT, d.costPerHitpoint());
+            line(w, "# Run a short synthetic pathfinder warm-up at server start (before any player can join)");
+            line(w, "# so the bot's FIRST real search doesn't run JIT-cold (a one-time ~16ms tick stall");
+            line(w, "# otherwise). Costs ~0.3-1.5s of startup wall-clock only; no effect after boot.");
+            kv(w, ConfigKeys.PATHING_WARMUP, d.warmup());
+            line(w, "# Hard cap (milliseconds) on that warm-up; it usually stops earlier, once search times");
+            line(w, "# plateau. 0 disables the warm-up entirely.");
+            kv(w, ConfigKeys.PATHING_WARMUP_BUDGET_MS, d.warmupBudgetMs());
         } catch (IOException e) {
             OrebitCommon.LOGGER.warn("[Orebit] could not write default config {} — using defaults in memory",
                     file, e);
