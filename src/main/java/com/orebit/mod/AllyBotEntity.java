@@ -92,6 +92,13 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     /** Below this squared speed while trying to move, treat the bot as stuck (horizontal on the ground →
      *  jump; full-3D off the ground/underwater → a stall the jump can't fix → recover). */
     private static final double STUCK_SPEED_SQR = 0.0016;
+    /** Consecutive grounded low-speed ticks before the held-jump backstop may fire (≈0.3s). A bot starting
+     *  a plan from REST is inherently below {@link #STUCK_SPEED_SQR} on its first driving ticks (walk
+     *  acceleration crosses the 0.04 b/t threshold in ~2–4 ticks), so an unarmed backstop hopped on tick 1
+     *  of every command — cosmetic on flat ground, off the course entirely when the plan started on a
+     *  ledge. A real physical hitch (a lip, a fence, a missed jump grinding in a gap) persists far past
+     *  this window, so recovery is only delayed by ~¼s, never lost. */
+    private static final int JUMP_FREE_ARM_TICKS = 6;
     /** Consecutive stuck ticks before the diagnostic dumps the surrounding blocks (≈1s). */
     private static final int STUCK_DUMP_TICKS = 20;
     /** Cross-track distance (blocks) off the planned segment that counts as a genuine slip off the line. */
@@ -833,6 +840,13 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.activePlanStep = -1; // rebuild any phase plan for the new plan's first step
         this.planStartFloor = startFloor; // first segment begins at the bot's current floor cell
         this.settledFloor = startFloor;   // the commit/replan anchor starts at the fresh plan's start cell
+        // A fresh plan starts with fresh recovery state: steerAlongPath stops running when a drive ends, so
+        // these counters FREEZE at whatever the old drive last saw (e.g. a grind at its final waypoint) and
+        // a stale count would pre-arm the jump backstop / escape hatch on the new plan's first ticks — the
+        // other half of the startup-hop bug alongside the JUMP_FREE_ARM_TICKS arming above.
+        this.stuckTicks = 0;
+        this.stallTicks = 0;
+        this.offTrackTicks = 0;
 
         boolean hasPath = path != null && path.size() > 0;
         if (Debug.ENABLED) {
@@ -1099,8 +1113,13 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         Vec3 velocity = this.getDeltaMovement();
         boolean grounded = EntityState.onGround(this);
         if (velocity.horizontalDistanceSqr() < STUCK_SPEED_SQR && grounded && !mining.busy()) {
-            this.setJumping(true);
-            if (++stuckTicks == STUCK_DUMP_TICKS && Debug.ENABLED) dumpStuck(wp);
+            // ARM before acting: the jump-free fires only once the no-progress state has PERSISTED
+            // (JUMP_FREE_ARM_TICKS) — on the first driving ticks of a fresh plan, low speed is just a bot
+            // that hasn't accelerated yet, and the old unarmed jump was the "startup hop" (a spurious leap
+            // off the course when the plan started on a ledge). The counter still runs from tick 1, so the
+            // GROUNDED_STALL_TICKS escape-hatch arm below keeps its exact semantics.
+            if (++stuckTicks >= JUMP_FREE_ARM_TICKS) this.setJumping(true);
+            if (stuckTicks == STUCK_DUMP_TICKS && Debug.ENABLED) dumpStuck(wp);
         } else {
             stuckTicks = 0;
         }
@@ -1191,7 +1210,15 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         }
         for (int i = 0; i < edits.placeCount(); i++) {
             BlockPos p = edits.placePos(i);
-            if (!Replaceable.isReplaceable(level.getBlockState(p))) continue;
+            BlockState occupant = level.getBlockState(p);
+            if (!Replaceable.isReplaceable(occupant)) {
+                // Same planner/executor vocabulary gap as place(): the search's open-for-place bit is
+                // shape-based, vanilla replaceability is stricter — a soft empty-shape occupant (berry
+                // bush, torch, sapling) must be cleared first or the planned place silently no-ops and
+                // the follower jumps onto a cap that never existed. Clear it like a player would.
+                if (occupant.getDestroySpeed(level, p) < 0) continue; // unbreakable — skip, replan nets it
+                WorldEdits.breakBlock(level, p);
+            }
             if (inv != null && cfg.consumesBlocks()) {
                 Block block = inv.consumeOnePlaceable();
                 if (block == null) continue; // out of blocks — skip; replan nets it
@@ -1367,7 +1394,18 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     public void place(int x, int y, int z) {
         ServerLevel level = (ServerLevel) Worlds.of(this);
         BlockPos p = new BlockPos(x, y, z);
-        if (!Replaceable.isReplaceable(level.getBlockState(p))) return;
+        BlockState existing = level.getBlockState(p);
+        if (!Replaceable.isReplaceable(existing)) {
+            // Planner/executor vocabulary gap: the search's open-for-place bit is SHAPE-based (an
+            // empty-collision cell — sweet berry bush, torch, sapling — is open to place into), but
+            // vanilla replaceability is stricter. Refusing outright here made a planned place silently
+            // no-op, so the bot jumped onto a cap that never existed (the berry-maze hop-over bug). Do
+            // what a player does instead: clear the soft occupant, then place. Every empty-shape
+            // occupant is soft (hardness ~0), so the clear is effectively free and stays unpriced
+            // planner-side (EditScratch.requireFloor).
+            if (existing.getDestroySpeed(level, p) < 0) return; // unbreakable occupant — give up
+            WorldEdits.breakBlock(level, p);
+        }
         lookAtCell(x, y, z); // look at what we place — for a pillar footing that's straight down, like a player
         Config cfg = ConfigLoader.config();
         if (cfg.consumesBlocks()) {

@@ -718,6 +718,13 @@ public final class PathPlan {
                     skeleton.size(), committedIndex, windowStart, windowLast(), skeleton.size() - 1,
                     botFloor.getX(), botFloor.getY(), botFloor.getZ(),
                     target.getX(), target.getY(), target.getZ(), target.equals(goalFloor), cuboidCap);
+            // The caps this search actually runs with — the one line that catches "the config file says X
+            // but the search priced with Y" (stale reload, wrong server dir, a caller passing a preset).
+            OrebitCommon.LOGGER.info(
+                    "[Orebit] search caps: takesDamage={} costPerHitpoint={} canBreak={} canPlace={} "
+                            + "maxNodes={} greedyWeight={}",
+                    caps.takesDamage(), caps.costPerHitpoint(), caps.canBreak(), caps.canPlace(),
+                    caps.maxNodes(), caps.greedyWeight());
         }
 
         // confineBound = null (unconfined), cuboidBound = the growth cap. startMode = the bot's live pose (so a

@@ -338,6 +338,8 @@ public final class MovementContext {
     // These let a movement read multi-cell facts (body clearance, edit-hazard) in ONE grid access
     // instead of probing each cell with descriptorAt. Read the raw bitmask once per cell, decode both.
 
+    /** {@code HEADROOM} level: ≥1 clear body cell (the cell directly above the floor is walk-clear). */
+    public static final int HEADROOM_CRAWL = NavFlags.HEADROOM_CRAWL;
     /** {@code HEADROOM} level: ≥2 clear body cells (room to stand). */
     public static final int HEADROOM_WALK = NavFlags.HEADROOM_WALK;
     /** {@code HEADROOM} level: ≥3 clear body cells (room to jump up). */
@@ -373,6 +375,12 @@ public final class MovementContext {
      * when {@code (y&15) + need <= 15}. So a WALK proof is exact up to {@code (y&15) <= 13} and only a JUMP
      * proof tightens to {@code <= 12} — verifying one fewer layer for the common walk case. A claims-clear
      * reading nearer the top face returns {@code false} here, so the caller verifies the real cells.
+     *
+     * <p>(The COLUMN build/patch path now computes near-seam bits against the section above — vertical
+     * overscan, see {@code NavFlags} — so a live grid's top-row bits are honest, not just one-directional.
+     * The per-level guard here is KEPT anyway: single-section producers without column context
+     * ({@code classifyInto}, the neighbour-less {@code patchCell}) remain air-optimistic above, and the
+     * guard costs one compare. Do not relax it while those paths exist.)
      */
     public boolean headroomProves(int flags, int y, int need) {
         return headroom(flags) >= need && (y & 15) + need <= 15;
@@ -501,18 +509,24 @@ public final class MovementContext {
     // prefilter bit is set (rare). Caps-honest like Fall's damage penalty: the DAMAGE term is zero for an
     // invulnerable bot; the SLOW terms apply to everyone (physics slows an immune bot just the same).
 
-    /**
-     * Ticks charged per damaging-but-passable body cell transited (fire, soul fire, sweet berry bush,
-     * wither rose, powder snow — lava is unreachable: never {@link #passable}). Derivation, on the {@link
-     * com.orebit.mod.pathfinding.blockpathfinder.movements.Fall} precedent of ~10 ticks per point of
-     * damage ({@code DAMAGE_PER_BLOCK}): crossing one fire cell at walk speed is ~4.6 ticks of contact
-     * (≥1 contact hit) plus the residual on-fire burn once out (several seconds at 1 dmg/s) ≈ 4 damage,
-     * so {@code 4 × 10 = 40} ticks ≈ 8.6 walk-blocks of detour per fire cell — the planner strongly
-     * prefers a few blocks of detour over walking through fire. One constant for the whole damaging set
-     * (the descriptor has a single damaging bit): a berry bush / powder snow cell is over-charged relative
-     * to its real ~0.5–1 damage, which is the safe direction (route around when a comparable route exists).
-     */
-    public static final float DAMAGE_TRANSIT_COST = 40f;
+    // ---- Damage pricing: ONE currency, caps.costPerHitpoint() (ticks per HP) -----------------------
+    // Each damaging-but-passable body cell transited (fire, soul fire, sweet berry bush, wither rose,
+    // powder snow — lava is unreachable: never passable) is priced as 1 HP × BotCaps.costPerHitpoint()
+    // (the pathing.costPerHitpoint config knob, default 100). The whole damaging set shares the flat 1-HP
+    // charge (the descriptor has a single damaging bit): a berry-bush cell is over-charged relative to
+    // its real ~0.5–1 damage, which is the safe direction (route around when a comparable route exists).
+    //
+    // TUNING / BREAK-EVEN (why the old hardcoded DAMAGE_TRANSIT_COST = 40 was replaced): the detour a
+    // hazard cell can buy is  costPerHitpoint / Traverse.FLAT_COST  walk-blocks per cell (the surcharge
+    // divided by the 4.633-tick per-block ruler). At 40 that was only ~8.6 blocks — fine for the
+    // SINGLE-BUSH regime (one hazard cell vs a short detour: the bot routes around), but in the MAZE
+    // regime (N hazard cells between bot and goal, detour length growing with N) each cell's share of the
+    // detour soon exceeded its ~9-block allowance and the planner rationally plowed a berry-bush maze
+    // LETHALLY — cumulative death was never priced. At the default 100 each cell buys ≈ 21.6 blocks, so a
+    // handful of cells justifies a 30–80-block detour. This scalar conversion is the ratified SHORT-TERM
+    // fix; the ratified successor (NOT yet built) is a cumulative health-aware damage BUDGET — a per-path
+    // HP ledger measured against the bot's remaining health, so N cells price superlinearly as they
+    // approach lethality — which will replace the flat per-cell term when it lands.
 
     /**
      * Ticks added per HEAVY through-slow body cell ({@link NavBlock#TRANSIT_HEAVY} — cobweb). A cobweb
@@ -542,11 +556,16 @@ public final class MovementContext {
      * candidate everywhere. Only when a bit fires are the two body descriptors read (path-edit-aware, so a
      * planned break of the hazard clears the charge) and priced per cell via {@link #cellTransitCost}.
      *
-     * <p>Boundary: the prefilter bits are computed within-section (air-optimistic near a section's top
-     * face), so a hazard just across a face can occasionally go uncharged — acceptable for a cost term
-     * (never a correctness gate). Solid damaging blocks (cactus / magma / campfire) in the body space also
-     * set the hazard bit, but {@link #cellTransitCost} charges only passable cells, so a folded BREAK of
-     * such a block is priced by its mining ticks alone.
+     * <p>Boundary: the hazard/slow prefilter bits are column-local (they read only the cells straight
+     * above the floor) and the nav build/patch now overscans the vertical seam (the top rows of every
+     * section read the section above — see {@code NavFlags} "Boundary handling"), so the prefilter is
+     * EXACT for this method: a hazard just across a section's top face IS flagged and charged. (The old
+     * within-section computation left the top ~3 floor rows of every section stale-CLEAR — this zero-read
+     * fast path then transited a seam-row berry-bush maze for free, lethally. Only the LATERALLY-read bits
+     * — RISKY_EDIT's fluid scan, PLACEABLE_NEIGHBOR — remain air-optimistic at chunk-side faces; neither
+     * is read here.) Solid damaging blocks (cactus / magma / campfire) in the body space also set the
+     * hazard bit, but {@link #cellTransitCost} charges only passable cells, so a folded BREAK of such a
+     * block is priced by its mining ticks alone.
      *
      * <p>The swim family deliberately does not consult this: a swimmable cell ({@link
      * NavBlock#isSwimmableWater}: water fluid + empty shape) can never be damaging — fire cannot coexist
@@ -563,15 +582,16 @@ public final class MovementContext {
     /**
      * The pass-through surcharge (ticks) for ONE already-read body-cell descriptor — the per-cell form for
      * movements that read the transited cells themselves ({@code Fall}'s drop column, {@code Diagonal}'s
-     * corner columns), where no flags prefilter applies. {@link #DAMAGE_TRANSIT_COST} for a
-     * damaging-but-passable cell when the bot {@link BotCaps#takesDamage takes damage}, plus the
-     * through-slow term ({@link #WEB_TRANSIT_COST} / {@link #LIGHT_TRANSIT_COST}) for every bot. Pure bit
-     * tests on the descriptor — no reads, no allocation.
+     * corner columns), where no flags prefilter applies. {@code 1 HP ×} {@link BotCaps#costPerHitpoint}
+     * for a damaging-but-passable cell when the bot {@link BotCaps#takesDamage takes damage} (the unified
+     * damage currency — see the damage-pricing section comment above), plus the through-slow term ({@link
+     * #WEB_TRANSIT_COST} / {@link #LIGHT_TRANSIT_COST}) for every bot. Pure bit tests on the descriptor
+     * plus a caps field load — no reads, no allocation.
      */
     public float cellTransitCost(long d) {
         float c = 0f;
         if (caps.takesDamage() && NavBlock.isDamaging(d) && NavBlock.isPassable(d)) {
-            c += DAMAGE_TRANSIT_COST;
+            c += caps.costPerHitpoint(); // 1 HP per damaging cell transited, in ticks-per-HP
         }
         int t = NavBlock.transitSlow(d);
         if (t == NavBlock.TRANSIT_HEAVY) c += WEB_TRANSIT_COST;

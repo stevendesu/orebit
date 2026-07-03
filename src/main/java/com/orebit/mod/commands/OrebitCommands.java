@@ -35,6 +35,7 @@ public final class OrebitCommands {
             new MineCommand(),
             new HereCommand(),
             new TraceCommand(),
+            new ProbeCommand(),
             new ConfigCommand(),
             new DebugCommand());
 

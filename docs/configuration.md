@@ -79,14 +79,16 @@ mining.ticksToMineFlat = 0
 ### Pathfinding — how the bot plans routes
 
 ```properties
-pathing.maxNodes     = 10000
-pathing.greedyWeight = 2.0
+pathing.maxNodes         = 10000
+pathing.greedyWeight     = 2.0
+pathing.costPerHitpoint  = 100.0
 ```
 
 | Key | Default | What it does |
 | --- | --- | --- |
 | `pathing.maxNodes` | `10000` | How hard the bot searches before giving up on a single plan. Higher finds paths through more tangled terrain but costs more CPU per plan. |
 | `pathing.greedyWeight` | `2.0` | How directly the bot beelines toward its goal. `1.0` finds the shortest possible route but searches slowly; higher values head straight at the goal and plan much faster, at the cost of slightly longer routes. Must be `1.0` or greater. |
+| `pathing.costPerHitpoint` | `100.0` | How many ticks of travel time the bot considers **one hitpoint of damage** to be worth (`>= 0`). This single number prices *all* damage in the planner: walking through fire, berry bushes, or powder snow, and dropping farther than a safe fall — each expected hitpoint costs this many ticks. The intuition: one hitpoint buys roughly `costPerHitpoint / 4.6` blocks of detour, so at the default `100` the bot will walk about 22 blocks out of its way to avoid each point of damage — enough to route around a whole thicket of bushes rather than push through it. Raise it for a more self-preserving bot (it will take long detours and gentle descents); lower it for a daredevil that trades health for time. Only matters when `survival.takesDamage` is `true` — an invulnerable bot ignores damage entirely. |
 
 ### Survival — is the bot mortal?
 
@@ -101,7 +103,7 @@ player simulation, so when these are on, the mechanics are the real ones — not
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `survival.takesDamage` | `false` | If `true`, the bot takes damage like a player — lava, fire, falls, cactus, mobs. This also changes how it *plans*: a mortal bot pays a steep path cost to walk through fire or a berry bush and treats big drops as expensive, so it routes around hazards an invulnerable bot would stroll through. `false` = invulnerable (hazards still cost it time, never health). |
+| `survival.takesDamage` | `false` | If `true`, the bot takes damage like a player — lava, fire, falls, cactus, mobs. This also changes how it *plans*: a mortal bot pays a steep path cost to walk through fire or a berry bush and treats big drops as expensive, so it routes around hazards an invulnerable bot would stroll through. How steep is one knob: `pathing.costPerHitpoint` (see Pathfinding above). `false` = invulnerable (hazards still cost it time, never health). |
 | `survival.hunger` | `false` | If `true`, the bot's food bar drains from activity like a player's. If `false`, it never gets hungry (and can always sprint). Note the bot doesn't yet feed itself — a hungry bot is your problem to keep fed. |
 | `survival.needsBreath` | `false` | If `true`, the bot's air depletes underwater and it can drown. If `false`, it can swim submerged indefinitely. |
 
