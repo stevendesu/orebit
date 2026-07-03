@@ -6,6 +6,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import com.orebit.mod.platform.LevelBounds;
 import com.orebit.mod.worldmodel.pathing.NavSection;
 import com.orebit.mod.worldmodel.pathing.NavStore;
+import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
 import net.minecraft.server.level.ServerLevel;
 
@@ -82,12 +83,20 @@ public final class RegionGrid {
 
     private final ServerLevel level;
     private final CostPyramid pyramid;
+    /**
+     * The dimension's resource-tally store — a parallel SoA layer on the SAME fixed-grid octree as
+     * {@link #pyramid} (find-mine-resources design §3). Same lifecycle: created with the grid, dropped with it
+     * ({@link #drop}/{@link #clear} remove the whole {@code RegionGrid} from {@code BY_LEVEL}, so no separate
+     * teardown is needed). Not yet written by chunk-load — that is phase 4.
+     */
+    private final ResourcePyramid resourcePyramid;
     /** Dimension floor, resolved once through the {@link LevelBounds} seam (overworld −64). */
     private final int minY;
 
     private RegionGrid(ServerLevel level) {
         this.level = level;
         this.pyramid = new CostPyramid();
+        this.resourcePyramid = new ResourcePyramid();
         this.minY = LevelBounds.minY(level);
     }
 
@@ -107,12 +116,22 @@ public final class RegionGrid {
     private RegionGrid(int minY) {
         this.level = null;
         this.pyramid = new CostPyramid();
+        this.resourcePyramid = new ResourcePyramid();
         this.minY = minY;
     }
 
     /** The dimension's cost store (for the maintenance hook — {@link PyramidMerger} / {@code HpaMaintenance}). */
     public CostPyramid pyramid() {
         return pyramid;
+    }
+
+    /**
+     * The dimension's resource-tally store — the parallel {@link ResourcePyramid} on the same fixed grid
+     * (find-mine-resources §3). Seeded by the phase-4 tally-on-classify hook and rolled up by
+     * {@link com.orebit.mod.worldmodel.resource.ResourceMerger}; read by the drill-down query (phase 5).
+     */
+    public ResourcePyramid resourcePyramid() {
+        return resourcePyramid;
     }
 
     /** The dimension floor (vertical origin for region {@code ry}; overworld −64). */
