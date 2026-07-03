@@ -25,17 +25,24 @@ public final class Log2Codec {
     }
 
     /**
-     * Merges two encoded counts (the pyramid roll-up). Exactly the original {@code mergeLogCounts}:
-     * the larger dominates, and two equal buckets combine to the next bucket up
-     * ({@code log₂(x) + log₂(x) = log₂(2x)}). Commutative.
+     * Merges two encoded counts (the pyramid roll-up). The larger dominates, and two equal <i>non-zero</i>
+     * buckets combine to the next bucket up ({@code log₂(x) + log₂(x) = log₂(2x)}). Commutative.
+     *
+     * <p><b>0 is the additive identity</b> (fixed in phase 3): {@code merge(0,x) == merge(x,0) == x} and
+     * {@code merge(0,0) == 0}. The original {@code mergeLogCounts} returned {@code 1} for {@code merge(0,0)}
+     * (its equal-bucket bump fired on two zeros), which would inject phantom counts into the pyramid roll-up
+     * — a parent whose children are all empty in some column would read as "1 block present". Guarding the
+     * zero cases keeps a summed-count roll-up honest: an all-empty column stays empty at every ancestor.
      */
     public static byte merge(byte a, byte b) {
         int ua = a & 0xFF;
         int ub = b & 0xFF;
 
+        if (ua == 0) return b; // 0 is the additive identity (no phantom counts in the roll-up)
+        if (ub == 0) return a;
         if (ua > ub) return a;
         if (ub > ua) return b;
-        return (byte) (ua + 1); // log₂(x) + log₂(x) = log₂(2x)
+        return (byte) (ua + 1); // log₂(x) + log₂(x) = log₂(2x); both > 0 here
     }
 
     /**

@@ -11,10 +11,11 @@ import org.junit.jupiter.api.Test;
  * monotone encode, encode/decode round-trip within a bucket, and an associative + commutative
  * {@link Log2Codec#merge} that approximates {@code encode(a+b)} within one bucket.
  *
- * <p>NOTE on {@code merge(x, 0-encoding) == x}: this is tested only for a <i>non-zero</i> {@code x}
- * (a populated region + an empty child = the region unchanged — the meaningful roll-up case). The
- * original {@code mergeLogCounts} returns {@code 1} for {@code merge(0,0)} (equal buckets bump up),
- * a latent quirk of the exact salvaged formula; that degenerate case is intentionally not asserted.
+ * <p>{@code 0} is the additive identity (fixed in phase 3): {@code merge(0,x) == merge(x,0) == x} for a
+ * non-zero {@code x} (a populated region + an empty child = the region unchanged), AND {@code merge(0,0) == 0}
+ * — the degenerate case the original {@code mergeLogCounts} got wrong (it returned {@code 1}, its equal-bucket
+ * bump firing on two zeros). That phantom count would corrupt the resource-pyramid roll-up (an all-empty
+ * column would read as "1 block present" at every ancestor), so it is now pinned.
  */
 public class Log2CodecTest {
 
@@ -105,5 +106,12 @@ public class Log2CodecTest {
             assertEquals(x, Log2Codec.merge(x, zero), "merge(x, 0-encoding) == x for x=" + a);
             assertEquals(x, Log2Codec.merge(zero, x), "merge(0-encoding, x) == x for x=" + a);
         }
+    }
+
+    @Test
+    void mergeZeroWithZeroIsZero() {
+        // The phase-3 0-identity fix: two empty children must NOT synthesize a phantom count at the parent.
+        assertEquals(0, Log2Codec.merge((byte) 0, (byte) 0),
+                "merge(0,0) must be 0 (0 is the additive identity — no phantom roll-up counts)");
     }
 }
