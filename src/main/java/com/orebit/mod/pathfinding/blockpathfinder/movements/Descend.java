@@ -1,9 +1,13 @@
 package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
+import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
+import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 
 /**
  * Step down exactly one block to a cardinal-adjacent floor cell (MOVEMENT-DESIGN.md §2, Tier 1) — the
@@ -71,5 +75,71 @@ public final class Descend implements Movement {
                 out.accept(nx, dy, nz, cost + e.extraCost(), e);
             }
         }
+    }
+
+    /**
+     * The phase-model execution plan (Stage 2 — the reactive-reconcile path that replaces {@code steer} +
+     * one-shot edits). Descend is <b>CLEAR &rarr; STEP</b>: establish ALL of the step-off geometry up front —
+     * break the three transit cells over the destination column and build the step-down floor — then walk off
+     * the edge and let gravity supply the one-block drop.
+     *
+     * <p><b>Geometry (plan coords).</b> {@code from} floor {@code (fx,fy,fz)} &rarr; {@code to} floor
+     * {@code (tx,ty,tz)} with {@code ty == fy-1} and {@code (tx,tz)} a cardinal neighbour of {@code (fx,fz)}.
+     * The bot starts standing on {@code (fx,fy,fz)} (feet block {@code (fx,fy+1,fz)}) and ends standing on
+     * {@code (tx,fy-1,tz)} (feet block {@code (tx,fy,tz)}), one block lower and one over. The step-off column is
+     * {@code (tx, fy..fy+2, tz)} — new feet, new head, and the step-off head-clearance — and the step-down
+     * floor is {@code (tx,fy-1,tz)}.
+     *
+     * <p><b>Why all geometry in CLEAR, none in STEP.</b> Unlike {@link Pillar}, Descend has no kinematic
+     * ordering constraint: the placed floor cell {@code (tx,fy-1,tz)} is never occupied by the bot (it lands
+     * <i>on</i> it, one over), so there is no "place only after airborne" gate. Establishing everything in the
+     * prep phase also walls the bot in while the transit column is still solid — it physically cannot walk off
+     * before the floor exists, and because the runner issues the footing place the same tick the last transit
+     * cell clears (before any drive), the floor is always down before the bot can step into the cleared column.
+     * Keeping STEP need-free makes it pure locomotion.
+     *
+     * <p><b>Coverage.</b> The three {@code Need.AIR} cells cover {@code candidates()}'s three {@code requireAir}
+     * breaks (folded only in the {@code !headroomProves} case), and the {@code Need.FOOTING} covers its
+     * {@code requireFloor} place (folded only when the dest isn't already standable). Both are declared
+     * unconditionally — the runner no-ops a {@code Need.AIR} whose cell is already air (the {@code headroomProves}
+     * case) and a {@code Need.FOOTING} whose cell is already solid (real terrain), so the superset is exactly
+     * correct. The two {@code bodyTransitCost} break-through cells are a subset of the transit {@code Need.AIR}
+     * cells, so any punch-through the search priced is covered.
+     *
+     * <p><b>Regression guard (armed).</b> {@code resetWhen} fires only once the bot has physically LEFT the
+     * start cell and then finds itself grounded back on it — a genuine balk (knocked back mid-step). The
+     * {@code left[0]} arm (set in STEP's drive after departure, cleared on re-entry to CLEAR) avoids the Parkour
+     * aliasing trap: the first STEP tick, still grounded at start, must not satisfy a bare "grounded at start"
+     * guard and bounce {@code STEP&rarr;CLEAR} forever. An overshoot that lands off the dest floor is not a reset
+     * case — that is the follower's grounded-stall recovery / replan arm (as with {@link Fall}/{@link Parkour}).
+     */
+    @Override
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+        final boolean[] left = new boolean[1]; // reset-guard arm — set once the bot leaves the start floor
+        MovePlan plan = new MovePlan();
+        // Physically back on the START floor AFTER having left it → re-establish geometry. Armed by STEP and
+        // disarmed on (re)entry to CLEAR, so it can't alias the first STEP tick (bot still grounded at start).
+        plan.resetWhen(b -> left[0]
+                && b.grounded() && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+        // CLEAR: break the step-off transit column and build the step-down floor. The runner mines one AIR cell
+        // per tick (holding, recentring) and places the FOOTING once the AIR cells are clear; while the transit
+        // is still solid the bot is walled in, so it cannot walk off before the floor exists.
+        plan.phase("clear")
+                .need(MovePlan.Need.AIR,     tx, fy + 2, tz)   // break: step-off head clearance
+                .need(MovePlan.Need.AIR,     tx, fy + 1, tz)   // break: transit / new head
+                .need(MovePlan.Need.AIR,     tx, fy,     tz)   // break: new feet
+                .need(MovePlan.Need.FOOTING, tx, fy - 1, tz)   // place: step-down floor (no-op on real terrain)
+                .drive((b, v) -> left[0] = false)              // disarm on (re)entry; advances same tick
+                .advanceWhen(b -> true);                       // geometry held (runner drives only when met) → STEP
+        // STEP: walk off the edge toward the dest column; gravity does the one-block drop. Complete once
+        // standing on the new floor (feet block == (tx, ty+1, tz) == (tx, fy, tz)).
+        plan.phase("step")
+                .drive((b, v) -> {
+                    if (!b.grounded() || b.footX() != fx || b.footZ() != fz) left[0] = true; // left start → arm
+                    SteerControl.drive(b, v);                  // medium-aware (walk on land, swim if submerged)
+                })
+                .done(b -> b.grounded()
+                        && b.footX() == tx && b.footY() == fy && b.footZ() == tz);
+        return plan;
     }
 }
