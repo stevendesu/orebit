@@ -98,7 +98,7 @@ public final class PlanExecutor {
             // JVM's lifetime. A changed maxThreads/searchBudgetMs needs a full restart — say so once.
             if (instance.budgetNanos != searchBudgetMs * 1_000_000L) {
                 OrebitCommon.LOGGER.warn("[Orebit] planner pool already running with the previous world's "
-                        + "settings — restart the game to apply changed pathing.maxThreads/searchBudgetMs");
+                        + "settings — restart the game to apply changed pathing.maxThreads/asyncSearchBudgetMs");
             }
             return;
         }
