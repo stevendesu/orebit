@@ -37,6 +37,7 @@ import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
+import com.orebit.mod.worldmodel.pathing.NavStore;
 import com.orebit.mod.worldmodel.pathing.NetherPortalIndex;
 import com.orebit.mod.worldmodel.resource.ResourceClasses;
 import com.orebit.mod.worldmodel.resource.ResourceQuery;
@@ -241,7 +242,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      *  hand-coded state machine (the agency/tasks layer is stubs) reusing the reactive executors: the
      *  resource drill-down ({@link ResourceQuery}), the two-tier driver ({@link #driveToward}), and the
      *  timed miner ({@link BotMining}). */
-    private enum GatherPhase { FIND, PATH, SCAN, MINE, RETURN }
+    private enum GatherPhase { FIND, PATH, MINE, RETURN }
 
     private int gatherColumn = -1;            // indexed resource column being gathered (-1 = not gathering)
     private int gatherQuota;                  // target count of PICKED-UP items (owner-ratified quota, §10)
@@ -251,7 +252,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private BlockPos gatherTargetCenter;      // centre block of the level-0 region currently being worked
     private int gatherRx, gatherRy, gatherRz; // that region's coords (blacklist key + section-scan origin)
     private int gatherLastInvTotal;           // inventory item total at the last standing-mine tick (Δ = drops)
-    /** Target cells to mine in the current section, nearest-first (filled by {@link #gatherScan}). */
+    /** Target cells to mine in the current section, nearest-first (filled by {@link #scanRegionIntoQueue}). */
     private final ArrayDeque<BlockPos> mineQueue = new ArrayDeque<>();
     /** Region keys ({@link #regionKey}) proven unreachable / empty this run — skipped by {@link #gatherFind}. */
     private final HashSet<Long> gatherBlacklist = new HashSet<>();
@@ -559,7 +560,6 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         switch (gatherPhase) {
             case FIND -> gatherFind(level);
             case PATH -> gatherPath(level);
-            case SCAN -> gatherScan(level);
             case MINE -> gatherMine(level);
             case RETURN -> gatherReturn(level);
         }
@@ -585,14 +585,39 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         setMode(Mode.STAY);
     }
 
-    /** PATH: drive to the target region's centre. Arrival → SCAN; an exhausted route (the driver gave up) →
-     *  blacklist that region and FIND another. */
+    /**
+     * PATH: head for the target region, then hand off to mining as soon as its exact ore cells are known. The
+     * region may sit in currently-UNLOADED chunks (the pyramid remembers regions from earlier exploration), so
+     * the precise ore position isn't knowable until we're close enough for the chunk to load and its nav to
+     * build. We therefore drive toward the region CENTRE only as a provisional heading; the moment the region
+     * is resident ({@link NavStore} holds its column — dropped on unload, so residency ⇒ chunk loaded + nav
+     * built ⇒ live blocks readable and pathable) we scan it for the exact cells and switch to {@link
+     * GatherPhase#MINE}, which paths to the ore itself. Chunks load well ahead of the bot, so residency fires
+     * while it is still far from the centre — this is what stops it mining a pointless shaft to a buried
+     * geometric centre that isn't even ore. A route the driver gives up on, or a resident-but-empty region (a
+     * stale load-populated tally, §8.5), blacklists the region and re-FINDs.
+     */
     private void gatherPath(ServerLevel level) {
-        BlockPos c = gatherTargetCenter;
-        boolean arrived = driveToward(c.getX() + 0.5, c.getY(), c.getZ() + 0.5, c.below());
-        if (arrived) {
-            gatherPhase = GatherPhase.SCAN;
-        } else if (navGaveUp) {
+        final BlockPos c = gatherTargetCenter;
+        // Region resident? (NavStore is keyed by chunk; the region's 16³ is one 16-aligned chunk column.)
+        if (NavStore.get(level, NavStore.key(c.getX() >> 4, c.getZ() >> 4)) != null) {
+            this.zza = 0.0f; // stand while scanning + retargeting (don't coast on the last drive tick)
+            if (scanRegionIntoQueue(level)) {
+                gatherLastInvTotal = new BotInventory(this).totalItemCount();
+                clearPlan(); // drop the drive-to-centre plan; MINE re-paths to the nearest ore cell
+                gatherPhase = GatherPhase.MINE;
+            } else { // stale tally — the vein was mined out since the chunk built
+                gatherBlacklist.add(regionKey(gatherRx, gatherRy, gatherRz));
+                this.navGaveUp = false;
+                clearPlan();
+                gatherPhase = GatherPhase.FIND;
+            }
+            return;
+        }
+        // Not resident yet — approach the centre to pull the region into load/build range; residency is
+        // re-checked every tick above, and fires (retargeting onto the real ore) long before arrival.
+        driveToward(c.getX() + 0.5, c.getY(), c.getZ() + 0.5, c.below());
+        if (navGaveUp) { // genuinely unreachable — give up on this region and look elsewhere
             gatherBlacklist.add(regionKey(gatherRx, gatherRy, gatherRz));
             this.navGaveUp = false;
             clearPlan();
@@ -600,11 +625,14 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         }
     }
 
-    /** SCAN: on arrival, read the 16³ level-0 region from the LIVE world for exact target-block cells (the
-     *  pyramid only localizes to the section, §6/§7), queue them nearest-first, → MINE. Empty (mined out since
-     *  chunk load — the pyramid is load-populated, §8.5) → blacklist + FIND. */
-    private void gatherScan(ServerLevel level) {
-        this.zza = 0.0f;
+    /**
+     * Scan the target region's 16³ level-0 cell from the LIVE world for exact {@code gatherColumn} block
+     * positions (the pyramid localizes only to the section, §6/§7), queued nearest-first into {@link
+     * #mineQueue}; returns {@code true} if any were found. The caller gates this on {@link NavStore} residency
+     * so the block reads never touch an unloaded chunk. A found-nothing result means the load-populated tally
+     * is stale — the vein was mined out since the chunk built (§8.5).
+     */
+    private boolean scanRegionIntoQueue(ServerLevel level) {
         mineQueue.clear();
         final int ox = gatherRx << 4, oz = gatherRz << 4;
         final int oy = RegionGrid.of(level).minY() + (gatherRy << 4);
@@ -620,17 +648,11 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                 }
             }
         }
-        if (found.isEmpty()) {
-            gatherBlacklist.add(regionKey(gatherRx, gatherRy, gatherRz));
-            clearPlan();
-            gatherPhase = GatherPhase.FIND;
-            return;
-        }
+        if (found.isEmpty()) return false;
         final double bx = getX(), by = getY(), bz = getZ();
         found.sort((a, b) -> Double.compare(distSq(a, bx, by, bz), distSq(b, bx, by, bz)));
         mineQueue.addAll(found);
-        gatherLastInvTotal = new BotInventory(this).totalItemCount();
-        gatherPhase = GatherPhase.MINE;
+        return true;
     }
 
     /**
