@@ -107,8 +107,14 @@ public final class ConfigKeys {
     public static final String MINING_ALLOW_UNBREAKABLE = "mining.allowUnbreakable";
 
     // ---- pathing: the A* search knobs (carried on BotCaps into BlockPathfinder) ---------------------
-    /** {@code int > 0} — A* node-expansion ceiling per search. Default {@code 10000}. */
-    public static final String PATHING_MAX_NODES = "pathing.maxNodes";
+    /**
+     * {@code int > 0} — A* node-expansion ceiling per SYNC-mode search (the tick-thread search budget, in
+     * nodes). Only consulted when {@link #PATHING_ASYNC} is off; async mode caps by wall-clock
+     * ({@link #PATHING_ASYNC_SEARCH_BUDGET_MS}) with a large memory-only node backstop instead. Sync keeps a
+     * NODE cap (not a time cap) so the tick stall stays bounded + deterministic — a wall-clock budget on the
+     * tick thread could freeze the server for its whole duration. Default {@code 10000}.
+     */
+    public static final String PATHING_SYNC_SEARCH_BUDGET_NODES = "pathing.syncSearchBudgetNodes";
     /**
      * {@code float >= 1.0} — heuristic greediness weight. {@code 1.0} = admissible/optimal/slow; higher
      * beelines (far fewer nodes, paths no longer guaranteed optimal). Default {@code 2.0}.
@@ -153,11 +159,11 @@ public final class ConfigKeys {
     public static final String PATHING_MAX_THREADS = "pathing.maxThreads";
     /**
      * {@code int >= 1} — wall-clock budget (milliseconds) per background path search when
-     * {@link #PATHING_ASYNC} is on: the time-based cap that replaces {@code pathing.maxNodes} as the
-     * effective limit (the node cap remains as a memory backstop). A search that exhausts the budget
-     * returns its best partial path — the bot moves that way and replans, converging on far goals.
-     * Bigger budgets escape bigger dead-ends at the cost of longer worst-case plan latency (the tick
-     * itself is never stalled either way). Default {@code 40} (~4–10× the node cap's reach, warm).
+     * {@link #PATHING_ASYNC} is on: the time-based cap that replaces {@link #PATHING_SYNC_SEARCH_BUDGET_NODES}
+     * as the effective limit (a large node cap remains only as a memory backstop). A search that exhausts the
+     * budget returns its best partial path — the bot moves that way and replans, converging on far goals.
+     * Bigger budgets escape bigger dead-ends at the cost of longer worst-case plan latency; the tick itself
+     * is never stalled either way (these searches run off the tick thread). Default {@code 250}.
      */
-    public static final String PATHING_SEARCH_BUDGET_MS = "pathing.searchBudgetMs";
+    public static final String PATHING_ASYNC_SEARCH_BUDGET_MS = "pathing.asyncSearchBudgetMs";
 }

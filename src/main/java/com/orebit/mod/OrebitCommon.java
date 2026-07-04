@@ -62,13 +62,13 @@ public final class OrebitCommon {
         });
 
         // Background planner pool (DESIGN-background-pathfinding.md §3): started once, AFTER ConfigLoader::load
-        // (reads pathing.async/maxThreads/searchBudgetMs) and after the warm-up above (JIT is warm before the
-        // first submitted search; each pool thread warms its own ThreadLocal scratch as it starts). When
+        // (reads pathing.async/maxThreads/asyncSearchBudgetMs) and after the warm-up above (JIT is warm before
+        // the first submitted search; each pool thread warms its own ThreadLocal scratch as it starts). When
         // pathing.async=false this never runs, PlanExecutor.instance() stays null, and every search remains
-        // synchronous on the tick thread — byte-identical to before.
+        // synchronous on the tick thread, node-capped by pathing.syncSearchBudgetNodes.
         events.onServerStarted(server -> {
             if (ConfigLoader.config().asyncPathing()) {
-                PlanExecutor.start(ConfigLoader.config().maxThreads(), ConfigLoader.config().searchBudgetMs());
+                PlanExecutor.start(ConfigLoader.config().maxThreads(), ConfigLoader.config().asyncSearchBudgetMs());
             }
         });
 

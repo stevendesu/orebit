@@ -231,8 +231,10 @@ public final class ConfigLoader {
             line(w, "");
 
             line(w, "# --- pathing: the A* search knobs ---");
-            line(w, "# A* node-expansion ceiling per search (> 0). Higher = can route farther, slower worst case.");
-            kv(w, ConfigKeys.PATHING_MAX_NODES, d.maxNodes());
+            line(w, "# A* node-expansion ceiling per SYNC-mode search (> 0) -- the tick-thread search budget in");
+            line(w, "# nodes. Only used when pathing.async=false; async caps by asyncSearchBudgetMs instead.");
+            line(w, "# Higher = can route farther per sync search, but a bigger worst-case tick stall.");
+            kv(w, ConfigKeys.PATHING_SYNC_SEARCH_BUDGET_NODES, d.maxNodes());
             line(w, "# Heuristic greediness weight (>= 1.0). 1.0 = optimal but slow; higher = faster + greedier.");
             kv(w, ConfigKeys.PATHING_GREEDY_WEIGHT, d.greedyWeight());
             line(w, "# Ticks the bot considers 1 HP of damage to be worth (>= 0) -- the ONE damage-pricing");
@@ -257,11 +259,11 @@ public final class ConfigLoader {
             line(w, "# lower to 1 on a constrained host. Requires a server restart to change.");
             kv(w, ConfigKeys.PATHING_MAX_THREADS, d.maxThreads());
             line(w, "# Wall-clock budget (milliseconds) per background path search when pathing.async=true --");
-            line(w, "# the time-based cap that effectively replaces pathing.maxNodes (which remains as a");
-            line(w, "# memory backstop). A search that runs out of budget returns its best partial path; the");
-            line(w, "# bot moves that way and replans. Bigger = escapes bigger dead-ends, longer worst-case");
-            line(w, "# plan latency (the tick itself is never stalled either way).");
-            kv(w, ConfigKeys.PATHING_SEARCH_BUDGET_MS, d.searchBudgetMs());
+            line(w, "# the time-based cap that replaces syncSearchBudgetNodes as the effective limit (a large");
+            line(w, "# node cap remains only as a memory backstop). A search that runs out of budget returns its");
+            line(w, "# best partial path; the bot moves that way and replans. Bigger = escapes bigger dead-ends,");
+            line(w, "# longer worst-case plan latency (the tick itself is never stalled -- these run off-thread).");
+            kv(w, ConfigKeys.PATHING_ASYNC_SEARCH_BUDGET_MS, d.asyncSearchBudgetMs());
         } catch (IOException e) {
             OrebitCommon.LOGGER.warn("[Orebit] could not write default config {} — using defaults in memory",
                     file, e);

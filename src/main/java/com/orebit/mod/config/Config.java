@@ -32,7 +32,7 @@ import net.minecraft.world.level.block.state.BlockState;
  * <ul>
  *   <li>{@code canBreak  = mining.canMine}, {@code maxBreakHardness = mining.maxHardness};</li>
  *   <li>{@code canPlace  = placement.canPlace};</li>
- *   <li>{@code maxNodes  = pathing.maxNodes}, {@code greedyWeight = pathing.greedyWeight};</li>
+ *   <li>{@code maxNodes  = pathing.syncSearchBudgetNodes}, {@code greedyWeight = pathing.greedyWeight};</li>
  *   <li>{@code costPerHitpoint = pathing.costPerHitpoint} — the ONE damage-pricing knob: ticks the
  *       planner considers 1 HP worth (hazard-cell transit + fall damage past the safe window are both
  *       priced in it; see {@link BotCaps#costPerHitpoint}).</li>
@@ -72,7 +72,7 @@ public record Config(
         int warmupBudgetMs,
         boolean asyncPathing,
         int maxThreads,
-        int searchBudgetMs) {
+        int asyncSearchBudgetMs) {
 
     /**
      * The all-defaults configuration — reproduces TODAY's hardcoded follower behaviour exactly (break +
@@ -88,8 +88,10 @@ public record Config(
                              ProtectedBlocks.EMPTY, false,
             /* pathing    */ BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT,
                              BotCaps.DEFAULT_COST_PER_HITPOINT, true, 1500,
-                             /* async off until in-game-soaked; 2 planner threads; 40 ms/search budget */
-                             false, 2, 40);
+                             /* async ON by default (searches run off the tick thread → no 10k-node flood);
+                              * 2 planner threads; 250 ms/async-search budget. Sync (async=false) keeps the
+                              * node cap = pathing.syncSearchBudgetNodes (DEFAULT_MAX_NODES). */
+                             true, 2, 250);
 
     /**
      * The capability gate the block-tier A* reads, derived from the placement / mining / pathing knobs
