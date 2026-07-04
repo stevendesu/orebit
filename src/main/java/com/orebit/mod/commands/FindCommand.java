@@ -12,6 +12,7 @@ import com.orebit.mod.platform.CommandFeedback;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.resource.ResourceClasses;
 import com.orebit.mod.worldmodel.resource.ResourceQuery;
+import com.orebit.mod.worldmodel.resource.ResourceScan;
 
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -81,43 +82,27 @@ public final class FindCommand implements BotCommand {
 
     /**
      * Live-scan the hit's 16³ level-0 region (the pyramid only localizes to a section, not a block — design
-     * §6/§7) and report the EXACT matching cells: how many the live world actually holds and the nearest one
-     * to the anchor. This is the "why did it think there was iron here?" diagnostic — it distinguishes the
-     * normal case (the ore is a real block somewhere in the cube, just not at the centre) from a genuine
-     * phantom ({@code LIVE: 0}, which means a stale load-populated tally or a real tally/coord bug worth
-     * instrumenting the write path for). A region no longer loaded can't be verified (its chunk unloaded
-     * since the tally was written); we say so rather than force-load it.
-     *
-     * <p>The region origin is the centre minus 8 on each axis (level-0 side = 16, {@code centre = origin+8}),
-     * so this needs no {@code minY} — the centre already encodes it.
+     * §6/§7) via {@link ResourceScan#exactCells} and report the EXACT matching cells: how many the live world
+     * actually holds and the nearest one to the anchor. This is the "why did it think there was iron here?"
+     * diagnostic — it distinguishes the normal case (the ore is a real block somewhere in the cube, just not
+     * at the centre) from a genuine phantom ({@code LIVE: 0}, a stale load-populated tally or a real tally/coord
+     * bug worth instrumenting the write path for). A region no longer resident can't be verified (its chunk
+     * unloaded since the tally was written); {@code exactCells} returns {@code null} there and we say so.
      */
     private static String liveScan(ServerLevel level, ResourceQuery.ResourceHit h, int column, BlockPos anchor) {
-        final BlockPos c = h.center();
-        if (!level.isLoaded(c)) return "  [region not loaded — can't verify exact cells]";
-        final int ox = c.getX() - 8, oy = c.getY() - 8, oz = c.getZ() - 8;
-        int count = 0;
+        final List<BlockPos> cells = ResourceScan.exactCells(level, h.rx(), h.ry(), h.rz(), column);
+        if (cells == null) return "  [region not loaded — can't verify exact cells]";
+        if (cells.isEmpty()) return "  [LIVE: 0 exact in the 16³ region — stale tally or a bug, NOT a real vein]";
         BlockPos nearest = null;
         long best = Long.MAX_VALUE;
-        final BlockPos.MutableBlockPos m = new BlockPos.MutableBlockPos();
-        for (int dx = 0; dx < 16; dx++) {
-            for (int dy = 0; dy < 16; dy++) {
-                for (int dz = 0; dz < 16; dz++) {
-                    m.set(ox + dx, oy + dy, oz + dz);
-                    if (ResourceClasses.columnForBlock(level.getBlockState(m).getBlock()) == column) {
-                        count++;
-                        final long ddx = m.getX() - anchor.getX();
-                        final long ddy = m.getY() - anchor.getY();
-                        final long ddz = m.getZ() - anchor.getZ();
-                        final long d = ddx * ddx + ddy * ddy + ddz * ddz;
-                        if (d < best) { best = d; nearest = m.immutable(); }
-                    }
-                }
-            }
+        for (BlockPos p : cells) {
+            final long ddx = p.getX() - anchor.getX();
+            final long ddy = p.getY() - anchor.getY();
+            final long ddz = p.getZ() - anchor.getZ();
+            final long d = ddx * ddx + ddy * ddy + ddz * ddz;
+            if (d < best) { best = d; nearest = p; }
         }
-        if (count == 0) {
-            return "  [LIVE: 0 exact in the 16³ region — stale tally or a bug, NOT a real vein]";
-        }
-        return "  [LIVE: " + count + " exact, nearest " + nearest.getX() + " " + nearest.getY()
+        return "  [LIVE: " + cells.size() + " exact, nearest " + nearest.getX() + " " + nearest.getY()
                 + " " + nearest.getZ() + "]";
     }
 }
