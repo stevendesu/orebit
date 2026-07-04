@@ -1004,6 +1004,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                     this.lastEditedIndex = -1;
                     this.activePlanStep = -1; // rebuild the phase plan for the new window's first step
                     this.planStartFloor = settledFloor; // follower anchor == the search source (both settledFloor)
+                    if (Debug.ENABLED) logWindowSwap(goalFloor); // capture boundary-wiggle: alternating targets/hops
                 }
                 // Eager pre-plan (DESIGN-background-pathfinding.md §7, async only): once THIS window's plan
                 // is more than half walked, precompute the next boundary's search from the plan's predicted
@@ -1122,6 +1123,33 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             CommandFeedback.sendTo(owner, message);
         } catch (Throwable ignored) {
             // never let progress chatter crash the tick
+        }
+    }
+
+    /**
+     * Diagnostic ({@code /bot debug}) for the region-boundary WIGGLE: one server-log line each time the
+     * committed skeleton's block WINDOW is swapped (bot cell → new window). It prints the bot cell, the goal,
+     * the window target and <b>why</b> it was chosen ({@link PathPlan.TargetKind} — {@code SNAPPED} = the goal
+     * was unstandable and got adjusted to a nearby cell, so the adjusted cell can differ each search → a prime
+     * oscillation source; {@code CENTER} = aiming a region centre), and the skeleton hop being followed. When
+     * the bot ping-pongs across a boundary this logs the TWO alternating (target, hop) pairs back to back, so
+     * the flip — region-route tie-break (hop alternates) vs goal-snap instability (target alternates, same
+     * hop) — is explicit. Never throws onto the tick.
+     */
+    private void logWindowSwap(BlockPos goalFloor) {
+        try {
+            if (pathPlan == null) return;
+            final BlockPos wt = pathPlan.currentWindowTarget();
+            final int step = pathPlan.windowTargetStepIndex();
+            final RegionPathPlan sk = pathPlan.skeletonPlan();
+            final String hop = (sk == null || step < 0 || step >= sk.size())
+                    ? "?"
+                    : "S" + step + "(" + sk.rx(step) + "," + sk.ry(step) + "," + sk.rz(step) + ")";
+            OrebitCommon.LOGGER.info("[Orebit] window-swap bot={} goal={} target={} kind={} hop={}",
+                    compact(this.blockPosition()), compact(goalFloor),
+                    wt == null ? "?" : compact(wt), pathPlan.windowTargetKind(), hop);
+        } catch (Throwable ignored) {
+            // diagnostics must never crash the tick
         }
     }
 
