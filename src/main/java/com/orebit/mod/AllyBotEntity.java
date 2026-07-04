@@ -1,6 +1,7 @@
 package com.orebit.mod;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 
@@ -236,26 +237,53 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private Mode mode = Mode.FOLLOW;
     private BlockPos comeTarget;    // fixed summon cell (owner's feet block at /bot come time)
 
-    // ---- GATHER: the find→mine→return resource loop (find-mine-resources design §7) ------------------
-    /** The phases of a {@code /bot gather} run, stepped one per tick by {@link #gatherLoopTick} — a
-     *  hand-coded state machine (the agency/tasks layer is stubs) reusing the reactive executors: the
-     *  resource drill-down ({@link ResourceQuery}), the two-tier driver ({@link #driveToward}), and the
-     *  timed miner ({@link BotMining}). */
-    private enum GatherPhase { FIND, PATH, MINE, RETURN }
+    // ---- GATHER: live-scan-primary find→mine→return resource loop ------------------------------------
+    /** Phases of a {@code /bot gather} run. SCAN live-scans loaded sections around the bot nearest-first
+     *  (the PRIMARY ore source — robust to the coarse, load-populated, sometimes-mis-bucketed resource
+     *  pyramid); MINE approaches + timed-mines the queued cells; COMPASS walks toward a distant pyramid hint
+     *  when nothing is loaded nearby, live-scanning en route so it grabs ore it passes; RETURN walks back to
+     *  the issue cell. Stepped one phase per tick by {@link #gatherLoopTick}. */
+    private enum GatherPhase { SCAN, MINE, COMPASS, RETURN }
 
     private int gatherColumn = -1;            // indexed resource column being gathered (-1 = not gathering)
-    private int gatherQuota;                  // target count of PICKED-UP items (owner-ratified quota, §10)
-    private int gathered;                     // items accrued so far (counted on standing-mine ticks, below)
+    private int gatherQuota;                  // target count of PICKED-UP items (owner-ratified, §10)
+    private int gathered;                     // items accrued so far (counted on standing-mine ticks)
     private GatherPhase gatherPhase;          // current phase (null = inactive)
     private BlockPos gatherStartPos;          // where /bot gather was issued — the fixed RETURN target (§10)
-    private BlockPos gatherTargetCenter;      // centre block of the level-0 region currently being worked
-    private int gatherRx, gatherRy, gatherRz; // that region's coords (blacklist key + section-scan origin)
     private int gatherLastInvTotal;           // inventory item total at the last standing-mine tick (Δ = drops)
-    /** Target cells to mine in the current section, nearest-first (filled by {@link #gatherPath} via
-     *  {@link ResourceScan#exactCells}). */
+    private int scanCursor;                   // index into SCAN_OFFSETS for the throttled nearest-first scan
+    private int scanAnchorX, scanAnchorY, scanAnchorZ; // bot cell the current scan sweep is centred on
+    private BlockPos compassTarget;           // centre of the pyramid-hinted region walked toward (COMPASS)
+    private long compassKey;                  // that region's blacklist key
+    /** Target ore cells found by the live scan, nearest-first; drained by MINE. */
     private final ArrayDeque<BlockPos> mineQueue = new ArrayDeque<>();
-    /** Region keys ({@link #regionKey}) proven unreachable / empty this run — skipped by {@link #gatherFind}. */
+    /** Pyramid regions the COMPASS reached but found no live ore in — skipped (stale/phantom tally). */
     private final HashSet<Long> gatherBlacklist = new HashSet<>();
+    /** Ore cells the driver could not reach this run — skipped by the scan so MINE can't loop on them. */
+    private final HashSet<Long> unreachableCells = new HashSet<>();
+
+    // Live-scan volume around the bot (in sections): horizontal ± chunks, plus a downward-biased vertical
+    // band (ore sits below). Swept nearest-first, SCAN_SECTIONS_PER_TICK at a time, stopping at the first ore.
+    private static final int SCAN_RADIUS_CHUNKS = 3;
+    private static final int SCAN_DOWN_SECTIONS = 6;
+    private static final int SCAN_UP_SECTIONS = 2;
+    private static final int SCAN_SECTIONS_PER_TICK = 12;
+    /** Section offsets {dChunkX, dSectionY, dChunkZ} in the scan volume, sorted nearest-first (built once). */
+    private static final int[][] SCAN_OFFSETS;
+    static {
+        List<int[]> offs = new ArrayList<>();
+        for (int dcx = -SCAN_RADIUS_CHUNKS; dcx <= SCAN_RADIUS_CHUNKS; dcx++) {
+            for (int dcz = -SCAN_RADIUS_CHUNKS; dcz <= SCAN_RADIUS_CHUNKS; dcz++) {
+                for (int dsy = -SCAN_DOWN_SECTIONS; dsy <= SCAN_UP_SECTIONS; dsy++) {
+                    offs.add(new int[]{dcx, dsy, dcz});
+                }
+            }
+        }
+        offs.sort((a, b) -> Integer.compare(
+                a[0] * a[0] + a[1] * a[1] + a[2] * a[2],
+                b[0] * b[0] + b[1] * b[1] + b[2] * b[2]));
+        SCAN_OFFSETS = offs.toArray(new int[0][]);
+    }
 
     /**
      * The two-tier driver (HPA-IMPLEMENTATION.md §9/§10): owns the coarse region skeleton and feeds the
@@ -528,14 +556,14 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         lookAtPlayer(owner);
     }
 
-    // ---- GATHER loop: find → path → scan → mine → return (find-mine-resources design §7) --------------
+    // ---- GATHER loop: scan (live) → mine → (compass) → return ----------------------------------------
 
     /**
-     * {@code /bot gather <resource> [count]} entry point (design §7). Begin the find→mine→return loop for
-     * indexed resource {@code column}, targeting {@code quota} PICKED-UP items (owner-ratified quota, §10).
-     * Anchors the RETURN target at the bot's current cell (a fixed target, not the owner's moving position),
-     * clears any active path, and enters {@link GatherPhase#FIND}; {@link #gatherLoopTick} then runs one
-     * phase per tick.
+     * {@code /bot gather <resource> [count]} entry point. Begin the loop for indexed resource {@code column},
+     * targeting {@code quota} PICKED-UP items (§10). Anchors the RETURN target at the bot's current cell and
+     * enters {@link GatherPhase#SCAN} — the primary ore source is a LIVE nearest-first scan of the loaded
+     * sections around the bot (the resource pyramid is coarse + load-populated + can mis-bucket, so it's used
+     * only as the COMPASS heading when nothing is loaded nearby).
      */
     public void startGather(int column, int quota) {
         this.mode = Mode.GATHER;
@@ -546,11 +574,13 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.gatherQuota = Math.max(1, quota);
         this.gathered = 0;
         this.gatherStartPos = this.blockPosition().immutable();
-        this.gatherTargetCenter = null;
+        this.compassTarget = null;
         this.mineQueue.clear();
         this.gatherBlacklist.clear();
+        this.unreachableCells.clear();
         this.navGaveUp = false;
-        this.gatherPhase = GatherPhase.FIND;
+        beginScanSweep();
+        this.gatherPhase = GatherPhase.SCAN;
     }
 
     /** One tick of the {@code /bot gather} state machine — dispatch to the current phase. */
@@ -558,101 +588,98 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         if (gatherPhase == null) { setMode(Mode.STAY); return; } // defensive: lost phase → stop
         ServerLevel level = (ServerLevel) Worlds.of(this);
         switch (gatherPhase) {
-            case FIND -> gatherFind(level);
-            case PATH -> gatherPath(level);
+            case SCAN -> gatherScan(level);
             case MINE -> gatherMine(level);
+            case COMPASS -> gatherCompass(level);
             case RETURN -> gatherReturn(level);
         }
     }
 
-    /** FIND: drill the resource pyramid from the bot's position for the nearest non-blacklisted level-0 region
-     *  holding the target; none known nearby → report + STAY (milestone 1 searches loaded/known regions). */
-    private void gatherFind(ServerLevel level) {
-        this.zza = 0.0f; // stand still while querying
-        lookAtPlayer(owner);
-        List<ResourceQuery.ResourceHit> hits =
-                ResourceQuery.find(level, gatherColumn, this.blockPosition(), 1, 8);
-        for (ResourceQuery.ResourceHit h : hits) {
-            if (gatherBlacklist.contains(regionKey(h.rx(), h.ry(), h.rz()))) continue;
-            gatherTargetCenter = h.center();
-            gatherRx = h.rx(); gatherRy = h.ry(); gatherRz = h.rz();
-            this.navGaveUp = false;
-            clearPlan();
-            gatherPhase = GatherPhase.PATH;
-            return;
-        }
-        chat("I don't see any " + ResourceClasses.nameOfColumn(gatherColumn) + " nearby.");
-        setMode(Mode.STAY);
+    /** Re-anchor a fresh nearest-first live scan on the bot's current cell. */
+    private void beginScanSweep() {
+        BlockPos p = this.blockPosition();
+        scanAnchorX = p.getX();
+        scanAnchorY = p.getY();
+        scanAnchorZ = p.getZ();
+        scanCursor = 0;
     }
 
     /**
-     * PATH: head for the target region, then hand off to mining as soon as its exact ore cells are known. The
-     * region may sit in currently-UNLOADED chunks (the pyramid remembers regions from earlier exploration), so
-     * the precise ore position isn't knowable until we're close enough for the chunk to load and its nav to
-     * build. We therefore drive toward the region CENTRE only as a provisional heading; the moment the region
-     * is resident we scan it for the exact ore cells ({@link ResourceScan#exactCells}) and switch to {@link
-     * GatherPhase#MINE}, which paths to the ore itself. Chunks load well ahead of the bot, so residency fires
-     * while it is still far from the centre — this is what stops it mining a pointless shaft to a buried
-     * geometric centre that isn't even ore. A route the driver gives up on, or a resident-but-empty region (a
-     * stale load-populated tally, §8.5), blacklists the region and re-FINDs.
+     * SCAN: the primary ore source. Live-scan the loaded sections around the bot nearest-first (throttled,
+     * {@link #advanceScan}); ore found → MINE. If the whole nearby volume is swept with nothing → fall back to
+     * the pyramid COMPASS for a distant heading.
      */
-    private void gatherPath(ServerLevel level) {
-        final BlockPos c = gatherTargetCenter;
-        // exactCells folds in the residency gate: null = region not resident yet, empty = resident but the
-        // tally was stale, non-empty = the ore cells. Chunks load ahead of the bot, so a non-null result
-        // arrives far from the centre and retargets onto the real ore before any shaft-to-centre digging.
-        List<BlockPos> cells = ResourceScan.exactCells(level, gatherRx, gatherRy, gatherRz, gatherColumn);
-        if (cells != null) {
-            this.zza = 0.0f; // stand while scanning + retargeting (don't coast on the last drive tick)
-            if (cells.isEmpty()) { // stale tally — the vein was mined out since the chunk built
-                gatherBlacklist.add(regionKey(gatherRx, gatherRy, gatherRz));
-                this.navGaveUp = false;
-                clearPlan();
-                gatherPhase = GatherPhase.FIND;
-                return;
-            }
-            final double bx = getX(), by = getY(), bz = getZ();
-            cells.sort((a, b) -> Double.compare(distSq(a, bx, by, bz), distSq(b, bx, by, bz)));
-            mineQueue.clear();
-            mineQueue.addAll(cells);
+    private void gatherScan(ServerLevel level) {
+        this.zza = 0.0f; // stand still while scanning
+        lookAtPlayer(owner);
+        if (advanceScan(level)) {
             gatherLastInvTotal = new BotInventory(this).totalItemCount();
-            clearPlan(); // drop the drive-to-centre plan; MINE re-paths to the nearest ore cell
+            clearPlan();
             gatherPhase = GatherPhase.MINE;
             return;
         }
-        // Not resident yet — approach the centre to pull the region into load/build range; residency is
-        // re-checked every tick above, and fires (retargeting onto the real ore) long before arrival.
-        driveToward(c.getX() + 0.5, c.getY(), c.getZ() + 0.5, c.below());
-        if (navGaveUp) { // genuinely unreachable — give up on this region and look elsewhere
-            gatherBlacklist.add(regionKey(gatherRx, gatherRy, gatherRz));
-            this.navGaveUp = false;
-            clearPlan();
-            gatherPhase = GatherPhase.FIND;
+        if (scanCursor >= SCAN_OFFSETS.length) { // nothing loaded nearby → ask the pyramid where to head
+            beginCompass(level);
         }
     }
 
     /**
-     * MINE: work the queued cells. A cell out of reach is approached with the normal two-tier driver; once
-     * within {@link #MINE_REACH} the bot stands and {@link BotMining#request}s it every tick (BotMining is
-     * reactive — no done-event). The quota counts PICKED-UP items (§10): the inventory delta is accrued ONLY
-     * on standing-mine ticks, where the sole fresh drops are the target's, so blocks broken while path-clearing
-     * on the approach never count toward it (and it stays robust to fortune/variant drop counts without a
-     * per-resource item table). Quota met → RETURN; section worked out → FIND.
+     * Advance the throttled nearest-first live scan by up to {@link #SCAN_SECTIONS_PER_TICK} sections from
+     * {@link #scanCursor}, reading each resident section's exact target cells ({@link ResourceScan#exactCells}
+     * — a {@code null} return skips an unloaded chunk). Returns {@code true} once a section yields ore, loading
+     * {@link #mineQueue} nearest-first (skipping cells already proven unreachable). Offsets are distance-sorted,
+     * so the first ore found is (about) the nearest.
+     */
+    private boolean advanceScan(ServerLevel level) {
+        final int bcx = scanAnchorX >> 4;
+        final int bcz = scanAnchorZ >> 4;
+        final int bsy = (scanAnchorY - RegionGrid.of(level).minY()) >> 4;
+        List<BlockPos> found = null;
+        int scanned = 0;
+        while (scanCursor < SCAN_OFFSETS.length && scanned < SCAN_SECTIONS_PER_TICK) {
+            final int[] o = SCAN_OFFSETS[scanCursor++];
+            scanned++;
+            final int ry = bsy + o[1];
+            if (ry < 0) continue; // below the world column
+            final List<BlockPos> cells =
+                    ResourceScan.exactCells(level, bcx + o[0], ry, bcz + o[2], gatherColumn);
+            if (cells == null || cells.isEmpty()) continue;
+            for (BlockPos cell : cells) {
+                if (!unreachableCells.contains(cell.asLong())) {
+                    if (found == null) found = new ArrayList<>();
+                    found.add(cell);
+                }
+            }
+        }
+        if (found == null) return false;
+        final double bx = getX(), by = getY(), bz = getZ();
+        found.sort((a, b) -> Double.compare(distSq(a, bx, by, bz), distSq(b, bx, by, bz)));
+        mineQueue.clear();
+        mineQueue.addAll(found);
+        return true;
+    }
+
+    /**
+     * MINE: drain {@link #mineQueue} nearest-first. A cell out of reach is approached with the two-tier driver
+     * (targeting the ore cell itself, so it tunnels right up to it — fixing the old "stop a few blocks short");
+     * once within {@link #MINE_REACH} the bot stands and timed-mines it via {@link BotMining} (real drops).
+     * Quota counts PICKED-UP items: the inventory delta is accrued ONLY on standing-mine ticks (the sole fresh
+     * drops there are the target's), so path-clearing on the approach never counts. An unreachable cell is
+     * blacklisted + skipped. Queue drained → re-SCAN around the (now-moved) bot for the next nearest ore — this
+     * is what makes it grab ore it walked past. Quota met → RETURN.
      */
     private void gatherMine(ServerLevel level) {
-        // Drop already-air cells (mined, or cleared by something else) from the head of the queue.
         while (!mineQueue.isEmpty() && level.getBlockState(mineQueue.peek()).isAir()) {
             mineQueue.poll();
         }
-        if (mineQueue.isEmpty()) { // this section is worked out — look for another
+        if (mineQueue.isEmpty()) { // worked out here — re-scan around the bot for the next nearest ore
             clearPlan();
-            gatherPhase = GatherPhase.FIND;
+            beginScanSweep();
+            gatherPhase = GatherPhase.SCAN;
             return;
         }
         final BlockPos cell = mineQueue.peek();
         if (withinReach(cell)) {
-            // Standing at the ore: the only fresh drops are the target's, so the inventory delta since the
-            // last standing tick is exactly what we just picked up. Accrue it, then check the quota.
             final int now = new BotInventory(this).totalItemCount();
             if (now > gatherLastInvTotal) gathered += now - gatherLastInvTotal;
             gatherLastInvTotal = now;
@@ -663,16 +690,64 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                 return;
             }
             this.zza = 0.0f;
-            mining.request(cell);
+            mining.request(cell); // BotMining faces + times the break + drops
         } else {
-            // Too far to mine — path to it. Exclude any pickups made while approaching from the quota delta.
-            gatherLastInvTotal = new BotInventory(this).totalItemCount();
-            boolean arrived = driveToward(cell.getX() + 0.5, cell.getY() + 0.5, cell.getZ() + 0.5, cell.below());
-            if (!arrived && navGaveUp) { // can't reach this cell — skip it and try the next
+            gatherLastInvTotal = new BotInventory(this).totalItemCount(); // exclude approach pickups from Δ
+            boolean arrived = driveToward(cell.getX() + 0.5, cell.getY() + 0.5, cell.getZ() + 0.5, cell);
+            if (!arrived && navGaveUp) { // can't reach this cell — blacklist it (so re-scan won't re-pick) + skip
+                unreachableCells.add(cell.asLong());
                 mineQueue.poll();
                 this.navGaveUp = false;
                 clearPlan();
             }
+        }
+    }
+
+    /**
+     * COMPASS: nothing loaded nearby, so ask the pyramid for the nearest non-blacklisted region holding the
+     * resource and start walking toward it — while still live-scanning (so ore that loads en route diverts us
+     * straight to MINE; we don't stride past visible ore). No pyramid hint → report + STAY.
+     */
+    private void beginCompass(ServerLevel level) {
+        List<ResourceQuery.ResourceHit> hits =
+                ResourceQuery.find(level, gatherColumn, this.blockPosition(), 1, 8);
+        for (ResourceQuery.ResourceHit h : hits) {
+            final long key = regionKey(h.rx(), h.ry(), h.rz());
+            if (gatherBlacklist.contains(key)) continue;
+            compassTarget = h.center();
+            compassKey = key;
+            this.navGaveUp = false;
+            clearPlan();
+            beginScanSweep();
+            gatherPhase = GatherPhase.COMPASS;
+            return;
+        }
+        chat("I don't see any " + ResourceClasses.nameOfColumn(gatherColumn) + " nearby.");
+        setMode(Mode.STAY);
+    }
+
+    /** COMPASS drive: head for the pyramid hint, live-scanning as we go (re-anchoring the scan as the bot
+     *  travels). Ore found → MINE. Reached (or can't reach) the hint with the local scan still empty → the
+     *  tally was stale; blacklist that region and get the next hint. */
+    private void gatherCompass(ServerLevel level) {
+        final BlockPos p = this.blockPosition();
+        if (Math.abs(p.getX() - scanAnchorX) + Math.abs(p.getY() - scanAnchorY)
+                + Math.abs(p.getZ() - scanAnchorZ) >= 12) {
+            beginScanSweep(); // re-anchor the scan on the bot as it travels
+        }
+        if (advanceScan(level)) {
+            gatherLastInvTotal = new BotInventory(this).totalItemCount();
+            clearPlan();
+            gatherPhase = GatherPhase.MINE;
+            return;
+        }
+        final BlockPos c = compassTarget;
+        boolean arrived = driveToward(c.getX() + 0.5, c.getY(), c.getZ() + 0.5, c.below());
+        if (arrived || navGaveUp) {
+            gatherBlacklist.add(compassKey);
+            this.navGaveUp = false;
+            clearPlan();
+            beginCompass(level);
         }
     }
 
