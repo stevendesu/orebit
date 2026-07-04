@@ -3,8 +3,10 @@ package com.orebit.mod.pathfinding.blockpathfinder.movements;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
+import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Axes;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Cuboid;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.MacroJump;
@@ -264,6 +266,103 @@ public final class Traverse implements Movement {
         int dz = Axes.stepZ(axis, sign) * valid;
         out.accept(x + dx, y, z + dz, valid * moveCost + transit + e.extraCost(), e);
         return true;
+    }
+
+    /**
+     * The phase-model execution plan (Stage 2 — Traverse converted from the {@code steer} + one-shot-edit path
+     * to a live-geometry reconcile). Traverse produces <b>four</b> step shapes, all distinguishable from the
+     * search-native FLOOR cells {@code (fx,fy,fz) → (tx,ty,tz)} alone, and this plan re-establishes exactly the
+     * cells {@link #candidates} folded into each shape's {@link EditScratch}:
+     *
+     * <ul>
+     *   <li><b>Flat micro</b> ({@code ddy==0}, one cell, no place) — clear the two body cells and walk on.
+     *   <li><b>Bridge micro</b> ({@code ddy==0}, one cell) — place the destination floor, then the two body cells.
+     *   <li><b>Macro flat run</b> ({@code ddy==0}, {@code J} cells on one cardinal axis) — one phase PER run cell.
+     *   <li><b>Step-assist</b> ({@code ddy==1}, single low partial, no jump) — clear the two (raised) body cells.
+     * </ul>
+     *
+     * <p><b>Why one phase per run cell.</b> A macro run can carry a break several cells ahead of the bot, but
+     * {@link com.orebit.mod.BotMining} has a reach limit — a single phase that declared every run cell's needs
+     * up front would {@code mine()} an out-of-reach cell forever and deadlock. So the horizontal run is modeled
+     * as one {@code walk}<i>k</i> phase per cell: the bot walks up to cell {@code k}, and the phase entered
+     * while it is still standing on cell {@code k-1} establishes cell {@code k}'s geometry from adjacency (bridge
+     * / mine one plank ahead, step on it). A single-cell step collapses to exactly one (terminal) phase.
+     *
+     * <p><b>Transit vs. break falls out of {@code Need.AIR} for free.</b> The runner mines a {@code Need.AIR}
+     * cell only while it is {@code solidAt} (movement-blocking); a passable-but-slow body cell (cobweb, berry
+     * bush) is not solid → never mined → transited intact, while a solid obstruction (a leaf block) is mined.
+     * That is exactly {@code candidates}' {@code bodyTransitCost}/{@code transitOrBreak} per-cell arbitration, so
+     * declaring {@code Need.AIR} on the body cells covers every {@code breakThrough} fold without ever mining a
+     * cell the search priced as intact transit.
+     *
+     * <p><b>Shapes we don't own</b> return {@code null} (stay legacy {@code steer}): a {@code ddy} outside
+     * {0, +1}, a diagonal (both horizontal axes move — that is {@link Diagonal}'s), or a multi-cell {@code +1}
+     * (step-assist is single-cell). The FOOTING gotcha is never triggered: every declared FOOTING sits under a
+     * cell the bot stands ON (never inside), and each run cell's FOOTING is declared while the bot is still on
+     * the previous cell, so it is never placed into an occupied cell.
+     */
+    @Override
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+        int ddx = tx - fx;
+        int ddy = ty - fy;
+        int ddz = tz - fz;
+
+        // Recognize only Traverse's own shapes; anything else stays on the legacy steer path.
+        if (ddy != 0 && ddy != 1) return null;                              // Traverse is flat or +1 only
+        boolean cardinal = (ddx == 0) ^ (ddz == 0);                        // exactly one horizontal axis moves
+        if (!cardinal) return null;                                        // a diagonal belongs to Diagonal
+        if (ddy == 1 && Math.abs(ddx) + Math.abs(ddz) != 1) return null;   // step-assist is single-cell
+
+        // Cold per-step math, done ONCE at build time — every per-tick predicate below is a couple of int
+        // compares plus the cheap along-axis multiply-add (one of sx/sz is 0 by the cardinal test).
+        final int sx = Integer.signum(ddx);
+        final int sz = Integer.signum(ddz);
+        final int n = Math.abs(ddx) + Math.abs(ddz);                       // run length (1 for micro / step-assist)
+
+        MovePlan plan = new MovePlan();
+
+        // Case B — step-assist (ddy == 1): a single low partial auto-stepped (~0.6 block) with NO jump. The body
+        // cells sit one higher (candidates' uy = fy+1), so AIR at (tx,ty+1,tz) and (tx,ty+2,tz); the destination
+        // floor is already standable, so NO footing (faithful to candidates, which folds no place here).
+        if (ddy == 1) {
+            // Inert for a one-phase plan, but set for uniformity: physically regressed to the from-cell.
+            plan.resetWhen(b -> b.grounded()
+                    && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+            plan.phase("stepup")
+                    .need(MovePlan.Need.AIR, tx, ty + 1, tz)                // = (tx, fy+2, tz): above the raised floor
+                    .need(MovePlan.Need.AIR, tx, ty + 2, tz)                // = (tx, fy+3, tz)
+                    .drive(SteerControl::drive)                             // hold forward + face; vanilla auto-steps the lip
+                    .done(b -> b.grounded()
+                            && b.footX() == tx && b.footY() == ty + 1 && b.footZ() == tz);
+            return plan;
+        }
+
+        // Case A — horizontal run (ddy == 0): flat / bridge / macro, one phase per run cell. The reset guard is
+        // only consulted once the cursor has advanced: the run physically fell back to its start cell.
+        plan.resetWhen(b -> b.grounded()
+                && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+        for (int k = 1; k <= n; k++) {
+            final int kk = k;
+            final int cx = fx + sx * k;
+            final int cz = fz + sz * k;
+            MovePlan.Phase ph = plan.phase("walk" + k)
+                    .need(MovePlan.Need.FOOTING, cx, fy, cz)               // plank under the cell (bridge places; flat/macro noop)
+                    .need(MovePlan.Need.AIR, cx, fy + 1, cz)               // feet-body cell clear (mine a solid, leave slow-passable)
+                    .need(MovePlan.Need.AIR, cx, fy + 2, cz)               // head-body cell clear
+                    .drive(SteerControl::drive);                           // medium-aware line-track walk (Traverse's default)
+            if (k < n) {
+                // Non-terminal: advance once grounded AT OR PAST cell k. Progress is monotone along the cardinal
+                // line (one of sx/sz is 0), so >= is skip-proof against a lag tick — at walk speed a cell is
+                // never skipped anyway, but >= cascades cleanly if it ever were.
+                ph.advanceWhen(b -> b.grounded()
+                        && (b.footX() - fx) * sx + (b.footZ() - fz) * sz >= kk);
+            } else {
+                // Terminal: the whole move is done standing on the to-cell.
+                ph.done(b -> b.grounded()
+                        && b.footX() == tx && b.footY() == ty + 1 && b.footZ() == tz);
+            }
+        }
+        return plan;
     }
 
     private static float cost(MovementContext ctx, long d) {

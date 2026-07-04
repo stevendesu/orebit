@@ -2,6 +2,7 @@ package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
+import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
@@ -167,5 +168,50 @@ public final class Fall implements Movement {
         } else {
             SteerControl.recenterOnTarget(b, path);
         }
+    }
+
+    /**
+     * The phase-model execution plan — the reactive counterpart of {@link #steer}, mapping its two branches
+     * (grounded → {@code steerTowards}, airborne → {@code recenterOnTarget}) 1:1 onto phase order so the
+     * driven behaviour is byte-for-byte the legacy drive. Fall is <b>WALKOFF &rarr; FALL</b>: stride off the
+     * lip toward the landing column {@code (tx,tz)} (which {@link #candidates} makes identical to the step-off
+     * neighbour column — the bot walks off into it and drops straight down), then, once airborne, home onto
+     * that column while the drop runs, completing only when actually standing on the landing cell.
+     *
+     * <p><b>No needs — Fall folds ZERO edits.</b> Every {@link #candidates} emit is the 4-arg edit-free {@code
+     * accept}; the whole drop column and the step-off body are proven passable-<i>intact</i> and priced with
+     * intact-transit costs ({@link MovementContext#cellTransitCost}/{@link MovementContext#bodyTransitCost}),
+     * never a break or place (the class Javadoc's "Fall folds no edits" rule). So neither phase carries a
+     * {@link MovePlan.Need}: the plan's empty need set covers the move's empty edit set exactly. Declaring an
+     * AIR need would be actively wrong — the runner would try to {@code mine} a mid-drop cell it can never
+     * reach while airborne.
+     *
+     * <p>No {@code boolean[]} arm is needed for {@link #resetWhen} (unlike {@link Parkour}): the runner only
+     * evaluates it once the cursor has advanced, and Fall reaches phase 1 ONLY via {@code advanceWhen(!grounded)},
+     * so by the time the guard is live the bot has already gone airborne — the phase-0→1 transition IS the
+     * "went airborne" event, with no takeoff-window aliasing to disarm around. The guard can then be true only
+     * if the bot came back down onto the exact start cell, which is precisely the balked step-off to re-attempt.
+     */
+    @Override
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+        final int landFeetY = ty + 1;             // feet BLOCK Y once standing on the landing floor
+        MovePlan plan = new MovePlan();
+        // Balked walk-off: physically back on the start floor with no drop taken → re-attempt from WALKOFF.
+        plan.resetWhen(b -> b.grounded()
+                && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+        // WALKOFF: line-track the takeoff→landing segment and hold forward, striding off the lip (the legacy
+        // grounded branch — steerTowards, not the medium-aware drive). Advance the moment the bot is airborne.
+        plan.phase("walkoff")
+                .drive(SteerControl::steerTowards)
+                .advanceWhen(b -> !b.grounded());
+        // FALL: airborne drop-control — recenterOnTarget pulls toward the landing column centre, eases near
+        // it and pushes BACK past it, so held step-off momentum can't carry the bot off a 1-wide landing.
+        // Complete only once actually STANDING on the landing cell (a touchdown on a wrong cell simply never
+        // fires done — the follower's grounded-stall recovery re-anchors and replans).
+        plan.phase("fall")
+                .drive(SteerControl::recenterOnTarget)
+                .done(b -> b.grounded()
+                        && b.footX() == tx && b.footY() == landFeetY && b.footZ() == tz);
+        return plan;
     }
 }
