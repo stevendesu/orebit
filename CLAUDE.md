@@ -160,6 +160,7 @@ routinely regress.** Understand why before touching anything hot:
 - `NavSectionBuilder` holds a **public static, non-thread-safe `BlockState[]` scratch** buffer; it also reflects into `PalettedContainer` internals — the most version-fragile code in the project.
 - ~~`ChunkNavLoader` discards its NavSection[]~~ — RESOLVED long since: it stores into `NavStore` (per-level chunk-key map) and notifies `HpaMaintenance`; unload drops + recycles.
 - README's "Smart Objects Over Managers" pillar is **contradicted** by the live static `BotManager`.
+- **PENDING — cross-dimension bot restore (needs a `platform/BotTeleport` overlay).** Bots now persist as real player data (stable per-owner UUID `nameUUIDFromBytes("OrebitBot:"+ownerUuid)`, saved/loaded via vanilla `placeNewPlayer`), and on rejoin `BotManager.spawnBotFor` re-snaps the bot beside the owner ("return to owner"). But if the bot logged out in a **different dimension**, that same-level `setPos` can't move it — it just logs and leaves the bot there (retrievable via `/bot come`/portal-seek). The clean fix is a new `platform/BotTeleport.to(bot, level, x,y,z, yaw,pitch)` seam (sibling of `BotSpawn`): on 26.x it's a one-liner `bot.teleportTo(level, x,y,z, java.util.Set.of(), yaw,pitch, false)`, but the signature churns pre-1.21.9 (`teleportTo(level,x,y,z,yaw,pitch)` / `changeDimension`), so it needs the usual 2–3 era flavors — deferred until we can build the full mc-1.21 matrix. `setServerLevel` alone is NOT enough (pointer flip → ghost entity; needs the real teleport).
 
 ## Where to look
 
