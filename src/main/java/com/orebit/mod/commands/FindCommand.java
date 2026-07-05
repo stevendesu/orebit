@@ -12,6 +12,7 @@ import com.orebit.mod.platform.CommandFeedback;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.resource.ResourceClasses;
 import com.orebit.mod.worldmodel.resource.ResourceQuery;
+import com.orebit.mod.worldmodel.resource.ResourceScan;
 
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -64,7 +65,8 @@ public final class FindCommand implements BotCommand {
                         + (minCount > 1 ? " (>=" + minCount + " per spot)" : "") + ".");
                 return;
             }
-            CommandFeedback.send(src, "nearest " + resource + " (" + hits.size() + "):");
+            CommandFeedback.send(src, "nearest " + resource + " (" + hits.size()
+                    + ") — coords are the 16³ region CENTRE, not the ore cell:");
             for (ResourceQuery.ResourceHit h : hits) {
                 final BlockPos c = h.center();
                 final long dx = c.getX() - anchor.getX();
@@ -72,9 +74,35 @@ public final class FindCommand implements BotCommand {
                 final long dz = c.getZ() - anchor.getZ();
                 final long dist = Math.round(Math.sqrt(dx * dx + dy * dy + dz * dz));
                 CommandFeedback.send(src, "  " + resource + " x~" + h.approxCount()
-                        + " at " + c.getX() + " " + c.getY() + " " + c.getZ()
-                        + " (" + dist + "m)");
+                        + " in region @ " + c.getX() + " " + c.getY() + " " + c.getZ()
+                        + " (" + dist + "m)" + liveScan(level, h, column, anchor));
             }
         });
+    }
+
+    /**
+     * Live-scan the hit's 16³ level-0 region (the pyramid only localizes to a section, not a block — design
+     * §6/§7) via {@link ResourceScan#exactCells} and report the EXACT matching cells: how many the live world
+     * actually holds and the nearest one to the anchor. This is the "why did it think there was iron here?"
+     * diagnostic — it distinguishes the normal case (the ore is a real block somewhere in the cube, just not
+     * at the centre) from a genuine phantom ({@code LIVE: 0}, a stale load-populated tally or a real tally/coord
+     * bug worth instrumenting the write path for). A region no longer resident can't be verified (its chunk
+     * unloaded since the tally was written); {@code exactCells} returns {@code null} there and we say so.
+     */
+    private static String liveScan(ServerLevel level, ResourceQuery.ResourceHit h, int column, BlockPos anchor) {
+        final List<BlockPos> cells = ResourceScan.exactCells(level, h.rx(), h.ry(), h.rz(), column);
+        if (cells == null) return "  [region not loaded — can't verify exact cells]";
+        if (cells.isEmpty()) return "  [LIVE: 0 exact in the 16³ region — stale tally or a bug, NOT a real vein]";
+        BlockPos nearest = null;
+        long best = Long.MAX_VALUE;
+        for (BlockPos p : cells) {
+            final long ddx = p.getX() - anchor.getX();
+            final long ddy = p.getY() - anchor.getY();
+            final long ddz = p.getZ() - anchor.getZ();
+            final long d = ddx * ddx + ddy * ddy + ddz * ddz;
+            if (d < best) { best = d; nearest = p; }
+        }
+        return "  [LIVE: " + cells.size() + " exact, nearest " + nearest.getX() + " " + nearest.getY()
+                + " " + nearest.getZ() + "]";
     }
 }

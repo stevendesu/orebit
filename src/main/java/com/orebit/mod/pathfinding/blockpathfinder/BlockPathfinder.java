@@ -115,8 +115,8 @@ public final class BlockPathfinder {
     /**
      * The node ceiling of a TIME-capped search ({@code budgetNanos != 0}) — a pure MEMORY backstop
      * (DESIGN-background-pathfinding.md §6): time is the binding limit by design, so the configured
-     * {@code pathing.maxNodes} (default 10k, which a 40 ms budget would never outlast) is deliberately
-     * NOT consulted in time mode. 256k rows bounds the per-thread Nodes SoA at ~10 MB — the
+     * sync {@code pathing.syncSearchBudgetNodes} (default 10k, which a 250 ms budget would never outlast) is
+     * deliberately NOT consulted in time mode. 256k rows bounds the per-thread Nodes SoA at ~10 MB — the
      * favour-cpu-over-ram ceiling the design priced per planner thread.
      */
     static final int TIME_MODE_NODE_BACKSTOP = 262_144;

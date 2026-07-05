@@ -82,6 +82,27 @@ public final class RegionPathfinder {
      */
     public static boolean REGION_PARTIAL_ON_BUDGET = true;
 
+    /**
+     * Step-by-step region-search trace sink — when non-null AND {@link #TRACE} is on, every node expansion and
+     * every candidate edge (kind, cost, crossing cell, accept/reject) is written here for OFFLINE analysis of
+     * WHY the region A* builds the skeleton it does (the down→over→up cavern-drop investigation — the region
+     * counterpart of {@link com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder#TRACE_OUT}). Format
+     * (space-separated, greppable):
+     * <pre>
+     *   E &lt;seq&gt; L&lt;level&gt; region=x,y,z frag=&lt;f&gt; g=&lt;g&gt; f=&lt;f&gt;
+     *     C &lt;kind&gt; -&gt; x,y,z frag=&lt;f&gt; cost=&lt;c&gt; crossing=wx,wy,wz &lt;OK|worse&gt;
+     * </pre>
+     * {@code kind} ∈ {walk, air-fall, air-pillar, solid-mine, water-swim, collapsed, unbuilt, mine-sibling,
+     * mine-fallback, mine-solid}. An {@code E} line is one pop (expansion order); the indented {@code C} lines
+     * under it are the edges it emitted ({@code OK} = relaxed onto the open set, {@code worse} = not an
+     * improvement / blacklisted). Writing per node does file I/O on the calling thread — a one-shot debug path
+     * driven by {@code /bot rtrace}, never on in normal play (the trace is huge + slow).
+     */
+    public static java.io.Writer TRACE_OUT;
+
+    /** Gate for {@link #TRACE_OUT}: emit the step-by-step region trace. Off in normal play (huge + slow). */
+    public static boolean TRACE = false;
+
     /** The ratified admissible heuristic (Euclidean region centers × min-cost-per-region). Strategy, not switch. */
     private static final RegionHeuristic HEURISTIC = new SimpleRegionHeuristic();
 
@@ -347,6 +368,8 @@ public final class RegionPathfinder {
             final int crx = nodes.x[current], cry = nodes.y[current], crz = nodes.z[current];
             final int fragA = nodes.frag[current];
             if (crx == grx && cry == gry && crz == grz && fragA == goalFrag) {
+                if (TRACE) trace("GOAL reached region=" + crx + "," + cry + "," + crz + " frag=" + fragA
+                        + " g=" + nodes.g[current]);
                 reachedRow = current;
                 break;
             }
@@ -359,6 +382,9 @@ public final class RegionPathfinder {
             final boolean uniformN = isUniformNode(rfN);
             final int countN = uniformN ? 1 : rfN.fragmentCount();
             final float gCur = nodes.g[current];
+            if (TRACE) trace("E " + expansions + " L" + level + " region=" + crx + "," + cry + "," + crz
+                    + " frag=" + fragA + " g=" + gCur + " f=" + nodes.f[current]
+                    + (uniformN ? " [" + kindLabel(rfN) + "]" : " [mixed frags=" + countN + "]"));
 
             // (A) Intra-region MINE edges to sibling fragments (dig through the wall) — MIXED, ≥2 fragments.
             // Dropped entirely for a no-break bot: it cannot dig between two disconnected pockets of a region.
@@ -367,8 +393,9 @@ public final class RegionPathfinder {
                     if (fragC == fragA) continue;
                     float edge = mineCost(level, rfN, fragA, fragC, minY, crx, cry, crz, wa, wb, wc);
                     // wb now holds fragC's centroid (its interior rep) — the mine-edge portal target.
-                    relaxFrag(nodes, current, gCur, edge, crx, cry, crz, fragC,
+                    boolean ok = relaxFrag(nodes, current, gCur, edge, crx, cry, crz, fragC,
                             wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
+                    if (TRACE) traceCand("mine-sibling", crx, cry, crz, fragC, edge, wb[0], wb[1], wb[2], ok);
                 }
             }
 
@@ -405,8 +432,10 @@ public final class RegionPathfinder {
                     // Uniform / collapsed / unbuilt neighbour: a single transit edge into its fragment 0.
                     float edge = uniformTransitCost(level, rfM, f, canPlace, safeFall);
                     footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
-                    relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
+                    boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
                             wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
+                    if (TRACE) traceCand(uniformKindLabel(rfM, f), mrx, mry, mrz, 0, edge,
+                            wb[0], wb[1], wb[2], ok);
                     continue;
                 }
 
@@ -425,8 +454,9 @@ public final class RegionPathfinder {
                     footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, packedB, wb);
                     if (footprintsOverlap(packedA, packedB)) {
                         float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall);
-                        relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, fb,
+                        boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, fb,
                                 wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
+                        if (TRACE) traceCand("walk", mrx, mry, mrz, fb, edge, wb[0], wb[1], wb[2], ok);
                         emitted = true;
                     } else {
                         long d = Math.abs(wb[0] - wa[0]) + Math.abs(wb[1] - wa[1]) + Math.abs(wb[2] - wa[2]);
@@ -440,14 +470,17 @@ public final class RegionPathfinder {
                         footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, packedB, wb);
                         float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall)
                                 + WALL_MINE_BLOCKS * MINE_PER_BLOCK * hardFactor;
-                        relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, bestFrag,
+                        boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, bestFrag,
                                 wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
+                        if (TRACE) traceCand("mine-fallback", mrx, mry, mrz, bestFrag, edge,
+                                wb[0], wb[1], wb[2], ok);
                     } else {
                         // Neighbour is MIXED but solid at this face → mine straight in to its fragment 0.
                         footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
                         float edge = RegionAddress.sideOf(level) * MINE_PER_BLOCK * hardFactor;
-                        relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
+                        boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
                                 wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
+                        if (TRACE) traceCand("mine-solid", mrx, mry, mrz, 0, edge, wb[0], wb[1], wb[2], ok);
                     }
                 }
             }
@@ -481,21 +514,21 @@ public final class RegionPathfinder {
      * {@link #WALK_PER_BLOCK} so every boundary crossing costs ≥ one tick — so g grows monotonically even for
      * perfectly-aligned portals (and for the free unbuilt transit), keeping the search well-ordered.
      */
-    private static void relaxFrag(Nodes nodes, int curRow, float gCur, float edge,
-                                  int mrx, int mry, int mrz, int mFrag,
-                                  int px, int py, int pz, int grx, int gry, int grz,
-                                  float hScale, RegionEdgeBlacklist blacklist) {
+    private static boolean relaxFrag(Nodes nodes, int curRow, float gCur, float edge,
+                                     int mrx, int mry, int mrz, int mFrag,
+                                     int px, int py, int pz, int grx, int gry, int grz,
+                                     float hScale, RegionEdgeBlacklist blacklist) {
         long k = fragmentKey(mrx, mry, mrz, mFrag);
         // Online repair (RegionEdgeBlacklist): skip a crossing the block tier proved unrealizable for these
         // caps, so the region A* routes around it (the walk-around) instead of re-offering the dead end.
         if (blacklist != null
                 && blacklist.contains(fragmentKey(nodes.x[curRow], nodes.y[curRow], nodes.z[curRow],
                         nodes.frag[curRow]), k)) {
-            return;
+            return false;
         }
         float tentative = gCur + Math.max(edge, WALK_PER_BLOCK);
         int row = nodes.intern(k, mrx, mry, mrz, mFrag);
-        if (tentative >= nodes.g[row]) return; // new rows start at +inf → first visit admitted
+        if (tentative >= nodes.g[row]) return false; // new rows start at +inf → first visit admitted
         nodes.g[row] = tentative;
         nodes.f[row] = tentative + HEURISTIC.estimate(mrx, mry, mrz, grx, gry, grz) * hScale;
         nodes.parent[row] = curRow;
@@ -504,6 +537,46 @@ public final class RegionPathfinder {
         nodes.portalY[row] = py;
         nodes.portalZ[row] = pz;
         nodes.push(row);
+        return true;
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Region trace sink helpers (only reached under TRACE — a /bot rtrace one-shot; see TRACE_OUT).
+    // ---------------------------------------------------------------------------------------------------
+
+    private static void trace(String line) {
+        java.io.Writer w = TRACE_OUT;
+        if (w == null) return;
+        try { w.write(line); w.write('\n'); } catch (java.io.IOException ignored) { }
+    }
+
+    /** Trace one emitted candidate edge + its accept/reject outcome (only when {@link #TRACE}). */
+    private static void traceCand(String kind, int rx, int ry, int rz, int frag, float cost,
+                                  int px, int py, int pz, boolean ok) {
+        trace("  C " + kind + " -> " + rx + "," + ry + "," + rz + " frag=" + frag
+                + " cost=" + cost + " crossing=" + px + "," + py + "," + pz + (ok ? " OK" : " worse"));
+    }
+
+    /** The own-kind label of the expanded node (the {@code E} line tag). */
+    private static String kindLabel(RegionFragments rf) {
+        if (rf == null) return "unbuilt";
+        switch (rf.kind()) {
+            case RegionFragments.KIND_SOLID: return "solid";
+            case RegionFragments.KIND_AIR:   return "air";
+            case RegionFragments.KIND_WATER: return "water";
+            default:                         return "collapsed";
+        }
+    }
+
+    /** The trace label for a uniform/collapsed/unbuilt transit edge across face {@code f} (only under TRACE). */
+    private static String uniformKindLabel(RegionFragments rfM, int f) {
+        if (rfM == null) return "unbuilt";
+        switch (rfM.kind()) {
+            case RegionFragments.KIND_SOLID: return "solid-mine";
+            case RegionFragments.KIND_WATER: return "water-swim";
+            case RegionFragments.KIND_AIR:   return f == 2 ? "air-fall" : "air-pillar";
+            default:                         return "collapsed";
+        }
     }
 
     /**

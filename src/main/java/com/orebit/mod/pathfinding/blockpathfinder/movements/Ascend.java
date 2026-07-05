@@ -4,6 +4,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
+import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
@@ -111,5 +112,85 @@ public final class Ascend implements Movement {
     public void steer(BotSteering b, SteerView path) {
         SteerControl.steerTowards(b, path);
         b.setJumping(true);
+    }
+
+    /**
+     * The phase-model execution plan (the reactive counterpart to {@link #candidates}'s edit-fold — the same
+     * conversion {@link Pillar} and {@link Parkour} made from the {@code steer} + one-shot-edit path to a
+     * live-geometry reconcile). An Ascend is <b>BUILD &rarr; CLIMB</b>: mine any solid takeoff/landing body
+     * cells clear and (in open air) build the step up, then walk-and-jump onto it. The from-floor is
+     * {@code (fx,fy,fz)} and the destination floor {@code (tx,ty,tz)} with {@code ty == fy + 1} (a cardinal
+     * unit step one up — the geometry {@link #candidates} resolved), so all cells below are derived off those.
+     *
+     * <h2>Coverage — every {@link #candidates} fold reproduced reactively</h2>
+     * The phase 0 {@code AIR} needs re-mine the three break folds (self-healing — one timed break/tick while
+     * the cell reads solid, no-op once already air):
+     * <ul>
+     *   <li>{@code (fx,fy+3,fz)} — the takeoff head-clearance (candidates' {@code requireAir(x,y+3,z)});</li>
+     *   <li>{@code (tx,ty+1,tz)} — the landing feet (candidates' {@code requireBodyClear} feet cell);</li>
+     *   <li>{@code (tx,ty+2,tz)} — the landing head (candidates' {@code requireBodyClear} head cell).</li>
+     * </ul>
+     * The phase 0 DRIVE is the reactive mirror of {@code requireFootingOn(nx,uy,nz, nx,y,nz)}, made safe by
+     * keying every place on {@code solidAt}: it places the footing {@code (tx,ty,tz)} only when that cell is
+     * not already solid, and the support {@code (tx,ty-1,tz)} beneath it only when the footing cell AND the
+     * cell below it are both air (the open-air staircase step). A natural floating ledge (footing solid, cell
+     * beneath air) places nothing and never stalls — the exact reason the support is a {@code solidAt}-gated
+     * drive body, NOT an unconditional {@code Need.FOOTING} (a declared footing need would place forever under
+     * a walk-only bot ascending a solid ledge). The candidates' pass-through-hazard break-through ({@code BT})
+     * is deliberately NOT reproduced — {@code Need.AIR} keys on {@code solidAt} and a berry-bush / cobweb is
+     * passable, so the runner transits it intact (harmless, identical to the {@link Pillar}/{@link Parkour}
+     * limitation). A footing with a natural SIDE face but air beneath places one extra unpriced support block
+     * vs candidates' single place — harmless fill under the new floor.
+     *
+     * <h2>The launch-armed reset (the {@link Parkour} {@code airborneOnce} precedent)</h2>
+     * {@code launched} is armed only once the climb drive sees the bot actually airborne, and cleared by the
+     * build drive on every re-attempt. The {@code resetWhen} guard — "we launched the jump and fell back onto
+     * the from-floor" — is checked by {@link PhaseRunner} only while in {@code "climb"} (cursor &gt; 0), so the
+     * arm is essential: without it, the instant phase 0 advances (tick 1 for a natural all-clear step) the bot
+     * is still on the from-cell and the guard would alias the start state and ping-pong (the aliasing Parkour
+     * documents). A balked ascend snaps back to phase 0, which re-mines and rebuilds the step and re-jumps.
+     */
+    @Override
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+        final int fromFootY = fy + 1;              // feet BLOCK Y standing on the from-floor
+        final int landFootY = ty + 1;              // feet BLOCK Y standing on the destination floor (= fy+2)
+        final boolean[] launched = new boolean[1]; // reset-guard arm (Parkour's airborneOnce precedent)
+        MovePlan plan = new MovePlan();
+        // Launched the jump then fell back onto the from-floor → a balked ascend; re-mine + rebuild + re-jump.
+        // Only meaningful in "climb" (PhaseRunner checks resetWhen at cursor > 0), and only once truly airborne
+        // (the launched arm), so it can't alias the still-on-from-cell state the instant phase 0 advances.
+        plan.resetWhen(b -> launched[0]
+                && b.grounded()
+                && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
+        // BUILD: mine the takeoff head + landing body clear (AIR needs, self-healing), then — once those hold —
+        // build the step up in open air. The drive places nothing on a natural step (footing already solid);
+        // digging into terrain places just the footing (support cell has a face); an open-air staircase places
+        // support then footing (the two-block step, the only path that ever calls place). Hold on the column
+        // (recenter) while building; advance the instant the footing is established (built or naturally present).
+        plan.phase("build")
+                .need(MovePlan.Need.AIR, fx, fy + 3, fz)
+                .need(MovePlan.Need.AIR, tx, ty + 1, tz)
+                .need(MovePlan.Need.AIR, tx, ty + 2, tz)
+                .drive((b, v) -> {
+                    launched[0] = false;                        // disarm the reset until the jump truly launches
+                    if (!b.solidAt(tx, ty, tz)) {               // footing needs building (skip on a natural step)
+                        if (!b.solidAt(tx, ty - 1, tz)) b.place(tx, ty - 1, tz); // open-air support first
+                        b.place(tx, ty, tz);                    // then the footing on top
+                    }
+                    SteerControl.recenterOnTarget(b, v);        // hold on the step column while building
+                })
+                .advanceWhen(b -> b.solidAt(tx, ty, tz));
+        // CLIMB: walk-forward-while-jumping onto the step (the legacy steer()). The held jump input also swims
+        // the bot up-and-out when this Ascend leaves water. Arm the reset only once actually airborne. Complete
+        // only when standing ON the destination floor (grounded at the landing feet cell).
+        plan.phase("climb")
+                .drive((b, v) -> {
+                    if (!b.grounded()) launched[0] = true;      // arm the reset only once off the ground
+                    SteerControl.steerTowards(b, v);
+                    b.setJumping(true);
+                })
+                .done(b -> b.grounded()
+                        && b.footX() == tx && b.footY() == landFootY && b.footZ() == tz);
+        return plan;
     }
 }

@@ -62,13 +62,13 @@ public final class OrebitCommon {
         });
 
         // Background planner pool (DESIGN-background-pathfinding.md §3): started once, AFTER ConfigLoader::load
-        // (reads pathing.async/maxThreads/searchBudgetMs) and after the warm-up above (JIT is warm before the
-        // first submitted search; each pool thread warms its own ThreadLocal scratch as it starts). When
+        // (reads pathing.async/maxThreads/asyncSearchBudgetMs) and after the warm-up above (JIT is warm before
+        // the first submitted search; each pool thread warms its own ThreadLocal scratch as it starts). When
         // pathing.async=false this never runs, PlanExecutor.instance() stays null, and every search remains
-        // synchronous on the tick thread — byte-identical to before.
+        // synchronous on the tick thread, node-capped by pathing.syncSearchBudgetNodes.
         events.onServerStarted(server -> {
             if (ConfigLoader.config().asyncPathing()) {
-                PlanExecutor.start(ConfigLoader.config().maxThreads(), ConfigLoader.config().searchBudgetMs());
+                PlanExecutor.start(ConfigLoader.config().maxThreads(), ConfigLoader.config().asyncSearchBudgetMs());
             }
         });
 
@@ -130,7 +130,15 @@ public final class OrebitCommon {
                 return; // our own bot leaving — nothing to clean up for it
             }
             LOGGER.info("[Orebit] Player {} disconnected.", player.getName().getString());
-            BotManager.removeBotFor(player);
+            // Marshal the teardown onto the SERVER THREAD (mirrors the deferred spawn in onPlayerJoin).
+            // This event fires on the network (Netty) thread; removeBotFor -> PlayerList.remove(bot) mutates
+            // the player list + entity section manager and SAVES the bot's player data. Doing that off-thread
+            // races the server thread — most visibly on Save & Exit, where IntegratedServer.halt saves player
+            // data at the same instant: the two saves collide on the bot's <uuid>.dat rename
+            // (NoSuchFileException) and the concurrent PlayerList mutation kills the shutdown before it
+            // completes. The server may already be stopping, in which case the task simply never runs (the
+            // whole server is going away) — either way the bot is never removed off-thread.
+            ((ServerLevel) Worlds.of(player)).getServer().execute(() -> BotManager.removeBotFor(player));
         });
     }
 }

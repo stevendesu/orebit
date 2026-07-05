@@ -9,7 +9,7 @@ try: sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception: pass
 
 TRACE = sys.argv[1] if len(sys.argv) > 1 else \
-    r"C:\Users\steve\Repos\personal\orebit-1.21.4\versions\26.2\run\orebit-trace.txt"
+    r"C:\Users\steve\Repos\personal\orebit\versions\26.2\run\orebit-trace.txt"
 OUT = sys.argv[2] if len(sys.argv) > 2 else TRACE.replace(".txt", ".png")
 
 E = re.compile(r"^E (\d+) (-?\d+) (-?\d+) (-?\d+) g=([\d.]+) f=([\d.]+) via=(\w+)")

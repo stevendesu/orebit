@@ -18,7 +18,7 @@ import net.minecraft.world.level.block.Block;
  * <h2>The rules</h2>
  * <ul>
  *   <li>booleans: anything other than {@code true}/{@code false} (case-insensitive) → the key's default;</li>
- *   <li>{@code pathing.maxNodes} must be {@code > 0} (else the A* backstop is disabled) → clamp to ≥ 1,
+ *   <li>{@code pathing.syncSearchBudgetNodes} must be {@code > 0} (else the sync A* cap is disabled) → clamp to ≥ 1,
  *       defaulting a non-integer;</li>
  *   <li>{@code pathing.greedyWeight} must be {@code >= 1.0} (below 1 is non-greedy / nonsensical for this
  *       weighted-octile search) → clamp up, defaulting a non-number;</li>
@@ -74,7 +74,7 @@ public final class ConfigValidator {
                 protectedBlocks(props, ConfigKeys.MINING_PROTECTED_BLOCKS, d.protectedBlocks()),
                 bool(props, ConfigKeys.MINING_ALLOW_UNBREAKABLE, d.allowUnbreakable()),
                 // pathing
-                intClamped(props, ConfigKeys.PATHING_MAX_NODES, d.maxNodes(), 1, Integer.MAX_VALUE),
+                intClamped(props, ConfigKeys.PATHING_SYNC_SEARCH_BUDGET_NODES, d.maxNodes(), 1, Integer.MAX_VALUE),
                 weight(props, ConfigKeys.PATHING_GREEDY_WEIGHT, d.greedyWeight()),
                 weightNonNeg(props, ConfigKeys.PATHING_COST_PER_HITPOINT, d.costPerHitpoint()),
                 bool(props, ConfigKeys.PATHING_WARMUP, d.warmup()),
@@ -83,7 +83,7 @@ public final class ConfigValidator {
                 // Upper clamps are sanity rails only: maxThreads is re-clamped to [1, cores-2] at pool
                 // start (the host's core count isn't known here), and a >10s search budget is a config typo.
                 intClamped(props, ConfigKeys.PATHING_MAX_THREADS, d.maxThreads(), 1, 64),
-                intClamped(props, ConfigKeys.PATHING_SEARCH_BUDGET_MS, d.searchBudgetMs(), 1, 10_000));
+                intClamped(props, ConfigKeys.PATHING_ASYNC_SEARCH_BUDGET_MS, d.asyncSearchBudgetMs(), 1, 10_000));
     }
 
     // ---- per-type parse + clamp (each warns through the sink and never throws) ----------------------
