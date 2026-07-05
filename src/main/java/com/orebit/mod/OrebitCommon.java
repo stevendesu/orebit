@@ -130,7 +130,15 @@ public final class OrebitCommon {
                 return; // our own bot leaving — nothing to clean up for it
             }
             LOGGER.info("[Orebit] Player {} disconnected.", player.getName().getString());
-            BotManager.removeBotFor(player);
+            // Marshal the teardown onto the SERVER THREAD (mirrors the deferred spawn in onPlayerJoin).
+            // This event fires on the network (Netty) thread; removeBotFor -> PlayerList.remove(bot) mutates
+            // the player list + entity section manager and SAVES the bot's player data. Doing that off-thread
+            // races the server thread — most visibly on Save & Exit, where IntegratedServer.halt saves player
+            // data at the same instant: the two saves collide on the bot's <uuid>.dat rename
+            // (NoSuchFileException) and the concurrent PlayerList mutation kills the shutdown before it
+            // completes. The server may already be stopping, in which case the task simply never runs (the
+            // whole server is going away) — either way the bot is never removed off-thread.
+            ((ServerLevel) Worlds.of(player)).getServer().execute(() -> BotManager.removeBotFor(player));
         });
     }
 }

@@ -10,6 +10,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.GameType;
 
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 public class BotManager {
@@ -24,17 +25,18 @@ public class BotManager {
         if (baseName.length() > 12) {
             baseName = baseName.substring(0, 12);
         }
-        GameProfile profile = new GameProfile(UUID.randomUUID(), baseName + "_bot");
+        // STABLE per-owner identity (not random): the bot is a real PlayerList member, so vanilla
+        // saves/loads its data under this UUID. A deterministic UUID makes the bot's saved player data
+        // (inventory, tools, XP) round-trip across sessions — mine diamonds, log out, log back in, they're
+        // still on the bot. Salted with a bot-specific prefix so it can never collide with a real (offline)
+        // player, whose UUID vanilla derives as nameUUIDFromBytes("OfflinePlayer:"+name).
+        GameProfile profile = new GameProfile(botUuidFor(player.getUUID()), baseName + "_bot");
 
         AllyBotEntity bot = new AllyBotEntity(server, world, profile, player);
+        // Position beside the owner BEFORE place so a brand-new bot's spawn packet is already at the right
+        // spot (a fresh bot has no saved data, so this position sticks).
         BlockPos safeSpot = BotPositioning.findSafeSpotNear(player, 3);
-        if (safeSpot != null) {
-            bot.setPos(safeSpot.getX() + 0.5, safeSpot.getY(), safeSpot.getZ() + 0.5);
-            BotPositioning.faceEachOther(bot, player);
-            BotPositioning.faceEachOther(player, bot);
-        } else {
-            bot.setPos(player.getX(), player.getY(), player.getZ()); // fallback
-        }
+        placeNearOwner(bot, player, safeSpot);
         bot.setCustomName(player.getDisplayName().copy().append("'s Bot"));
         bot.setCustomNameVisible(true);
 
@@ -44,6 +46,8 @@ public class BotManager {
         // before the spawn packet (no "add player prior to sending player info" race) and the
         // bot renders. This replaces the old hand-rolled broadcast + addFreshEntity. The
         // version-specific cookie / placeNewPlayer signature lives in the BotSpawn overlay.
+        // placeNewPlayer also runs vanilla's load(<uuid>.dat): a RETURNING bot's saved inventory,
+        // tools and XP (and its logout position/dimension) are restored right here.
         BotSpawn.place(server, bot);
 
         // Complete the join the way a real client would: mark the bot's connection "client-loaded". As of
@@ -62,8 +66,40 @@ public class BotManager {
         // no instant-break, takes fall/lava/drown damage when takesDamage is on).
         bot.setGameMode(GameType.SURVIVAL);
 
+        // "Return to owner" on rejoin: the load in placeNewPlayer may have restored the bot to its LOGOUT
+        // position — re-snap it beside the player so a returning bot comes back to you, keeping the restored
+        // inventory. A cross-dimension restore (bot logged out in another dimension) can't be snapped without
+        // a teleport, so leave it there; the owner can /bot come (portal-seek) to retrieve it. Same-dimension
+        // is the common case.
+        if (Worlds.of(bot) == world) {
+            placeNearOwner(bot, player, safeSpot);
+        } else {
+            OrebitCommon.LOGGER.info("[Orebit] Restored bot for {} in a different dimension ({}) — /bot come to retrieve it.",
+                    player.getName().getString(), Worlds.of(bot));
+        }
+
         botsByOwner.put(player.getUUID(), bot);
         OrebitCommon.LOGGER.info("[Orebit] Spawned bot for {}", player.getName().getString());
+    }
+
+    /** Place the bot beside its owner (a safe spot near the player, else the player's own cell), facing them. */
+    private static void placeNearOwner(AllyBotEntity bot, ServerPlayer player, BlockPos safeSpot) {
+        if (safeSpot != null) {
+            bot.setPos(safeSpot.getX() + 0.5, safeSpot.getY(), safeSpot.getZ() + 0.5);
+            BotPositioning.faceEachOther(bot, player);
+            BotPositioning.faceEachOther(player, bot);
+        } else {
+            bot.setPos(player.getX(), player.getY(), player.getZ()); // fallback
+        }
+    }
+
+    /**
+     * The deterministic per-owner bot UUID so the bot's saved player data (inventory, tools, XP) persists
+     * across sessions. Salted with {@code "OrebitBot:"} so it can never collide with a real offline player
+     * UUID (vanilla derives those as {@code nameUUIDFromBytes("OfflinePlayer:"+name)}).
+     */
+    private static UUID botUuidFor(UUID ownerUuid) {
+        return UUID.nameUUIDFromBytes(("OrebitBot:" + ownerUuid).getBytes(StandardCharsets.UTF_8));
     }
 
     /** The bot owned by {@code player}, or {@code null} if they have none (used by the /bot commands). */
