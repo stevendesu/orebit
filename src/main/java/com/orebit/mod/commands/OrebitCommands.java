@@ -38,6 +38,7 @@ public final class OrebitCommands {
             new GatherCommand(),
             new HereCommand(),
             new TraceCommand(),
+            new RegionTraceCommand(),
             new ProbeCommand(),
             new ConfigCommand(),
             new DebugCommand());

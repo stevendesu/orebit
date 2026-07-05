@@ -12,6 +12,7 @@ import com.orebit.mod.pathfinding.PathStatus;
 import com.orebit.mod.pathfinding.async.PlanExecutor;
 import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
+import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
@@ -1360,6 +1361,75 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             BlockPathfinder.TRACE = false;
             BlockPathfinder.TRACE_OUT = null;
             BlockPathfinder.LOG_TIMING = savedTiming;
+        }
+        return file.getAbsolutePath();
+    }
+
+    /**
+     * {@code /bot rtrace} — the REGION-tier counterpart of {@link #traceTo}: a one-shot diagnostic of WHY the
+     * region A* builds the skeleton it does (the down→over→up cavern-drop investigation). Stops the bot, then
+     * runs a single direct level-0 {@link RegionPathfinder#plan} from the bot to the caller with
+     * {@link RegionPathfinder#TRACE} on, dumping every expansion + candidate edge (kind, cost, crossing cell,
+     * accept/reject) to {@code <run dir>/orebit-region-trace.txt} for offline analysis.
+     *
+     * <p>It first builds the real two-tier {@link PathPlan} (TRACE off) purely to capture
+     * {@link PathPlan#describeSkeleton} — the skeleton the bot actually used — as a cross-check in the header;
+     * the traced search is the direct level-0 fragment plan, which reproduces that skeleton for a near
+     * (cap-safe level-0) goal like an in-cavern hop. For a far goal the live cascade may plan at a coarser
+     * level, so the header skeleton is the authoritative record and the traced level-0 search is the detail.
+     */
+    public String regionTraceTo(BlockPos goalFloor) {
+        setMode(Mode.STAY); // stop the per-tick replan; the trace is a standalone one-shot search
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        RegionGrid grid = RegionGrid.of(level);
+        BlockPos startFloor = this.blockPosition().below();
+        final BotCaps caps = caps();
+
+        String skeletonDump = null;
+        try {
+            PathPlan plan = new PathPlan(level, grid, startFloor, goalFloor, caps, inventoryFeasibility());
+            skeletonDump = plan.describeSkeleton(); // the skeleton the live cascade actually produced
+        } catch (Throwable t) {
+            skeletonDump = "(live PathPlan threw " + t + ")";
+        }
+
+        java.io.File file = new java.io.File("orebit-region-trace.txt"); // run dir
+        try (java.io.BufferedWriter w = new java.io.BufferedWriter(new java.io.FileWriter(file))) {
+            w.write("Orebit REGION A* trace  start=" + startFloor + "  goal=" + goalFloor + "  caps=" + caps
+                    + "  (direct level-0 fragment plan)\n");
+            if (skeletonDump != null) {
+                w.write("\n== live cascade skeleton (cross-check) ==\n" + skeletonDump + "\n");
+            }
+            w.write("\nlegend: 'E <seq> L<level> region=x,y,z frag=<f> g=<g> f=<f> [kind]' = one expansion"
+                    + " (pop), in order;  '  C <kind> -> x,y,z frag=<f> cost=<c> crossing=wx,wy,wz <OK|worse>'"
+                    + " = a candidate edge it emitted. kinds: walk|air-fall|air-pillar|solid-mine|water-swim|"
+                    + "collapsed|unbuilt|mine-sibling|mine-fallback|mine-solid.\n\n");
+            RegionPathPlan rp;
+            RegionPathfinder.TRACE_OUT = w;
+            RegionPathfinder.TRACE = true;
+            try {
+                rp = RegionPathfinder.plan(level, grid, startFloor, goalFloor, caps);
+            } finally {
+                RegionPathfinder.TRACE = false;
+                RegionPathfinder.TRACE_OUT = null;
+            }
+            if (rp == null || rp.isEmpty()) {
+                w.write("\nRESULT: no skeleton (null/empty)\n");
+            } else {
+                StringBuilder sb = new StringBuilder("\nRESULT: " + rp.size() + " regions"
+                        + (rp.reachedGoalRegion() ? " (reached goal region)" : " (PARTIAL — goal not reached)")
+                        + "  L" + rp.level() + "\n");
+                for (int i = 0; i < rp.size(); i++) {
+                    sb.append("  [").append(i).append("] region=").append(rp.rx(i)).append(',')
+                            .append(rp.ry(i)).append(',').append(rp.rz(i));
+                    if (rp.isFragmentModel()) sb.append(" frag=").append(rp.fragmentId(i));
+                    if (rp.hasPortal(i)) sb.append(" crossing=").append(rp.portalCell(i));
+                    sb.append('\n');
+                }
+                w.write(sb.toString());
+            }
+        } catch (java.io.IOException e) {
+            return "region trace FAILED: " + e;
         }
         return file.getAbsolutePath();
     }
