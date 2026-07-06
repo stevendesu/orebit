@@ -55,4 +55,35 @@ public final class RegionCostField {
         if (ix < 0 || ix >= dimX || iy < 0 || iy >= dimY || iz < 0 || iz >= dimZ) return -1;
         return (iy * dimZ + iz) * dimX + ix;
     }
+
+    /**
+     * Diagnostic dump of every reached region, sorted cheapest-first: its region-unit cost-to-goal and the
+     * block-tick heuristic contribution it produces ({@code cost × Traverse.FLAT_COST}, before the greedy
+     * weight). Written into the {@code /bot trace} region dump so the field values are inspectable — in
+     * particular whether pillar/fall-heavy routes are over-priced vs the block tier, and whether the goal
+     * region reads 0 (the same-region blindness).
+     */
+    public String dump() {
+        int reached = 0;
+        for (float c : cost) {
+            if (c < UNREACHED) reached++;
+        }
+        Integer[] order = new Integer[cost.length];
+        for (int i = 0; i < order.length; i++) {
+            order[i] = i;
+        }
+        java.util.Arrays.sort(order, (a, b) -> Float.compare(cost[a], cost[b]));
+        StringBuilder sb = new StringBuilder();
+        sb.append("region cost-to-goal field: ").append(reached).append(" of ").append(cost.length)
+                .append(" box regions reached  (cost = region units;  h≈ = ×4.633 → block ticks, pre-greedy)\n");
+        for (int i : order) {
+            if (cost[i] >= UNREACHED) {
+                break;
+            }
+            int ix = i % dimX, iz = (i / dimX) % dimZ, iy = i / (dimX * dimZ);
+            sb.append(String.format("  (%d,%d,%d)  cost=%.1f  h≈%.0f%n",
+                    minRx + ix, minRy + iy, minRz + iz, cost[i], cost[i] * 4.633f));
+        }
+        return sb.toString();
+    }
 }
