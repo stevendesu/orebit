@@ -11,6 +11,7 @@ import com.orebit.mod.pathfinding.PathPlan;
 import com.orebit.mod.pathfinding.PathStatus;
 import com.orebit.mod.pathfinding.async.PlanExecutor;
 import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
+import com.orebit.mod.pathfinding.regionpathfinder.RegionCostField;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionMineModel;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
@@ -37,6 +38,7 @@ import com.orebit.mod.platform.MoveReport;
 import com.orebit.mod.platform.Replaceable;
 import com.orebit.mod.platform.WorldEdits;
 import com.orebit.mod.platform.Worlds;
+import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
@@ -1560,43 +1562,88 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             return "trace FAILED: two-tier plan threw " + t;
         }
 
-        java.io.File file = new java.io.File("orebit-trace.txt"); // run dir
+        final boolean haveWindow = target != null && corridor != null;
+        final BlockPos searchGoal = haveWindow ? target : goalFloor;
+
+        // PROTOTYPE region-informed heuristic A/B (region cost/fragment work): build a per-region cost-to-goal
+        // field rooted at the block search's goal, bounded to a box around the start+goal regions, and run the
+        // trace TWICE — baseline (octile only) → orebit-trace.txt, region-heuristic ON → orebit-trace-region.txt
+        // — so we can compare expansion counts + PNG both. The field is a prototype extra; on any failure we fall
+        // back to a baseline-only trace.
+        final RegionGrid rgrid = RegionGrid.of(level);
+        final int minY = rgrid.minY();
+        final RegionMineModel mine = RegionMineModel.from(inv != null ? inv.mining() : null);
+        RegionCostField field = null;
+        try {
+            RegionPathfinder.RegionBox bound = RegionPathfinder.RegionBox.around(
+                    RegionAddress.regionX(startFloor.getX(), 0), RegionAddress.regionY(startFloor.getY(), 0, minY),
+                    RegionAddress.regionZ(startFloor.getZ(), 0),
+                    RegionAddress.regionX(searchGoal.getX(), 0), RegionAddress.regionY(searchGoal.getY(), 0, minY),
+                    RegionAddress.regionZ(searchGoal.getZ(), 0), 3);
+            field = RegionPathfinder.costToGoalField(rgrid, minY, searchGoal,
+                    caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), mine, bound);
+        } catch (Throwable t) {
+            field = null;
+        }
+
+        int baseExp = traceOneRun(new java.io.File("orebit-trace.txt"), level, startFloor, goalFloor,
+                searchGoal, haveWindow, corridor, caps, inv, skeletonDump, false, null);
+        if (baseExp < 0) {
+            return "trace FAILED: I/O error on baseline run";
+        }
+        String msg = "baseline=" + baseExp + " expansions → orebit-trace.txt";
+        if (field != null) {
+            int regExp = traceOneRun(new java.io.File("orebit-trace-region.txt"), level, startFloor, goalFloor,
+                    searchGoal, haveWindow, corridor, caps, inv, skeletonDump, true, field);
+            msg += (regExp >= 0)
+                    ? "   |   region-heuristic=" + regExp + " expansions → orebit-trace-region.txt"
+                    : "   |   region run I/O error";
+        } else {
+            msg += "   |   region field unavailable (prototype)";
+        }
+        return msg;
+    }
+
+    /** One traced block-A* run for {@link #traceTo} — writes the trace to {@code file} and returns the expansion
+     *  count. {@code regionMode} toggles the prototype region-informed heuristic ({@code field} its cost field). */
+    private int traceOneRun(java.io.File file, ServerLevel level, BlockPos startFloor, BlockPos goalFloor,
+                            BlockPos searchGoal, boolean haveWindow, RegionBound corridor, BotCaps caps,
+                            MovementContext.InventoryView inv, String skeletonDump, boolean regionMode,
+                            RegionCostField field) {
         boolean savedTiming = BlockPathfinder.LOG_TIMING;
         try (java.io.BufferedWriter w = new java.io.BufferedWriter(new java.io.FileWriter(file))) {
-            final boolean haveWindow = target != null && corridor != null;
-            if (haveWindow) {
-                w.write("Orebit A* trace  start=" + startFloor + "  goal=" + goalFloor
-                        + "  window target=" + target + "  corridor=" + corridor + "  caps=" + caps
-                        + "  (HPA* first window — corridor + cuboids + macro-ops + goal premium ACTIVE)\n");
-            } else {
-                w.write("Orebit A* trace  start=" + startFloor + "  goal=" + goalFloor + "  caps=" + caps
-                        + "  (HPA* produced NO window — falling back to raw block-A*, no corridor)\n");
-            }
+            w.write("Orebit A* trace  start=" + startFloor + "  goal=" + goalFloor
+                    + (haveWindow ? "  window target=" + searchGoal + "  corridor=" + corridor
+                                  : "  (raw block-A*, no corridor)")
+                    + "  regionHeuristic=" + (regionMode && field != null) + "  caps=" + caps + "\n");
             if (skeletonDump != null) {
-                w.write("\n" + skeletonDump + "\n\n"); // the region skeleton behind this window target
+                w.write("\n" + skeletonDump + "\n\n");
             }
             w.write("legend: 'E <seq> <x> <y> <z> g=<g> f=<f> via=<move|start>' = one expansion (pop), in"
                     + " order;  '  C <move> <x> <y> <z> cost=<c> <OK|worse|corridor>' = a candidate it"
                     + " emitted (OK=relaxed onto the open set, worse=not an improvement).\n\n");
             BlockPathfinder.TRACE_OUT = w;
             BlockPathfinder.TRACE = true;
-            BlockPathfinder.LOG_TIMING = false; // the trace IS the record; skip the one-line summary
-            // Match the live driver: UNCONFINED search (confineBound=null) with the cuboid GROWTH cap
-            // (cuboidBound=corridor) so macros/forced-cost are active but the trace isn't walled to a corridor.
+            BlockPathfinder.LOG_TIMING = false;
+            BlockPathfinder.REGION_FIELD = field;
+            BlockPathfinder.REGION_HEURISTIC = regionMode && field != null;
             BlockPathPlan plan = haveWindow
-                    ? BlockPathfinder.findPath(new NavGridView(level), startFloor, target, caps, null, corridor, inv)
+                    ? BlockPathfinder.findPath(new NavGridView(level), startFloor, searchGoal, caps, null, corridor, inv)
                     : BlockPathfinder.findPath(new NavGridView(level), startFloor, goalFloor, caps, null, null, inv);
             BlockPathfinder.TRACE = false;
+            int exp = BlockPathfinder.lastExpansions();
             w.write("\nRESULT: " + (plan == null ? "FAIL (null)" : plan.size() + "wp cost=" + plan.cost())
-                    + "\n");
+                    + "  expansions=" + exp + "\n");
+            return exp;
         } catch (java.io.IOException e) {
-            return "trace FAILED: " + e;
+            return -1;
         } finally {
             BlockPathfinder.TRACE = false;
             BlockPathfinder.TRACE_OUT = null;
             BlockPathfinder.LOG_TIMING = savedTiming;
+            BlockPathfinder.REGION_HEURISTIC = false;
+            BlockPathfinder.REGION_FIELD = null;
         }
-        return file.getAbsolutePath();
     }
 
     /**
