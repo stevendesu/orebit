@@ -130,6 +130,16 @@ public final class RegionPathfinder {
     /** Per-block downward FALL ticks (cheap): falling is near-free; charged ~one walk-tick/block of descent. */
     public static final float FALL_PER_BLOCK = WALK_PER_BLOCK;                                     // 1.0
 
+    // Block-honest PILLAR/FALL ratios for the cost-to-goal FIELD only (the heuristic must be commensurate with
+    // block ticks). The region A* keeps its behavioral compressed costs above (PILLAR 6 / FALL 1 — self-consistent
+    // within the region search); but as a BLOCK heuristic (rc × WALK_REAL_TICKS ≈ block ticks) those ratios are
+    // wrong — the block tier prices pillar ≈ 10.6 t and a fall drop ≈ 2.5 t/block against a 4.633 t walk. So the
+    // field uses the block RATIOS (PERF-DESIGN region §5's "honest ratios, compressed scale"): keep WALK=1 (↔4.633
+    // t) and set PILLAR = 10.6/4.633 ≈ 2.29, FALL = 2.5/4.633 ≈ 0.54. This de-inflates climb/fall-heavy routes
+    // (the walk-around) in the heuristic ~2.6× so it stops reading far above the dig-down.
+    static final float PILLAR_PER_BLOCK_FIELD = 2.29f;
+    static final float FALL_PER_BLOCK_FIELD = 0.54f;
+
     /** Per-block MINE ticks at the reference (stone) hardness; scaled by {@code avgSolidHardness/STONE_REF}. */
     public static final float MINE_PER_BLOCK = LeafCostComputer.MINE_PER_BLOCK;                    // 3.0
 
@@ -946,13 +956,17 @@ public final class RegionPathfinder {
      * preferred over a single big-{@code |dy|} cliff the block tier would dead-end on.
      */
     private static float walkCost(int dx, int dy, int dz, boolean canPlace, int safeFall, boolean reverse) {
+        // Field mode (reverse): use the block-honest PILLAR/FALL ratios so the cost-to-goal heuristic matches
+        // block ticks; the forward A* keeps its compressed behavioral costs.
+        final float pillar = reverse ? PILLAR_PER_BLOCK_FIELD : PILLAR_PER_BLOCK;
+        final float fall = reverse ? FALL_PER_BLOCK_FIELD : FALL_PER_BLOCK;
         float c = octile(dx, dz) * WALK_PER_BLOCK;
         // Reverse edge (goal-rooted cost-TO-goal Dijkstra): the ONLY asymmetry is vertical — traversing this edge
         // in the opposite direction swaps up (dear PILLAR) and down (cheap FALL). Negating dy yields the reverse
         // cost (octile horizontal is symmetric). Forward A* passes reverse=false → identical.
         if (reverse) dy = -dy;
         if (dy > 0) {
-            c += dy * PILLAR_PER_BLOCK;
+            c += dy * pillar;
             // No-place bot can't pillar a wall taller than a step — a big net rise must be existing terrain
             // (gradual stairs ⇒ small dy); penalize the excess so the search prefers the gradual route.
             if (!canPlace && dy > safeFall) {
@@ -960,7 +974,7 @@ public final class RegionPathfinder {
             }
         } else if (dy < 0) {
             final int drop = -dy;
-            c += drop * FALL_PER_BLOCK;
+            c += drop * fall;
             // Damage cost for a fall past the safe window — applies to EVERY bot (falling needs no placing,
             // unlike a wall-climb), so it biases the region A* toward gradual descents (small per-transit drop)
             // over cliffs, matching the block tier's Fall cost-not-blocker model. Not gated on canPlace.
@@ -1035,13 +1049,13 @@ public final class RegionPathfinder {
                 // so decide up/down on the OPPOSITE face — reverse of "up into air" (dear) is "fall out" (cheap).
                 final int ef = reverse ? RegionAddress.opposite(f) : f;
                 if (ef == 2) {
-                    float fall = vExtent * FALL_PER_BLOCK;
+                    float fall = vExtent * (reverse ? FALL_PER_BLOCK_FIELD : FALL_PER_BLOCK);
                     if (!canPlace && vExtent > safeFall) {
                         fall += (vExtent - safeFall) * UNSAFE_VERTICAL_PENALTY;
                     }
                     return fall;
                 }
-                return vExtent * PILLAR_PER_BLOCK;
+                return vExtent * (reverse ? PILLAR_PER_BLOCK_FIELD : PILLAR_PER_BLOCK);
         }
     }
 
