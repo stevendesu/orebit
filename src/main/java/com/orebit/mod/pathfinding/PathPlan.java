@@ -14,6 +14,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.regionpathfinder.HierarchicalRegionPlan;
+import com.orebit.mod.pathfinding.regionpathfinder.RegionMineModel;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
@@ -342,8 +343,10 @@ public final class PathPlan {
         this.goalRZ = RegionAddress.regionZ(goalFloor.getZ(), 0);
 
         // Region tier: the nested-skeleton cascade (HPA-CASCADE.md) re-derives its L0 segment as the bot moves
-        // and owns its per-level blacklists; PathPlan just drives the L0 segment it hands back.
-        this.hier = HierarchicalRegionPlan.build(regionGrid, minY, startFloor, goalFloor, caps);
+        // and owns its per-level blacklists; PathPlan just drives the L0 segment it hands back. The region dig
+        // cost is made tool-aware from the SAME inventory snapshot the block tier uses (PERF-DESIGN region §5).
+        RegionMineModel mine = RegionMineModel.from(inventory != null ? inventory.mining() : null);
+        this.hier = HierarchicalRegionPlan.build(regionGrid, minY, startFloor, goalFloor, caps, mine);
         this.skeleton = hier.l0Skeleton();
         this.windowStart = 0;
         this.committedIndex = 0;

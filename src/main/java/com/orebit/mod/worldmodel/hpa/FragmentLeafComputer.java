@@ -97,4 +97,34 @@ public final class FragmentLeafComputer {
                 hardnessSumSolid, solidCount,
                 out);
     }
+
+    /**
+     * The kept fragment id that contains local cell {@code (lx,ly,lz)} in this leaf's {@link NavSection},
+     * reproduced by re-flooding the section — the MC read behind the flood-from-bot start-fragment resolver
+     * (PERF-DESIGN region §4, {@link FragmentBuilder#fragmentContaining}). Returns {@code -1} when the cell isn't
+     * in an occupiable fragment, the region collapsed, or the coords are out of range — the caller falls back to
+     * nearest-centroid. Fills the same thread-local passable/standable masks as {@link #computeLeaf} (a subset of
+     * its scan — no hardness/water tallies needed here); single-threaded on the tick/planner thread.
+     *
+     * @param section the 16³ section backing this leaf (resolved by the caller, same as {@link #computeLeaf})
+     * @param lx,ly,lz section-local cell coords (0..15)
+     */
+    public static int fragmentContaining(NavSection section, int lx, int ly, int lz) {
+        if (lx < 0 || lx >= LEAF || ly < 0 || ly >= LEAF || lz < 0 || lz >= LEAF) {
+            return -1;
+        }
+        final boolean[] standable = STANDABLE.get();
+        final boolean[] passable = PASSABLE.get();
+        for (int y = 0; y < LEAF; y++) {
+            for (int z = 0; z < LEAF; z++) {
+                for (int x = 0; x < LEAF; x++) {
+                    long desc = NavBlock.descriptor((short) section.getNavtype(x, y, z));
+                    int i = idx(x, y, z);
+                    standable[i] = NavBlock.isStandable(desc);
+                    passable[i] = NavBlock.isPassable(desc);
+                }
+            }
+        }
+        return FragmentBuilder.fragmentContaining(passable, standable, LEAF, idx(lx, ly, lz));
+    }
 }

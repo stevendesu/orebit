@@ -202,6 +202,90 @@ public final class FragmentBuilder {
         }
     }
 
+    /**
+     * The kept fragment id (0..{@link RegionFragments#MAX_FRAGMENTS}-1) whose 6-connected occupiable component
+     * contains cell {@code seedCell} — the <b>flood-from-bot start-fragment resolver</b> (PERF-DESIGN region §4).
+     * Returns {@code -1} when the seed's component is not a fragment (non-occupiable), the region over-flowed the
+     * cap and collapsed (so the stored record holds no fragments), or the seed cell isn't passable — the caller
+     * then falls back to nearest-centroid.
+     *
+     * <p>This reproduces {@link #build}'s exact deterministic flood, occupiability filter, and {@code kept}
+     * counter over the <b>same</b> {@code passable}/{@code standable} masks, so the returned id is byte-identical
+     * to the fragment id {@code build} assigned to that component in the stored {@link RegionFragments} record —
+     * no footprint signature-matching, no ambiguity. Nearest-centroid mis-assigns a bot at the bottom of a tall
+     * fragment to a nearby pocket's (closer) centroid; flooding the bot's own cell is exact. Cold-start only (one
+     * extra flood, a few µs); reuses the same thread-local {@link #LABEL}/{@link #QUEUE} scratch as {@link #build}
+     * and does no face-bbox work (membership only).
+     *
+     * @param passable  the SAME passable mask the stored record was built from (flood membership)
+     * @param standable the SAME standable mask (occupiability floor test)
+     * @param G         grid side (a power of two ≤ {@link #MAX_G}); 16 at the leaf
+     * @param seedCell  the bot's cell as a flat {@code (y<<2·gbits)|(z<<gbits)|x} index
+     */
+    public static int fragmentContaining(boolean[] passable, boolean[] standable, int G, int seedCell) {
+        final int cells = G * G * G;
+        if (seedCell < 0 || seedCell >= cells || !passable[seedCell]) {
+            return -1;
+        }
+
+        final int gbits = Integer.numberOfTrailingZeros(G);
+        final int g2bits = gbits * 2;
+        final int gmask = G - 1;
+        final int G2 = G * G;
+
+        final int[] label = LABEL.get();
+        final int[] queue = QUEUE.get();
+        Arrays.fill(label, 0, cells, -1);
+
+        int comp = 0;      // raw component id (pre-filter) — mirrors build()
+        int kept = 0;      // surviving occupiable fragments so far — mirrors build()'s kept
+        int target = -1;   // kept id of the seed's component (once found), if occupiable + within cap
+        boolean collapsed = false;
+
+        for (int seed = 0; seed < cells; seed++) {
+            if (!passable[seed] || label[seed] != -1) continue;
+
+            int head = 0, tail = 0;
+            queue[tail++] = seed;
+            label[seed] = comp;
+            boolean occupiable = false;
+            boolean containsTarget = false;
+
+            while (head < tail) {
+                int c = queue[head++];
+                if (c == seedCell) containsTarget = true;
+                int x = c & gmask;
+                int z = (c >> gbits) & gmask;
+                int y = c >> g2bits;
+
+                if (!occupiable) {
+                    boolean floorBelow = (y > 0) && standable[c - G2];
+                    boolean headAbove = (y == G - 1) || passable[c + G2];
+                    if (floorBelow && headAbove) occupiable = true;
+                }
+
+                if (x > 0     && passable[c - 1]  && label[c - 1]  == -1) { label[c - 1]  = comp; queue[tail++] = c - 1; }
+                if (x < gmask && passable[c + 1]  && label[c + 1]  == -1) { label[c + 1]  = comp; queue[tail++] = c + 1; }
+                if (z > 0     && passable[c - G]  && label[c - G]  == -1) { label[c - G]  = comp; queue[tail++] = c - G; }
+                if (z < gmask && passable[c + G]  && label[c + G]  == -1) { label[c + G]  = comp; queue[tail++] = c + G; }
+                if (y > 0     && passable[c - G2] && label[c - G2] == -1) { label[c - G2] = comp; queue[tail++] = c - G2; }
+                if (y < gmask && passable[c + G2] && label[c + G2] == -1) { label[c + G2] = comp; queue[tail++] = c + G2; }
+            }
+            comp++;
+
+            if (!occupiable) continue;               // not a fragment (matches build()'s filter)
+            if (kept < RegionFragments.MAX_FRAGMENTS) {
+                if (containsTarget) target = kept;
+            } else {
+                collapsed = true;                    // over cap → the whole region collapses (no stored fragments)
+            }
+            kept++;
+        }
+
+        // A collapsed region stores fragmentCount 0, so any id we found is meaningless → fall back to centroid.
+        return collapsed ? -1 : target;
+    }
+
     /** Accumulate cell {@code (u,v)} into face {@code f}'s bbox. */
     private static void accFace(int f, int u, int v, int[] minU, int[] maxU, int[] minV, int[] maxV) {
         if (u < minU[f]) minU[f] = u;

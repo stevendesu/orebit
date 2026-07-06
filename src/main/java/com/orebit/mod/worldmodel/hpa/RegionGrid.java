@@ -222,6 +222,30 @@ public final class RegionGrid {
         PyramidMerger.combineFragments(pyramid, level, row, rx, ry, rz);
     }
 
+    /**
+     * The kept fragment id (PERF-DESIGN region §4 flood-from-bot) that <b>contains</b> world cell
+     * {@code (wx,wy,wz)} in its level-0 leaf {@code (rx,ry,rz)}, reproduced by re-flooding the leaf's resident
+     * {@link NavSection} ({@link FragmentLeafComputer#fragmentContaining}). Returns {@code -1} when the cell isn't
+     * in an occupiable fragment, the region collapsed, or the section isn't resident (or this is a headless grid)
+     * — the caller (region-A* start-fragment resolution) then falls back to nearest-centroid.
+     *
+     * <p>Level-0 only: coarse levels have no backing section, and the mis-assignment this fixes is a leaf-scale
+     * connectivity fact (a bot standing in one component being nearer a sibling component's centroid). The caller
+     * gates on {@code level == 0}.
+     */
+    public int startFragmentByFlood(int rx, int ry, int rz, int wx, int wy, int wz) {
+        if (level == null) {
+            return -1;
+        }
+        NavSection[] column = NavStore.get(level, NavStore.key(rx, rz));
+        if (column == null || ry < 0 || ry >= column.length || column[ry] == null) {
+            return -1;
+        }
+        // Section-local coords: origin is (rx<<4, minY + ry<<4, rz<<4); lx/lz wrap to the low nibble, ly measured
+        // from the dimension floor so a non-16-aligned minY still lands in [0,16).
+        return FragmentLeafComputer.fragmentContaining(column[ry], wx & 15, (wy - minY) & 15, wz & 15);
+    }
+
     // ---------------------------------------------------------------------------------------------------
     // Fragment-model reads (HPA-FRAGMENTS.md §2, §5) — the chokepoint the region A* reads. Each applies an
     // optimistic default-on-miss policy: an interned-but-unbuilt (or never-touched) node reads as a uniform AIR
