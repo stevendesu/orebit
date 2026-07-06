@@ -503,13 +503,14 @@ public final class RegionPathfinder {
         nodes.portalZ[startRow] = NO_PORTAL;
         nodes.push(startRow);
 
-        final RegionCostField field = new RegionCostField(bound, minY);
+        final RegionCostField field = new RegionCostField(bound, minY, grid);
         int expansions = 0;
         while (nodes.heapSize > 0) {
             int current = nodes.pop();
             if (nodes.poppedF > nodes.f[current]) continue; // stale heap entry
             final int crx = nodes.x[current], cry = nodes.y[current], crz = nodes.z[current];
-            field.record(crx, cry, crz, nodes.g[current]); // min-over-fragments per region
+            final int fragA = nodes.frag[current];
+            field.record(crx, cry, crz, fragA, nodes.g[current]); // per-(region,fragment) cost
             if (++expansions > MAX_REGION_EXPANSIONS) break;
             expandNode(nodes, current, expansions, grid, 0, minY, grx, gry, grz,
                     goalFloor.getX(), goalFloor.getY(), goalFloor.getZ(),
