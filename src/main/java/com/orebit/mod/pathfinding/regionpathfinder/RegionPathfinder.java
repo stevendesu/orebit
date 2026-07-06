@@ -177,6 +177,13 @@ public final class RegionPathfinder {
     private static final ThreadLocal<Nodes> SEARCH = ThreadLocal.withInitial(() -> new Nodes(256, 512));
 
     /**
+     * A SECOND reusable region-search state per thread, for the goal-rooted {@link #costToGoalField} Dijkstra —
+     * kept distinct from {@link #SEARCH} because a block-tier search may drive a cost-field build while a region
+     * A* is still in flight on the same thread (they must not clobber each other's {@link Nodes} table).
+     */
+    private static final ThreadLocal<Nodes> FIELD_SEARCH = ThreadLocal.withInitial(() -> new Nodes(256, 512));
+
+    /**
      * Plan a <b>direct level-0 fragment skeleton</b> from {@code startFloor} to {@code goalFloor} (HPA-FRAGMENTS.md
      * §S3): node = {@code (region, fragment)}, edges derived not stored. Resolves the start/goal fragment, short-
      * circuits the trivial same-region-same-fragment case, and otherwise runs the level-0 fragment A* to the goal.
@@ -385,11 +392,6 @@ public final class RegionPathfinder {
         final Nodes nodes = SEARCH.get();
         nodes.reset();
 
-        // Per-search world-coord scratch, reused from the ThreadLocal state (no per-plan/per-edge alloc).
-        final int[] wa = nodes.wa; // our (fragA) boundary-opening center
-        final int[] wb = nodes.wb; // neighbour (fragB) boundary-opening center / centroid
-        final int[] wc = nodes.wc; // scratch for centroid accumulation
-
         // Heuristic scale: SimpleRegionHeuristic is calibrated per LEVEL-0 region (COST_PER_REGION = one leaf
         // walk). At level L the derived edge costs scale with sideOf(L) = LEAF<<L, so scale h the same (×2^L)
         // to keep g and h in the same units — otherwise the coarse search is ~2^L under-guided and floods loaded
@@ -427,179 +429,8 @@ public final class RegionPathfinder {
             if (hCur < bestH) { bestH = hCur; bestRow = current; }
             if (++expansions > MAX_REGION_EXPANSIONS) { budgetHit = true; break; }
 
-            ensureNode(grid, level, crx, cry, crz);
-            final RegionFragments rfN = grid.fragmentRecord(level, crx, cry, crz);
-            final boolean uniformN = isUniformNode(rfN);
-            final int countN = uniformN ? 1 : rfN.fragmentCount();
-            final float gCur = nodes.g[current];
-            // Entry opening of THIS node — where we crossed INTO it (the §4 entry→exit walk anchor). The start
-            // node has no incoming crossing, so hop-0 traversal anchors on the bot's actual start floor cell
-            // (honester than any synthetic opening). An intra-region-mine (INTERIOR) entry stored the sibling
-            // centroid as its portal, so this reads that centroid for it — no special-casing needed.
-            int entX = nodes.portalX[current], entY = nodes.portalY[current], entZ = nodes.portalZ[current];
-            if (entX == NO_PORTAL) { entX = startWx; entY = startWy; entZ = startWz; }
-            if (TRACE) trace("E " + expansions + " L" + level + " region=" + crx + "," + cry + "," + crz
-                    + " frag=" + fragA + " g=" + gCur + " f=" + nodes.f[current]
-                    + (uniformN ? " [" + kindLabel(rfN) + "]" : " [mixed frags=" + countN + "]"));
-
-            // (A) Intra-region MINE edges to sibling fragments (dig through the wall) — MIXED, ≥2 fragments.
-            // Dropped entirely for a no-break bot: it cannot dig between two disconnected pockets of a region.
-            if (canBreak && !uniformN && countN > 1) {
-                for (int fragC = 0; fragC < countN; fragC++) {
-                    if (fragC == fragA) continue;
-                    float edge = mineCost(level, rfN, fragA, fragC, minY, crx, cry, crz, wa, wb, wc, mine);
-                    // wa/wb now hold fragA/fragC centroids; wb is the mine-edge portal target.
-                    boolean ok = relaxFrag(nodes, current, gCur, edge, crx, cry, crz, fragC,
-                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, ENTRY_INTERIOR, false);
-                    if (TRACE) {
-                        traceCand("mine-sibling", crx, cry, crz, fragC, edge, wb[0], wb[1], wb[2], ok);
-                        mineSpans(wa[0], wa[1], wa[2], wb[0], wb[1], wb[2], level, wc);
-                        traceBreakdown("mine-sibling: " + digBreakdown(wc[0], wc[1],
-                                mine.unitsPerBlock(rfN.avgSolidHardness())) + " = " + edge + " ticks");
-                    }
-                }
-            }
-
-            // (B) Inter-region edges across each face fragA reaches (a uniform node reaches all six).
-            for (int f = 0; f < 6; f++) {
-                if (!uniformN && !rfN.touchesFace(fragA, f)) {
-                    // DIG-THROUGH (PERF-DESIGN §3): SOLID sits between fragA's air pocket and this face, so no
-                    // walk/fall/pillar opening exists — the one connectivity hole. A break-capable bot tunnels
-                    // OUR region's own rock to the sealed face and crosses into the neighbour: emit exactly one
-                    // edge into the neighbour's fragment 0 / oppF-face centre, priced by fragA's distance to that
-                    // face × our rock's hardness. Emitted DIRECTLY (never falling through to the walk path, which
-                    // would read packedA = NO_FACE = full face and spawn spurious walk edges). A no-break bot
-                    // emits nothing — it cannot dig — and the block tier's RegionEdgeBlacklist is the source of
-                    // truth for a dig it still cannot realize. Vertical faces above the octree→quadtree transition
-                    // have no ±Y neighbour, so skip them exactly as the touched-face branch below does.
-                    if (canBreak && !(level >= RegionAddress.OCTREE_TOP && (f == 2 || f == 3))) {
-                        final int dmx = RegionAddress.neighborRX(crx, f);
-                        final int dmy = RegionAddress.neighborRY(cry, f);
-                        final int dmz = RegionAddress.neighborRZ(crz, f);
-                        ensureNode(grid, level, dmx, dmy, dmz);
-                        final int dOpp = RegionAddress.opposite(f);
-                        // The dig edge is emitted for EVERY neighbour kind (full capability-connectivity: there is
-                        // always our own rock to tunnel through to reach the sealed face). But only a uniform-SOLID
-                        // neighbour yields a genuinely BURIED crossing cell that the block tier must dig to — so only
-                        // then tag dig=true (windowTarget forwards a dig cell unfiltered). For an AIR/WATER/MIXED/
-                        // unbuilt neighbour the oppF face centre is open (or ambiguous); leave dig=false so
-                        // windowTarget snaps it like any other crossing rather than aiming the block search at a
-                        // floorless mid-air cell.
-                        final RegionFragments rfDig = grid.fragmentRecord(level, dmx, dmy, dmz);
-                        final boolean buried = rfDig != null && rfDig.kind() == RegionFragments.KIND_SOLID;
-                        // wa = fragA's interior centroid (the tunnel start); wb = the neighbour's oppF face centre.
-                        fragmentCentroidWorld(level, rfN, fragA, minY, crx, cry, crz, wa, wc);
-                        footprintCenterWorld(level, minY, dmx, dmy, dmz, dOpp, RegionFragments.NO_FACE, wb);
-                        mineSpans(wa[0], wa[1], wa[2], wb[0], wb[1], wb[2], level, wc);
-                        float edge = digCost(wc[0], wc[1], mine.unitsPerBlock(rfN.avgSolidHardness()));
-                        boolean ok = relaxFrag(nodes, current, gCur, edge, dmx, dmy, dmz, 0,
-                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, dOpp, buried);
-                        if (TRACE) {
-                            traceCand("dig-through", dmx, dmy, dmz, 0, edge, wb[0], wb[1], wb[2], ok);
-                            traceBreakdown("dig-through: " + digBreakdown(wc[0], wc[1],
-                                    mine.unitsPerBlock(rfN.avgSolidHardness())) + " = " + edge + " ticks");
-                        }
-                    }
-                    continue;
-                }
-                // Above the octree→quadtree transition the vertical extent is ONE padded slab spanning the whole
-                // dimension, so there is no ±Y neighbour region (ry is pinned to 0 — RegionAddress.regionY).
-                // Skip the vertical faces there; neighborRY would otherwise key a phantom ry=±1 region.
-                if (level >= RegionAddress.OCTREE_TOP && (f == 2 || f == 3)) continue;
-                final int mrx = RegionAddress.neighborRX(crx, f);
-                final int mry = RegionAddress.neighborRY(cry, f);
-                final int mrz = RegionAddress.neighborRZ(crz, f);
-                ensureNode(grid, level, mrx, mry, mrz);
-                final RegionFragments rfM = grid.fragmentRecord(level, mrx, mry, mrz);
-                final int oppF = RegionAddress.opposite(f);
-
-                // Our opening center on face f (full-face for a uniform node).
-                final int packedA = uniformN ? RegionFragments.NO_FACE : rfN.footprint(fragA, f);
-                footprintCenterWorld(level, minY,crx, cry, crz, f, packedA, wa);
-
-                if (isUniformNode(rfM)) {
-                    // A uniform SOLID neighbour is reachable only by mining → impassable for a no-break bot
-                    // (an unbuilt/AIR/WATER neighbour is still a real walk/fall/swim, so those remain).
-                    if (!canBreak && rfM != null && rfM.kind() == RegionFragments.KIND_SOLID) continue;
-                    // Symmetric caps-correctness for a no-PLACE bot: a uniform-AIR neighbour is a floorless
-                    // shaft, and a no-place bot cannot pillar, so the ONLY way it can enter one is by FALLING
-                    // straight DOWN into it (face 2 = −Y, neighbour below). An upward (face 3) or sideways
-                    // crossing into open air is physically impossible for it — so drop those edges, exactly as
-                    // the no-break/solid rule above drops mine edges. This stops the region tier routing a
-                    // no-place bot UP through the open cave void (the lip-ascent flood); it then finds a
-                    // walkable ramp instead. (A place-capable bot keeps the dear PILLAR cost and may climb.)
-                    if (!canPlace && rfM != null && rfM.kind() == RegionFragments.KIND_AIR && f != 2) continue;
-                    // Uniform / collapsed / unbuilt neighbour: a single transit edge into its fragment 0.
-                    float edge = uniformTransitCost(level, rfM, f, canPlace, safeFall, mine);
-                    footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
-                    boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
-                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false);
-                    if (TRACE) traceCand(uniformKindLabel(rfM, f), mrx, mry, mrz, 0, edge,
-                            wb[0], wb[1], wb[2], ok);
-                    continue;
-                }
-
-                // MIXED neighbour: portal edge to every fragment whose footprint OVERLAPS ours on the shared
-                // face (a real walkable opening, always allowed); if none overlaps, a mine edge to the nearest
-                // touching fragment (or its fragment 0 if solid at this face) — keeping the graph fully
-                // connected (§2, no FAIL). The mine fallback is gated on canBreak below: a no-break bot only
-                // gets the overlapping-portal edges, so a face with no real opening is simply impassable.
-                boolean emitted = false;
-                int bestFrag = -1;
-                long bestDist = Long.MAX_VALUE;
-                final int countM = rfM.fragmentCount();
-                for (int fb = 0; fb < countM; fb++) {
-                    if (!rfM.touchesFace(fb, oppF)) continue;
-                    int packedB = rfM.footprint(fb, oppF);
-                    footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, packedB, wb);
-                    if (footprintsOverlap(packedA, packedB)) {
-                        // §4 entry→exit: charge the traversal ACROSS this region (entry opening → our exit
-                        // opening wa) plus the ~1 boundary hop (wa → neighbour opening wb). The entry→exit leg
-                        // is the missing "moving within a 16-block region isn't free" term that made lateral
-                        // walks cost ~1 and turned open caverns near-free. entryFace in the node key (§2) makes
-                        // this a FIXED edge cost (the entry opening is pinned per node), keeping A* consistent.
-                        float edge = walkCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, canPlace, safeFall)
-                                + walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall);
-                        boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, fb,
-                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false);
-                        if (TRACE) {
-                            traceCand("walk", mrx, mry, mrz, fb, edge, wb[0], wb[1], wb[2], ok);
-                            traceBreakdown("traverse[" + walkBreakdown(wa[0] - entX, wa[1] - entY, wa[2] - entZ,
-                                    canPlace, safeFall) + "]  +  cross[" + walkBreakdown(wb[0] - wa[0],
-                                    wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall) + "]");
-                        }
-                        emitted = true;
-                    } else {
-                        long d = Math.abs(wb[0] - wa[0]) + Math.abs(wb[1] - wa[1]) + Math.abs(wb[2] - wa[2]);
-                        if (d < bestDist) { bestDist = d; bestFrag = fb; }
-                    }
-                }
-                if (!emitted && canBreak) {
-                    final float mineUnit = mine.unitsPerBlock(rfM.avgSolidHardness());
-                    if (bestFrag != -1) {
-                        int packedB = rfM.footprint(bestFrag, oppF);
-                        footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, packedB, wb);
-                        // Approach walk to the wall + tunnel a fixed WALL_MINE_BLOCKS-thick horizontal hole.
-                        float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall)
-                                + digCost(WALL_MINE_BLOCKS, 0, mineUnit);
-                        boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, bestFrag,
-                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false);
-                        if (TRACE) {
-                            traceCand("mine-fallback", mrx, mry, mrz, bestFrag, edge, wb[0], wb[1], wb[2], ok);
-                            traceBreakdown("walk[" + walkBreakdown(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2],
-                                    canPlace, safeFall) + "] + wall " + digBreakdown(WALL_MINE_BLOCKS, 0, mineUnit)
-                                    + " = " + edge);
-                        }
-                    } else {
-                        // Neighbour is MIXED but solid at this face → mine straight in to its fragment 0.
-                        footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
-                        float edge = digCost(RegionAddress.sideOf(level), 0, mineUnit);
-                        boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
-                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false);
-                        if (TRACE) traceCand("mine-solid", mrx, mry, mrz, 0, edge, wb[0], wb[1], wb[2], ok);
-                    }
-                }
-            }
+            expandNode(nodes, current, expansions, grid, level, minY, grx, gry, grz,
+                    startWx, startWy, startWz, canBreak, canPlace, safeFall, blacklist, mine, hScale, null, false);
         }
 
         if (reachedRow == -1) {
@@ -625,6 +456,283 @@ public final class RegionPathfinder {
         return reconstructFragments(nodes, startRow, reachedRow, minY, level, reachedGoalRegion);
     }
 
+    // ===================================================================================================
+    // Goal-rooted region Dijkstra (PROTOTYPE) — a per-region cost-to-goal FIELD over the same edge model
+    // ===================================================================================================
+
+    /**
+     * Build a <b>goal-rooted, bounded Dijkstra cost-to-goal field</b> over the level-0 fragment graph: seed the
+     * goal region/fragment at {@code g=0} and exhaust the heap confined to {@code bound}, recording the
+     * min-over-fragments settled {@code g} per region into a {@link RegionCostField}. It reuses the SAME derived
+     * edge model as the A* ({@link #expandNode}) — the ONLY differences are (a) the search is rooted at the goal
+     * and never goal-tests (it floods the whole box), and (b) the heuristic is suppressed ({@code dijkstra=true},
+     * so {@code f == g}) making the settle order a true shortest-first Dijkstra. Runs on the dedicated
+     * {@link #FIELD_SEARCH} state so it can coexist with an in-flight region A* on the same thread.
+     *
+     * <p>NOTE: because the fragment edge model prices a crossing by the FROM-node's geometry (entry→exit walk,
+     * our-rock dig-through), the field is an admissible-ish approximation of "cost to reach the goal FROM here",
+     * not an exact reverse metric; it is intended as a coarse guidance field, not a substitute for the A*.
+     */
+    public static RegionCostField costToGoalField(RegionGrid grid, int minY, BlockPos goalFloor,
+                                                  boolean canBreak, boolean canPlace, int safeFall,
+                                                  RegionMineModel mine, RegionBox bound) {
+        final int grx = RegionAddress.regionX(goalFloor.getX(), 0);
+        final int gry = RegionAddress.regionY(goalFloor.getY(), 0, minY);
+        final int grz = RegionAddress.regionZ(goalFloor.getZ(), 0);
+        grid.ensureLeaf(grx, gry, grz);
+        final int goalFrag = nearestFragment(grid, 0, grx, gry, grz, goalFloor);
+
+        final Nodes nodes = FIELD_SEARCH.get();
+        nodes.reset();
+        final int startRow = nodes.intern(searchKey(fragmentKey(grx, gry, grz, goalFrag), ENTRY_START),
+                grx, gry, grz, goalFrag, ENTRY_START);
+        nodes.g[startRow] = 0f;
+        nodes.f[startRow] = 0f;
+        nodes.portalX[startRow] = NO_PORTAL;
+        nodes.portalY[startRow] = NO_PORTAL;
+        nodes.portalZ[startRow] = NO_PORTAL;
+        nodes.push(startRow);
+
+        final RegionCostField field = new RegionCostField(bound, minY);
+        int expansions = 0;
+        while (nodes.heapSize > 0) {
+            int current = nodes.pop();
+            if (nodes.poppedF > nodes.f[current]) continue; // stale heap entry
+            final int crx = nodes.x[current], cry = nodes.y[current], crz = nodes.z[current];
+            field.record(crx, cry, crz, nodes.g[current]); // min-over-fragments per region
+            if (++expansions > MAX_REGION_EXPANSIONS) break;
+            expandNode(nodes, current, expansions, grid, 0, minY, grx, gry, grz,
+                    goalFloor.getX(), goalFloor.getY(), goalFloor.getZ(),
+                    canBreak, canPlace, safeFall, null, mine, 1.0f, bound, true);
+        }
+        return field;
+    }
+
+    /**
+     * A tiny immutable region-coordinate bounding box (level-0 regions) that confines a {@link #costToGoalField}
+     * Dijkstra to a finite volume — the field's dimensions come straight from it. {@link #contains} is the
+     * per-relax admission test in {@link #relaxFrag}; {@link #around} builds the bbox of two region cells padded
+     * by a margin on every axis (the usual "start↔goal box plus slack" the caller wants a field over).
+     */
+    public static final class RegionBox {
+        public final int minRx, minRy, minRz, maxRx, maxRy, maxRz;
+
+        RegionBox(int minRx, int minRy, int minRz, int maxRx, int maxRy, int maxRz) {
+            this.minRx = minRx; this.minRy = minRy; this.minRz = minRz;
+            this.maxRx = maxRx; this.maxRy = maxRy; this.maxRz = maxRz;
+        }
+
+        /** Whether region cell {@code (rx,ry,rz)} lies within (inclusive) this box. */
+        public boolean contains(int rx, int ry, int rz) {
+            return rx >= minRx && rx <= maxRx
+                    && ry >= minRy && ry <= maxRy
+                    && rz >= minRz && rz <= maxRz;
+        }
+
+        /** The bbox of region cells {@code a} and {@code b}, expanded by {@code pad} on each axis. */
+        public static RegionBox around(int arx, int ary, int arz, int brx, int bry, int brz, int pad) {
+            return new RegionBox(
+                    Math.min(arx, brx) - pad, Math.min(ary, bry) - pad, Math.min(arz, brz) - pad,
+                    Math.max(arx, brx) + pad, Math.max(ary, bry) + pad, Math.max(arz, brz) + pad);
+        }
+    }
+
+    /**
+     * The per-pop edge-emission body of the fragment search — the block-(A) intra-region mine-sibling edges and
+     * the block-(B) six-face inter-region edges (dig-through / uniform-transit / portal-walk / mine-fallback /
+     * mine-solid), each ending in a {@link #relaxFrag}. Extracted VERBATIM from {@link #planLevelFragments}'s
+     * loop so the goal-rooted Dijkstra ({@link #costToGoalField}) can reuse the identical edge model. It
+     * recomputes its own copies of the pop-node locals from {@code nodes[current]} (cheap); the A* loop keeps its
+     * own {@code crx/cry/crz/fragA} for the goal test. {@code bound} (nullable) confines the search to a region
+     * bbox and {@code dijkstra} suppresses the heuristic (both threaded straight through to {@link #relaxFrag}) —
+     * with {@code bound == null, dijkstra == false} this is byte-identical to the original inline body.
+     */
+    private static void expandNode(Nodes nodes, int current, int seq, RegionGrid grid, int level, int minY,
+                                   int grx, int gry, int grz, int startWx, int startWy, int startWz,
+                                   boolean canBreak, boolean canPlace, int safeFall,
+                                   RegionEdgeBlacklist blacklist, RegionMineModel mine, float hScale,
+                                   RegionBox bound, boolean dijkstra) {
+        final int crx = nodes.x[current], cry = nodes.y[current], crz = nodes.z[current];
+        final int fragA = nodes.frag[current];
+        final int[] wa = nodes.wa; // our (fragA) boundary-opening center
+        final int[] wb = nodes.wb; // neighbour (fragB) boundary-opening center / centroid
+        final int[] wc = nodes.wc; // scratch for centroid accumulation
+
+        ensureNode(grid, level, crx, cry, crz);
+        final RegionFragments rfN = grid.fragmentRecord(level, crx, cry, crz);
+        final boolean uniformN = isUniformNode(rfN);
+        final int countN = uniformN ? 1 : rfN.fragmentCount();
+        final float gCur = nodes.g[current];
+        // Entry opening of THIS node — where we crossed INTO it (the §4 entry→exit walk anchor). The start
+        // node has no incoming crossing, so hop-0 traversal anchors on the bot's actual start floor cell
+        // (honester than any synthetic opening). An intra-region-mine (INTERIOR) entry stored the sibling
+        // centroid as its portal, so this reads that centroid for it — no special-casing needed.
+        int entX = nodes.portalX[current], entY = nodes.portalY[current], entZ = nodes.portalZ[current];
+        if (entX == NO_PORTAL) { entX = startWx; entY = startWy; entZ = startWz; }
+        if (TRACE) trace("E " + seq + " L" + level + " region=" + crx + "," + cry + "," + crz
+                + " frag=" + fragA + " g=" + gCur + " f=" + nodes.f[current]
+                + (uniformN ? " [" + kindLabel(rfN) + "]" : " [mixed frags=" + countN + "]"));
+
+        // (A) Intra-region MINE edges to sibling fragments (dig through the wall) — MIXED, ≥2 fragments.
+        // Dropped entirely for a no-break bot: it cannot dig between two disconnected pockets of a region.
+        if (canBreak && !uniformN && countN > 1) {
+            for (int fragC = 0; fragC < countN; fragC++) {
+                if (fragC == fragA) continue;
+                float edge = mineCost(level, rfN, fragA, fragC, minY, crx, cry, crz, wa, wb, wc, mine);
+                // wa/wb now hold fragA/fragC centroids; wb is the mine-edge portal target.
+                boolean ok = relaxFrag(nodes, current, gCur, edge, crx, cry, crz, fragC,
+                        wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, ENTRY_INTERIOR, false, bound, dijkstra);
+                if (TRACE) {
+                    traceCand("mine-sibling", crx, cry, crz, fragC, edge, wb[0], wb[1], wb[2], ok);
+                    mineSpans(wa[0], wa[1], wa[2], wb[0], wb[1], wb[2], level, wc);
+                    traceBreakdown("mine-sibling: " + digBreakdown(wc[0], wc[1],
+                            mine.unitsPerBlock(rfN.avgSolidHardness())) + " = " + edge + " ticks");
+                }
+            }
+        }
+
+        // (B) Inter-region edges across each face fragA reaches (a uniform node reaches all six).
+        for (int f = 0; f < 6; f++) {
+            if (!uniformN && !rfN.touchesFace(fragA, f)) {
+                // DIG-THROUGH (PERF-DESIGN §3): SOLID sits between fragA's air pocket and this face, so no
+                // walk/fall/pillar opening exists — the one connectivity hole. A break-capable bot tunnels
+                // OUR region's own rock to the sealed face and crosses into the neighbour: emit exactly one
+                // edge into the neighbour's fragment 0 / oppF-face centre, priced by fragA's distance to that
+                // face × our rock's hardness. Emitted DIRECTLY (never falling through to the walk path, which
+                // would read packedA = NO_FACE = full face and spawn spurious walk edges). A no-break bot
+                // emits nothing — it cannot dig — and the block tier's RegionEdgeBlacklist is the source of
+                // truth for a dig it still cannot realize. Vertical faces above the octree→quadtree transition
+                // have no ±Y neighbour, so skip them exactly as the touched-face branch below does.
+                if (canBreak && !(level >= RegionAddress.OCTREE_TOP && (f == 2 || f == 3))) {
+                    final int dmx = RegionAddress.neighborRX(crx, f);
+                    final int dmy = RegionAddress.neighborRY(cry, f);
+                    final int dmz = RegionAddress.neighborRZ(crz, f);
+                    ensureNode(grid, level, dmx, dmy, dmz);
+                    final int dOpp = RegionAddress.opposite(f);
+                    // The dig edge is emitted for EVERY neighbour kind (full capability-connectivity: there is
+                    // always our own rock to tunnel through to reach the sealed face). But only a uniform-SOLID
+                    // neighbour yields a genuinely BURIED crossing cell that the block tier must dig to — so only
+                    // then tag dig=true (windowTarget forwards a dig cell unfiltered). For an AIR/WATER/MIXED/
+                    // unbuilt neighbour the oppF face centre is open (or ambiguous); leave dig=false so
+                    // windowTarget snaps it like any other crossing rather than aiming the block search at a
+                    // floorless mid-air cell.
+                    final RegionFragments rfDig = grid.fragmentRecord(level, dmx, dmy, dmz);
+                    final boolean buried = rfDig != null && rfDig.kind() == RegionFragments.KIND_SOLID;
+                    // wa = fragA's interior centroid (the tunnel start); wb = the neighbour's oppF face centre.
+                    fragmentCentroidWorld(level, rfN, fragA, minY, crx, cry, crz, wa, wc);
+                    footprintCenterWorld(level, minY, dmx, dmy, dmz, dOpp, RegionFragments.NO_FACE, wb);
+                    mineSpans(wa[0], wa[1], wa[2], wb[0], wb[1], wb[2], level, wc);
+                    float edge = digCost(wc[0], wc[1], mine.unitsPerBlock(rfN.avgSolidHardness()));
+                    boolean ok = relaxFrag(nodes, current, gCur, edge, dmx, dmy, dmz, 0,
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, dOpp, buried, bound, dijkstra);
+                    if (TRACE) {
+                        traceCand("dig-through", dmx, dmy, dmz, 0, edge, wb[0], wb[1], wb[2], ok);
+                        traceBreakdown("dig-through: " + digBreakdown(wc[0], wc[1],
+                                mine.unitsPerBlock(rfN.avgSolidHardness())) + " = " + edge + " ticks");
+                    }
+                }
+                continue;
+            }
+            // Above the octree→quadtree transition the vertical extent is ONE padded slab spanning the whole
+            // dimension, so there is no ±Y neighbour region (ry is pinned to 0 — RegionAddress.regionY).
+            // Skip the vertical faces there; neighborRY would otherwise key a phantom ry=±1 region.
+            if (level >= RegionAddress.OCTREE_TOP && (f == 2 || f == 3)) continue;
+            final int mrx = RegionAddress.neighborRX(crx, f);
+            final int mry = RegionAddress.neighborRY(cry, f);
+            final int mrz = RegionAddress.neighborRZ(crz, f);
+            ensureNode(grid, level, mrx, mry, mrz);
+            final RegionFragments rfM = grid.fragmentRecord(level, mrx, mry, mrz);
+            final int oppF = RegionAddress.opposite(f);
+
+            // Our opening center on face f (full-face for a uniform node).
+            final int packedA = uniformN ? RegionFragments.NO_FACE : rfN.footprint(fragA, f);
+            footprintCenterWorld(level, minY,crx, cry, crz, f, packedA, wa);
+
+            if (isUniformNode(rfM)) {
+                // A uniform SOLID neighbour is reachable only by mining → impassable for a no-break bot
+                // (an unbuilt/AIR/WATER neighbour is still a real walk/fall/swim, so those remain).
+                if (!canBreak && rfM != null && rfM.kind() == RegionFragments.KIND_SOLID) continue;
+                // Symmetric caps-correctness for a no-PLACE bot: a uniform-AIR neighbour is a floorless
+                // shaft, and a no-place bot cannot pillar, so the ONLY way it can enter one is by FALLING
+                // straight DOWN into it (face 2 = −Y, neighbour below). An upward (face 3) or sideways
+                // crossing into open air is physically impossible for it — so drop those edges, exactly as
+                // the no-break/solid rule above drops mine edges. This stops the region tier routing a
+                // no-place bot UP through the open cave void (the lip-ascent flood); it then finds a
+                // walkable ramp instead. (A place-capable bot keeps the dear PILLAR cost and may climb.)
+                if (!canPlace && rfM != null && rfM.kind() == RegionFragments.KIND_AIR && f != 2) continue;
+                // Uniform / collapsed / unbuilt neighbour: a single transit edge into its fragment 0.
+                float edge = uniformTransitCost(level, rfM, f, canPlace, safeFall, mine);
+                footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
+                boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
+                        wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
+                if (TRACE) traceCand(uniformKindLabel(rfM, f), mrx, mry, mrz, 0, edge,
+                        wb[0], wb[1], wb[2], ok);
+                continue;
+            }
+
+            // MIXED neighbour: portal edge to every fragment whose footprint OVERLAPS ours on the shared
+            // face (a real walkable opening, always allowed); if none overlaps, a mine edge to the nearest
+            // touching fragment (or its fragment 0 if solid at this face) — keeping the graph fully
+            // connected (§2, no FAIL). The mine fallback is gated on canBreak below: a no-break bot only
+            // gets the overlapping-portal edges, so a face with no real opening is simply impassable.
+            boolean emitted = false;
+            int bestFrag = -1;
+            long bestDist = Long.MAX_VALUE;
+            final int countM = rfM.fragmentCount();
+            for (int fb = 0; fb < countM; fb++) {
+                if (!rfM.touchesFace(fb, oppF)) continue;
+                int packedB = rfM.footprint(fb, oppF);
+                footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, packedB, wb);
+                if (footprintsOverlap(packedA, packedB)) {
+                    // §4 entry→exit: charge the traversal ACROSS this region (entry opening → our exit
+                    // opening wa) plus the ~1 boundary hop (wa → neighbour opening wb). The entry→exit leg
+                    // is the missing "moving within a 16-block region isn't free" term that made lateral
+                    // walks cost ~1 and turned open caverns near-free. entryFace in the node key (§2) makes
+                    // this a FIXED edge cost (the entry opening is pinned per node), keeping A* consistent.
+                    float edge = walkCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, canPlace, safeFall)
+                            + walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall);
+                    boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, fb,
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
+                    if (TRACE) {
+                        traceCand("walk", mrx, mry, mrz, fb, edge, wb[0], wb[1], wb[2], ok);
+                        traceBreakdown("traverse[" + walkBreakdown(wa[0] - entX, wa[1] - entY, wa[2] - entZ,
+                                canPlace, safeFall) + "]  +  cross[" + walkBreakdown(wb[0] - wa[0],
+                                wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall) + "]");
+                    }
+                    emitted = true;
+                } else {
+                    long d = Math.abs(wb[0] - wa[0]) + Math.abs(wb[1] - wa[1]) + Math.abs(wb[2] - wa[2]);
+                    if (d < bestDist) { bestDist = d; bestFrag = fb; }
+                }
+            }
+            if (!emitted && canBreak) {
+                final float mineUnit = mine.unitsPerBlock(rfM.avgSolidHardness());
+                if (bestFrag != -1) {
+                    int packedB = rfM.footprint(bestFrag, oppF);
+                    footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, packedB, wb);
+                    // Approach walk to the wall + tunnel a fixed WALL_MINE_BLOCKS-thick horizontal hole.
+                    float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall)
+                            + digCost(WALL_MINE_BLOCKS, 0, mineUnit);
+                    boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, bestFrag,
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
+                    if (TRACE) {
+                        traceCand("mine-fallback", mrx, mry, mrz, bestFrag, edge, wb[0], wb[1], wb[2], ok);
+                        traceBreakdown("walk[" + walkBreakdown(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2],
+                                canPlace, safeFall) + "] + wall " + digBreakdown(WALL_MINE_BLOCKS, 0, mineUnit)
+                                + " = " + edge);
+                    }
+                } else {
+                    // Neighbour is MIXED but solid at this face → mine straight in to its fragment 0.
+                    footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
+                    float edge = digCost(RegionAddress.sideOf(level), 0, mineUnit);
+                    boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
+                    if (TRACE) traceCand("mine-solid", mrx, mry, mrz, 0, edge, wb[0], wb[1], wb[2], ok);
+                }
+            }
+        }
+    }
+
     /**
      * Relax the edge into {@code (mrx,mry,mrz,mFrag)} via {@code curRow}. The edge cost is floored at
      * {@link #WALK_PER_BLOCK} so every boundary crossing costs ≥ one tick — so g grows monotonically even for
@@ -634,7 +742,10 @@ public final class RegionPathfinder {
                                      int mrx, int mry, int mrz, int mFrag,
                                      int px, int py, int pz, int grx, int gry, int grz,
                                      float hScale, RegionEdgeBlacklist blacklist,
-                                     int entryFace, boolean dig) {
+                                     int entryFace, boolean dig, RegionBox bound, boolean dijkstra) {
+        // Bounded search (goal-rooted Dijkstra field): reject a target outside the search box BEFORE interning,
+        // so out-of-box nodes never enter the table / heap (the field is confined to its bbox).
+        if (bound != null && !bound.contains(mrx, mry, mrz)) return false;
         // The blacklist keys crossings PHYSICALLY (region, fragment) — a dead crossing is unrealizable
         // regardless of how the FROM region was entered (§2), so the online-repair probe uses the plain
         // physical key, NOT the entry-augmented search key.
@@ -651,7 +762,7 @@ public final class RegionPathfinder {
         int row = nodes.intern(searchKey(physKey, entryFace), mrx, mry, mrz, mFrag, entryFace);
         if (tentative >= nodes.g[row]) return false; // new rows start at +inf → first visit admitted
         nodes.g[row] = tentative;
-        nodes.f[row] = tentative + HEURISTIC.estimate(mrx, mry, mrz, grx, gry, grz) * hScale;
+        nodes.f[row] = dijkstra ? tentative : tentative + HEURISTIC.estimate(mrx, mry, mrz, grx, gry, grz) * hScale;
         nodes.parent[row] = curRow;
         nodes.frag[row] = mFrag;
         nodes.portalX[row] = px;
