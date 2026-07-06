@@ -147,11 +147,12 @@ public final class PathPlan {
      * fragment (the skeleton tail), so the false positive falls through to the near-window portal target and the
      * search stays local.
      *
-     * <p><b>Default {@code false} deliberately</b>: it preserves the flood as a strong repro for developing
-     * analytical A* pruning (the "sky is a swamp" work). Flip to {@code true} to enable the fix. (Behaviour is
-     * byte-identical to before while {@code false}.)
+     * <p><b>Default {@code true}</b> (the fix is live): the region-informed field work that used the region-only
+     * flood as its A/B repro has landed, so the false positive is now corrected in production — a goal in a
+     * different fragment of a windowed region targets the near-window portal and the search stays local instead of
+     * flooding the open volume. (Left as a flag for a quick revert while the field wiring beds in.)
      */
-    public static boolean FRAGMENT_AWARE_GOAL_WINDOW = false;
+    public static boolean FRAGMENT_AWARE_GOAL_WINDOW = true;
 
     // ---- immutable inputs ----------------------------------------------------------------------------
     private final ServerLevel level;
