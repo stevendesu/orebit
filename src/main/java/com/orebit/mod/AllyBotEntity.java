@@ -1631,11 +1631,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             BlockPathfinder.TRACE_OUT = w;
             BlockPathfinder.TRACE = true;
             BlockPathfinder.LOG_TIMING = false;
-            BlockPathfinder.REGION_FIELD = field;
-            BlockPathfinder.REGION_HEURISTIC = regionMode && field != null;
+            RegionCostField useField = regionMode ? field : null; // A/B: baseline run passes null (plain octile)
             BlockPathPlan plan = haveWindow
-                    ? BlockPathfinder.findPath(new NavGridView(level), startFloor, searchGoal, caps, null, corridor, inv)
-                    : BlockPathfinder.findPath(new NavGridView(level), startFloor, goalFloor, caps, null, null, inv);
+                    ? BlockPathfinder.findPath(new NavGridView(level), startFloor, searchGoal, caps, null, corridor,
+                            inv, BlockPathfinder.MODE_AUTO, null, useField)
+                    : BlockPathfinder.findPath(new NavGridView(level), startFloor, goalFloor, caps, null, null,
+                            inv, BlockPathfinder.MODE_AUTO, null, useField);
             BlockPathfinder.TRACE = false;
             int exp = BlockPathfinder.lastExpansions();
             w.write("\nRESULT: " + (plan == null ? "FAIL (null)" : plan.size() + "wp cost=" + plan.cost())
@@ -1647,8 +1648,6 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             BlockPathfinder.TRACE = false;
             BlockPathfinder.TRACE_OUT = null;
             BlockPathfinder.LOG_TIMING = savedTiming;
-            BlockPathfinder.REGION_HEURISTIC = false;
-            BlockPathfinder.REGION_FIELD = null;
         }
     }
 
