@@ -66,6 +66,16 @@ public final class PathDebugRenderer {
         level.sendParticles(DustParticleOptions.REDSTONE, x, y, z, 1, 0.0, 0.0, 0.0, 0.0);
     }
 
+    /**
+     * Mark a single targeted cell (e.g. the {@code /bot gather} ore the bot is currently going for) with a
+     * bright cluster so the owner can SEE which block was chosen while tuning targeting. {@link ParticleTypes#FLAME}
+     * (orange) is deliberately distinct from the red block-path dust and the skeleton overlay. {@code /bot debug} only.
+     */
+    public static void highlightCell(ServerLevel level, BlockPos cell) {
+        level.sendParticles(ParticleTypes.FLAME,
+                cell.getX() + 0.5, cell.getY() + 0.5, cell.getZ() + 0.5, 6, 0.28, 0.28, 0.28, 0.0);
+    }
+
     // ---- region/HPA skeleton overlay (HANDOFF #1) ----------------------------------------------------
     //
     // The block path above is the LOCAL route (red dust); this draws the MACRO plan it refines: the region
