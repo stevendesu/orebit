@@ -1619,6 +1619,9 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             if (skeletonDump != null) {
                 w.write("\n" + skeletonDump + "\n\n");
             }
+            if (regionMode && field != null) {
+                w.write(field.dump() + "\n");
+            }
             w.write("legend: 'E <seq> <x> <y> <z> g=<g> f=<f> via=<move|start>' = one expansion (pop), in"
                     + " order;  '  C <move> <x> <y> <z> cost=<c> <OK|worse|corridor>' = a candidate it"
                     + " emitted (OK=relaxed onto the open set, worse=not an improvement).\n\n");
