@@ -4,6 +4,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
+import com.orebit.mod.pathfinding.regionpathfinder.RegionCostField;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -28,8 +29,10 @@ import net.minecraft.server.level.ServerLevel;
  * @param cuboidCap   the macro growth cap (value box), or {@code null}
  * @param baseline    the splice seed ({@code null} = unseeded)
  * @param budgetNanos the wall-clock search budget ({@code 0} = node-cap only)
+ * @param field       the region-informed cost-to-goal heuristic field, built on the tick thread at submit and
+ *                    read-only (write-once) on the worker, or {@code null} (no region heuristic)
  */
 public record SearchRequest(ServerLevel level, BlockPos startFloor, BlockPos target, BotCaps caps,
                             MovementContext.InventoryView inventory, int startMode, RegionBound cuboidCap,
-                            EditSnapshot baseline, long budgetNanos) {
+                            EditSnapshot baseline, long budgetNanos, RegionCostField field) {
 }

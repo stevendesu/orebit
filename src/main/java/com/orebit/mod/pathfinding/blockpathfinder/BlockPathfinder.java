@@ -184,23 +184,6 @@ public final class BlockPathfinder {
      */
     public static boolean MACRO_MOVES = true;
 
-    /**
-     * PROTOTYPE (region-informed heuristic, "sky is a swamp"): when {@code true} AND {@link #REGION_FIELD} is
-     * set, the block heuristic is augmented with a per-region cost-to-goal estimate from the region graph
-     * ({@link com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder#costToGoalField}), so cells whose
-     * region is far-from-goal through the real topology (the open sky above a down-goal) get a high {@code h}
-     * and A* stops flooding them. Default off (byte-identical). Set the field + flip this around a search to
-     * measure (see {@code /bot trace}, which A/Bs it).
-     */
-    public static boolean REGION_HEURISTIC = false;
-
-    /**
-     * The per-region cost-to-goal field consumed when {@link #REGION_HEURISTIC} is on — set by the caller
-     * around a search (single-threaded {@code /bot trace} prototype), like {@link #TRACE_OUT}. Not thread-safe;
-     * the async live path would carry it as data on the search request instead (deferred).
-     */
-    public static com.orebit.mod.pathfinding.regionpathfinder.RegionCostField REGION_FIELD;
-
     // NOTE (E1/E2, 2026-07): a per-pop edit-bbox relevance gate was implemented, measured, and DELETED
     // per protocol (design doc deleted post-refutation; rationale in PERF-RESULTS-2026-07-03.md §E1/E2):
     // a counter probe put the envelope-disjoint pop
@@ -614,7 +597,24 @@ public final class BlockPathfinder {
                                          MovementContext.InventoryView inventory, int startModeOverride,
                                          EditSnapshot baseline) {
         return findPath(grid, startFloor, goalFloor, caps, confineBound, cuboidBound, inventory,
-                startModeOverride, baseline, 0L);
+                startModeOverride, baseline, 0L, null);
+    }
+
+    /**
+     * As above, additionally threading the region-informed cost-to-goal heuristic field ({@code regionField},
+     * {@link com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder#costToGoalField} — a topology-aware
+     * lower bound the {@code Relaxer} {@code max}es against the octile so the search is pulled along the region
+     * skeleton and out of dead-end floods). {@code null} (headless / bench / non-region callers) is byte-identical
+     * to the overload above. Built on the tick thread (it reads the region grid / nav sections) and carried
+     * read-only onto the async {@link com.orebit.mod.pathfinding.async.SearchRequest}.
+     */
+    public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
+                                         BotCaps caps, RegionBound confineBound, RegionBound cuboidBound,
+                                         MovementContext.InventoryView inventory, int startModeOverride,
+                                         EditSnapshot baseline,
+                                         com.orebit.mod.pathfinding.regionpathfinder.RegionCostField regionField) {
+        return findPath(grid, startFloor, goalFloor, caps, confineBound, cuboidBound, inventory,
+                startModeOverride, baseline, 0L, regionField);
     }
 
     /**
@@ -632,6 +632,20 @@ public final class BlockPathfinder {
                                          BotCaps caps, RegionBound confineBound, RegionBound cuboidBound,
                                          MovementContext.InventoryView inventory, int startModeOverride,
                                          EditSnapshot baseline, long budgetNanos) {
+        return findPath(grid, startFloor, goalFloor, caps, confineBound, cuboidBound, inventory,
+                startModeOverride, baseline, budgetNanos, null);
+    }
+
+    /**
+     * As above, additionally threading the region-informed cost-to-goal heuristic {@code regionField} (see the
+     * {@code (…, baseline, regionField)} overload). This is the deepest overload — every other delegates here.
+     * {@code null} {@code regionField} is byte-identical to the pre-region-heuristic search.
+     */
+    public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
+                                         BotCaps caps, RegionBound confineBound, RegionBound cuboidBound,
+                                         MovementContext.InventoryView inventory, int startModeOverride,
+                                         EditSnapshot baseline, long budgetNanos,
+                                         com.orebit.mod.pathfinding.regionpathfinder.RegionCostField regionField) {
         final long t0 = System.nanoTime();
         LAST_EXPANSIONS_TL.get()[0] = 0; // reset the instrumentation seam (covers the early no-start-ground return)
         LAST_PARTIAL_TL.get()[0] = false;
@@ -698,7 +712,7 @@ public final class BlockPathfinder {
         editPool.reset();
         final float hWeight = caps.greedyWeight() >= 1.0f ? caps.greedyWeight() : BotCaps.DEFAULT_GREEDY_WEIGHT;
         Relaxer relaxer = new Relaxer(nodes, editPool, sx, sy, sz, gx, gy, gz, confineBound, forced, hWeight,
-                REGION_HEURISTIC ? REGION_FIELD : null);
+                regionField);
 
         int startRow = nodes.intern(startKey, sx, sy, sz, startMode);
         nodes.g[startRow] = 0f;
