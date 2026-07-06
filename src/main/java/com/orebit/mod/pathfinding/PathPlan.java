@@ -252,7 +252,7 @@ public final class PathPlan {
      * footprint; {@code EXTENDED} = the whole window was air, so the horizon was extended DOWN the skeleton to
      * the first standable landing (a free fall); {@code CENTER} = last-resort region-center projection.
      */
-    public enum TargetKind { GOAL, PORTAL, SNAPPED, EXTENDED, CENTER }
+    public enum TargetKind { GOAL, PORTAL, DIG, SNAPPED, EXTENDED, CENTER }
     private TargetKind windowTargetKind = TargetKind.PORTAL;
 
     /** How the current window target was chosen (debug visibility) — see {@link TargetKind}. */
@@ -1187,6 +1187,17 @@ public final class PathPlan {
                     continue;
                 }
                 final BlockPos p = skeleton.portalCell(i);
+                // DIG-THROUGH crossing (PERF-DESIGN-region-dig-through.md §5): the portal cell is buried in solid
+                // — the region tier committed to mining through this face. Pass it straight through (like the
+                // GOAL branch), NOT rejecting/snapping it: the block A* digs to a buried target within its
+                // isGoal tolerance and prices break-through under canBreak. Skipping isUsableTarget/snap here is
+                // exactly what lets an INTERMEDIATE dig-through be realized instead of relocated to the near
+                // wall face (defeating the dig).
+                if (skeleton.isDig(i)) {
+                    windowTargetStep = i;
+                    windowTargetKind = TargetKind.DIG;
+                    return p;
+                }
                 final boolean airOK = airTargetOk(i);
                 if (isUsableTarget(grid, p, airOK)) {
                     windowTargetStep = i;
