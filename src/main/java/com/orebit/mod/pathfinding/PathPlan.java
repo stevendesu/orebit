@@ -14,9 +14,11 @@ import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.regionpathfinder.HierarchicalRegionPlan;
+import com.orebit.mod.pathfinding.regionpathfinder.RegionCostField;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionMineModel;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
+import com.orebit.mod.pathfinding.regionpathfinder.RegionPlaceModel;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.RegionFragments;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
@@ -158,6 +160,9 @@ public final class PathPlan {
     private final ServerLevel level;
     private final RegionGrid regionGrid;
     private final BlockPos goalFloor;
+    /** The region-informed cost-to-goal heuristic field (goal-rooted, built once per plan on the tick thread);
+     *  threaded read-only into every windowed block search, sync and async. {@code null} if the build failed. */
+    private final RegionCostField regionField;
     private final BotCaps caps;
     /**
      * The live bot's per-pathfind inventory feasibility snapshot (PRD §10 Phase 1b/1c), passed straight to
@@ -364,6 +369,29 @@ public final class PathPlan {
         // and owns its per-level blacklists; PathPlan just drives the L0 segment it hands back. The region dig
         // cost is made tool-aware from the SAME inventory snapshot the block tier uses (PERF-DESIGN region §5).
         RegionMineModel mine = RegionMineModel.from(inventory != null ? inventory.mining() : null);
+
+        // Region-informed block heuristic (now the LIVE path, not just /bot trace): a goal-rooted cost-to-goal
+        // field over the fragment graph, bounded to the start<->goal box, feeding BlockPathfinder's Relaxer a
+        // topology-aware lower bound so the block search follows the skeleton and DIGS to a buried goal (via the
+        // goal dig-flood multi-source seed) instead of flooding / walking around. Built HERE on the tick thread
+        // (it reads the region grid / nav sections) and threaded read-only into both the sync search and the async
+        // SearchRequest — RegionCostField is write-once, safe for a worker to read. Any failure ⇒ null ⇒ the block
+        // search falls back to plain octile.
+        RegionCostField field;
+        try {
+            int srx = RegionAddress.regionX(startFloor.getX(), 0);
+            int sry = RegionAddress.regionY(startFloor.getY(), 0, minY);
+            int srz = RegionAddress.regionZ(startFloor.getZ(), 0);
+            RegionPathfinder.RegionBox box =
+                    RegionPathfinder.RegionBox.around(srx, sry, srz, goalRX, goalRY, goalRZ, 3);
+            field = RegionPathfinder.costToGoalField(regionGrid, minY, goalFloor,
+                    caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), mine,
+                    RegionPlaceModel.from(inventory), box);
+        } catch (Throwable t) {
+            field = null;
+        }
+        this.regionField = field;
+
         this.hier = HierarchicalRegionPlan.build(regionGrid, minY, startFloor, goalFloor, caps, mine);
         this.skeleton = hier.l0Skeleton();
         this.windowStart = 0;
@@ -853,7 +881,7 @@ public final class PathPlan {
         // must not pay the per-search view construction twice (SHORT-guard discipline).
         final NavGridView grid = new NavGridView(level);
         this.blockPlan = BlockPathfinder.findPath(grid, botFloor, target, caps, null, cuboidCap, inventory,
-                startMode, baseline);
+                startMode, baseline, regionField);
         this.lastPlanPartial = blockPlan != null && BlockPathfinder.lastWasPartial();
         this.status = (blockPlan != null) ? PathStatus.RUNNING : PathStatus.BLOCKED;
         if (Debug.ENABLED && blockPlan != null) {
@@ -870,7 +898,7 @@ public final class PathPlan {
         // Without this, a stale parked plan could later overwrite the fresh adoption (review finding).
         if (!preplan) parkedPlan = null;
         pending = executor.submit(new SearchRequest(level, fromFloor, target, caps, inventory, startMode,
-                cuboidCap, seed, executor.budgetNanos()));
+                cuboidCap, seed, executor.budgetNanos(), regionField));
         pendingStart = fromFloor;
         pendingTarget = target;
         pendingPreplan = preplan;
