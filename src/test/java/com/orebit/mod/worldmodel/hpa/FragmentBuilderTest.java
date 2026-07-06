@@ -192,6 +192,61 @@ public class FragmentBuilderTest {
     }
 
     // ===================================================================================================
+    // FRAGMENT-CONTAINING (flood-from-bot, PERF-DESIGN region §4) — the id a cell belongs to must match the
+    // id build() assigned that component, and be -1 for a non-fragment cell (fall back to nearest-centroid).
+    // ===================================================================================================
+    @Test
+    void fragmentContaining_matchesBuildIds() {
+        boolean[] passable = new boolean[CELLS];
+        boolean[] standable = new boolean[CELLS];
+        carveTunnel(passable, standable, 4);   // lower seed index (y=1,z=0,x=4) ⇒ fragment 0
+        carveTunnel(passable, standable, 12);  // ⇒ fragment 1
+
+        assertEquals(2, build(passable, standable).fragmentCount(), "fixture is two disjoint tunnels");
+
+        // A cell is resolved to the fragment that CONTAINS it (not the nearest centroid).
+        assertEquals(0, FragmentBuilder.fragmentContaining(passable, standable, G, idx(4, 1, 5)),
+                "a cell in tunnel A is fragment 0");
+        assertEquals(1, FragmentBuilder.fragmentContaining(passable, standable, G, idx(12, 2, 9)),
+                "a cell in tunnel B is fragment 1");
+        // A solid cell between the tunnels is in no fragment.
+        assertEquals(-1, FragmentBuilder.fragmentContaining(passable, standable, G, idx(8, 1, 5)),
+                "a non-passable (solid) cell has no fragment");
+    }
+
+    @Test
+    void fragmentContaining_nonOccupiableAndCollapsed_returnMinusOne() {
+        // Checkerboard: every passable cell is a non-occupiable singleton ⇒ -1.
+        boolean[] cbPass = new boolean[CELLS];
+        boolean[] cbStand = new boolean[CELLS];
+        for (int x = 0; x < G; x++)
+            for (int y = 0; y < G; y++)
+                for (int z = 0; z < G; z++) {
+                    boolean pass = ((x + y + z) & 1) == 0 && y < G - 1;
+                    cbPass[idx(x, y, z)] = pass;
+                    cbStand[idx(x, y, z)] = !pass;
+                }
+        int cbSeed = -1;
+        for (int i = 0; i < CELLS; i++) if (cbPass[i]) { cbSeed = i; break; }
+        assertTrue(cbSeed >= 0, "checkerboard has a passable cell");
+        assertEquals(-1, FragmentBuilder.fragmentContaining(cbPass, cbStand, G, cbSeed),
+                "a non-occupiable component yields no fragment id");
+
+        // Over-cap collapse: a pocket cell ⇒ -1 (the stored record holds no fragments → fall back to centroid).
+        boolean[] ocPass = new boolean[CELLS];
+        boolean[] ocStand = new boolean[CELLS];
+        for (int x = 1; x < G; x += 2)
+            for (int z = 1; z < G; z += 2) {
+                ocStand[idx(x, 0, z)] = true;
+                ocPass[idx(x, 1, z)] = true;
+                ocPass[idx(x, 2, z)] = true;
+            }
+        assertTrue(build(ocPass, ocStand).isCollapsed(), "64 pockets collapse");
+        assertEquals(-1, FragmentBuilder.fragmentContaining(ocPass, ocStand, G, idx(1, 1, 1)),
+                "a collapsed region resolves to no fragment id");
+    }
+
+    // ===================================================================================================
     // UNIFORM fast-paths — all-solid, all-air, all-water.
     // ===================================================================================================
     @Test
