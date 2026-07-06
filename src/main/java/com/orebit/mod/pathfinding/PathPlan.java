@@ -136,6 +136,23 @@ public final class PathPlan {
      */
     public static final int REPLAN_NEAR_TARGET = 3;
 
+    /**
+     * Make the {@link #windowTarget() window-target} "goal in window" test <b>fragment-aware</b>. The test fires
+     * when a window step is the goal <i>region</i>; but a region can appear in the window at one fragment while
+     * the goal is a DIFFERENT fragment of that region reached only via a loop (the goal is a separate pocket of
+     * the bot's own start region — e.g. the start on an upper ledge, the goal in a lower cave of the same
+     * region, connected only by an up-and-over route). A region-only match then targets the goal <b>directly</b>,
+     * unconfining the block search into a huge flood (it hunts the whole open volume for a way over/around).
+     * When {@code true}, the goal branch additionally requires the window step's <i>fragment</i> to be the goal
+     * fragment (the skeleton tail), so the false positive falls through to the near-window portal target and the
+     * search stays local.
+     *
+     * <p><b>Default {@code false} deliberately</b>: it preserves the flood as a strong repro for developing
+     * analytical A* pruning (the "sky is a swamp" work). Flip to {@code true} to enable the fix. (Behaviour is
+     * byte-identical to before while {@code false}.)
+     */
+    public static boolean FRAGMENT_AWARE_GOAL_WINDOW = false;
+
     // ---- immutable inputs ----------------------------------------------------------------------------
     private final ServerLevel level;
     private final RegionGrid regionGrid;
@@ -1168,8 +1185,16 @@ public final class PathPlan {
         // Goal in window? The goal region is the skeleton's tail iff reachedGoalRegion; treat "goal region
         // index ≤ last" by checking whether any window region equals the goal region.
         if (skeleton.reachedGoalRegion()) {
+            // Fragment-aware guard (FRAGMENT_AWARE_GOAL_WINDOW): the goal is the skeleton TAIL's (region,fragment).
+            // A region-only match is a false positive when the window contains the goal region at a DIFFERENT
+            // fragment (goal = a separate pocket of the start's own region, reached via a loop) — it targets the
+            // goal directly and unconfines the search into a flood. Requiring the fragment match falls through to
+            // the near-window portal. Default off keeps that flood reproducible for pruning research.
+            final boolean fragAware = FRAGMENT_AWARE_GOAL_WINDOW && skeleton.isFragmentModel();
+            final int goalFrag = fragAware ? skeleton.fragmentId(skeleton.size() - 1) : -1;
             for (int i = windowStart; i <= last; i++) {
-                if (skeleton.rx(i) == goalRX && skeleton.ry(i) == goalRY && skeleton.rz(i) == goalRZ) {
+                if (skeleton.rx(i) == goalRX && skeleton.ry(i) == goalRY && skeleton.rz(i) == goalRZ
+                        && (!fragAware || skeleton.fragmentId(i) == goalFrag)) {
                     windowTargetStep = i;
                     windowTargetKind = TargetKind.GOAL;
                     return goalFloor;
