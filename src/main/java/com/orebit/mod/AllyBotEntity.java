@@ -27,6 +27,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.config.Config;
 import com.orebit.mod.config.ConfigLoader;
+import com.orebit.mod.platform.BlockShapes;
 import com.orebit.mod.platform.BotInventory;
 import com.orebit.mod.platform.ClientLoad;
 import com.orebit.mod.platform.CommandFeedback;
@@ -244,7 +245,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      *  pyramid); MINE approaches + timed-mines the queued cells; COMPASS walks toward a distant pyramid hint
      *  when nothing is loaded nearby, live-scanning en route so it grabs ore it passes; RETURN walks back to
      *  the issue cell. Stepped one phase per tick by {@link #gatherLoopTick}. */
-    private enum GatherPhase { SCAN, MINE, COMPASS, RETURN }
+    private enum GatherPhase { SCAN, MINE, COLLECT, COMPASS, RETURN }
 
     private int gatherColumn = -1;            // indexed resource column being gathered (-1 = not gathering)
     private int gatherQuota;                  // target count of PICKED-UP items (owner-ratified, §10)
@@ -262,6 +263,39 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private final HashSet<Long> gatherBlacklist = new HashSet<>();
     /** Ore cells the driver could not reach this run — skipped by the scan so MINE can't loop on them. */
     private final HashSet<Long> unreachableCells = new HashSet<>();
+    /** Candidates accumulated across a (possibly multi-tick) scan sweep, so exposed-vs-buried can be ranked. */
+    private final List<BlockPos> scanFound = new ArrayList<>();
+    /** MINE: the ore currently being pursued — chosen from {@link #mineQueue} by the two-A* route-cost compare
+     *  ({@link #selectMineTarget}), not simply the nearest. Null → re-select on the next MINE tick. */
+    private BlockPos mineTarget;
+    /** COLLECT: the just-mined cell whose drop we are waiting to pick up (now air). */
+    private BlockPos collectCell;
+    /** COLLECT: ticks spent chasing the current drop (bounded by {@link #COLLECT_TIMEOUT}). */
+    private int collectTicks;
+    /** MINE: the level-0 region (blockPos>>4) the current target was selected from; a change re-runs selection. */
+    private long mineSelectRegion = Long.MIN_VALUE;
+    /** MINE: ticks since the last opportunistic re-target challenge (throttles it — see {@link #maybeChallengeTarget}). */
+    private int proximityTicks;
+    /** Reused mutable cursor for the LOS raycast + exposed-face neighbour reads (no per-check allocation). */
+    private final BlockPos.MutableBlockPos scratchPos = new BlockPos.MutableBlockPos();
+
+    /** Ticks to wait for a mined drop to be collected before giving up on it (drop despawned / fell away). */
+    private static final int COLLECT_TIMEOUT = 60;
+    /** Drive-arrival tolerance while MINING/COLLECTING: deliberately TIGHTER than the ~1.0 closest a bot can get
+     *  to a solid block's centre, so {@code driveToward} never short-circuits to "arrived" and stops the bot a
+     *  block of stone short — it keeps tunnelling until the real stop condition ({@link #hasLineOfSight} in MINE,
+     *  the drop pickup in COLLECT) is met. Follow/come keep the looser {@link #ARRIVE_DIST}/{@link #ARRIVE_Y}. */
+    private static final double MINE_ARRIVE_DIST = 0.6;
+    private static final double MINE_ARRIVE_Y = 0.6;
+    /** The 6 face neighbours ({dx,dy,dz}) — for the {@link #hasExposedFace} targeting check. */
+    private static final int[][] FACE_OFFSETS =
+            {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    /** How often (ticks) MINE re-weighs its committed target against a newly-close pooled vein. Cheap distance
+     *  math runs free every tick, but the A* challenge only every this-many ticks (throttled). */
+    private static final int PROXIMITY_INTERVAL = 15;
+    /** How close (blocks) a pooled ore must come before it may CHALLENGE the committed target — the "there's a
+     *  vein right here, reconsider" radius (well beyond mining reach, so it fires as the bot draws near). */
+    private static final int PROXIMITY_GRAB_RADIUS = 14;
 
     // Live-scan volume around the bot (in sections): horizontal ± chunks, plus a downward-biased vertical
     // band (ore sits below). Swept nearest-first, SCAN_SECTIONS_PER_TICK at a time, stopping at the first ore.
@@ -591,6 +625,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         switch (gatherPhase) {
             case SCAN -> gatherScan(level);
             case MINE -> gatherMine(level);
+            case COLLECT -> gatherCollect(level);
             case COMPASS -> gatherCompass(level);
             case RETURN -> gatherReturn(level);
         }
@@ -603,6 +638,8 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         scanAnchorY = p.getY();
         scanAnchorZ = p.getZ();
         scanCursor = 0;
+        scanFound.clear();
+        mineTarget = null; // a fresh sweep re-picks the target
     }
 
     /**
@@ -616,7 +653,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         if (advanceScan(level)) {
             gatherLastInvTotal = new BotInventory(this).totalItemCount();
             clearPlan();
-            gatherPhase = GatherPhase.MINE;
+            enterMine();
             return;
         }
         if (scanCursor >= SCAN_OFFSETS.length) { // nothing loaded nearby → ask the pyramid where to head
@@ -626,16 +663,20 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     /**
      * Advance the throttled nearest-first live scan by up to {@link #SCAN_SECTIONS_PER_TICK} sections from
-     * {@link #scanCursor}, reading each resident section's exact target cells ({@link ResourceScan#exactCells}
-     * — a {@code null} return skips an unloaded chunk). Returns {@code true} once a section yields ore, loading
-     * {@link #mineQueue} nearest-first (skipping cells already proven unreachable). Offsets are distance-sorted,
-     * so the first ore found is (about) the nearest.
+     * {@link #scanCursor}, accumulating this run's exact target cells ({@link ResourceScan#exactCells} — a
+     * {@code null} return skips an unloaded chunk) into {@link #scanFound}.
+     *
+     * <p><b>Prefers the EASY ore.</b> Rather than committing to the nearest ore (which may be buried behind
+     * stone — a 9-block dig when a slightly-farther vein is exposed), it keeps sweeping nearest-first until it
+     * finds an ore with an {@linkplain #hasExposedFace exposed face} OR the whole volume is swept, and only then
+     * commits — ranking {@link #mineQueue} exposed-first, then by distance. So it walks to visible ore before it
+     * digs, and only digs the nearest buried ore when nothing nearby is exposed. Returns {@code true} on commit;
+     * {@code false} while it still wants to sweep more (or found nothing — then {@link #gatherScan} goes COMPASS).
      */
     private boolean advanceScan(ServerLevel level) {
         final int bcx = scanAnchorX >> 4;
         final int bcz = scanAnchorZ >> 4;
         final int bsy = (scanAnchorY - RegionGrid.of(level).minY()) >> 4;
-        List<BlockPos> found = null;
         int scanned = 0;
         while (scanCursor < SCAN_OFFSETS.length && scanned < SCAN_SECTIONS_PER_TICK) {
             final int[] o = SCAN_OFFSETS[scanCursor++];
@@ -646,17 +687,21 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                     ResourceScan.exactCells(level, bcx + o[0], ry, bcz + o[2], gatherColumn);
             if (cells == null || cells.isEmpty()) continue;
             for (BlockPos cell : cells) {
-                if (!unreachableCells.contains(cell.asLong())) {
-                    if (found == null) found = new ArrayList<>();
-                    found.add(cell);
-                }
+                if (!unreachableCells.contains(cell.asLong())) scanFound.add(cell);
             }
         }
-        if (found == null) return false;
-        final double bx = getX(), by = getY(), bz = getZ();
-        found.sort((a, b) -> Double.compare(distSq(a, bx, by, bz), distSq(b, bx, by, bz)));
+        if (scanFound.isEmpty()) return false; // nothing found yet — keep sweeping / (exhausted → COMPASS)
+        // Keep sweeping until there is at least one EXPOSED option in the pool (or the volume is exhausted), so
+        // {@link #selectMineTarget}'s two-A* has both an exposed and a buried candidate to weigh — otherwise we
+        // could commit to digging the nearest buried ore before ever noticing a nearby vein we could walk to.
+        boolean anyExposed = false;
+        for (BlockPos cell : scanFound) {
+            if (hasExposedFace(level, cell)) { anyExposed = true; break; }
+        }
+        if (!anyExposed && scanCursor < SCAN_OFFSETS.length) return false;
         mineQueue.clear();
-        mineQueue.addAll(found);
+        mineQueue.addAll(scanFound); // the candidate POOL — selectMineTarget picks the cheapest-route target
+        scanFound.clear();
         return true;
     }
 
@@ -670,38 +715,178 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      * is what makes it grab ore it walked past. Quota met → RETURN.
      */
     private void gatherMine(ServerLevel level) {
-        while (!mineQueue.isEmpty() && level.getBlockState(mineQueue.peek()).isAir()) {
-            mineQueue.poll();
-        }
-        if (mineQueue.isEmpty()) { // worked out here — re-scan around the bot for the next nearest ore
+        // Re-run SELECTION when the bot crosses into a new region (the two-A* route-cost compare is
+        // position-dependent — walking toward a cave mouth changes which vein is cheapest) — unless mid-break.
+        if (!mining.busy() && regionOf(this.blockPosition()) != mineSelectRegion) {
             clearPlan();
             beginScanSweep();
             gatherPhase = GatherPhase.SCAN;
             return;
         }
-        final BlockPos cell = mineQueue.peek();
-        if (withinReach(cell)) {
-            final int now = new BotInventory(this).totalItemCount();
-            if (now > gatherLastInvTotal) gathered += now - gatherLastInvTotal;
-            gatherLastInvTotal = now;
-            if (gathered >= gatherQuota) {
-                clearPlan();
-                gatherPhase = GatherPhase.RETURN;
-                chat("got " + gathered + " " + ResourceClasses.nameOfColumn(gatherColumn) + " — heading back.");
+        // (Re)choose the target when we have none, or the current one was mined / proven unreachable.
+        if (mineTarget == null || level.getBlockState(mineTarget).isAir()
+                || unreachableCells.contains(mineTarget.asLong())) {
+            selectMineTarget(level);
+        }
+        if (mineTarget == null) { // pool worked out → re-scan around the (now-moved) bot for the next veins
+            clearPlan();
+            beginScanSweep();
+            gatherPhase = GatherPhase.SCAN;
+            return;
+        }
+        // Opportunistic re-target (throttled): while still approaching (not mid-break), every PROXIMITY_INTERVAL
+        // ticks let a newly-close pooled vein challenge the committed target — but only switch if A* PROVES it
+        // cheaper. This is what stops the bot walking past a nearer vein it discovers en route (the cave case).
+        if (!mining.busy() && ++proximityTicks >= PROXIMITY_INTERVAL) {
+            proximityTicks = 0;
+            maybeChallengeTarget(level);
+        }
+        final BlockPos cell = mineTarget;
+        if (Debug.ENABLED) PathDebugRenderer.highlightCell(level, cell); // show the chosen ore (/bot debug)
+        // Break ONLY when both within reach AND with line-of-sight — the LOS gate is what stops the bot mining
+        // ore through 3 blocks of stone (raw reach alone did). Buried ore therefore keeps driving (tunnelling)
+        // until the bot is adjacent with a clear line; exposed ore can be mined from reach like a real player.
+        if (withinReach(cell) && hasLineOfSight(level, cell)) {
+            this.zza = 0.0f;
+            if (level.getBlockState(cell).isAir()) { // the break just completed → collect its drop before moving on
+                beginCollect(cell);
                 return;
             }
-            this.zza = 0.0f;
             mining.request(cell); // BotMining faces + times the break + drops
         } else {
             gatherLastInvTotal = new BotInventory(this).totalItemCount(); // exclude approach pickups from Δ
-            boolean arrived = driveToward(cell.getX() + 0.5, cell.getY() + 0.5, cell.getZ() + 0.5, cell);
-            if (!arrived && navGaveUp) { // can't reach this cell — blacklist it (so re-scan won't re-pick) + skip
+            // Tight MINE arrival so it tunnels ALL the way to a line-of-sight cell, not 3 blocks short.
+            boolean arrived = driveToward(cell.getX() + 0.5, cell.getY() + 0.5, cell.getZ() + 0.5, cell,
+                    MINE_ARRIVE_DIST, MINE_ARRIVE_Y);
+            if (!arrived && navGaveUp) { // can't reach it — blacklist + drop from the pool, re-select next tick
                 unreachableCells.add(cell.asLong());
-                mineQueue.poll();
+                mineQueue.remove(cell);
+                mineTarget = null;
                 this.navGaveUp = false;
                 clearPlan();
             }
         }
+    }
+
+    /**
+     * Choose the next ore to mine (sets {@link #mineTarget}): compare the nearest EXPOSED candidate and the
+     * nearest BURIED candidate by a REAL block-A* route cost (which prices the digging), and keep the cheaper —
+     * so the bot walks to a visible vein rather than tunnelling past it, yet still digs a near buried vein when
+     * that is genuinely cheaper. Because the cost is a real search, A* distinguishes "buried behind stone" (an
+     * expensive dig) from "exposed in a cavern we can drop into" (a cheap fall) far better than any Y-heuristic.
+     * Only TWO searches (owner-ratified — one-per-ore is untenable). {@code null} → the pool is worked out.
+     */
+    private void selectMineTarget(ServerLevel level) {
+        mineQueue.removeIf(c -> level.getBlockState(c).isAir() || unreachableCells.contains(c.asLong()));
+        if (mineQueue.isEmpty()) { mineTarget = null; return; }
+        final double bx = getX(), by = getY(), bz = getZ();
+        BlockPos nearestExposed = null, nearestBuried = null;
+        double eD = Double.MAX_VALUE, bD = Double.MAX_VALUE;
+        for (BlockPos c : mineQueue) {
+            final double d = distSq(c, bx, by, bz);
+            if (hasExposedFace(level, c)) { if (d < eD) { eD = d; nearestExposed = c; } }
+            else                          { if (d < bD) { bD = d; nearestBuried = c; } }
+        }
+        if (nearestExposed == null) { mineTarget = nearestBuried; return; }
+        if (nearestBuried == null)  { mineTarget = nearestExposed; return; }
+        // Two real A* route costs (dig priced in); cheaper wins, tie → exposed (walking beats tunnelling). A null
+        // plan (unreachable within the node budget) scores +inf, so the reachable candidate is preferred.
+        final BotCaps caps = caps();
+        final NavGridView grid = new NavGridView(level);
+        final BlockPos start = this.blockPosition().below();
+        final BlockPathPlan pe = BlockPathfinder.findPath(grid, start, nearestExposed, caps);
+        final BlockPathPlan pb = BlockPathfinder.findPath(grid, start, nearestBuried, caps);
+        final float ce = pe != null ? pe.cost() : Float.MAX_VALUE;
+        final float cb = pb != null ? pb.cost() : Float.MAX_VALUE;
+        mineTarget = (ce <= cb) ? nearestExposed : nearestBuried;
+        proximityTicks = 0; // fresh target — wait a full interval before challenging it
+    }
+
+    /**
+     * Opportunistic re-target: if a pooled vein has come within {@link #PROXIMITY_GRAB_RADIUS} of the bot, run a
+     * real A* to it AND to the currently-committed {@link #mineTarget} from HERE, and switch only if the newcomer
+     * is <b>proven strictly cheaper</b> (sticky — we do not abandon the committed vein on a hunch). This catches
+     * the case the up-front two-A* can't: the bot heads the long way to a straight-line-nearest vein and, en
+     * route, passes a genuinely cheaper one (the cave diagram). Gated + throttled by the caller, so it is at most
+     * two A* every {@link #PROXIMITY_INTERVAL} ticks — and only when a candidate is actually near.
+     */
+    private void maybeChallengeTarget(ServerLevel level) {
+        if (mineTarget == null) return;
+        final double bx = getX(), by = getY(), bz = getZ();
+        BlockPos challenger = null;
+        double best = (double) PROXIMITY_GRAB_RADIUS * PROXIMITY_GRAB_RADIUS;
+        for (BlockPos c : mineQueue) {
+            if (c.equals(mineTarget)) continue;
+            if (level.getBlockState(c).isAir() || unreachableCells.contains(c.asLong())) continue;
+            final double d = distSq(c, bx, by, bz);
+            if (d < best) { best = d; challenger = c; } // the nearest newly-close vein is the best challenger
+        }
+        if (challenger == null) return; // nothing close enough to reconsider — keep going
+        final BotCaps caps = caps();
+        final NavGridView grid = new NavGridView(level);
+        final BlockPos start = this.blockPosition().below();
+        final BlockPathPlan pc = BlockPathfinder.findPath(grid, start, challenger, caps);
+        if (pc == null) return; // challenger unreachable → stick with the committed target
+        final BlockPathPlan pt = BlockPathfinder.findPath(grid, start, mineTarget, caps);
+        final float committed = pt != null ? pt.cost() : Float.MAX_VALUE;
+        if (pc.cost() < committed) mineTarget = challenger; // proven cheaper → take it
+    }
+
+    /** Enter COLLECT: the target block just broke; pause to actually pick up its drop before the next ore. */
+    private void beginCollect(BlockPos cell) {
+        collectCell = cell;
+        collectTicks = 0;
+        gatherLastInvTotal = new BotInventory(this).totalItemCount(); // baseline before the drop lands in us
+        clearPlan();
+        gatherPhase = GatherPhase.COLLECT;
+    }
+
+    /**
+     * COLLECT: the just-mined block is now air and its drop is on the ground. Step onto the cell so vanilla
+     * auto-pickup grabs it; the moment the inventory count ticks up, accrue to the quota and MINE the next ore.
+     * Bounded by {@link #COLLECT_TIMEOUT} so a drop that fell into a pit / lava / despawned can't strand the loop.
+     * This is what stops the bot running straight off to the next vein and leaving its iron on the floor.
+     */
+    private void gatherCollect(ServerLevel level) {
+        final int now = new BotInventory(this).totalItemCount();
+        if (now > gatherLastInvTotal) { // got it
+            gathered += now - gatherLastInvTotal;
+            gatherLastInvTotal = now;
+            finishCollect();
+            return;
+        }
+        if (collectCell == null || ++collectTicks > COLLECT_TIMEOUT) { // drop lost / gone — give up, move on
+            finishCollect();
+            return;
+        }
+        if (Debug.ENABLED) PathDebugRenderer.highlightCell(level, collectCell); // show the drop we're collecting
+        driveToward(collectCell.getX() + 0.5, collectCell.getY() + 0.5, collectCell.getZ() + 0.5, collectCell,
+                MINE_ARRIVE_DIST, MINE_ARRIVE_Y);
+    }
+
+    /** Leave COLLECT: drop the mined cell from the queue, check the quota, and resume MINE (or RETURN). */
+    private void finishCollect() {
+        if (collectCell != null) mineQueue.remove(collectCell); // done with it (it's air now anyway)
+        collectCell = null;
+        mineTarget = null; // pick the next ore via a fresh two-A* compare
+        clearPlan();
+        if (gathered >= gatherQuota) {
+            gatherPhase = GatherPhase.RETURN;
+            chat("got " + gathered + " " + ResourceClasses.nameOfColumn(gatherColumn) + " — heading back.");
+            return;
+        }
+        enterMine();
+    }
+
+    /** Transition into MINE, stamping the region the current target was selected from (for the re-select gate). */
+    private void enterMine() {
+        mineSelectRegion = regionOf(this.blockPosition());
+        gatherPhase = GatherPhase.MINE;
+    }
+
+    /** The level-0 region (16-block cube) a world cell sits in — the granularity of the MINE re-select trigger. */
+    private static long regionOf(BlockPos p) {
+        return regionKey(p.getX() >> 4, p.getY() >> 4, p.getZ() >> 4);
     }
 
     /**
@@ -739,7 +924,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         if (advanceScan(level)) {
             gatherLastInvTotal = new BotInventory(this).totalItemCount();
             clearPlan();
-            gatherPhase = GatherPhase.MINE;
+            enterMine();
             return;
         }
         final BlockPos c = compassTarget;
@@ -772,6 +957,46 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         double dy = cell.getY() + 0.5 - getEyeY();
         double dz = cell.getZ() + 0.5 - getZ();
         return dx * dx + dy * dy + dz * dz <= MINE_REACH * MINE_REACH;
+    }
+
+    /**
+     * The mining line-of-sight gate: true iff a straight line from the bot's eyes to {@code target}'s centre
+     * is not interrupted by a full solid block BEFORE the target (the target itself is excluded). This is what
+     * stops the bot breaking ore <i>through</i> a wall — {@link #withinReach} alone (raw distance) let it mine
+     * 3 blocks of stone away. A stepped sample (~4/block) is plenty at reach distance and stays allocation-free
+     * (a single reused {@link BlockPos.MutableBlockPos}); solidity uses the version-portable
+     * {@link BlockShapes#isSolidRender} seam, not a fragile direct MC raytrace.
+     */
+    private boolean hasLineOfSight(net.minecraft.world.level.Level level, BlockPos target) {
+        final double ox = getX(), oy = getEyeY(), oz = getZ();
+        final double dx = target.getX() + 0.5 - ox, dy = target.getY() + 0.5 - oy, dz = target.getZ() + 0.5 - oz;
+        final int steps = Math.max(1, (int) Math.ceil(Math.sqrt(dx * dx + dy * dy + dz * dz) * 4.0));
+        for (int i = 1; i < steps; i++) {
+            final double t = (double) i / steps;
+            final int bx = (int) Math.floor(ox + dx * t);
+            final int by = (int) Math.floor(oy + dy * t);
+            final int bz = (int) Math.floor(oz + dz * t);
+            if (bx == target.getX() && by == target.getY() && bz == target.getZ()) continue; // the target itself
+            scratchPos.set(bx, by, bz);
+            final BlockState s = level.getBlockState(scratchPos);
+            if (!s.isAir() && BlockShapes.isSolidRender(s, level, scratchPos)) return false;
+        }
+        return true;
+    }
+
+    /**
+     * A cheap, position-independent "easy target" test for ore SELECTION: true iff any of {@code cell}'s six
+     * face neighbours is not a full solid block (air / water / a non-cube), i.e. the ore can be reached and
+     * mined without tunnelling to it. Preferred over a per-bot line-of-sight for targeting because it does not
+     * change as the bot moves (no flip-flop) and is 1-6 block reads with an early out.
+     */
+    private boolean hasExposedFace(net.minecraft.world.level.Level level, BlockPos cell) {
+        for (int[] o : FACE_OFFSETS) {
+            scratchPos.set(cell.getX() + o[0], cell.getY() + o[1], cell.getZ() + o[2]);
+            final BlockState s = level.getBlockState(scratchPos);
+            if (s.isAir() || !BlockShapes.isSolidRender(s, level, scratchPos)) return true;
+        }
+        return false;
     }
 
     private static double distSq(BlockPos p, double x, double y, double z) {
@@ -932,13 +1157,20 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         portalSeekGaveUp = false;
     }
 
+    /** Drive toward {@code (tx,ty,tz)} with the default follow/come arrival tolerance ({@link #ARRIVE_DIST}/
+     *  {@link #ARRIVE_Y}). Mining passes a tighter tolerance so it goes all the way to the target. */
+    private boolean driveToward(double tx, double ty, double tz, BlockPos goalFloor) {
+        return driveToward(tx, ty, tz, goalFloor, ARRIVE_DIST, ARRIVE_Y);
+    }
+
     /**
      * Path toward {@code (tx,ty,tz)} (goal floor cell {@code goalFloor}), steering along the plan and
-     * falling back to a straight-line steer off-grid. Returns {@code true} once within
-     * {@link #ARRIVE_DIST} horizontally <i>and</i> {@link #ARRIVE_Y} vertically (the caller decides what
-     * arrival means for its mode).
+     * falling back to a straight-line steer off-grid. Returns {@code true} once within {@code arriveDist}
+     * horizontally <i>and</i> {@code arriveY} vertically — the caller decides what arrival means for its mode
+     * (loose for FOLLOW/COME; tight for MINE, which must reach a line-of-sight cell before it can break).
      */
-    private boolean driveToward(double tx, double ty, double tz, BlockPos goalFloor) {
+    private boolean driveToward(double tx, double ty, double tz, BlockPos goalFloor,
+                                double arriveDist, double arriveY) {
         double dx = tx - this.getX();
         double dy = ty - this.getY();
         double dz = tz - this.getZ();
@@ -947,7 +1179,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // Arrived only when close in 3D. Horizontal proximity alone would let the bot stop directly
         // BELOW the target (it walks under a sky platform / the top of a staircase and quits) — it must
         // also match the target's height, which is what makes it actually climb to reach you.
-        if (distXZ <= ARRIVE_DIST && Math.abs(dy) <= ARRIVE_Y) {
+        if (distXZ <= arriveDist && Math.abs(dy) <= arriveY) {
             this.zza = 0.0f;
             clearPlan();
             lookAtPlayer(owner);

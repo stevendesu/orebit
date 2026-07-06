@@ -424,7 +424,13 @@ public final class RegionPathfinder {
                     // wb now holds fragC's centroid (its interior rep) — the mine-edge portal target.
                     boolean ok = relaxFrag(nodes, current, gCur, edge, crx, cry, crz, fragC,
                             wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, ENTRY_INTERIOR, false);
-                    if (TRACE) traceCand("mine-sibling", crx, cry, crz, fragC, edge, wb[0], wb[1], wb[2], ok);
+                    if (TRACE) {
+                        traceCand("mine-sibling", crx, cry, crz, fragC, edge, wb[0], wb[1], wb[2], ok);
+                        final int sp = Math.max(Math.abs(wa[0] - wb[0]) + Math.abs(wa[1] - wb[1])
+                                + Math.abs(wa[2] - wb[2]), RegionAddress.sideOf(level) / 2);
+                        traceBreakdown("mine-sibling: span=" + sp + " blk × MINE=" + MINE_PER_BLOCK + "/blk × hardness="
+                                + hardnessFactor(rfN.avgSolidHardness()) + " = " + edge + " ticks");
+                    }
                 }
             }
 
@@ -462,7 +468,11 @@ public final class RegionPathfinder {
                         float edge = span * MINE_PER_BLOCK * hardnessFactor(rfN.avgSolidHardness());
                         boolean ok = relaxFrag(nodes, current, gCur, edge, dmx, dmy, dmz, 0,
                                 wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, dOpp, buried);
-                        if (TRACE) traceCand("dig-through", dmx, dmy, dmz, 0, edge, wb[0], wb[1], wb[2], ok);
+                        if (TRACE) {
+                            traceCand("dig-through", dmx, dmy, dmz, 0, edge, wb[0], wb[1], wb[2], ok);
+                            traceBreakdown("dig: span=" + span + " blk × MINE=" + MINE_PER_BLOCK + "/blk × hardness="
+                                    + hardnessFactor(rfN.avgSolidHardness()) + " = " + edge + " ticks");
+                        }
                     }
                     continue;
                 }
@@ -526,7 +536,12 @@ public final class RegionPathfinder {
                                 + walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall);
                         boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, fb,
                                 wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false);
-                        if (TRACE) traceCand("walk", mrx, mry, mrz, fb, edge, wb[0], wb[1], wb[2], ok);
+                        if (TRACE) {
+                            traceCand("walk", mrx, mry, mrz, fb, edge, wb[0], wb[1], wb[2], ok);
+                            traceBreakdown("traverse[" + walkBreakdown(wa[0] - entX, wa[1] - entY, wa[2] - entZ,
+                                    canPlace, safeFall) + "]  +  cross[" + walkBreakdown(wb[0] - wa[0],
+                                    wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall) + "]");
+                        }
                         emitted = true;
                     } else {
                         long d = Math.abs(wb[0] - wa[0]) + Math.abs(wb[1] - wa[1]) + Math.abs(wb[2] - wa[2]);
@@ -542,8 +557,12 @@ public final class RegionPathfinder {
                                 + WALL_MINE_BLOCKS * MINE_PER_BLOCK * hardFactor;
                         boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, bestFrag,
                                 wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false);
-                        if (TRACE) traceCand("mine-fallback", mrx, mry, mrz, bestFrag, edge,
-                                wb[0], wb[1], wb[2], ok);
+                        if (TRACE) {
+                            traceCand("mine-fallback", mrx, mry, mrz, bestFrag, edge, wb[0], wb[1], wb[2], ok);
+                            traceBreakdown("walk[" + walkBreakdown(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2],
+                                    canPlace, safeFall) + "] + wallmine=" + (WALL_MINE_BLOCKS * MINE_PER_BLOCK * hardFactor)
+                                    + " (" + WALL_MINE_BLOCKS + "blk × MINE=" + MINE_PER_BLOCK + "/blk × hardness=" + hardFactor + ")");
+                        }
                     } else {
                         // Neighbour is MIXED but solid at this face → mine straight in to its fragment 0.
                         footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
@@ -631,6 +650,31 @@ public final class RegionPathfinder {
                                   int px, int py, int pz, boolean ok) {
         trace("  C " + kind + " -> " + rx + "," + ry + "," + rz + " frag=" + frag
                 + " cost=" + cost + " crossing=" + px + "," + py + "," + pz + (ok ? " OK" : " worse"));
+    }
+
+    /** TRACE only: an indented cost-breakdown line under the last candidate, so the owner can see WHY a walk/dig
+     *  edge costs what it does (in ticks) — WALK/PILLAR/FALL/MINE per-block rates and the spans they multiply. */
+    private static void traceBreakdown(String detail) {
+        trace("      ~ " + detail);
+    }
+
+    /** Decompose one {@link #walkCost} into its horizontal-octile and directional-Δy tick components (TRACE). */
+    private static String walkBreakdown(int dx, int dy, int dz, boolean canPlace, int safeFall) {
+        final float oct = octile(dx, dz);
+        final StringBuilder sb = new StringBuilder();
+        sb.append("horiz=").append(oct * WALK_PER_BLOCK)
+                .append(" (octile ").append(oct).append("×").append(WALK_PER_BLOCK).append("/blk)");
+        if (dy > 0) {
+            sb.append(" + up=").append(dy * PILLAR_PER_BLOCK)
+                    .append(" (").append(dy).append("×PILLAR ").append(PILLAR_PER_BLOCK).append("/blk)");
+            if (!canPlace && dy > safeFall) sb.append(" +cliff=").append((dy - safeFall) * UNSAFE_VERTICAL_PENALTY);
+        } else if (dy < 0) {
+            final int drop = -dy;
+            sb.append(" + down=").append(drop * FALL_PER_BLOCK)
+                    .append(" (").append(drop).append("×FALL ").append(FALL_PER_BLOCK).append("/blk)");
+            if (drop > safeFall) sb.append(" +cliff=").append((drop - safeFall) * UNSAFE_VERTICAL_PENALTY);
+        }
+        return sb.toString();
     }
 
     /** The own-kind label of the expanded node (the {@code E} line tag). */
