@@ -184,6 +184,23 @@ public final class BlockPathfinder {
      */
     public static boolean MACRO_MOVES = true;
 
+    /**
+     * PROTOTYPE (region-informed heuristic, "sky is a swamp"): when {@code true} AND {@link #REGION_FIELD} is
+     * set, the block heuristic is augmented with a per-region cost-to-goal estimate from the region graph
+     * ({@link com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder#costToGoalField}), so cells whose
+     * region is far-from-goal through the real topology (the open sky above a down-goal) get a high {@code h}
+     * and A* stops flooding them. Default off (byte-identical). Set the field + flip this around a search to
+     * measure (see {@code /bot trace}, which A/Bs it).
+     */
+    public static boolean REGION_HEURISTIC = false;
+
+    /**
+     * The per-region cost-to-goal field consumed when {@link #REGION_HEURISTIC} is on — set by the caller
+     * around a search (single-threaded {@code /bot trace} prototype), like {@link #TRACE_OUT}. Not thread-safe;
+     * the async live path would carry it as data on the search request instead (deferred).
+     */
+    public static com.orebit.mod.pathfinding.regionpathfinder.RegionCostField REGION_FIELD;
+
     // NOTE (E1/E2, 2026-07): a per-pop edit-bbox relevance gate was implemented, measured, and DELETED
     // per protocol (design doc deleted post-refutation; rationale in PERF-RESULTS-2026-07-03.md §E1/E2):
     // a counter probe put the envelope-disjoint pop
@@ -680,7 +697,8 @@ public final class BlockPathfinder {
         final EditPool editPool = EDIT_POOL.get();
         editPool.reset();
         final float hWeight = caps.greedyWeight() >= 1.0f ? caps.greedyWeight() : BotCaps.DEFAULT_GREEDY_WEIGHT;
-        Relaxer relaxer = new Relaxer(nodes, editPool, sx, sy, sz, gx, gy, gz, confineBound, forced, hWeight);
+        Relaxer relaxer = new Relaxer(nodes, editPool, sx, sy, sz, gx, gy, gz, confineBound, forced, hWeight,
+                REGION_HEURISTIC ? REGION_FIELD : null);
 
         int startRow = nodes.intern(startKey, sx, sy, sz, startMode);
         nodes.g[startRow] = 0f;
@@ -829,6 +847,9 @@ public final class BlockPathfinder {
         private final RegionBound bound; // corridor confinement (null = unbounded); rejects out-of-box candidates
         private final GoalForcedCost.Forced forced; // once-per-search goal-cuboid premium (extent 0 = no correction)
         private final float hWeight; // greediness (BotCaps.greedyWeight), read once at search start
+        // PROTOTYPE region-informed heuristic (null = off): per-region cost-to-goal, added to h as a topology-aware
+        // lower bound so the sky (far-from-goal regions) is deprioritised instead of flooded.
+        private final com.orebit.mod.pathfinding.regionpathfinder.RegionCostField regionField;
 
         int current;        // row being expanded
         float currentG;     // its g (read once per expansion, not per candidate)
@@ -837,7 +858,8 @@ public final class BlockPathfinder {
         boolean anyEdits;   // has any edge carried break/place edits? (gates the per-pop diff rebuild)
 
         Relaxer(Nodes nodes, EditPool editPool, int sx, int sy, int sz, int gx, int gy, int gz,
-                RegionBound bound, GoalForcedCost.Forced forced, float hWeight) {
+                RegionBound bound, GoalForcedCost.Forced forced, float hWeight,
+                com.orebit.mod.pathfinding.regionpathfinder.RegionCostField regionField) {
             this.nodes = nodes;
             this.editPool = editPool;
             this.sx = sx;
@@ -849,6 +871,7 @@ public final class BlockPathfinder {
             this.bound = bound;
             this.forced = forced;
             this.hWeight = hWeight;
+            this.regionField = regionField;
             double dlen = Math.sqrt((double) (gx - sx) * (gx - sx)
                     + (double) (gy - sy) * (gy - sy)
                     + (double) (gz - sz) * (gz - sz));
@@ -875,7 +898,19 @@ public final class BlockPathfinder {
             float cy = pz * dx - px * dz;
             float cz = px * dy - py * dx;
             float cross = (float) Math.sqrt(cx * cx + cy * cy + cz * cz);
-            return octile(x, y, z, gx, gy, gz, hWeight) + H_TIE * (cross * invLineLen)
+            float base = octile(x, y, z, gx, gy, gz, hWeight);
+            if (regionField != null) {
+                float rc = regionField.costAt(x, y, z);
+                if (rc < com.orebit.mod.pathfinding.regionpathfinder.RegionCostField.UNREACHED) {
+                    // Region cost-to-goal is in region per-block units (WALK_PER_BLOCK = 1/block); ×H_STRAIGHT
+                    // (Traverse.FLAT_COST) → block ticks, ×hWeight to stay commensurate with the greedy-weighted
+                    // octile. max() keeps the tighter, topology-aware lower bound, so a sky cell whose region
+                    // loops back to the goal reads HIGH and is deprioritised instead of flooded.
+                    float hr = hWeight * rc * H_STRAIGHT;
+                    if (hr > base) base = hr;
+                }
+            }
+            return base + H_TIE * (cross * invLineLen)
                     + GoalForcedCost.premium(forced, x, y, z, gx, gy, gz);
         }
 
