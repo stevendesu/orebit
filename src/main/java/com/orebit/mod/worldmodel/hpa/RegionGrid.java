@@ -4,6 +4,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.orebit.mod.platform.LevelBounds;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavSection;
 import com.orebit.mod.worldmodel.pathing.NavStore;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
@@ -244,6 +245,99 @@ public final class RegionGrid {
         // Section-local coords: origin is (rx<<4, minY + ry<<4, rz<<4); lx/lz wrap to the low nibble, ly measured
         // from the dimension floor so a non-16-aligned minY still lands in [0,16).
         return FragmentLeafComputer.fragmentContaining(column[ry], wx & 15, (wy - minY) & 15, wz & 15);
+    }
+
+    /** Sink for {@link #goalDigSeeds}: one dig-reachable pocket — its level-0 region {@code (rx,ry,rz)} and kept
+     *  fragment id, plus the {@code digCells} of breakable rock between that pocket and the goal cell. */
+    @FunctionalInterface
+    public interface DigSeedSink {
+        void accept(int rx, int ry, int rz, int frag, int digCells);
+    }
+
+    private static final int[] DIG_DX = { 1, -1, 0, 0, 0, 0 };
+    private static final int[] DIG_DY = { 0, 0, 1, -1, 0, 0 };
+    private static final int[] DIG_DZ = { 0, 0, 0, 0, 1, -1 };
+
+    /**
+     * Enumerate the occupiable pockets a <b>buried goal cell</b> can be reached from by digging — the goal-side
+     * analog of {@link #startFragmentByFlood} (the s48 flood-from-bot start fix). A buried ore is a SOLID cell in
+     * no fragment; {@code nearestFragment} then mis-assigns the goal to the nearest air pocket by centroid, which
+     * may not be the pocket 2 blocks from the ore. Instead: BFS outward from the goal cell through <b>breakable</b>
+     * solid (6-connected, ≤ {@code maxCells} deep), and every time the front touches a passable cell, report that
+     * cell's pocket and the dig distance. The reverse-Dijkstra cost-to-goal field then <b>multi-source seeds</b>
+     * every reported pocket at its dig cost — so a goal reachable from several pockets is modelled exactly (no
+     * arbitrary "which fragment" pick), and the flood picks the bot-side-cheapest entry when the block search reads
+     * the field. An <b>exposed</b> goal (already passable) reports its own fragment at {@code digCells == 0}.
+     *
+     * <p>Loaded-section only (near-bot level-0 pathfinding): reads the resident {@link NavSection}s per cell, so it
+     * naturally crosses region boundaries and stops at any unloaded/unbreakable wall. Reports nothing (caller falls
+     * back to nearest-centroid) when the goal cell's section isn't resident. Cold path (once per plan): a bounded
+     * BFS over ≤ {@code maxCells} cells with small transient collections — no per-node-search cost.
+     */
+    public void goalDigSeeds(int gx, int gy, int gz, int maxCells, DigSeedSink sink) {
+        if (level == null) {
+            return;
+        }
+        int goalNav = navtypeAt(gx, gy, gz);
+        if (goalNav < 0) {
+            return; // goal section not resident → caller falls back to nearest-centroid
+        }
+        if (NavBlock.isPassable(NavBlock.descriptor((short) goalNav))) {
+            // Exposed goal: already in a pocket — seed that fragment at zero dig.
+            int f = startFragmentByFlood(gx >> 4, (gy - minY) >> 4, gz >> 4, gx, gy, gz);
+            if (f >= 0) {
+                sink.accept(gx >> 4, (gy - minY) >> 4, gz >> 4, f, 0);
+            }
+            return;
+        }
+        // Buried goal: BFS through breakable-solid cells; each passable neighbour is a pocket seed at its dig
+        // distance. Uniform edge cost ⇒ BFS gives the min dig distance; coords are packed relative to the goal
+        // (|Δ| ≤ maxCells, so 8 bits/axis) to key the visited/dist map without boxing full world coords.
+        java.util.ArrayDeque<int[]> queue = new java.util.ArrayDeque<>();
+        java.util.HashSet<Integer> seen = new java.util.HashSet<>();
+        seen.add(relKey(0, 0, 0));
+        queue.add(new int[] { gx, gy, gz, 1 }); // dist 1: breaking the goal cell itself is the first dug block
+        while (!queue.isEmpty()) {
+            int[] c = queue.poll();
+            int cx = c[0], cy = c[1], cz = c[2], d = c[3];
+            for (int face = 0; face < 6; face++) {
+                int nx = cx + DIG_DX[face], ny = cy + DIG_DY[face], nz = cz + DIG_DZ[face];
+                if (!seen.add(relKey(nx - gx, ny - gy, nz - gz))) {
+                    continue;
+                }
+                int nav = navtypeAt(nx, ny, nz);
+                if (nav < 0) {
+                    continue; // unloaded / out of bounds — treat as an impassable wall
+                }
+                long desc = NavBlock.descriptor((short) nav);
+                if (NavBlock.isPassable(desc)) {
+                    int f = startFragmentByFlood(nx >> 4, (ny - minY) >> 4, nz >> 4, nx, ny, nz);
+                    if (f >= 0) {
+                        sink.accept(nx >> 4, (ny - minY) >> 4, nz >> 4, f, d);
+                    }
+                    continue; // don't dig into air
+                }
+                // Solid: dig on only if the block is breakable and we're within the dig budget.
+                if (NavBlock.isBreakable(desc) && d < maxCells) {
+                    queue.add(new int[] { nx, ny, nz, d + 1 });
+                }
+            }
+        }
+    }
+
+    /** The navtype index at world cell {@code (wx,wy,wz)}, or {@code -1} if its section isn't resident. */
+    private int navtypeAt(int wx, int wy, int wz) {
+        int rx = wx >> 4, rz = wz >> 4, ry = (wy - minY) >> 4;
+        NavSection[] column = NavStore.get(level, NavStore.key(rx, rz));
+        if (column == null || ry < 0 || ry >= column.length || column[ry] == null) {
+            return -1;
+        }
+        return column[ry].getNavtype(wx & 15, (wy - minY) & 15, wz & 15);
+    }
+
+    /** Pack a goal-relative cell offset (each in [-127,127], guaranteed by the {@code maxCells} bound) into an int. */
+    private static int relKey(int dx, int dy, int dz) {
+        return ((dx + 128) << 16) | ((dy + 128) << 8) | (dz + 128);
     }
 
     // ---------------------------------------------------------------------------------------------------
