@@ -82,24 +82,44 @@ treatment or tolerates the centroid (it likely does, since it only tracks progre
 
 ## 5. Fix 3 — region dig cost is tool-blind and flat
 
-**Cause.** The region tier prices every dig as `span × MINE_PER_BLOCK (3.0) × hardnessFactor` — a **flat
-constant**, ignoring the equipped tool. The **block tier already models this correctly**: `MiningModel`
-computes real ticks = `ceil(destroyTimeSeconds × 20 × harvestMultiplier / toolSpeed)` from the bot's real
-inventory (harvest 1.5 correct / 5.0 wrong; tool speed bare 1 / wood 2 / stone 4 / iron 6 / **diamond 8** /
-netherite 9 / gold 12). So a diamond-pick bot's *estimate* at the region tier is wildly off from what it
-will actually pay. The `hardness=0.5` seen in the trace is NOT a bug — air is already excluded from the
-average (`FragmentBuilder:86-90` sums only solid cells / `solidCount`); 0.5 is the genuine dirt-surface
-region, and the stone regions correctly report 1.0.
+**Cause.** The region tier prices every dig as `span × MINE_PER_BLOCK (3.0) × hardnessFactor` — a **single
+flat-constant, tool-blind term**. Two structural flaws:
+- **A dig can price BELOW a walk.** `MINE=3 × dirt-hardness 0.5 = 1.5` per block — cheaper than several
+  things, and as tools improve a pure-multiplier dig term keeps dropping. Digging should *never* be cheaper
+  than walking the same distance (you still have to walk the tunnel you dug).
+- **It ignores the 2-tall body.** Tunnelling one block *horizontally* means breaking **two** blocks (feet +
+  head); mining straight *down* breaks ~one. The flat `span` counts neither.
 
-**Fix.** Make the region dig estimate **tool-aware / consistent with `MiningModel`** — e.g. price a region
-dig off the same per-(hardness × tool-tier) tick model (using the region's `avgSolidHardness` and the bot's
-tool snapshot) rather than a flat 3. Keep it a cheap closed-form (no per-block table walk at the region
-tier), just calibrated to the block tier's real ticks.
+The **block tier already models the tool correctly**: `MiningModel` computes real ticks = `ceil(destroyTime ×
+20 × harvestMultiplier / toolSpeed)` from the bot's real inventory (harvest 1.5 correct / 5.0 wrong; tool
+speed bare 1 / wood 2 / stone 4 / iron 6 / **diamond 8** / netherite 9 / gold 12). The region tier throws all
+that away. (The `hardness=0.5` in the trace is NOT a bug — air is already excluded, `FragmentBuilder:86-90`
+sums only solid cells / `solidCount`; 0.5 is the genuine dirt surface region, stone reports 1.0.)
 
-**Risk.** Recalibration changes every dig-vs-walk decision → re-baseline region tests. Note the whole region
-tick scale is **compressed** (`WALK_PER_BLOCK=1` ≈ 1 tick/block vs ~4.6 real; `AIR_TRANSIT_TICKS=16` for a
-16-block region). If we make digs honest we must sanity-check walk/pillar/fall against real ticks too, so
-the **ratios** stay right — an isolated dig recalibration on top of too-cheap walks would over-correct.
+**Fix — a two-term `walk + dig` cost (owner-ratified).** Coarse per-block units are fine (raw ticks not
+required); the invariant that matters is **dig ≥ walk always**. Split the dig-through / mine cost into:
+```
+cost = span × WALK_PER_BLOCK                                       // you still WALK the tunnel
+     + (2·horizSpan + 1·vertSpan) × mineUnitsPerBlock(hardness, tool)  // + break what's in the way
+```
+- The **walk term** (distance only) is always present, so a dig can never undercut a walk regardless of tool
+  — the structural fix.
+- The **dig term** uses a **2-tall block count** (2× the horizontal span + 1× the vertical), which the
+  dig-through edge can compute from its Δ components (it has them, not just the Manhattan sum).
+- `mineUnitsPerBlock` is **tool-aware but deliberately coarse** (the two-term model makes the tool factor
+  low-stakes — it only sets the dig/walk *ratio*, and can't flip dig below walk). Do NOT average tools and do
+  NOT model the axe: map the region's **avgSolidHardness → the likely tool category** (soft dirt/sand →
+  shovel; mid/high stone/ore → pickaxe; wood-ish → pickaxe, slightly pessimistic — safe), then read
+  `MiningModel`'s already-computed **best tier for that category** from the bot's inventory snapshot. This
+  self-handles "no shovel" (snapshot → bare-hand → dirt digging gets expensive → prefer walking). One
+  hardness→category branch, no averaging, no axe tier. Keep it a cheap closed-form (no per-block table walk).
+
+**Risk.** This makes region digs *substantially* more expensive than today → re-baseline region tests, and it
+**forces the whole-scale ratio pass**: the region tick scale is **compressed** (`WALK_PER_BLOCK=1` ≈ 1 vs
+~4.6 real; `AIR_TRANSIT_TICKS=16` for a 16-block region), so honest digs on top of too-cheap walks/pillars
+would over-correct and make the bot walk around things it should dig. Recalibrate walk/pillar/fall against
+real ticks in the SAME change so the **ratios** stay right (the absolute scale can stay compressed as long as
+the ratios are honest).
 
 ## 6. Sequencing & validation
 
