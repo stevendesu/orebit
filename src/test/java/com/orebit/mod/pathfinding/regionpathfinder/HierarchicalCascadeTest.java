@@ -1,6 +1,7 @@
 package com.orebit.mod.pathfinding.regionpathfinder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -113,6 +114,35 @@ public class HierarchicalCascadeTest {
             h.onBotMoved(new BlockPos(x, 4, 8));
         }
         assertNotSame(l1Before, h.skeletonAt(1), "exhausting L1's window must re-plan L1");
+    }
+
+    // ===================================================================================================
+    // Boundary clip tolerance (the cliff flip-flop fix) — a bot ONE region off the window is clipping an
+    // adjacent cell (a fall-lineup), NOT deviating; it must NOT re-derive. A farther-off bot still does.
+    // ===================================================================================================
+    @Test
+    void onBotMoved_oneRegionClip_doesNotReplan() {
+        HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, 0, new BlockPos(8, 4, 8), farGoalX(), CAPS);
+        RegionPathPlan l0Before = h.l0Skeleton();
+
+        // Step ONE L0 region laterally off the +X skeleton (rz 0→1 at z=24) — a boundary clip. The old code
+        // fired a full suffix re-derive here, which reset the commit cursor and flipped the target every settle
+        // (the cliff-edge flip-flop). It must now be tolerated: no re-derive, L0 skeleton unchanged.
+        boolean changed = h.onBotMoved(new BlockPos(8, 4, 8 + 16));
+        assertFalse(changed, "a one-region clip must NOT re-derive the L0 segment");
+        assertSame(l0Before, h.l0Skeleton(), "the L0 skeleton is unchanged by a one-region clip");
+    }
+
+    @Test
+    void onBotMoved_farDeviation_stillReplans() {
+        HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, 0, new BlockPos(8, 4, 8), farGoalX(), CAPS);
+        RegionPathPlan l0Before = h.l0Skeleton();
+
+        // Step THREE L0 regions off the skeleton (z=56) — a genuine off-route deviation, not a one-cell clip:
+        // the cascade must still re-derive promptly (the clip tolerance is exactly one region).
+        boolean changed = h.onBotMoved(new BlockPos(8, 4, 8 + 48));
+        assertTrue(changed, "a genuine (≥2-region) deviation must re-derive the L0 segment");
+        assertNotSame(l0Before, h.l0Skeleton(), "the L0 skeleton is re-derived from the deviated cell");
     }
 
     // ===================================================================================================
