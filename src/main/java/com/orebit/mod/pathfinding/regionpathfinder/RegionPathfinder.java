@@ -142,6 +142,14 @@ public final class RegionPathfinder {
     static final float PILLAR_PER_BLOCK_FIELD = 2.29f;
     static final float FALL_PER_BLOCK_FIELD = 0.54f;
 
+    /**
+     * Dig budget (breakable-solid cells) for the goal dig-flood ({@link RegionGrid#goalDigSeeds}) that seeds the
+     * cost-to-goal field. A buried goal reachable only past this many blocks of rock falls back to the single
+     * nearest-centroid seed. Bounds the cold per-plan flood (a 6-connected diamond of ≤ this radius) and reflects
+     * that a dig deeper than ~a dozen blocks to a buried target is rarely the optimal route vs. an exposed one.
+     */
+    static final int MAX_GOAL_DIG_CELLS = 12;
+
     /** Per-block MINE ticks at the reference (stone) hardness; scaled by {@code avgSolidHardness/STONE_REF}. */
     public static final float MINE_PER_BLOCK = LeafCostComputer.MINE_PER_BLOCK;                    // 3.0
 
@@ -498,18 +506,31 @@ public final class RegionPathfinder {
         final int gry = RegionAddress.regionY(goalFloor.getY(), 0, minY);
         final int grz = RegionAddress.regionZ(goalFloor.getZ(), 0);
         grid.ensureLeaf(grx, gry, grz);
-        final int goalFrag = nearestFragment(grid, 0, grx, gry, grz, goalFloor);
 
         final Nodes nodes = FIELD_SEARCH.get();
         nodes.reset();
-        final int startRow = nodes.intern(searchKey(fragmentKey(grx, gry, grz, goalFrag), ENTRY_START),
-                grx, gry, grz, goalFrag, ENTRY_START);
-        nodes.g[startRow] = 0f;
-        nodes.f[startRow] = 0f;
-        nodes.portalX[startRow] = NO_PORTAL;
-        nodes.portalY[startRow] = NO_PORTAL;
-        nodes.portalZ[startRow] = NO_PORTAL;
-        nodes.push(startRow);
+
+        // Multi-source seeds (goal dig-flood): a buried goal is a SOLID cell in no fragment, so seed EVERY
+        // occupiable pocket it can be dug into from, each at its dig cost — the goal-side analog of the s48
+        // flood-from-bot start fix. nearest-centroid alone would mis-assign the goal to the pocket whose CENTROID
+        // is nearest (not the one 2 blocks through the wall); the multi-source Dijkstra instead lets each entry
+        // pocket compete, and the field resolves which is cheapest for the bot to reach. A no-break bot cannot
+        // dig, so it keeps the plain nearest-centroid single seed.
+        if (canBreak) {
+            final RegionFragments rfGoal = grid.fragmentRecord(0, grx, gry, grz);
+            final float mineUnit = mine.unitsPerBlock(rfGoal != null ? rfGoal.avgSolidHardness() : STONE_REF_NIBBLE);
+            grid.goalDigSeeds(goalFloor.getX(), goalFloor.getY(), goalFloor.getZ(), MAX_GOAL_DIG_CELLS,
+                    (rx, ry, rz, frag, digCells) -> {
+                        grid.ensureLeaf(rx, ry, rz);
+                        seedField(nodes, rx, ry, rz, frag, digCost(digCells, 0, mineUnit));
+                    });
+        }
+        if (nodes.heapSize == 0) {
+            // No dig-reachable pocket (no-break bot, unresident goal section, or deep-buried past the budget):
+            // fall back to the single nearest-centroid goal fragment at zero cost (the pre-dig-flood behaviour).
+            int goalFrag = nearestFragment(grid, 0, grx, gry, grz, goalFloor);
+            seedField(nodes, grx, gry, grz, goalFrag, 0f);
+        }
 
         final RegionCostField field = new RegionCostField(bound, minY, grid);
         int expansions = 0;
@@ -533,6 +554,25 @@ public final class RegionPathfinder {
                     canBreak, canPlace, safeFall, null, mine, pillarField, 1.0f, bound, true);
         }
         return field;
+    }
+
+    /**
+     * Seed one source of the goal-rooted cost-to-goal Dijkstra: the level-0 region fragment {@code (rx,ry,rz,frag)}
+     * at cost {@code g} (the dig cost to reach the goal from that pocket; {@code 0} for the goal's own pocket / the
+     * fallback). Idempotent per pocket — a cheaper later seed lowers it, a dearer one is ignored (rows start at
+     * {@code +inf}) — so {@link RegionGrid#goalDigSeeds} may report a pocket more than once without a dedup map.
+     * Portal is {@link #NO_PORTAL} (a root: {@link #costToGoalField}'s record reads its exit as the goal cell,
+     * onward 0), and {@code f == g} (Dijkstra).
+     */
+    private static void seedField(Nodes nodes, int rx, int ry, int rz, int frag, float g) {
+        int row = nodes.intern(searchKey(fragmentKey(rx, ry, rz, frag), ENTRY_START), rx, ry, rz, frag, ENTRY_START);
+        if (g >= nodes.g[row]) return; // a cheaper (or equal) seed for this pocket is already queued
+        nodes.g[row] = g;
+        nodes.f[row] = g;
+        nodes.portalX[row] = NO_PORTAL;
+        nodes.portalY[row] = NO_PORTAL;
+        nodes.portalZ[row] = NO_PORTAL;
+        nodes.push(row);
     }
 
     /**
