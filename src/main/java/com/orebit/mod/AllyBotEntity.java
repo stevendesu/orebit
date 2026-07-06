@@ -1599,6 +1599,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                     searchGoal, haveWindow, corridor, caps, inv, skeletonDump, true, field);
             msg += (regExp >= 0)
                     ? "   |   region-heuristic=" + regExp + " expansions → orebit-trace-region.txt"
+                            + String.format("  (field pillar=%.2f/blk vs stand-in 2.29)", place.pillarPerBlock())
                     : "   |   region run I/O error";
         } else {
             msg += "   |   region field unavailable (prototype)";
