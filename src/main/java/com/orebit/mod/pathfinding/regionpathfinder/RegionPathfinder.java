@@ -661,7 +661,7 @@ public final class RegionPathfinder {
                 // walkable ramp instead. (A place-capable bot keeps the dear PILLAR cost and may climb.)
                 if (!canPlace && rfM != null && rfM.kind() == RegionFragments.KIND_AIR && f != 2) continue;
                 // Uniform / collapsed / unbuilt neighbour: a single transit edge into its fragment 0.
-                float edge = uniformTransitCost(level, rfM, f, canPlace, safeFall, mine);
+                float edge = uniformTransitCost(level, rfM, f, canPlace, safeFall, mine, dijkstra);
                 footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
                 boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
                         wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
@@ -689,8 +689,8 @@ public final class RegionPathfinder {
                     // is the missing "moving within a 16-block region isn't free" term that made lateral
                     // walks cost ~1 and turned open caverns near-free. entryFace in the node key (§2) makes
                     // this a FIXED edge cost (the entry opening is pinned per node), keeping A* consistent.
-                    float edge = walkCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, canPlace, safeFall)
-                            + walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall);
+                    float edge = walkCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, canPlace, safeFall, dijkstra)
+                            + walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall, dijkstra);
                     boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, fb,
                             wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
                     if (TRACE) {
@@ -711,7 +711,7 @@ public final class RegionPathfinder {
                     int packedB = rfM.footprint(bestFrag, oppF);
                     footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, packedB, wb);
                     // Approach walk to the wall + tunnel a fixed WALL_MINE_BLOCKS-thick horizontal hole.
-                    float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall)
+                    float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall, dijkstra)
                             + digCost(WALL_MINE_BLOCKS, 0, mineUnit);
                     boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, bestFrag,
                             wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
@@ -945,8 +945,12 @@ public final class RegionPathfinder {
      * gradual route spreads its rise/drop horizontally (small {@code |dy|} per transit, no penalty) and so is
      * preferred over a single big-{@code |dy|} cliff the block tier would dead-end on.
      */
-    private static float walkCost(int dx, int dy, int dz, boolean canPlace, int safeFall) {
+    private static float walkCost(int dx, int dy, int dz, boolean canPlace, int safeFall, boolean reverse) {
         float c = octile(dx, dz) * WALK_PER_BLOCK;
+        // Reverse edge (goal-rooted cost-TO-goal Dijkstra): the ONLY asymmetry is vertical — traversing this edge
+        // in the opposite direction swaps up (dear PILLAR) and down (cheap FALL). Negating dy yields the reverse
+        // cost (octile horizontal is symmetric). Forward A* passes reverse=false → identical.
+        if (reverse) dy = -dy;
         if (dy > 0) {
             c += dy * PILLAR_PER_BLOCK;
             // No-place bot can't pillar a wall taller than a step — a big net rise must be existing terrain
@@ -995,7 +999,7 @@ public final class RegionPathfinder {
      * built {@link RegionFragments#KIND_AIR KIND_AIR} region (which keeps the directional pillar/fall chute).
      */
     private static float uniformTransitCost(int level, RegionFragments rfM, int f, boolean canPlace, int safeFall,
-                                            RegionMineModel mine) {
+                                            RegionMineModel mine, boolean reverse) {
         // UNBUILT / unloaded (null record): we don't know what's there, so assume the best possible — free
         // passage (a "teleporter" through the unknown). Returning ~0 keeps g flat across unloaded space, so the
         // region A* degenerates to greedy-best-first and BEELINES at the goal instead of flooding the expansion
@@ -1027,7 +1031,10 @@ public final class RegionPathfinder {
                 // A uniform-AIR region is a full vExtent-tall shaft: a no-place bot falling through it drops
                 // vExtent blocks, unsafe past safeFall, so even the down-chute is penalized for it (prefer a
                 // gradual MIXED descent with real floors over a free-fall shaft).
-                if (f == 2) {
+                // Reverse (cost-TO-goal Dijkstra): traversing this transit the other way swaps its vertical sense,
+                // so decide up/down on the OPPOSITE face — reverse of "up into air" (dear) is "fall out" (cheap).
+                final int ef = reverse ? RegionAddress.opposite(f) : f;
+                if (ef == 2) {
                     float fall = vExtent * FALL_PER_BLOCK;
                     if (!canPlace && vExtent > safeFall) {
                         fall += (vExtent - safeFall) * UNSAFE_VERTICAL_PENALTY;
