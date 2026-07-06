@@ -902,10 +902,12 @@ public final class BlockPathfinder {
             if (regionField != null) {
                 float rc = regionField.costAt(x, y, z);
                 if (rc < com.orebit.mod.pathfinding.regionpathfinder.RegionCostField.UNREACHED) {
-                    // Region cost-to-goal is in region per-block units (WALK_PER_BLOCK = 1/block); ×H_STRAIGHT
-                    // (Traverse.FLAT_COST) → block ticks, ×hWeight to stay commensurate with the greedy-weighted
-                    // octile. max() keeps the tighter, topology-aware lower bound, so a sky cell whose region
-                    // loops back to the goal reads HIGH and is deprioritised instead of flooded.
+                    // rc is this cell's intra-region gradient value — octile(cell→goalward exit) + onward — in
+                    // region per-block units (WALK_PER_BLOCK = 1/block); ×H_STRAIGHT (Traverse.FLAT_COST) → block
+                    // ticks, ×hWeight to stay commensurate with the greedy-weighted octile. max() keeps the tighter,
+                    // topology-aware lower bound, so a sky cell whose region loops back to the goal reads HIGH and
+                    // is deprioritised instead of flooded — and the gradient pulls the search toward the exit
+                    // rather than flooding the whole region at a flat per-region cost.
                     float hr = hWeight * rc * H_STRAIGHT;
                     if (hr > base) base = hr;
                 }

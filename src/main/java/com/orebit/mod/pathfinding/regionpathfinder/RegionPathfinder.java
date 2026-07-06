@@ -510,7 +510,15 @@ public final class RegionPathfinder {
             if (nodes.poppedF > nodes.f[current]) continue; // stale heap entry
             final int crx = nodes.x[current], cry = nodes.y[current], crz = nodes.z[current];
             final int fragA = nodes.frag[current];
-            field.record(crx, cry, crz, fragA, nodes.g[current]); // per-(region,fragment) cost
+            // Goalward exit opening = the crossing cell toward this node's Dijkstra parent (the parent is goalward
+            // in the goal-rooted flood); onward = that parent's cost-to-goal. The goal's own start node has no
+            // parent/portal, so its exit is the goal floor and onward is 0 — costAt then reproduces the plain
+            // block octile at the goal fragment (no double-count under the block heuristic's max()).
+            final int parent = nodes.parent[current];
+            final float onward = parent >= 0 ? nodes.g[parent] : 0f;
+            int ex = nodes.portalX[current], ey = nodes.portalY[current], ez = nodes.portalZ[current];
+            if (ex == NO_PORTAL) { ex = goalFloor.getX(); ey = goalFloor.getY(); ez = goalFloor.getZ(); }
+            field.record(crx, cry, crz, fragA, nodes.g[current], ex, ey, ez, onward); // per-(region,fragment) cost + gradient
             if (++expansions > MAX_REGION_EXPANSIONS) break;
             expandNode(nodes, current, expansions, grid, 0, minY, grx, gry, grz,
                     goalFloor.getX(), goalFloor.getY(), goalFloor.getZ(),
