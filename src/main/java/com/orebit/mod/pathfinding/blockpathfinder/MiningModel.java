@@ -233,6 +233,22 @@ public final class MiningModel {
     }
 
     /**
+     * A COARSE region-tier estimate of the real break ticks for a solid block of quantized <i>region</i>
+     * hardness {@code nibble} (0..15, {@link com.orebit.mod.worldmodel.hpa.RegionFragments#avgSolidHardness})
+     * mined with {@code tier} of category {@code bestToolOrdinal}, {@code toolRequired} governing the harvest
+     * multiplier. Inverts the region nibble to an approximate {@link NavBlock} hardness
+     * ({@code navHardness ≈ 2·nibble} — the inverse of {@link
+     * com.orebit.mod.worldmodel.hpa.FragmentBuilder#avgSolidHardnessNibble}'s step-2 quantization) and reuses
+     * the block-tier {@link #ticksFor(int,int,boolean,Tier)} closed form, so the region and block tiers price
+     * digging with ONE model (respecting {@code mining.ticksByHardness}). Off the hot path — the region
+     * mine-model table ({@code RegionMineModel}) is built once per plan, not per edge.
+     */
+    public static float regionMineTicks(int nibble, int bestToolOrdinal, boolean toolRequired, Tier tier) {
+        int navHardness = Math.min(Math.max(nibble, 0) * 2, 254); // 2·nibble; clamp below the 255 unbreakable sentinel
+        return ticksFor(navHardness, bestToolOrdinal, toolRequired, tier);
+    }
+
+    /**
      * Bare-hand mining ticks for a descriptor — the break-cost fallback for a search with NO inventory
      * snapshot (the JMH benchmarks, {@code /bot trace}, unit tests, and any caps-only search): mine time with
      * an empty hand ({@link Tier#BARE}). A pure resident-table read ({@code TICKS_BY_FIELDS[key][BARE]}), so
@@ -303,6 +319,16 @@ public final class MiningModel {
             int cat = NavBlock.tool(descriptor);
             int tier = tierForCategory[cat];
             return tier;
+        }
+
+        /**
+         * The best {@link Tier} ordinal this bot carries for a given {@link NavBlock.Tool} <b>category ordinal</b>
+         * (a bare category index, not a descriptor) — the region tier's tool-aware dig-cost input (PERF-DESIGN
+         * region §5, {@code RegionMineModel}). Falls back to {@link Tier#BARE}'s ordinal for a category the bot
+         * has no tool of. Cold (read once per category when the region mine-model table is built).
+         */
+        public int bestTierOrdinal(int toolCategoryOrdinal) {
+            return tierForCategory[toolCategoryOrdinal];
         }
 
         /**

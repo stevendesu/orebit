@@ -11,6 +11,7 @@ import com.orebit.mod.pathfinding.PathPlan;
 import com.orebit.mod.pathfinding.PathStatus;
 import com.orebit.mod.pathfinding.async.PlanExecutor;
 import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
+import com.orebit.mod.pathfinding.regionpathfinder.RegionMineModel;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
@@ -1636,12 +1637,16 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             w.write("\nlegend: 'E <seq> L<level> region=x,y,z frag=<f> g=<g> f=<f> [kind]' = one expansion"
                     + " (pop), in order;  '  C <kind> -> x,y,z frag=<f> cost=<c> crossing=wx,wy,wz <OK|worse>'"
                     + " = a candidate edge it emitted. kinds: walk|air-fall|air-pillar|solid-mine|water-swim|"
-                    + "collapsed|unbuilt|mine-sibling|mine-fallback|mine-solid.\n\n");
+                    + "collapsed|unbuilt|mine-sibling|mine-fallback|mine-solid|dig-through.\n\n");
             RegionPathPlan rp;
+            // Tool-aware region dig cost from the bot's real inventory (PERF-DESIGN region §5), so the trace's
+            // dig breakdowns reflect the actual tools (null snapshot ⇒ the stone-tier RegionMineModel.DEFAULT).
+            MovementContext.InventoryView traceInv = inventoryFeasibility();
+            RegionMineModel mine = RegionMineModel.from(traceInv != null ? traceInv.mining() : null);
             RegionPathfinder.TRACE_OUT = w;
             RegionPathfinder.TRACE = true;
             try {
-                rp = RegionPathfinder.plan(level, grid, startFloor, goalFloor, caps);
+                rp = RegionPathfinder.plan(level, grid, startFloor, goalFloor, caps, mine);
             } finally {
                 RegionPathfinder.TRACE = false;
                 RegionPathfinder.TRACE_OUT = null;

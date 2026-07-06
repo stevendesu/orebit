@@ -54,6 +54,8 @@ public final class HierarchicalRegionPlan {
     private final int minY;
     private final BlockPos goal;
     private final BotCaps caps;
+    /** The bot's tool-aware region dig-cost model (PERF-DESIGN region §5), built once from its inventory. */
+    private final RegionMineModel mine;
 
     // ---- the stack (indices 0..topLevel valid) -------------------------------------------------------
     private final LevelPlan[] levels = new LevelPlan[RegionAddress.MAX_COARSE_LEVEL + 1];
@@ -63,11 +65,12 @@ public final class HierarchicalRegionPlan {
     /** {@code true} once no route exists (a level returned {@code null} with escalation exhausted) — FAILED. */
     private boolean failed;
 
-    private HierarchicalRegionPlan(RegionGrid grid, int minY, BlockPos goal, BotCaps caps) {
+    private HierarchicalRegionPlan(RegionGrid grid, int minY, BlockPos goal, BotCaps caps, RegionMineModel mine) {
         this.grid = grid;
         this.minY = minY;
         this.goal = goal;
         this.caps = caps;
+        this.mine = mine;
         for (int i = 0; i < levels.length; i++) {
             levels[i] = new LevelPlan();
             blacklists[i] = new RegionEdgeBlacklist();
@@ -82,7 +85,18 @@ public final class HierarchicalRegionPlan {
      */
     public static HierarchicalRegionPlan build(RegionGrid grid, int minY, BlockPos botFloor, BlockPos goal,
                                                BotCaps caps) {
-        HierarchicalRegionPlan h = new HierarchicalRegionPlan(grid, minY, goal, caps);
+        return build(grid, minY, botFloor, goal, caps, RegionMineModel.DEFAULT);
+    }
+
+    /**
+     * As {@link #build(RegionGrid, int, BlockPos, BlockPos, BotCaps)}, with the bot's tool-aware region dig-cost
+     * model ({@link RegionMineModel}, §5) threaded to every per-level {@link RegionPathfinder#planWithin}. The
+     * live driver ({@link com.orebit.mod.pathfinding.PathPlan}) passes a model built from the bot's inventory;
+     * the no-model overload uses the stone-tier {@link RegionMineModel#DEFAULT} (headless / tests).
+     */
+    public static HierarchicalRegionPlan build(RegionGrid grid, int minY, BlockPos botFloor, BlockPos goal,
+                                               BotCaps caps, RegionMineModel mine) {
+        HierarchicalRegionPlan h = new HierarchicalRegionPlan(grid, minY, goal, caps, mine);
         h.rebuild(botFloor);
         return h;
     }
@@ -234,7 +248,7 @@ public final class HierarchicalRegionPlan {
         BlockPos subGoal = (fromLevel >= topLevel) ? goal : handDown(levels[fromLevel + 1]);
         for (int L = fromLevel; L >= 0; L--) {
             RegionPathPlan skel = RegionPathfinder.planWithin(L, grid, minY, botFloor, subGoal, goal, caps,
-                    blacklists[L]);
+                    blacklists[L], mine);
             if (skel == null) {
                 return false;
             }
