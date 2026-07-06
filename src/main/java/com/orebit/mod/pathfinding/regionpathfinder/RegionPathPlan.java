@@ -61,6 +61,16 @@ public final class RegionPathPlan {
     private final int[] portalY;
     private final int[] portalZ;
 
+    /**
+     * Per-step <b>dig-through flag</b> (PERF-DESIGN-region-dig-through.md §5): {@code true} iff this step's
+     * {@link #portalCell portal cell} is a <b>buried</b> crossing the block tier must mine to (a Fix-1
+     * dig-through edge — solid sat between the previous fragment's air pocket and this face). The
+     * {@link com.orebit.mod.pathfinding.PathPlan} window driver passes such a target through unfiltered (like
+     * its goal target) instead of rejecting/snapping the buried cell. {@code null} for a bare-coords /
+     * center-model plan and for the trivial same-fragment plan (no dig steps).
+     */
+    private final boolean[] digs;
+
     /** Sentinel in {@link #portalX} for a step with no portal cell (the start step, or a center-model plan). */
     public static final int NO_PORTAL = Integer.MIN_VALUE;
 
@@ -122,6 +132,7 @@ public final class RegionPathPlan {
         this.portalX = null;
         this.portalY = null;
         this.portalZ = null;
+        this.digs = null;
         this.minY = minY;
         this.level = level;
         this.reachedGoalRegion = reachedGoalRegion;
@@ -136,17 +147,18 @@ public final class RegionPathPlan {
     public RegionPathPlan(int[] rxs, int[] rys, int[] rzs, int[] frags,
                           int[] portalX, int[] portalY, int[] portalZ,
                           int size, int minY, boolean reachedGoalRegion) {
-        this(rxs, rys, rzs, frags, portalX, portalY, portalZ, size, minY, 0, reachedGoalRegion);
+        this(rxs, rys, rzs, frags, portalX, portalY, portalZ, null, size, minY, 0, reachedGoalRegion);
     }
 
     /**
      * As {@link #RegionPathPlan(int[], int[], int[], int[], int[], int[], int[], int, int, boolean)} with an
-     * explicit pyramid {@code level} (HPA-CASCADE.md §9, S6.1): a coarse cascade skeleton carries its level so
-     * {@link #centerOf} resolves the level-sized world center. The pre-cascade level-0 ctor delegates here with
-     * {@code level == 0}.
+     * explicit pyramid {@code level} (HPA-CASCADE.md §9, S6.1) and the per-step {@code digs} tag
+     * (PERF-DESIGN-region-dig-through.md §5): a coarse cascade skeleton carries its level so {@link #centerOf}
+     * resolves the level-sized world center. {@code digs} may be {@code null} (no dig steps). The pre-cascade
+     * level-0 ctor delegates here with {@code level == 0} and {@code digs == null}.
      */
     public RegionPathPlan(int[] rxs, int[] rys, int[] rzs, int[] frags,
-                          int[] portalX, int[] portalY, int[] portalZ,
+                          int[] portalX, int[] portalY, int[] portalZ, boolean[] digs,
                           int size, int minY, int level, boolean reachedGoalRegion) {
         this.rxs = trim(rxs, size);
         this.rys = trim(rys, size);
@@ -155,6 +167,7 @@ public final class RegionPathPlan {
         this.portalX = trim(portalX, size);
         this.portalY = trim(portalY, size);
         this.portalZ = trim(portalZ, size);
+        this.digs = (digs == null) ? null : trim(digs, size);
         this.minY = minY;
         this.level = level;
         this.reachedGoalRegion = reachedGoalRegion;
@@ -166,6 +179,16 @@ public final class RegionPathPlan {
             return a;
         }
         int[] t = new int[size];
+        System.arraycopy(a, 0, t, 0, size);
+        return t;
+    }
+
+    /** Trim {@code a} to exactly {@code size} (returns it unchanged when already that length). */
+    private static boolean[] trim(boolean[] a, int size) {
+        if (a.length == size) {
+            return a;
+        }
+        boolean[] t = new boolean[size];
         System.arraycopy(a, 0, t, 0, size);
         return t;
     }
@@ -222,6 +245,16 @@ public final class RegionPathPlan {
     /** Whether step {@code i} has a portal cell (false on the start step and on every center-model step). */
     public boolean hasPortal(int i) {
         return portalX != null && portalX[i] != NO_PORTAL;
+    }
+
+    /**
+     * Whether step {@code i}'s {@link #portalCell portal cell} is a <b>buried dig-through crossing</b>
+     * (PERF-DESIGN-region-dig-through.md §5) — the block tier must mine to reach it, so the
+     * {@link com.orebit.mod.pathfinding.PathPlan} window driver targets it directly rather than
+     * rejecting/snapping the solid cell. Always {@code false} for a center-model / bare-coords plan.
+     */
+    public boolean isDig(int i) {
+        return digs != null && digs[i];
     }
 
     /**

@@ -1105,6 +1105,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             case EXTENDED: how = " [extended down — falling to landing]"; break;
             case SNAPPED:  how = " [target adjusted → standable]"; break;
             case CENTER:   how = " [no portal — aiming region center]"; break;
+            case DIG:      how = " [digging through to buried crossing]"; break;
             default:       how = ""; break; // GOAL / PORTAL — the normal cases, no annotation
         }
         final String msg;

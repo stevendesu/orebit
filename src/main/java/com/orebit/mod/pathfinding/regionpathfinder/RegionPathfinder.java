@@ -152,6 +152,25 @@ public final class RegionPathfinder {
     /** Sentinel for "no portal cell" in the SoA portal arrays (the start node). */
     private static final int NO_PORTAL = RegionPathPlan.NO_PORTAL;
 
+    // ---------------------------------------------------------------------------------------------------
+    // Entry-face node identity (PERF-DESIGN-region-dig-through.md §2). The SEARCH node is
+    // (region, fragment, entryFace) — the face (0..5) through which the node was entered, plus two sentinels.
+    // Making entry part of the key keeps the §4 entry→exit walk cost a FIXED edge cost (consistent A*): a
+    // fragment "entered from north" and "…from south" are distinct rows. Folded into the free high bits 56..58
+    // of the physical fragmentKey; CONSUMERS stay physical (see fragmentNodeKey) — entryFace never leaks out.
+    // ---------------------------------------------------------------------------------------------------
+
+    /** Entry-face sentinel: the start node (no incoming crossing; hop-0 traversal anchors on the bot's cell). */
+    private static final int ENTRY_START = 6;
+
+    /** Entry-face sentinel: reached by an intra-region mine edge (entry opening is the sibling centroid, no face). */
+    private static final int ENTRY_INTERIOR = 7;
+
+    /** Fold a 3-bit {@code entryFace} (0..5 face, or {@link #ENTRY_START}/{@link #ENTRY_INTERIOR}) into the key. */
+    private static long searchKey(long physKey, int entryFace) {
+        return physKey ^ ((long) (entryFace & 0x7) << 56);
+    }
+
     /** One reusable region-search state per thread, reset at the top of each {@link #plan}. */
     private static final ThreadLocal<Nodes> SEARCH = ThreadLocal.withInitial(() -> new Nodes(256, 512));
 
@@ -218,8 +237,9 @@ public final class RegionPathfinder {
             return new RegionPathPlan(rx, ry, rz, fr, px, py, pz, 1, minY, true);
         }
 
-        return planLevelFragments(0, grid, minY, srx, sry, srz, startFrag, grx, gry, grz, goalFrag, true,
-                canBreak, canPlace, safeFall, null);
+        return planLevelFragments(0, grid, minY, srx, sry, srz, startFrag,
+                startFloor.getX(), startFloor.getY(), startFloor.getZ(),
+                grx, gry, grz, goalFrag, true, canBreak, canPlace, safeFall, null);
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -306,8 +326,9 @@ public final class RegionPathfinder {
         final int sFrag = nearestFragment(grid, level, sx, sy, sz, botFloor);
         final int gFrag = nearestFragment(grid, level, gx, gy, gz, subGoalWorld);
 
-        return planLevelFragments(level, grid, minY, sx, sy, sz, sFrag, gx, gy, gz, gFrag, reached,
-                caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), blacklist);
+        return planLevelFragments(level, grid, minY, sx, sy, sz, sFrag,
+                botFloor.getX(), botFloor.getY(), botFloor.getZ(),
+                gx, gy, gz, gFrag, reached, caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), blacklist);
     }
 
     /**
@@ -329,6 +350,7 @@ public final class RegionPathfinder {
      */
     private static RegionPathPlan planLevelFragments(int level, RegionGrid grid, int minY,
                                                       int srx, int sry, int srz, int startFrag,
+                                                      int startWx, int startWy, int startWz,
                                                       int grx, int gry, int grz, int goalFrag,
                                                       boolean reachedGoalRegion,
                                                       boolean canBreak, boolean canPlace, int safeFall,
@@ -347,7 +369,8 @@ public final class RegionPathfinder {
         // terrain (the level-0 Dijkstra-flood failure mode, re-expressed at coarse resolution). Level 0 ⇒ ×1.
         final float hScale = 1 << level;
 
-        final int startRow = nodes.intern(fragmentKey(srx, sry, srz, startFrag), srx, sry, srz, startFrag);
+        final int startRow = nodes.intern(searchKey(fragmentKey(srx, sry, srz, startFrag), ENTRY_START),
+                srx, sry, srz, startFrag, ENTRY_START);
         nodes.g[startRow] = 0f;
         nodes.f[startRow] = HEURISTIC.estimate(srx, sry, srz, grx, gry, grz) * hScale;
         nodes.portalX[startRow] = NO_PORTAL;
@@ -382,6 +405,12 @@ public final class RegionPathfinder {
             final boolean uniformN = isUniformNode(rfN);
             final int countN = uniformN ? 1 : rfN.fragmentCount();
             final float gCur = nodes.g[current];
+            // Entry opening of THIS node — where we crossed INTO it (the §4 entry→exit walk anchor). The start
+            // node has no incoming crossing, so hop-0 traversal anchors on the bot's actual start floor cell
+            // (honester than any synthetic opening). An intra-region-mine (INTERIOR) entry stored the sibling
+            // centroid as its portal, so this reads that centroid for it — no special-casing needed.
+            int entX = nodes.portalX[current], entY = nodes.portalY[current], entZ = nodes.portalZ[current];
+            if (entX == NO_PORTAL) { entX = startWx; entY = startWy; entZ = startWz; }
             if (TRACE) trace("E " + expansions + " L" + level + " region=" + crx + "," + cry + "," + crz
                     + " frag=" + fragA + " g=" + gCur + " f=" + nodes.f[current]
                     + (uniformN ? " [" + kindLabel(rfN) + "]" : " [mixed frags=" + countN + "]"));
@@ -394,14 +423,49 @@ public final class RegionPathfinder {
                     float edge = mineCost(level, rfN, fragA, fragC, minY, crx, cry, crz, wa, wb, wc);
                     // wb now holds fragC's centroid (its interior rep) — the mine-edge portal target.
                     boolean ok = relaxFrag(nodes, current, gCur, edge, crx, cry, crz, fragC,
-                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, ENTRY_INTERIOR, false);
                     if (TRACE) traceCand("mine-sibling", crx, cry, crz, fragC, edge, wb[0], wb[1], wb[2], ok);
                 }
             }
 
             // (B) Inter-region edges across each face fragA reaches (a uniform node reaches all six).
             for (int f = 0; f < 6; f++) {
-                if (!uniformN && !rfN.touchesFace(fragA, f)) continue;
+                if (!uniformN && !rfN.touchesFace(fragA, f)) {
+                    // DIG-THROUGH (PERF-DESIGN §3): SOLID sits between fragA's air pocket and this face, so no
+                    // walk/fall/pillar opening exists — the one connectivity hole. A break-capable bot tunnels
+                    // OUR region's own rock to the sealed face and crosses into the neighbour: emit exactly one
+                    // edge into the neighbour's fragment 0 / oppF-face centre, priced by fragA's distance to that
+                    // face × our rock's hardness. Emitted DIRECTLY (never falling through to the walk path, which
+                    // would read packedA = NO_FACE = full face and spawn spurious walk edges). A no-break bot
+                    // emits nothing — it cannot dig — and the block tier's RegionEdgeBlacklist is the source of
+                    // truth for a dig it still cannot realize. Vertical faces above the octree→quadtree transition
+                    // have no ±Y neighbour, so skip them exactly as the touched-face branch below does.
+                    if (canBreak && !(level >= RegionAddress.OCTREE_TOP && (f == 2 || f == 3))) {
+                        final int dmx = RegionAddress.neighborRX(crx, f);
+                        final int dmy = RegionAddress.neighborRY(cry, f);
+                        final int dmz = RegionAddress.neighborRZ(crz, f);
+                        ensureNode(grid, level, dmx, dmy, dmz);
+                        final int dOpp = RegionAddress.opposite(f);
+                        // The dig edge is emitted for EVERY neighbour kind (full capability-connectivity: there is
+                        // always our own rock to tunnel through to reach the sealed face). But only a uniform-SOLID
+                        // neighbour yields a genuinely BURIED crossing cell that the block tier must dig to — so only
+                        // then tag dig=true (windowTarget forwards a dig cell unfiltered). For an AIR/WATER/MIXED/
+                        // unbuilt neighbour the oppF face centre is open (or ambiguous); leave dig=false so
+                        // windowTarget snaps it like any other crossing rather than aiming the block search at a
+                        // floorless mid-air cell.
+                        final RegionFragments rfDig = grid.fragmentRecord(level, dmx, dmy, dmz);
+                        final boolean buried = rfDig != null && rfDig.kind() == RegionFragments.KIND_SOLID;
+                        // wa = fragA's interior centroid (the tunnel start); wb = the neighbour's oppF face centre.
+                        fragmentCentroidWorld(level, rfN, fragA, minY, crx, cry, crz, wa, wc);
+                        footprintCenterWorld(level, minY, dmx, dmy, dmz, dOpp, RegionFragments.NO_FACE, wb);
+                        int span = Math.abs(wb[0] - wa[0]) + Math.abs(wb[1] - wa[1]) + Math.abs(wb[2] - wa[2]);
+                        float edge = span * MINE_PER_BLOCK * hardnessFactor(rfN.avgSolidHardness());
+                        boolean ok = relaxFrag(nodes, current, gCur, edge, dmx, dmy, dmz, 0,
+                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, dOpp, buried);
+                        if (TRACE) traceCand("dig-through", dmx, dmy, dmz, 0, edge, wb[0], wb[1], wb[2], ok);
+                    }
+                    continue;
+                }
                 // Above the octree→quadtree transition the vertical extent is ONE padded slab spanning the whole
                 // dimension, so there is no ±Y neighbour region (ry is pinned to 0 — RegionAddress.regionY).
                 // Skip the vertical faces there; neighborRY would otherwise key a phantom ry=±1 region.
@@ -433,7 +497,7 @@ public final class RegionPathfinder {
                     float edge = uniformTransitCost(level, rfM, f, canPlace, safeFall);
                     footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
                     boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
-                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false);
                     if (TRACE) traceCand(uniformKindLabel(rfM, f), mrx, mry, mrz, 0, edge,
                             wb[0], wb[1], wb[2], ok);
                     continue;
@@ -453,9 +517,15 @@ public final class RegionPathfinder {
                     int packedB = rfM.footprint(fb, oppF);
                     footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, packedB, wb);
                     if (footprintsOverlap(packedA, packedB)) {
-                        float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall);
+                        // §4 entry→exit: charge the traversal ACROSS this region (entry opening → our exit
+                        // opening wa) plus the ~1 boundary hop (wa → neighbour opening wb). The entry→exit leg
+                        // is the missing "moving within a 16-block region isn't free" term that made lateral
+                        // walks cost ~1 and turned open caverns near-free. entryFace in the node key (§2) makes
+                        // this a FIXED edge cost (the entry opening is pinned per node), keeping A* consistent.
+                        float edge = walkCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, canPlace, safeFall)
+                                + walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall);
                         boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, fb,
-                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
+                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false);
                         if (TRACE) traceCand("walk", mrx, mry, mrz, fb, edge, wb[0], wb[1], wb[2], ok);
                         emitted = true;
                     } else {
@@ -471,7 +541,7 @@ public final class RegionPathfinder {
                         float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall)
                                 + WALL_MINE_BLOCKS * MINE_PER_BLOCK * hardFactor;
                         boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, bestFrag,
-                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
+                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false);
                         if (TRACE) traceCand("mine-fallback", mrx, mry, mrz, bestFrag, edge,
                                 wb[0], wb[1], wb[2], ok);
                     } else {
@@ -479,7 +549,7 @@ public final class RegionPathfinder {
                         footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
                         float edge = RegionAddress.sideOf(level) * MINE_PER_BLOCK * hardFactor;
                         boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
-                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist);
+                                wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false);
                         if (TRACE) traceCand("mine-solid", mrx, mry, mrz, 0, edge, wb[0], wb[1], wb[2], ok);
                     }
                 }
@@ -517,17 +587,22 @@ public final class RegionPathfinder {
     private static boolean relaxFrag(Nodes nodes, int curRow, float gCur, float edge,
                                      int mrx, int mry, int mrz, int mFrag,
                                      int px, int py, int pz, int grx, int gry, int grz,
-                                     float hScale, RegionEdgeBlacklist blacklist) {
-        long k = fragmentKey(mrx, mry, mrz, mFrag);
+                                     float hScale, RegionEdgeBlacklist blacklist,
+                                     int entryFace, boolean dig) {
+        // The blacklist keys crossings PHYSICALLY (region, fragment) — a dead crossing is unrealizable
+        // regardless of how the FROM region was entered (§2), so the online-repair probe uses the plain
+        // physical key, NOT the entry-augmented search key.
+        long physKey = fragmentKey(mrx, mry, mrz, mFrag);
         // Online repair (RegionEdgeBlacklist): skip a crossing the block tier proved unrealizable for these
         // caps, so the region A* routes around it (the walk-around) instead of re-offering the dead end.
         if (blacklist != null
                 && blacklist.contains(fragmentKey(nodes.x[curRow], nodes.y[curRow], nodes.z[curRow],
-                        nodes.frag[curRow]), k)) {
+                        nodes.frag[curRow]), physKey)) {
             return false;
         }
         float tentative = gCur + Math.max(edge, WALK_PER_BLOCK);
-        int row = nodes.intern(k, mrx, mry, mrz, mFrag);
+        // The SEARCH node folds entryFace into the key (§2) so "fragment entered from north" ≠ "…from south".
+        int row = nodes.intern(searchKey(physKey, entryFace), mrx, mry, mrz, mFrag, entryFace);
         if (tentative >= nodes.g[row]) return false; // new rows start at +inf → first visit admitted
         nodes.g[row] = tentative;
         nodes.f[row] = tentative + HEURISTIC.estimate(mrx, mry, mrz, grx, gry, grz) * hScale;
@@ -536,6 +611,7 @@ public final class RegionPathfinder {
         nodes.portalX[row] = px;
         nodes.portalY[row] = py;
         nodes.portalZ[row] = pz;
+        nodes.dig[row] = dig;
         nodes.push(row);
         return true;
     }
@@ -592,6 +668,7 @@ public final class RegionPathfinder {
         }
         int[] rxs = new int[len], rys = new int[len], rzs = new int[len], frags = new int[len];
         int[] px = new int[len], py = new int[len], pz = new int[len];
+        boolean[] digs = new boolean[len];
         int i = len - 1;
         for (int n = reachedRow; n != -1; n = nodes.parent[n]) {
             rxs[i] = nodes.x[n];
@@ -601,10 +678,11 @@ public final class RegionPathfinder {
             px[i] = nodes.portalX[n];
             py[i] = nodes.portalY[n];
             pz[i] = nodes.portalZ[n];
+            digs[i] = nodes.dig[n]; // §5: this step's portal cell is a buried dig-through crossing
             i--;
             if (n == startRow) break;
         }
-        return new RegionPathPlan(rxs, rys, rzs, frags, px, py, pz, len, minY, level, reachedGoalRegion);
+        return new RegionPathPlan(rxs, rys, rzs, frags, px, py, pz, digs, len, minY, level, reachedGoalRegion);
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -905,6 +983,8 @@ public final class RegionPathfinder {
         long[] key;
         int[] x, y, z;          // level-0 region coords
         int[] frag;             // fragment id within (x,y,z) — 0 for center-model / uniform nodes
+        int[] entryFace;        // face (0..5) / ENTRY_START / ENTRY_INTERIOR this node was entered through (§2)
+        boolean[] dig;          // parent edge is a Fix-1 dig-through (buried crossing cell) — §5 consumer tag
         int[] portalX, portalY, portalZ; // world portal cell of the parent edge (NO_PORTAL on the start node)
         float[] g, f;
         int[] parent;           // predecessor row, -1 at the start
@@ -935,6 +1015,8 @@ public final class RegionPathfinder {
             y = new int[nodeHint];
             z = new int[nodeHint];
             frag = new int[nodeHint];
+            entryFace = new int[nodeHint];
+            dig = new boolean[nodeHint];
             portalX = new int[nodeHint];
             portalY = new int[nodeHint];
             portalZ = new int[nodeHint];
@@ -959,13 +1041,17 @@ public final class RegionPathfinder {
             Arrays.fill(mapRow, -1);
         }
 
-        /** Row for {@code k}, creating it ({@code g=+inf}, unlinked) if absent. One probe. {@code cf} = fragment id. */
-        int intern(long k, int cx, int cy, int cz, int cf) {
+        /**
+         * Row for {@code k}, creating it ({@code g=+inf}, unlinked) if absent. One probe. {@code cf} = fragment
+         * id; {@code cface} = the entry face (§2), stored on first creation (it is part of {@code k}, so a row's
+         * entry face is fixed for its lifetime).
+         */
+        int intern(long k, int cx, int cy, int cz, int cf, int cface) {
             int slot = slotFor(k, mapMask);
             for (;;) {
                 int row = mapRow[slot];
                 if (row == -1) {
-                    row = newRow(k, cx, cy, cz, cf);
+                    row = newRow(k, cx, cy, cz, cf, cface);
                     mapKey[slot] = k;
                     mapRow[slot] = row;
                     if (++mapSize >= mapGrowAt) growMap();
@@ -976,12 +1062,14 @@ public final class RegionPathfinder {
             }
         }
 
-        private int newRow(long k, int cx, int cy, int cz, int cf) {
+        private int newRow(long k, int cx, int cy, int cz, int cf, int cface) {
             int n = count;
             if (n == key.length) growNodes();
             key[n] = k;
             x[n] = cx; y[n] = cy; z[n] = cz;
             frag[n] = cf;
+            entryFace[n] = cface;
+            dig[n] = false;
             portalX[n] = NO_PORTAL; portalY[n] = NO_PORTAL; portalZ[n] = NO_PORTAL;
             g[n] = Float.POSITIVE_INFINITY;
             f[n] = Float.POSITIVE_INFINITY;
@@ -1039,6 +1127,8 @@ public final class RegionPathfinder {
             y = Arrays.copyOf(y, cap);
             z = Arrays.copyOf(z, cap);
             frag = Arrays.copyOf(frag, cap);
+            entryFace = Arrays.copyOf(entryFace, cap);
+            dig = Arrays.copyOf(dig, cap);
             portalX = Arrays.copyOf(portalX, cap);
             portalY = Arrays.copyOf(portalY, cap);
             portalZ = Arrays.copyOf(portalZ, cap);
