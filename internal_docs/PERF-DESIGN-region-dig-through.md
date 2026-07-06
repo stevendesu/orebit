@@ -87,26 +87,46 @@ carries `entryFace`.**
 
 ---
 
-## 3. Fix 1 — full 6-connectivity via a dig-through fallback
+## 3. Fix 1 — the dig-through edge (the untouched-face hole)
 
-**Mechanism.** In the `planLevelFragments` face loop, track a **register-resident coverage bitmask** (one
-`int`/`byte`): set bit `f` whenever an edge is *offered* across face `f` (i.e. `relaxFrag` is called for it —
-regardless of its improve/"worse" return; a worse edge still means the face is connected). After the loop, for
-a `canBreak` bot, run one ≤6-iteration pass: for every **uncovered** face (and, above `OCTREE_TOP`, skipping
-the pinned ±Y faces `2`/`3` exactly as `:408` does), resolve the neighbour once and emit **one** dig-through
-edge.
+**Connectivity principle (owner-ratified).** The Minecraft world is fully 6-connected: between any two adjacent
+regions *some* move always exists, at a cost — walk/fall through an opening, **bridge/pillar** up into open air
+(needs place), **dig** through solid (needs break). The region tier must therefore offer **every
+capability-permitted move**, withholding an edge *only* where the bot's caps can't do it (no-place → no
+bridge/pillar edge; no-break → no dig edge). It must **never statically declare a face "unreachable."** True
+unreachability is discovered exclusively at the **block tier**: a partial path that *starts* with an
+irreversible move → the crossing is blacklisted (`RegionEdgeBlacklist`) and the region A* re-plans without it.
+(Better block-A* pruning ⇒ fewer partials ⇒ that repair path fires more rarely.)
 
-This guarantees **every face ends with ≥1 edge** — closing not just the untouched-face hole but also the cases
-where a *touched* face emits nothing today (uniform-AIR neighbour with `!canPlace` and `f≠2` at `:431`; a
-no-overlap MIXED face for a no-break bot). No-break bots see **zero** fan-out change (the pass is `canBreak`-
-gated) and correctly stay disconnected where they cannot dig.
+**What already works — leave it alone.** The face loop already emits the right caps-gated edges for every face
+`fragA` *touches*: walk/parkour across an overlapping opening (`:456`), `uniformTransitCost` for a uniform
+neighbour — **pillar** cost rising / **fall** cost dropping into AIR (`:433`, caps-gated at `:423`/`:431`),
+swim into WATER, mine into SOLID — and the MIXED `mine-fallback`/`mine-solid` for a `canBreak` bot with no
+overlap (`:466-484`). The uniform-AIR bridge/pillar/fall edge is exactly the "no dig, but a place/fall cost"
+move; the `:431` skip correctly removes it only for a genuinely `!canPlace` bot. **This change does not touch
+any of that.**
 
-**Why the bitmask (not `continue → emit`).** Emitting inline would (a) reuse `packedA = footprint(fragA,f)` =
-`NO_FACE`, which `footprintsOverlap` treats as a full face → spurious `walk` edges, and (b) risk a second
-emission for a face that already got a real edge. The bitmask emits exactly one dig-through per genuinely
-uncovered face. Granularity is **per-expansion (per fragment-node)**: two fragments of one region that both
-fail to reach a sealed face each emit their own dig-through across it — correct, because the source-distance
-cost differs.
+**The one hole:** a face `fragA` does **not** reach (`:404` `!rfN.touchesFace(fragA,f)` → `continue`) — i.e.
+there is SOLID between the fragment's air pocket and that face — emits *nothing* today. That is the missing
+"dig through our own region's rock to the sealed face" move.
+
+**Mechanism — emit inline, no bitmask.** The dig-through condition *is* exactly the `:404` untouched-face test,
+so emit the edge right there instead of `continue`-ing:
+```
+if (!uniformN && !rfN.touchesFace(fragA, f)) {
+    if (canBreak && !(level >= OCTREE_TOP && (f==2||f==3))) emitDigThrough(f);   // solid between fragA and face f
+    continue;
+}
+```
+Emit **directly** (compute the dig cost + `relaxFrag` into the neighbour's fragment 0 / face-centre) — do NOT
+fall through to the walk path, which would read `packedA = footprint(fragA,f) = NO_FACE` and let
+`footprintsOverlap` treat it as a full face (spurious walk edges). Because we emit-then-`continue`, there is no
+double emission and **no coverage bitmask / post-loop pass is needed** (the earlier draft's bitmask was to also
+"close" *touched-but-no-edge* faces like the `:431` air case — that was wrong: an open-air face has nothing to
+dig and is already correctly caps-gated; forcing a dig edge there would offer an impossible move). Granularity
+is **per-expansion (per fragment-node)** for free — A* expands one `(region, fragment[, entryFace])` node at a
+time, so each fragment emits its own dig-through across a sealed face, priced by *its* source distance (two
+fragments of one region that both fail to reach a face each dig their own way out — correct, the cost differs).
 
 **Cost (distance-based).** Mirror the existing sibling `mineCost` but aim at the neighbour's face:
 ```
