@@ -135,8 +135,10 @@ public final class RegionPathfinder {
     // within the region search); but as a BLOCK heuristic (rc × WALK_REAL_TICKS ≈ block ticks) those ratios are
     // wrong — the block tier prices pillar ≈ 10.6 t and a fall drop ≈ 2.5 t/block against a 4.633 t walk. So the
     // field uses the block RATIOS (PERF-DESIGN region §5's "honest ratios, compressed scale"): keep WALK=1 (↔4.633
-    // t) and set PILLAR = 10.6/4.633 ≈ 2.29, FALL = 2.5/4.633 ≈ 0.54. This de-inflates climb/fall-heavy routes
-    // (the walk-around) in the heuristic ~2.6× so it stops reading far above the dig-down.
+    // t) and set FALL = 2.5/4.633 ≈ 0.54. This de-inflates fall-heavy routes (the walk-around) in the heuristic so
+    // it stops reading far above the dig-down. The PILLAR ratio is now supplied per-search by RegionPlaceModel
+    // (the bot's real place base + removal premium ÷ a walk tick); PILLAR_PER_BLOCK_FIELD is the fallback stand-in
+    // it reproduces for a block-less / headless bot (10.6/4.633 ≈ 2.29 = Pillar.COST 4.633 + placeBaseCost 6).
     static final float PILLAR_PER_BLOCK_FIELD = 2.29f;
     static final float FALL_PER_BLOCK_FIELD = 0.54f;
 
@@ -439,8 +441,11 @@ public final class RegionPathfinder {
             if (hCur < bestH) { bestH = hCur; bestRow = current; }
             if (++expansions > MAX_REGION_EXPANSIONS) { budgetHit = true; break; }
 
+            // Forward A* (dijkstra=false) keeps its behavioral PILLAR_PER_BLOCK; the pillarField arg is read only
+            // on the reverse field edges, so the constant here is an inert placeholder.
             expandNode(nodes, current, expansions, grid, level, minY, grx, gry, grz,
-                    startWx, startWy, startWz, canBreak, canPlace, safeFall, blacklist, mine, hScale, null, false);
+                    startWx, startWy, startWz, canBreak, canPlace, safeFall, blacklist, mine,
+                    PILLAR_PER_BLOCK_FIELD, hScale, null, false);
         }
 
         if (reachedRow == -1) {
@@ -485,7 +490,10 @@ public final class RegionPathfinder {
      */
     public static RegionCostField costToGoalField(RegionGrid grid, int minY, BlockPos goalFloor,
                                                   boolean canBreak, boolean canPlace, int safeFall,
-                                                  RegionMineModel mine, RegionBox bound) {
+                                                  RegionMineModel mine, RegionPlaceModel place, RegionBox bound) {
+        // Capability-aware pillar cost for the field's upward-climb term (place-side sibling of the mine model);
+        // replaces the hardcoded PILLAR_PER_BLOCK_FIELD stand-in. Only the reverse (field) edges read it.
+        final float pillarField = place.pillarPerBlock();
         final int grx = RegionAddress.regionX(goalFloor.getX(), 0);
         final int gry = RegionAddress.regionY(goalFloor.getY(), 0, minY);
         final int grz = RegionAddress.regionZ(goalFloor.getZ(), 0);
@@ -522,7 +530,7 @@ public final class RegionPathfinder {
             if (++expansions > MAX_REGION_EXPANSIONS) break;
             expandNode(nodes, current, expansions, grid, 0, minY, grx, gry, grz,
                     goalFloor.getX(), goalFloor.getY(), goalFloor.getZ(),
-                    canBreak, canPlace, safeFall, null, mine, 1.0f, bound, true);
+                    canBreak, canPlace, safeFall, null, mine, pillarField, 1.0f, bound, true);
         }
         return field;
     }
@@ -569,8 +577,8 @@ public final class RegionPathfinder {
     private static void expandNode(Nodes nodes, int current, int seq, RegionGrid grid, int level, int minY,
                                    int grx, int gry, int grz, int startWx, int startWy, int startWz,
                                    boolean canBreak, boolean canPlace, int safeFall,
-                                   RegionEdgeBlacklist blacklist, RegionMineModel mine, float hScale,
-                                   RegionBox bound, boolean dijkstra) {
+                                   RegionEdgeBlacklist blacklist, RegionMineModel mine, float pillarField,
+                                   float hScale, RegionBox bound, boolean dijkstra) {
         final int crx = nodes.x[current], cry = nodes.y[current], crz = nodes.z[current];
         final int fragA = nodes.frag[current];
         final int[] wa = nodes.wa; // our (fragA) boundary-opening center
@@ -680,7 +688,7 @@ public final class RegionPathfinder {
                 // walkable ramp instead. (A place-capable bot keeps the dear PILLAR cost and may climb.)
                 if (!canPlace && rfM != null && rfM.kind() == RegionFragments.KIND_AIR && f != 2) continue;
                 // Uniform / collapsed / unbuilt neighbour: a single transit edge into its fragment 0.
-                float edge = uniformTransitCost(level, rfM, f, canPlace, safeFall, mine, dijkstra);
+                float edge = uniformTransitCost(level, rfM, f, canPlace, safeFall, mine, pillarField, dijkstra);
                 footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
                 boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
                         wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
@@ -708,8 +716,8 @@ public final class RegionPathfinder {
                     // is the missing "moving within a 16-block region isn't free" term that made lateral
                     // walks cost ~1 and turned open caverns near-free. entryFace in the node key (§2) makes
                     // this a FIXED edge cost (the entry opening is pinned per node), keeping A* consistent.
-                    float edge = walkCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, canPlace, safeFall, dijkstra)
-                            + walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall, dijkstra);
+                    float edge = walkCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, canPlace, safeFall, dijkstra, pillarField)
+                            + walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall, dijkstra, pillarField);
                     boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, fb,
                             wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
                     if (TRACE) {
@@ -730,7 +738,7 @@ public final class RegionPathfinder {
                     int packedB = rfM.footprint(bestFrag, oppF);
                     footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, packedB, wb);
                     // Approach walk to the wall + tunnel a fixed WALL_MINE_BLOCKS-thick horizontal hole.
-                    float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall, dijkstra)
+                    float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall, dijkstra, pillarField)
                             + digCost(WALL_MINE_BLOCKS, 0, mineUnit);
                     boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, bestFrag,
                             wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
@@ -964,10 +972,13 @@ public final class RegionPathfinder {
      * gradual route spreads its rise/drop horizontally (small {@code |dy|} per transit, no penalty) and so is
      * preferred over a single big-{@code |dy|} cliff the block tier would dead-end on.
      */
-    private static float walkCost(int dx, int dy, int dz, boolean canPlace, int safeFall, boolean reverse) {
-        // Field mode (reverse): use the block-honest PILLAR/FALL ratios so the cost-to-goal heuristic matches
-        // block ticks; the forward A* keeps its compressed behavioral costs.
-        final float pillar = reverse ? PILLAR_PER_BLOCK_FIELD : PILLAR_PER_BLOCK;
+    private static float walkCost(int dx, int dy, int dz, boolean canPlace, int safeFall, boolean reverse,
+                                  float pillarField) {
+        // Field mode (reverse): use the block-honest FALL ratio and the CAPABILITY-AWARE pillar cost
+        // (pillarField, from RegionPlaceModel — the bot's place base + removal premium) so the cost-to-goal
+        // heuristic matches the block tier's real build economy; the forward A* keeps its compressed behavioral
+        // costs. pillarField defaults to the PILLAR_PER_BLOCK_FIELD stand-in for a block-less/headless bot.
+        final float pillar = reverse ? pillarField : PILLAR_PER_BLOCK;
         final float fall = reverse ? FALL_PER_BLOCK_FIELD : FALL_PER_BLOCK;
         float c = octile(dx, dz) * WALK_PER_BLOCK;
         // Reverse edge (goal-rooted cost-TO-goal Dijkstra): the ONLY asymmetry is vertical — traversing this edge
@@ -1022,7 +1033,7 @@ public final class RegionPathfinder {
      * built {@link RegionFragments#KIND_AIR KIND_AIR} region (which keeps the directional pillar/fall chute).
      */
     private static float uniformTransitCost(int level, RegionFragments rfM, int f, boolean canPlace, int safeFall,
-                                            RegionMineModel mine, boolean reverse) {
+                                            RegionMineModel mine, float pillarField, boolean reverse) {
         // UNBUILT / unloaded (null record): we don't know what's there, so assume the best possible — free
         // passage (a "teleporter" through the unknown). Returning ~0 keeps g flat across unloaded space, so the
         // region A* degenerates to greedy-best-first and BEELINES at the goal instead of flooding the expansion
@@ -1064,7 +1075,7 @@ public final class RegionPathfinder {
                     }
                     return fall;
                 }
-                return vExtent * (reverse ? PILLAR_PER_BLOCK_FIELD : PILLAR_PER_BLOCK);
+                return vExtent * (reverse ? pillarField : PILLAR_PER_BLOCK);
         }
     }
 
