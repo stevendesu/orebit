@@ -1,6 +1,9 @@
 # PERF-DESIGN: region-tier dig-through connectivity + walk-across cost
 
-**STATUS: PROPOSED (owner design-reviewed 2026-07-05; not yet implemented or benchmarked).**
+**STATUS: RATIFIED (owner design-reviewed + locked 2026-07-05; implementation in progress via workflow).**
+Supersedes the earlier "centroid" walk-cost framing — the chosen walk model is **entry→exit** (§4), and the
+node identity gains an **entry-face** component to keep edge costs fixed (§2). We are NOT preserving current
+behavior (it is known-bad); validation is a region-tier JMH perf-guard + expected-*improvement* tests (§7).
 
 Per the CLAUDE.md performance protocol, this records mechanism + invariants + expected win + risk BEFORE
 implementation. Nothing here is merged. Validation (paired JMH A/B) is gated on a new region-tier benchmark
@@ -49,13 +52,38 @@ free; charging ~1 makes the whole open cavern near-free to wander, which is the 
 
 ---
 
-## 2. Node model (confirmed)
+## 2. Node model (confirmed) + the entry-face augmentation (RATIFIED)
 
-An HPA* node is **`(region, fragment)`**, not `(region)` — each 6-connected occupiable air component of a
+An HPA* node today is **`(region, fragment)`**, not `(region)` — each 6-connected occupiable air component of a
 region is its own search node (`nodes.frag[current] = fragA`; key = `fragmentKey(rx,ry,rz,frag)` XORing the
 fragment id into bits 50–55). A region contributes one node per fragment (usually 1; a handful in caves; a
 synthetic fragment 0 for uniform/collapsed). This is why a **per-fragment** dig-through is correct: the dig
 cost depends on how far the *source fragment* sits from the face.
+
+**The rework augments the SEARCH node to `(region, fragment, entryFace)`** — the face (0–5, plus a `START`
+sentinel) through which the node was entered. Rationale: the §4 entry→exit walk cost makes the cost of an edge
+*out* of a fragment depend on *where you entered it*. If entry is not part of the node identity, that cost is
+**path-dependent** (the stored `portalX/Y/Z` is overwritten by the min-`g` parent — `relaxFrag:536`), softly
+violating A*'s fixed-edge-cost assumption. Putting `entryFace` in the key makes "fragment entered from the
+north" and "…from the south" distinct states with fixed edge costs → clean, consistent A*. One footprint per
+`(fragment, face)` means `entryFace` fully determines the entry-opening center, so face granularity (≤6× nodes,
+usually far less) is sufficient — no need to key the full portal cell.
+
+**Node-count is a non-issue** (owner call): a level holds ≤16³ = 4096 regions and long range zooms to a coarser
+level, so even a 6× blow-up is ~24k nodes — and the region tier has no flood pathology (unlike the block tier
+there is no one-expensive-axis-vs-many-cheap structure: a fragmented region charges *walk* per crossing, a
+uniform-AIR region charges bridging = pillar in every lateral direction, so going straight at the goal is almost
+always cheapest). Worst realistic search stays far under the block tier's 40–60k floods.
+
+**Consumers stay PHYSICAL `(region, fragment)` — do NOT thread `entryFace` into them.** The
+`RegionEdgeBlacklist` keys a crossing by `fragmentNodeKey` (`PathPlan.blockedHop:1034-1037`) and the driver's
+per-tick membership probe `fragmentOf` (`PathPlan:1484`) both map a *physical* bot position to a node. A
+crossing's unrealizability is geometric — independent of how the FROM region was entered — so an
+entry-augmented blacklist key would be over-specific (fail to suppress a dead crossing reached via a different
+entry). And `entryFace` is a search-state attribute, not a world one, so it must not leak into position→node
+resolution. The skeleton already stores the entry portal cell per hop (`reconstructFragments:601-603`), so any
+consumer that needs the entry face can recover it — but by design none should. **Only the search frontier
+carries `entryFace`.**
 
 ---
 
@@ -130,20 +158,31 @@ needs a real passable cell to aim at):
 | **B. Entry→exit** (the faithful HPA* traversal) | `octile(entryOpening_A → exitOpening_A on face f) + ~1 boundary hop`, where `entryOpening_A = nodes.portalX/Y/Z[current]` (the cell we crossed INTO A through) | accurate: a corner-to-corner cross really costs ~48, a clipped corner ~2 | **mildly path-dependent** — the edge cost depends on the parent's entry opening, softly violating A*'s fixed-edge-cost assumption (the exact thing border-nodes exist to avoid). Bounded by region size; acceptable for an ordinal tier | tiny, reuses the already-stored portal cell, no new field |
 | **C. Border nodes** (textbook HPA*) | true intra-region mini-search between per-border nodes | exact | clean | **large restructure** — many more nodes + intra-region pathfinds; not worth it for an ordinal tier |
 
-**Recommendation: A (centroid) for the first pass** — smallest change, keeps the search well-behaved
-(path-independent), and turns ~1 into ~16, which is all the observed bug needs. **B (entry→exit) is the more
-faithful fix** and the natural upgrade *if* the centroid coarseness bites once measurable on the region JMH
-bench (§7) — it needs the start node's missing entry handled (use `startFloor`/the fragment centroid for hop 0)
-and accepts the path-dependence caveat. **C is out of scope.**
+**RATIFIED: B (entry→exit).** Centroid (A) is rejected — it is geometry-blind: two adjacent regions' centroids
+are ~one region pitch apart *regardless* of where you enter/exit, so it prices every hop at ~16 and cannot tell
+a corner-clip (~2) from a corner-to-corner cross (~30). Entry→exit prices the real traversal:
+```
+cost(A→B) = walk( entryOpening_A → exitOpening_A )   // cross the region — the missing term
+          + walk( exitOpening_A → entryOpening_B )   // the ~1 boundary hop we already charge
+```
+where `entryOpening_A` = the node's stored entry-opening center (from `entryFace`, §2 — `nodes.portal[current]`
+for a settled node), and `exitOpening_A`/`entryOpening_B` = `footprintCenterWorld` on the exit face / opposite
+face (the existing `wa`/`wb`). The path-dependence that made B "less clean" in the earlier draft is **resolved
+by the §2 entry-face node identity** — with `entryFace` in the key, `entryOpening_A` is fixed per node, so edge
+costs are fixed and A* stays consistent. **Start node** (`entryFace = START`, no entry opening): hop-0
+within-region cost uses the bot's actual start floor cell as the entry point (honester than any synthetic
+opening). **C (border nodes) remains out of scope** — the entry-face augmentation gets ~all of C's fidelity at
+a fraction of the restructure.
 
 **Scope split (both A and B).** Only the *horizontal* term becomes honest here. The *vertical* (Δy) stays
 opening/centroid-based (mid-air) — that is the deferred standable-anchor refinement (§6), not this change.
 
-**Perf note (A).** `fragmentCentroidWorld` averages up-to-6 face centers, so it is more per-edge ALU than the
-current single `footprintCenterWorld`. `fragA`'s centroid is fixed per expansion → **hoist it once** at the top
-of the node expansion; only `fragB`'s centroid is per-edge. (Option B avoids this — it reads the stored entry
-cell and computes one `octile`.) The JMH bench (§7) must confirm neither regresses the setup-bound
-short-search scenarios.
+**Perf note (B).** Entry→exit is cheap: `entryOpening_A` is already stored on the node (no recompute), and the
+added work is `footprintCenterWorld(fragA, exitFace)` (which `wa` already computes at `:418`) + one extra
+`octile`/`walkCost` on the entry→exit leg. So per-edge cost rises by ~one `walkCost` call vs today. Hoist
+nothing centroid-related (centroid rejected). The JMH bench (§7) must still confirm the setup-bound short-search
+scenarios don't regress — and that the ≤6× node-identity split doesn't inflate expansions on the dig-heavy /
+zero-cap scenarios beyond the perf budget.
 
 ---
 
@@ -183,9 +222,17 @@ null or snaps to a floor on the **near** side of the wall (`:1327-1334`), defeat
   cascade — ideally via a synthetic `RegionGrid`/pre-populated `RegionFragments` seam (analogous to
   `PathfinderBenchmark`'s synthetic `NavGridView(minY, chunks)` ctor) so it runs headless. **JMH runs only on
   the mc-1.21 era**, so authoring is on `core`, running is at-home on `mc-1.21`.
-- **Behavior change, not mechanical.** New edges + new walk costs change f-values and expansion order → the
-  region correctness tests (`RegionPathfinderFragmentTest`, `HierarchicalCascadeTest`, `PyramidMergerTest`,
-  `FragmentBuilderTest`, `HpaMilestoneTest`) will need updated expectations; update them intentionally.
+- **We are NOT preserving behavior — current behavior is known-bad.** So do NOT re-baseline existing skeleton
+  assertions to "match the new output" (that just enshrines whatever we produce). Instead author
+  **expected-improvement** tests that encode what a correct search *should* do — RED on current `core`, GREEN
+  after the rework: e.g. (a) buried-ore directly below → skeleton digs straight down (few hops, dig edge into
+  the goal region) rather than the long cavern detour; (b) entry→exit walk cost reflects opening geometry (a
+  corner-to-corner cross costs ≫ a corner-clip, and ≫ the old ~1); (c) a MIXED region sealed on a face still
+  emits a `canBreak` dig-through across it (full 6-connectivity). Existing region tests
+  (`RegionPathfinderFragmentTest`, `HierarchicalCascadeTest`, `PyramidMergerTest`, `FragmentBuilderTest`,
+  `HpaMilestoneTest`) that assert *fragment/pyramid data* (not skeleton cost/order) should still pass untouched;
+  any that assert the old winding skeleton is a bug-enshrining test → delete or convert to an improvement test,
+  intentionally and noted.
 - **Fan-out.** Fix 1 adds ≤6 dig edges per MIXED node (≈ doubling candidate emissions), but dig edges are
   expensive → mostly heap-resident, rarely popped; the added cost is relax/heap-push, not extra expansions.
   Bounded further by the cap-safe level selection and the fully-connected geometry making most searches
@@ -198,10 +245,22 @@ null or snaps to a floor on the **near** side of the wall (`:1327-1334`), defeat
 
 ---
 
-## 8. Implementation order (at home, on mc-1.21)
+## 8. Implementation order (authored on `core`; JMH measured on `mc-1.21`)
 
-1. Region-tier JMH benchmark (instrument first; also profiles current cost sources).
-2. Fix 2 (walk-across centroid cost) — measure in isolation.
-3. Fix 1 (bitmask + dig-through) — measure.
-4. Consumer dig-tag passthrough (§5) for intermediate digs.
-5. Update region correctness-test expectations; in-game `/bot rtrace` before/after on the gather repro.
+Code (common logic + tests + bench) is authored on **`core`**; the region-tier JMH bench only *runs* on the
+**mc-1.21 era** (JMH unavailable on 26.x), so the measurement step is a `git merge core → mc-1.21` +
+`Set active project to 1.21.4` + `:1.21.4:jmh` dance (owner-driven, per the bench-traps in memory).
+
+1. **Synthetic region seam** — a headless way to construct a `RegionGrid`/`RegionFragments` fixture from a
+   compact scenario spec (hand-built fragment records via the package-private `RegionFragments` setters),
+   analogous to the block tier's `NavGridView(minY, chunks)` ctor. Shared by the bench and the tests.
+2. **Region-tier JMH benchmark** driving `RegionPathfinder.plan`/`planWithin` over representative scenarios —
+   open-cavern, walled/sealed (dig-heavy), multi-fragment cave, long-range cascade, and a zero-cap (no
+   break/place) variant. Capture a **baseline on current `core`** before any cost change.
+3. **Expected-improvement unit tests** (§7) — RED now, GREEN after.
+4. **Fix 2 + node identity** — entry→exit walk cost (§4) + augment the search node to `(region, fragment,
+   entryFace)` (§2), consumers stay physical. `START` sentinel + start-floor hop-0 cost.
+5. **Fix 1** — per-fragment dig-through via the coverage bitmask (§3), `canBreak`-gated.
+6. **Consumer dig-tag passthrough** (§5) for intermediate buried-cell targets.
+7. **Re-measure** JMH (new vs the step-2 baseline — the perf guard, not an A/B of a preserved behavior) + the
+   expected-improvement tests green + in-game `/bot rtrace` before/after on the gather repro.
