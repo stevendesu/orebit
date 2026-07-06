@@ -15,6 +15,7 @@ import com.orebit.mod.pathfinding.regionpathfinder.RegionCostField;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionMineModel;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
+import com.orebit.mod.pathfinding.regionpathfinder.RegionPlaceModel;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
@@ -1573,6 +1574,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         final RegionGrid rgrid = RegionGrid.of(level);
         final int minY = rgrid.minY();
         final RegionMineModel mine = RegionMineModel.from(inv != null ? inv.mining() : null);
+        final RegionPlaceModel place = RegionPlaceModel.from(inv); // capability-aware field pillar cost
         RegionCostField field = null;
         try {
             RegionPathfinder.RegionBox bound = RegionPathfinder.RegionBox.around(
@@ -1581,7 +1583,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                     RegionAddress.regionX(searchGoal.getX(), 0), RegionAddress.regionY(searchGoal.getY(), 0, minY),
                     RegionAddress.regionZ(searchGoal.getZ(), 0), 3);
             field = RegionPathfinder.costToGoalField(rgrid, minY, searchGoal,
-                    caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), mine, bound);
+                    caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), mine, place, bound);
         } catch (Throwable t) {
             field = null;
         }
