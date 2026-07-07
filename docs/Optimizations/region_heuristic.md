@@ -56,7 +56,7 @@ and record the cheapest settled cost for each region. It reuses the *exact same 
 model* the forward region A\* uses — the only differences are that it starts at the goal
 and never goal-tests (it floods the whole box), and that it runs shortest-first with the
 heuristic suppressed. One coarse flood over a few dozen regions, roughly six microseconds
-per plan; then every one of the block search's millions of heuristic reads is a single
+per build; then every one of the block search's millions of heuristic reads is a single
 array lookup.
 
 There's a calibration subtlety worth a sentence. The forward region search prices a
@@ -177,10 +177,16 @@ chapter had been landing in a diagnostic and nowhere else.
 Wiring it live meant carrying the field as data instead of a static: the search gained a
 field parameter (null stays byte-identical), the [background search](background_pathfinding.md)'s
 request record carries it — built on the tick thread where it can read the world, then
-read-only on the worker, which is safe because the field is written once and never touched
-again — and the two-tier driver builds it once per plan and threads it into both. It's a
-small change that only exists because we'd been grading our homework against an answer key
-the student never saw.
+read-only on the worker, which is safe because each field is written once and never touched
+again — and the two-tier driver builds one per **window target**, rooted at the cell that
+search actually aims for and cached until the target moves. That root matters more than it
+sounds: the first live wiring built the field once per plan, rooted at the *final* goal, and
+handed that same field to every window search — so a window search deep in a cave was
+gradient-guided toward a goal hundreds of blocks past its own target, read a start heuristic
+sixty times its honest octile, and flooded tens of thousands of nodes chasing the wrong
+attractor. A gradient is only as good as its root; each search gets one rooted at its own
+goal. It's a small change that only exists because we'd been grading our homework against
+an answer key the student never saw.
 
 ## What honest costs buy you
 
