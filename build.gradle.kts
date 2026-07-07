@@ -25,6 +25,19 @@ dependencies {
     implementation("net.fabricmc.fabric-api:fabric-api:${mod.dep("fabric_api")}")
 }
 
+loom {
+    runs {
+        named("client") {
+            // Pin the dev-client username. Without it vanilla invents "Player###" (random per
+            // launch); in offline mode the owner UUID is derived from that name, and the bot's
+            // UUID (and saved inventory) is derived from the owner UUID — so every runClient
+            // used to orphan the previous session's bot data. A stable name = stable identities.
+            // (Era-owned run config: the mc-1.21 branch needs the same pin in its own scripts.)
+            programArgs("--username", "Dev")
+        }
+    }
+}
+
 // Single Fabric module: fold the loader glue (fabric/src) in next to the common source (src/).
 // OrebitFabric (the fabric.mod.json `main` entrypoint) wires FabricPlatformEvents into
 // OrebitCommon.init — plain DI, no Architectury bundling. Version-divergent files come from
