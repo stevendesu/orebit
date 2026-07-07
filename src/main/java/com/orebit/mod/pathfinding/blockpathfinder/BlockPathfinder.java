@@ -734,6 +734,10 @@ public final class BlockPathfinder {
         int bestX = sx, bestY = sy, bestZ = sz;
         int bestRow = startRow;     // row of the closest-approach node — the partial-path target on budget exhaustion
         boolean budgetHit = false;
+        // End (exclusive) of the START's direct-successor row range, captured after the first expansion —
+        // the partial-commit seed set (see the budget-hit block below). -1 = never captured (budget blew
+        // before the start even expanded, or start==goal).
+        int childrenEnd = -1;
 
         while (nodes.heapSize > 0) {
             int current = nodes.pop();
@@ -792,6 +796,14 @@ public final class BlockPathfinder {
                 relaxer.move = mi;
                 tier1.get(mi).candidates(ctx, cx, cy, cz, relaxer);
             }
+
+            // Capture the START's direct-successor row range for the partial-commit seed (below). The first
+            // expansion is necessarily startRow (the heap held only it, and a sole entry can't be stale), and
+            // the node table is APPEND-ONLY (rows are never recycled/compacted), so every row appended by the
+            // expansion just above — (startRow, count) right now — is a direct start successor. Cost model:
+            // one register compare per pop, perfectly predicted after the first (same budget as the
+            // budgetNanos test above); the capture itself runs once.
+            if (expansions == 1) childrenEnd = nodes.count;
         }
 
         LAST_EXPANSIONS_TL.get()[0] = expansions; // instrumentation seam — the just-finished search's node count
@@ -803,6 +815,28 @@ public final class BlockPathfinder {
             // and replans from there — converging on a goal a single bounded search can't reach in one shot.
             // A search that EXHAUSTED the heap (walled in) returns null instead: the closest cell is all it can
             // reach, so moving there and replanning would just re-fail (and keeps the FAIL signal visible).
+            //
+            // Commit-point seeding from the start's direct successors (the 2026-07-06 buried-target incident):
+            // bestRow updates only at POP time, so a relaxed-but-never-popped start neighbour — e.g. the one
+            // expensive dig toward a buried window target, whose g (35–160 ticks of mining) keeps it behind
+            // thousands of cheap walk relaxations for the whole budget — can NEVER become the commit point,
+            // and the partial inches along whatever cheap flood the heuristic favoured instead of taking the
+            // one real block of progress. Evaluate h once per captured start child and adopt the overall min
+            // STRICTLY below the popped bestH (a tie keeps today's popped choice); the winner then flows
+            // through the SAME min-progress + irreversibility checks as a popped commit point — no forked
+            // logic. O(branching factor) work, once, only on the budget-hit path: the hot loop is untouched
+            // and FOUND results stay byte-identical. The parent==-1 skip is defensive (every first visit is
+            // relaxed, g starts +inf) — reconstruct() needs a parent chain, so never commit to a row without
+            // one. NOTE a seeded child's parent may since have been REWIRED to a cheaper deeper node; that
+            // chain is still valid (and cheaper), so reconstruct/lastReversibleRow handle it unchanged.
+            boolean seeded = false;
+            if (PARTIAL_PATH && budgetHit && childrenEnd > 0) {
+                for (int r = startRow + 1; r < childrenEnd; r++) {
+                    if (nodes.parent[r] == -1) continue;
+                    float rh = relaxer.h(nodes.x[r], nodes.y[r], nodes.z[r]);
+                    if (rh < bestH) { bestH = rh; bestRow = r; seeded = true; }
+                }
+            }
             if (PARTIAL_PATH && budgetHit && bestRow != startRow
                     && (relaxer.h(sx, sy, sz) - bestH) > PARTIAL_MIN_PROGRESS) {
                 // Irreversibility guard: don't commit a partial past a move the bot can't undo (§IRREVERSIBLE_GUARD).
@@ -814,8 +848,11 @@ public final class BlockPathfinder {
                     if ((relaxer.h(sx, sy, sz) - commitH) > PARTIAL_MIN_PROGRESS) {
                         BlockPathPlan partial = reconstruct(nodes, startRow, commitRow);
                         LAST_PARTIAL_TL.get()[0] = true;
+                        // Tag: "-seed" = the commit point is a seeded never-popped start child; "-irrev" = the
+                        // guard truncated to an ancestor (ancestors were all popped, so the two are exclusive).
                         if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
-                                "PARTIAL-" + partial.size() + "wp" + (commitRow != bestRow ? "-irrev" : ""),
+                                "PARTIAL-" + partial.size() + "wp"
+                                        + (commitRow != bestRow ? "-irrev" : (seeded ? "-seed" : "")),
                                 sx, sy, sz, gx, gy, gz);
                         return partial;
                     }

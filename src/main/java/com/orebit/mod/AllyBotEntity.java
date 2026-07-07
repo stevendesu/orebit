@@ -85,6 +85,25 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     /** Last (waypoint|movement|medium) announced by {@code /bot debug verbose} — dedups it to one line per change. */
     private String lastVerbose;
 
+    // ---- Debug.VERBOSE execution forensics (cold; only touched while verbose is on) --------------------
+    // The stuck-bot discriminators: which of the known edit-execution seams is biting (see logPhaseDiagnostics).
+    /** Result of the current step's {@code phaseRunner.run} (previously discarded) — {@code false} at a step
+     *  change means the cursor advanced past a phase that never finished (the reached-before-done seam). */
+    private boolean lastPhaseDone;
+    /** Move name of the active phase plan — names the OLD step's move in the abandon line. */
+    private String lastPlanMove = "";
+    /** {@code phaseRunner.regressions()} at last look — a change is a fall-back/re-attempt. */
+    private int lastRegressions;
+    /** (step|need|cell) key + consecutive ticks of the current PhaseRunner hold — throttles the holding line. */
+    private String lastHoldKey;
+    private int holdTicks;
+    /** Last announced non-following drive state (HOLD / straight-line) — one line per change. */
+    private String lastDriveState;
+    /** Last announced silent mine/place refusal key — one line per cell, not per tick. */
+    private String lastRefusalKey;
+    /** Re-announce a persistent phase hold every this-many held ticks (2s at 20 tps). */
+    private static final int HOLD_LOG_TICKS = 40;
+
     // ---- Follow / path-steering tuning -------------------------------------------------------
     /** Stop moving once this close to the owner (blocks, horizontal). */
     private static final double ARRIVE_DIST = 2.5;
@@ -134,6 +153,16 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      *  the gap was 1 deep (the only case holding jump self-heals). Longer than {@link #STUCK_DUMP_TICKS}
      *  so the diagnostic dump still fires first. */
     private static final int GROUNDED_STALL_TICKS = 30;
+    /** Consecutive steering ticks without the waypoint cursor advancing before the escape hatch fires
+     *  REGARDLESS of the motion signature (≈4s). The three motion arms each detect a KIND of stuck
+     *  (grounded grind / airborne stall / off-line drift) and all have blind spots a RHYTHMIC motion resets
+     *  forever — the diagnosed one: a Parkour re-attempting a jump it can never make (the bot slipped one
+     *  block below its planned takeoff) is airborne-fast half the time and grounded only briefly between
+     *  hops, so no arm ever accumulates while the settled-boundary gate starves every refresh. Waypoint
+     *  progress is the thing all the arms exist to protect, so this arm watches it directly. Timed breaks
+     *  are exempt (mining.busy() holds the counter at 0); any legit single move (runup + jump + landing,
+     *  a long fall) completes well inside the window. */
+    private static final int NO_PROGRESS_TICKS = 80;
     /** Ticks to wait after a recovery before the off-track/stall detector can fire again (throttle). */
     private static final int RECOVER_COOLDOWN = 20;
     /** Dead-band (blocks) under the planned depth within which the water-rise rule stops holding jump — keeps
@@ -287,8 +316,8 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private static final int COLLECT_TIMEOUT = 60;
     /** Drive-arrival tolerance while MINING/COLLECTING: deliberately TIGHTER than the ~1.0 closest a bot can get
      *  to a solid block's centre, so {@code driveToward} never short-circuits to "arrived" and stops the bot a
-     *  block of stone short — it keeps tunnelling until the real stop condition ({@link #hasLineOfSight} in MINE,
-     *  the drop pickup in COLLECT) is met. Follow/come keep the looser {@link #ARRIVE_DIST}/{@link #ARRIVE_Y}. */
+     *  block of stone short — it keeps tunnelling until the real stop condition (a clear {@link #firstOcclusion}
+     *  line in MINE, the drop pickup in COLLECT) is met. Follow/come keep the looser {@link #ARRIVE_DIST}/{@link #ARRIVE_Y}. */
     private static final double MINE_ARRIVE_DIST = 0.6;
     private static final double MINE_ARRIVE_Y = 0.6;
     /** The 6 face neighbours ({dx,dy,dz}) — for the {@link #hasExposedFace} targeting check. */
@@ -370,6 +399,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private int offTrackTicks;  // consecutive ticks the bot is off the planned segment (slip detection)
     private int stallTicks;     // consecutive airborne/underwater no-progress ticks (a jump can't fix these)
     private int recoverCooldown; // throttle between forced re-searches after an off-track/stall recovery
+    private int noProgressTicks; // consecutive steering ticks without a waypoint advance (the watchdog arm)
 
     // ---- Stage-2 phase-model execution (converted moves only; others keep the steer + one-shot-edit path) ----
     /** Runs the current step's {@link MovePlan} when its move provides one (Pillar today); reactive geometry. */
@@ -712,7 +742,9 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     /**
      * MINE: drain {@link #mineQueue} nearest-first. A cell out of reach is approached with the two-tier driver
      * (targeting the ore cell itself, so it tunnels right up to it — fixing the old "stop a few blocks short");
-     * once within {@link #MINE_REACH} the bot stands and timed-mines it via {@link BotMining} (real drops).
+     * once within {@link #MINE_REACH} the bot stands, digs the sight line open if a block still occludes the
+     * ore (the path goal tolerance ends plans adjacent, with no break edit for that last block), and
+     * timed-mines the target via {@link BotMining} (real drops).
      * Quota counts PICKED-UP items: the inventory delta is accrued ONLY on standing-mine ticks (the sole fresh
      * drops there are the target's), so path-clearing on the approach never counts. An unreachable cell is
      * blacklisted + skipped. Queue drained → re-SCAN around the (now-moved) bot for the next nearest ore — this
@@ -720,8 +752,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      */
     private void gatherMine(ServerLevel level) {
         // Re-run SELECTION when the bot crosses into a new region (the two-A* route-cost compare is
-        // position-dependent — walking toward a cave mouth changes which vein is cheapest) — unless mid-break.
-        if (!mining.busy() && regionOf(this.blockPosition()) != mineSelectRegion) {
+        // position-dependent — walking toward a cave mouth changes which vein is cheapest) — unless mid-break,
+        // and only once SETTLED (grounded): regionOf buckets y>>4, so a bot standing one block under a
+        // vertical region boundary crossed it at every JUMP APEX — each Pillar/Ascend hop tripped this gate
+        // mid-air, cleared the plan before the move could finish, re-scanned, re-planned the same first hop,
+        // and jumped again (the diagnosed bounce livelock at y=95/96).
+        if (!mining.busy() && grounded() && regionOf(this.blockPosition()) != mineSelectRegion) {
             clearPlan();
             beginScanSweep();
             gatherPhase = GatherPhase.SCAN;
@@ -748,15 +784,33 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         final BlockPos cell = mineTarget;
         if (Debug.ENABLED) PathDebugRenderer.highlightCell(level, cell); // show the chosen ore (/bot debug)
         // Break ONLY when both within reach AND with line-of-sight — the LOS gate is what stops the bot mining
-        // ore through 3 blocks of stone (raw reach alone did). Buried ore therefore keeps driving (tunnelling)
-        // until the bot is adjacent with a clear line; exposed ore can be mined from reach like a real player.
-        if (withinReach(cell) && hasLineOfSight(level, cell)) {
+        // ore through 3 blocks of stone (raw reach alone did). Out of reach keeps driving (tunnelling) closer;
+        // within reach but OCCLUDED digs the sight line open itself (see below) — the path tiers can't do it:
+        // their ±1/±2 goal tolerance ends the plan adjacent to the vein with NO break edit for the last block,
+        // so re-driving from here just walks the bot into the wall forever (the stand-at-the-wall bug).
+        if (withinReach(cell)) {
             this.zza = 0.0f;
             if (level.getBlockState(cell).isAir()) { // the break just completed → collect its drop before moving on
                 beginCollect(cell);
                 return;
             }
-            mining.request(cell); // BotMining faces + times the break + drops
+            final BlockPos occluder = firstOcclusion(level, cell);
+            if (occluder == null) {
+                mining.request(cell); // clear line → BotMining faces + times the break + drops
+            } else {
+                // Dig the eye→ore ray open, first blocking block per tick — each break strictly shortens the
+                // occlusion, so this terminates with a clear line and falls into the branch above.
+                gatherLastInvTotal = new BotInventory(this).totalItemCount(); // occluder drops never count
+                final BlockState s = level.getBlockState(occluder);
+                if (ConfigLoader.config().mayBreak(s, s.getDestroySpeed(level, occluder))) {
+                    mining.request(occluder);
+                } else { // protected/unbreakable in the sight line → not minable from here; drop the vein
+                    unreachableCells.add(cell.asLong());
+                    mineQueue.remove(cell);
+                    mineTarget = null;
+                    clearPlan();
+                }
+            }
         } else {
             gatherLastInvTotal = new BotInventory(this).totalItemCount(); // exclude approach pickups from Δ
             // Tight MINE arrival so it tunnels ALL the way to a line-of-sight cell, not 3 blocks short.
@@ -794,14 +848,18 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         if (nearestExposed == null) { mineTarget = nearestBuried; return; }
         if (nearestBuried == null)  { mineTarget = nearestExposed; return; }
         // Two real A* route costs (dig priced in); cheaper wins, tie → exposed (walking beats tunnelling). A null
-        // plan (unreachable within the node budget) scores +inf, so the reachable candidate is preferred.
+        // OR PARTIAL plan scores +inf: a budget-hit search returns a best-effort PARTIAL whose cost() is only
+        // the TRUNCATED prefix — near zero — which let a flooding search to a buried vein "beat" a genuinely
+        // FOUND route to an exposed one (the diagnosed wrong-commit). Unproven ≠ cheap.
         final BotCaps caps = caps();
         final NavGridView grid = new NavGridView(level);
         final BlockPos start = this.blockPosition().below();
         final BlockPathPlan pe = BlockPathfinder.findPath(grid, start, nearestExposed, caps);
+        final boolean pePartial = BlockPathfinder.lastWasPartial();
         final BlockPathPlan pb = BlockPathfinder.findPath(grid, start, nearestBuried, caps);
-        final float ce = pe != null ? pe.cost() : Float.MAX_VALUE;
-        final float cb = pb != null ? pb.cost() : Float.MAX_VALUE;
+        final boolean pbPartial = BlockPathfinder.lastWasPartial();
+        final float ce = (pe != null && !pePartial) ? pe.cost() : Float.MAX_VALUE;
+        final float cb = (pb != null && !pbPartial) ? pb.cost() : Float.MAX_VALUE;
         mineTarget = (ce <= cb) ? nearestExposed : nearestBuried;
         proximityTicks = 0; // fresh target — wait a full interval before challenging it
     }
@@ -830,9 +888,11 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         final NavGridView grid = new NavGridView(level);
         final BlockPos start = this.blockPosition().below();
         final BlockPathPlan pc = BlockPathfinder.findPath(grid, start, challenger, caps);
-        if (pc == null) return; // challenger unreachable → stick with the committed target
+        if (pc == null || BlockPathfinder.lastWasPartial()) return; // unreachable/unPROVEN → keep committed
         final BlockPathPlan pt = BlockPathfinder.findPath(grid, start, mineTarget, caps);
-        final float committed = pt != null ? pt.cost() : Float.MAX_VALUE;
+        // A PARTIAL committed cost is the truncated prefix (near zero) — score it +inf so a genuinely FOUND
+        // challenger can rescue a commit whose search floods (same honesty rule as selectMineTarget).
+        final float committed = (pt != null && !BlockPathfinder.lastWasPartial()) ? pt.cost() : Float.MAX_VALUE;
         if (pc.cost() < committed) mineTarget = challenger; // proven cheaper → take it
     }
 
@@ -964,14 +1024,17 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     }
 
     /**
-     * The mining line-of-sight gate: true iff a straight line from the bot's eyes to {@code target}'s centre
-     * is not interrupted by a full solid block BEFORE the target (the target itself is excluded). This is what
-     * stops the bot breaking ore <i>through</i> a wall — {@link #withinReach} alone (raw distance) let it mine
-     * 3 blocks of stone away. A stepped sample (~4/block) is plenty at reach distance and stays allocation-free
-     * (a single reused {@link BlockPos.MutableBlockPos}); solidity uses the version-portable
-     * {@link BlockShapes#isSolidRender} seam, not a fragile direct MC raytrace.
+     * The mining line-of-sight gate, in discriminating form: the FIRST full solid block interrupting the
+     * straight line from the bot's eyes to {@code target}'s centre (the target itself is excluded), or
+     * {@code null} when the line is clear. A non-null result is both the "don't break ore <i>through</i> a
+     * wall" refusal — {@link #withinReach} alone (raw distance) let it mine 3 blocks of stone away — and the
+     * next block {@link #gatherMine} must dig to OPEN that line (the within-reach-but-occluded case the path
+     * goal tolerance leaves behind). A stepped sample (~4/block) is plenty at reach distance; the scan itself
+     * is allocation-free (a single reused {@link BlockPos.MutableBlockPos}), with one immutable copy made only
+     * on a hit; solidity uses the version-portable {@link BlockShapes#isSolidRender} seam, not a fragile
+     * direct MC raytrace.
      */
-    private boolean hasLineOfSight(net.minecraft.world.level.Level level, BlockPos target) {
+    private BlockPos firstOcclusion(net.minecraft.world.level.Level level, BlockPos target) {
         final double ox = getX(), oy = getEyeY(), oz = getZ();
         final double dx = target.getX() + 0.5 - ox, dy = target.getY() + 0.5 - oy, dz = target.getZ() + 0.5 - oz;
         final int steps = Math.max(1, (int) Math.ceil(Math.sqrt(dx * dx + dy * dy + dz * dz) * 4.0));
@@ -983,9 +1046,9 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             if (bx == target.getX() && by == target.getY() && bz == target.getZ()) continue; // the target itself
             scratchPos.set(bx, by, bz);
             final BlockState s = level.getBlockState(scratchPos);
-            if (!s.isAir() && BlockShapes.isSolidRender(s, level, scratchPos)) return false;
+            if (!s.isAir() && BlockShapes.isSolidRender(s, level, scratchPos)) return scratchPos.immutable();
         }
-        return true;
+        return null;
     }
 
     /**
@@ -1226,6 +1289,22 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             // settledFloor to the live cell, so a move that never completes still reaches a boundary and
             // re-searches (the escape hatch).
             if (blockRefreshTicks > 0) blockRefreshTicks--;
+            // CONSUMED-PLAN RECOVERY (2026-07-06 starvation incident): every waypoint of the current plan
+            // has been walked (waypointIndex >= path.size()) but we're not done — the dispatch below falls
+            // to "straight-line (plan consumed, not arrived)", where steerAlongPath — the ONLY place
+            // settledFloor normally re-anchors — never runs. If the bot's live floor doesn't happen to
+            // equal the stale settledFloor, the settled gate below never re-engages and the whole
+            // onBotMoved/refreshWindow/pollPending machinery starves permanently. A consumed plan by
+            // definition has NO move in flight (nothing half-executed to un-adopt, no irreversible step
+            // whose realized cell we'd mis-anchor), so re-anchoring to the live floor cannot violate the
+            // mid-move protection the gate exists for. Grounded OR in water (review finding): treading
+            // water is the one consumed state that can PERSIST ungrounded, and in SYNC mode the tick-rate
+            // poll below is a no-op (PathPlan has no executor) — without the water arm a plan consumed
+            // mid-swim starves the default config forever. Mid-fall stays excluded: a fall ends grounded
+            // within ticks (this re-anchor then fires), and in async mode the poll below covers it anyway.
+            if (path != null && waypointIndex >= path.size() && (grounded() || this.isInWater())) {
+                this.settledFloor = this.blockPosition().below();
+            }
             if (settledFloor != null && this.blockPosition().below().equals(settledFloor)) {
                 pathPlan.onBotMoved(settledFloor, currentStartMode());
                 boolean consumed = path != null && waypointIndex >= path.size() && !pathPlan.isComplete();
@@ -1261,9 +1340,16 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // boundary the normal drain rides — it may never settle (treading water, mid-fall), and there is
         // nothing to un-adopt. Poll at tick rate and, on adoption, run the same swap/anchor mechanics the
         // boundary block runs — anchored at the bot's LIVE floor, exactly how replan() seeds a fresh plan.
-        if (pathPlan != null && path == null) {
+        // A CONSUMED plan (every waypoint walked) is treated the same as no plan (2026-07-06 incident):
+        // it too has no move in flight, and while consumed-but-airborne (mid-fall past the plan's end)
+        // the settled-gate re-anchor above never fires — this poll is the only drain there (async only;
+        // a sync mid-fall lands grounded within ticks and the re-anchor takes over).
+        // Double adoption with the boundary block is impossible: both compare against lastBlockPlanRef,
+        // so whichever runs first swaps and the other no-ops on the same reference.
+        boolean planConsumed = path != null && waypointIndex >= path.size();
+        if (pathPlan != null && (path == null || planConsumed)) {
             BlockPos liveFloor = this.blockPosition().below();
-            pathPlan.pollWhenPlanless(liveFloor);
+            pathPlan.pollWhenPlanless(liveFloor, planConsumed);
             BlockPathPlan adopted = pathPlan.currentBlockPlan();
             if (adopted != lastBlockPlanRef) {
                 this.path = adopted;
@@ -1276,6 +1362,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                 this.stuckTicks = 0;
                 this.stallTicks = 0;
                 this.offTrackTicks = 0;
+                this.noProgressTicks = 0;
             }
         }
 
@@ -1285,14 +1372,18 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         repairStep();
 
         if (path != null && waypointIndex < path.size()) {
+            lastDriveState = null; // following a path again → re-announce the next non-following state
             steerAlongPath();
         } else if (navGaveUp || (pathPlan != null && pathPlan.status() == PathStatus.BLOCKED)) {
             // HOLD when we either gave up OR a committed-skeleton window is momentarily BLOCKED (the region
             // repair reroutes next tick). Do NOT straight-line here: that ignores the planner and could walk
             // the bot off the very ledge the guard refused (the irreversible yeet). Straight-line stays only
             // for the genuinely off-grid case below (no plan / no built ground under the owner).
+            if (Debug.VERBOSE) driveStateLog(navGaveUp ? "HOLD (nav gave up)" : "HOLD (window BLOCKED)");
             this.zza = 0.0f;
         } else {
+            if (Debug.VERBOSE) driveStateLog(path == null
+                    ? "straight-line (no block plan)" : "straight-line (plan consumed, not arrived)");
             steerStraight(dx, dz); // no nav data here — fall back to straight-line follow
         }
 
@@ -1445,6 +1536,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.stuckTicks = 0;
         this.stallTicks = 0;
         this.offTrackTicks = 0;
+        this.noProgressTicks = 0;
 
         boolean hasPath = path != null && path.size() > 0;
         if (Debug.ENABLED) {
@@ -1743,7 +1835,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         for (int j = path.size() - 1; j >= waypointIndex; j--) {
             BlockPos w = path.waypoint(j);
             if (path.movement(j).reached(this, w.getX(), w.getY(), w.getZ())) {
+                if (Debug.VERBOSE && j > waypointIndex) {
+                    vlog("advance SKIPPED " + (j - waypointIndex) + " step(s): " + waypointIndex + "→" + (j + 1)
+                            + " — skipped steps' edits/phases never ran");
+                }
                 waypointIndex = j + 1;
+                noProgressTicks = 0; // real progress — feed the watchdog arm
                 // A move just COMPLETED — this is the settled stand cell the driver commits/replans off (its
                 // edits are now applied). Advancing the anchor only here is what keeps a mid-move transient from
                 // triggering a boundary replan (see settledFloor). w is the stand position; below() = its floor.
@@ -1763,6 +1860,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // a window swap that reset the cursor) rebuilds it and resets the runner. The plan is written in the
         // search-native FLOOR cells; waypoints are floor.above() (stand positions), so the floor is one below.
         if (waypointIndex != activePlanStep) {
+            if (Debug.VERBOSE && phaseRunner.active() && !lastPhaseDone && activePlanStep >= 0) {
+                // The reached-before-done seam: the cursor moved on while the old step's phase plan was still
+                // mid-flight — whatever breaks/places its remaining phases owed were dropped on the floor.
+                vlog("ABANDONED " + lastPlanMove + " step " + activePlanStep + " mid-phase "
+                        + phaseRunner.phase() + "/" + phaseRunner.phases() + " (reached fired before done)");
+            }
             activePlanStep = waypointIndex;
             BlockPos toFloor = wp.below();
             BlockPos fromFloor = (waypointIndex == 0)
@@ -1771,6 +1874,9 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             MovePlan mp = movement.plan(fromFloor.getX(), fromFloor.getY(), fromFloor.getZ(),
                     toFloor.getX(), toFloor.getY(), toFloor.getZ());
             if (mp != null) phaseRunner.begin(mp); else phaseRunner.clear();
+            lastPhaseDone = false;
+            lastRegressions = 0;
+            lastPlanMove = movement.getClass().getSimpleName();
         }
 
         // Build the SEGMENT the move tracks: from the previous waypoint (or the window/plan start for the
@@ -1787,7 +1893,8 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // each tick — breaking/placing reactively via the PhaseRunner, no one-shot applyEdits, so a missed edit
         // self-heals. An UNCONVERTED move keeps the original path: apply its folded edits once, then steer.
         if (phaseRunner.active()) {
-            phaseRunner.run(this, cursor);
+            lastPhaseDone = phaseRunner.run(this, cursor);
+            if (Debug.VERBOSE) logPhaseDiagnostics(movement);
         } else {
             StepEdits edits = path.edits(waypointIndex);
             if (edits != null && waypointIndex != lastEditedIndex && movement.editsReadyNow(this)) {
@@ -1850,10 +1957,22 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // the case the first two arms are blind to (a missed parkour jump grinding at the bottom of the gap).
         offTrackTicks = (SteerControl.crossTrack(this, cursor) > OFF_TRACK_DIST) ? offTrackTicks + 1 : 0;
         stallTicks = (!grounded && velocity.lengthSqr() < STUCK_SPEED_SQR) ? stallTicks + 1 : 0;
+        // The watchdog arm: reset by every waypoint advance / plan swap, exempt during timed breaks —
+        // counts pure wall-clock without progress, so it catches whatever rhythmic livelock the motion
+        // arms above are blind to (see NO_PROGRESS_TICKS).
+        noProgressTicks = mining.busy() ? 0 : noProgressTicks + 1;
         if (recoverCooldown > 0) {
             recoverCooldown--;
         } else if (offTrackTicks >= OFF_TRACK_TICKS || stallTicks >= STALL_TICKS
-                || stuckTicks >= GROUNDED_STALL_TICKS) {
+                || stuckTicks >= GROUNDED_STALL_TICKS || noProgressTicks >= NO_PROGRESS_TICKS) {
+            if (Debug.VERBOSE) {
+                vlog("RECOVER (" + (offTrackTicks >= OFF_TRACK_TICKS ? "off-track"
+                        : stallTicks >= STALL_TICKS ? "airborne-stall"
+                        : stuckTicks >= GROUNDED_STALL_TICKS ? "grounded-stall" : "no-progress watchdog")
+                        + ") at step " + waypointIndex + "/" + path.size() + " "
+                        + movement.getClass().getSimpleName() + "→" + compact(wp)
+                        + " — re-anchor " + compact(this.blockPosition().below()) + " + re-search");
+            }
             blockRefreshTicks = 0; // re-search the window from the bot's actual cell next tick (driveToward)
             // Recovery escape hatch: the bot has genuinely slipped/stalled off-plan (a move that won't complete),
             // so re-anchor the driver to its LIVE cell — this is exactly the case where we DO want to bail on the
@@ -1862,6 +1981,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             offTrackTicks = 0;
             stallTicks = 0;
             stuckTicks = 0;
+            noProgressTicks = 0;
             recoverCooldown = RECOVER_COOLDOWN;
         }
     }
@@ -1978,6 +2098,73 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         OrebitCommon.LOGGER.info("[Orebit] exec {} -> {} ({}) feetY={} targetY={}",
                 move, compact(wp), medium, String.format("%.2f", getY()),
                 String.format("%.2f", wp.getY() + 1.0));
+    }
+
+    /** A {@code Debug.VERBOSE} forensic line → owner chat AND the server log (callers dedup/throttle). */
+    private void vlog(String msg) {
+        chat("[bot] " + msg);
+        OrebitCommon.LOGGER.info("[Orebit] {}", msg);
+    }
+
+    /**
+     * {@code /bot debug verbose}: per-tick phase-execution forensics for a CONVERTED move (the PhaseRunner
+     * path) — the discriminators for the "missed a break/place and got stuck" reports, since a stuck bot goes
+     * silent on every one-line-per-change log. Emits (deduped/throttled):
+     * <ul>
+     *   <li><b>regressed → re-attempt #n</b> — the move fell back and restarted; a climbing count is the
+     *       attempt/mis-land/reset livelock (e.g. a parkour jump that keeps coming up short).</li>
+     *   <li><b>holding Nt … needs AIR/FOOTING at (cell)</b> every {@link #HOLD_LOG_TICKS} held ticks, with the
+     *       live occupant and {@code mining.busy()}: an AIR hold with {@code busy=false} means the break is
+     *       being refused or never starting (see the mine/place REFUSED lines); {@code busy=true} with the
+     *       occupant unchanged across many lines is a legitimately slow dig. A FOOTING hold that persists
+     *       means {@code place()} is silently refusing — its own REFUSED line names why.</li>
+     * </ul>
+     */
+    private void logPhaseDiagnostics(Movement movement) {
+        final int r = phaseRunner.regressions();
+        if (r != lastRegressions) {
+            lastRegressions = r;
+            vlog(movement.getClass().getSimpleName() + " step " + waypointIndex + " regressed → re-attempt #" + r);
+        }
+        final MovePlan.Need need = phaseRunner.holdNeed();
+        if (need == null) {
+            lastHoldKey = null;
+            holdTicks = 0;
+            return;
+        }
+        final String key = waypointIndex + "|" + need + "|"
+                + phaseRunner.holdX() + "," + phaseRunner.holdY() + "," + phaseRunner.holdZ();
+        if (key.equals(lastHoldKey)) {
+            holdTicks++;
+        } else {
+            lastHoldKey = key;
+            holdTicks = 1;
+        }
+        if (holdTicks % HOLD_LOG_TICKS == 0) {
+            ServerLevel level = (ServerLevel) Worlds.of(this);
+            scratchPos.set(phaseRunner.holdX(), phaseRunner.holdY(), phaseRunner.holdZ());
+            vlog("holding " + holdTicks + "t: " + movement.getClass().getSimpleName()
+                    + " step " + waypointIndex + " phase " + phaseRunner.phase() + "/" + phaseRunner.phases()
+                    + " needs " + need + " at " + compact(scratchPos)
+                    + " occ=" + level.getBlockState(scratchPos).getBlock()
+                    + " miningBusy=" + mining.busy());
+        }
+    }
+
+    /** {@code Debug.VERBOSE}: announce (once per change) that the driver is NOT following a path and why —
+     *  the state every other execution log is blind to (a consumed/blocked plan emits nothing per tick). */
+    private void driveStateLog(String state) {
+        if (state.equals(lastDriveState)) return;
+        lastDriveState = state;
+        vlog("drive: " + state);
+    }
+
+    /** {@code Debug.VERBOSE}: name a silent mine/place refusal the moment it first happens (one line per
+     *  (kind|cell), not per re-issued tick) — these silent returns are the prime "phase holds forever" causes. */
+    private void refusalLog(String key, String msg) {
+        if (!Debug.VERBOSE || key.equals(lastRefusalKey)) return;
+        lastRefusalKey = key;
+        vlog(msg);
     }
 
     /**
@@ -2116,6 +2303,18 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     /** Route a break request to the timed {@link BotMining} actuator (equip/face/swing/real-time/drops). */
     @Override
     public void mine(int x, int y, int z) {
+        if (Debug.VERBOSE) {
+            // Pre-flight the exact refusal BotMining applies SILENTLY (its mayBreak backstop stop()s the
+            // break with no signal) — a phase re-requesting a refused cell every tick holds forever, and
+            // without this line the hold is indistinguishable from a legitimately slow dig.
+            ServerLevel level = (ServerLevel) Worlds.of(this);
+            scratchPos.set(x, y, z);
+            BlockState s = level.getBlockState(scratchPos);
+            if (!s.isAir() && !ConfigLoader.config().mayBreak(s, s.getDestroySpeed(level, scratchPos))) {
+                refusalLog("mine|" + x + "," + y + "," + z, "mine REFUSED at (" + x + "," + y + "," + z + "): "
+                        + s.getBlock() + " protected/unbreakable — BotMining will release it every tick");
+            }
+        }
         mining.request(new BlockPos(x, y, z));
     }
 
@@ -2130,7 +2329,11 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // A protected occupant is never cleared NOR replaced by a placement (filling the cell destroys it
         // either way) — the planner's OPEN_PLACE bit excludes protected cells; this live backstop also
         // covers a stale grid. Give up on the cell; the next tick / replan nets it.
-        if (!existing.isAir() && cfg.protectedBlocks().matches(existing)) return;
+        if (!existing.isAir() && cfg.protectedBlocks().matches(existing)) {
+            refusalLog("place-prot|" + x + "," + y + "," + z, "place REFUSED at (" + x + "," + y + "," + z
+                    + "): protected occupant " + existing.getBlock());
+            return;
+        }
         if (!Replaceable.isReplaceable(existing)) {
             // Planner/executor vocabulary gap: the search's open-for-place bit is SHAPE-based (an
             // empty-collision cell — sweet berry bush, torch, sapling — is open to place into), but
@@ -2140,13 +2343,21 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             // occupant is soft (hardness ~0), so the clear is effectively free and stays unpriced
             // planner-side (EditScratch.requireFloor). mayBreak refuses an unbreakable occupant (give
             // up, replan nets it) AND an owner-protected one (mining.protectedBlocks — never broken).
-            if (!cfg.mayBreak(existing, existing.getDestroySpeed(level, p))) return;
+            if (!cfg.mayBreak(existing, existing.getDestroySpeed(level, p))) {
+                refusalLog("place-occ|" + x + "," + y + "," + z, "place REFUSED at (" + x + "," + y + "," + z
+                        + "): unbreakable/protected occupant " + existing.getBlock());
+                return;
+            }
             WorldEdits.breakBlock(level, p);
         }
         lookAtCell(x, y, z); // look at what we place — for a pillar footing that's straight down, like a player
         if (cfg.consumesBlocks()) {
             Block block = new BotInventory(this).consumeOnePlaceable();
-            if (block == null) return; // out of blocks — the next tick / replan nets it
+            if (block == null) { // out of blocks — the next tick / replan nets it
+                refusalLog("place-inv|" + x + "," + y + "," + z, "place REFUSED at (" + x + "," + y + "," + z
+                        + "): out of placeable blocks");
+                return;
+            }
             WorldEdits.placeBlock(level, p, block.defaultBlockState());
         } else {
             WorldEdits.placeBlock(level, p, placeBlock()); // conjured, infinite supply
