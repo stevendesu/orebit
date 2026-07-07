@@ -87,10 +87,19 @@ What each region stores:
   all collapse to one of three uniform kinds — **solid** (mine through, cost from
   average hardness), **air** (a one-way chute: falling in is cheap, pillaring out
   is dear), or **water** (a symmetric swim).
-- **Costs on a 4-bit log scale** — crossing costs are derived from the fragment
-  record and quantized to a nibble that spans roughly three orders of magnitude
-  (a walk to mining through obsidian), which is all the fidelity the coarse tier
-  needs; the recomputed block layer supplies exactness on approach.
+- **Costs derived, not stored — and tool-aware.** A region stores only geometry
+  (fragment footprints) and a 4-bit average-hardness nibble; the actual crossing
+  costs are computed from those on demand, so a single block edit never invalidates a
+  stored cost table. Crucially, the dig cost is priced in the **same currency the bot
+  uses**: the hardness nibble is turned into real mining ticks against the bot's
+  *actual* tools at plan time, and the model is deliberately two-term — you pay to
+  walk the tunnel *and* to break the two-block-tall body in the way — so **digging is
+  never cheaper than walking the same distance** for any tool. (An earlier flat,
+  tool-blind dig cost priced soft dirt below a walk, which had the bot happily tunnel
+  straight down through a hillside instead of strolling to the cave mouth twenty
+  blocks over. The [region-heuristic chapter](Optimizations/region_heuristic.md)
+  follows where honest dig-versus-walk costs lead.) The recomputed block layer still
+  supplies final exactness on approach.
 - **A pyramid of coarser levels** — parent regions merge their children's fragments,
   so the same machinery plans at 16, 32, 64… blocks per cell, and a route across
   tens of thousands of blocks is a short search at a high level.
