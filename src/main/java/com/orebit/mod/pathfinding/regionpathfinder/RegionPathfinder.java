@@ -563,8 +563,11 @@ public final class RegionPathfinder {
      */
     private static DigSeedSet buildDigSeeds(RegionGrid grid, int minY, BlockPos goalFloor,
                                             boolean canBreak, RegionMineModel mine) {
-        if (!canBreak) {
-            return null; // a no-break bot can't dig to the goal — keep nearest-centroid
+        if (!canBreak || grid.level() == null) {
+            // No-break bot ⇒ can't dig; headless grid (tests / JMH) ⇒ no resident sections to flood. Either way
+            // skip the flood + its scratch allocation and keep nearest-centroid — so the region A* is byte-
+            // identical (no per-plan cost) wherever the dig-flood can't engage.
+            return null;
         }
         final int grx = RegionAddress.regionX(goalFloor.getX(), 0);
         final int gry = RegionAddress.regionY(goalFloor.getY(), 0, minY);
