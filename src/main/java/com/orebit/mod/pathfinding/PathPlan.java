@@ -1385,7 +1385,11 @@ public final class PathPlan {
         final int face = entranceFace(step);
         final RegionFragments rf = regionGrid.fragmentRecord(0, skeleton.rx(step), skeleton.ry(step),
                 skeleton.rz(step));
-        final int packed = (rf != null && !rf.isUniform())
+        // The virtual goal node has no real fragment record — snap within the whole region (NO_FACE) rather than
+        // indexing rf.footprint with the sentinel id. (In practice the goal-in-window branch fires before a virtual
+        // tail is portal-snapped, but guard defensively against an AIOOBE.)
+        final int packed = (rf != null && !rf.isUniform()
+                && !RegionPathfinder.isVirtualGoal(skeleton.fragmentId(step)))
                 ? rf.footprint(skeleton.fragmentId(step), face) : RegionFragments.NO_FACE;
         int uMin = 0, uMax = s - 1, vMin = 0, vMax = s - 1;
         if (packed != RegionFragments.NO_FACE) {
