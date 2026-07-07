@@ -46,13 +46,25 @@ several rounds of measured optimization — the
 [depth-nibble](Optimizations/depth_nibbles.md) chapters tell that story in full.
 (Even the *first* search after boot is covered: the server warms the pathfinder up on
 synthetic terrain at startup — `pathing.warmup` — so no player pays the JIT compiler's
-one-time ~22 ms bill.) The load-bearing pieces:
+one-time ~22 ms bill.) It can also run **[off the server tick entirely](Optimizations/background_pathfinding.md)**,
+on a pool of background worker threads with a wall-clock time budget instead of a node
+cap — so a big flood no longer has to fit between two frames (`pathing.async`). The
+load-bearing pieces:
 
 - **Weighted search, not provably-optimal search.** The heuristic is 3D octile
   distance scaled by a configurable greed weight (default `2.0`), plus a microscopic
   straight-line tie-break so the search threads obstacle fields instead of drowning
   in equal-cost alternatives. A bot needs a good path *now*, not a certificate of
   optimality.
+- **A heuristic that can read the map.** Octile distance is topology-blind — it
+  points straight at a goal behind a wall and floods the open volume hunting a way
+  through. So the block heuristic also consults the region tier: a goal-rooted flood
+  over the coarse graph yields a **cost-to-goal estimate per region**, and the search
+  takes the *larger* of it and the straight-line distance. A cell whose region loops
+  back to the goal now reads high and is deprioritised instead of flooded — and a
+  *buried* goal (an ore in no air pocket at all) is reached by seeding that flood from
+  the pockets that can dig to it. The [region-heuristic chapter](Optimizations/region_heuristic.md)
+  tells the whole story.
 - **A goal premium that respects building.** Distance heuristics are blind to the
   fact that a goal floating over open air must be *built to* — so the search adds the
   provable placement cost of the forced climb below the goal into the estimate,
