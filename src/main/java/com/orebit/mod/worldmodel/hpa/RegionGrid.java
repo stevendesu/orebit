@@ -83,6 +83,16 @@ public final class RegionGrid {
     // ---------------------------------------------------------------------------------------------------
 
     private final ServerLevel level;
+    /**
+     * Headless section backing ({@link #headless(int, ConcurrentHashMap)}): when non-null, the three section
+     * resolvers ({@link #rebuildLeaf}/{@link #startFragmentByFlood}/{@link #navtypeAt}) read their
+     * {@link NavSection} columns from THIS map instead of {@link NavStore} — so the live-path region tier
+     * (dig-flood, start-flood, leaf build) can be driven with no {@code ServerLevel}. Always {@code null} in
+     * production (the loader interns via {@link #of}) and in the record-only headless seam ({@link #headless(int)}).
+     * {@link NavStore} is keyed by {@code ServerLevel} and can't take a null key, which is exactly why the
+     * headless full-search seam carries its own per-grid section map rather than a synthetic level token.
+     */
+    private final ConcurrentHashMap<Long, NavSection[]> sections;
     private final CostPyramid pyramid;
     /**
      * The dimension's resource-tally store — a parallel SoA layer on the SAME fixed-grid octree as
@@ -96,6 +106,7 @@ public final class RegionGrid {
 
     private RegionGrid(ServerLevel level) {
         this.level = level;
+        this.sections = null;
         this.pyramid = new CostPyramid();
         this.resourcePyramid = new ResourcePyramid();
         this.minY = LevelBounds.minY(level);
@@ -111,11 +122,27 @@ public final class RegionGrid {
      * default for that region). <b>Not used in production</b> (the loader always interns via {@link #of}).
      */
     public static RegionGrid headless(int minY) {
-        return new RegionGrid(minY);
+        return new RegionGrid(minY, null);
     }
 
-    private RegionGrid(int minY) {
+    /**
+     * Full-search headless seam (PERF-DESIGN full-search bench §8 step 1): a grid with <b>no backing
+     * {@link ServerLevel}</b> but a hand-authored {@code sections} map (the same
+     * {@code ConcurrentHashMap<Long, NavSection[]>} the block tier's synthetic
+     * {@link com.orebit.mod.worldmodel.pathing.NavGridView#NavGridView(int, ConcurrentHashMap)} seam consumes).
+     * Unlike {@link #headless(int)} — which leaves every leaf unbuilt and relies on the §6 optimistic default —
+     * this variant lets {@link #rebuildLeaf} flood REAL fragments from the sections and lets the goal dig-flood /
+     * start-flood engage, so the whole live-gameplay region path can be exercised headlessly (a regression the
+     * record-only headless grid can't see). Feed the SAME map to {@code new NavGridView(minY, sections)} so the
+     * block window search reads the same terrain. <b>Not used in production.</b>
+     */
+    public static RegionGrid headless(int minY, ConcurrentHashMap<Long, NavSection[]> sections) {
+        return new RegionGrid(minY, sections);
+    }
+
+    private RegionGrid(int minY, ConcurrentHashMap<Long, NavSection[]> sections) {
         this.level = null;
+        this.sections = sections;
         this.pyramid = new CostPyramid();
         this.resourcePyramid = new ResourcePyramid();
         this.minY = minY;
@@ -180,14 +207,16 @@ public final class RegionGrid {
      * reads the §6 optimistic default).
      */
     public void rebuildLeaf(int rx, int ry, int rz) {
-        // Headless test seam ({@link #headless}): with no backing level there is no NavStore to build from, so
-        // a not-pre-seeded row stays unbuilt and the planner reads the §6 optimistic default.
-        if (level == null) {
+        // Record-only headless seam ({@link #headless(int)}): no backing level AND no sections map, so there is
+        // nothing to build from — a not-pre-seeded row stays unbuilt and the planner reads the §6 optimistic
+        // default. The full-search headless seam ({@link #headless(int, ConcurrentHashMap)}) DOES have sections,
+        // so it falls through and builds real fragments from them.
+        if (level == null && sections == null) {
             return;
         }
         // Only build if the chunk's nav data is resident and this vertical section exists; otherwise leave the
         // node unbuilt (fragment reads fall back to the §6 default).
-        NavSection[] column = NavStore.get(level, NavStore.key(rx, rz));
+        NavSection[] column = columnAt(rx, rz);
         if (column == null || ry < 0 || ry >= column.length || column[ry] == null) {
             return;
         }
@@ -235,10 +264,10 @@ public final class RegionGrid {
      * gates on {@code level == 0}.
      */
     public int startFragmentByFlood(int rx, int ry, int rz, int wx, int wy, int wz) {
-        if (level == null) {
+        if (level == null && sections == null) {
             return -1;
         }
-        NavSection[] column = NavStore.get(level, NavStore.key(rx, rz));
+        NavSection[] column = columnAt(rx, rz);
         if (column == null || ry < 0 || ry >= column.length || column[ry] == null) {
             return -1;
         }
@@ -275,7 +304,7 @@ public final class RegionGrid {
      * BFS over ≤ {@code maxCells} cells with small transient collections — no per-node-search cost.
      */
     public void goalDigSeeds(int gx, int gy, int gz, int maxCells, DigSeedSink sink) {
-        if (level == null) {
+        if (level == null && sections == null) {
             return;
         }
         int goalNav = navtypeAt(gx, gy, gz);
@@ -328,11 +357,22 @@ public final class RegionGrid {
     /** The navtype index at world cell {@code (wx,wy,wz)}, or {@code -1} if its section isn't resident. */
     private int navtypeAt(int wx, int wy, int wz) {
         int rx = wx >> 4, rz = wz >> 4, ry = (wy - minY) >> 4;
-        NavSection[] column = NavStore.get(level, NavStore.key(rx, rz));
+        NavSection[] column = columnAt(rx, rz);
         if (column == null || ry < 0 || ry >= column.length || column[ry] == null) {
             return -1;
         }
         return column[ry].getNavtype(wx & 15, (wy - minY) & 15, wz & 15);
+    }
+
+    /**
+     * Resolve the {@link NavSection} column at chunk {@code (rx,rz)} from whichever backing this grid has: the
+     * hand-authored {@link #sections} map (headless full-search seam) when present, else the live {@link NavStore}
+     * keyed by {@link #level}. Only reached after the caller's {@code level == null && sections == null} guard, so
+     * exactly one backing is non-null. Returns {@code null} when that backing has no column for the chunk.
+     */
+    private NavSection[] columnAt(int rx, int rz) {
+        long key = NavStore.key(rx, rz);
+        return sections != null ? sections.get(key) : NavStore.get(level, key);
     }
 
     /** Pack a goal-relative cell offset (each in [-127,127], guaranteed by the {@code maxCells} bound) into an int. */
