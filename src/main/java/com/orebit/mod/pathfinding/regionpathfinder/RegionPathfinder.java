@@ -586,6 +586,8 @@ public final class RegionPathfinder {
                     grid.ensureLeaf(rx, ry, rz);
                     final long key = fragmentKey(rx, ry, rz, frag);
                     final float cost = digCost(digCells, 0, mineUnit);
+                    if (TRACE) trace("  DIG-SEED pocket region=" + rx + "," + ry + "," + rz + " frag=" + frag
+                            + " digCells=" + digCells + " -> V cost=" + cost);
                     for (int i = 0; i < count[0]; i++) {
                         if (keys[i] == key) { // dedup: keep the cheapest dig to this pocket
                             if (cost < costs[i]) costs[i] = cost;
@@ -617,6 +619,9 @@ public final class RegionPathfinder {
         final float tentative = nodes.g[curRow] + digCost;
         final long key = searchKey(fragmentKey(grx, gry, grz, VIRTUAL_GOAL_FRAG), ENTRY_INTERIOR);
         final int row = nodes.intern(key, grx, gry, grz, VIRTUAL_GOAL_FRAG, ENTRY_INTERIOR);
+        if (TRACE) traceCand("virtual-goal(dig from " + nodes.x[curRow] + "," + nodes.y[curRow] + ","
+                + nodes.z[curRow] + " frag=" + nodes.frag[curRow] + " g=" + nodes.g[curRow] + ")",
+                grx, gry, grz, VIRTUAL_GOAL_FRAG, digCost, goalWx, goalWy, goalWz, tentative < nodes.g[row]);
         if (tentative >= nodes.g[row]) return;
         nodes.g[row] = tentative;
         nodes.f[row] = tentative; // h == 0 at the goal
