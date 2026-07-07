@@ -160,9 +160,25 @@ public final class PathPlan {
     private final ServerLevel level;
     private final RegionGrid regionGrid;
     private final BlockPos goalFloor;
-    /** The region-informed cost-to-goal heuristic field (goal-rooted, built once per plan on the tick thread);
-     *  threaded read-only into every windowed block search, sync and async. {@code null} if the build failed. */
-    private final RegionCostField regionField;
+    /** The region-informed cost-to-goal heuristic field threaded read-only into every windowed block search,
+     *  sync and async — rooted at the CURRENT window's search target ({@link #fieldRoot}), NOT the final goal.
+     *  A window search guided by a final-goal-rooted gradient chases the wrong attractor (startH 60× the
+     *  window octile), floods tens of thousands of nodes, and its PARTIAL commit point (min-h at pop) inches
+     *  toward the final goal instead of the window target — the 2026-07-06 cave incident. Rebuilt lazily by
+     *  {@link #regionFieldFor} whenever the window target moves (~6 µs, replan cadence only); each rebuild
+     *  constructs a NEW write-once instance and swaps the reference, so in-flight async workers keep reading
+     *  the old (still-immutable) instance. {@code null} before the first {@link #replanBlock} and after a
+     *  failed build (⇒ the block search falls back to plain octile, the documented byte-identical fallback). */
+    private RegionCostField regionField;
+    /** The search target {@link #regionField} is rooted at ({@code null} until the first build). The root
+     *  compare in {@link #regionFieldFor} gates the rebuild — an unchanged window target reuses the cached
+     *  field across every replan/pre-plan toward it, never rebuilding per tick. */
+    private BlockPos fieldRoot;
+    /** Tool-aware region dig-cost model, snapshotted once from the ctor's inventory — shared by the cascade
+     *  build and every {@link #regionFieldFor} field rebuild (same snapshot semantics as before). */
+    private final RegionMineModel regionMine;
+    /** Place-cost sibling of {@link #regionMine} (the field's pillar/climb term), snapshotted once likewise. */
+    private final RegionPlaceModel regionPlace;
     private final BotCaps caps;
     /**
      * The live bot's per-pathfind inventory feasibility snapshot (PRD §10 Phase 1b/1c), passed straight to
@@ -271,10 +287,14 @@ public final class PathPlan {
     /**
      * How {@link #windowTarget} chose the current target — surfaced so the debug chat can explain a movement
      * choice (a target adjusted for caps, or the window extended down a fall). {@code GOAL} = the real goal;
-     * {@code PORTAL} = the stored portal centroid as-is; {@code SNAPPED} = the centroid was unusable (buried
-     * or a mid-air cell the bot can't/shouldn't stand at) so it was snapped to a real standable cell in the
-     * footprint; {@code EXTENDED} = the whole window was air, so the horizon was extended DOWN the skeleton to
-     * the first standable landing (a free fall); {@code CENTER} = last-resort region-center projection.
+     * {@code PORTAL} = the stored portal centroid as-is; {@code DIG} = a buried crossing passed through RAW
+     * (deliberately unsnapped) for a break-capable bot — either a region-committed dig-through step or a lossy
+     * centroid that landed in breakable solid; the block A* digs to it under break pricing + its goal tolerance;
+     * {@code SNAPPED} = the centroid was unusable (a mid-air cell the bot can't/shouldn't stand at, or buried
+     * with a no-break bot, or buried in unbreakable/protected rock) so it was snapped to a real standable cell
+     * in the footprint; {@code EXTENDED} = the
+     * whole window was air, so the horizon was extended DOWN the skeleton to the first standable landing (a
+     * free fall); {@code CENTER} = last-resort region-center projection.
      */
     public enum TargetKind { GOAL, PORTAL, DIG, SNAPPED, EXTENDED, CENTER }
     private TargetKind windowTargetKind = TargetKind.PORTAL;
@@ -369,28 +389,16 @@ public final class PathPlan {
         // and owns its per-level blacklists; PathPlan just drives the L0 segment it hands back. The region dig
         // cost is made tool-aware from the SAME inventory snapshot the block tier uses (PERF-DESIGN region §5).
         RegionMineModel mine = RegionMineModel.from(inventory != null ? inventory.mining() : null);
+        this.regionMine = mine;
+        this.regionPlace = RegionPlaceModel.from(inventory);
 
-        // Region-informed block heuristic (now the LIVE path, not just /bot trace): a goal-rooted cost-to-goal
-        // field over the fragment graph, bounded to the start<->goal box, feeding BlockPathfinder's Relaxer a
-        // topology-aware lower bound so the block search follows the skeleton and DIGS to a buried goal (via the
-        // goal dig-flood multi-source seed) instead of flooding / walking around. Built HERE on the tick thread
-        // (it reads the region grid / nav sections) and threaded read-only into both the sync search and the async
-        // SearchRequest — RegionCostField is write-once, safe for a worker to read. Any failure ⇒ null ⇒ the block
-        // search falls back to plain octile.
-        RegionCostField field;
-        try {
-            int srx = RegionAddress.regionX(startFloor.getX(), 0);
-            int sry = RegionAddress.regionY(startFloor.getY(), 0, minY);
-            int srz = RegionAddress.regionZ(startFloor.getZ(), 0);
-            RegionPathfinder.RegionBox box =
-                    RegionPathfinder.RegionBox.around(srx, sry, srz, goalRX, goalRY, goalRZ, 3);
-            field = RegionPathfinder.costToGoalField(regionGrid, minY, goalFloor,
-                    caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), mine,
-                    RegionPlaceModel.from(inventory), box);
-        } catch (Throwable t) {
-            field = null;
-        }
-        this.regionField = field;
+        // Region-informed block heuristic: a cost-to-goal field over the fragment graph feeding BlockPathfinder's
+        // Relaxer a topology-aware lower bound, so the block search follows the skeleton and DIGS to a buried
+        // target (via the goal dig-flood multi-source seed) instead of flooding / walking around. NOT built here:
+        // it is built lazily per WINDOW TARGET by regionFieldFor() at each search-launch site — a plan-lifetime
+        // final-goal-rooted field mis-guided every window search toward the wrong attractor (see the regionField
+        // javadoc). The ctor's replanBlock() below performs the first build on the tick thread, so the first
+        // window search already runs with a field.
 
         this.hier = HierarchicalRegionPlan.build(regionGrid, minY, startFloor, goalFloor, caps, mine);
         this.skeleton = hier.l0Skeleton();
@@ -881,12 +889,53 @@ public final class PathPlan {
         // must not pay the per-search view construction twice (SHORT-guard discipline).
         final NavGridView grid = new NavGridView(level);
         this.blockPlan = BlockPathfinder.findPath(grid, botFloor, target, caps, null, cuboidCap, inventory,
-                startMode, baseline, regionField);
+                startMode, baseline, regionFieldFor(target));
         this.lastPlanPartial = blockPlan != null && BlockPathfinder.lastWasPartial();
+        if (slideWindowOnEmptyPlan()) {
+            // Bounded recursion — see slideWindowOnEmptyPlan: each slide strictly advances committedIndex
+            // (≤ skeleton length), so a chain of already-satisfied windows resolves in this one call.
+            replanBlock();
+            return;
+        }
         this.status = (blockPlan != null) ? PathStatus.RUNNING : PathStatus.BLOCKED;
         if (Debug.ENABLED && blockPlan != null) {
             logBlockPlan();
         }
+    }
+
+    /**
+     * Consume a ZERO-waypoint FOUND result inside the driver (2026-07-06 starvation incident): an empty
+     * non-partial plan means the search's START cell already satisfied the window target's goal tolerance
+     * (±1 horizontal / ±2 vertical) — the bot is effectively AT the window target. The correct reaction is
+     * the same commit-and-slide that the commit-on-approach rule in {@link #onBotMoved} performs, NOT
+     * handing the follower an unwalkable 0-waypoint plan: the follower "consumes" that instantly
+     * ({@code waypointIndex >= path.size()} at index 0) and then starves, because {@code settledFloor} only
+     * re-anchors inside a steering step that never runs. Called at EVERY site where a search result becomes
+     * {@link #blockPlan}: the sync {@link #replanBlock} findPath, and the async boundary-replan and parked
+     * pre-plan adoptions in {@link #pollPending}. Returns {@code true} when it committed+slid
+     * ({@link #blockPlan} cleared — the caller must {@code replanBlock()} for the NEW window).
+     *
+     * <p><b>Bound</b>: a slide requires {@code windowTargetStep > committedIndex} and sets
+     * {@code committedIndex = windowTargetStep} — strictly monotone, and {@code windowTargetStep} never
+     * exceeds the skeleton's last index — so a replan→empty→slide chain terminates after at most
+     * {@code skeleton.size()-1} slides (the recursion/round-trip cap is the skeleton length by
+     * construction; no counter needed).
+     *
+     * <p><b>Exclusions</b>: a PARTIAL empty plan proves nothing about target proximity (a budget/guard
+     * truncation that kept only the start cell), so committing on it would falsely advance the window — it
+     * adopts as before. When the guard fails (target step already committed, e.g. the goal window whose
+     * arrival the {@link #onBotMoved} goal-tolerance check owns) the empty plan also stays adopted exactly
+     * as before; the follower-side consumed-plan recovery re-engages the boundary machinery.
+     */
+    private boolean slideWindowOnEmptyPlan() {
+        if (blockPlan == null || !blockPlan.isEmpty() || lastPlanPartial) return false;
+        if (windowTargetPos == null || windowTargetStep <= committedIndex) return false;
+        committedIndex = windowTargetStep;
+        windowStart = windowTargetStep;
+        debounceIndex = -1;
+        debounceTicks = 0;
+        blockPlan = null; // never expose the 0-waypoint plan to the follower
+        return true;
     }
 
     /** Cancel any in-flight search and drop the parked pre-plan (superseded / plan cleared). */
@@ -897,8 +946,11 @@ public final class PathPlan {
         // PREVIOUS plan's end cell and remaining edits, both stale once a new search replaces that plan.
         // Without this, a stale parked plan could later overwrite the fresh adoption (review finding).
         if (!preplan) parkedPlan = null;
+        // regionFieldFor(target): the snapshot must carry the field rooted at THIS submission's target —
+        // covers both the boundary replan and the P4 pre-plan (which targets windowTargetPos, so the root
+        // matches the cached field from the last replanBlock and this is a cheap equals hit).
         pending = executor.submit(new SearchRequest(level, fromFloor, target, caps, inventory, startMode,
-                cuboidCap, seed, executor.budgetNanos(), regionField));
+                cuboidCap, seed, executor.budgetNanos(), regionFieldFor(target)));
         pendingStart = fromFloor;
         pendingTarget = target;
         pendingPreplan = preplan;
@@ -951,8 +1003,14 @@ public final class PathPlan {
                 } else {
                     this.blockPlan = done.plan();
                     this.lastPlanPartial = blockPlan != null && done.wasPartial();
-                    this.status = (blockPlan != null) ? PathStatus.RUNNING : PathStatus.BLOCKED;
-                    if (Debug.ENABLED && blockPlan != null) logBlockPlan();
+                    if (slideWindowOnEmptyPlan()) {
+                        // Async: replanBlock submits the NEXT window's search — a chain of already-
+                        // satisfied windows costs one search round trip per window, never a stall.
+                        replanBlock();
+                    } else {
+                        this.status = (blockPlan != null) ? PathStatus.RUNNING : PathStatus.BLOCKED;
+                        if (Debug.ENABLED && blockPlan != null) logBlockPlan();
+                    }
                 }
             }
         }
@@ -964,9 +1022,13 @@ public final class PathPlan {
             } else if (new SpliceSeam(parkedStart, startMode, EditSnapshot.EMPTY).accepts(actualFloor)) {
                 this.blockPlan = parkedPlan;
                 this.lastPlanPartial = parkedPartial;
-                this.status = PathStatus.RUNNING;
                 parkedPlan = null;
-                if (Debug.ENABLED) logBlockPlan();
+                if (slideWindowOnEmptyPlan()) {
+                    replanBlock(); // same empty-plan consumption as the boundary-replan adoption above
+                } else {
+                    this.status = PathStatus.RUNNING;
+                    if (Debug.ENABLED) logBlockPlan();
+                }
             }
         }
     }
@@ -1006,9 +1068,15 @@ public final class PathPlan {
      * water, long fall) could wait forever on its FIRST plan, because {@link #onBotMoved} — the only
      * other drain — is boundary-gated by the caller. Also refreshes {@link #botFloor} so a
      * rejected-seam resubmit searches from the bot's LIVE cell, not the stale ctor cell.
+     *
+     * <p>{@code planConsumed} extends the same exception to a CONSUMED follower plan (every waypoint
+     * walked — 2026-07-06 incident): a consumed plan has no move in flight either, so a finished async
+     * result may be adopted at tick rate there too, instead of waiting on a settled boundary the follower
+     * may never re-anchor (only the caller knows its waypoint cursor, hence the flag rather than a
+     * {@link #blockPlan} test). False keeps the original planless-only semantics.
      */
-    public void pollWhenPlanless(BlockPos liveFloor) {
-        if (executor == null || blockPlan != null) return;
+    public void pollWhenPlanless(BlockPos liveFloor, boolean planConsumed) {
+        if (executor == null || (blockPlan != null && !planConsumed)) return;
         if (status == PathStatus.COMPLETE || status == PathStatus.FAILED || skeleton == null) return;
         this.botFloor = liveFloor;
         pollPending(liveFloor);
@@ -1160,6 +1228,47 @@ public final class PathPlan {
     }
 
     /**
+     * The region-informed heuristic field for a block search toward {@code target}, rebuilt ONLY when the root
+     * changed (the window target moved). Called by every search-launch site — the sync {@link #replanBlock}
+     * findPath and the async {@link #submit} (boundary replan and P4 pre-plan alike) — so a search is never
+     * handed a field rooted at a cell other than its own goal: a final-goal-rooted gradient made window
+     * searches flood 58–67k nodes toward the wrong attractor and inch their PARTIAL commit points goalward
+     * (the 2026-07-06 incident). The reverse Dijkstra is bounded to the botFloor↔target region box (+3 pad) —
+     * the same box logic the old ctor build used, at window scale. ~6 µs per build at replan cadence; an
+     * unchanged root is one BlockPos equals. When the goal is in-window the window target IS {@code goalFloor},
+     * so that case matches the old goal-rooted behaviour by construction.
+     *
+     * <p><b>Thread safety</b>: {@link RegionCostField} is write-once-read-many; a rebuild constructs a NEW
+     * instance and swaps the reference — never mutates the old one — so an in-flight async worker keeps
+     * reading the field its {@link SearchRequest} snapshotted, safely. Build failure ⇒ {@code null} (the
+     * plain-octile fallback), cached under the same root so a failing target isn't re-attempted every replan.
+     */
+    private RegionCostField regionFieldFor(BlockPos target) {
+        if (target.equals(fieldRoot)) {
+            return regionField;
+        }
+        RegionCostField field;
+        try {
+            final int brx = RegionAddress.regionX(botFloor.getX(), 0);
+            final int bry = RegionAddress.regionY(botFloor.getY(), 0, minY);
+            final int brz = RegionAddress.regionZ(botFloor.getZ(), 0);
+            final RegionPathfinder.RegionBox box = RegionPathfinder.RegionBox.around(
+                    brx, bry, brz,
+                    RegionAddress.regionX(target.getX(), 0),
+                    RegionAddress.regionY(target.getY(), 0, minY),
+                    RegionAddress.regionZ(target.getZ(), 0), 3);
+            field = RegionPathfinder.costToGoalField(regionGrid, minY, target,
+                    caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), regionMine,
+                    regionPlace, box);
+        } catch (Throwable t) {
+            field = null; // any failure ⇒ octile fallback for searches toward this root
+        }
+        this.regionField = field;
+        this.fieldRoot = target;
+        return field;
+    }
+
+    /**
      * The corridor box for the current window (HPA-IMPLEMENTATION.md §9): the world-space AABB enclosing the
      * window's skeleton regions (and the start + target cells), expanded by {@link #CORRIDOR_MARGIN}
      * horizontally and {@link #CORRIDOR_VMARGIN} vertically. The block-A* rejects candidates outside it, so
@@ -1203,7 +1312,10 @@ public final class PathPlan {
      * walking far→near. A portal is only the bbox-center of a fragment's face footprint, so the centroid can
      * land in solid rock (the A→B bounce) <i>or</i> in mid-air with no floor (an {@code air-no-floor} portal —
      * the descent/ascent flood: the block tier can't stand at a point it only falls through, so it floods the
-     * open cave). A centroid is used directly only when {@link #isUsableTarget usable}; otherwise we
+     * open cave). A centroid is used directly when {@link #isUsableTarget usable}, or when it is BURIED in
+     * {@link NavBlock#isBreakable breakable} solid and the bot can break (raw {@link TargetKind#DIG} — the
+     * block A* digs to it, preserving the far step's routing information rather than degrading to a near
+     * snap; unbreakable/protected solids keep the snap — no search can ever mine to those); otherwise we
      * {@link #snapInFootprint snap} to a real standable cell within the portal's footprint bbox. Whether a
      * mid-air cell is acceptable is {@link #airTargetOk caps + direction}-aware (a place-capable bot climbing
      * upward may target air; everyone else needs standable ground). For a <b>center-model</b> skeleton (coarse
@@ -1233,8 +1345,12 @@ public final class PathPlan {
         // Fragment model: aim at the FARTHEST window portal that is occupiable. A portal is only the stored
         // bbox CENTROID (lossy) — when it lands in rock we don't give up, because the real opening is still
         // recoverable from the nav grid: snapToOccupiable scans the step's region for the nearest real cell.
-        // So we prefer, far→near: (1) a non-buried centroid, else (2) its snapped real cell. Only if NO window
-        // step yields either do we fall back to the center projection.
+        // So we prefer, far→near, per step: (1) a region-committed dig → raw; (2) a usable centroid → raw;
+        // (3) a centroid BURIED in breakable solid, bot can break → raw (dig to it — see below); else (4) record the
+        // step's snapped real cell and continue nearer. Only if NO window step yields a raw target does the
+        // farthest snap win, and only when even that fails do we fall back to the center projection. The far
+        // target carries the skeleton's ROUTING information — snapping destroys it, so raw wins over snap even
+        // when the raw cell is buried.
         if (skeleton.isFragmentModel()) {
             final NavGridView grid = new NavGridView(level);
             BlockPos snappedFallback = null; // a snapped cell from the farthest unusable portal, if any
@@ -1249,7 +1365,8 @@ public final class PathPlan {
                 // GOAL branch), NOT rejecting/snapping it: the block A* digs to a buried target within its
                 // isGoal tolerance and prices break-through under canBreak. Skipping isUsableTarget/snap here is
                 // exactly what lets an INTERMEDIATE dig-through be realized instead of relocated to the near
-                // wall face (defeating the dig).
+                // wall face (defeating the dig). TargetKind.DIG covers BOTH this region-committed case and the
+                // lossy-centroid buried case below.
                 if (skeleton.isDig(i)) {
                     windowTargetStep = i;
                     windowTargetKind = TargetKind.DIG;
@@ -1260,6 +1377,30 @@ public final class PathPlan {
                     windowTargetStep = i;
                     windowTargetKind = TargetKind.PORTAL;
                     return p; // the stored centroid is itself a usable target — best case
+                }
+                // BURIED centroid + break-capable bot (2026-07-06 incident): the centroid landed in solid rock
+                // without the region tier committing a dig (the lossy bbox center just missed the opening — or
+                // the whole face footprint is rock). Snapping here can DESTROY the far step's routing value:
+                // when every far footprint is unsnappable (a buried stretch), the surviving snappedFallback is
+                // the NEAREST crossing's face cell — sometimes 1 block from the bot, which produced a FOUND
+                // 0-waypoint empty plan and starved the driver. A break-capable bot doesn't need the snap: treat
+                // the buried centroid exactly like the isDig branch — raw DIG target, reached within the block
+                // A*'s goal tolerance under break pricing. The re-rooted region field handles a buried root too
+                // (costToGoalField's goalDigSeeds seeds the reachable pockets around a solid root, and when the
+                // flood can't engage it falls back to nearest-centroid seeding — it never fails on solid). The
+                // cell is guaranteed BUILT here (isUsableTarget short-circuits unbuilt cells to usable), so
+                // !passable really means solid rock, not an unloaded read. A no-break bot keeps the snap
+                // fallback: a raw buried target would be unreachable for it. isBreakable gates the same way
+                // (review finding): the derived BREAKABLE bit excludes vanilla-unbreakable (bedrock — nether
+                // roof/floor centroids) and owner-PROTECTED solids, cells the block A* can NEVER generate
+                // break edits for — aiming raw at one just floods the budget into a wall face, then falsely
+                // BLOCKED-blacklists a realizable hop. Those centroids keep the snap (the pre-incident path
+                // to the real opening); it also skips fluids (lava centroid ≠ rock to dig).
+                final long dCentroid = grid.descriptorAt(p.getX(), p.getY(), p.getZ());
+                if (caps.canBreak() && !NavBlock.isPassable(dCentroid) && NavBlock.isBreakable(dCentroid)) {
+                    windowTargetStep = i;
+                    windowTargetKind = TargetKind.DIG;
+                    return p;
                 }
                 // Not usable (buried in rock, or a mid-air cell we can't / shouldn't stand at): recover a real
                 // cell by scanning ONLY this portal's footprint bbox (§S4) — clamped to the fragment opening,

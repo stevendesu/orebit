@@ -28,10 +28,19 @@ public final class PhaseRunner {
     private MovePlan plan;
     private int cursor;
 
+    // ---- Execution diagnostics (read by the follower's Debug.VERBOSE forensics; never drive behavior) ----
+    /** Regression snaps since {@link #begin} — a climbing count is the attempt/fall-back/re-attempt livelock. */
+    private int regressions;
+    /** The unmet need {@link #run} held on THIS tick ({@code null} = not holding), plus its cell. */
+    private MovePlan.Need holdNeed;
+    private int holdX, holdY, holdZ;
+
     /** Begin executing {@code plan} from its first phase (called when a new step's plan is built). */
     public void begin(MovePlan plan) {
         this.plan = plan;
         this.cursor = 0;
+        this.regressions = 0;
+        this.holdNeed = null;
     }
 
     /** Whether a plan is currently loaded (the follower runs {@link #run} only then; else it uses {@code steer}). */
@@ -43,7 +52,35 @@ public final class PhaseRunner {
     public void clear() {
         this.plan = null;
         this.cursor = 0;
+        this.regressions = 0;
+        this.holdNeed = null;
     }
+
+    // ---- Diagnostic getters (Debug.VERBOSE only; see AllyBotEntity.logPhaseDiagnostics) ---------------
+
+    /** The current phase cursor (0-based). */
+    public int phase() {
+        return cursor;
+    }
+
+    /** Total phases in the loaded plan (0 when none). */
+    public int phases() {
+        return plan != null ? plan.size() : 0;
+    }
+
+    /** Regression snaps since {@link #begin} (the move physically fell back and re-attempted). */
+    public int regressions() {
+        return regressions;
+    }
+
+    /** The unmet need the last {@link #run} held on ({@code null} = it drove/finished instead). */
+    public MovePlan.Need holdNeed() {
+        return holdNeed;
+    }
+
+    public int holdX() { return holdX; }
+    public int holdY() { return holdY; }
+    public int holdZ() { return holdZ; }
 
     /**
      * Advance the plan one tick against the live world. Returns {@code true} when the move is complete (the last
@@ -55,6 +92,7 @@ public final class PhaseRunner {
         }
         if (cursor > 0 && plan.regressed(bot)) {
             cursor = 0; // reality override: the move fell back to its start — re-attempt from phase 0
+            regressions++;
         }
 
         MovePlan.Phase phase = plan.phaseAt(cursor);
@@ -63,16 +101,19 @@ public final class PhaseRunner {
         // need claims the tick and we hold; placements are instant, so all missing footings resolve now. While
         // anything is unmet, hold on the target column instead of driving the phase (stop and fix the geometry).
         boolean holding = false;
+        holdNeed = null;
         for (MovePlan.Req r : phase.needs()) {
             if (r.kind == MovePlan.Need.AIR) {
                 if (bot.solidAt(r.x, r.y, r.z)) {
                     bot.mine(r.x, r.y, r.z);
+                    if (holdNeed == null) { holdNeed = r.kind; holdX = r.x; holdY = r.y; holdZ = r.z; }
                     holding = true;
                     break; // one timed break per tick
                 }
             } else { // FOOTING
                 if (!bot.solidAt(r.x, r.y, r.z)) {
                     bot.place(r.x, r.y, r.z);
+                    if (holdNeed == null) { holdNeed = r.kind; holdX = r.x; holdY = r.y; holdZ = r.z; }
                     holding = true; // re-validate next tick (place is instant)
                 }
             }

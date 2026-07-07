@@ -16,6 +16,8 @@ E = re.compile(r"^E (\d+) (-?\d+) (-?\d+) (-?\d+) g=([\d.]+) f=([\d.]+) via=(\w+
 HDR = re.compile(r"start=BlockPos\{x=(-?\d+), y=(-?\d+), z=(-?\d+)\}.*goal=BlockPos\{x=(-?\d+), y=(-?\d+), z=(-?\d+)\}")
 
 start = goal = None
+result = ""        # the trailing "RESULT: ..." line (the true outcome; the goal-reaching pop is NOT E-logged,
+                   # since the goal-test breaks before the E line, so DON'T infer FOUND/FAIL from expansions)
 rows = []          # (seq,x,y,z,g,f,via)
 cand_total = Counter()   # candidate outcomes per move (OK/worse/corridor)
 with open(TRACE, "r", encoding="utf-8", errors="replace") as fh:
@@ -25,6 +27,8 @@ with open(TRACE, "r", encoding="utf-8", errors="replace") as fh:
             if m:
                 start = tuple(int(v) for v in m.group(1, 2, 3))
                 goal = tuple(int(v) for v in m.group(4, 5, 6))
+        if line.startswith("RESULT:"):
+            result = line.split("RESULT:", 1)[1].strip()
         m = E.match(line)
         if m:
             rows.append((int(m.group(1)), int(m.group(2)), int(m.group(3)),
@@ -95,7 +99,8 @@ try:
             if key not in bestf or f < bestf[key]:
                 bestf[key] = f
     fig, ax = plt.subplots(2, 2, figsize=(15, 11))
-    fig.suptitle(f"Orebit A* flood — start={start} goal={goal}  ({n} expansions, FAIL)", fontsize=13)
+    fig.suptitle(f"Orebit A* — start={start} goal={goal}  ({n} logged expansions)"
+                 + (f"  RESULT: {result}" if result else ""), fontsize=13)
 
     # (0,0) top-down XZ, colour = min f
     pts = [(x,z,f) for (x,z,p),f in bestf.items() if p=='xz']
