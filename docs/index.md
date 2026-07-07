@@ -65,7 +65,9 @@ outshine Baritone:
  * Rather than the simple but hardly-useful 2 bits per chunk representation of
    distant locations, I build a compact [region-level cost model](./worldmodel.md#region-level)
    of the world, enabling truly hierarchical pathfinding — plans that reach
-   thousands of blocks — and, eventually, efficient block search
+   thousands of blocks — and feed that same coarse map *back down* into the block
+   search as a [topology-aware heuristic](./Optimizations/region_heuristic.md), so
+   the fine search stops flooding walls it can't see around
 
 The end result is faster and more accurate block search and pathfinding over
 significantly larger distances.

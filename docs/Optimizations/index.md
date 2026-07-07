@@ -24,3 +24,10 @@ They read best in order — each chapter builds on the ones before it:
 9. [Depth Nibbles](depth_nibbles.md) — the next campaign under that protocol: a
    perfect-sounding gate killed by p = 0.000, two nibbles that erased a third of
    cuboid-heavy search time, and a 32× fix for the first-search stall.
+10. [Off the Tick Thread](background_pathfinding.md) — moving the search onto
+    background workers so a big flood no longer has to fit between two frames, and
+    the epoch trick that makes recycled memory safe to read concurrently.
+11. [Teaching the Block Search the Map](region_heuristic.md) — the payoff Fewer
+    Nodes promised: feeding the coarse region tier's cost-to-goal down into the
+    block heuristic so the fine search stops flooding walls, and the virtual goal
+    node that lets a bot dig straight to a buried target.
