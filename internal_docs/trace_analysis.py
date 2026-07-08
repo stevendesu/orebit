@@ -16,6 +16,7 @@ E = re.compile(r"^E (\d+) (-?\d+) (-?\d+) (-?\d+) g=([\d.]+) f=([\d.]+) via=(\w+
 HDR = re.compile(r"start=BlockPos\{x=(-?\d+), y=(-?\d+), z=(-?\d+)\}.*goal=BlockPos\{x=(-?\d+), y=(-?\d+), z=(-?\d+)\}")
 
 start = goal = None
+hdr_line = ""      # raw header text (checked for an explicit goal-tolerance, if the format ever grows one)
 result = ""        # the trailing "RESULT: ..." line (the true outcome; the goal-reaching pop is NOT E-logged,
                    # since the goal-test breaks before the E line, so DON'T infer FOUND/FAIL from expansions)
 rows = []          # (seq,x,y,z,g,f,via)
@@ -27,6 +28,7 @@ with open(TRACE, "r", encoding="utf-8", errors="replace") as fh:
             if m:
                 start = tuple(int(v) for v in m.group(1, 2, 3))
                 goal = tuple(int(v) for v in m.group(4, 5, 6))
+                hdr_line = line
         if line.startswith("RESULT:"):
             result = line.split("RESULT:", 1)[1].strip()
         m = E.match(line)
@@ -79,6 +81,35 @@ def oct3(x,y,z):
 closest = min(rows, key=lambda r: oct3(r[1],r[2],r[3]))
 print(f"\nclosest approach to goal: ({closest[1]},{closest[2]},{closest[3]}) at seq={closest[0]} "
       f"(still {abs(closest[1]-gx)+abs(closest[2]-gy)+abs(closest[3]-gz)} blocks, h≈{oct3(closest[1],closest[2],closest[3]):.0f})")
+
+# ---- cost reference for the f-vs-expansion panel ----------------------------
+# If an expansion sits at/within the goal-arrival tolerance, its g IS the true cost-to-goal.
+# Header tolerance wins if present; else exact goal cell; else BlockPathfinder's documented
+# arrival tolerance (±1 horizontal / ±2 vertical, Chebyshev). NOTE the goal-reaching pop is
+# NOT E-logged (the goal test breaks before the E line), so a FOUND search may still show no
+# in-tolerance expansion — then the reference falls back to the closest approach (min octile
+# distance to goal), reporting its g and remaining distance.
+tol_m = re.search(r"tol(?:erance)?\D*?(\d+)\D+?(\d+)", hdr_line)
+def in_tol(r, txz, ty):
+    return max(abs(r[1]-gx), abs(r[3]-gz)) <= txz and abs(r[2]-gy) <= ty
+if tol_m:
+    goal_rows = [r for r in rows if in_tol(r, int(tol_m.group(1)), int(tol_m.group(2)))]
+else:
+    goal_rows = [r for r in rows if (r[1], r[2], r[3]) == (gx, gy, gz)]
+    if not goal_rows:
+        goal_rows = [r for r in rows if in_tol(r, 1, 2)]
+if goal_rows:
+    ref_row = min(goal_rows, key=lambda r: r[4])
+    ref_g = ref_row[4]
+    ref_label = f"true cost to goal = {ref_g:.1f}"
+    print(f"\ngoal FOUND in-trace: expansion seq={ref_row[0]} at ({ref_row[1]},{ref_row[2]},{ref_row[3]}) "
+          f"-> true cost to goal = {ref_g:.1f}")
+else:
+    ref_g = closest[4]
+    dist_blocks = oct3(closest[1], closest[2], closest[3]) / 2.0   # oct3 is tick-scaled x2
+    ref_label = f"closest approach: g={ref_g:.1f} at {dist_blocks:.1f} blocks out"
+    print(f"\nno in-tolerance goal expansion (partial/failed search, or the goal pop was unlogged) "
+          f"-> reference = closest approach: g={ref_g:.1f} at {dist_blocks:.1f} blocks out")
 
 print("\ncandidate outcomes by move (OK=relaxed, worse=dominated, corridor=out of bounds):")
 moves = sorted(set(k[0] for k in cand_total))
@@ -134,8 +165,8 @@ try:
     # (1,1) f vs expansion order (the rising frontier)
     step=max(1,n//3000)
     ax[1,1].plot([r[0] for r in rows[::step]],[r[5] for r in rows[::step]],lw=0.6,color='purple')
-    ax[1,1].axhline(2*abs(gy-sy)*2,color='gray',ls=':',label=f'true pillar cost ≈{abs(gy-sy)}×4={abs(gy-sy)*4}')
-    ax[1,1].set_title("f of each popped node vs expansion order\n(the frontier creeps up; never reaches the pillar cost)")
+    ax[1,1].axhline(ref_g,color='gray',ls=':',label=ref_label)
+    ax[1,1].set_title("f of each popped node vs expansion order\n(the rising frontier vs the cost reference)")
     ax[1,1].set_xlabel("expansion #"); ax[1,1].set_ylabel("f (popped)"); ax[1,1].legend()
 
     plt.tight_layout(rect=[0,0,1,0.97])

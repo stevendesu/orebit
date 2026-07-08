@@ -9,7 +9,7 @@ import com.orebit.mod.platform.BlockLookup;
 
 /**
  * Maps tracked blocks to a stable resource-<b>class</b> id (0..63) and, for the subset worth a
- * pyramid column, to an <b>indexed column</b> (0..22).
+ * pyramid column, to an <b>indexed column</b> (0..{@link #COLUMN_COUNT}-1).
  *
  * <p>Rehomed from the deleted semantic {@code region.RegionBlockIndex} (find-mine-resources design,
  * phase 2). Two deliberately-split concepts:
@@ -18,7 +18,7 @@ import com.orebit.mod.platform.BlockLookup;
  *       frozen so ids never shift — future persisted resource data stays compatible. Adding more
  *       block <i>strings</i> to an existing class (e.g. the deepslate ore variants below) does NOT
  *       shift ids.</li>
- *   <li><b>Indexed columns (23):</b> the subset that actually gets a pyramid column. The tally,
+ *   <li><b>Indexed columns ({@link #COLUMN_COUNT}):</b> the subset that actually gets a pyramid column. The tally,
  *       storage and query all operate on <i>columns</i>; non-indexed classes map to column −1.</li>
  * </ul>
  *
@@ -32,8 +32,8 @@ import com.orebit.mod.platform.BlockLookup;
 public final class ResourceClasses {
     public static final int MAX_CLASS = 64;
 
-    /** The number of indexed pyramid columns (0..22). */
-    public static final int COLUMN_COUNT = 23;
+    /** The number of indexed pyramid columns (0..23). */
+    public static final int COLUMN_COUNT = 24;
 
     private static int nextIndex = 0;
     private static final Map<Block, Integer> BLOCK_TO_CLASS = new HashMap<>();
@@ -223,7 +223,7 @@ public final class ResourceClasses {
     public static final int USER_DEFINED_2  = 63;
 
     // ===================================================================================================
-    // Indexed-column layer: 23 of the 64 classes get a pyramid column (0..22); the rest map to -1.
+    // Indexed-column layer: 24 of the 64 classes get a pyramid column (0..23); the rest map to -1.
     // ===================================================================================================
     private static final int[] COLUMN_OF = new int[MAX_CLASS];
     private static final String[] COLUMN_NAME = new String[COLUMN_COUNT];
@@ -258,6 +258,12 @@ public final class ResourceClasses {
         bindColumn(20, TERRACOTTA,        "terracotta");
         bindColumn(21, GLOWSTONE,         "glowstone");
         bindColumn(22, VINES,             "vines");
+
+        // Gatherables (columns 23..). The LOG class was registered from day one but never column-bound,
+        // which made `/bot gather wood` impossible (scan + pyramid tally are both column-keyed, s52).
+        // Every consumer sizes off COLUMN_COUNT and the pyramid is in-memory (rebuilt per chunk load),
+        // so growing the column set needs no data migration.
+        bindColumn(23, LOG,               "wood");
     }
 
     private ResourceClasses() {}
@@ -292,20 +298,26 @@ public final class ResourceClasses {
         return BLOCK_TO_CLASS.getOrDefault(block, -1);
     }
 
-    /** The indexed pyramid column (0..22) for {@code block}, or −1 if not tracked / not indexed. */
+    /** The indexed pyramid column (0..COLUMN_COUNT-1) for {@code block}, or −1 if not tracked / not indexed. */
     public static int columnForBlock(Block block) {
         int classId = BLOCK_TO_CLASS.getOrDefault(block, -1);
         return classId < 0 ? -1 : COLUMN_OF[classId];
     }
 
-    /** The indexed pyramid column (0..22) for a class id, or −1 if that class is not indexed. */
+    /** The indexed pyramid column (0..COLUMN_COUNT-1) for a class id, or −1 if that class is not indexed. */
     public static int columnFor(int classId) {
         return (classId < 0 || classId >= MAX_CLASS) ? -1 : COLUMN_OF[classId];
     }
 
-    /** The number of indexed pyramid columns (23). */
+    /** The number of indexed pyramid columns ({@link #COLUMN_COUNT}). */
     public static int columnCount() {
         return COLUMN_COUNT;
+    }
+
+    /** An immutable view of every column's canonical name, in column order — the tab-completion source
+     *  for {@code /bot gather} / {@code /bot find} (cold, command-suggestion cadence). */
+    public static java.util.List<String> columnNames() {
+        return java.util.List.of(COLUMN_NAME);
     }
 
     /** Parse a user token ("diamond", "iron", "andesite") to its column, or −1 if unknown. */
@@ -315,7 +327,7 @@ public final class ResourceClasses {
         return col == null ? -1 : col;
     }
 
-    /** The canonical display name of a column (0..22), or null if out of range. */
+    /** The canonical display name of a column (0..COLUMN_COUNT-1), or null if out of range. */
     public static String nameOfColumn(int column) {
         return (column < 0 || column >= COLUMN_COUNT) ? null : COLUMN_NAME[column];
     }

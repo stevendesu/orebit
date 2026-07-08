@@ -22,6 +22,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Guard for Option D (forward-only edit-shrink — CUBOID-PERF-OPTIONS.md §D). The speculative edit-shrink in
@@ -125,7 +126,7 @@ class ForwardShrinkTest {
 
         // Lowest section: stone floor at section-local y=0, air above.
         PalettedContainer<BlockState> floorStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 floorStates.set(x, 0, z, stone);
@@ -135,7 +136,7 @@ class ForwardShrinkTest {
         NavSectionBuilder.classifyInto(floorStates, false, floor.getTraversalGrid());
 
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airSection = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
 

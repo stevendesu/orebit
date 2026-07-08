@@ -24,6 +24,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Headless proof of {@code DiagonalParkour} (the diagonal gap jump): one sealed stone section with a
@@ -42,8 +43,8 @@ import net.minecraft.world.level.chunk.PalettedContainer;
  * displacement) and the owner-verified 2-gap each cross as exactly ONE DiagonalParkour waypoint at the
  * STAND position ({@code floor.above()}). Negatives: an oak fence on the floored corner ({@code topY ≈
  * 24} pokes into the arc's feet path) clips the jump — the very cell a plain solid floor passes; the
- * 3-gap ({@code 4.24}-block air span, at the physics limit) is offered only under
- * {@link Parkour#AGGRESSIVE} (the parkour family's shared knob, restored in {@code finally}). Not
+ * 3-gap ({@code 4.24}-block air span, at the physics limit) is offered unconditionally
+ * (s52 — the family AGGRESSIVE flag is gone). Not
  * testable headless: the √2 takeoff-trigger projection, corner-support kinematics (in-game pass).
  */
 class DiagonalParkourTest {
@@ -105,23 +106,16 @@ class DiagonalParkourTest {
     }
 
     @Test
-    void threeCellDiagonalGapIsGatedBehindAggressive() {
+    void threeCellDiagonalGapIsOffered() {
+        // The 3-gap (4.24-block span, at the physics limit) ships in the one unconditional envelope
+        // (s52 — the family AGGRESSIVE flag is gone).
         NavGridView grid = buildCourse(3, false);
-        assertNull(BlockPathfinder.findPath(grid, START, goal(3), BotCaps.DEFAULT, CORRIDOR),
-                "the 3-cell diagonal gap (4.24-block span) must not be offered by default");
-
-        boolean saved = Parkour.AGGRESSIVE;
-        Parkour.AGGRESSIVE = true;
-        try {
-            BlockPathPlan plan = BlockPathfinder.findPath(grid, START, goal(3), BotCaps.DEFAULT, CORRIDOR);
-            assertNotNull(plan, "the family AGGRESSIVE flag should open the 3-cell diagonal gap");
-            assertEquals(1, count(plan, MovementRegistry.DIAGONAL_PARKOUR),
-                    "the 3-gap jump should still be a single DiagonalParkour waypoint");
-            assertEquals(new BlockPos(9, 6, 9), waypointOf(plan, MovementRegistry.DIAGONAL_PARKOUR),
-                    "the jump's waypoint should be the stand position above the landing floor");
-        } finally {
-            Parkour.AGGRESSIVE = saved;
-        }
+        BlockPathPlan plan = BlockPathfinder.findPath(grid, START, goal(3), BotCaps.DEFAULT, CORRIDOR);
+        assertNotNull(plan, "the 3-cell diagonal gap should be offered (one envelope, always on)");
+        assertEquals(1, count(plan, MovementRegistry.DIAGONAL_PARKOUR),
+                "the 3-gap jump should still be a single DiagonalParkour waypoint");
+        assertEquals(new BlockPos(9, 6, 9), waypointOf(plan, MovementRegistry.DIAGONAL_PARKOUR),
+                "the jump's waypoint should be the stand position above the landing floor");
     }
 
     // ---------------------------------------------------------------- helpers
@@ -154,7 +148,7 @@ class DiagonalParkourTest {
         BlockState stone = Blocks.STONE.defaultBlockState();
 
         PalettedContainer<BlockState> s = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int y = 0; y < 16; y++) {
                 for (int z = 0; z < 16; z++) {
@@ -185,7 +179,7 @@ class DiagonalParkourTest {
         NavSectionBuilder.classifyInto(s, false, section.getTraversalGrid());
 
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airSection = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
 

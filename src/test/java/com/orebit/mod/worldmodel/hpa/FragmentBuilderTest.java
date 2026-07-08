@@ -247,6 +247,63 @@ public class FragmentBuilderTest {
     }
 
     // ===================================================================================================
+    // LABEL-ALL (the goal dig-flood's per-build label slabs) — for EVERY cell, the slab must answer exactly
+    // what the single-target fragmentContaining resolver answers: kept id / -1, incl. the all--1 collapsed case.
+    // ===================================================================================================
+    @Test
+    void labelAll_matchesFragmentContainingEverywhere() {
+        // Two disjoint tunnels (kept ids 0 and 1) + solid in between.
+        boolean[] passable = new boolean[CELLS];
+        boolean[] standable = new boolean[CELLS];
+        carveTunnel(passable, standable, 4);
+        carveTunnel(passable, standable, 12);
+        assertLabelAllMatches(passable, standable, "two tunnels");
+
+        // Checkerboard: every passable cell is a non-occupiable singleton ⇒ all -1.
+        boolean[] cbPass = new boolean[CELLS];
+        boolean[] cbStand = new boolean[CELLS];
+        for (int x = 0; x < G; x++)
+            for (int y = 0; y < G; y++)
+                for (int z = 0; z < G; z++) {
+                    boolean pass = ((x + y + z) & 1) == 0 && y < G - 1;
+                    cbPass[idx(x, y, z)] = pass;
+                    cbStand[idx(x, y, z)] = !pass;
+                }
+        assertLabelAllMatches(cbPass, cbStand, "checkerboard");
+
+        // Over-cap collapse: fragmentContaining answers -1 everywhere ⇒ so must the slab.
+        boolean[] ocPass = new boolean[CELLS];
+        boolean[] ocStand = new boolean[CELLS];
+        for (int x = 1; x < G; x += 2)
+            for (int z = 1; z < G; z += 2) {
+                ocStand[idx(x, 0, z)] = true;
+                ocPass[idx(x, 1, z)] = true;
+                ocPass[idx(x, 2, z)] = true;
+            }
+        assertLabelAllMatches(ocPass, ocStand, "collapsed");
+
+        // OPEN floor+air (one big fragment touching most faces).
+        boolean[] opPass = new boolean[CELLS];
+        boolean[] opStand = new boolean[CELLS];
+        for (int x = 0; x < G; x++)
+            for (int z = 0; z < G; z++) {
+                opStand[idx(x, 0, z)] = true;
+                for (int y = 1; y < G; y++) opPass[idx(x, y, z)] = true;
+            }
+        assertLabelAllMatches(opPass, opStand, "open");
+    }
+
+    /** Assert {@code labelAll}'s slab equals {@code fragmentContaining}'s answer for all 4096 cells. */
+    private static void assertLabelAllMatches(boolean[] passable, boolean[] standable, String what) {
+        byte[] slab = new byte[CELLS];
+        FragmentBuilder.labelAll(passable, standable, G, slab);
+        for (int i = 0; i < CELLS; i++) {
+            assertEquals(FragmentBuilder.fragmentContaining(passable, standable, G, i), slab[i],
+                    what + ": labelAll diverges from fragmentContaining at cell " + i);
+        }
+    }
+
+    // ===================================================================================================
     // UNIFORM fast-paths — all-solid, all-air, all-water.
     // ===================================================================================================
     @Test

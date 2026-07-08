@@ -127,4 +127,32 @@ public final class FragmentLeafComputer {
         }
         return FragmentBuilder.fragmentContaining(passable, standable, LEAF, idx(lx, ly, lz));
     }
+
+    /**
+     * Label every cell of this leaf's {@link NavSection} with its kept fragment id in ONE flood — the
+     * whole-region form of {@link #fragmentContaining}, for callers that will query many cells of the same
+     * section ({@link RegionGrid#goalDigSeeds}'s per-build label slabs). {@code out[idx(lx,ly,lz)]} equals what
+     * {@code fragmentContaining(section, lx, ly, lz)} would return for every local cell (kept id, or {@code -1}
+     * — see {@link FragmentBuilder#labelAll} for the exact per-cell contract, including the all-{@code -1}
+     * collapsed case). Fills the same thread-local masks as {@link #computeLeaf} (a subset of its scan);
+     * single-threaded on the tick/planner thread.
+     *
+     * @param section the 16³ section backing this leaf (resolved by the caller, same as {@link #computeLeaf})
+     * @param out     caller-owned slab of at least {@value #CELLS} cells, fully overwritten
+     */
+    public static void labelFragments(NavSection section, byte[] out) {
+        final boolean[] standable = STANDABLE.get();
+        final boolean[] passable = PASSABLE.get();
+        for (int y = 0; y < LEAF; y++) {
+            for (int z = 0; z < LEAF; z++) {
+                for (int x = 0; x < LEAF; x++) {
+                    long desc = NavBlock.descriptor((short) section.getNavtype(x, y, z));
+                    int i = idx(x, y, z);
+                    standable[i] = NavBlock.isStandable(desc);
+                    passable[i] = NavBlock.isPassable(desc);
+                }
+            }
+        }
+        FragmentBuilder.labelAll(passable, standable, LEAF, out);
+    }
 }

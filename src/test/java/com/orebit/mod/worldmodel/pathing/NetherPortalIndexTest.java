@@ -23,6 +23,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Headless proof of the nether-portal discovery layer (portal-follow DESIGN 3, parts a/b): the
@@ -92,8 +93,7 @@ class NetherPortalIndexTest {
     @Test
     void airOnlySectionSkipsTheCollectorEntirely() {
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, Blocks.AIR.defaultBlockState(),
-                PalettedContainer.Strategy.SECTION_STATES);
+                Blocks.AIR.defaultBlockState(), Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection section = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, section.getTraversalGrid(),
                 cell -> fail("collector must not run on the all-air bypass"));
@@ -179,8 +179,7 @@ class NetherPortalIndexTest {
 
     private static PalettedContainer<BlockState> solidStoneSection() {
         PalettedContainer<BlockState> s = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, Blocks.AIR.defaultBlockState(),
-                PalettedContainer.Strategy.SECTION_STATES);
+                Blocks.AIR.defaultBlockState(), Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         BlockState stone = Blocks.STONE.defaultBlockState();
         for (int x = 0; x < 16; x++) {
             for (int y = 0; y < 16; y++) {

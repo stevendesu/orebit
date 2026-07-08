@@ -19,6 +19,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Exercises the incremental block-update hook ({@link NavSectionBuilder#patchCell}): build a section,
@@ -29,9 +30,7 @@ public class NavGridPatchTest {
 
     private static PalettedContainer<BlockState> newSection() {
         return new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY,
-                Blocks.AIR.defaultBlockState(),
-                PalettedContainer.Strategy.SECTION_STATES);
+                Blocks.AIR.defaultBlockState(), Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
     }
 
     @Test

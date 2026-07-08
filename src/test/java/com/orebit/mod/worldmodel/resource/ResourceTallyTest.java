@@ -15,6 +15,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Phase-4 correctness: the resource tally that rides {@link NavSectionBuilder#classifyNavtypes} (the gated
@@ -27,9 +28,7 @@ public class ResourceTallyTest {
 
     private static PalettedContainer<BlockState> newSection() {
         return new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY,
-                Blocks.AIR.defaultBlockState(),
-                PalettedContainer.Strategy.SECTION_STATES);
+                Blocks.AIR.defaultBlockState(), Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
     }
 
     private static BlockState state(String id) {

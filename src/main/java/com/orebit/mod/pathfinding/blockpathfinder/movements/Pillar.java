@@ -32,7 +32,11 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  * cell ({@code y+2}) is the old head, already clear because any search node has verified body clearance.
  *
  * <p><b>Caps.</b> Requires {@link BotCaps#canPlace} (it places the footing) and {@code jumpHeight ≥ 1};
- * a walk-only bot emits nothing here, exactly as before.
+ * a walk-only bot emits nothing here, exactly as before. Also requires a <b>full-height start floor</b>
+ * ({@code topY == 16}): the placed footing's top sits {@code 32 − startTopY} sixteenths above the start
+ * surface, and a jump gains only {@link MovementContext#JUMP_RISE} (20) — from a slab ({@code 8 + 20 =
+ * 28 < 32}) the feet never clear the cell being filled, so you cannot pillar off a slab (derivation at
+ * the gate in {@link #candidates}).
  *
  * <h2>Macro-awareness (MACRO-IMPLEMENTATION.md §8.1)</h2>
  * When macro-movement collapse is enabled ({@link BlockPathfinder#MACRO_MOVES} <i>and</i> the search
@@ -85,6 +89,18 @@ public final class Pillar implements Movement {
         long floorDesc = ctx.descriptorOf(x, ny, z, packed);
         // Must be an open cell to place into; if it's already standable this isn't a pillar.
         if (!ctx.openForPlace(floorDesc)) return;
+
+        // FULL-height start surface required (canon: heights in sixteenths, jump rise = JUMP_RISE = 20).
+        // Pillaring places a full cube into the bot's own feet cell, whose top is 32 − startSurface above
+        // the start surface. From a partial start (a slab, top 8) the jump apex reaches only
+        // startSurface + 20 = 28 < 32 — the feet can never clear the cell being filled, and the follower
+        // would place a block inside the bot. Only a full-height surface (16 + 20 = 36 ≥ 32) pillars; a
+        // macro chain's later steps stand on the just-placed full cubes (topY 16 via the path-edit diff),
+        // so every chained step passes on its own. floorSurface (standable → topY, else 16) keeps
+        // non-standable-floor nodes (a flooded-shaft swim node's water floor — jump = swim-up there) at
+        // their historical geometry. One cached read per (rare — place-capable, open-cell-above) reached
+        // expansion.
+        if (ctx.floorSurface(x, y, z) < 16) return;
 
         int flags = MovementContext.flagsOf(packed);
 

@@ -21,6 +21,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Headless synthetic <b>full-search</b> fixtures — the driver-level analog of {@code PathfinderBenchmark}'s
@@ -132,7 +133,7 @@ public final class FullSearchScenarios {
          * per-dimension {@code RegionGrid.of(level)} does across replans.
          */
         public BlockPathPlan search() {
-            RegionCostField field = RegionPathfinder.costToGoalField(grid, minY, goalFloor,
+            RegionCostField field = RegionPathfinder.costToGoalField(grid, minY, goalFloor, startFloor,
                     caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), mine, place, box);
             RegionPathPlan skeleton = RegionPathfinder.plan(null, grid, startFloor, goalFloor, caps, mine);
             BlockPos target = windowTarget(skeleton);
@@ -250,8 +251,8 @@ public final class FullSearchScenarios {
 
     /** A fresh empty section-state container (default AIR). */
     private static PalettedContainer<BlockState> newStates() {
-        return new PalettedContainer<>(Block.BLOCK_STATE_REGISTRY, Blocks.AIR.defaultBlockState(),
-                PalettedContainer.Strategy.SECTION_STATES);
+        return new PalettedContainer<>(
+                Blocks.AIR.defaultBlockState(), Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
     }
 
     /** Classify one 16³ section's states into a fresh {@link NavSection}. */
@@ -303,6 +304,116 @@ public final class FullSearchScenarios {
             }
         }
         NavSection[] col = { section(low, false), airSection(), airSection(), airSection() };
+        NavSectionBuilder.computeDepth(col);
+        return col;
+    }
+
+    // ===================================================================================================
+    // Field-build bench world (RegionFieldBuildBenchmark) — a flat world big enough for a 10³-region box
+    // ===================================================================================================
+
+    /** Field-bench world: authored chunk extent (inclusive), sections per column, solid/floor layout. */
+    private static final int FIELD_CHUNK_MIN = 3;
+    private static final int FIELD_CHUNK_MAX = 14;
+    private static final int FIELD_SECTIONS = 11;      // world y 0..175 (region ry 0..10)
+    private static final int FIELD_SOLID_TOP = 4;      // sections 0..4 fully solid stone
+    private static final int FIELD_FLOOR_SECTION = 5;  // stone plane at its bottom layer (y=80), air above
+    private static final int FIELD_CENTER = 8 * 16 + 8; // world x/z of the goal column (chunk (8,8))
+
+    /**
+     * The {@code RegionFieldBuildBenchmark} world (PERF-AUDIT-region-field.md §6): a flat surface world whose
+     * columns are {@value #FIELD_SECTIONS} sections tall — sections 0..{@value #FIELD_SOLID_TOP} fully solid
+     * stone (the underground), section {@value #FIELD_FLOOR_SECTION} a stone floor plane at world y=80 with air
+     * above (the surface), sections 6..10 open air — authored over chunks
+     * {@value #FIELD_CHUNK_MIN}..{@value #FIELD_CHUNK_MAX}² so that a field box of up to <b>10³ regions</b>
+     * centered on either goal region is entirely RESIDENT. Residency matters: an unresident region inside the
+     * box would fall back to the optimistic-AIR unbuilt default ({@code RegionGrid.rebuildLeaf}'s no-op path),
+     * and the reverse Dijkstra would flood fake air instead of real terrain — production fields are built
+     * around a loaded bot, so every box region is resident there too.
+     *
+     * <p>Two goal FLOOR cells (the solid block stood on — the same convention {@code PathPlan} hands
+     * {@code costToGoalField}):
+     * <ul>
+     *   <li><b>surface</b> — the floor-plane cell (136,80,136), region (8,5,8): the common window-target case
+     *       (the target floor cell is solid, its feet pocket one cell up, so the goal dig-flood seeds
+     *       trivially).</li>
+     *   <li><b>buried</b> — (136,77,136), embedded in the solid underground (region (8,4,8), 3 blocks below
+     *       the floor plane): the buried-goal case, whose dig-flood BFS (§2 item 2, the boxed-Integer path)
+     *       must dig ~4 cells up to the surface pocket.</li>
+     * </ul>
+     * One shared read-only column instance backs every chunk key (the {@link #flatColumn()} idiom).
+     */
+    public static FieldWorld fieldWorld() {
+        ConcurrentHashMap<Long, NavSection[]> sections = new ConcurrentHashMap<>();
+        NavSection[] col = fieldColumn();
+        for (int cx = FIELD_CHUNK_MIN; cx <= FIELD_CHUNK_MAX; cx++) {
+            for (int cz = FIELD_CHUNK_MIN; cz <= FIELD_CHUNK_MAX; cz++) {
+                sections.put(NavStore.key(cx, cz), col);
+            }
+        }
+        RegionGrid grid = RegionGrid.headless(MINY, sections);
+        return new FieldWorld(sections, grid, MINY,
+                new BlockPos(FIELD_CENTER, FIELD_FLOOR_SECTION * 16, FIELD_CENTER),      // surface floor (y=80)
+                new BlockPos(FIELD_CENTER, FIELD_FLOOR_SECTION * 16 - 3, FIELD_CENTER),  // buried (y=77, solid)
+                FIELD_CHUNK_MIN, FIELD_CHUNK_MAX, FIELD_SECTIONS);
+    }
+
+    /** The built field-bench world: the shared section map, the region grid over it, and the two goal FLOOR
+     *  cells (see {@link #fieldWorld()}). {@code chunkMin/chunkMax/sectionCount} describe the authored extent
+     *  so callers can assert a candidate {@code RegionBox} is fully resident. */
+    public static final class FieldWorld {
+        public final ConcurrentHashMap<Long, NavSection[]> sections;
+        public final RegionGrid grid;
+        public final int minY;
+        public final BlockPos surfaceGoalFloor;
+        public final BlockPos buriedGoalFloor;
+        public final int chunkMin, chunkMax;
+        public final int sectionCount;
+
+        FieldWorld(ConcurrentHashMap<Long, NavSection[]> sections, RegionGrid grid, int minY,
+                   BlockPos surfaceGoalFloor, BlockPos buriedGoalFloor,
+                   int chunkMin, int chunkMax, int sectionCount) {
+            this.sections = sections;
+            this.grid = grid;
+            this.minY = minY;
+            this.surfaceGoalFloor = surfaceGoalFloor;
+            this.buriedGoalFloor = buriedGoalFloor;
+            this.chunkMin = chunkMin;
+            this.chunkMax = chunkMax;
+            this.sectionCount = sectionCount;
+        }
+    }
+
+    /**
+     * The field-bench column (see {@link #fieldWorld()}): sections 0..{@value #FIELD_SOLID_TOP} fully solid
+     * stone, section {@value #FIELD_FLOOR_SECTION} a floor plane (stone at local y 0, air above), the rest air.
+     * Distinct section instances per slot (the depth sweep writes each once); the whole column is read-only and
+     * shared across every chunk key.
+     */
+    private static NavSection[] fieldColumn() {
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        NavSection[] col = new NavSection[FIELD_SECTIONS];
+        for (int i = 0; i <= FIELD_SOLID_TOP; i++) {
+            PalettedContainer<BlockState> solid = newStates();
+            for (int x = 0; x < 16; x++) {
+                for (int y = 0; y < 16; y++) {
+                    for (int z = 0; z < 16; z++) {
+                        solid.set(x, y, z, stone);
+                    }
+                }
+            }
+            col[i] = section(solid, false);
+        }
+        PalettedContainer<BlockState> floor = newStates();
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                floor.set(x, 0, z, stone);
+            }
+        }
+        col[FIELD_FLOOR_SECTION] = section(floor, false);
+        for (int i = FIELD_FLOOR_SECTION + 1; i < FIELD_SECTIONS; i++) {
+            col[i] = airSection();
+        }
         NavSectionBuilder.computeDepth(col);
         return col;
     }

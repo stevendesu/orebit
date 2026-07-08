@@ -70,7 +70,8 @@ public final class Diagonal implements Movement {
             long c4 = ctx.descriptorAt(x, y + 2, nz);
             if (!ctx.passable(c4)) continue;
 
-            float cost = (ctx.isSlow(dstDesc) ? COST + Traverse.SLOW_SURCHARGE : COST)
+            float cost = (ctx.isSlow(dstDesc) ? COST * Traverse.SLOW_COST_FACTOR : COST)
+                    + ctx.floorHazardCost(dstDesc)
                     + ctx.bodyTransitCost(flags, nx, y, nz) // destination body, via the resident flag bits
                     + ctx.cellTransitCost(c1) + ctx.cellTransitCost(c2)
                     + ctx.cellTransitCost(c3) + ctx.cellTransitCost(c4);

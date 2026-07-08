@@ -37,6 +37,7 @@ public class SteerControlTest {
         @Override public int footZ() { return (int) Math.floor(z); }
         @Override public boolean grounded() { return grounded; }
         @Override public boolean inWater() { return inWater; }
+        @Override public boolean inLava() { return false; }
         @Override public void faceHorizontally(double dx, double dz) { faceDx = dx; faceDz = dz; }
         @Override public void setForward(float zza) { forward = zza; }
         @Override public void setSprinting(boolean s) { sprinting = s; }

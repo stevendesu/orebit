@@ -31,3 +31,6 @@ They read best in order — each chapter builds on the ones before it:
     Nodes promised: feeding the coarse region tier's cost-to-goal down into the
     block heuristic so the fine search stops flooding walls, and the virtual goal
     node that lets a bot dig straight to a buried target.
+12. [Paying for the Map](field_build.md) — the bill for that heuristic: the profiler
+    finds 90% of a full search in the map build, a question answered once per region
+    instead of once per cell, and a flood that learns to stop when it knows the way.

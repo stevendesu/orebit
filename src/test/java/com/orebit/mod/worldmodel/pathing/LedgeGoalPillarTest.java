@@ -22,6 +22,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * End-to-end guard for the far-face exclusion in {@code GoalForcedCost.probe}: {@link MacroPillarTest}'s
@@ -92,7 +93,7 @@ class LedgeGoalPillarTest {
         BlockState stone = Blocks.STONE.defaultBlockState();
 
         PalettedContainer<BlockState> groundStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 groundStates.set(x, 0, z, stone);
@@ -102,12 +103,12 @@ class LedgeGoalPillarTest {
         NavSectionBuilder.classifyInto(groundStates, false, ground.getTraversalGrid());
 
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airSection = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
 
         PalettedContainer<BlockState> ledgeStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         ledgeStates.set(8, 15, 8, stone); // world y = 16 + 15 = 31 — one block above the goal
         NavSection ledge = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(ledgeStates, false, ledge.getTraversalGrid());

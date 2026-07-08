@@ -105,9 +105,9 @@ its deadline is identical to one that never had a deadline; the clock only decid
 *partial* truncates, and partials get replanned at the next boundary anyway. The
 nondeterminism is confined to the budget-exhaustion case that was already nondeterministic.
 
-The budget buys room the tick never could. At ~1500 ns a node, a 40 ms budget is
-twenty-five to a hundred thousand positions — four to ten times the old cap — *without
-touching a single tick*. The floods that used to be unsolvable-between-frames now finish;
+The budget buys room the tick never could. At ~1500 ns a node, the default 250 ms budget
+is on the order of a hundred and fifty thousand positions — fifteen times the old cap —
+*without touching a single tick*. The floods that used to be unsolvable-between-frames now finish;
 in testing, a search that needed **13,600 positions found its path**, well past the old
 ten-thousand wall it would previously have died at.
 
@@ -140,9 +140,10 @@ Held to the [house benchmark protocol](measure_everything.md), the change measur
 are free, sign-flipping across interleaved pairs at well under a percent. That's the result
 you want from an architectural change: it moves the work, it doesn't tax the work.
 
-It ships **off by default** (`pathing.async`) while it soaks — the sync path is byte-
-identical, which is exactly why turning it on is low-risk. `pathing.maxThreads` sizes the
-pool; `pathing.searchBudgetMs` sets the wall-clock budget. See
+It shipped **off by default** while it soaked, and now ships **on** (`pathing.async`) —
+the synchronous path is still there (`pathing.async = false`) and still byte-identical,
+which is exactly what made flipping the default low-risk. `pathing.maxThreads` sizes the
+pool; `pathing.asyncSearchBudgetMs` sets the wall-clock budget. See
 [Configuring Orebit](../configuration.md).
 
 The lesson is the inversion. Every prior chapter asked "how do we make this fit in the

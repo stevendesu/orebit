@@ -24,6 +24,35 @@ import net.minecraft.world.level.block.state.BlockState;
 public final class NavGridUpdater {
     private NavGridUpdater() {}
 
+    /**
+     * Per-level count of TRACKED-grid block edits (bumped once per patched cell). This is the cheap
+     * "did the world change at all?" signal the follower's terrain-recheck debounce gates on: an
+     * unchanged epoch means no built nav cell changed since the plan's last window search, so the
+     * periodic re-search would be byte-identical and is skipped entirely (a stationary bot in a quiet
+     * world never re-searches). Tick-thread confined (the mixin fires on the server thread; the driver
+     * reads on the server thread) — no synchronization. Known coarseness, documented: the epoch is
+     * level-global (an edit anywhere re-arms every bot's recheck — one wasted-but-correct search), and
+     * it includes the bot's OWN plan edits (excluding those needs per-edit attribution; a plan's own
+     * assumed edits are already modelled by PathEdits, so those re-searches return equivalent routes).
+     */
+    private static final java.util.WeakHashMap<ServerLevel, int[]> EDIT_EPOCH = new java.util.WeakHashMap<>();
+
+    /** The current edit epoch for {@code level} (0 until its first tracked edit). Server thread only. */
+    public static int editEpoch(ServerLevel level) {
+        final int[] c = EDIT_EPOCH.get(level);
+        return c == null ? 0 : c[0];
+    }
+
+    /**
+     * Advance the epoch for a NON-block-change grid mutation — chunk nav sections built or dropped
+     * ({@code ChunkNavLoader}). A newly BUILT area is exactly as plan-relevant as an edited one: without
+     * this, a bot whose first search ran before its chunks built (seconds after world open) had no signal
+     * to re-search until some block changed (the s52b cold-open false START-DEAD). Server thread only.
+     */
+    public static void bumpEpoch(ServerLevel level) {
+        EDIT_EPOCH.computeIfAbsent(level, l -> new int[1])[0]++;
+    }
+
     /** Register the nav-grid patcher against the block-change seam (once, at init). */
     public static void register() {
         BlockChangeEvents.register(NavGridUpdater::onBlockChanged);
@@ -41,6 +70,20 @@ public final class NavGridUpdater {
         if (section == null) return;
 
         final int lx = pos.getX() & 15, ly = pos.getY() & 15, lz = pos.getZ() & 15;
+
+        // NAVTYPE NO-OP EARLY-OUT: a state change that interns to the SAME navtype (redstone power
+        // flips, crop growth stages, observer churn) changes nothing the nav grid or any plan can see —
+        // this cell's descriptor is identical, so every neighbour's flag/depth window (which reads only
+        // navtypes) is identical too. Skipping the patch here is pure saved work; skipping the epoch
+        // bump is what keeps the follower's terrain-recheck debounce MEANINGFUL — without it a single
+        // redstone clock anywhere in the level re-arms every bot's periodic re-search forever
+        // (PERF-DESIGN-navgrid-edit-batching.md phase 0).
+        if (NavBlock.navtypeFor(newState) == (short) section.getTraversalGrid().navtype(lx, ly, lz)) {
+            return;
+        }
+
+        // A tracked cell is about to be patched — the world visibly changed for every plan over this level.
+        EDIT_EPOCH.computeIfAbsent(server, l -> new int[1])[0]++;
 
         // Nether-portal index maintenance (NetherPortalIndex incremental feed). Read the cell's OLD navtype
         // BEFORE patching (the patch overwrites it): a portal patched out is removed, a portal patched in is

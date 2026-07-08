@@ -41,20 +41,26 @@ public final class Surface implements Movement {
         for (int[] d : CARDINALS) {
             int nx = x + d[0];
             int nz = z + d[1];
-            if (ctx.built(nx, y, nz) && ctx.standable(nx, y, nz)
+            if (!ctx.built(nx, y, nz)) continue;
+            long nd = ctx.descriptorAt(nx, y, nz);
+            if (ctx.standable(nd)
                     && ctx.passable(nx, y + 1, nz) && ctx.passable(nx, y + 2, nz)) {
-                out.accept(nx, y, nz, COST, MovementContext.MODE_STANDING);
+                // Bank floor read once: a damaging bank (magma shore — standable since s52b) charges the
+                // flat floor-contact HP in the one damage currency; free for an immune bot.
+                out.accept(nx, y, nz, COST + ctx.floorHazardCost(nd), MovementContext.MODE_STANDING);
             }
         }
     }
 
     /**
-     * Swim toward the standable exit ({@link SteerControl#swimTowards}): in water it heads (and, via the
-     * follower's "hold jump while submerged and below target" rule, rises) toward the bank; once out of the
-     * water vanilla stands the bot up, and the same look + forward becomes a plain walk onto land.
+     * Swim toward the standable exit ({@link SteerControl#swimTowards}), rising toward the bank top via the
+     * {@link SteerControl#holdDepth depth autopilot} (bias 0 — the target feet height IS the bank top, so
+     * below it the autopilot holds jump and the bot pops up to step-assist out). Once out of the water the
+     * autopilot no-ops, vanilla stands the bot up, and the same look + forward becomes a plain walk onto land.
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
         SteerControl.swimTowards(b, path);
+        SteerControl.holdDepth(b, path, 0.0);
     }
 }

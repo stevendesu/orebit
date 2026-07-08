@@ -24,22 +24,23 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
- * Headless proof that slow blocks are priced, not ignored (the slow-FLOOR {@link Traverse#SLOW_SURCHARGE}
+ * Headless proof that slow blocks are priced, not ignored (the slow-FLOOR {@link Traverse#SLOW_COST_FACTOR}
  * and the through-slow {@code MovementContext.WEB_TRANSIT_COST} body term):
  *
  * <ul>
- *   <li><b>Slow floor</b> — of two equal-length corridors, one floored with soul soil (SURFACE_SLOW; note
- *       soul <i>sand</i>'s 14/16-tall collision box classifies {@code SHAPE_OTHER} = un-standable in
- *       {@link com.orebit.mod.worldmodel.navblock.NavBlock}, so the strip is soul <i>soil</i>, the same
- *       slow class), the search takes the clean one.</li>
+ *   <li><b>Slow floor</b> — of two equal-length corridors, one floored with soul sand (SURFACE_SLOW via
+ *       vanilla {@code getSpeedFactor()} = 0.4; its 14/16-tall SHAPE_OTHER box is standable since the
+ *       s52b topY≤16 widening — soul <i>soil</i>, the old fixture, does not slow walking in vanilla),
+ *       the search takes the clean one.</li>
  *   <li><b>Cobweb corridor</b> — a bot that may dig tunnels a few blocks of dirt around a webbed passage
  *       (~15 ticks per bare-hand dirt break, ≈ 200 total) instead of paying the ~88-tick-per-cell web
  *       surcharge (≈ 310 total); a walk-only bot has no alternative and pushes through the webs — proving
  *       webs are costed, not blocked.</li>
- *   <li><b>Macro run</b> — the SAME flat straight run costs exactly {@code walked × (FLAT + SLOW_SURCHARGE)}
- *       over a soul-soil floor vs {@code walked × FLAT} over stone, pinning that a collapsed macro run
+ *   <li><b>Macro run</b> — the SAME flat straight run costs exactly {@code walked × FLAT × SLOW_COST_FACTOR}
+ *       over a soul-sand floor vs {@code walked × FLAT} over stone, pinning that a collapsed macro run
  *       charges the slow surcharge for EVERY cell (MACRO-MOVEMENTS §3b), not once per jump.</li>
  * </ul>
  *
@@ -76,7 +77,7 @@ class SlowBlockCostTest {
             BotCaps.DEFAULT_COST_PER_HITPOINT, true, false,
             10, false, BotCaps.DEFAULT_MAX_NODES, 1.0f);
 
-    // ---- (a) slow floor: clean corridor beats an equal-length soul-soil corridor --------------
+    // ---- (a) slow floor: clean corridor beats an equal-length soul-sand corridor --------------
 
     @Test
     void cleanCorridorBeatsAnEqualLengthSoulSoilCorridor() {
@@ -91,7 +92,7 @@ class SlowBlockCostTest {
         for (int i = 0; i < plan.size(); i++) {
             BlockPos wp = plan.waypoint(i);
             assertFalse(wp.getZ() == 5 && wp.getX() >= 3 && wp.getX() <= 11,
-                    "the equal-length soul-soil corridor (z=5) costs SLOW_SURCHARGE per step — the clean "
+                    "the equal-length soul-sand corridor (z=5) costs the SLOW_COST_FACTOR multiplier per step — the clean "
                             + "z=9 corridor must win; stepped on slow floor at " + wp);
         }
         assertTrue(anyAtZ(plan, 9), "the plan should run the clean z=9 corridor");
@@ -162,20 +163,20 @@ class SlowBlockCostTest {
             BlockPathPlan clean = BlockPathfinder.findPath(
                     flatFloorWorld(Blocks.STONE.defaultBlockState()), start, goal, WALK, corridor);
             BlockPathPlan slow = BlockPathfinder.findPath(
-                    flatFloorWorld(Blocks.SOUL_SOIL.defaultBlockState()), start, goal, WALK, corridor);
+                    flatFloorWorld(Blocks.SOUL_SAND.defaultBlockState()), start, goal, WALK, corridor);
 
             assertNotNull(clean);
             assertNotNull(slow);
 
             // Both runs are the same straight flat walk; per the tick cost model the totals are EXACTLY
             // walked × per-step — the slow run's surcharge scales with every collapsed cell, so a macro
-            // jump that charged SLOW_SURCHARGE once per JUMP (not per cell) fails the equality.
+            // jump that charged the slow multiplier once per JUMP (not per cell) fails the equality.
             int walkedClean = assertStraightRun(clean, start);
             int walkedSlow = assertStraightRun(slow, start);
             assertEquals(walkedClean * Traverse.FLAT_COST, clean.cost(), 0.01f,
                     "clean flat run must cost exactly walked × FLAT_COST");
-            assertEquals(walkedSlow * (Traverse.FLAT_COST + Traverse.SLOW_SURCHARGE), slow.cost(), 0.01f,
-                    "soul-soil run must cost exactly walked × (FLAT_COST + SLOW_SURCHARGE) — per CELL, "
+            assertEquals(walkedSlow * (Traverse.FLAT_COST * Traverse.SLOW_COST_FACTOR), slow.cost(), 0.01f,
+                    "soul-sand run must cost exactly walked × FLAT_COST × SLOW_COST_FACTOR — per CELL, "
                             + "even when the run is collapsed into macro jumps");
             assertTrue(slow.cost() > clean.cost(), "the slow floor must cost more than the clean one");
         } finally {
@@ -213,14 +214,14 @@ class SlowBlockCostTest {
 
     /**
      * One sealed stone section with two EQUAL-LENGTH corridors {@code x=3..11} at {@code z=5} (floor =
-     * soul soil) and {@code z=9} (floor = stone), joined by connector columns spanning {@code z=5..9} at
+     * soul sand) and {@code z=9} (floor = stone), joined by connector columns spanning {@code z=5..9} at
      * {@code x=2} and {@code x=12}. Start/goal sit mid-connector, so both routes are 14 steps — the only
      * difference is the 9 slow-floor cells.
      */
     private static NavGridView twinCorridors() {
         BlockState air = Blocks.AIR.defaultBlockState();
         BlockState stone = Blocks.STONE.defaultBlockState();
-        BlockState soulSoil = Blocks.SOUL_SOIL.defaultBlockState();
+        BlockState soulSand = Blocks.SOUL_SAND.defaultBlockState();
 
         PalettedContainer<BlockState> s = filled(stone, air);
         for (int z = 5; z <= 9; z++) {
@@ -229,7 +230,7 @@ class SlowBlockCostTest {
         }
         for (int x = 3; x <= 11; x++) {
             carve(s, air, x, 5);   // slow corridor ...
-            s.set(x, 0, 5, soulSoil); // ... floored with soul soil
+            s.set(x, 0, 5, soulSand); // ... floored with soul sand
             carve(s, air, x, 9);   // clean corridor
         }
         return singleSectionView(s, air);
@@ -255,7 +256,7 @@ class SlowBlockCostTest {
     private static NavGridView flatFloorWorld(BlockState floorBlock) {
         BlockState air = Blocks.AIR.defaultBlockState();
         PalettedContainer<BlockState> s = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 s.set(x, 0, z, floorBlock);
@@ -266,7 +267,7 @@ class SlowBlockCostTest {
 
     private static PalettedContainer<BlockState> filled(BlockState fill, BlockState air) {
         PalettedContainer<BlockState> s = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int y = 0; y < 16; y++) {
                 for (int z = 0; z < 16; z++) {
@@ -289,7 +290,7 @@ class SlowBlockCostTest {
         NavSectionBuilder.classifyInto(states, false, section.getTraversalGrid());
 
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airSection = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
 

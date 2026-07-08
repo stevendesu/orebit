@@ -11,8 +11,12 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 
 /**
  * Jump up one block onto a cardinal-adjacent floor cell that's a full step up (MOVEMENT-DESIGN.md §2,
- * Tier 1). Distinct from {@link Traverse}'s step-assist: this is a destination whose collision top is
- * <i>above</i> {@link MovementContext#STEP_ASSIST_MAX_TOP_Y}, so gaining it needs a real jump.
+ * Tier 1). Distinct from {@link Traverse}'s step-assist: this is a rise (start floor top → destination
+ * floor top, in sixteenths — {@link MovementContext#rise}) <i>above</i>
+ * {@link MovementContext#STEP_ASSIST_MAX_RISE}, so gaining it needs a real jump — and at most
+ * {@link MovementContext#JUMP_RISE}, the most one jump gains. Both ends' partial heights count: from a
+ * slab (start top 8) onto a full block one up the rise is {@code 16 + 16 − 8 = 24 > 20} — NOT jumpable
+ * (you cannot ascend 1.5 blocks) — while slab → slab one up is {@code 16 + 8 − 8 = 16}, an ordinary jump.
  *
  * <p><b>The head-clearance fix.</b> A jump from the source column needs the cell <i>above the bot's own
  * head</i> (source {@code y+3}) clear, or the bot bonks the ceiling and never gains the block — the cell
@@ -59,6 +63,17 @@ public final class Ascend implements Movement {
         int srcFlags = ctx.flagsAt(x, y, z);
         boolean srcClear = ctx.headroomProves(srcFlags, y, MovementContext.HEADROOM_JUMP);
         boolean srcRisky = MovementContext.risksEdit(srcFlags);
+        // The START surface height (sixteenths) — a partial start (slab, top 8) eats into the jump
+        // budget: every rise below is measured from THIS surface (MovementContext.rise). floorSurface,
+        // not raw topY: a surface-swim node's water "floor" reads as 16 (feet at the cell boundary), so
+        // shore exits keep their historical geometry. Hoisted out of the direction loop (one read per
+        // expansion; the per-search chunk cache makes it an array index).
+        final int startTopY = ctx.floorSurface(x, y, z);
+        // A PLACED step is a full cube, so its top is a fixed rise of 32 − startTopY sixteenths (one block
+        // level up + a full 16 top). From a low partial start (startTopY < 12) that exceeds JUMP_RISE = 20,
+        // so the build-a-step arm is dead for the whole expansion — decided once, not per direction.
+        final boolean canGainPlacedStep =
+                MovementContext.rise(1, 16, startTopY) <= MovementContext.JUMP_RISE;
 
         for (int[] d : CARDINALS) {
             int nx = x + d[0];
@@ -70,10 +85,19 @@ public final class Ascend implements Movement {
             if (dstPacked == MovementContext.UNBUILT) continue;
             long dstDesc = ctx.descriptorOf(nx, uy, nz, dstPacked);
 
-            // A low partial already one up is Traverse's step-assist (a no-jump auto-step), not an Ascend —
-            // leave it to Traverse. (Only when footing already exists; a placed step is a full block.)
+            // Rise gate (start-top-aware): measure the real surface-to-surface gain one block level up.
+            //  - rise ≤ STEP_ASSIST_MAX_RISE (9): Traverse's step-assist owns it (a no-jump auto-step) —
+            //    same partition as before, now measured from the START surface too.
+            //  - rise > JUMP_RISE (20): one jump can't gain it (slab → full one up = 24) — no candidate.
+            // A missing floor is the build-a-step arm: the placed step is a full cube, gated once above.
             boolean dstStandable = ctx.standable(dstDesc);
-            if (dstStandable && ctx.topYOf(dstDesc) <= MovementContext.STEP_ASSIST_MAX_TOP_Y) continue;
+            if (dstStandable) {
+                int rise = MovementContext.rise(1, ctx.topYOf(dstDesc), startTopY);
+                if (rise <= MovementContext.STEP_ASSIST_MAX_RISE) continue; // Traverse's step-assist
+                if (rise > MovementContext.JUMP_RISE) continue;            // taller than one jump gains
+            } else if (!canGainPlacedStep) {
+                continue; // a placed full-cube step would sit 32 − startTopY > 20 above the start surface
+            }
 
             int dstFlags = MovementContext.flagsOf(dstPacked);
             EditScratch e = ctx.edits().reset(!(srcRisky || MovementContext.risksEdit(dstFlags)));
@@ -93,8 +117,8 @@ public final class Ascend implements Movement {
                 // dest flag bits are clear; the edit-folding form breaks through a bush/web where that's
                 // cheaper). The source y+3 takeoff cell is clearance-only — not a body cell the bot
                 // lingers in — and is left unpriced.
-                float cost = COST
-                        + (ctx.isSlow(dstDesc) ? Traverse.SLOW_SURCHARGE : 0f)
+                float cost = (ctx.isSlow(dstDesc) ? COST * Traverse.SLOW_COST_FACTOR : COST)
+                        + ctx.floorHazardCost(dstDesc)
                         + ctx.bodyTransitCost(e, dstFlags, nx, uy, nz);
                 out.accept(nx, uy, nz, cost + e.extraCost(), e);
             }

@@ -2,6 +2,7 @@ package com.orebit.mod;
 
 import com.mojang.authlib.GameProfile;
 import com.orebit.mod.platform.BotSpawn;
+import com.orebit.mod.platform.BotTeleport;
 import com.orebit.mod.platform.ClientLoad;
 import com.orebit.mod.platform.Worlds;
 import net.minecraft.core.BlockPos;
@@ -9,8 +10,14 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.GameType;
+import net.minecraft.world.level.storage.LevelResource;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 
 public class BotManager {
@@ -29,12 +36,19 @@ public class BotManager {
         // saves/loads its data under this UUID. A deterministic UUID makes the bot's saved player data
         // (inventory, tools, XP) round-trip across sessions — mine diamonds, log out, log back in, they're
         // still on the bot. Salted with a bot-specific prefix so it can never collide with a real (offline)
-        // player, whose UUID vanilla derives as nameUUIDFromBytes("OfflinePlayer:"+name).
-        GameProfile profile = new GameProfile(botUuidFor(player.getUUID()), baseName + "_bot");
+        // player, whose UUID vanilla derives as nameUUIDFromBytes("OfflinePlayer:"+name). When the OWNER'S
+        // identity itself changed (offline-mode rename, dev runClient's random "Player###" name), the
+        // derived UUID orphans the old saved data — resolveBotUuid consults the on-disk bot registry and
+        // adopts the world's known bot UUID in the single-bot case, so the inventory survives that too.
+        GameProfile profile = new GameProfile(
+                resolveBotUuid(server, player.getUUID(), player.getName().getString()),
+                baseName + "_bot");
 
         AllyBotEntity bot = new AllyBotEntity(server, world, profile, player);
         // Position beside the owner BEFORE place so a brand-new bot's spawn packet is already at the right
-        // spot (a fresh bot has no saved data, so this position sticks).
+        // spot. For a FRESH bot (no saved data) this position sticks; for a RETURNING bot the saved-data
+        // load inside BotSpawn.place overwrites it with the logout position, and the placeNearOwner
+        // re-snap after place corrects that.
         BlockPos safeSpot = BotPositioning.findSafeSpotNear(player, 3);
         placeNearOwner(bot, player, safeSpot);
         bot.setCustomName(player.getDisplayName().copy().append("'s Bot"));
@@ -46,8 +60,10 @@ public class BotManager {
         // before the spawn packet (no "add player prior to sending player info" race) and the
         // bot renders. This replaces the old hand-rolled broadcast + addFreshEntity. The
         // version-specific cookie / placeNewPlayer signature lives in the BotSpawn overlay.
-        // placeNewPlayer also runs vanilla's load(<uuid>.dat): a RETURNING bot's saved inventory,
-        // tools and XP (and its logout position/dimension) are restored right here.
+        // BotSpawn.place also restores a RETURNING bot's saved <uuid>.dat (inventory, tools, XP,
+        // logout position): on ≤1.21.8 placeNewPlayer loads it internally; on 1.21.9+ the load
+        // moved into vanilla's login flow (which a fake player never runs), so the overlays/1.21.9
+        // flavor replays it — loadPlayerData(nameAndId) → Entity.load(ValueInput) — before place.
         BotSpawn.place(server, bot);
 
         // Complete the join the way a real client would: mark the bot's connection "client-loaded". As of
@@ -66,17 +82,25 @@ public class BotManager {
         // no instant-break, takes fall/lava/drown damage when takesDamage is on).
         bot.setGameMode(GameType.SURVIVAL);
 
-        // "Return to owner" on rejoin: the load in placeNewPlayer may have restored the bot to its LOGOUT
-        // position — re-snap it beside the player so a returning bot comes back to you, keeping the restored
-        // inventory. A cross-dimension restore (bot logged out in another dimension) can't be snapped without
-        // a teleport, so leave it there; the owner can /bot come (portal-seek) to retrieve it. Same-dimension
-        // is the common case.
-        if (Worlds.of(bot) == world) {
-            placeNearOwner(bot, player, safeSpot);
-        } else {
-            OrebitCommon.LOGGER.info("[Orebit] Restored bot for {} in a different dimension ({}) — /bot come to retrieve it.",
+        // "Return to owner" on rejoin: the saved-data load in BotSpawn.place may have restored the bot to
+        // its LOGOUT position — possibly in ANOTHER DIMENSION (≤1.21.8 only: placeNewPlayer's internal
+        // load switches the level from the tag's Dimension; the 1.21.9+ flavor's Entity.load(ValueInput)
+        // restores position but never changes level, so there this branch stays dormant and the re-snap
+        // below is all that runs). A cross-dimension return needs a real player teleport
+        // first (setPos is same-level by construction; a bare setServerLevel pointer flip = ghost entity),
+        // so bridge the level gap via the version-selected BotTeleport seam, then re-snap beside the player
+        // unconditionally — the restored inventory rides along either way.
+        if (Worlds.of(bot) != world) {
+            OrebitCommon.LOGGER.info("[Orebit] Bot for {} logged out in another dimension ({}) — teleporting it back to its owner.",
                     player.getName().getString(), Worlds.of(bot));
+            BotTeleport.to(bot, world, player.getX(), player.getY(), player.getZ(), bot.getYRot(), bot.getXRot());
+            // A respawn-style teleport resets connection.hasClientLoaded() on 1.21.11+, and a clientless
+            // bot never re-sends the signal — re-arm it here (idempotent; the bot's own post-tick level-
+            // change detection also re-arms, but this teleport runs OUTSIDE the bot tick, so don't rely
+            // on ordering). Same fix as the markLoaded call after BotSpawn.place above.
+            ClientLoad.markLoaded(bot);
         }
+        placeNearOwner(bot, player, safeSpot);
 
         botsByOwner.put(player.getUUID(), bot);
         OrebitCommon.LOGGER.info("[Orebit] Spawned bot for {}", player.getName().getString());
@@ -100,6 +124,93 @@ public class BotManager {
      */
     private static UUID botUuidFor(UUID ownerUuid) {
         return UUID.nameUUIDFromBytes(("OrebitBot:" + ownerUuid).getBytes(StandardCharsets.UTF_8));
+    }
+
+    // ---- Bot UUID registry (orphan adoption) --------------------------------------------------------
+    //
+    // botUuidFor is a pure function of the OWNER'S UUID — which in offline mode is a pure function of
+    // the owner's NAME. A dev runClient (random "Player###" per launch) or an offline-server rename
+    // therefore derives a brand-new bot UUID, and placeNewPlayer loads fresh empty player data while
+    // the real bot .dat (with the diamonds) sits orphaned under the old UUID. The registry is a tiny
+    // sidecar properties file in the world save — one line per known bot, `<botUuid>=<ownerName>` —
+    // that lets spawn ADOPT the world's existing bot when the derivation misses. All I/O here is cold
+    // (once per spawn) and defensive (missing/corrupt file = empty registry).
+
+    /**
+     * The bot UUID to spawn with. Normally the deterministic {@link #botUuidFor} derivation; but when
+     * that UUID has NO saved player data and the world's bot registry lists exactly ONE bot, adopt the
+     * registered UUID instead — the single-bot V1 case where the owner's identity changed (dev relaunch,
+     * offline rename) but the world unambiguously has one Orebit bot whose inventory should survive.
+     * Several registered bots (future V2) = no guessing, fall back to the derivation. Either way the
+     * chosen UUID is recorded in the registry so the NEXT identity change can adopt it.
+     *
+     * <p>Adoption is gated to the INTEGRATED (single-player/LAN-host) server: on a dedicated server a
+     * brand-new player's first join also hits "derived UUID has no data", and with one registered bot
+     * the adoption would hand them another owner's bot — inventory theft. The identity-drift bug this
+     * fixes (dev runClient's random name) only exists on the integrated server anyway; a dedicated
+     * offline server that renames a player keeps the derivation (bot re-earns its kit).
+     */
+    private static UUID resolveBotUuid(MinecraftServer server, UUID ownerUuid, String ownerName) {
+        UUID chosen = botUuidFor(ownerUuid);
+        Properties registry = loadBotRegistry(server);
+        if (server.isSingleplayer() && !playerDataExists(server, chosen) && registry.size() == 1) {
+            String key = registry.stringPropertyNames().iterator().next();
+            try {
+                UUID adopted = UUID.fromString(key.trim());
+                if (!adopted.equals(chosen)) {
+                    OrebitCommon.LOGGER.info(
+                            "[Orebit] No saved data for derived bot UUID {} — adopting this world's registered bot {} "
+                                    + "(created for '{}') for {}; the owner's identity changed (offline rename or dev relaunch).",
+                            chosen, adopted, registry.getProperty(key), ownerName);
+                    chosen = adopted;
+                }
+            } catch (IllegalArgumentException e) {
+                OrebitCommon.LOGGER.warn("[Orebit] Ignoring corrupt bot-registry entry '{}'.", key);
+            }
+        }
+        if (!ownerName.equals(registry.getProperty(chosen.toString()))) {
+            registry.setProperty(chosen.toString(), ownerName);
+            saveBotRegistry(server, registry);
+        }
+        return chosen;
+    }
+
+    /**
+     * Whether vanilla has saved player data for {@code uuid}. LevelResource.PLAYER_DATA_DIR tracks the
+     * on-disk rename itself (javap-verified: {@code "playerdata"} on 1.17.1→1.21.11, {@code "players/data"}
+     * on 26.x), and the per-player file is {@code <uuid>.dat} on every supported version — so this resolve
+     * is correct across the whole range with no per-era seam.
+     */
+    private static boolean playerDataExists(MinecraftServer server, UUID uuid) {
+        return Files.isRegularFile(server.getWorldPath(LevelResource.PLAYER_DATA_DIR).resolve(uuid + ".dat"));
+    }
+
+    /** {@code <world>/orebit-bots.properties} — LevelResource.ROOT is stable across 1.17 → 26.x (mojmap-verified). */
+    private static Path botRegistryPath(MinecraftServer server) {
+        return server.getWorldPath(LevelResource.ROOT).resolve("orebit-bots.properties");
+    }
+
+    private static Properties loadBotRegistry(MinecraftServer server) {
+        Properties registry = new Properties();
+        Path path = botRegistryPath(server);
+        if (Files.isRegularFile(path)) {
+            try (InputStream in = Files.newInputStream(path)) {
+                registry.load(in);
+            } catch (IOException | IllegalArgumentException e) {
+                OrebitCommon.LOGGER.warn("[Orebit] Could not read bot registry {} — treating it as empty.", path, e);
+                registry.clear();
+            }
+        }
+        return registry;
+    }
+
+    private static void saveBotRegistry(MinecraftServer server, Properties registry) {
+        Path path = botRegistryPath(server);
+        try (OutputStream out = Files.newOutputStream(path)) {
+            registry.store(out, "Orebit bot registry: <botUuid>=<owner name at creation>. Lets a respawn adopt the world's existing bot when the owner's offline UUID changes.");
+        } catch (IOException e) {
+            OrebitCommon.LOGGER.warn("[Orebit] Could not write bot registry {}.", path, e);
+        }
     }
 
     /** The bot owned by {@code player}, or {@code null} if they have none (used by the /bot commands). */

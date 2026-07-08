@@ -62,6 +62,11 @@ public final class ChunkNavLoader {
                 // beside its nav sections, so a rebuild is idempotent and a portal-less rebuild self-cleans.
                 NetherPortalIndex.CellBuffer portals = new NetherPortalIndex.CellBuffer();
                 NavStore.put(level, k, ChunkNavBuilder.buildAllSections(level, chunk, portals));
+                // Newly BUILT nav data is as plan-relevant as an edit: advance the edit epoch so the
+                // follower's terrain-recheck debounce re-searches over the fresh area (without this a
+                // bot whose first search ran before its chunks built waited on an unrelated block change
+                // — the s52b cold-open false START-DEAD). One bump per chunk build, cold.
+                NavGridUpdater.bumpEpoch(level);
                 NetherPortalIndex.record(level, k, portals.toArray());
                 // Eager HPA* region build (HPA-IMPLEMENTATION.md §12): build the region leaves as the chunk's
                 // nav data is built, so the cost pyramid accumulates explored terrain (and survives chunk
@@ -82,6 +87,7 @@ public final class ChunkNavLoader {
         events.onChunkUnload((level, chunk) -> {
             long key = NavStore.key(ChunkCoords.x(chunk.getPos()), ChunkCoords.z(chunk.getPos()));
             NavStore.remove(level, key);
+            NavGridUpdater.bumpEpoch(level); // dropped nav data changes the grid the same as building it
             NetherPortalIndex.remove(level, key); // the portal index lives exactly as long as the nav data
         });
     }

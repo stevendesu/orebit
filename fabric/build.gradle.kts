@@ -77,6 +77,42 @@ loom {
         isIdeConfigGenerated = true
         runDir = "../../../run"
     }
+    runs {
+        named("client") {
+            // Pin the dev-client username. Without it vanilla invents "Player###" (random per
+            // launch); in offline mode the owner UUID is derived from that name, and the bot's
+            // UUID (and saved inventory) is derived from the owner UUID — so every runClient
+            // used to orphan the previous session's bot data. A stable name = stable identities.
+            // (Same pin as the 26 era's era-owned build.gradle.kts, s52 commit 7f9e527.)
+            programArgs("--username", "Dev")
+        }
+    }
+}
+
+// ---- Headless autotest run config (internal_docs/RESEARCH-headless-gametest.md §3.3) --------------
+// A dedicated-SERVER run that arms the common-src HeadlessAutotest hook (-Dorebit.autotest) in its own
+// run dir (run/autotest), so the scenario's seed/world/config never collide with the interactive run/.
+// Loom's server() preset appends the `nogui` program arg itself (bytecode-verified on Arch Loom
+// 1.13.469) — the run opens no window. The shared runConfigs.all block above fires when this config is
+// ADDED, then this create-closure runs, so the runDir set here wins over the shared "../../../run".
+// Launch: ./gradlew :fabric:1.21.11:runAutotest   (after scripts/run-autotest.ps1 preps the run dir —
+// server.properties pins the worldgen seed, eula.txt, config/orebit.properties pins the bot caps).
+loom {
+    runs {
+        create("autotest") {
+            server()
+            configName = "Orebit Autotest ($minecraft)"
+            runDir = "../../../run/autotest"
+            vmArg("-Dorebit.autotest=true")
+            // CLI overrides ride gradle -P properties into the JVM:
+            //   ./gradlew :fabric:1.21.11:runAutotest "-Porebit.autotest.budgetTicks=48000"
+            for (key in listOf("start", "goal", "budgetTicks", "debug", "trace")) {
+                val v = project.findProperty("orebit.autotest.$key")
+                if (v != null) vmArg("-Dorebit.autotest.$key=$v")
+            }
+            isIdeConfigGenerated = false // CLI/script-driven; no IDE launch config needed
+        }
+    }
 }
 
 java {
