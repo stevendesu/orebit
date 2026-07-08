@@ -70,6 +70,7 @@ public final class NavGridUpdater {
         if (section == null) return;
 
         final int lx = pos.getX() & 15, ly = pos.getY() & 15, lz = pos.getZ() & 15;
+        final short newNavtype = NavBlock.navtypeFor(newState); // interned ONCE here, passed down to patchCell
 
         // NAVTYPE NO-OP EARLY-OUT: a state change that interns to the SAME navtype (redstone power
         // flips, crop growth stages, observer churn) changes nothing the nav grid or any plan can see —
@@ -78,7 +79,7 @@ public final class NavGridUpdater {
         // bump is what keeps the follower's terrain-recheck debounce MEANINGFUL — without it a single
         // redstone clock anywhere in the level re-arms every bot's periodic re-search forever
         // (PERF-DESIGN-navgrid-edit-batching.md phase 0).
-        if (NavBlock.navtypeFor(newState) == (short) section.getTraversalGrid().navtype(lx, ly, lz)) {
+        if (!changesGrid(section, lx, ly, lz, newNavtype)) {
             return;
         }
 
@@ -91,7 +92,7 @@ public final class NavGridUpdater {
         // toggles (vanishingly rare), and this path is per-block-change, never per-A*-node.
         boolean wasPortal = NavBlock.isPortal(
                 NavBlock.descriptor((short) section.getTraversalGrid().navtype(lx, ly, lz)));
-        boolean nowPortal = NavBlock.isPortal(NavBlock.descriptorFor(newState));
+        boolean nowPortal = NavBlock.isPortal(NavBlock.descriptor(newNavtype));
         if (wasPortal != nowPortal) {
             if (nowPortal) NetherPortalIndex.add(server, pos.getX(), pos.getY(), pos.getZ());
             else NetherPortalIndex.removeCell(server, pos.getX(), pos.getY(), pos.getZ());
@@ -103,6 +104,19 @@ public final class NavGridUpdater {
         // floor cells). Null at the world edges — patchCell treats that as air / skips, matching build.
         NavSection above = sectionIndex + 1 < sections.length ? sections[sectionIndex + 1] : null;
         NavSection below = sectionIndex > 0 ? sections[sectionIndex - 1] : null;
-        NavSectionBuilder.patchCell(section, above, below, lx, ly, lz, newState);
+        NavSectionBuilder.patchCell(section, above, below, lx, ly, lz, newNavtype);
+    }
+
+    /**
+     * The grid-visibility decision the no-op early-out gates on (package-private: the headless epoch
+     * test drives this seam directly — {@code onBlockChanged} itself needs a live {@code ServerLevel},
+     * which cannot be stood up under the Knot test classloader). {@code false} means the change is
+     * invisible to the nav grid: equal navtype ⇒ equal descriptor ⇒ identical inputs to every
+     * neighbour's flag/depth window ⇒ {@code patchCell} would recompute byte-identical values, so
+     * skipping BOTH the patch and the epoch bump exactly satisfies the epoch contract above
+     * (unchanged epoch ⇒ re-search byte-identical).
+     */
+    static boolean changesGrid(NavSection section, int lx, int ly, int lz, short newNavtype) {
+        return newNavtype != (short) section.getTraversalGrid().navtype(lx, ly, lz);
     }
 }

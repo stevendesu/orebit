@@ -479,9 +479,19 @@ public final class NavSectionBuilder {
      */
     public static void patchCell(NavSection section, NavSection above, NavSection below,
                                  int lx, int ly, int lz, BlockState newState) {
+        patchCell(section, above, below, lx, ly, lz, NavBlock.navtypeFor(newState));
+    }
+
+    /**
+     * {@link #patchCell(NavSection, NavSection, NavSection, int, int, int, BlockState) patchCell} taking
+     * the already-interned navtype — the state param's only use was the {@link NavBlock#navtypeFor}
+     * lookup, which {@link NavGridUpdater} already pays for its navtype no-op early-out and passes down
+     * (PERF-DESIGN-navgrid-edit-batching.md §4.1: the lookup moves, it doesn't add).
+     */
+    public static void patchCell(NavSection section, NavSection above, NavSection below,
+                                 int lx, int ly, int lz, short newNavtype) {
         final long[] desc = DESC_SCRATCH.get();
         final TraversalGrid grid = section.getTraversalGrid();
-        final short newNavtype = NavBlock.navtypeFor(newState);
 
         // Write the new navtype first (with its stale flags — the window recompute below fixes them), so
         // BOTH scratch rebuilds — this section's, and the below section's, which reads this grid as ITS
