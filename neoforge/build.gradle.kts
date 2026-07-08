@@ -64,6 +64,17 @@ loom {
         isIdeConfigGenerated = true
         runDir = "../../../run"
     }
+    runs {
+        named("client") {
+            // Pin the dev-client username (same pin + rationale as fabric/build.gradle.kts: a
+            // stable name = stable offline owner UUID = the world-save bot registry re-adopts the
+            // same bot across dev sessions). Verified pass-through for NeoForge: Loom appends run
+            // programArgs after the userdev template args (which set no --username), and FML's
+            // client entrypoint (fml.startup.Client / the older modlauncher clientService) forwards
+            // the program args to net.minecraft.client.main.Main, which parses --username.
+            programArgs("--username", "Dev")
+        }
+    }
 }
 
 java {
