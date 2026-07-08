@@ -102,22 +102,16 @@ public final class SprintSwim implements Movement {
     }
 
     /**
-     * Look at the planned cell in 3-D and swim forward ({@link SteerControl#swimTowards}), sprinting — so
-     * vanilla adopts the prone sprint-swim (fast, and the 0.6-tall pose that threads a 1×1 hole), and the bot
-     * dives/climbs by looking down/up. Surfacing and the final climb out onto a bank are assisted by the
-     * follower's "hold jump while submerged and below target" rule.
+     * Look at the planned cell and swim forward ({@link SteerControl#swimTowards}), sprinting — so vanilla
+     * adopts the prone sprint-swim (fast, and the 0.6-tall pose that threads a 1×1 hole) — while the
+     * {@link SteerControl#holdDepth depth autopilot} rides {@link SteerControl#SUBMERGE_BIAS} below the
+     * planned depth: the short prone hitbox pinned under the surface never breaches, so vanilla keeps the
+     * pose (a breach drops it and degrades to the slow {@link Swim}).
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
         SteerControl.swimTowards(b, path);
         b.setSprinting(true);
-    }
-
-    /** Prone pose — the follower pins it under the surface so the short hitbox never breaches (see {@link
-     *  Movement#keepsSubmerged}). Without this, a surface-skimming sprint-swim floats out of the water and
-     *  drops the pose, degrading to the slow {@link Swim}. */
-    @Override
-    public boolean keepsSubmerged() {
-        return true;
+        SteerControl.holdDepth(b, path, SteerControl.SUBMERGE_BIAS);
     }
 }

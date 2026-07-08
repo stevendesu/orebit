@@ -14,6 +14,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.Palette;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 import net.minecraft.world.level.chunk.SingleValuePalette;
 
 /**
@@ -31,7 +32,7 @@ public class McBootstrapTest {
 
         BlockState air = Blocks.AIR.defaultBlockState();
         PalettedContainer<BlockState> c = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
 
         // All air -> SingleValuePalette, and get() returns air.
         Palette<BlockState> palette = NavSectionBuilder.getPaletteViaReflection(c);

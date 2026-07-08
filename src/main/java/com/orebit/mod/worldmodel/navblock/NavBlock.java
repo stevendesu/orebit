@@ -293,12 +293,25 @@ public final class NavBlock {
         int shape = shape(d);
         boolean solid = shape != SHAPE_EMPTY;
         boolean noFluid = fluid(d) == 0;
-        if (solid && shape != SHAPE_OTHER && noFluid && !isDamaging(d))      d |= STANDABLE_BIT;
+        // STANDABLE is pure GEOMETRY (owner ruling, s52b hazard-media): a solid top you can stand on.
+        // Damaging floors (magma, campfire) ARE standable — the damage is a COST the movement layer
+        // charges via caps.costPerHitpoint (an immune bot walks them free); excluding them here made
+        // them caps-blind walls and turned magma fields into hard BLOCKED. SHAPE_OTHER is standable
+        // when nothing pokes above the unit cube (topY <= 16): soul sand (14), honey (15), chests,
+        // anvils are all real vanilla floors that the old blanket OTHER-exclusion walled off — that
+        // net exists for fences/walls (topY 24), which the topY test still catches. Without this,
+        // getSpeedFactor-classified slow floors (soul sand/honey, both OTHER) could never be stood on
+        // and SURFACE_SLOW would be dead code.
+        if (solid && noFluid && (shape != SHAPE_OTHER || topY(d) <= 16))     d |= STANDABLE_BIT;
         if (solid && noFluid && hardness(d) != 255 && !isProtected(d))       d |= BREAKABLE_BIT;
         // OPEN_PLACE also excludes protected: filling the cell would REPLACE (destroy) its occupant — a
         // protected bush/grass must not be cleared by a placement any more than by a punch. (Protected
         // air is a degenerate config nobody should write; it would just make the cell unfillable.)
-        if ((isReplaceable(d) || shape == SHAPE_EMPTY) && noFluid && !isProtected(d)) d |= OPEN_PLACE_BIT;
+        // FLUIDS ARE OPEN (owner ruling, s52b): water and lava are vanilla-replaceable — placing into
+        // them is completely valid (sealing a lava source with cobble is a standard technique). The old
+        // noFluid conjunct wrongly barred every fluid cell. (NOTE: the NavFlags RISKY_EDIT fold gate
+        // still refuses edits whose body space borders fluid — a separate, break-motivated guard.)
+        if ((isReplaceable(d) || shape == SHAPE_EMPTY) && !isProtected(d))           d |= OPEN_PLACE_BIT;
         if (solid && noFluid)                                                d |= COLLISION_BIT;
         return d;
     }
@@ -313,9 +326,9 @@ public final class NavBlock {
             long d = descriptors[i];
             int shape = shape(d);
             boolean solid = shape != SHAPE_EMPTY, noFluid = fluid(d) == 0;
-            boolean standable = solid && shape != SHAPE_OTHER && noFluid && !isDamaging(d);
+            boolean standable = solid && noFluid && (shape != SHAPE_OTHER || topY(d) <= 16);
             boolean breakable = solid && noFluid && hardness(d) != 255 && !isProtected(d);
-            boolean openPlace = (isReplaceable(d) || shape == SHAPE_EMPTY) && noFluid && !isProtected(d);
+            boolean openPlace = (isReplaceable(d) || shape == SHAPE_EMPTY) && !isProtected(d);
             boolean collision = solid && noFluid;
             if (isStandable(d) != standable || isBreakable(d) != breakable
                     || isOpenForPlace(d) != openPlace || hasCollision(d) != collision) {
@@ -355,10 +368,16 @@ public final class NavBlock {
                 || block == Blocks.BLUE_ICE || block == Blocks.FROSTED_ICE;
     }
 
+    /**
+     * A slow FLOOR, classified from vanilla's own per-block walk-speed factor ({@code
+     * Block.getSpeedFactor()} — soul sand and honey are 0.4, everything else 1.0). The principled source
+     * (owner ruling, s52b): the old hand list wrongly included soul soil / slime / cobweb, none of which
+     * reduce walk speed in vanilla (cobweb's real cost is the through-transit class; slime only changes
+     * bounce). Also auto-classifies any modded slow floor. Priced as a MULTIPLIER by the movement layer
+     * ({@code Traverse.SLOW_COST_FACTOR} = 1/0.4).
+     */
     private static boolean isSlow(Block block) {
-        return block == Blocks.SOUL_SAND || block == Blocks.SOUL_SOIL
-                || block == Blocks.HONEY_BLOCK || block == Blocks.SLIME_BLOCK
-                || block == Blocks.COBWEB;
+        return block.getSpeedFactor() < 0.999f;
     }
 
     /**
@@ -546,6 +565,12 @@ public final class NavBlock {
      * seagrass — empty shape, water fluid) ARE swimmable. Lava (fluid 3) is never swimmable.
      */
     public static boolean isSwimmableWater(long d) { return fluid(d) == FLUID_WATER && isPassable(d); }
+
+    /** A swimmable LAVA cell (lava fluid, empty shape) — the lava analog of {@link #isSwimmableWater}.
+     *  The swim layer admits these with the hard-coded lava adjustments (extra damage + extra slow —
+     *  s52b hazard-media, owner-ratified); lava remains excluded from {@code passable} (walk clearance)
+     *  and from the prone sprint-swim family (no prone pose in lava — a 1x1 lava gap is impassable). */
+    public static boolean isSwimmableLava(long d) { return fluid(d) == FLUID_LAVA && isPassable(d); }
     /** True if nothing collides here (air/plant/fluid). */
     public static boolean isPassable(long d) { return shape(d) == SHAPE_EMPTY; }
 

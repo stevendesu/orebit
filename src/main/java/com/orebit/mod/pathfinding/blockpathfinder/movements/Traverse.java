@@ -18,12 +18,22 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  *
  * <ul>
  *   <li><b>Flat</b> (same floor level) — step onto an adjacent solid-topped cell with two clear cells
- *       above it.
- *   <li><b>Step-assist</b> (one cell up onto a low partial) — a slab / single snow layer / stair lip
- *       whose collision top is ≤ {@link MovementContext#STEP_ASSIST_MAX_TOP_Y} sixteenths is auto-stepped
- *       (~0.6 blocks) without a jump. This is the visible "uses stairs naturally" behaviour, and it
- *       falls straight out of the {@code topY} fact — no jump means the follower must <i>not</i> trigger
- *       one, which is why this is a distinct movement from {@link Ascend}.
+ *       above it. Same-level is NOT automatically flat: the LIP between the two floors' real tops
+ *       ({@code destTopY − startTopY}, sixteenths) must be ≤ {@link MovementContext#STEP_ASSIST_MAX_RISE}
+ *       — walking from a very low partial (a 2/16 repeater plate) onto a full block is a 14/16 rise no
+ *       auto-step clears. <i>Known gap (documented, not invented away):</i> a same-level lip of 10..20
+ *       sixteenths IS jumpable in vanilla ({@link MovementContext#JUMP_RISE}) but NO movement emits a
+ *       same-block-level jump today (Ascend is strictly one level up), so such a lip is simply not
+ *       offered.
+ *   <li><b>Step-assist</b> (one cell up onto a low partial) — a slab / snow-layer / stair lip is
+ *       auto-stepped (~0.6 blocks) without a jump when the RISE from the start floor's top to the
+ *       destination floor's top ({@link MovementContext#rise}: {@code 16 + destTopY − startTopY}) is
+ *       ≤ {@link MovementContext#STEP_ASSIST_MAX_RISE} sixteenths. Both ends' partial heights count:
+ *       full → slab one up is {@code 16 + 8 − 16 = 8 ≤ 9} (auto-step), slab → slab one up is
+ *       {@code 16 + 8 − 8 = 16 > 9} (that's {@link Ascend}'s jump). This is the visible "uses stairs
+ *       naturally" behaviour, and it falls straight out of the {@code topY} fact — no jump means the
+ *       follower must <i>not</i> trigger one, which is why this is a distinct movement from
+ *       {@link Ascend}.
  * </ul>
  *
  * <p><b>Body clearance via the resident bit.</b> The two body cells above a destination floor are checked
@@ -67,18 +77,26 @@ public final class Traverse implements Movement {
      */
     public static final float FLAT_COST = 4.633f;
     /**
-     * Extra ticks for crossing a slow surface (soul sand / honey / cobweb / slime), on top of {@link
-     * #FLAT_COST}. Baritone walks soul sand at ~0.4× speed ({@code WALK_ONE_OVER_SOUL_SAND_COST ≈
-     * WALK_ONE_BLOCK_COST / 0.4 ≈ 11.6}), i.e. ~2.5× the flat walk; the surcharge is that delta
-     * ({@code ≈ 11.6 − 4.633 ≈ 7.0}). Source: Baritone {@code ActionCosts.WALK_ONE_OVER_SOUL_SAND_COST}.
+     * Cost MULTIPLIER for a move onto a slow floor (vanilla {@code speedFactor} 0.4 — soul sand, honey —
+     * ⇒ {@code 1/0.4 = 2.5×} the move's own base time). A multiplier, NOT a flat surcharge (owner ruling,
+     * s52b): a diagonal covers 1.41× the distance of a cardinal step, so its slow penalty must scale with
+     * the move's base cost — the old flat {@code SLOW_SURCHARGE = 7.0} undercharged every longer move.
+     * For the cardinal walk the two agree by construction ({@code 4.633 × 2.5 ≈ 11.6}, Baritone's
+     * {@code WALK_ONE_OVER_SOUL_SAND_COST}).
      */
-    public static final float SLOW_SURCHARGE = 7.0f;
+    public static final float SLOW_COST_FACTOR = 1f / 0.4f;
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
         if (ctx.mode() != MovementContext.MODE_STANDING) return; // a ground walk — only while upright
+        // The START surface height (sixteenths): every rising-lip test below measures from this real
+        // surface (a slab start is 8/16 lower than a full block). floorSurface, not raw topY — a
+        // surface-swim node's water "floor" reads as 16 (feet at the cell boundary), so walking OUT of
+        // water onto the bank keeps its historical zero-lip geometry. Hoisted out of the direction loop
+        // — one read per expansion, served by the per-search chunk cache.
+        final int startTopY = ctx.floorSurface(x, y, z);
         for (int[] d : CARDINALS) {
             int nx = x + d[0];
             int nz = z + d[1];
@@ -93,7 +111,15 @@ public final class Traverse implements Movement {
             // Flat walk onto an adjacent solid-topped cell. The two body cells must be clear; a block in
             // the way (e.g. leaves) is folded into a break-set when the bot may break, raising the cost
             // instead of failing the move (MOVEMENT-DESIGN.md §1 — the motivating forest-leaves case).
-            if (standable) {
+            // START-SIDE lip gate: same-level is only "flat" when the rising lip between the two floors'
+            // real tops (destTopY − startTopY, sixteenths) fits the auto-step — a low-partial start onto
+            // a full block can be a 10..14/16 rise no step assist clears (class Javadoc; a NEGATIVE lip,
+            // stepping DOWN off a slab, is always walkable and passes). This gate covers the macro path
+            // too: a cuboid run is navtype-uniform, so within the run the lip is 0 — only the entry lip
+            // from the start cell can differ, and it is exactly what's tested here.
+            if (standable
+                    && MovementContext.rise(0, ctx.topYOf(pd), startTopY)
+                            <= MovementContext.STEP_ASSIST_MAX_RISE) {
                 int flags = MovementContext.flagsOf(p);
 
                 // Macro path: collapse a uniform flat run into a single jump candidate. Gated on the master
@@ -122,13 +148,18 @@ public final class Traverse implements Movement {
                 }
             }
 
-            // Step-assist: one cell up onto a low partial (slab / snow / stair lip) — no jump. Same
-            // break-the-body-path modifier as the flat case. Distinct cell, so its own single resolve.
+            // Step-assist: one cell up onto a low partial (slab / snow / stair lip) — no jump. The rise
+            // is measured surface-to-surface (16 + destTopY − startTopY ≤ STEP_ASSIST_MAX_RISE), so a
+            // partial START narrows what's auto-steppable (slab → slab one up is a 16/16 rise — Ascend's
+            // jump, not a step). Same break-the-body-path modifier as the flat case. Distinct cell, so
+            // its own single resolve.
             int uy = y + 1;
             int pu = ctx.packedAt(nx, uy, nz);
             if (pu != MovementContext.UNBUILT) {
                 long pud = ctx.descriptorOf(nx, uy, nz, pu);
-                if (ctx.standable(pud) && ctx.topYOf(pud) <= MovementContext.STEP_ASSIST_MAX_TOP_Y) {
+                if (ctx.standable(pud)
+                        && MovementContext.rise(1, ctx.topYOf(pud), startTopY)
+                                <= MovementContext.STEP_ASSIST_MAX_RISE) {
                     int flags = MovementContext.flagsOf(pu);
                     EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
                     ctx.requireBodyClear(e, nx, uy, nz, flags);
@@ -143,8 +174,12 @@ public final class Traverse implements Movement {
             // Bridge: no footing in the neighbour column — place a throwaway floor and walk onto it when
             // the bot may place (the source cell is always an adjacent face to build against). "Bridge"
             // is not its own movement, just Traverse with a place in its edit-set (decision 1). Reuses the
-            // same-level slot read at the top of the loop.
-            if (built && !standable) {
+            // same-level slot read at the top of the loop. The placed plank is a full cube (top 16), so
+            // walking onto it from a partial start is a rising lip of 16 − startTopY sixteenths — gated
+            // by the same auto-step budget (a slab start's 8/16 lip walks; a 2/16 plate start's 14/16
+            // lip doesn't).
+            if (built && !standable
+                    && MovementContext.rise(0, 16, startTopY) <= MovementContext.STEP_ASSIST_MAX_RISE) {
                 int flags = MovementContext.flagsOf(p);
                 EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
                 e.requireFloor(nx, y, nz);
@@ -366,6 +401,9 @@ public final class Traverse implements Movement {
     }
 
     private static float cost(MovementContext ctx, long d) {
-        return ctx.isSlow(d) ? FLAT_COST + SLOW_SURCHARGE : FLAT_COST;
+        // Slow floor = multiplier on the walk time; damaging floor (magma — standable since s52b) = the
+        // flat 1-HP contact charge in the one damage currency (0 for an immune bot). Both read the
+        // destination-floor descriptor already in hand.
+        return (ctx.isSlow(d) ? FLAT_COST * SLOW_COST_FACTOR : FLAT_COST) + ctx.floorHazardCost(d);
     }
 }

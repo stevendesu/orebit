@@ -16,6 +16,7 @@ import com.orebit.mod.worldmodel.resource.ResourceScan;
 
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 
@@ -41,6 +42,9 @@ public final class FindCommand implements BotCommand {
     public void contribute(LiteralArgumentBuilder<CommandSourceStack> bot) {
         bot.then(Commands.literal("find")
                 .then(Commands.argument("resource", StringArgumentType.word())
+                        // Tab-complete the valid column names, same provider as /bot gather (s52).
+                        .suggests((ctx, b) -> SharedSuggestionProvider.suggest(
+                                ResourceClasses.columnNames(), b))
                         .executes(ctx -> run(ctx, 1))
                         .then(Commands.argument("minCount", IntegerArgumentType.integer(1))
                                 .executes(ctx -> run(ctx, IntegerArgumentType.getInteger(ctx, "minCount"))))));

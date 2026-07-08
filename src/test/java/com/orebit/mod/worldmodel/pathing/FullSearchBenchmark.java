@@ -20,6 +20,7 @@ import com.orebit.mod.Debug;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
+import com.orebit.mod.worldmodel.hpa.RegionGrid;
 
 import net.minecraft.SharedConstants;
 import net.minecraft.server.Bootstrap;
@@ -108,7 +109,7 @@ public class FullSearchBenchmark {
         if (fixture.scenario == FullSearchScenarios.Scenario.GOAL_IN_WINDOW) {
             int[] pockets = { 0 };
             fixture.grid.goalDigSeeds(fixture.goalFloor.getX(), fixture.goalFloor.getY(),
-                    fixture.goalFloor.getZ(), 12, (rx, ry, rz, frag, digCells) -> pockets[0]++);
+                    fixture.goalFloor.getZ(), RegionGrid.MAX_GOAL_DIG_CELLS, (rx, ry, rz, frag, digCells) -> pockets[0]++);
             System.out.println("[FullSearchBenchmark] GOAL_IN_WINDOW dig-flood pockets=" + pockets[0]);
             if (pockets[0] == 0) {
                 throw new IllegalStateException("GOAL_IN_WINDOW dig-flood found no pockets headless — the "

@@ -33,9 +33,11 @@ import net.minecraft.core.BlockPos;
 public final class SpliceSeam {
 
     /**
-     * Default acceptance radius (Chebyshev, blocks) — matches {@code PathPlan.REPLAN_NEAR_TARGET}: the
-     * "close enough that the window machinery self-corrects" radius, deliberately smaller than a region
-     * so a parallel-tunnel arrival is rejected rather than walked from the wrong corridor.
+     * Default acceptance radius (Chebyshev, blocks): the "close enough that the window machinery
+     * self-corrects" radius, deliberately smaller than a region so a parallel-tunnel arrival is rejected
+     * rather than walked from the wrong corridor. (Historically twinned with PathPlan's commit-on-approach
+     * radius; that constant was removed in s52 — window commits now ride the block tier's own goal
+     * tolerance — while this SEAM acceptance radius legitimately remains its own concern.)
      */
     public static final int DEFAULT_TOLERANCE_CHEB = 3;
 

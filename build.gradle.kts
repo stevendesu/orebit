@@ -78,6 +78,37 @@ tasks.named<Test>("test") {
     useJUnitPlatform()
 }
 
+// Pre-clean for the bench tasks below: kill a LINGERING test-worker JVM left by a PREVIOUS run.
+// Both bench harnesses bootstrap Minecraft inside the Knot classloader in the test worker; the
+// bootstrapped MC spawns non-daemon threads (background executors/timers) that can keep the worker
+// JVM alive after a SUCCESSFUL run. The orphan holds open handles under
+// build/test-results/<task>/binary (output.bin), so the NEXT run's result-dir clean fails with
+// "Unable to delete". Identification is deliberately narrow, so unrelated JVMs are never touched:
+// a java process whose command line has BOTH the Gradle test-worker main class
+// (worker.org.gradle.process.internal.worker.GradleWorkerMain) AND this task's gate system
+// property (-Djmh=true / -Dcoldstart=true) — Gradle puts Test-task systemProperty values on the
+// worker's command line. At doFirst time the current run's worker does not exist yet, so any match
+// is an orphan. Windows-only (the file-lock symptom is Windows-specific); a silent no-op when
+// nothing lingers.
+fun killLingeringBenchWorker(gateProp: String) {
+    if (!System.getProperty("os.name").orEmpty().lowercase().contains("win")) return
+    val script =
+        "Get-CimInstance Win32_Process -Filter 'Name=''java.exe''' | " +
+        "Where-Object { \$_.CommandLine -like '*worker.org.gradle.process.internal.worker.GradleWorkerMain*' " +
+        "-and \$_.CommandLine -like '*-D$gateProp=true*' } | " +
+        "ForEach-Object { Write-Output ('[orebit] pre-clean: killing lingering bench worker PID ' + \$_.ProcessId); " +
+        "Stop-Process -Id \$_.ProcessId -Force; " +
+        "Wait-Process -Id \$_.ProcessId -Timeout 10 -ErrorAction SilentlyContinue }"
+    try {
+        val proc = ProcessBuilder("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+                .redirectErrorStream(true).start()
+        proc.inputStream.bufferedReader().forEachLine { line -> if (line.isNotBlank()) println(line) }
+        proc.waitFor()
+    } catch (e: Exception) {
+        logger.warn("[orebit] lingering-worker pre-clean failed (continuing): ${e.message}")
+    }
+}
+
 // JMH benchmarks inside Fabric's Knot classloader (forks=0). Gated by -Djmh=true so
 // a normal `test` skips them. Invoke via `./gradlew :<commonNode>:jmh [-Pbench=...]`.
 tasks.register<Test>("jmh") {
@@ -91,8 +122,33 @@ tasks.register<Test>("jmh") {
     if (project.hasProperty("bench")) systemProperty("bench", project.property("bench")!!)
     if (project.hasProperty("prof")) systemProperty("prof", project.property("prof")!!)
     if (project.hasProperty("scenario")) systemProperty("scenario", project.property("scenario")!!)
+    if (project.hasProperty("arm")) systemProperty("arm", project.property("arm")!!)
     testLogging { showStandardStreams = true }
     outputs.upToDateWhen { false }
+    doFirst { killLingeringBenchWorker("jmh") }
+}
+
+// E5 cold-start harness: times the JIT-COLD first pathfinder search in a FRESH test-worker JVM —
+// the number JMH's warmed forks=0 JVM cannot see. ONE measured run per Gradle invocation; forkEvery 1
+// + never-up-to-date guarantee a new worker each time (workers don't persist across builds anyway).
+// Arm: -Pwarmarm=true|false → -Dorebit.bench.warmup (run NavWarmup before the timed search, or not).
+// Gated by -Dcoldstart=true so a normal `test` skips it.
+tasks.register<Test>("coldstart") {
+    group = "verification"
+    description = "Fresh-JVM cold-start pathfinder timing (E5 warm-up experiment)."
+    useJUnitPlatform()
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    filter { includeTestsMatching("com.orebit.mod.worldmodel.pathing.ColdStartHarnessTest") }
+    systemProperty("coldstart", "true")
+    if (project.hasProperty("warmarm")) systemProperty("orebit.bench.warmup", project.property("warmarm")!!)
+    setForkEvery(1)
+    maxParallelForks = 1
+    testLogging { showStandardStreams = true }
+    outputs.upToDateWhen { false }
+    // Same MC-in-the-worker linger vulnerability as `jmh` (forkEvery 1 makes the worker EXIT-eligible
+    // after its one test class, but non-daemon MC threads can still pin the process).
+    doFirst { killLingeringBenchWorker("coldstart") }
 }
 
 tasks.build {

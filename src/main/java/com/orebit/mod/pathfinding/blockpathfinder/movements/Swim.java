@@ -73,6 +73,18 @@ public final class Swim implements Movement {
             if (twoDeep || deepBelow) return;
         }
 
+        // LAVA RISE (s52b hazard-media): a bot SUBMERGED in lava (feet + head both lava) has no other
+        // planner rung — there is no prone pose in lava, so SprintSwim's submerged mobility doesn't
+        // exist here — yet vanilla swims up in lava exactly like water (hold jump). One cell up per
+        // step, priced as a lava cell (slow factor + immersion damage), so A* can climb a lava column
+        // to the surface, paddle across, and exit via the ordinary walk moves — and will only ever
+        // choose to when nothing cheaper exists. Water keeps its existing division of labor
+        // (submerged rise = the sprint-swim family) — this rung is lava-only by design.
+        if (ctx.built(x, y + 1, z) && ctx.lava(ctx.descriptorAt(x, y + 1, z))
+                && ctx.built(x, y + 2, z) && ctx.lava(ctx.descriptorAt(x, y + 2, z))) {
+            out.accept(x, y + 1, z, ctx.lavaSwimCellCost(COST));
+        }
+
         int feetY = y + 1;
         for (int[] d : CARDINALS) {
             int nx = x + d[0];
@@ -84,11 +96,13 @@ public final class Swim implements Movement {
             for (int wf = feetY; wf >= feetY - MAX_SINK; wf--) {
                 if (!ctx.built(nx, wf, nz)) break;          // unknown column — don't path into it
                 long fd = ctx.descriptorAt(nx, wf, nz);
-                if (ctx.water(fd)) {
-                    // Water feet found. A SURFACE position needs open air at the head; a water head means the
-                    // column is submerged here — that's SprintSwim's job, not a normal-swim destination.
+                if (ctx.water(fd) || ctx.lava(fd)) {
+                    // Fluid feet found. A SURFACE position needs open air at the head; a submerged-water
+                    // head is SprintSwim's job (and a submerged-lava column is reached only via the lava
+                    // rise above). A LAVA cell prices the hard-coded lava adjustments — slow factor +
+                    // immersion damage (s52b hazard-media) — so A* enters lava only when forced.
                     if (!ctx.passable(nx, wf + 1, nz)) break;
-                    out.accept(nx, wf - 1, nz, COST);
+                    out.accept(nx, wf - 1, nz, ctx.lava(fd) ? ctx.lavaSwimCellCost(COST) : COST);
                     break;
                 }
                 if (!ctx.passable(fd)) break;               // hit solid before any water — no surface this way
@@ -103,13 +117,15 @@ public final class Swim implements Movement {
     }
 
     /**
-     * Surface swim: look at the planned cell in 3-D and hold forward ({@link SteerControl#swimTowards}) — the
-     * bot swims where it looks. Not sprinting; the prone 1×1 pose is {@link SprintSwim}. Rising/surfacing/
-     * exiting onto a bank is the follower's cross-cutting "hold jump while submerged and below target" rule.
+     * Surface swim: look at the planned cell and hold forward ({@link SteerControl#swimTowards}), holding the
+     * planned depth with the {@link SteerControl#holdDepth depth autopilot} (bias 0 — the tall standing pose
+     * rides at the planned feet height). Not sprinting; the prone 1×1 pose is {@link SprintSwim}. This move
+     * owns its whole control set — rising, diving, and holding depth (s52; no follower water rule exists).
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
         SteerControl.swimTowards(b, path);
+        SteerControl.holdDepth(b, path, 0.0);
     }
 
     /**

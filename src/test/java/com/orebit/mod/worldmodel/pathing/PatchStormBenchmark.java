@@ -25,6 +25,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Prices {@link NavSectionBuilder#patchCell} — the per-block-change nav-grid maintenance that runs on
@@ -105,7 +106,7 @@ public class PatchStormBenchmark {
         boolean[] allAir = new boolean[SECTIONS];
         for (int i = 0; i < SECTIONS; i++) {
             PalettedContainer<BlockState> states = new PalettedContainer<>(
-                    Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
             boolean any = false;
             for (int ly = 0; ly < 16; ly++) {
                 int y = i * 16 + ly;

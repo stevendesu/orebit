@@ -11,6 +11,30 @@ import com.orebit.mod.worldmodel.hpa.RegionGrid;
  * coarse GUIDANCE surface (a block cell reads its enclosing region's fragment cost via {@link #costAt}), not an
  * exact per-block metric.
  *
+ * <h2>Frontier-floor (s53, owner-ratified)</h2>
+ * A query that resolves to no settled slot — an out-of-box region, or an in-box region the (possibly
+ * fat-skeleton-terminated) Dijkstra never settled — returns <b>{@code max(floorCost, cheb × MIN_CROSS)}</b>
+ * instead of {@link #UNREACHED}, where {@code cheb} is the Chebyshev region distance from the queried region to
+ * the goal region. Both terms are provable LOWER BOUNDS on the slot's true field value:
+ * <ul>
+ *   <li><b>{@link #floorCost}</b> = the maximum settled cost at termination. The producing search is a plain
+ *       Dijkstra ({@code f == g}, non-negative edges), which settles nodes in NONDECREASING {@code g} — so any
+ *       slot left unsettled at termination would have settled later at {@code g ≥ floorCost}. (For an
+ *       out-of-box region this bound is heuristic only — a path through un-modelled space could be cheaper —
+ *       which is the ratified, deliberately inadmissibility-tolerant guidance semantics.)</li>
+ *   <li><b>{@code cheb × }{@link #MIN_CROSS}</b> — an independent absolute bound: every relaxed edge moves at
+ *       most one region per axis and costs ≥ {@link #MIN_CROSS} (the {@code relaxFrag} per-crossing floor), and
+ *       every Dijkstra seed sits within Chebyshev 1 of the goal region at {@code g ≥ cheb(seed) × MIN_CROSS}
+ *       (the goal's own pocket seeds at 0; a dig-pocket seed's cost carries ≥ one walk unit) — so by induction
+ *       along parents any reachable slot in region {@code R} has {@code g ≥ cheb(R, goalRegion) × MIN_CROSS}.
+ *       This term restores a goal-anchored distance gradient over floored space (out-of-box detours keep
+ *       goal-ward pull instead of reading one flat value).</li>
+ * </ul>
+ * The max of two lower bounds is a lower bound. The floor is guidance, never exclusion: {@link #costAt} no
+ * longer returns {@link #UNREACHED} (and never returns infinity), so the block heuristic's field term stays
+ * live everywhere — the owner's latent-pathology fix for searches forced into a wide detour that previously
+ * lost ALL field guidance the moment they left the box.
+ *
  * <h2>Intra-region gradient (the refined HPA* heuristic)</h2>
  * The bare fragment {@code g} is a CONSTANT over the whole 16³ region — every block cell reads the same value, so
  * the block A* gets no pull toward the goalward exit and floods each region uniformly. To restore a gradient, each
@@ -28,8 +52,24 @@ import com.orebit.mod.worldmodel.hpa.RegionGrid;
  */
 public final class RegionCostField {
 
-    /** Sentinel cost for a slot the bounded Dijkstra never settled (outside the box, walled off, or unused). */
+    /** Sentinel cost for a slot the bounded Dijkstra never settled (outside the box, walled off, or unused).
+     *  Internal to the {@code cost[]} array (and the {@code dump()} diagnostic): since the s53 frontier-floor,
+     *  {@link #costAt} never RETURNS it — unsettled queries read {@code max(floorCost, cheb × MIN_CROSS)}. */
     public static final float UNREACHED = 1e9f;
+
+    /**
+     * The TRUE minimum cost of one region crossing in the field's native units ({@code WALK_PER_BLOCK = 1}
+     * region unit ≈ one block-walk tick — the same units {@code cost[]}/{@code onward[]} carry and the block
+     * heuristic scales by {@code H_STRAIGHT}). Derivation: the producing Dijkstra relaxes every edge through
+     * {@code RegionPathfinder.relaxFrag}, which floors the edge at {@code Math.max(edge, WALK_PER_BLOCK)} "so
+     * every boundary crossing costs ≥ one tick" — including the otherwise-cheaper faces (the free unbuilt
+     * transit, near-aligned portal walks, and the all-air fall chute, whose raw {@code FALL_PER_BLOCK_FIELD}
+     * ≈ 0.54/block cost is floored per crossing). The old center-model directional ENTER/EXIT face costs
+     * ({@code LeafCostComputer}/{@code CostPyramid}) do not participate in this level-0 fragment-edge field.
+     * So 1.0 is the provable per-crossing minimum, and {@code cheb × MIN_CROSS} is an absolute lower bound on
+     * any goal-to-region path cost (see the class Javadoc).
+     */
+    public static final float MIN_CROSS = RegionPathfinder.WALK_PER_BLOCK;
 
     /** Fragment slots per region cell (mirrors {@link RegionFragments#MAX_FRAGMENTS}). */
     private static final int MAX_FRAGMENTS = RegionFragments.MAX_FRAGMENTS;
@@ -50,8 +90,23 @@ public final class RegionCostField {
     // parent's cost-to-goal). Only meaningful where cost[i] < UNREACHED; the gradient term reads them in costAt.
     private final int[] exitX, exitY, exitZ;
     private final float[] onward;
+    // The goal's level-0 region cell — the anchor of the cheb × MIN_CROSS distance term (class Javadoc).
+    private final int goalRx, goalRy, goalRz;
+    /**
+     * The frontier floor: the maximum settled cost at the producing Dijkstra's termination — a provable lower
+     * bound on every unsettled in-box slot's true field value (Dijkstra settles in nondecreasing {@code g};
+     * see the class Javadoc). Written once by {@link #setFloor} at build termination; {@code 0} (the trivial
+     * bound) until then / when nothing settled.
+     */
+    private float floorCost;
+    /**
+     * Diagnostic (package-private, tests + trace): the fat-skeleton chain the producing Dijkstra terminated
+     * on, as {@code (rx,ry,rz)} triplets goal→start along best predecessors — {@code null} when the build ran
+     * to exhaustion (no early exit). One small array per build; not read on any hot path.
+     */
+    int[] chainRegions;
 
-    RegionCostField(RegionPathfinder.RegionBox b, int minY, RegionGrid grid) {
+    RegionCostField(RegionPathfinder.RegionBox b, int minY, RegionGrid grid, int goalRx, int goalRy, int goalRz) {
         this.minRx = b.minRx;
         this.minRy = b.minRy;
         this.minRz = b.minRz;
@@ -60,6 +115,9 @@ public final class RegionCostField {
         this.dimZ = b.maxRz - b.minRz + 1;
         this.minY = minY;
         this.grid = grid;
+        this.goalRx = goalRx;
+        this.goalRy = goalRy;
+        this.goalRz = goalRz;
         int slots = dimX * dimY * dimZ * MAX_FRAGMENTS;
         this.cost = new float[slots];
         this.exitX = new int[slots];
@@ -67,6 +125,16 @@ public final class RegionCostField {
         this.exitZ = new int[slots];
         this.onward = new float[slots];
         java.util.Arrays.fill(cost, UNREACHED);
+    }
+
+    /** Set the frontier floor (the maximum settled cost) — written once by the producing Dijkstra at termination. */
+    void setFloor(float floor) {
+        this.floorCost = floor;
+    }
+
+    /** The frontier floor (package-private — the invariant unit tests read it; consumers go through {@link #costAt}). */
+    float floor() {
+        return floorCost;
     }
 
     /**
@@ -88,19 +156,24 @@ public final class RegionCostField {
     }
 
     /**
-     * The goal cost-to-reach for the level-0 region fragment enclosing world cell {@code (wx,wy,wz)}, or
-     * {@link #UNREACHED} if that region lies outside the field's box. Region mapping mirrors
-     * {@link com.orebit.mod.worldmodel.hpa.RegionAddress} at level 0: {@code rx = wx>>4}, {@code rz = wz>>4},
-     * {@code ry = (wy - minY)>>4}. The cell's fragment is resolved by nearest-centroid membership
-     * ({@link RegionPathfinder#fragmentOf}); if that specific fragment was never reached, the field falls back to
-     * the cheapest reached fragment of the region (robust where nearest-centroid disagrees with the Dijkstra's
-     * fragment ids). The returned value is the {@link #record recorded} slot's {@code onward} cost PLUS the octile
-     * distance from the cell to that slot's goalward exit opening — the intra-region gradient, in region units.
+     * The goal cost-to-reach for the level-0 region fragment enclosing world cell {@code (wx,wy,wz)}. Region
+     * mapping mirrors {@link com.orebit.mod.worldmodel.hpa.RegionAddress} at level 0: {@code rx = wx>>4},
+     * {@code rz = wz>>4}, {@code ry = (wy - minY)>>4}. The cell's fragment is resolved by nearest-centroid
+     * membership ({@link RegionPathfinder#fragmentOf}); if that specific fragment was never reached, the field
+     * falls back to the cheapest reached fragment of the region (robust where nearest-centroid disagrees with
+     * the Dijkstra's fragment ids). The returned value is the {@link #record recorded} slot's {@code onward}
+     * cost PLUS the octile distance from the cell to that slot's goalward exit opening — the intra-region
+     * gradient, in region units.
+     *
+     * <p>When no settled slot resolves — the region lies outside the field's box, or the (possibly
+     * fat-skeleton-terminated) Dijkstra never settled any of its fragments — the query returns the
+     * frontier-floor bound {@code max(floorCost, cheb × MIN_CROSS)} (class Javadoc) instead of the old
+     * {@link #UNREACHED} sentinel. Never infinity: the floor is guidance, not exclusion.
      */
     public float costAt(int wx, int wy, int wz) {
         int rx = wx >> 4, ry = (wy - minY) >> 4, rz = wz >> 4;
         int ri = regionIndex(rx, ry, rz);
-        if (ri < 0) return UNREACHED;
+        if (ri < 0) return floorAt(rx, ry, rz);
         int frag = RegionPathfinder.fragmentOf(grid, rx, ry, rz, wx, wy, wz, CENT.get(), TMP.get());
         if (frag < 0) frag = 0;
         else if (frag >= MAX_FRAGMENTS) frag = MAX_FRAGMENTS - 1;
@@ -108,10 +181,34 @@ public final class RegionCostField {
         if (cost[slot] >= UNREACHED) {
             // Fallback: the cheapest reached fragment of this region (nearest-centroid disagreed with the flood).
             slot = cheapestReachedSlot(ri);
-            if (slot < 0) return UNREACHED;
+            if (slot < 0) return floorAt(rx, ry, rz);
         }
         // Intra-region gradient: distance to the goalward exit opening + that exit's onward cost-to-goal.
         return octileToExit(wx - exitX[slot], wy - exitY[slot], wz - exitZ[slot]) + onward[slot];
+    }
+
+    /**
+     * The frontier-floor read for a region with no settled slot: {@code max(floorCost, cheb(R, goalRegion) ×
+     * MIN_CROSS)} — the max of the two lower bounds derived in the class Javadoc. The {@code cheb} term keeps a
+     * goal-anchored gradient over floored space (out-of-box included), so a search forced off the field still
+     * feels goal-ward pull instead of one flat value.
+     */
+    private float floorAt(int rx, int ry, int rz) {
+        int dx = Math.abs(rx - goalRx), dy = Math.abs(ry - goalRy), dz = Math.abs(rz - goalRz);
+        int cheb = Math.max(dx, Math.max(dy, dz));
+        float distBound = cheb * MIN_CROSS;
+        return distBound > floorCost ? distBound : floorCost;
+    }
+
+    /**
+     * Raw settled cost of slot {@code (rx,ry,rz,frag)} — {@link #UNREACHED} when unsettled or out of box.
+     * Package-private test seam (the fat-skeleton invariant tests compare exhaustive vs early-exit builds
+     * slot-by-slot); production reads go through {@link #costAt}.
+     */
+    float rawCost(int rx, int ry, int rz, int frag) {
+        int ri = regionIndex(rx, ry, rz);
+        if (ri < 0 || frag < 0 || frag >= MAX_FRAGMENTS) return UNREACHED;
+        return cost[ri * MAX_FRAGMENTS + frag];
     }
 
     /** The cheapest reached fragment slot of region row {@code ri}, or {@code -1} if none was settled. */
@@ -164,6 +261,10 @@ public final class RegionCostField {
         sb.append("region cost-to-goal field: ").append(reached).append(" of ").append(cost.length)
                 .append(" box (region,fragment) slots reached  (cost = region units;  h≈ = ×4.633 → block ticks, pre-greedy;")
                 .append("  onward = parent cost-to-goal;  exit = goalward opening for the intra-region gradient)\n");
+        sb.append(String.format("  frontier floor=%.1f  (unsettled/out-of-box reads = max(floor, cheb×%.1f));  %s%n",
+                floorCost, MIN_CROSS,
+                chainRegions == null ? "exhaustive build (no fat-skeleton exit)"
+                        : "fat-skeleton early exit, chain=" + (chainRegions.length / 3) + " steps"));
         for (int i : order) {
             if (cost[i] >= UNREACHED) {
                 break;

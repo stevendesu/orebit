@@ -25,6 +25,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Headless proof of the {@code Parkour} gap jump: a sealed stone section with a 1-wide corridor at
@@ -128,21 +129,12 @@ class ParkourTest {
 
     @Test
     void flatFourWideGapIsNeverOffered() {
-        // Equivalent negative to the old default-cap gate: there is NO flat 4 row in any envelope — the
-        // ~3.4-block flat sprint-jump reach doesn't cover it (the 4-range belongs to the falling arcs,
-        // which need a lower landing; this course's landing is at takeoff level over a bottomless chasm).
+        // There is NO flat 4 row in the envelope — the ~3.4-block flat sprint-jump reach doesn't cover
+        // it (the 4-range belongs to the falling arcs, which need a lower landing; this course's landing
+        // is at takeoff level over a bottomless chasm). (s52: one unconditional envelope, no flag.)
         NavGridView grid = buildCourse(4, null, null);
         assertNull(BlockPathfinder.findPath(grid, START, goal(4), BotCaps.DEFAULT, CORRIDOR),
-                "a flat 4-gap must not be offered by default");
-
-        boolean saved = Parkour.AGGRESSIVE;
-        Parkour.AGGRESSIVE = true;
-        try {
-            assertNull(BlockPathfinder.findPath(grid, START, goal(4), BotCaps.DEFAULT, CORRIDOR),
-                    "flat stays capped at 3 even under AGGRESSIVE — the flag only opens deeper drops");
-        } finally {
-            Parkour.AGGRESSIVE = saved;
-        }
+                "a flat 4-gap must never be offered");
     }
 
     /** Goal floor: one cell onto the landing platform (landing column is {@code 5+g}). */
@@ -169,7 +161,7 @@ class ParkourTest {
         BlockState stone = Blocks.STONE.defaultBlockState();
 
         PalettedContainer<BlockState> s = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int y = 0; y < 16; y++) {
                 for (int z = 0; z < 16; z++) {
@@ -196,7 +188,7 @@ class ParkourTest {
         NavSectionBuilder.classifyInto(s, false, section.getTraversalGrid());
 
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airSection = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
 

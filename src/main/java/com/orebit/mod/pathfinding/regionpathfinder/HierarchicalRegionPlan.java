@@ -49,20 +49,6 @@ public final class HierarchicalRegionPlan {
      */
     public static final int WINDOW_CELLS = 4;
 
-    /**
-     * How many regions (Chebyshev) off the committed window the bot may be and still be treated as ON it — the
-     * <b>boundary flip-flop tolerance</b>. A block path legitimately clips an ADJACENT, non-skeleton region for
-     * a step while executing inside the window cuboid (e.g. stepping to the fall column at a cliff edge before
-     * dropping into a cave — the clip cell is one region off the cell the bot just left). Firing a full suffix
-     * re-derive on that one-cell excursion reset the committed cursor to 0 (sliding the window back OFF the
-     * goal), which flipped the block target between GOAL and a cliff-top intermediate every settle — the bot
-     * walked back and forth across the region edge forever. A bot within this many regions of the window is a
-     * clip and is tolerated (no re-derive); a bot FARTHER off (a genuine off-route deviation / teleport) still
-     * re-derives immediately. The forward {@code exhausted} window-slide is unaffected — only the deviation exit
-     * is gated. {@code 1} = tolerate a single-region clip. Ordinal, tunable.
-     */
-    private static final int BOUNDARY_CLIP_CHEB = 1;
-
     // ---- immutable navigation context ----------------------------------------------------------------
     private final RegionGrid grid;
     private final int minY;
@@ -148,13 +134,28 @@ public final class HierarchicalRegionPlan {
         return (level < 0 || level > topLevel) ? -1 : levels[level].committedIndex;
     }
 
+    /** As {@link #onBotMoved(BlockPos, boolean)} with {@code onRoute=false} — for callers (tests, headless)
+     *  that have no block plan to vouch for an off-window excursion. */
+    public boolean onBotMoved(BlockPos botFloor) {
+        return onBotMoved(botFloor, false);
+    }
+
     /**
      * Per-tick hook (HPA-CASCADE.md §5): given the bot's current floor cell, advance each level's commit and
      * re-plan only the suffix at/below the <b>coarsest level whose window the bot exhausted</b>. Returns
      * {@code true} iff the level-0 skeleton changed (so the driver should swap it in + reset its block window);
      * {@code false} means the bot is still inside every level's window — the driver just slides its block window.
+     *
+     * <p>{@code onRoute} = the caller (who owns the active block plan) vouches that the bot is currently ON
+     * that plan — standing at/near one of its waypoints. A block path may legitimately step through an
+     * ADJACENT, non-skeleton region while executing inside the window (a cliff-edge fall-lineup); the plan
+     * itself is the authority on whether that excursion is intentional. An off-window bot that is on its plan
+     * is following a route the block tier already vouched for, so no re-derive fires (re-deriving there reset
+     * the commit cursor and flip-flopped the target every settle — the old cliff bug). An off-window bot NOT
+     * on its plan is a genuine deviation and re-derives immediately. (s52: this replaced the old
+     * {@code BOUNDARY_CLIP_CHEB} spatial guess — "within 1 region counts as on-route" — with asking the plan.)
      */
-    public boolean onBotMoved(BlockPos botFloor) {
+    public boolean onBotMoved(BlockPos botFloor, boolean onRoute) {
         if (failed) {
             return false;
         }
@@ -170,30 +171,22 @@ public final class HierarchicalRegionPlan {
             // Advance committedIndex forward to the furthest committed-window cell whose level-L region is the
             // bot's (forward-only, so a transient dip back never retreats it — region-tier commit hysteresis),
             // and note whether the bot is anywhere in the committed window at all.
-            // Advance committedIndex forward to the furthest committed-window cell the bot is IN, and measure the
-            // Chebyshev distance (in level-L regions) to the nearest window cell (for the clip tolerance below).
             boolean inWindow = false;
-            int minCheb = Integer.MAX_VALUE;
             for (int i = far; i >= lp.committedIndex; i--) {
-                final int cheb = Math.max(Math.abs(sk.rx(i) - brx),
-                        Math.max(Math.abs(sk.ry(i) - bry), Math.abs(sk.rz(i) - brz)));
-                if (cheb < minCheb) minCheb = cheb;
-                if (cheb == 0) {
+                if (sk.rx(i) == brx && sk.ry(i) == bry && sk.rz(i) == brz) {
                     if (i > lp.committedIndex) lp.committedIndex = i;
                     inWindow = true;
                     break;
                 }
             }
             // Exit this level when EITHER the bot committed to its far cell (window exhausted — needs sliding,
-            // unless that cell is the true goal end) OR the bot is genuinely OFF the window. "Off" excludes a
-            // BOUNDARY_CLIP_CHEB-region clip: a bot one region off the window is stepping through an adjacent cell
-            // while executing inside the window cuboid (the cliff fall-lineup), NOT a deviation — tolerating it
-            // stops the re-derive that reset the commit cursor and flipped the target every settle (the flip-flop).
-            // A farther-off bot (real off-route / teleport) still re-derives. Re-plan the suffix at/below the
-            // coarsest exited level.
+            // unless that cell is the true goal end) OR the bot is genuinely OFF the route: outside the window
+            // AND not on its active block plan (onRoute — the plan vouches for intentional off-window steps
+            // like a cliff-edge fall-lineup; see the method javadoc). Re-plan the suffix at/below the coarsest
+            // exited level.
             final boolean reachedEnd = sk.reachedGoalRegion() && far == sk.size() - 1;
             final boolean exhausted = !reachedEnd && lp.committedIndex >= far;
-            final boolean deviated = !inWindow && minCheb > BOUNDARY_CLIP_CHEB;
+            final boolean deviated = !inWindow && !onRoute;
             if (exited == -1 && (exhausted || deviated)) {
                 exited = L;
             }

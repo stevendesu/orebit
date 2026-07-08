@@ -26,6 +26,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * The HPA* "earns its keep" milestone proof (PRD §10 Phase 3; HPA-IMPLEMENTATION.md §13).
@@ -355,7 +356,7 @@ public class HpaMilestoneTest {
 
         // Ground section: stone plane at local y=0, air above.
         PalettedContainer<BlockState> groundStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 groundStates.set(x, 0, z, stone);
@@ -366,7 +367,7 @@ public class HpaMilestoneTest {
 
         // All-air section (the onlyAir shortcut path).
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airSection = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
 

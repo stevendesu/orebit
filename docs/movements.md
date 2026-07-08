@@ -36,7 +36,7 @@ which is what lets hazards be *costs* instead of walls.
 | Climb (up) | 8.51 / block | 20 ÷ 2.35 (ladder ascent speed) |
 | Climb (down) | 6.67 / block | 20 ÷ 3.0 (ladder descent clamp) |
 | Parkour | 15.6 / 18.6 / 21.6 | run-up + airtime + commit penalty |
-| DiagonalParkour | ≈ 20.1 / 24.1 | the Parkour table at diagonal reach |
+| DiagonalParkour | ≈ 20.1 / 24.1 / 28.6 | the Parkour table at diagonal reach |
 | Swim (surface) | 9.09 / block | 20 ÷ 2.2 (surface paddle speed) |
 | Sprint-swim | 3.564 / block | 20 ÷ 5.612 (sprint-swim speed) |
 | Start sprint-swim / Surface | 2 each | pose transitions |
@@ -107,39 +107,46 @@ and holds jump when the target is above.
 ## Gap jumps
 
 **Parkour** — a running jump across open columns to a landing at, above, or below the
-takeoff level. The envelope is deliberately conservative — every default row was
-verified by a human at the controls, and the physics-marginal rows exist but stay
-gated behind an aggressive flag (off by default):
+takeoff level. The envelope is one unconditional table, following the sprint-jump
+parabola with the reachable maxima verified by a human at the controls (the flat
+3-gap, a rising landing across gaps up to 3, the falling (−1) 4-gap; the deeper-drop
+rows are derived from the same parabola — a drop gains range):
 
-| Landing | Default gaps | Gated (aggressive) |
-|:---|:---|:---|
-| flat (same level) | 1–3 | — |
-| rising (+1) | 1–2 | 3 |
-| falling (−1) | 1–4 | — |
-| falling (−2, −3) | — | 1–4 |
+| Landing | Gaps |
+|:---|:---|
+| flat (same level) | 1–3 |
+| rising (+1) | 1–3 |
+| falling (−1, −2, −3) | 1–4 |
 
-Cost = one run-up step (4.633) + airtime (8 / 11 / 14 ticks for gaps 1/2/3) + a
-3-tick commit penalty, totalling **15.6 / 18.6 / 21.6** — always at least the
+The edges of the table are deliberate. There is no flat 4-gap anywhere — the
+~3.4-block flat reach doesn't cover it; the 4-range belongs to the falling arcs alone.
+And drops deeper than −3 aren't parkour at all: past that, each extra 3–4 blocks of
+drop buys only ~1 block of range while landing precision degrades, and
+[Fall](#falling) already owns deep descents off an edge.
+
+Cost = one run-up step (4.633) + airtime (8 / 11 / 14 / 16 ticks for gaps 1/2/3/4) + a
+3-tick commit penalty — flat totals **15.6 / 18.6 / 21.6** — always at least the
 4.633-per-block ruler, so a jump never beats safe walking unless it actually saves
 distance. A rising landing is 2 ticks *cheaper* (the higher floor intercepts the arc
-early); a falling one adds 2/3/5 ticks by depth, plus fall damage pricing past the
-safe window. When no straight landing exists, an **offset tier** probes landings one
-cell off the cardinal line — a (2, ±1) landing is √5 ≈ 2.24 blocks of reach, well
-inside the ~4-block flat envelope. Parkour is **edit-free by rule** (you can't mine or
-place mid-flight — a gap that would need it simply isn't a candidate) and executes as
-a four-phase plan: run-up → take-off (triggered ~0.35 blocks past the takeoff cell's
-centre — jumping as late as the block still supports) → airborne → land, with a balk
-guard that resets the attempt if the jump never left the ground.
+early); a falling one adds 2/3/5 ticks by drop depth, plus fall damage pricing past the
+safe window. When no straight landing exists, an **offset tier** probes flat landings
+one cell off the cardinal line — a (2, ±1) landing is √5 ≈ 2.24 blocks of reach and a
+(3, ±1) is √10 ≈ 3.16, both inside the 4-block flat reach. Parkour is **edit-free by
+rule** (you can't mine or place mid-flight — a gap that would need it simply isn't a
+candidate) and executes as a four-phase plan: run-up → take-off (triggered ~0.35 blocks
+past the takeoff cell's centre — jumping as late as the block still supports) →
+airborne → land, with a balk guard that resets the attempt if the jump never left the
+ground.
 
 **DiagonalParkour** — the same idea along a diagonal, mirroring how Diagonal
 accompanies Traverse. A diagonal gap of *g* cells spans g·√2 blocks of air, so the
-shipped envelope is gaps 1–2 (the 2-gap's 2.83-block span sits inside the verified
-~3-block flat reach; the 3-gap is at the physics limit and rides the same aggressive
-flag). Airtime interpolates the cardinal table at the diagonal displacement — ≈ 10.5 /
-14.5 ticks — on top of a diagonal run-up step (6.552) and the shared commit penalty:
-**≈ 20.1 / 24.1 total**. Every cell-to-cell transition additionally sweeps both corner
-columns, one row taller than walking Diagonal checks, because the jump arc carries the
-hitbox higher.
+envelope is gaps 1–3: the 2-gap's 2.83-block span sits inside the verified ~3-block
+flat reach, and the 3-gap's 4.24-block span is at the physics limit, matching the
+cardinal table's outer rows. Airtime interpolates the cardinal table at the diagonal
+displacement — ≈ 10.5 / 14.5 / 19 ticks — on top of a diagonal run-up step (6.552) and
+the shared commit penalty: **≈ 20.1 / 24.1 / 28.6 total**. Every cell-to-cell
+transition additionally sweeps both corner columns, one row taller than walking
+Diagonal checks, because the jump arc carries the hitbox higher.
 
 ## Swimming
 

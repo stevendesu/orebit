@@ -28,6 +28,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Headless proof of the caps-honest pass-through hazard surcharge ({@code MovementContext.bodyTransitCost}
@@ -339,7 +340,7 @@ class PassThroughHazardTest {
         BlockState fire = Blocks.FIRE.defaultBlockState();
 
         PalettedContainer<BlockState> s = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int y = 0; y < 16; y++) {
                 for (int z = 0; z < 16; z++) {
@@ -358,7 +359,7 @@ class PassThroughHazardTest {
         NavSectionBuilder.classifyInto(s, false, section.getTraversalGrid());
 
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airSection = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
 
@@ -409,7 +410,7 @@ class PassThroughHazardTest {
         NavSectionBuilder.classifyInto(east, false, eastSection.getTraversalGrid());
 
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airSection = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
 
@@ -464,7 +465,7 @@ class PassThroughHazardTest {
         NavSectionBuilder.computeFlags(eastBodyS.getTraversalGrid(), false, null);
 
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airSection = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
 
@@ -486,7 +487,7 @@ class PassThroughHazardTest {
     /** A section container pre-filled with solid stone (the maze is carved out of it). */
     private static PalettedContainer<BlockState> filledStone(BlockState air, BlockState stone) {
         PalettedContainer<BlockState> s = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int y = 0; y < 16; y++) {
                 for (int z = 0; z < 16; z++) {

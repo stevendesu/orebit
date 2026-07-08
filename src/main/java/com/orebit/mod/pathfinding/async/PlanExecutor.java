@@ -206,7 +206,8 @@ public final class PlanExecutor {
                 NavGridView grid = NavGridView.background(req.level());
                 BlockPathPlan plan = BlockPathfinder.findPath(grid, req.startFloor(), req.target(),
                         req.caps(), null, req.cuboidCap(), req.inventory(), req.startMode(),
-                        req.baseline(), req.budgetNanos(), req.field());
+                        req.baseline(), req.budgetNanos(), req.field(),
+                        req.goalTolXZ(), req.goalTolY());
                 job.handle.complete(plan, plan != null && BlockPathfinder.lastWasPartial(),
                         BlockPathfinder.lastExpansions());
             } catch (Throwable t) {

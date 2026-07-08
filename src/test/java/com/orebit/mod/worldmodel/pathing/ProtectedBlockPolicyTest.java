@@ -26,6 +26,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Planner-side proof of the two mining policy knobs, at both the vocabulary and the search level.
@@ -254,7 +255,7 @@ class ProtectedBlockPolicyTest {
         BlockState stone = Blocks.STONE.defaultBlockState();
 
         PalettedContainer<BlockState> s = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int y = 0; y < 16; y++) {
                 for (int z = 0; z < 16; z++) {
@@ -276,7 +277,7 @@ class ProtectedBlockPolicyTest {
         NavSectionBuilder.classifyInto(s, false, section.getTraversalGrid());
 
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airSection = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
 

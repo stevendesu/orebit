@@ -43,7 +43,7 @@ class FullSearchHeadlessTest {
     void digFloodEngagesOnSectionsBackedGrid() {
         FullSearchScenarios.Fixture f = FullSearchScenarios.build(FullSearchScenarios.Scenario.GOAL_IN_WINDOW);
         int[] pockets = { 0 };
-        f.grid.goalDigSeeds(f.goalFloor.getX(), f.goalFloor.getY(), f.goalFloor.getZ(), 12,
+        f.grid.goalDigSeeds(f.goalFloor.getX(), f.goalFloor.getY(), f.goalFloor.getZ(), RegionGrid.MAX_GOAL_DIG_CELLS,
                 (rx, ry, rz, frag, digCells) -> pockets[0]++);
         assertTrue(pockets[0] > 0,
                 "buried goal should dig-flood to >=1 pocket over the NavSection-backed headless grid");
@@ -58,7 +58,7 @@ class FullSearchHeadlessTest {
     void digFloodIsInertOnRecordOnlyGrid() {
         RegionGrid recordOnly = RegionGrid.headless(FullSearchScenarios.MINY);
         int[] pockets = { 0 };
-        recordOnly.goalDigSeeds(36, 3, 8, 12, (rx, ry, rz, frag, digCells) -> pockets[0]++);
+        recordOnly.goalDigSeeds(36, 3, 8, RegionGrid.MAX_GOAL_DIG_CELLS, (rx, ry, rz, frag, digCells) -> pockets[0]++);
         assertEquals(0, pockets[0], "record-only headless grid has no sections → the dig-flood must early-out");
     }
 

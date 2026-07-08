@@ -23,12 +23,59 @@ import net.minecraft.world.level.block.Blocks;
  */
 public final class MovementContext {
 
+    // ---- Vertical-clearance physics (canon; ALL heights in SIXTEENTHS of a block) ----------------------
+    // A floor cell's real surface is its block base plus the NavBlock topY fraction (16 = full block,
+    // 8 = bottom slab). Every "can I gain that floor" rule is therefore a RISE test between two real
+    // surfaces, not a block-level compare: rise = dyBlocks·16 + destTopY − startTopY (see #rise). The
+    // two budgets below are the only two vertical gains vanilla locomotion offers.
+
     /**
-     * A floor cell whose collision top is at or below this many sixteenths is a <b>low step</b> — a
-     * slab / single snow layer / stair lip the player auto-steps onto (~0.6 blocks) without jumping.
-     * Above it, gaining the cell needs a real jump (Ascend). 10/16 ≈ 0.625, just past the auto-step.
+     * Sixteenths of rise ONE vanilla jump clears: the jump apex is 1.25 blocks above the feet
+     * ({@code vy₀ = 0.42} with per-tick {@code vy ← (vy − 0.08)·0.98} peaks at ~1.25), and
+     * {@code 1.25 × 16 = 20}. A move that must gain more than this between the START floor's top and
+     * the DESTINATION floor's top cannot be jumped: e.g. slab → full block one level up is
+     * {@code 16 + 16 − 8 = 24 > 20} (you cannot ascend 1.5 blocks), while full → full one up is
+     * {@code 16 + 16 − 16 = 16 ≤ 20} (the everyday Ascend).
      */
-    public static final int STEP_ASSIST_MAX_TOP_Y = 10;
+    public static final int JUMP_RISE = 20;
+
+    /**
+     * Sixteenths of rise the vanilla step assist (0.6-block auto-step) clears without a jump:
+     * {@code 9/16 = 0.5625 ≤ 0.6 < 10/16 = 0.625}, so 9 is the largest whole-sixteenth lip that fits
+     * under the 0.6 threshold. (The historical value here was 10 — {@code 10/16 = 0.625 > 0.6} — which
+     * over-admitted exactly-10-sixteenth lips; reconciled to the physics.) Measured between the two
+     * floors' real tops via {@link #rise}: onto a slab one level up from a full block is
+     * {@code 16 + 8 − 16 = 8 ≤ 9} (auto-step), from a slab onto the same slab-step is
+     * {@code 16 + 8 − 8 = 16 > 9} (needs the jump).
+     */
+    public static final int STEP_ASSIST_MAX_RISE = 9;
+
+    /**
+     * The rise (sixteenths, negative = a drop) from standing on a floor with collision top
+     * {@code startTopY} to standing on a floor {@code dyBlocks} block-levels away with collision top
+     * {@code destTopY}: {@code dyBlocks·16 + destTopY − startTopY}. The single derivation point every
+     * height-aware gate ({@link #STEP_ASSIST_MAX_RISE} / {@link #JUMP_RISE}) measures against — static
+     * integer math, JIT-inlined, hot-path safe.
+     */
+    public static int rise(int dyBlocks, int destTopY, int startTopY) {
+        return dyBlocks * 16 + destTopY - startTopY;
+    }
+
+    /**
+     * The height (sixteenths, within the floor cell) of the surface the bot's feet rest on at node
+     * {@code (x,y,z)} — the START-side input to every {@link #rise} test. For a {@link #standable}
+     * floor this is its real collision top ({@code topY}: 16 full block, 8 slab, 2 repeater plate).
+     * For a NON-standable "floor" it is <b>16</b>: the floor-cell convention gives float nodes a
+     * non-solid floor (a surface-swim node's floor is the water cell below the feet — Swim decision C —
+     * and a climb node's can be the ladder/vine), and such a bot's feet ride at the cell boundary
+     * {@code y+1.0}, exactly where a full-block top would put them — so water/climb starts keep their
+     * historical rise arithmetic (a shore exit is NOT a 16/16-deficit jump). One path-edit-aware
+     * descriptor read (a PLACED floor correctly reads as the full cube).
+     */
+    public int floorSurface(int x, int y, int z) {
+        long d = descriptorAt(x, y, z);
+        return NavBlock.isStandable(d) ? NavBlock.topY(d) : 16;
+    }
 
     /**
      * Sentinel a {@link #packedAt} read returns for an unbuilt cell — re-exported from {@link
@@ -501,7 +548,8 @@ public final class MovementContext {
 
     /**
      * Can the bot stand on top of this cell? True for any solid-topped shape (full / slab / stair /
-     * layer / low partial) that isn't a fluid and isn't damaging (lava, magma, cactus, fire). Excludes
+     * layer / low partial) that isn't a fluid. Damaging floors (magma, cactus tops) ARE standable since
+     * s52b — the damage is priced by {@link #floorHazardCost}, not walled off. Excludes
      * {@link NavBlock#SHAPE_OTHER} (fences/walls/panes — you don't get a clean footing on those) and
      * {@link NavBlock#SHAPE_EMPTY} (no floor at all).
      */
@@ -604,6 +652,50 @@ public final class MovementContext {
      * with water, a waterlogged campfire is extinguished, and the solid damaging blocks fail the
      * empty-shape test — and no through-slow block is a water cell.
      */
+    /**
+     * Flat 1-HP contact charge for a move that ENDS standing on a damaging floor (magma, campfire —
+     * standable since the s52b hazard-media change), in the ONE damage currency
+     * ({@code caps.costPerHitpoint}, 0 for an immune bot). The same safe flat-HP convention as the
+     * pass-through hazard charge above (magma's real cost ≈0.5 HP/cell walked with i-frames — the flat
+     * 1 HP over-charge is the safe direction). Descriptor form: one bit test on a descriptor already in
+     * hand (the ground moves all hold their destination floor descriptor).
+     */
+    public float floorHazardCost(long floorDesc) {
+        return (caps.takesDamage() && NavBlock.isDamaging(floorDesc)) ? caps.costPerHitpoint() : 0f;
+    }
+
+    /** Coordinate form of {@link #floorHazardCost(long)} for callers without the floor descriptor in hand
+     *  (Fall's landing). Reads the descriptor ONLY for a mortal bot — an immune bot pays zero reads. */
+    public float floorHazardCost(int x, int y, int z) {
+        if (!caps.takesDamage()) return 0f;
+        return NavBlock.isDamaging(descriptorAt(x, y, z)) ? caps.costPerHitpoint() : 0f;
+    }
+
+    /**
+     * The per-cell cost of swimming through LAVA (s52b hazard-media, owner-ratified hard-coded lava
+     * adjustments — lava's magnitude derives from BEING lava, no stored data): the water swim cost ×
+     * {@link #LAVA_SWIM_COST_FACTOR} (vanilla lava locomotion is far slower than water) plus
+     * {@link #LAVA_HP_PER_CELL} × {@code costPerHitpoint} immersion damage for a mortal bot (≈4 HP per
+     * 10-tick i-frame window over the ~23 ticks a lava cell takes, plus burn aftermath). At the default
+     * 100 ticks/HP one lava cell prices ≈ 1000+ ticks (~220 walk-blocks of detour) — A* crosses lava only
+     * when nothing else exists; an immune bot pays only the slow factor.
+     */
+    public float lavaSwimCellCost(float waterCellCost) {
+        return waterCellCost * LAVA_SWIM_COST_FACTOR
+                + (caps.takesDamage() ? LAVA_HP_PER_CELL * caps.costPerHitpoint() : 0f);
+    }
+
+    /** Lava locomotion slow factor vs water swimming (~0.02 vs ~0.05 travel acceleration ⇒ ~2.5×). */
+    public static final float LAVA_SWIM_COST_FACTOR = 2.5f;
+    /** Flat HP charged per lava cell swum by a mortal bot (immersion + burn; derivation on
+     *  {@link #lavaSwimCellCost}). */
+    public static final float LAVA_HP_PER_CELL = 10f;
+
+    /** A swimmable LAVA cell ({@link NavBlock#isSwimmableLava}) — read-once descriptor form. */
+    public boolean lava(long d) {
+        return NavBlock.isSwimmableLava(d);
+    }
+
     public float bodyTransitCost(int flags, int fx, int fy, int fz) {
         boolean hazard = NavFlags.clearableHazard(flags) && caps.takesDamage();
         if (!hazard && !NavFlags.slowTransit(flags)) return 0f;
@@ -787,10 +879,9 @@ public final class MovementContext {
     /**
      * Can the bot create footing at an empty floor cell by placing a throwaway block? True only when the
      * bot {@link BotCaps#canPlace may place}, the cell is open ({@link NavBlock#isReplaceable} or genuinely
-     * empty — so we don't try to place into a solid) and at least one orthogonal/below neighbour offers a
-     * sturdy face to place the block against (so the placement is physically valid). Reuses {@code
-     * replaceable}/{@code faces} — no new bit. The exact against-face is chosen by the follower at
-     * execution time from whatever neighbour is still solid then.
+     * empty — so we don't try to place into a solid) and at least one of the SIX adjacent cells holds a
+     * non-replaceable occupant to place against (the owner-verified vanilla rule, s52b). The exact
+     * against-face is chosen by the follower at execution time from whatever neighbour is still solid then.
      */
     public boolean placeable(int x, int y, int z) {
         return placeable(x, y, z, descriptorAt(x, y, z));
@@ -810,16 +901,27 @@ public final class MovementContext {
         // / trace / tests), this is a no-op, so the geometry test below is unchanged from today.
         InventoryView inv = inventory;
         if (inv != null && inv.consumesBlocks() && inv.placeableBlocks() <= 0) return false;
-        if (!openForPlace(d)) return false;        // need a clear, non-fluid cell to fill
-        // A sturdy neighbour to place against: the four sides, plus the block below.
-        return standable(x, y - 1, z)
-                || hasSolidCollision(x + 1, y, z) || hasSolidCollision(x - 1, y, z)
-                || hasSolidCollision(x, y, z + 1) || hasSolidCollision(x, y, z - 1);
+        if (!openForPlace(d)) return false;        // need an open cell to fill (replaceable/empty — fluids count)
+        // Placement support (owner-verified vanilla semantics, s52b): a solid full cube — the only thing
+        // the bot ever places — can be placed against ANY ADJACENT block (all SIX faces, including the
+        // ceiling above) that is not vanilla-REPLACEABLE. Not "standable" (that's a walkability question —
+        // it wrongly excluded damaging floors like magma and made bridging out of a magma field
+        // impossible), and not "has a solid collision shape" either (torches/grass/dripstone are all
+        // legal support in vanilla despite empty collision). A replaceable neighbour (air, water, lava,
+        // fire, tall grass) is the one true non-support: placing "on" it would replace IT — the wrong
+        // cell. The two vanilla caveats don't apply here: the bot never places slabs (slab-merge) nor
+        // support-requiring blocks (torches). REPLACE_BIT is true per-state vanilla replaceability,
+        // interned at classification via the Replaceable seam — pure descriptor bit math, no
+        // block-identity checks.
+        return supportsPlacement(x, y - 1, z) || supportsPlacement(x, y + 1, z)
+                || supportsPlacement(x + 1, y, z) || supportsPlacement(x - 1, y, z)
+                || supportsPlacement(x, y, z + 1) || supportsPlacement(x, y, z - 1);
     }
 
     /**
-     * Whether {@code d} is an open target a placed block could fill — replaceable or genuinely empty, and
-     * holding no fluid. This is the "is the cell free" half of {@link #placeable}, split out because a
+     * Whether {@code d} is an open target a placed block could fill — vanilla-replaceable (which includes
+     * water AND lava — placing into a fluid is valid and seals it, owner ruling s52b) or genuinely empty.
+     * This is the "is the cell free" half of {@link #placeable}, split out because a
      * staircase step places a footing whose face comes from a freshly-placed <i>support</i> beneath it
      * (not from the footing's own neighbours), so {@code EditScratch} needs the open test on its own.
      */
@@ -918,8 +1020,10 @@ public final class MovementContext {
                 + (inv != null ? inv.placeRemovalPremium() : 0f);
     }
 
-    /** Whether a cell has any solid collision (a face to build against) — full block, slab, stair, … */
-    private boolean hasSolidCollision(int x, int y, int z) {
-        return NavBlock.hasCollision(descriptorAt(x, y, z)); // precomputed: solid, no fluid
+    /** Whether a cell can SUPPORT a solid-cube placement on/against it: any occupant that is not
+     *  vanilla-replaceable (owner-verified rule — includes torches, grass, dripstone, slabs, magma;
+     *  excludes air, fluids, fire, plants). An unbuilt cell reads AIR → replaceable → no support. */
+    private boolean supportsPlacement(int x, int y, int z) {
+        return !NavBlock.isReplaceable(descriptorAt(x, y, z));
     }
 }

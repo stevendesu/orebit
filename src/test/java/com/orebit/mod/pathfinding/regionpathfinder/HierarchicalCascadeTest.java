@@ -117,20 +117,34 @@ public class HierarchicalCascadeTest {
     }
 
     // ===================================================================================================
-    // Boundary clip tolerance (the cliff flip-flop fix) — a bot ONE region off the window is clipping an
-    // adjacent cell (a fall-lineup), NOT deviating; it must NOT re-derive. A farther-off bot still does.
+    // On-route tolerance (the cliff flip-flop fix, s52 form) — an off-window bot whose BLOCK PLAN vouches
+    // for the excursion (onRoute=true: the fall-lineup clip) must NOT re-derive; an off-window bot NOT on
+    // its plan is a genuine deviation and re-derives immediately, however small the excursion.
+    // (Replaced the old BOUNDARY_CLIP_CHEB "within 1 region counts as on it" spatial guess.)
     // ===================================================================================================
     @Test
-    void onBotMoved_oneRegionClip_doesNotReplan() {
+    void onBotMoved_offWindowButOnPlan_doesNotReplan() {
         HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, 0, new BlockPos(8, 4, 8), farGoalX(), CAPS);
         RegionPathPlan l0Before = h.l0Skeleton();
 
-        // Step ONE L0 region laterally off the +X skeleton (rz 0→1 at z=24) — a boundary clip. The old code
-        // fired a full suffix re-derive here, which reset the commit cursor and flipped the target every settle
-        // (the cliff-edge flip-flop). It must now be tolerated: no re-derive, L0 skeleton unchanged.
-        boolean changed = h.onBotMoved(new BlockPos(8, 4, 8 + 16));
-        assertFalse(changed, "a one-region clip must NOT re-derive the L0 segment");
-        assertSame(l0Before, h.l0Skeleton(), "the L0 skeleton is unchanged by a one-region clip");
+        // One L0 region laterally off the +X skeleton (rz 0→1 at z=24), with the block plan vouching for it
+        // (onRoute=true). Re-deriving here reset the commit cursor and flipped the target every settle (the
+        // cliff-edge flip-flop); it must be tolerated: no re-derive, L0 skeleton unchanged.
+        boolean changed = h.onBotMoved(new BlockPos(8, 4, 8 + 16), true);
+        assertFalse(changed, "an off-window step the block plan vouches for must NOT re-derive the L0 segment");
+        assertSame(l0Before, h.l0Skeleton(), "the L0 skeleton is unchanged by an on-plan excursion");
+    }
+
+    @Test
+    void onBotMoved_offWindowNotOnPlan_replans() {
+        HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, 0, new BlockPos(8, 4, 8), farGoalX(), CAPS);
+        RegionPathPlan l0Before = h.l0Skeleton();
+
+        // The same one-region excursion with NO plan vouching for it (onRoute=false): a genuine off-route
+        // deviation — re-derive promptly.
+        boolean changed = h.onBotMoved(new BlockPos(8, 4, 8 + 16), false);
+        assertTrue(changed, "an off-window step with no plan vouching for it must re-derive the L0 segment");
+        assertNotSame(l0Before, h.l0Skeleton(), "the L0 skeleton is re-derived from the deviated cell");
     }
 
     @Test
@@ -138,10 +152,9 @@ public class HierarchicalCascadeTest {
         HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, 0, new BlockPos(8, 4, 8), farGoalX(), CAPS);
         RegionPathPlan l0Before = h.l0Skeleton();
 
-        // Step THREE L0 regions off the skeleton (z=56) — a genuine off-route deviation, not a one-cell clip:
-        // the cascade must still re-derive promptly (the clip tolerance is exactly one region).
+        // Three L0 regions off the skeleton (z=56), not on any plan — a genuine off-route deviation.
         boolean changed = h.onBotMoved(new BlockPos(8, 4, 8 + 48));
-        assertTrue(changed, "a genuine (≥2-region) deviation must re-derive the L0 segment");
+        assertTrue(changed, "a genuine deviation must re-derive the L0 segment");
         assertNotSame(l0Before, h.l0Skeleton(), "the L0 skeleton is re-derived from the deviated cell");
     }
 

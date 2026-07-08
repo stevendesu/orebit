@@ -48,20 +48,15 @@ public final class StartSprintSwim implements Movement {
 
     /**
      * Initiate by diving + sprinting: look toward the (often lower) target and sprint, so vanilla submerges
-     * the bot and adopts the prone {@code Pose.SWIMMING} — the same drive as {@link SprintSwim}, since
-     * initiating IS "dive in and start sprint-swimming." Without this the default walk steer would just drift
-     * the bot at the surface instead of going prone.
+     * the bot and adopts the prone {@code Pose.SWIMMING} — the same drive as {@link SprintSwim}. The
+     * {@link SteerControl#holdDepth depth autopilot} rides {@link SteerControl#SUBMERGE_BIAS} under the
+     * planned depth (the sink half IS the dive — the bot must submerge to enter the prone pose instead of
+     * floating at the surface where it can't).
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
         SteerControl.swimTowards(b, path);
         b.setSprinting(true);
-    }
-
-    /** Entering the prone pose (the dive) — pin under the surface so the bot submerges to go prone instead of
-     *  floating at the surface where the pose can't be entered (see {@link Movement#keepsSubmerged}). */
-    @Override
-    public boolean keepsSubmerged() {
-        return true;
+        SteerControl.holdDepth(b, path, SteerControl.SUBMERGE_BIAS);
     }
 }

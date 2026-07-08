@@ -25,6 +25,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Headless proof of the {@code Parkour} RISING(+1) and FALLING(−1..) landing classes ({@code ParkourTest}
@@ -38,25 +39,24 @@ import net.minecraft.world.level.chunk.PalettedContainer;
  * <p><b>Positives.</b> Rising(+1) over a 2-gap with DEFAULT caps (no pillar available, no detour exists)
  * lands as exactly ONE Parkour waypoint at the STAND position {@code floor.above()}; a placing bot still
  * picks the 16.6-tick rising jump over a ~2-place bridge + step-up. Falling(−1) crosses a 3-gap AND the
- * owner-verified 4-gap with the default flags (the falling row's default envelope is 1–4 after the
- * envelope flip); the parabola-derived deeper drops (−2/−3) stay gated behind
- * {@link Parkour#AGGRESSIVE}, and so does the rising 3-gap (demoted from the default envelope after
- * in-game undershoots — the demotion note on {@code Parkour}'s envelope table). Fall damage is a COST,
- * not a
+ * owner-verified 4-gap; the parabola-derived deeper drops (−2/−3) and the rising 3-gap are in the same
+ * one unconditional envelope (s52 — the AGGRESSIVE flag is gone; the rising 3-gap's in-game undershoot
+ * is a takeoff-tuning pathology noted on {@code Parkour}'s envelope table, not a gate). Fall damage is a
+ * COST, not a
  * blocker: shrinking {@code safeFallDistance} on an otherwise-identical bot raises the SAME route's plan
  * cost by exactly {@code (drop − safeFall) ·} {@link BotCaps#costPerHitpoint} (the unified damage knob —
  * ≈1 HP per excess block × ticks-per-HP; both bots here carry the 100-tick default). A drop beyond
  * {@code maxFallDistance} is never emitted at all (plan is null, not merely expensive).
  *
- * <p><b>Envelope negatives.</b> A 5-gap is beyond every row of every table (never offered, even
- * aggressively); a drop deeper than −1 is aggressive-only; a blocked transit cell in a gap column
+ * <p><b>Envelope negatives.</b> A 5-gap is beyond every row of the table (never offered); a blocked
+ * transit cell in a gap column
  * ({@code y+2} stone) kills the whole direction; the rising jump's EXTRA clearance row ({@code y+4} over
  * the takeoff column and over a gap column) is verified — blocking either kills the +1 jump; a standable
- * cell mid-gap ENDS the scan (never overfly a ledge): at the (now default) flat cap of 3, a floored
+ * cell mid-gap ENDS the scan (never overfly a ledge): at the flat cap of 3, a floored
  * island in the middle of a 3-gap forces TWO 1-gap jumps instead of the cheaper single 3-gap jump the
  * scan must no longer see.
  *
- * <p>Flags touched ({@link Parkour#AGGRESSIVE}, {@link Parkour#PARKOUR_MAX_GAP}) are restored in
+ * <p>Flags touched ({@link Parkour#PARKOUR_MAX_GAP}) are restored in
  * {@code finally}. Not testable headless: jump kinematics, drop-control steering, missed-jump recovery
  * (the in-game pass).
  */
@@ -108,29 +108,19 @@ class ParkourLandingsTest {
     }
 
     @Test
-    void risingThreeGapIsAggressiveOnly() {
-        // 3-gap, landing floor y=6: parabola-legal but demoted from the default envelope (it consistently
-        // undershoots in-game — the sprint-speed-at-takeoff note on Parkour's envelope table), so the
-        // default plan must be NULL (no other route: DEFAULT caps can't pillar, the corridor is 1-wide,
-        // the chasm bottomless) while AGGRESSIVE still offers it for takeoff tuning.
+    void risingThreeGapIsOffered() {
+        // 3-gap, landing floor y=6: parabola-legal and (s52) in the one unconditional envelope — the
+        // AGGRESSIVE flag is gone. The known in-game undershoot is a takeoff-tuning pathology to fix,
+        // not an envelope gate (see Parkour's class Javadoc).
         NavGridView grid = buildCourse(3, 6, null);
         BlockPos goal = new BlockPos(9, 6, 8);
-        assertNull(BlockPathfinder.findPath(grid, START, goal, BotCaps.DEFAULT, CORRIDOR),
-                "the rising 3-gap must not be offered with default flags (demoted to AGGRESSIVE)");
-
-        boolean saved = Parkour.AGGRESSIVE;
-        Parkour.AGGRESSIVE = true;
-        try {
-            BlockPathPlan plan = BlockPathfinder.findPath(grid, START, goal, BotCaps.DEFAULT, CORRIDOR);
-            assertNotNull(plan, "AGGRESSIVE should re-open the rising 3-gap");
-            assertEquals(1, count(plan, MovementRegistry.PARKOUR),
-                    "the rising 3-gap should be exactly one Parkour waypoint");
-            // Stand position above the +1 landing floor (8,6,8).
-            assertEquals(new BlockPos(8, 7, 8), waypointOf(plan, MovementRegistry.PARKOUR),
-                    "the rising 3-gap's waypoint should be the stand position above the +1 landing floor");
-        } finally {
-            Parkour.AGGRESSIVE = saved;
-        }
+        BlockPathPlan plan = BlockPathfinder.findPath(grid, START, goal, BotCaps.DEFAULT, CORRIDOR);
+        assertNotNull(plan, "the rising 3-gap should be offered (one envelope, always on)");
+        assertEquals(1, count(plan, MovementRegistry.PARKOUR),
+                "the rising 3-gap should be exactly one Parkour waypoint");
+        // Stand position above the +1 landing floor (8,6,8).
+        assertEquals(new BlockPos(8, 7, 8), waypointOf(plan, MovementRegistry.PARKOUR),
+                "the rising 3-gap's waypoint should be the stand position above the +1 landing floor");
     }
 
     @Test
@@ -212,73 +202,46 @@ class ParkourLandingsTest {
 
     @Test
     void fallingFiveGapIsNeverOffered() {
-        // Equivalent negative to the old aggressive gate on the 4-gap: a 5-gap exceeds every row of both
-        // envelope tables (default AND aggressive — the flag opens deeper DROPS, never wider gaps), so
-        // the scan horizon itself ends before the far platform and no route exists.
+        // A 5-gap exceeds every row of the (one, unconditional) envelope table, so the scan horizon
+        // itself ends before the far platform and no route exists.
         NavGridView grid = buildCourse(5, 4, null);
         BlockPos goal = new BlockPos(11, 4, 8);
         assertNull(BlockPathfinder.findPath(grid, START, goal, BotCaps.DEFAULT, CORRIDOR),
-                "a falling 5-gap must not be offered with default flags");
-
-        boolean saved = Parkour.AGGRESSIVE;
-        Parkour.AGGRESSIVE = true;
-        try {
-            assertNull(BlockPathfinder.findPath(grid, START, goal, BotCaps.DEFAULT, CORRIDOR),
-                    "a falling 5-gap must not be offered even under AGGRESSIVE");
-        } finally {
-            Parkour.AGGRESSIVE = saved;
-        }
+                "a falling 5-gap must never be offered");
     }
 
     @Test
-    void deeperFallingJumpIsAggressiveOnlyAndChargesDamage() {
-        // 2-gap, landing floor y=3 (drop 2): the default table stops at drop 1, so this is null until
-        // AGGRESSIVE; once open, shrinking the safe window to 0 surcharges 2 blocks of damage on the
-        // same forced route.
+    void deeperFallingJumpIsOfferedAndChargesDamage() {
+        // 2-gap, landing floor y=3 (drop 2): in the one unconditional envelope (s52). Shrinking the
+        // safe window to 0 surcharges 2 blocks of damage on the same forced route.
         NavGridView grid = buildCourse(2, 3, null);
         BlockPos goal = new BlockPos(8, 3, 8);
-        assertNull(BlockPathfinder.findPath(grid, START, goal, BotCaps.DEFAULT, CORRIDOR),
-                "a −2 falling jump must not be offered with default flags");
+        BlockPathPlan free = BlockPathfinder.findPath(grid, START, goal, BotCaps.DEFAULT, CORRIDOR);
+        assertNotNull(free, "the −2 falling jump should be offered (one envelope, always on)");
+        assertEquals(1, count(free, MovementRegistry.PARKOUR),
+                "one −2 falling jump should be exactly one Parkour waypoint");
+        // Any landing on the low platform stands at y=4 (floor y=3 + 1) — the exact column is the
+        // search's choice between equal-drop landings, so pin only the stand height.
+        assertEquals(4, waypointOf(free, MovementRegistry.PARKOUR).getY(),
+                "the −2 jump's waypoint should STAND one above the y=3 landing floor");
 
-        boolean saved = Parkour.AGGRESSIVE;
-        Parkour.AGGRESSIVE = true;
-        try {
-            BlockPathPlan free = BlockPathfinder.findPath(grid, START, goal, BotCaps.DEFAULT, CORRIDOR);
-            assertNotNull(free, "AGGRESSIVE should open the −2 falling jump");
-            assertEquals(1, count(free, MovementRegistry.PARKOUR),
-                    "one −2 falling jump should be exactly one Parkour waypoint");
-            // Any landing on the low platform stands at y=4 (floor y=3 + 1) — the exact column is the
-            // search's choice between equal-drop landings, so pin only the stand height.
-            assertEquals(4, waypointOf(free, MovementRegistry.PARKOUR).getY(),
-                    "the −2 jump's waypoint should STAND one above the y=3 landing floor");
-
-            BlockPathPlan hurt = BlockPathfinder.findPath(grid, START, goal,
-                    capsWithFallWindow(0, BotCaps.DEFAULT_MAX_FALL), CORRIDOR);
-            assertNotNull(hurt, "damage is a cost, not a blocker");
-            assertEquals(2 * BotCaps.DEFAULT_COST_PER_HITPOINT, hurt.cost() - free.cost(), 1e-3,
-                    "two blocks past the safe window should surcharge exactly 2 HP × costPerHitpoint");
-        } finally {
-            Parkour.AGGRESSIVE = saved;
-        }
+        BlockPathPlan hurt = BlockPathfinder.findPath(grid, START, goal,
+                capsWithFallWindow(0, BotCaps.DEFAULT_MAX_FALL), CORRIDOR);
+        assertNotNull(hurt, "damage is a cost, not a blocker");
+        assertEquals(2 * BotCaps.DEFAULT_COST_PER_HITPOINT, hurt.cost() - free.cost(), 1e-3,
+                "two blocks past the safe window should surcharge exactly 2 HP × costPerHitpoint");
     }
 
     @Test
     void fallingJumpIsNeverEmittedBeyondMaxFallDistance() {
-        // Same −2 course with AGGRESSIVE on (so the envelope TABLE offers the drop): a bot whose
+        // Same −2 course (the envelope TABLE offers the drop unconditionally): a bot whose
         // maxFallDistance is 1 must not get the candidate at all — rejection, not a damage surcharge.
         NavGridView grid = buildCourse(2, 3, null);
         BlockPos goal = new BlockPos(8, 3, 8);
-
-        boolean saved = Parkour.AGGRESSIVE;
-        Parkour.AGGRESSIVE = true;
-        try {
-            assertNotNull(BlockPathfinder.findPath(grid, START, goal, BotCaps.DEFAULT, CORRIDOR),
-                    "sanity: the −2 jump is open for a bot whose caps allow the drop");
-            assertNull(BlockPathfinder.findPath(grid, START, goal, capsWithFallWindow(1, 1), CORRIDOR),
-                    "a drop beyond maxFallDistance must never be emitted, however the table reads");
-        } finally {
-            Parkour.AGGRESSIVE = saved;
-        }
+        assertNotNull(BlockPathfinder.findPath(grid, START, goal, BotCaps.DEFAULT, CORRIDOR),
+                "sanity: the −2 jump is open for a bot whose caps allow the drop");
+        assertNull(BlockPathfinder.findPath(grid, START, goal, capsWithFallWindow(1, 1), CORRIDOR),
+                "a drop beyond maxFallDistance must never be emitted, however the table reads");
     }
 
     // ---------------------------------------------------------------- scan termination
@@ -340,7 +303,7 @@ class ParkourLandingsTest {
         BlockState stone = Blocks.STONE.defaultBlockState();
 
         PalettedContainer<BlockState> s = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int y = 0; y < 16; y++) {
                 for (int z = 0; z < 16; z++) {
@@ -373,7 +336,7 @@ class ParkourLandingsTest {
         NavSectionBuilder.classifyInto(s, false, section.getTraversalGrid());
 
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airSection = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
 

@@ -113,6 +113,19 @@ public final class BlockPathfinder {
     public static boolean TRACE = false;
 
     /**
+     * Optional per-search rollover hook for a LONG-LIVED trace sink (the headless autotest, which leaves
+     * {@link #TRACE} on for a whole run of many searches): when non-null AND {@link #TRACE} is on, invoked
+     * once at {@code findPath} entry (after the start-ground check, before the first {@code E} line) with
+     * the search's start and goal floors, so the sink can rotate {@link #TRACE_OUT} to a fresh per-search
+     * file and write its own header. Null in normal play AND for {@code /bot trace} (which opens and owns
+     * its single file itself) — both stay byte-identical. Cold: consulted once per SEARCH (behind the
+     * {@code TRACE} gate), never per node. Single-sink like {@code TRACE_OUT} itself, so a long-lived
+     * consumer needs sync pathing ({@code pathing.async=false}) — concurrent planner-thread searches
+     * would interleave through one rotating writer.
+     */
+    public static java.util.function.BiConsumer<BlockPos, BlockPos> TRACE_SEARCH_START;
+
+    /**
      * The node ceiling of a TIME-capped search ({@code budgetNanos != 0}) — a pure MEMORY backstop
      * (DESIGN-background-pathfinding.md §6): time is the binding limit by design, so the configured
      * sync {@code pathing.syncSearchBudgetNodes} (default 10k, which a 250 ms budget would never outlast) is
@@ -160,8 +173,9 @@ public final class BlockPathfinder {
      * Irreversibility guard for PARTIAL paths — <b>ON.</b> A budget-exhausted partial walks the bot to a
      * closest-approach cell <i>off</i> the region skeleton (the search never reached the window target, so the
      * region tier never vouched for that cell). If getting there crosses an <b>irreversible</b> move — a drop
-     * deeper than the bot can climb back without placing ({@code drop &gt; jumpHeight && !canPlace}: a {@code
-     * Fall}/{@code MineDown} a no-place bot can't undo) — committing it can ratchet the bot into a one-way trap
+     * deeper than the bot can climb back without placing ({@code !canPlace} and the rise back exceeds the jump
+     * budget, measured between the two floors' REAL tops in sixteenths — a drop onto a slab is half a block
+     * deeper than its block-level delta; see {@code lastReversibleRow}) — committing it can ratchet the bot into a one-way trap
      * it then can't leave (the deep cave-descent stranding: ~48 blocks of one-way falls toward a portal that
      * turned out block-unreachable). So a partial is truncated to the <b>last cell before its first irreversible
      * move</b>; if that makes no real progress the partial is suppressed and the bot stays put — never the
@@ -638,14 +652,39 @@ public final class BlockPathfinder {
 
     /**
      * As above, additionally threading the region-informed cost-to-goal heuristic {@code regionField} (see the
-     * {@code (…, baseline, regionField)} overload). This is the deepest overload — every other delegates here.
-     * {@code null} {@code regionField} is byte-identical to the pre-region-heuristic search.
+     * {@code (…, baseline, regionField)} overload). {@code null} {@code regionField} is byte-identical to the
+     * pre-region-heuristic search. Uses the {@link #DEFAULT_GOAL_TOL_XZ default} goal tolerance.
      */
     public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
                                          BotCaps caps, RegionBound confineBound, RegionBound cuboidBound,
                                          MovementContext.InventoryView inventory, int startModeOverride,
                                          EditSnapshot baseline, long budgetNanos,
                                          com.orebit.mod.pathfinding.regionpathfinder.RegionCostField regionField) {
+        return findPath(grid, startFloor, goalFloor, caps, confineBound, cuboidBound, inventory,
+                startModeOverride, baseline, budgetNanos, regionField,
+                DEFAULT_GOAL_TOL_XZ, DEFAULT_GOAL_TOL_Y);
+    }
+
+    /** The historical goal-arrival tolerance: within 1 block horizontally / 2 vertically counts as reached —
+     *  right for "get NEAR this cell" goals (window portals, follow, mining reach). Callers whose "done" is
+     *  standing ON the exact cell (drop pickup) pass 0/0 instead (s52: the tolerance is the CALLER's
+     *  definition of done, not the search's — the reached-vs-done decoupling). */
+    public static final int DEFAULT_GOAL_TOL_XZ = 1;
+    public static final int DEFAULT_GOAL_TOL_Y = 2;
+
+    /**
+     * As above with an explicit goal-arrival tolerance ({@code goalTolXZ}/{@code goalTolY} — the Chebyshev
+     * box around {@code goalFloor} whose entry ends the search). This is the deepest overload — every other
+     * delegates here. {@code (1, 2)} reproduces the historical behaviour byte-for-byte; {@code (0, 0)} makes
+     * the search land ON the exact goal cell (drop collection — standing adjacent leaves the item outside
+     * the pickup box, the stare-at-the-drop bug).
+     */
+    public static BlockPathPlan findPath(NavGridView grid, BlockPos startFloor, BlockPos goalFloor,
+                                         BotCaps caps, RegionBound confineBound, RegionBound cuboidBound,
+                                         MovementContext.InventoryView inventory, int startModeOverride,
+                                         EditSnapshot baseline, long budgetNanos,
+                                         com.orebit.mod.pathfinding.regionpathfinder.RegionCostField regionField,
+                                         int goalTolXZ, int goalTolY) {
         final long t0 = System.nanoTime();
         LAST_EXPANSIONS_TL.get()[0] = 0; // reset the instrumentation seam (covers the early no-start-ground return)
         LAST_PARTIAL_TL.get()[0] = false;
@@ -656,6 +695,13 @@ public final class BlockPathfinder {
         if (!grid.built(sx, sy, sz)) {
             if (LOG_TIMING) logTiming(t0, 0, false, "no-start-ground", sx, sy, sz, gx, gy, gz);
             return null;
+        }
+
+        // Long-lived trace sinks (the headless autotest) rotate TRACE_OUT here, once per search — see
+        // TRACE_SEARCH_START. Null for /bot trace and in normal play; the whole block is TRACE-gated.
+        if (TRACE) {
+            java.util.function.BiConsumer<BlockPos, BlockPos> roll = TRACE_SEARCH_START;
+            if (roll != null) roll.accept(startFloor, goalFloor);
         }
 
         // Read the configurable search params into search-start locals ONCE — the hot loop's budget test
@@ -746,7 +792,7 @@ public final class BlockPathfinder {
             if (nodes.poppedF > nodes.f[current]) continue;
 
             int cx = nodes.x[current], cy = nodes.y[current], cz = nodes.z[current];
-            if (isGoal(cx, cy, cz, gx, gy, gz)) {
+            if (isGoal(cx, cy, cz, gx, gy, gz, goalTolXZ, goalTolY)) {
                 reachedRow = current;
                 break;
             }
@@ -842,7 +888,8 @@ public final class BlockPathfinder {
                 // Irreversibility guard: don't commit a partial past a move the bot can't undo (§IRREVERSIBLE_GUARD).
                 // Truncate to the last cell before the first unclimbable drop, then re-check that the (shorter)
                 // commit still makes real progress — if not, suppress the partial entirely (the bot stays put).
-                int commitRow = IRREVERSIBLE_GUARD ? lastReversibleRow(nodes, startRow, bestRow, caps) : bestRow;
+                int commitRow = IRREVERSIBLE_GUARD
+                        ? lastReversibleRow(ctx, nodes, startRow, bestRow, caps) : bestRow;
                 if (commitRow != startRow) {
                     float commitH = relaxer.h(nodes.x[commitRow], nodes.y[commitRow], nodes.z[commitRow]);
                     if ((relaxer.h(sx, sy, sz) - commitH) > PARTIAL_MIN_PROGRESS) {
@@ -1023,8 +1070,8 @@ public final class BlockPathfinder {
         }
     }
 
-    private static boolean isGoal(int x, int y, int z, int gx, int gy, int gz) {
-        return Math.abs(x - gx) <= 1 && Math.abs(z - gz) <= 1 && Math.abs(y - gy) <= 2;
+    private static boolean isGoal(int x, int y, int z, int gx, int gy, int gz, int tolXZ, int tolY) {
+        return Math.abs(x - gx) <= tolXZ && Math.abs(z - gz) <= tolXZ && Math.abs(y - gy) <= tolY;
     }
 
     /** Bias added to Y before packing it into {@link #key} so the (often-negative) world Y lands in the
@@ -1158,16 +1205,32 @@ public final class BlockPathfinder {
     /**
      * The furthest node along the partial path {@code start → best} the bot can reach WITHOUT crossing an
      * irreversible move — the irreversibility guard's commit point ({@link #IRREVERSIBLE_GUARD}). A move is
-     * irreversible when it drops the bot further than it can climb back unaided: {@code drop > jumpHeight}
-     * (one jump regains at most {@code jumpHeight}) and the bot {@code !canPlace} (so it can't pillar back up).
-     * Returns {@code startRow} when the very first edge is irreversible (⇒ suppress the partial, stay put), or
-     * {@code bestRow} when the whole partial is reversible (or the bot can place, so nothing is irreversible).
+     * irreversible when the bot can't climb back up it unaided and {@code !canPlace} (so it can't pillar
+     * back up). "Climb back" is measured in <b>real surface heights, in sixteenths</b> (the block-height
+     * canon), not whole block levels: each node's standing surface is {@code y·16 + topY(floor)} (a slab
+     * floor is 8/16 lower than a full block), and the edge is irreversible when the rise BACK up it
+     * exceeds the jump budget {@code jumpHeight·16 + (JUMP_RISE − 16)} — i.e. {@code jumpHeight} whole
+     * blocks plus the 4/16 apex margin ({@link MovementContext#JUMP_RISE} = 20 for the vanilla
+     * {@code jumpHeight == 1}). So a one-block-level drop ONTO a slab is a 24/16 (1.5-block) drop whose
+     * return jump needs 24 > 20 — irreversible for a no-place bot — while the same drop between full
+     * blocks is 16 ≤ 20 (reversible, exactly the old whole-block behaviour: for full tops the test
+     * reduces to {@code drop > jumpHeight}).
      *
-     * <p>Cold path: one walk per budget-exhausted partial, never on the search hot loop. The {@code drop} is
-     * read per A* edge from the stored node Ys; a macro Fall/MineDown carries its full collapsed drop, so it is
-     * correctly seen as one big irreversible edge and the commit stops before it (not mid-drop).
+     * <p>Returns {@code startRow} when the very first edge is irreversible (⇒ suppress the partial, stay
+     * put), or {@code bestRow} when the whole partial is reversible (or the bot can place, so nothing is
+     * irreversible).
+     *
+     * <p>Cold path: one walk per budget-exhausted partial, never on the search hot loop — the per-node
+     * {@code floorSurface} reads (two per edge, cached-section resolves) are fine here. The {@code ctx}
+     * reads see whatever {@link PathEdits} diff the search last loaded, not necessarily this chain's; for
+     * a {@code !canPlace} bot (the only kind that reaches the walk) the diff holds only BREAKS, and a
+     * stale-broken floor cell reads as air → {@code floorSurface} 16, i.e. that node degrades to the
+     * historical whole-block arithmetic — never a NEW kind of wrong answer. A macro Fall/MineDown carries
+     * its full collapsed drop on one edge, so it is correctly seen as one big irreversible edge and the
+     * commit stops before it (not mid-drop).
      */
-    private static int lastReversibleRow(Nodes nodes, int startRow, int bestRow, BotCaps caps) {
+    private static int lastReversibleRow(MovementContext ctx, Nodes nodes, int startRow, int bestRow,
+                                         BotCaps caps) {
         if (caps.canPlace()) return bestRow; // a placing bot can always pillar back out — nothing is one-way
         // Collect the start→best chain forward, then walk to the first unclimbable drop.
         List<Integer> rows = new ArrayList<>();
@@ -1176,11 +1239,19 @@ public final class BlockPathfinder {
             if (n == startRow) break;
         }
         Collections.reverse(rows);
-        final int jump = caps.jumpHeight();
+        // The rise (sixteenths) one jump regains: jumpHeight whole blocks + the 4/16 apex margin the
+        // vanilla 1.25-block jump has over its 1-block gain (JUMP_RISE = 20 = 16 + 4). Derived, not
+        // hardcoded, so a jump-boosted bot (jumpHeight 2 → 36) scales the same way.
+        final int jumpRise = caps.jumpHeight() * 16 + (MovementContext.JUMP_RISE - 16);
         for (int i = 1; i < rows.size(); i++) {
             int p = rows.get(i - 1), n = rows.get(i);
-            int drop = nodes.y[p] - nodes.y[n]; // > 0 = this edge descended
-            if (drop > jump) return p;          // stop just before the first drop the bot can't climb back
+            // Rise back up this edge between the two REAL standing surfaces (block level ·16 + the
+            // effective floor surface: floorSurface reads a standable floor's topY, and 16 for a
+            // non-standable float "floor" — a swim node's water floor — so all-water chains keep the
+            // whole-block arithmetic they had before).
+            int riseBack = nodes.y[p] * 16 + ctx.floorSurface(nodes.x[p], nodes.y[p], nodes.z[p])
+                    - (nodes.y[n] * 16 + ctx.floorSurface(nodes.x[n], nodes.y[n], nodes.z[n]));
+            if (riseBack > jumpRise) return p;  // stop just before the first drop the bot can't climb back
         }
         return bestRow; // whole partial is reversible
     }

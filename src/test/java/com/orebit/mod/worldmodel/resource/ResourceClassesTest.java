@@ -39,7 +39,12 @@ public class ResourceClassesTest {
         // Non-indexed / non-tracked map to -1.
         assertEquals(-1, ResourceClasses.columnForBlock(block("stone")), "stone -> -1 (registry-only)");
         assertEquals(-1, ResourceClasses.columnForBlock(block("deepslate")), "deepslate block -> -1 (saturates)");
-        assertEquals(-1, ResourceClasses.columnForBlock(block("oak_log")), "oak_log -> -1 (registry-only)");
+        // s52: LOG is column-bound now (23, "wood") — /bot gather wood is an owner-directed feature.
+        int woodCol = ResourceClasses.columnForBlock(block("oak_log"));
+        assertTrue(woodCol >= 0, "oak_log must be indexed (the wood column, s52)");
+        assertEquals(woodCol, ResourceClasses.columnForName("wood"), "columnForName(wood) matches oak_log");
+        assertEquals(woodCol, ResourceClasses.columnForBlock(block("crimson_stem")),
+                "stems share the LOG class -> the wood column");
 
         // andesite is an indexed builder-palette block.
         int andesiteCol = ResourceClasses.columnForBlock(block("andesite"));
@@ -53,7 +58,7 @@ public class ResourceClassesTest {
         assertEquals(ironCol, ResourceClasses.columnForName("iron"), "columnForName(iron) matches block");
 
         // Column count and full name round-trip over every column.
-        assertEquals(23, ResourceClasses.columnCount(), "23 indexed columns");
+        assertEquals(24, ResourceClasses.columnCount(), "24 indexed columns (s52: +wood at 23)");
         for (int c = 0; c < ResourceClasses.columnCount(); c++) {
             String name = ResourceClasses.nameOfColumn(c);
             assertNotNull(name, "column " + c + " must have a name");

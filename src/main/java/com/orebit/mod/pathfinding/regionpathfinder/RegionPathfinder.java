@@ -143,12 +143,11 @@ public final class RegionPathfinder {
     static final float FALL_PER_BLOCK_FIELD = 0.54f;
 
     /**
-     * Dig budget (breakable-solid cells) for the goal dig-flood ({@link RegionGrid#goalDigSeeds}) that seeds the
-     * cost-to-goal field. A buried goal reachable only past this many blocks of rock falls back to the single
-     * nearest-centroid seed. Bounds the cold per-plan flood (a 6-connected diamond of ≤ this radius) and reflects
-     * that a dig deeper than ~a dozen blocks to a buried target is rarely the optimal route vs. an exposed one.
+     * Dig budget (breakable-solid cells) for the goal dig-flood that seeds the cost-to-goal field. Lives on
+     * {@link RegionGrid#MAX_GOAL_DIG_CELLS} (the flood's owner — it also sizes the flood's pooled scratch);
+     * aliased here because every {@code goalDigSeeds} call site in this class passes it.
      */
-    static final int MAX_GOAL_DIG_CELLS = 12;
+    static final int MAX_GOAL_DIG_CELLS = RegionGrid.MAX_GOAL_DIG_CELLS;
 
     /**
      * Reserved fragment id for the <b>virtual goal node</b> (the skeleton-side dig-flood). A buried/walled goal
@@ -642,19 +641,52 @@ public final class RegionPathfinder {
     // ===================================================================================================
 
     /**
+     * As {@link #costToGoalField(RegionGrid, int, BlockPos, BlockPos, boolean, boolean, int, RegionMineModel,
+     * RegionPlaceModel, RegionBox)} with no start cell — the Dijkstra runs to exhaustion (no fat-skeleton early
+     * exit; the frontier floor is still computed). Kept for start-less callers (goal-anchored diagnostics,
+     * fixture guards, the bench's EXHAUST arm).
+     */
+    public static RegionCostField costToGoalField(RegionGrid grid, int minY, BlockPos goalFloor,
+                                                  boolean canBreak, boolean canPlace, int safeFall,
+                                                  RegionMineModel mine, RegionPlaceModel place, RegionBox bound) {
+        return costToGoalField(grid, minY, goalFloor, null, canBreak, canPlace, safeFall, mine, place, bound);
+    }
+
+    /**
      * Build a <b>goal-rooted, bounded Dijkstra cost-to-goal field</b> over the level-0 fragment graph: seed the
-     * goal region/fragment at {@code g=0} and exhaust the heap confined to {@code bound}, recording the
+     * goal region/fragment at {@code g=0} and flood the heap confined to {@code bound}, recording the
      * min-over-fragments settled {@code g} per region into a {@link RegionCostField}. It reuses the SAME derived
      * edge model as the A* ({@link #expandNode}) — the ONLY differences are (a) the search is rooted at the goal
-     * and never goal-tests (it floods the whole box), and (b) the heuristic is suppressed ({@code dijkstra=true},
-     * so {@code f == g}) making the settle order a true shortest-first Dijkstra. Runs on the dedicated
-     * {@link #FIELD_SEARCH} state so it can coexist with an in-flight region A* on the same thread.
+     * and never goal-tests, and (b) the heuristic is suppressed ({@code dijkstra=true}, so {@code f == g})
+     * making the settle order a true shortest-first Dijkstra. Runs on the dedicated {@link #FIELD_SEARCH} state
+     * so it can coexist with an in-flight region A* on the same thread.
+     *
+     * <h4>Fat-skeleton early exit + frontier floor (s53, owner-ratified)</h4>
+     * When {@code startFloor} (the bot's floor cell) is given and its region lies inside {@code bound}, the
+     * Dijkstra no longer exhausts the box. It stops once
+     * <ol>
+     *   <li>the start {@code (region, fragment)} settles (any entry-face row — Dijkstra settles the cheapest
+     *       first), at which point the optimal goal→start region chain is reconstructed from the parent links,
+     *       and</li>
+     *   <li>every region within Chebyshev 1 of that chain (the <b>fat skeleton</b>) has all its REACHED work
+     *       finished — every enqueued row in a marked region is settled. Rows never enqueued by then need no
+     *       wait: their slots read the frontier floor.</li>
+     * </ol>
+     * Tracking is O(1)-amortized per pop (a pending counter fed by a stamp-marked region set — no per-pop box
+     * scan). Because the early-exit run is an exact PREFIX of the exhaustive run (same seeds, same relax order),
+     * every slot it settles carries its exhaustive value. At termination the field's frontier floor is set to
+     * the maximum settled cost — by Dijkstra's nondecreasing settle order a provable lower bound on every
+     * unsettled slot's true field value (see {@link RegionCostField}) — and {@link RegionCostField#costAt}
+     * returns {@code max(floor, cheb × MIN_CROSS)} for unsettled/out-of-box queries, never {@code UNREACHED}.
+     * If the start region is outside the box, {@code startFloor} is {@code null}, or the start never settles
+     * (walled off for these caps / expansion backstop), the build falls back to today's exhaustion — never a
+     * hole without a floor.
      *
      * <p>NOTE: because the fragment edge model prices a crossing by the FROM-node's geometry (entry→exit walk,
      * our-rock dig-through), the field is an admissible-ish approximation of "cost to reach the goal FROM here",
      * not an exact reverse metric; it is intended as a coarse guidance field, not a substitute for the A*.
      */
-    public static RegionCostField costToGoalField(RegionGrid grid, int minY, BlockPos goalFloor,
+    public static RegionCostField costToGoalField(RegionGrid grid, int minY, BlockPos goalFloor, BlockPos startFloor,
                                                   boolean canBreak, boolean canPlace, int safeFall,
                                                   RegionMineModel mine, RegionPlaceModel place, RegionBox bound) {
         // Capability-aware pillar cost for the field's upward-climb term (place-side sibling of the mine model);
@@ -690,7 +722,30 @@ public final class RegionPathfinder {
             seedField(nodes, grx, gry, grz, goalFrag, 0f);
         }
 
-        final RegionCostField field = new RegionCostField(bound, minY, grid);
+        // Fat-skeleton arming: resolve the start (region, fragment) up front (cold, once per build). Out-of-box
+        // start ⇒ stay unarmed ⇒ exhaustive (the ratified fallback).
+        int srx = 0, sry = 0, srz = 0, startFrag = -1;
+        boolean armed = false;
+        if (startFloor != null) {
+            srx = RegionAddress.regionX(startFloor.getX(), 0);
+            sry = RegionAddress.regionY(startFloor.getY(), 0, minY);
+            srz = RegionAddress.regionZ(startFloor.getZ(), 0);
+            if (bound.contains(srx, sry, srz)) {
+                grid.ensureLeaf(srx, sry, srz);
+                startFrag = startFragment(grid, 0, srx, sry, srz, startFloor);
+                armed = true;
+            }
+        }
+        final int dimX = bound.maxRx - bound.minRx + 1;
+        final int dimY = bound.maxRy - bound.minRy + 1;
+        final int dimZ = bound.maxRz - bound.minRz + 1;
+        boolean marking = false;   // start settled + fat skeleton marked — phase 2
+        int pendingMarked = 0;     // reached-but-unsettled rows in marked regions (phase-2 termination gate)
+        boolean earlyExit = false;
+
+        final RegionCostField field = new RegionCostField(bound, minY, grid, grx, gry, grz);
+        float maxSettled = 0f;     // the frontier floor: max settled g (== last settled g, Dijkstra order)
+        int settles = 0;
         int expansions = 0;
         while (nodes.heapSize > 0) {
             int current = nodes.pop();
@@ -706,12 +761,97 @@ public final class RegionPathfinder {
             int ex = nodes.portalX[current], ey = nodes.portalY[current], ez = nodes.portalZ[current];
             if (ex == NO_PORTAL) { ex = goalFloor.getX(); ey = goalFloor.getY(); ez = goalFloor.getZ(); }
             field.record(crx, cry, crz, fragA, nodes.g[current], ex, ey, ez, onward); // per-(region,fragment) cost + gradient
+            nodes.closed[current] = true;
+            settles++;
+            if (nodes.g[current] > maxSettled) maxSettled = nodes.g[current];
+            if (marking && regionMarked(nodes, bound, dimX, dimZ, crx, cry, crz)) pendingMarked--;
             if (++expansions > MAX_REGION_EXPANSIONS) break;
+            final int rowsBefore = nodes.count;
             expandNode(nodes, current, expansions, grid, 0, minY, grx, gry, grz,
                     goalFloor.getX(), goalFloor.getY(), goalFloor.getZ(),
                     canBreak, canPlace, safeFall, null, mine, pillarField, 1.0f, bound, true);
+            if (marking) {
+                // Phase 2: rows first reached by THIS expansion join the pending count if they sit in the fat
+                // skeleton (relaxFrag admits a fresh row exactly once — later relaxes reuse it).
+                for (int r = rowsBefore; r < nodes.count; r++) {
+                    if (regionMarked(nodes, bound, dimX, dimZ, nodes.x[r], nodes.y[r], nodes.z[r])) pendingMarked++;
+                }
+            } else if (armed && crx == srx && cry == sry && crz == srz && fragA == startFrag) {
+                // The start (region, fragment) just settled: reconstruct the optimal goal→start region chain from
+                // the parent links, mark its Chebyshev-1 neighbourhood (the fat skeleton), and count the reached-
+                // but-unsettled rows inside it — the remaining work before the early exit may fire. The scan runs
+                // ONCE per build (not per pop); afterwards the counter is maintained incrementally above.
+                field.chainRegions = markFatSkeleton(nodes, current, bound, dimX, dimY, dimZ);
+                marking = true;
+                pendingMarked = 0;
+                for (int r = 0; r < nodes.count; r++) {
+                    if (!nodes.closed[r]
+                            && regionMarked(nodes, bound, dimX, dimZ, nodes.x[r], nodes.y[r], nodes.z[r])) {
+                        pendingMarked++;
+                    }
+                }
+            }
+            if (marking && pendingMarked == 0) {
+                earlyExit = true;
+                break;
+            }
         }
+        field.setFloor(maxSettled);
+        final int[] stats = LAST_FIELD_STATS.get();
+        stats[0] = settles;
+        stats[1] = earlyExit ? 1 : 0;
         return field;
+    }
+
+    /** Diagnostics for the last {@link #costToGoalField} build on this thread: [0] = settles, [1] = early exit. */
+    private static final ThreadLocal<int[]> LAST_FIELD_STATS = ThreadLocal.withInitial(() -> new int[2]);
+
+    /** Settled-pop count of this thread's last {@link #costToGoalField} build (bench/test diagnostics). */
+    static int lastFieldSettles() {
+        return LAST_FIELD_STATS.get()[0];
+    }
+
+    /** Whether this thread's last {@link #costToGoalField} build terminated via the fat-skeleton early exit. */
+    static boolean lastFieldEarlyExit() {
+        return LAST_FIELD_STATS.get()[1] != 0;
+    }
+
+    /**
+     * Reconstruct the optimal goal→start region chain from {@code startRow}'s parent links and stamp-mark every
+     * box region within Chebyshev 1 of it — the <b>fat skeleton</b> (≤ 27 regions per chain step, deduped by the
+     * stamp). The mark scratch is pooled on {@link Nodes} (stamp-cleared, grown geometrically — no per-build
+     * clearing or steady-state allocation). Returns the chain as {@code (rx,ry,rz)} triplets for the
+     * {@link RegionCostField#chainRegions} diagnostic (one small array per build, cold).
+     */
+    private static int[] markFatSkeleton(Nodes nodes, int startRow, RegionBox bound, int dimX, int dimY, int dimZ) {
+        int len = 0;
+        for (int n = startRow; n != -1; n = nodes.parent[n]) len++;
+        final int[] chain = new int[len * 3];
+        nodes.ensureMarkCapacity(dimX * dimY * dimZ);
+        nodes.markGen++;
+        int i = 0;
+        for (int n = startRow; n != -1; n = nodes.parent[n]) {
+            final int rx = nodes.x[n], ry = nodes.y[n], rz = nodes.z[n];
+            chain[i++] = rx; chain[i++] = ry; chain[i++] = rz;
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        final int mx = rx + dx, my = ry + dy, mz = rz + dz;
+                        if (!bound.contains(mx, my, mz)) continue; // out-of-box neighbours are never enqueued
+                        final int idx = ((my - bound.minRy) * dimZ + (mz - bound.minRz)) * dimX + (mx - bound.minRx);
+                        nodes.markScratch[idx] = nodes.markGen;
+                    }
+                }
+            }
+        }
+        return chain;
+    }
+
+    /** Whether region {@code (rx,ry,rz)} is stamp-marked as fat skeleton (out-of-box ⇒ false). */
+    private static boolean regionMarked(Nodes nodes, RegionBox bound, int dimX, int dimZ, int rx, int ry, int rz) {
+        if (!bound.contains(rx, ry, rz)) return false;
+        final int idx = ((ry - bound.minRy) * dimZ + (rz - bound.minRz)) * dimX + (rx - bound.minRx);
+        return nodes.markScratch[idx] == nodes.markGen;
     }
 
     /**
@@ -1468,7 +1608,12 @@ public final class RegionPathfinder {
         int[] portalX, portalY, portalZ; // world portal cell of the parent edge (NO_PORTAL on the start node)
         float[] g, f;
         int[] parent;           // predecessor row, -1 at the start
+        boolean[] closed;       // settled marker — costToGoalField bookkeeping only (the forward A* never reads it)
         int count;
+
+        // ---- fat-skeleton region-mark scratch (costToGoalField early exit; stamp-cleared, pooled) ----
+        int[] markScratch = new int[0];  // box-region-indexed stamps; marked ⇔ markScratch[i] == markGen
+        int markGen;
 
         // ---- key→row index (open addressing, linear probe) ----
         long[] mapKey;
@@ -1503,6 +1648,7 @@ public final class RegionPathfinder {
             g = new float[nodeHint];
             f = new float[nodeHint];
             parent = new int[nodeHint];
+            closed = new boolean[nodeHint];
             mapKey = new long[mapCap];
             mapRow = new int[mapCap];
             Arrays.fill(mapRow, -1);
@@ -1554,6 +1700,7 @@ public final class RegionPathfinder {
             g[n] = Float.POSITIVE_INFINITY;
             f[n] = Float.POSITIVE_INFINITY;
             parent[n] = -1;
+            closed[n] = false;
             count = n + 1;
             return n;
         }
@@ -1615,6 +1762,14 @@ public final class RegionPathfinder {
             g = Arrays.copyOf(g, cap);
             f = Arrays.copyOf(f, cap);
             parent = Arrays.copyOf(parent, cap);
+            closed = Arrays.copyOf(closed, cap);
+        }
+
+        /** Grow the fat-skeleton mark scratch to cover {@code vol} box regions (stamp semantics — no clearing). */
+        void ensureMarkCapacity(int vol) {
+            if (markScratch.length < vol) {
+                markScratch = new int[Math.max(vol, markScratch.length << 1)];
+            }
         }
 
         private void growMap() {

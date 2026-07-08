@@ -11,6 +11,7 @@ import com.orebit.mod.worldmodel.resource.ResourceClasses;
 
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.commands.SharedSuggestionProvider;
 
 /**
  * {@code /bot gather <resource> [count]} — the find→mine→return milestone (find-mine-resources design §7).
@@ -31,6 +32,10 @@ public final class GatherCommand implements BotCommand {
     public void contribute(LiteralArgumentBuilder<CommandSourceStack> bot) {
         bot.then(Commands.literal("gather")
                 .then(Commands.argument("resource", StringArgumentType.word())
+                        // Tab-complete the valid column names (prefix-filtered) — the list was
+                        // previously undiscoverable in-game (s52).
+                        .suggests((ctx, b) -> SharedSuggestionProvider.suggest(
+                                ResourceClasses.columnNames(), b))
                         .executes(ctx -> run(ctx, 1))
                         .then(Commands.argument("count", IntegerArgumentType.integer(1))
                                 .executes(ctx -> run(ctx, IntegerArgumentType.getInteger(ctx, "count"))))));

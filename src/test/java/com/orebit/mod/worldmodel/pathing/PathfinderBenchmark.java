@@ -30,6 +30,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Drives {@link BlockPathfinder#findPath} over a SYNTHETIC in-memory nav grid — no live {@code ServerLevel},
@@ -70,6 +71,22 @@ import net.minecraft.world.level.chunk.PalettedContainer;
  *       and any FUTURE cross-search persistent structures warm. A future "persist base cuboids across
  *       searches" change must show its win here; a persistence bug (stale data leaking across searches)
  *       shows here as a wrong-cost/wrong-time anomaly relative to SHORT + UPOVER_OPEN measured alone.
+ *   <li><b>SETUP</b> — the DIRECT per-search-setup probe (PERF-DESIGN-cold-start-bench.md): a fresh
+ *       {@link NavGridView} per op searching to a goal already inside {@code isGoal}'s arrival tolerance
+ *       (start {@code (8,0,8)} → goal {@code (9,0,9)}: within 1 horizontally), so the FIRST pop terminates
+ *       the search — {@code lastExpansions() == 0}, zero relaxations, empty plan. What remains inside the
+ *       op is EXACTLY the per-search fixed cost SHORT can only bundle with its ~30-60-pop walk: view
+ *       construction (the two 512-slot chunk-cache arrays), Nodes/EditPool reset, MovementContext +
+ *       Relaxer construction, start intern/push/pop, reconstruct. No corridor — like SHORT, this arm
+ *       deliberately EXCLUDES the macro context (see SETUP_MACRO). Derivations: SHORT − SETUP ≈ the pure
+ *       micro-walk cost of a trivial search; a per-search-setup regression moves SETUP directly instead of
+ *       being inferred from FLOOD-minus-SHORT arithmetic.
+ *   <li><b>SETUP_MACRO</b> — the PRODUCTION-SHAPED setup probe: identical to SETUP but passing a cuboid
+ *       growth cap ({@code confineBound == null}, {@code cuboidBound != null} — the live window replan's
+ *       exact parameter shape), so the op ALSO pays {@code NavGridCuboidsView} construction and the
+ *       one-shot {@code GoalForcedCost.probe} (goal-face cuboid extractions — the 38-45%-of-small-searches
+ *       item in PERF-PROFILE-2026-07.md). SHORT passes {@code bound == null}, so the probe early-outs and
+ *       NO existing scenario measured this. SETUP_MACRO − SETUP ≈ the macro-context + goal-probe bill.
  *   <li><b>FLOOD</b> — the WARM EDIT-HEAVY guard (the perf profile's S3 shape, which no other scenario
  *       reproduces since macro collapse shrank TOWER to ~28 pops): an unreachable goal above the built
  *       ceiling with NO corridor, so no cuboids/premium exist and the search runs the classic pillar-cone
@@ -91,7 +108,7 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 public class PathfinderBenchmark {
 
     @Param({"TOWER", "OPEN", "UPOVER_OPEN", "UPOVER_WALL", "SHORT", "MULTI", "FLOOD", "CLIFFS",
-            "BRIDGE", "SPIRAL"})
+            "BRIDGE", "SPIRAL", "SETUP", "SETUP_MACRO"})
     private String scenario;
 
     private NavGridView grid;
@@ -102,7 +119,8 @@ public class PathfinderBenchmark {
     private BotCaps caps = BotCaps.BREAK_PLACE;
 
     /** Dispatch kind precomputed at setup so the measured op branches on an int, not a String switch. */
-    private static final int KIND_PREBUILT = 0, KIND_SHORT = 1, KIND_MULTI = 2;
+    private static final int KIND_PREBUILT = 0, KIND_SHORT = 1, KIND_MULTI = 2, KIND_SETUP = 3,
+            KIND_SETUP_MACRO = 4;
     private int kind = KIND_PREBUILT;
 
     /** SHORT/MULTI only: the chunk map prebuilt ONCE at trial setup; the measured op wraps it in a fresh
@@ -156,6 +174,16 @@ public class PathfinderBenchmark {
                 kind = KIND_MULTI;
                 freshChunks = buildFlatChunks();
                 sanityDryRun();
+                break;
+            case "SETUP":
+                kind = KIND_SETUP;
+                freshChunks = buildFlatChunks();
+                setupSanityDryRun(null);
+                break;
+            case "SETUP_MACRO":
+                kind = KIND_SETUP_MACRO;
+                freshChunks = buildFlatChunks();
+                setupSanityDryRun(SETUP_CORRIDOR);
                 break;
             case "FLOOD":
                 // The WARM EDIT-HEAVY guard (PERF-PROFILE-2026-07 §2's "WARM FLOOD" probe, promoted): an
@@ -261,6 +289,32 @@ public class PathfinderBenchmark {
     }
 
     /**
+     * Setup-time (NOT measured) shape check for SETUP/SETUP_MACRO: the search must FIND immediately
+     * (start already inside the arrival tolerance) with ZERO expansions and an EMPTY plan — if any
+     * expansion happens, the scenario is no longer a pure per-search-setup probe (an isGoal-tolerance or
+     * geometry change would surface here, not as a silent drift in what the number means). {@code bound}
+     * is the cuboid growth cap of the arm under test (null = SETUP, the corridor = SETUP_MACRO).
+     */
+    private void setupSanityDryRun(RegionBound bound) {
+        var plan = BlockPathfinder.findPath(new NavGridView(0, freshChunks),
+                SETUP_START, SETUP_GOAL, BotCaps.BREAK_PLACE, null, bound, null);
+        int expansions = BlockPathfinder.lastExpansions();
+        System.out.println("[PathfinderBenchmark] " + scenario + " sanity: found=" + (plan != null)
+                + " expansions=" + expansions + " planSize=" + (plan == null ? -1 : plan.size()));
+        if (plan == null) {
+            throw new IllegalStateException(scenario + " did not find — fixture broken");
+        }
+        if (expansions != 0) {
+            throw new IllegalStateException(scenario + " expanded " + expansions
+                    + " nodes (expected 0) — no longer a pure per-search-setup probe");
+        }
+        if (plan.size() != 0) {
+            throw new IllegalStateException(scenario + " returned " + plan.size()
+                    + " waypoints (expected an empty plan) — the start is no longer inside the goal tolerance");
+        }
+    }
+
+    /**
      * Setup-time (NOT measured) shape check for CLIFFS: the search must FIND a route and that route must
      * actually descend the terraces by FALLING (several Fall steps) — if a movement/cost change reroutes it
      * (dig-down staircases, say), the scenario no longer measures Fall's down-scan volume and the guard is
@@ -330,6 +384,18 @@ public class PathfinderBenchmark {
     static final BlockPos SHORT_START = new BlockPos(8, 0, 8);
     static final BlockPos SHORT_GOAL = new BlockPos(36, 0, 8);
 
+    // --- SETUP geometry: the goal sits INSIDE isGoal's arrival tolerance of the start (within 1
+    //     horizontally on both axes, 0 vertically), so the very first pop — the start node — terminates
+    //     the search before a single expansion is counted or a single candidate is relaxed. The goal is
+    //     deliberately OFFSET (9,0,9), not equal to the start: start==goal degenerates primaryAxis and the
+    //     goal-probe's far-face exclusion (domDelta == 0 → exclude nothing), whereas the offset keeps both
+    //     on their production code path (dominant axis X via the argmax X>Z>Y tie-break). The corridor
+    //     (SETUP_MACRO only) mirrors a live sliding-window cuboid cap: 32x32 horizontally around the
+    //     start, y 0..33 — comfortably inside the flat world's built chunks (-4..4 = blocks -64..79).
+    static final BlockPos SETUP_START = new BlockPos(8, 0, 8);
+    static final BlockPos SETUP_GOAL = new BlockPos(9, 0, 9);
+    static final RegionBound SETUP_CORRIDOR = new RegionBound(-8, 24, 0, 33, -8, 24);
+
     /** The X-plane the UPOVER_WALL barrier sits on (between start x=8 and goal x=23, inside the corridor). */
     static final int WALL_X = 15;
     /** The wall's top Y (inclusive): tall enough to force a real climb-over, low enough that the bounded
@@ -358,7 +424,7 @@ public class PathfinderBenchmark {
 
         // Ground section: stone plane at local y=0, air above.
         PalettedContainer<BlockState> groundStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 groundStates.set(x, 0, z, stone);
@@ -372,7 +438,7 @@ public class PathfinderBenchmark {
         // ≥14 below the built-column top); the TOP slot needs its OWN instance because its runUp grades
         // 0..14 down from the unbuilt boundary — instance-shared cells must hold identical depth values.
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airMid = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airMid.getTraversalGrid());
         NavSection airTop = NavSection.create(BlockPos.ZERO);
@@ -417,7 +483,7 @@ public class PathfinderBenchmark {
 
         // Shared flat-ground column (ground at local y=0, air above) for every chunk the wall doesn't touch.
         PalettedContainer<BlockState> groundStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 groundStates.set(x, 0, z, stone);
@@ -429,7 +495,7 @@ public class PathfinderBenchmark {
         // Shared air sections — middle slots share one instance, the TOP slot gets its own (its runUp
         // nibble grades down from the unbuilt boundary; see buildFlatChunks).
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airMid = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airMid.getTraversalGrid());
         NavSection airTop = NavSection.create(BlockPos.ZERO);
@@ -455,7 +521,7 @@ public class PathfinderBenchmark {
         for (int cz = 0; cz <= 1; cz++) {       // chunk-rows the corridor's Z span (2..29) crosses
             // Lower wall section (world y 0..15): ground plane + wall stone at local x=15, y 1..15.
             PalettedContainer<BlockState> lowStates = new PalettedContainer<>(
-                    Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
             for (int x = 0; x < 16; x++) {
                 for (int z = 0; z < 16; z++) {
                     lowStates.set(x, 0, z, stone);            // ground
@@ -471,7 +537,7 @@ public class PathfinderBenchmark {
 
             // Upper wall section (world y 16..31): wall stone at local x=15, local y 0..(WALL_TOP_Y-16).
             PalettedContainer<BlockState> highStates = new PalettedContainer<>(
-                    Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
             for (int z = 0; z < 16; z++) {
                 for (int yl = 0; yl <= (WALL_TOP_Y - 16); yl++) {   // world y 16..WALL_TOP_Y
                     highStates.set(wallXLocal, yl, z, stone);
@@ -540,7 +606,7 @@ public class PathfinderBenchmark {
                     int baseY = i * 16;
                     boolean onlyAir = baseY > t;
                     PalettedContainer<BlockState> states = new PalettedContainer<>(
-                            Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
                     if (!onlyAir) {
                         for (int y = 0; y < 16 && baseY + y <= t; y++) {
                             for (int x = 0; x < 16; x++) {
@@ -596,7 +662,7 @@ public class PathfinderBenchmark {
 
         // Shared air sections (middle slots share one instance; TOP slot its own — see buildFlatChunks).
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airMid = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airMid.getTraversalGrid());
         NavSection airTop = NavSection.create(BlockPos.ZERO);
@@ -605,7 +671,7 @@ public class PathfinderBenchmark {
         // Ground-section factory: stone plane at local y=0 minus the gap's local-x span for this chunk.
         java.util.function.IntFunction<NavSection> groundFor = cx -> {
             PalettedContainer<BlockState> g = new PalettedContainer<>(
-                    Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
             for (int x = 0; x < 16; x++) {
                 int wx = (cx << 4) + x;
                 if (wx >= BRIDGE_GAP_MIN_X && wx <= BRIDGE_GAP_MAX_X) continue; // the ravine
@@ -749,7 +815,7 @@ public class PathfinderBenchmark {
         NavSection[] towerColumn = new NavSection[4];
         for (int sec = 0; sec < 4; sec++) {
             PalettedContainer<BlockState> states = new PalettedContainer<>(
-                    Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
             boolean onlyAir = true;
             for (int yl = 0; yl < 16; yl++) {
                 int wy = (sec << 4) + yl;
@@ -842,6 +908,18 @@ public class PathfinderBenchmark {
                         SHORT_START, SHORT_GOAL, BotCaps.BREAK_PLACE, null));
                 bh.consume(BlockPathfinder.findPath(new NavGridView(0, freshChunks),
                         UPOVER_START, UPOVER_GOAL, BotCaps.BREAK_PLACE, UPOVER_CORRIDOR));
+                break;
+            case KIND_SETUP:
+                // Pure per-search setup: fresh view + context/scratch construction, first pop terminates
+                // (goal inside the arrival tolerance). No corridor → no cuboid view, no goal probe.
+                bh.consume(BlockPathfinder.findPath(new NavGridView(0, freshChunks),
+                        SETUP_START, SETUP_GOAL, BotCaps.BREAK_PLACE, null));
+                break;
+            case KIND_SETUP_MACRO:
+                // Production-shaped setup: confineBound null + cuboidBound set (the live window replan's
+                // parameter shape) → ALSO pays NavGridCuboidsView construction + GoalForcedCost.probe.
+                bh.consume(BlockPathfinder.findPath(new NavGridView(0, freshChunks),
+                        SETUP_START, SETUP_GOAL, BotCaps.BREAK_PLACE, null, SETUP_CORRIDOR, null));
                 break;
             default:
                 bh.consume(BlockPathfinder.findPath(grid, start, goal, caps, corridor));

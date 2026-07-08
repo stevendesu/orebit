@@ -288,6 +288,69 @@ public final class RegionGrid {
     private static final int[] DIG_DZ = { 0, 0, 0, 0, 1, -1 };
 
     /**
+     * Dig budget (breakable-solid cells) for the goal dig-flood ({@link #goalDigSeeds}) that seeds the
+     * cost-to-goal field. A buried goal reachable only past this many blocks of rock falls back to the single
+     * nearest-centroid seed. Bounds the cold per-plan flood (a 6-connected diamond of ≤ this radius) and reflects
+     * that a dig deeper than ~a dozen blocks to a buried target is rarely the optimal route vs. an exposed one.
+     *
+     * <p>Also sizes the flood's pooled scratch ({@link DigScratch} — visited/queue span {@code 2·cap+1} per
+     * axis), and, being {@code < 16}, bounds the touched regions to the goal region ±1 per axis. Must stay
+     * {@code ≤ 15}: the BFS queue packs each goal-relative axis offset into 5 bits, and a cap ≥ 16 would let the
+     * flood cross two region boundaries per axis.
+     *
+     * <p>9 (owner-ratified, s53; was 12): entering a neighbor region costs {@code 16−l} blocks on an axis's
+     * +side or {@code l+1} on its −side (sum ≥ 17 per axis), and maximizing the count of {@code {−1,0,+1}³}
+     * offsets whose entry costs fit in 9 gives <b>at most 8 touched regions</b> (the corner-goal 2×2×2 octant;
+     * a mid-region goal reaches only the 6 face neighbors) instead of up to 27 at cap 12 — an 8-label-slab
+     * worst case per build. The r=12 → r=9 diamond shrink trims the under-floor lateral crawl, not useful
+     * dig reach.
+     */
+    public static final int MAX_GOAL_DIG_CELLS = 9;
+
+    /** Goal-relative diamond span per axis ({@code ±MAX_GOAL_DIG_CELLS} around the goal). */
+    private static final int DIG_SPAN = 2 * MAX_GOAL_DIG_CELLS + 1;
+    /** Cells in the goal-relative visited/queue box ({@code DIG_SPAN}³). */
+    private static final int DIG_VOL = DIG_SPAN * DIG_SPAN * DIG_SPAN;
+
+    /** Slots in the per-build regionKey→label-slab cache (≤ 27 live entries — goal region ±1 per axis). */
+    private static final int SLAB_CAP = 64;
+    private static final int SLAB_MASK = SLAB_CAP - 1;
+    /** Negative-cache sentinel slab: the region's section isn't resident (every query answers {@code -1}). */
+    private static final byte[] SLAB_UNRESIDENT = new byte[0];
+
+    /** Slots in the per-build chunkKey→column cache (≤ 4 live entries — goal chunk ±1 per horizontal axis). */
+    private static final int COL_CAP = 16;
+    private static final int COL_MASK = COL_CAP - 1;
+    /** Negative-cache sentinel column: the backing store has no column for the chunk. */
+    private static final NavSection[] COL_MISSING = new NavSection[0];
+
+    /**
+     * Pooled per-thread scratch for {@link #goalDigSeeds} — the dig-flood is cold (once per plan) but runs on
+     * both the tick and the planner threads, so the pool is ThreadLocal like {@link FragmentBuilder}'s. Nothing
+     * here is allocated per build past warm-up (hot-path no-alloc rule): the BFS runs over a primitive visited
+     * array + packed-int FIFO queue (replacing the boxed {@code HashSet<Integer>}/{@code ArrayDeque<int[]>}
+     * machinery — ~78% of the measured field-build allocation), and the two open-addressed caches (the
+     * {@code NavGridView} per-search chunk-cache idiom) each box a key at most once per distinct region/chunk
+     * per build. A {@code null} value marks an empty slot, so resets are a small {@code vals}-array fill and the
+     * keys need no sentinel.
+     */
+    private static final class DigScratch {
+        /** Per-cell seen mark over the goal-relative diamond (index {@link #relIdx}); cleared per build. */
+        final byte[] visited = new byte[DIG_VOL];
+        /** FIFO BFS queue of packed {@code vx | vy<<5 | vz<<10 | d<<15} entries; each cell enqueued ≤ once. */
+        final int[] queue = new int[DIG_VOL];
+        // regionKey → kept-fragment-id label slab (built by FragmentLeafComputer.labelFragments on first touch).
+        final long[] slabKeys = new long[SLAB_CAP];
+        final byte[][] slabVals = new byte[SLAB_CAP][]; // null = empty slot; SLAB_UNRESIDENT = negative cache
+        final byte[][] slabPool = new byte[SLAB_CAP][]; // per-slot pooled 4096-cell slabs (lazily allocated, reused)
+        // chunkKey → NavSection[] column (kills the per-probe boxed CHM lookup in navtypeAt).
+        final long[] colKeys = new long[COL_CAP];
+        final NavSection[][] colVals = new NavSection[COL_CAP][]; // null = empty slot; COL_MISSING = negative cache
+    }
+
+    private static final ThreadLocal<DigScratch> DIG_SCRATCH = ThreadLocal.withInitial(DigScratch::new);
+
+    /**
      * Enumerate the occupiable pockets a <b>buried goal cell</b> can be reached from by digging — the goal-side
      * analog of {@link #startFragmentByFlood} (the s48 flood-from-bot start fix). A buried ore is a SOLID cell in
      * no fragment; {@code nearestFragment} then mis-assigns the goal to the nearest air pocket by centroid, which
@@ -300,65 +363,196 @@ public final class RegionGrid {
      *
      * <p>Loaded-section only (near-bot level-0 pathfinding): reads the resident {@link NavSection}s per cell, so it
      * naturally crosses region boundaries and stops at any unloaded/unbreakable wall. Reports nothing (caller falls
-     * back to nearest-centroid) when the goal cell's section isn't resident. Cold path (once per plan): a bounded
-     * BFS over ≤ {@code maxCells} cells with small transient collections — no per-node-search cost.
+     * back to nearest-centroid) when the goal cell's section isn't resident. Cold path (once per plan) over pooled
+     * {@link DigScratch} — no per-node-search cost, no per-build allocation past warm-up. Each touched region's
+     * cell→fragment answers come from a per-build label slab (one {@link FragmentLeafComputer#labelFragments}
+     * flood per touched region, then O(1) array reads) that reproduces {@link #startFragmentByFlood}'s answers
+     * exactly — the pre-slab code paid that full re-scan-and-re-flood bill on EVERY distinct passable cell touch.
+     * {@code maxCells} is clamped to {@link #MAX_GOAL_DIG_CELLS} (the scratch is sized for the production cap).
      */
     public void goalDigSeeds(int gx, int gy, int gz, int maxCells, DigSeedSink sink) {
         if (level == null && sections == null) {
             return;
         }
-        int goalNav = navtypeAt(gx, gy, gz);
+        final DigScratch s = DIG_SCRATCH.get();
+        // Reset the per-build caches (a null value marks an empty slot — the pooled slabs persist in slabPool).
+        java.util.Arrays.fill(s.slabVals, null);
+        java.util.Arrays.fill(s.colVals, null);
+        final int cap = Math.min(maxCells, MAX_GOAL_DIG_CELLS);
+        int goalNav = navtypeAt(s, gx, gy, gz);
         if (goalNav < 0) {
             return; // goal section not resident → caller falls back to nearest-centroid
         }
         if (NavBlock.isPassable(NavBlock.descriptor((short) goalNav))) {
             // Exposed goal: already in a pocket — seed that fragment at zero dig.
-            int f = startFragmentByFlood(gx >> 4, (gy - minY) >> 4, gz >> 4, gx, gy, gz);
+            int f = slabFragment(s, gx, gy, gz);
             if (f >= 0) {
                 sink.accept(gx >> 4, (gy - minY) >> 4, gz >> 4, f, 0);
             }
             return;
         }
         // Buried goal: BFS through breakable-solid cells; each passable neighbour is a pocket seed at its dig
-        // distance. Uniform edge cost ⇒ BFS gives the min dig distance; coords are packed relative to the goal
-        // (|Δ| ≤ maxCells, so 8 bits/axis) to key the visited/dist map without boxing full world coords.
-        java.util.ArrayDeque<int[]> queue = new java.util.ArrayDeque<>();
-        java.util.HashSet<Integer> seen = new java.util.HashSet<>();
-        seen.add(relKey(0, 0, 0));
-        queue.add(new int[] { gx, gy, gz, 1 }); // dist 1: breaking the goal cell itself is the first dug block
-        while (!queue.isEmpty()) {
-            int[] c = queue.poll();
-            int cx = c[0], cy = c[1], cz = c[2], d = c[3];
+        // distance. Uniform edge cost ⇒ BFS gives the min dig distance. Same queue discipline (FIFO), same
+        // mark-on-probe dedupe, same face order as the boxed original — the seed sequence is byte-identical;
+        // only the machinery is primitive (goal-relative visited bytes + a packed-int queue).
+        final byte[] visited = s.visited;
+        final int[] queue = s.queue;
+        java.util.Arrays.fill(visited, (byte) 0);
+        final int m = MAX_GOAL_DIG_CELLS;
+        visited[relIdx(m, m, m)] = 1;                  // the goal cell itself, (0,0,0) + m
+        int head = 0, tail = 0;
+        queue[tail++] = packRel(m, m, m, 1); // dist 1: breaking the goal cell itself is the first dug block
+        while (head < tail) {
+            int e = queue[head++];
+            int vx = e & 31, vy = (e >>> 5) & 31, vz = (e >>> 10) & 31, d = e >>> 15;
+            int cx = gx + vx - m, cy = gy + vy - m, cz = gz + vz - m;
             for (int face = 0; face < 6; face++) {
                 int nx = cx + DIG_DX[face], ny = cy + DIG_DY[face], nz = cz + DIG_DZ[face];
-                if (!seen.add(relKey(nx - gx, ny - gy, nz - gz))) {
+                // Probes stay within ±cap ≤ m of the goal (popped cells sit at ≤ cap−1), so the index is in box.
+                int vi = relIdx(nx - gx + m, ny - gy + m, nz - gz + m);
+                if (visited[vi] != 0) {
                     continue;
                 }
-                int nav = navtypeAt(nx, ny, nz);
+                visited[vi] = 1;
+                int nav = navtypeAt(s, nx, ny, nz);
                 if (nav < 0) {
                     continue; // unloaded / out of bounds — treat as an impassable wall
                 }
                 long desc = NavBlock.descriptor((short) nav);
                 if (NavBlock.isPassable(desc)) {
-                    int f = startFragmentByFlood(nx >> 4, (ny - minY) >> 4, nz >> 4, nx, ny, nz);
+                    int f = slabFragment(s, nx, ny, nz);
                     if (f >= 0) {
                         sink.accept(nx >> 4, (ny - minY) >> 4, nz >> 4, f, d);
                     }
                     continue; // don't dig into air
                 }
                 // Solid: dig on only if the block is breakable and we're within the dig budget.
-                if (NavBlock.isBreakable(desc) && d < maxCells) {
-                    queue.add(new int[] { nx, ny, nz, d + 1 });
+                if (NavBlock.isBreakable(desc) && d < cap) {
+                    queue[tail++] = packRel(nx - gx + m, ny - gy + m, nz - gz + m, d + 1);
                 }
             }
         }
     }
 
-    /** The navtype index at world cell {@code (wx,wy,wz)}, or {@code -1} if its section isn't resident. */
-    private int navtypeAt(int wx, int wy, int wz) {
+    /** Flat index into {@link DigScratch#visited} for goal-relative coords shifted to {@code 0..DIG_SPAN-1}. */
+    private static int relIdx(int vx, int vy, int vz) {
+        return (vx * DIG_SPAN + vy) * DIG_SPAN + vz;
+    }
+
+    /** Pack a shifted goal-relative cell + its dig distance into one BFS queue entry (5 bits/axis, d above). */
+    private static int packRel(int vx, int vy, int vz, int d) {
+        return vx | (vy << 5) | (vz << 10) | (d << 15);
+    }
+
+    /**
+     * The kept fragment id containing world cell {@code (wx,wy,wz)}, answered from the per-build label slab of
+     * the cell's region — same contract as {@link #startFragmentByFlood} ({@code -1} = no occupiable fragment /
+     * collapsed / unresident), but the region is flooded once per build instead of once per query.
+     */
+    private int slabFragment(DigScratch s, int wx, int wy, int wz) {
+        int rx = wx >> 4, ry = (wy - minY) >> 4, rz = wz >> 4;
+        byte[] slab = slabFor(s, rx, ry, rz);
+        if (slab == null) { // cache saturated (unreachable at the current cap) — exact, just unmemoized
+            return startFragmentByFlood(rx, ry, rz, wx, wy, wz);
+        }
+        if (slab == SLAB_UNRESIDENT) {
+            return -1;
+        }
+        return slab[(((wy - minY) & 15) << 8) | ((wz & 15) << 4) | (wx & 15)];
+    }
+
+    /**
+     * Resolve region {@code (rx,ry,rz)}'s label slab through the per-build cache: on a slot's first touch, flood
+     * the region's kept-fragment labels ONCE into a pooled slab ({@link FragmentLeafComputer#labelFragments});
+     * every later query in that region is an array read. Mirrors {@code NavGridView.lookupChunk} (probe bound +
+     * degrade-on-saturation): saturation cannot happen at ≤ 27 live regions in {@value #SLAB_CAP} slots, but if
+     * it ever did, return {@code null} — the caller degrades to the exact single-cell flood, never a hang.
+     */
+    private byte[] slabFor(DigScratch s, int rx, int ry, int rz) {
+        final long key = regionKey(rx, ry, rz);
+        int slot = slabSlot(key);
+        for (int probes = 0; probes < SLAB_CAP; probes++) {
+            byte[] v = s.slabVals[slot];
+            if (v == null) { // cold slot — resolve the section and label the whole region once
+                NavSection[] column = colFor(s, rx, rz);
+                byte[] slab;
+                if (column == COL_MISSING || ry < 0 || ry >= column.length || column[ry] == null) {
+                    slab = SLAB_UNRESIDENT;
+                } else {
+                    slab = s.slabPool[slot];
+                    if (slab == null) {
+                        slab = s.slabPool[slot] = new byte[16 * 16 * 16];
+                    }
+                    FragmentLeafComputer.labelFragments(column[ry], slab);
+                }
+                s.slabKeys[slot] = key;
+                s.slabVals[slot] = slab;
+                return slab;
+            }
+            if (s.slabKeys[slot] == key) {
+                return v;
+            }
+            slot = (slot + 1) & SLAB_MASK;
+        }
+        return null; // cache saturated — caller degrades to the exact per-cell flood
+    }
+
+    /**
+     * Resolve chunk {@code (rx,rz)}'s section column through the per-build cache — the boxed
+     * {@code ConcurrentHashMap} lookup ({@link #columnAt}) runs at most once per distinct chunk per build,
+     * instead of once per BFS probe (the measured {@code Long}-boxing + treeified-bin bill).
+     */
+    private NavSection[] colFor(DigScratch s, int rx, int rz) {
+        final long key = NavStore.key(rx, rz);
+        int slot = colSlot(key);
+        for (int probes = 0; probes < COL_CAP; probes++) {
+            NavSection[] v = s.colVals[slot];
+            if (v == null) { // cold slot — box once, resolve from the backing store, cache even a miss
+                NavSection[] column = columnAt(rx, rz);
+                s.colKeys[slot] = key;
+                s.colVals[slot] = column == null ? COL_MISSING : column;
+                return s.colVals[slot];
+            }
+            if (s.colKeys[slot] == key) {
+                return v;
+            }
+            slot = (slot + 1) & COL_MASK;
+        }
+        NavSection[] column = columnAt(rx, rz); // cache saturated — degrade to a direct lookup
+        return column == null ? COL_MISSING : column;
+    }
+
+    /** Pack region coords into a cache key (26/12/26 bits — exact for any region the world border admits). */
+    private static long regionKey(int rx, int ry, int rz) {
+        return (((long) rx & 0x3FFFFFFL) << 38) | (((long) ry & 0xFFFL) << 26) | ((long) rz & 0x3FFFFFFL);
+    }
+
+    /** Murmur3 64-bit finalizer → slab-cache slot (the {@code NavGridView.chunkSlot} idiom). */
+    private static int slabSlot(long k) {
+        k ^= k >>> 33;
+        k *= 0xff51afd7ed558ccdL;
+        k ^= k >>> 33;
+        k *= 0xc4ceb9fe1a85ec53L;
+        k ^= k >>> 33;
+        return (int) k & SLAB_MASK;
+    }
+
+    /** Murmur3 64-bit finalizer → column-cache slot. */
+    private static int colSlot(long k) {
+        k ^= k >>> 33;
+        k *= 0xff51afd7ed558ccdL;
+        k ^= k >>> 33;
+        k *= 0xc4ceb9fe1a85ec53L;
+        k ^= k >>> 33;
+        return (int) k & COL_MASK;
+    }
+
+    /** The navtype index at world cell {@code (wx,wy,wz)} (through the per-build column cache), or {@code -1}
+     *  if its section isn't resident. */
+    private int navtypeAt(DigScratch s, int wx, int wy, int wz) {
         int rx = wx >> 4, rz = wz >> 4, ry = (wy - minY) >> 4;
-        NavSection[] column = columnAt(rx, rz);
-        if (column == null || ry < 0 || ry >= column.length || column[ry] == null) {
+        NavSection[] column = colFor(s, rx, rz);
+        if (column == COL_MISSING || ry < 0 || ry >= column.length || column[ry] == null) {
             return -1;
         }
         return column[ry].getNavtype(wx & 15, (wy - minY) & 15, wz & 15);
@@ -373,11 +567,6 @@ public final class RegionGrid {
     private NavSection[] columnAt(int rx, int rz) {
         long key = NavStore.key(rx, rz);
         return sections != null ? sections.get(key) : NavStore.get(level, key);
-    }
-
-    /** Pack a goal-relative cell offset (each in [-127,127], guaranteed by the {@code maxCells} bound) into an int. */
-    private static int relKey(int dx, int dy, int dz) {
-        return ((dx + 128) << 16) | ((dy + 128) << 8) | (dz + 128);
     }
 
     // ---------------------------------------------------------------------------------------------------

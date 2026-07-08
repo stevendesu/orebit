@@ -19,8 +19,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  * diagonal steps out, so the jump displacement is {@code (g+1)·√2} and the air span itself {@code g·√2}
  * blocks. The owner verified the 2-gap (a {@code 2·√2 ≈ 2.83}-block air span — inside the ~3-block flat
  * sprint-jump reach that makes the cardinal 3-gap possible); the 3-gap ({@code 4.24}-block span) is at
- * the physics limit and stays FLAG-GATED behind {@link Parkour#AGGRESSIVE} (the parkour family shares the
- * one knob). Shipped default: gaps 1–2, sprint for 2.
+ * the physics limit and ships enabled (s52: the parkour family's AGGRESSIVE flag is gone — a row that
+ * misbehaves gets its pathology fixed, not flag-hidden). Gaps 1–3, sprint for 2+.
  *
  * <h2>Clearance geometry — the transit prism + the corner pairs</h2>
  * Like cardinal {@link Parkour}, every gap cell needs its node-level cell open (the SHAPE_OTHER fence
@@ -60,7 +60,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  * Air time scales with horizontal distance, so {@link #AIR_COST} interpolates {@link Parkour}'s flat
  * table (8/11/14/16 ticks at displacements 2/3/4/5) at the diagonal displacements {@code (g+1)·√2}:
  * {@code g=1} → 2.83 → ≈10.5; {@code g=2} → 4.24 → ≈14.5; {@code g=3} → 5.66 → ≈19 (extrapolated past
- * the table at the same ~3.6 t/block sprint ruler; academic until the aggressive gate opens). Runup is
+ * the table at the same ~3.6 t/block sprint ruler; offered unconditionally — the whole gap range is part
+ * of the ONE parkour envelope since the AGGRESSIVE flag was deleted). Runup is
  * one DIAGONAL walk step ({@link Diagonal#COST} ≈ 6.55) and {@link Parkour#COMMIT_PENALTY} is shared →
  * totals ≈ 20.1 / 24.1 / 28.6. Per-edge cost is well above the octile heuristic between the endpoints
  * ({@code 4.633·√2·(g+1)}: 13.1 / 19.7 / 26.2) — admissible with margin. Transit pricing: gap prisms and
@@ -84,8 +85,9 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  */
 public final class DiagonalParkour implements Movement {
 
-    /** Diagonal gap caps (open diagonal cells): shipped 2 (owner-verified), 3 behind the family flag. */
-    private static final int MAX_GAP_DEFAULT = 2, MAX_GAP_AGGRESSIVE = 3;
+    /** Diagonal gap cap (open diagonal cells): 3 = the full physics-limit envelope (2 owner-verified;
+     *  s52: always on, no family flag). */
+    private static final int MAX_GAP = 3;
 
     /**
      * Ticks in the air by diagonal gap ({@code [g]}, index 0 unused) — the cardinal flat table
@@ -127,7 +129,7 @@ public final class DiagonalParkour implements Movement {
             }
         }
 
-        final int maxGap = Parkour.AGGRESSIVE ? MAX_GAP_AGGRESSIVE : MAX_GAP_DEFAULT;
+        final int maxGap = MAX_GAP;
         for (int[] d : DIAGONALS) {
             scanDirection(ctx, x, y, z, d[0], d[1], out, maxGap);
         }

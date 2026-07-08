@@ -47,6 +47,10 @@ public interface BotSteering {
      */
     boolean inWater();
 
+    /** Whether the bot's body is in lava — the lava analog of {@link #inWater} ({@code Entity.isInLava}).
+     *  Gates the {@link SteerControl#holdDepth} fluid autopilot for lava swimming (s52b hazard-media). */
+    boolean inLava();
+
     /** Aim the body + head yaw along a horizontal delta (folds the {@code atan2} the follower used to repeat). */
     void faceHorizontally(double dx, double dz);
 
