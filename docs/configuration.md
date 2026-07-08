@@ -36,7 +36,9 @@ back so you can confirm they loaded.) The defaults are chosen so that, out of th
 freshly configured bot behaves exactly as it does with no config at all — change only what
 you want to change.
 
-The one exception is `mining.protectedBlocks`: the reload makes the bot *refuse* to break
+A few keys are exceptions. `pathing.async` and `pathing.maxThreads` (the background-planner
+switch and its thread-pool size) only take effect on a server restart. And
+`mining.protectedBlocks` is half-and-half: the reload makes the bot *refuse* to break
 newly-protected blocks immediately, but the planner keeps routing from cached block data
 until a restart (or until the affected chunks naturally rebuild) — see the key's entry
 below.
@@ -90,26 +92,26 @@ mining.allowUnbreakable = false
 ### Pathfinding — how the bot plans routes
 
 ```properties
-pathing.maxNodes         = 10000
-pathing.greedyWeight     = 2.0
-pathing.costPerHitpoint  = 100.0
-pathing.warmup           = true
-pathing.warmupBudgetMs   = 1500
-pathing.async            = false
-pathing.maxThreads       = 2
-pathing.searchBudgetMs   = 40
+pathing.syncSearchBudgetNodes = 10000
+pathing.greedyWeight          = 2.0
+pathing.costPerHitpoint       = 100.0
+pathing.warmup                = true
+pathing.warmupBudgetMs        = 1500
+pathing.async                 = true
+pathing.maxThreads            = 2
+pathing.asyncSearchBudgetMs   = 250
 ```
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `pathing.maxNodes` | `10000` | How hard the bot searches before giving up on a single plan. Higher finds paths through more tangled terrain but costs more CPU per plan. |
+| `pathing.syncSearchBudgetNodes` | `10000` | How hard the bot searches before giving up on a single plan **when `pathing.async` is off** — the tick-thread search cap, counted in positions examined rather than milliseconds so a slow search can never freeze the server for its whole duration. Higher finds paths through more tangled terrain but costs more CPU per plan. With `pathing.async` on (the default), the time budget below is the effective limit instead and this cap is only a memory backstop. |
 | `pathing.greedyWeight` | `2.0` | How directly the bot beelines toward its goal. `1.0` finds the shortest possible route but searches slowly; higher values head straight at the goal and plan much faster, at the cost of slightly longer routes. Must be `1.0` or greater. |
 | `pathing.costPerHitpoint` | `100.0` | How many ticks of travel time the bot considers **one hitpoint of damage** to be worth (`>= 0`). This single number prices *all* damage in the planner: walking through fire, berry bushes, or powder snow, and dropping farther than a safe fall — each expected hitpoint costs this many ticks. The intuition: one hitpoint buys roughly `costPerHitpoint / 4.6` blocks of detour, so at the default `100` the bot will walk about 22 blocks out of its way to avoid each point of damage — enough to route around a whole thicket of bushes rather than push through it. Raise it for a more self-preserving bot (it will take long detours and gentle descents); lower it for a daredevil that trades health for time. Only matters when `survival.takesDamage` is `true` — an invulnerable bot ignores damage entirely. |
 | `pathing.warmup` | `true` | Run a short synthetic pathfinder warm-up at server start, before any player can join, so the first *real* path isn't computed by a cold JIT compiler (a one-time ~22 ms tick stall otherwise; ~0.7 ms with the warm-up — [the measurements](Optimizations/depth_nibbles.md)). Costs roughly half a second of startup wall-clock and nothing afterwards. |
 | `pathing.warmupBudgetMs` | `1500` | The hard wall-clock cap, in milliseconds, on that warm-up pass. It usually finishes early (it stops once search times plateau, typically ~400–500 ms); `0` disables the warm-up entirely. |
-| `pathing.async` | `false` | Compute paths on background threads instead of the server tick thread. Searches stop costing tick time entirely; a plan arrives a tick or two after it's requested, and the bot keeps walking its current plan meanwhile (it also pre-computes the next stretch before finishing the current one, so long walks don't pause at plan boundaries). Requires a server restart to change. |
+| `pathing.async` | `true` | Compute paths on background threads instead of the server tick thread. Searches stop costing tick time entirely; a plan arrives a tick or two after it's requested, and the bot keeps walking its current plan meanwhile (it also pre-computes the next stretch before finishing the current one, so long walks don't pause at plan boundaries). Set `false` for the synchronous behaviour: searches run on the tick thread under the node cap above. Requires a server restart to change. |
 | `pathing.maxThreads` | `2` | How many background planner threads to run when `pathing.async` is on (clamped to your core count minus two). All bots share the pool — raise it on a server with many bots to keep their plans snappy, lower it to `1` on a constrained host. Trades bot responsiveness against server CPU headroom, like view-distance. Requires a restart to change. |
-| `pathing.searchBudgetMs` | `40` | The wall-clock budget, in milliseconds, for one background path search — with `pathing.async` on, *time* replaces `pathing.maxNodes` as the effective search limit (the node cap remains as a memory backstop). A search that runs out of budget returns its best partial path; the bot moves that way and replans, converging on far goals. Bigger budgets escape bigger dead-ends at the cost of slower worst-case planning — the server tick is never stalled either way. |
+| `pathing.asyncSearchBudgetMs` | `250` | The wall-clock budget, in milliseconds, for one background path search — with `pathing.async` on, *time* replaces the node cap as the effective search limit (the node cap remains as a memory backstop). A search that runs out of budget returns its best partial path; the bot moves that way and replans, converging on far goals. Bigger budgets escape bigger dead-ends at the cost of slower worst-case planning — the server tick is never stalled either way. |
 
 ### Survival — is the bot mortal?
 
@@ -158,10 +160,10 @@ default the bot will pillar or bridge a short distance rather than take a long d
 for a more build-happy bot; raise it to make the bot strongly prefer walking and digging over
 building scaffolding.
 
-**A fast pathfinder for big open worlds** — plans quickly and ranges far, accepting slightly
-less optimal routes:
+**A fast pathfinder for big open worlds** — beelines hard and gets more time to escape big
+dead-ends, accepting slightly less optimal routes:
 
 ```properties
-pathing.maxNodes     = 20000
-pathing.greedyWeight = 4.0
+pathing.greedyWeight        = 4.0
+pathing.asyncSearchBudgetMs = 500
 ```

@@ -46,9 +46,10 @@ several rounds of measured optimization — the
 [depth-nibble](Optimizations/depth_nibbles.md) chapters tell that story in full.
 (Even the *first* search after boot is covered: the server warms the pathfinder up on
 synthetic terrain at startup — `pathing.warmup` — so no player pays the JIT compiler's
-one-time ~22 ms bill.) It can also run **[off the server tick entirely](Optimizations/background_pathfinding.md)**,
+one-time ~22 ms bill.) By default it runs **[off the server tick entirely](Optimizations/background_pathfinding.md)**,
 on a pool of background worker threads with a wall-clock time budget instead of a node
-cap — so a big flood no longer has to fit between two frames (`pathing.async`). The
+cap — so a big flood no longer has to fit between two frames (`pathing.async`, on by
+default; set it `false` for the old synchronous tick-thread search). The
 load-bearing pieces:
 
 - **Weighted search, not provably-optimal search.** The heuristic is 3D octile
@@ -63,8 +64,13 @@ load-bearing pieces:
   takes the *larger* of it and the straight-line distance. A cell whose region loops
   back to the goal now reads high and is deprioritised instead of flooded — and a
   *buried* goal (an ore in no air pocket at all) is reached by seeding that flood from
-  the pockets that can dig to it. The [region-heuristic chapter](Optimizations/region_heuristic.md)
-  tells the whole story.
+  the pockets that can dig to it. The flood itself stops as soon as it has priced the
+  neighbourhood of the route it found, and any region it never settled reads a provable
+  lower bound anchored on the goal rather than a blank — so the guidance never simply
+  runs out at the edge of the map, even when the search is forced into a wide detour.
+  The [region-heuristic chapter](Optimizations/region_heuristic.md) tells the whole
+  story; [what building that field costs](Optimizations/field_build.md) got its own
+  chapter.
 - **A goal premium that respects building.** Distance heuristics are blind to the
   fact that a goal floating over open air must be *built to* — so the search adds the
   provable placement cost of the forced climb below the goal into the estimate,
@@ -101,8 +107,8 @@ per-movement reference, with every cost constant and its derivation:
 | Pillar          | Jump and place beneath yourself — straight up in the same column           |
 | MineDown        | Dig the block underfoot and drop one — straight down in the same column    |
 | Climb           | Ascend or descend a ladder, vine, or scaffolding                           |
-| Parkour         | Sprint-jump a gap to a flat (1–3), rising (1–2), or falling (1–4) landing — plus offset landings one cell off the line |
-| DiagonalParkour | The same running jump along a diagonal (gaps 1–2)                          |
+| Parkour         | Sprint-jump a gap to a flat (1–3), rising (1–3), or falling (1–4) landing — plus offset landings one cell off the line |
+| DiagonalParkour | The same running jump along a diagonal (gaps 1–3)                          |
 | Swim            | Paddle at the water surface (slow)                                         |
 | Sprint-swim     | Fast prone swimming — the 3D underwater workhorse                          |
 | Start sprint-swim / Surface | The transitions into and out of the prone swimming pose        |

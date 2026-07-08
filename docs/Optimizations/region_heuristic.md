@@ -55,9 +55,10 @@ seed the goal region at zero, exhaust a heap bounded to a box around the start a
 and record the cheapest settled cost for each region. It reuses the *exact same edge
 model* the forward region A\* uses — the only differences are that it starts at the goal
 and never goal-tests (it floods the whole box), and that it runs shortest-first with the
-heuristic suppressed. One coarse flood over a few dozen regions, roughly six microseconds
-per build; then every one of the block search's millions of heuristic reads is a single
-array lookup.
+heuristic suppressed. One coarse flood per window re-plan; then every one of the block
+search's millions of heuristic reads is a single array lookup. (What that one flood
+actually *costs* turned out to be a story of its own — the
+[next chapter](field_build.md).)
 
 There's a calibration subtlety worth a sentence. The forward region search prices a
 pillar-up dear and a fall cheap on a *compressed* scale that's self-consistent for
