@@ -12,8 +12,10 @@ package com.orebit.mod.pathfinding.blockpathfinder;
  * you don't teleport your momentum. The payoff is that medium-specific behaviour falls out of vanilla for
  * free — most importantly, <b>vertical movement in water is the JUMP input, not a tuned velocity</b>: holding
  * jump makes vanilla {@code aiStep} swim the bot up (buoyancy) in water and jump on land, one mechanism for
- * both. The follower owns that water rule (see {@code AllyBotEntity}); a movement just contributes its look +
- * forward (+ jump for a climb, + sprint for a sprint-swim).
+ * both. The depth-hold autopilot ({@link #holdDepth}) is called by each move's own {@code steer} — the moves
+ * OWN their vertical control (s52; the old cross-cutting follower water rule is gone). The one exception to
+ * "inputs only" is the sink half: vanilla's -0.04 down-swim lives in the CLIENT tick a headless bot never
+ * runs, so {@link BotSteering#sinkInWater} replicates it.
  *
  * <h2>Tracking the line, not a point</h2>
  * Rather than aim at the next waypoint centre (which cuts corners and drifts wide with no correction), the
@@ -33,6 +35,18 @@ public final class SteerControl {
     static final double LOOKAHEAD = 1.5;
     /** Lengths below this are treated as zero (degenerate segment / already on the point) — avoids /0. */
     static final double EPS = 1.0e-4;
+    /** Dead-band (blocks) around the planned depth inside which {@link #holdDepth} presses neither rise nor
+     *  sink — bang-bang controller hysteresis so a bot at its target depth doesn't chatter jump on/off. */
+    static final double WATER_RISE_DEADBAND = 0.2;
+    /**
+     * How far (blocks) below the planned depth a PRONE-pose move rides ({@link #holdDepth}'s {@code bias} for
+     * the sprint-swim moves). The prone hitbox is only ~0.6 tall, so at a surface-level planned depth the
+     * {@link #WATER_RISE_DEADBAND} up-slack would float the whole hitbox clear of the water and vanilla would
+     * drop {@code Pose.SWIMMING} (its continuation rule needs {@code isInWater()}), degrading the fast
+     * sprint-swim to the slow surface swim. Sinking the ride ~0.5 keeps the hitbox wet while staying under
+     * {@code Swim.REACHED_Y} (0.6) so the swim cursor still advances. Standing water moves pass bias 0.
+     */
+    public static final double SUBMERGE_BIAS = 0.5;
 
     // ---- per-call geometry scratch (single bot per tick → one reusable instance) ---------------------
 
@@ -107,10 +121,10 @@ public final class SteerControl {
 
     /**
      * Swim along the planned line, HORIZONTALLY: face the look-ahead pursuit point and hold forward (the same
-     * W-key + look a player uses). Vertical is NOT here — it's the follower's cross-cutting water rule, which
-     * holds space to rise / "holds shift" to sink toward the planned depth (the input a player presses; see
-     * {@code AllyBotEntity}). A pure vertical (degenerate) segment has no horizontal target, so it just stops
-     * pushing and lets that rule drive the dive/climb straight down/up the column.
+     * W-key + look a player uses). Vertical is the caller's {@link #holdDepth} (each swim move calls it with
+     * its own bias — the moves own their vertical control). A pure vertical (degenerate) segment has no
+     * horizontal target, so it just stops pushing and lets {@code holdDepth} drive the dive/climb straight
+     * down/up the column.
      */
     public static void swimTowards(BotSteering b, SteerView p) {
         computeGeom(b, p);
@@ -123,14 +137,38 @@ public final class SteerControl {
     }
 
     /**
+     * The water-column depth autopilot: press the inputs a player would to bring the bot's feet to the
+     * planned depth ({@code path.ty() - bias}). Below it (past the {@link #WATER_RISE_DEADBAND dead-band}) →
+     * hold jump (vanilla {@code jumpInLiquid} rises +0.04/t); above it → {@link BotSteering#sinkInWater}
+     * (the client-only -0.04 down-swim a headless bot must replicate). No-op out of water — a move that
+     * just exited onto a bank must not hop. This is how the bot dives to a submerged hole, holds depth,
+     * surfaces, and climbs out: called by each water-capable move's {@code steer} (the four swim moves with
+     * their pose's bias, and {@link #drive}'s in-water branch for ground moves crossing/exiting water).
+     * (s52: relocated from the follower's cross-cutting water rule — movements own their controls.)
+     */
+    public static void holdDepth(BotSteering b, SteerView p, double bias) {
+        if (!b.inWater() && !b.inLava()) { // the autopilot works in ANY fluid (lava swims like slow water)
+            return;
+        }
+        final double depth = p.ty() - bias;
+        if (b.y() < depth - WATER_RISE_DEADBAND) {
+            b.setJumping(true);
+        } else if (b.y() > depth + WATER_RISE_DEADBAND) {
+            b.sinkInWater();
+        }
+    }
+
+    /**
      * The generic locomotion actuator chosen by medium: on land, the input-based line-tracking walk
-     * ({@link #steerTowards}); in water, the horizontal swim drive ({@link #swimTowards}) — so a ground move
-     * still submerged on its way out of water is steered toward the exit while the follower's water rule lifts
-     * it, instead of stalling.
+     * ({@link #steerTowards}); in water, the horizontal swim drive ({@link #swimTowards}) plus the
+     * {@link #holdDepth depth-hold} at the planned feet height (bias 0) — so a ground move still submerged
+     * (leaving water onto a bank, clipping a stream, knocked into a pool mid-segment) is steered toward the
+     * exit AND lifted/sunk toward its planned cell instead of stalling at buoyancy equilibrium.
      */
     public static void drive(BotSteering b, SteerView p) {
         if (b.inWater()) {
             swimTowards(b, p);
+            holdDepth(b, p, 0.0);
         } else {
             steerTowards(b, p);
         }

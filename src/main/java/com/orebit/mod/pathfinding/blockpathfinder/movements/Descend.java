@@ -69,8 +69,8 @@ public final class Descend implements Movement {
                 // surcharge for the landing body cells (nx, y-1's body = y, y+1 — the transit), zero-read
                 // when the dest flag bits are clear; the edit-folding form breaks through a bush/web where
                 // that's cheaper. The step-off head cell (y+2) is clearance-only.
-                float cost = COST
-                        + (ctx.isSlow(dstDesc) ? Traverse.SLOW_SURCHARGE : 0f)
+                float cost = (ctx.isSlow(dstDesc) ? COST * Traverse.SLOW_COST_FACTOR : COST)
+                        + ctx.floorHazardCost(dstDesc)
                         + ctx.bodyTransitCost(e, flags, nx, dy, nz);
                 out.accept(nx, dy, nz, cost + e.extraCost(), e);
             }

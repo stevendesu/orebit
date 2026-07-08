@@ -26,6 +26,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Guard for {@link GoalForcedCost#probe}'s <b>far-face exclusion</b>: the goal face whose stand cell lies on
@@ -151,7 +152,7 @@ class GoalForcedFarFaceTest {
         BlockState stone = Blocks.STONE.defaultBlockState();
 
         PalettedContainer<BlockState> floorStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 floorStates.set(x, 0, z, stone);
@@ -161,14 +162,14 @@ class GoalForcedFarFaceTest {
         NavSectionBuilder.classifyInto(floorStates, false, floor.getTraversalGrid());
 
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airSection = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
 
         NavSection second = airSection; // y 16..31
         if (ledgeAboveGoal) {
             PalettedContainer<BlockState> ledgeStates = new PalettedContainer<>(
-                    Block.BLOCK_STATE_REGISTRY, air, PalettedContainer.Strategy.SECTION_STATES);
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
             ledgeStates.set(GX, (GY + 1) & 15, GZ, stone); // world y = GY+1 = 21 -> section-local y 5
             second = NavSection.create(BlockPos.ZERO);
             NavSectionBuilder.classifyInto(ledgeStates, false, second.getTraversalGrid());

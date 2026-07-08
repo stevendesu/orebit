@@ -68,9 +68,9 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  * The owner's manual testing: flat 3-gap possible; rising(+1) during a 1–3 gap; falling(−1) cleared a
  * 4-gap via the parabola; deeper drops gain range. The shipped defaults FOLLOW that hand-verified
  * envelope (the "less conservative, more jump-y" flip — the earlier one-block timing margin proved
- * unnecessary): flat 1–3, rising 1–2, falling(−1) 1–4. Gated behind {@link #AGGRESSIVE} (default OFF):
- * the parabola-DERIVED, never hand-verified deeper falling rows (−2/−3), plus the rising 3-gap (in the
- * hand-verified envelope but demoted by live-run data — the note below the table):
+ * unnecessary), and (s52) the FULL envelope ships unconditionally — the old compile-time AGGRESSIVE
+ * flag is gone (owner ruling: consistent movements, no arbitrary gating; a row that misbehaves in-game
+ * gets its pathology FIXED, not flag-hidden): flat 1–3, rising 1–3, falling drops −1..−3 gaps to 4:
  *
  * <pre>
  *   landing      default   aggressive    physics bound (sprint ≈0.28 b/t, arc ticks below)
@@ -81,17 +81,14 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  *   falling(−3)  —         1–4           t17 → ~4.8 b (parabola-derived, marginal — gated)
  * </pre>
  *
- * <p><b>Rising 3-gap demotion (in-game, 26.2).</b> The bot consistently falls SHORT of a rising(+1)
- * 3-gap landing in live runs, despite the row sitting inside the parabola bound. The suspected
- * sprint-at-takeoff flag gap is NOT the cause in-code: {@link #plan} asserts {@code setSprinting} in
- * every driving phase (RUNUP, TAKEOFF, AIRBORNE — a rising jump satisfies both halves of the sprint
- * condition), so the residual suspect is sprint SPEED rather than the sprint flag — the runup is a
- * single block, so a bot entering at walk speed (or from rest on a plan's first step) has not finished
- * accelerating to the ~0.28 b/t the envelope assumes when it leaves the lip, and the rising row's reach
- * is the tightest (flat −½ b). The default cap is therefore 2; the 3-gap stays available under
- * {@link #AGGRESSIVE} for takeoff tuning. Note for the AGGRESSIVE tuner: future hunger tracking may make
- * sprint-dependent rows caps-conditional at runtime (no sprint below vanilla's food threshold), which
- * would shrink every sprint-reliant row further — keep that in mind before re-promoting rising 3.
+ * <p><b>Rising 3-gap — KNOWN pathology to fix at the source (in-game, 26.2).</b> The bot consistently
+ * falls SHORT of a rising(+1) 3-gap landing in live runs, despite the row sitting inside the parabola
+ * bound. Not the sprint FLAG ({@link #plan} asserts {@code setSprinting} in every driving phase); the
+ * residual suspect is sprint SPEED at takeoff — a one-block runup from walk speed/rest hasn't reached
+ * the ~0.28 b/t the envelope assumes, and the rising row's reach is the tightest (flat −½ b). The row
+ * ships enabled anyway (s52): the fix is takeoff tuning (earlier sprint assert / longer runup demand),
+ * not envelope-hiding. Future hunger tracking may make sprint-dependent rows caps-conditional at
+ * runtime (no sprint below vanilla's food threshold).
  *
  * Parabola: vanilla jump {@code vy₀ = 0.42}, per-tick {@code vy ← (vy − 0.08) · 0.98} ⇒ feet return to 0
  * at ~t12 (apex +1.25 at t6), cross −1 at ~t14, −2 at ~t15, −3 at ~t17; horizontal sprint-jump ≈ 0.28 b/t.
@@ -100,8 +97,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  * already owns deep descents off an edge. There is deliberately NO flat 4 row anywhere (the ~3.4-block
  * flat reach doesn't cover it; the 4-range belongs to the falling arcs alone). {@link #PARKOUR_MAX_GAP}
  * is <b>honored</b> as the flat row's cap exactly as in v1 (default 3, the verified maximum; lower it to
- * 2 to restore the old conservative flat row); {@link #AGGRESSIVE} pins the flat row to 3 regardless and
- * opens the deep falling rows.
+ * 2 to restore the old conservative flat row).
  *
  * <h2>Clearance cell sets (derivations)</h2>
  * <b>Flat</b> (v1): takeoff head {@code y+3}; per gap column the node-level cell open (the SHAPE_OTHER
@@ -266,38 +262,25 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
 public final class Parkour implements Movement {
 
     /**
-     * Master envelope switch: {@code false} (shipped) = the live-run-tightened envelope (flat 1–3 via
-     * {@link #PARKOUR_MAX_GAP}, rising 1–2, falling(−1) 1–4); {@code true} additionally opens the
-     * parabola-DERIVED, never hand-verified deep falling rows (drops −2/−3, gaps to 4) AND the rising
-     * 3-gap (parabola-legal but undershooting in-game — the demotion note in the class Javadoc). OFF by
-     * default — the gated rows either have no in-game verification or failed it. Shared by
-     * {@link DiagonalParkour} (one knob for the whole parkour family; its diagonal default stays 2 with
-     * 3 gated here).
-     */
-    public static boolean AGGRESSIVE = false;
-
-    /**
      * The largest FLAT gap (open columns) the move offers — the v1 knob, honored with its exact v1
      * semantics (default 3, the owner-verified flat maximum; lower to 2 for the old conservative row,
      * values above 3 clamp to the cost table — there is deliberately no flat 4). The rising/falling rows
-     * have their own envelope (see the class Javadoc table); {@link #AGGRESSIVE} pins the flat row to 3
-     * regardless of this field.
+     * have their own envelope (see the class Javadoc table).
      */
     public static int PARKOUR_MAX_GAP = 3;
 
-    /** Rising(+1) gap cap, default / aggressive. Default 2: the rising 3-gap is parabola-legal (and was
-     *  once hand-verified) but consistently undershoots in live runs — the sprint-SPEED-at-takeoff
-     *  demotion note in the class Javadoc — so it is {@link #AGGRESSIVE}-only until takeoff tuning lands. */
-    private static final int RISE_MAX_DEFAULT = 2, RISE_MAX_AGGRESSIVE = 3;
+    /** Rising(+1) gap cap. 3 = the full parabola-legal envelope (s52: always on). The rising 3-gap is
+     *  KNOWN to undershoot in live runs — sprint speed at takeoff, see the class Javadoc — a pathology
+     *  to fix in takeoff tuning, not to envelope-hide. */
+    private static final int RISE_MAX = 3;
 
     /**
-     * Falling gap caps by drop depth ({@code [drop]}, index 0 unused). Default: drop 1, gaps 1–4 (the
-     * owner-verified falling(−1) maximum). Aggressive: drops 1–3, gaps to 4 (drops 2–3 parabola-derived —
-     * see the class Javadoc). The array LENGTH is the deepest drop offered; deeper landings are left to
-     * {@link Fall} off the near edge.
+     * Falling gap caps by drop depth ({@code [drop]}, index 0 unused): drops 1–3, gaps to 4 (drop 1 is
+     * the owner-verified falling(−1) maximum; drops 2–3 parabola-derived — see the class Javadoc; s52:
+     * the full envelope ships unconditionally). The array LENGTH is the deepest drop offered; deeper
+     * landings are left to {@link Fall} off the near edge.
      */
-    private static final int[] FALL_MAX_DEFAULT = {0, 4};
-    private static final int[] FALL_MAX_AGGRESSIVE = {0, 4, 4, 4};
+    private static final int[] FALL_MAX = {0, 4, 4, 4};
 
     /** Ticks for the approach step onto the takeoff edge — one walk step ({@link Traverse#FLAT_COST}). */
     public static final float RUNUP_COST = Traverse.FLAT_COST;
@@ -436,10 +419,9 @@ public final class Parkour implements Movement {
         }
 
         // Resolve the envelope once per expansion (field reads hoisted out of the per-column loop).
-        final boolean aggr = AGGRESSIVE;
-        final int flatMax = Math.min(aggr ? 3 : PARKOUR_MAX_GAP, COST.length - 1);
-        final int riseMax = aggr ? RISE_MAX_AGGRESSIVE : RISE_MAX_DEFAULT;
-        final int[] fallMax = aggr ? FALL_MAX_AGGRESSIVE : FALL_MAX_DEFAULT;
+        final int flatMax = Math.min(PARKOUR_MAX_GAP, COST.length - 1);
+        final int riseMax = RISE_MAX;
+        final int[] fallMax = FALL_MAX;
         // Deepest drop actually allowed: the envelope table depth capped by the bot's max survivable fall.
         final int capsDrop = Math.min(fallMax.length - 1, ctx.caps().maxFallDistance());
         final int safeFall = ctx.caps().safeFallDistance();
@@ -543,7 +525,7 @@ public final class Parkour implements Movement {
                             long vs = verifyPrisms(ctx, x, y, z, dx, dz, verified, verifiedTransit, g);
                             if (vs != PRISM_BLOCKED
                                     && emitRising(ctx, out, x, y, z, dx, dz, c, g,
-                                            Float.intBitsToFloat((int) vs))) {
+                                            Float.intBitsToFloat((int) vs), d1)) {
                                 found |= DIR_EMITTED;
                             }
                         }
@@ -576,7 +558,7 @@ public final class Parkour implements Movement {
                         long vs = verifyPrisms(ctx, x, y, z, dx, dz, verified, verifiedTransit, g);
                         if (vs != PRISM_BLOCKED
                                 && emitRising(ctx, out, x, y, z, dx, dz, c, g,
-                                        Float.intBitsToFloat((int) vs))) {
+                                        Float.intBitsToFloat((int) vs), d1)) {
                             found |= DIR_EMITTED;
                         }
                     }
@@ -680,7 +662,19 @@ public final class Parkour implements Movement {
      * (feeds the caller's {@link #DIR_EMITTED} fallback bookkeeping).
      */
     private static boolean emitRising(MovementContext ctx, CandidateSink out, int x, int y, int z,
-            int dx, int dz, int c, int g, float transit) {
+            int dx, int dz, int c, int g, float transit, long landDesc) {
+        // Rise gate (start-surface-aware — the Ascend rule applied to the arc): the +1 landing is gained
+        // only when the surface-to-surface rise fits one jump's budget, rise = 16 + landTopY − startSurf
+        // sixteenths ≤ JUMP_RISE (20) (MovementContext.rise). A partial-height TAKEOFF floor eats the
+        // deficit: from a slab (start top 8) onto a full-block ledge the rise is 24 > 20 — the arc apex
+        // (start surface + 20/16) never reaches the landing top, however clear the prisms are.
+        // floorSurface (standable → topY, else 16) keeps a non-standable-floor takeoff at its historical
+        // geometry. Two cached reads, only on this rare (rising-ledge-found) path; a full-height start
+        // onto any standable ledge (landTopY ≤ 16 ⇒ rise ≤ 16) passes unchanged.
+        if (MovementContext.rise(1, ctx.topYOf(landDesc), ctx.floorSurface(x, y, z))
+                > MovementContext.JUMP_RISE) {
+            return false;
+        }
         int cx = x + dx * c;
         int cz = z + dz * c;
         // Landing body: feet y+2, head y+3.

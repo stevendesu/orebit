@@ -4,13 +4,10 @@ import com.orebit.mod.Debug;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.async.PlanExecutor;
-import com.orebit.mod.pathfinding.async.PlanHandle;
 import com.orebit.mod.pathfinding.async.SearchRequest;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
-import com.orebit.mod.pathfinding.splice.SpliceSeam;
-import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.regionpathfinder.HierarchicalRegionPlan;
@@ -20,9 +17,7 @@ import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPlaceModel;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
-import com.orebit.mod.worldmodel.hpa.RegionFragments;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
-import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 
 import net.minecraft.core.BlockPos;
@@ -54,9 +49,9 @@ import net.minecraft.server.level.ServerLevel;
  * waypoints map to a skeleton region with index in {@code [committedIndex, j)}</b> — i.e. the path never
  * goes back. This advances {@code A→B→A→B→A→B→C} to B exactly once (on the final B-entry after which the
  * remaining path stays in B/C) and to C when the path stays in C. Transient dips back to earlier regions
- * never lower {@code committedIndex} and never replan. If the waypoint scan is inconclusive (e.g. the block
- * plan is null), the fallback is a debounce: advance only after the bot's floor sits inside
- * {@code skeleton[j]} for {@link #COMMIT_TICKS} consecutive ticks.
+ * never lower {@code committedIndex} and never replan. A window target the bot ALREADY satisfies (within the
+ * block tier's ±1/±2 goal tolerance) is committed+slid at target-selection time — {@link #replanBlock}'s
+ * forward-slide — so a search is never aimed at a satisfied target (s52; no debounce fallback exists).
  *
  * <h2>Replan triggers</h2>
  * The window's block plan is recomputed ({@link #replanBlock}) when the window advances (commit), when the
@@ -71,7 +66,7 @@ import net.minecraft.server.level.ServerLevel;
  * {@code (region, fragment)} nodes carrying a per-step <b>portal cell</b> (the reachable on-face boundary cell
  * the path enters the step's region through). Two places use it:
  * <ul>
- *   <li><b>Window target</b> ({@link #windowTarget()}): the far step's {@link RegionPathPlan#portalCell portal
+ *   <li><b>Window target</b> ({@link WindowTargeting#target}): the far step's {@link RegionPathPlan#portalCell portal
  *       cell} — a real occupiable cell — instead of a {@code center → projectToStandableFloor} projection that
  *       would land on buried/mid-air cells in carved terrain (the §6 "buried target" bug).</li>
  *   <li><b>Commit key</b> ({@link #forwardIndexOf}): the bot's current skeleton step is matched on
@@ -98,13 +93,6 @@ public final class PathPlan {
     public static final int WINDOW = 3;
 
     /**
-     * Debounce: when the wiggle waypoint scan is inconclusive (e.g. a null block plan), advance the window to
-     * {@code skeleton[j]} only after the bot's floor has been inside that region for this many consecutive
-     * ticks (HPA-IMPLEMENTATION.md §9).
-     */
-    public static final int COMMIT_TICKS = 3;
-
-    /**
      * Horizontal corridor slack in blocks, added to the window's <b>region bounds</b> (not the bot's current
      * position) — HPA-IMPLEMENTATION.md §9/§15a. Set to <b>9 = a region half (8, boundary→center) + 1</b>:
      * that is exactly the reach the coarse <i>face-to-center</i> cost represents into an adjacent region, so a
@@ -127,19 +115,7 @@ public final class PathPlan {
     public static final int CUBOID_CAP_MARGIN = 16;
 
     /**
-     * Replan / slide the window when the bot comes within this many blocks (Chebyshev) of the window target,
-     * rather than requiring exact arrival or a region-boundary crossing. A portal centroid can be slightly off
-     * (buried / mid-air); committing on APPROACH avoids forcing the bot to pillar up to an imperfect centroid
-     * only to drop back down, and breaks the boundary-straddle bob (the target sits 1 cell into the next region,
-     * which the ±1 block tolerance "reaches" without the bot ever entering that region). Kept small (a
-     * {@code 2N+1} cube): at 5 it was a 11³ box — nearly a whole region — that could slide the window while the
-     * bot is still in a parallel tunnel. 3 ⇒ a 7³ box, enough to break the 1–2 block boundary straddle without
-     * reaching across a wall.
-     */
-    public static final int REPLAN_NEAR_TARGET = 3;
-
-    /**
-     * Make the {@link #windowTarget() window-target} "goal in window" test <b>fragment-aware</b>. The test fires
+     * Make the {@link WindowTargeting#target window-target} "goal in window" test <b>fragment-aware</b>. The test fires
      * when a window step is the goal <i>region</i>; but a region can appear in the window at one fragment while
      * the goal is a DIFFERENT fragment of that region reached only via a loop (the goal is a separate pocket of
      * the bot's own start region — e.g. the start on an upper ledge, the goal in a lower cave of the same
@@ -156,9 +132,9 @@ public final class PathPlan {
      */
     public static boolean FRAGMENT_AWARE_GOAL_WINDOW = true;
 
-    // ---- immutable inputs ----------------------------------------------------------------------------
-    private final ServerLevel level;
-    private final RegionGrid regionGrid;
+    // ---- immutable inputs (package-private where a same-package collaborator reads them) --------------
+    final ServerLevel level;
+    final RegionGrid regionGrid;
     private final BlockPos goalFloor;
     /** The region-informed cost-to-goal heuristic field threaded read-only into every windowed block search,
      *  sync and async — rooted at the CURRENT window's search target ({@link #fieldRoot}), NOT the final goal.
@@ -201,27 +177,23 @@ public final class PathPlan {
      * (DESIGN-background-pathfinding.md §5).
      */
     private final PlanExecutor executor;
-    // ---- async in-flight state (all tick-thread-confined; meaningful only when executor != null) ----
-    /** The outstanding search, or {@code null}. At most one per plan (latest-wins: superseders cancel). */
-    private PlanHandle pending;
-    /** The floor cell {@link #pending} was searched FROM — the seam's predicted start. */
-    private BlockPos pendingStart;
-    /** The window target {@link #pending} was searched TOWARD (adoption re-checks it's still current). */
-    private BlockPos pendingTarget;
-    /** Whether {@link #pending} is a P4 pre-plan (predicted future start) vs a boundary replan (started
-     *  from the bot's actual floor). A pre-plan result PARKS until the bot arrives; a replan result whose
-     *  seam rejects resubmits immediately. */
-    private boolean pendingPreplan;
-    // Parked pre-plan result: computed-but-not-yet-adopted (the bot hasn't reached the predicted start).
-    private BlockPathPlan parkedPlan;
-    private boolean parkedPartial;
-    private BlockPos parkedStart;
-    private BlockPos parkedTarget;
-    /** The window target the last pre-plan was attempted for — one attempt per target (churn guard). */
-    private BlockPos preplanAttemptedTarget;
+    /**
+     * The async search mailbox — the in-flight/parked/pre-plan-attempt state and its transitions
+     * ({@link AsyncWindowSearch}). Always constructed (empty in sync mode, so {@link #cancelPending} is
+     * always safe); its state is only ever touched when {@link #executor} is non-null. The adopt/status
+     * decisions its drains feed stay HERE, in {@link #pollPending} — the mailbox only classifies.
+     */
+    private final AsyncWindowSearch async;
+    /** Window-target selection ({@link WindowTargeting}) — the plan-immutable context is captured once in
+     *  the ctor; {@link #replanBlock} asks it for a fresh choice per replan. */
+    private final WindowTargeting targeting;
     private final int minY;
     /** The goal's level-0 region coords (so we can test "goal in window" by index). */
-    private final int goalRX, goalRY, goalRZ;
+    final int goalRX, goalRY, goalRZ;
+    /** The FINAL goal's arrival tolerance — the caller's definition of done (s52). Applied to searches whose
+     *  target IS {@link #goalFloor} and to {@link #withinGoalTolerance}; window-portal targets keep the
+     *  {@link BlockPathfinder#DEFAULT_GOAL_TOL_XZ default}. */
+    private final int goalTolXZ, goalTolY;
 
     // ---- skeleton + window state ---------------------------------------------------------------------
     /**
@@ -229,23 +201,18 @@ public final class PathPlan {
      * whenever the cascade re-derives a fresh L0 segment (HPA-CASCADE.md §5). Non-final for that swap; all the
      * window/commit/target readers below treat it as the current skeleton.
      */
-    private RegionPathPlan skeleton;
+    RegionPathPlan skeleton;
     /**
      * The region-tier nested-skeleton cascade (HPA-CASCADE.md) — the self-refreshing <b>source</b> of
      * {@link #skeleton}: {@link #onBotMoved} steps it first and, on an L0 change, swaps {@link #skeleton} +
      * resets the block window; {@link #repairBlocked} drives its blocked-hop escalation. It owns the per-level
      * blacklists, so PathPlan keeps none of its own.
      */
-    private final HierarchicalRegionPlan hier;
+    final HierarchicalRegionPlan hier;
     /** Index into the skeleton of the window's leading (start) region. */
-    private int windowStart;
+    int windowStart;
     /** Furthest skeleton index the bot has committed to (HPA-IMPLEMENTATION.md §9, the wiggle anchor). */
-    private int committedIndex;
-
-    // ---- debounce fallback state ---------------------------------------------------------------------
-    /** The skeleton index the bot's floor currently sits in, for the consecutive-ticks debounce. */
-    private int debounceIndex = -1;
-    private int debounceTicks;
+    int committedIndex;
 
     // ---- fragment-model per-tick scratch (HPA-FRAGMENTS.md §S4) ---------------------------------------
     /**
@@ -259,13 +226,13 @@ public final class PathPlan {
     private final long[] repairHopScratch = new long[2];
 
     // ---- active block plan ---------------------------------------------------------------------------
-    private BlockPathPlan blockPlan;
+    BlockPathPlan blockPlan;
     /** Whether {@link #blockPlan} is a best-effort PARTIAL (from {@code BlockPathfinder.lastWasPartial()} /
      *  the async result). */
-    private boolean lastPlanPartial;
+    boolean lastPlanPartial;
     private PathStatus status;
     /** The bot's last reported floor cell (the block-A* start for the next replan). */
-    private BlockPos botFloor;
+    BlockPos botFloor;
     /** The bot's current movement mode ({@link BlockPathfinder#MODE_AUTO} = derive from geometry, else the
      *  live pose STANDING/PRONE) — threaded into every windowed search so a replan mid-sprint-swim keeps the
      *  prone state instead of re-deriving STANDING from a buoyancy bob and re-initiating. Updated per tick by
@@ -285,7 +252,7 @@ public final class PathPlan {
     private RegionBound windowCorridor;
 
     /**
-     * How {@link #windowTarget} chose the current target — surfaced so the debug chat can explain a movement
+     * How {@link WindowTargeting#target} chose the current target — surfaced so the debug chat can explain a movement
      * choice (a target adjusted for caps, or the window extended down a fall). {@code GOAL} = the real goal;
      * {@code PORTAL} = the stored portal centroid as-is; {@code DIG} = a buried crossing passed through RAW
      * (deliberately unsnapped) for a break-capable bot — either a region-committed dig-through step or a lossy
@@ -370,6 +337,24 @@ public final class PathPlan {
     public PathPlan(ServerLevel level, RegionGrid regionGrid, BlockPos startFloor, BlockPos goalFloor,
                     BotCaps caps, MovementContext.InventoryView inventory, int startMode,
                     EditSnapshot baseline, PlanExecutor executor) {
+        this(level, regionGrid, startFloor, goalFloor, caps, inventory, startMode, baseline, executor,
+                BlockPathfinder.DEFAULT_GOAL_TOL_XZ, BlockPathfinder.DEFAULT_GOAL_TOL_Y);
+    }
+
+    /**
+     * As above with an explicit FINAL-goal arrival tolerance ({@code goalTolXZ}/{@code goalTolY}) — the
+     * CALLER's definition of "done" (s52, the reached-vs-done decoupling). {@code (1,2)} is the historical
+     * "get near the cell" (follow, window slides, mining reach); {@code (0,0)} means the plan is complete
+     * only when the bot stands ON the exact goal cell (drop collection — the block tier otherwise ends
+     * plans adjacent and the item sits just outside the pickup box). Applies ONLY to searches aimed at the
+     * real {@code goalFloor} and to {@link #isComplete()}'s tolerance mirror; intermediate window-portal
+     * targets keep the default (a window hop needs no exactness).
+     */
+    public PathPlan(ServerLevel level, RegionGrid regionGrid, BlockPos startFloor, BlockPos goalFloor,
+                    BotCaps caps, MovementContext.InventoryView inventory, int startMode,
+                    EditSnapshot baseline, PlanExecutor executor, int goalTolXZ, int goalTolY) {
+        this.goalTolXZ = goalTolXZ;
+        this.goalTolY = goalTolY;
         this.baseline = baseline;
         this.executor = executor;
         this.level = level;
@@ -384,6 +369,12 @@ public final class PathPlan {
         this.goalRX = RegionAddress.regionX(goalFloor.getX(), 0);
         this.goalRY = RegionAddress.regionY(goalFloor.getY(), 0, minY);
         this.goalRZ = RegionAddress.regionZ(goalFloor.getZ(), 0);
+
+        // Collaborators (same-package, replan-cadence only — one construction per plan, cold):
+        // window-target selection with the plan-immutable context, and the async search mailbox
+        // (empty/no-op in sync mode, so cancelPending is always safe).
+        this.targeting = new WindowTargeting(level, regionGrid, minY, caps, goalFloor, goalRX, goalRY, goalRZ);
+        this.async = new AsyncWindowSearch(executor);
 
         // Region tier: the nested-skeleton cascade (HPA-CASCADE.md) re-derives its L0 segment as the bot moves
         // and owns its per-level blacklists; PathPlan just drives the L0 segment it hands back. The region dig
@@ -407,8 +398,8 @@ public final class PathPlan {
 
         if (skeleton == null || skeleton.isEmpty()) {
             // No coarse route at all (no built ground at the start region). Leave the block plan null and the
-            // status FAILED so AllyBotEntity falls back to its visible straight-line steer (the milestone
-            // wants pathological failures visible, HPA-IMPLEMENTATION.md §10).
+            // status FAILED so AllyBotEntity gives up visibly (HOLD + a chat line — pathological failures
+            // stay visible, HPA-IMPLEMENTATION.md §10).
             this.blockPlan = null;
             this.status = PathStatus.FAILED;
             return;
@@ -478,7 +469,7 @@ public final class PathPlan {
         return committedIndex;
     }
 
-    /** The skeleton step the current window is heading toward ({@link #windowTarget} aims at it). */
+    /** The skeleton step the current window is heading toward ({@link WindowTargeting#target} aims at it). */
     public int windowTargetStepIndex() {
         return windowTargetStep;
     }
@@ -489,133 +480,12 @@ public final class PathPlan {
      * <b>portal cell</b> it is entered through, and the geometric center — each annotated with a built/standable
      * <b>probe</b> ({@code [stand]} = a real floor, {@code [air-no-floor]} = passable but nothing to stand on,
      * {@code [SOLID/buried]} = inside rock, {@code [unbuilt]} = unloaded). A {@code [SOLID/buried]} portal is the
-     * §6 buried-target bug made legible. The {@code *TARGET} marker flags the step {@link #windowTarget} aims at.
-     * Cold path (builds a fresh {@link NavGridView}); call only on replan / trace under {@link Debug#ENABLED}.
+     * §6 buried-target bug made legible. The {@code *TARGET} marker flags the step {@link WindowTargeting#target}
+     * aims at. Cold path (builds a fresh {@link NavGridView}); call only on replan / trace under
+     * {@link Debug#ENABLED}. Formatting lives in {@link SkeletonDump}.
      */
     public String describeSkeleton() {
-        if (skeleton == null || skeleton.isEmpty()) {
-            return "skeleton: NONE (no coarse route — no built ground at start, or region A* FAILed)";
-        }
-        final NavGridView grid = new NavGridView(level);
-        final StringBuilder sb = new StringBuilder();
-        sb.append("skeleton ").append(skeleton.size()).append(" steps  fragmentModel=")
-                .append(skeleton.isFragmentModel()).append("  committed=").append(committedIndex)
-                .append("  window=[").append(windowStart).append("..").append(windowLast())
-                .append("]  goalRegion=(").append(goalRX).append(',').append(goalRY).append(',').append(goalRZ)
-                .append(")  reachedGoal=").append(skeleton.reachedGoalRegion());
-        // Cascade stack (HPA-CASCADE.md): when the nested-skeleton cascade drives this plan, dump every coarse
-        // level above L0 — its skeleton, the committed cursor (*), and each cell's portal/center probe — so the
-        // L1/L2 macro route + which regions are built/standable/water is legible (the L0 detail follows below).
-        if (hier != null) {
-            sb.append("\n  CASCADE top=L").append(hier.topLevel())
-                    .append(hier.isFailed() ? " FAILED" : "");
-            for (int L = hier.topLevel(); L >= 1; L--) {
-                final RegionPathPlan sk = hier.skeletonAt(L);
-                if (sk == null) {
-                    sb.append("\n  L").append(L).append(": (none)");
-                    continue;
-                }
-                sb.append("\n  L").append(L).append(' ').append(sk.size()).append(" steps committed=")
-                        .append(hier.committedAt(L)).append(" reachedGoal=").append(sk.reachedGoalRegion());
-                for (int i = 0; i < sk.size(); i++) {
-                    sb.append("\n    L").append(L).append('.').append(i)
-                            .append(i == hier.committedAt(L) ? "*" : " ")
-                            .append(" region=(").append(sk.rx(i)).append(',').append(sk.ry(i)).append(',')
-                            .append(sk.rz(i)).append(") frag=").append(sk.fragmentId(i));
-                    if (sk.hasPortal(i)) {
-                        final BlockPos p = sk.portalCell(i);
-                        sb.append(" portal=").append(compactPos(p)).append(probe(grid, p));
-                    }
-                    final BlockPos cc = sk.centerOf(i);
-                    sb.append(" center=").append(compactPos(cc)).append(probe(grid, cc));
-                }
-            }
-            sb.append("\n  L0 (driven):");
-        }
-        final int last = windowLast();
-        // The step windowTarget() actually aims at: the farthest window portal that's non-buried, else (all
-        // buried) the farthest portal (it gets snapped). Mark THAT, not just windowLast — the two differ when
-        // the far portal is buried, which is exactly when this dump matters.
-        int targetStep = -1;
-        for (int i = last; i > windowStart; i--) {
-            if (skeleton.hasPortal(i) && notBuried(grid, skeleton.portalCell(i))) { targetStep = i; break; }
-        }
-        if (targetStep == -1) {
-            for (int i = last; i > windowStart; i--) {
-                if (skeleton.hasPortal(i)) { targetStep = i; break; }
-            }
-        }
-        for (int i = 0; i < skeleton.size(); i++) {
-            final int rx = skeleton.rx(i), ry = skeleton.ry(i), rz = skeleton.rz(i);
-            final String tag = (i == targetStep) ? "*TARGET"
-                    : (i == last) ? "far    "
-                    : (i >= windowStart && i <= last) ? "win    " : "       ";
-            // Force a build attempt so kind reflects what ensureLeaf produces NOW (the planner already did this
-            // during the search; re-doing it is idempotent). navSection = is the underlying NavStore section
-            // even present? If navSection=built but kind=AIR, ensureLeaf failed to classify a present section
-            // (a region/NavStore bug); if navSection=unbuilt, the chunk nav simply isn't loaded there.
-            final BlockPos c = skeleton.centerOf(i);
-            regionGrid.ensureLeaf(rx, ry, rz);
-            final boolean navSection = grid.built(c.getX(), c.getY(), c.getZ());
-            sb.append("\n  S").append(i).append(' ').append(tag)
-                    .append(" region=(").append(rx).append(',').append(ry).append(',').append(rz).append(')')
-                    .append(" frag=").append(skeleton.fragmentId(i))
-                    .append(" kind=").append(kindName(regionGrid.kind(0, rx, ry, rz)))
-                    .append(" navSection=").append(navSection ? "built" : "UNBUILT");
-            if (skeleton.hasPortal(i)) {
-                final BlockPos p = skeleton.portalCell(i);
-                sb.append("  portal=").append(compactPos(p)).append(probe(grid, p));
-            } else {
-                sb.append("  portal=none");
-            }
-            sb.append("  center=").append(compactPos(c)).append(probe(grid, c));
-        }
-        return sb.toString();
-    }
-
-    /**
-     * Occupiability annotation for a <b>floor</b> cell {@code p} (the convention for skeleton targets — the
-     * solid block the bot stands ON). {@code [stand]} = a real floor with ≥2 passable cells above; {@code
-     * [buried]} = a standable block sealed by rock above (the §6 buried-target tell — what looked like
-     * {@code [stand]} before this headroom check); {@code [air-no-floor]} = passable but not a floor;
-     * {@code [SOLID]} = solid non-floor; {@code [unbuilt]} = no nav data.
-     */
-    private static String probe(NavGridView grid, BlockPos p) {
-        final int x = p.getX(), y = p.getY(), z = p.getZ();
-        if (!grid.built(x, y, z)) {
-            return "[unbuilt]";
-        }
-        final long d = grid.descriptorAt(x, y, z);
-        if (NavBlock.isStandable(d)) {
-            // Standable bit = "solid top you could stand on", but it ignores headroom: a buried rock block has
-            // it set. Require 2 passable cells above (feet + head) for a genuinely occupiable floor.
-            final boolean feet = NavBlock.isPassable(grid.descriptorAt(x, y + 1, z));
-            final boolean head = NavBlock.isPassable(grid.descriptorAt(x, y + 2, z));
-            return (feet && head) ? "[stand]" : "[buried]";
-        }
-        // Swimmable water is an occupiable target — distinguish it from dry mid-air so a [water] portal is
-        // legible as REACHABLE in the dump (vs an [air-no-floor] cell that needs a climb intent to target). A
-        // waterlogged solid (water fluid but a collision shape) is NOT swimmable → it falls through to [SOLID].
-        if (NavBlock.isSwimmableWater(d)) {
-            return "[water]";
-        }
-        if (NavBlock.isLava(d)) {
-            return "[LAVA]";
-        }
-        return NavBlock.isPassable(d) ? "[air-no-floor]" : "[SOLID]";
-    }
-
-    private static String compactPos(BlockPos p) {
-        return "(" + p.getX() + "," + p.getY() + "," + p.getZ() + ")";
-    }
-
-    private static String kindName(int kind) {
-        switch (kind) {
-            case RegionFragments.KIND_SOLID: return "SOLID";
-            case RegionFragments.KIND_AIR:   return "AIR";
-            case RegionFragments.KIND_WATER: return "WATER";
-            default:                         return "MIXED";
-        }
+        return SkeletonDump.describeSkeleton(this);
     }
 
     /** {@code true} once the bot's floor is within the block tier's goal tolerance of the real goal. */
@@ -659,21 +529,9 @@ public final class PathPlan {
             return;
         }
 
-        // Came WITHIN REPLAN_NEAR_TARGET of the window target → COMMIT to its step and slide the window, even if
-        // the bot is not yet physically inside the target's region. Committing on APPROACH (not exact arrival)
-        // (a) breaks the boundary-straddle bob — a portal sits 1 cell into the next region, which the block
-        // tier "reaches" 1 short, leaving the bot in the previous region so the region-based commit never fires;
-        // and (b) avoids forcing the bot onto an imperfect (buried/mid-air) portal centroid. (Skip when the
-        // target IS the goal region — handled by the goal-tolerance check above.)
-        if (windowTargetPos != null && windowTargetStep > committedIndex
-                && chebyshev(botFloor, windowTargetPos) <= REPLAN_NEAR_TARGET) {
-            committedIndex = windowTargetStep;
-            windowStart = windowTargetStep;
-            debounceIndex = -1;
-            debounceTicks = 0;
-            replanBlock();
-            return;
-        }
+        // (Window commit-on-approach lives in replanBlock's FORWARD-SLIDE now: a target the bot satisfies
+        // within the block tier's own ±1/±2 goal tolerance is committed+slid at target-selection time —
+        // the search's own arrival radius, no separate spatial hysteresis constant. s52.)
 
         // Fragment model (HPA-FRAGMENTS.md §S4): the bot's current skeleton step is matched on
         // (region, fragment), so resolve which fragment of its region the bot occupies (alloc-free). Center-
@@ -698,34 +556,13 @@ public final class PathPlan {
                 // A real forward step: the path no longer revisits any region in [committedIndex, curRegion).
                 committedIndex = curRegion;
                 windowStart = curRegion;
-                debounceIndex = -1;
-                debounceTicks = 0;
                 replanBlock();
                 return;
             }
         }
-
-        // Debounce fallback: when the waypoint scan is inconclusive (curRegion found but not yet committed,
-        // typically because the block plan is null/exhausted), advance on COMMIT_TICKS consecutive ticks
-        // inside the same forward region.
-        if (curRegion > committedIndex && (blockPlan == null || blockPlan.isEmpty())) {
-            if (curRegion == debounceIndex) {
-                if (++debounceTicks >= COMMIT_TICKS) {
-                    committedIndex = curRegion;
-                    windowStart = curRegion;
-                    debounceIndex = -1;
-                    debounceTicks = 0;
-                    replanBlock();
-                    return;
-                }
-            } else {
-                debounceIndex = curRegion;
-                debounceTicks = 1;
-            }
-        } else {
-            debounceIndex = -1;
-            debounceTicks = 0;
-        }
+        // (No debounce fallback: its inconclusive case — a null/empty block plan at commit time — no longer
+        // exists. Empty plans are never produced (the forward-slide commits satisfied targets pre-search) and
+        // a null plan is BLOCKED, which the online repair owns. s52: COMMIT_TICKS deleted.)
 
         // Terrain changed under us (BLOCKED) — recompute the current window's block plan from where we are.
         if (blockPlan == null) {
@@ -741,7 +578,11 @@ public final class PathPlan {
      * with the normal block-window slide over the same skeleton. Only called when {@link #hier} is present.
      */
     private boolean stepCascade() {
-        if (!hier.onBotMoved(botFloor)) {
+        // onRoute: the block plan vouches for the bot's position (it stands at/near a plan waypoint), so an
+        // off-window excursion (a fall-lineup clip into an adjacent region) is intentional, not a deviation —
+        // the cascade only re-derives for a bot that is off-window AND off its plan (s52; replaced the old
+        // BOUNDARY_CLIP_CHEB spatial tolerance with asking the plan).
+        if (!hier.onBotMoved(botFloor, botOnBlockPlan(botFloor))) {
             return false; // still within every level's window — slide the block window over the unchanged L0
         }
         this.skeleton = hier.l0Skeleton();
@@ -755,12 +596,32 @@ public final class PathPlan {
         return true;
     }
 
-    /** Reset the sliding window + debounce to the head of a freshly-swapped skeleton (cascade L0 change). */
+    /**
+     * Whether the bot's floor cell sits on (within one block of) a waypoint of the active block plan — the
+     * "is the bot following its plan" vouch passed to the cascade's deviation test. The follower settles
+     * exactly on waypoint floors, so while it executes the plan this is a hit by construction; the ±1 slack
+     * absorbs seam-adoption drift. Alloc-free scan of ≤ a window of waypoints, settle cadence only.
+     */
+    private boolean botOnBlockPlan(BlockPos floor) {
+        if (blockPlan == null || blockPlan.isEmpty()) {
+            return false;
+        }
+        final int n = blockPlan.size();
+        for (int i = 0; i < n; i++) {
+            final BlockPos wp = blockPlan.waypoint(i); // the stand cell; its floor is one below
+            if (Math.abs(wp.getX() - floor.getX()) <= 1
+                    && Math.abs(wp.getY() - 1 - floor.getY()) <= 1
+                    && Math.abs(wp.getZ() - floor.getZ()) <= 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Reset the sliding window to the head of a freshly-swapped skeleton (cascade L0 change). */
     private void resetWindow() {
         this.windowStart = 0;
         this.committedIndex = 0;
-        this.debounceIndex = -1;
-        this.debounceTicks = 0;
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -774,12 +635,12 @@ public final class PathPlan {
      * never goes back. Scans the live {@link BlockPathPlan} in place (≤ a window of ~48 waypoints, no copy,
      * no boxing) and maps each remaining waypoint to its level-0 region.
      *
-     * <p>Inconclusive (no block plan / empty) → {@code false}; the {@link #onBotMoved} debounce fallback then
-     * gates the advance on {@link #COMMIT_TICKS} consecutive ticks instead.
+     * <p>Inconclusive (no block plan / empty) → {@code false}: a null plan is BLOCKED (repair owns it) and
+     * the commit then happens via {@link #replanBlock}'s forward-slide when the next plan arrives.
      */
     private boolean committed(int j) {
         if (blockPlan == null || blockPlan.isEmpty()) {
-            return false; // inconclusive — defer to the debounce fallback
+            return false; // inconclusive — no commit without a plan to vouch for it
         }
         // Find the bot's current waypoint (nearest remaining), then scan from there to the window target.
         final int n = blockPlan.size();
@@ -822,7 +683,7 @@ public final class PathPlan {
     // ---------------------------------------------------------------------------------------------------
 
     /** The skeleton index of the window's far (last) region: {@code min(windowStart+WINDOW-1, lastIndex)}. */
-    private int windowLast() {
+    int windowLast() {
         return Math.min(windowStart + WINDOW - 1, skeleton.size() - 1);
     }
 
@@ -833,7 +694,27 @@ public final class PathPlan {
      * over a fresh full {@link NavGridView}. Sets {@link #status} to RUNNING (found) or BLOCKED (null).
      */
     private void replanBlock() {
-        final BlockPos target = windowTarget();
+        WindowTargeting.Result choice = targeting.target(skeleton, windowStart, windowLast());
+        // FORWARD-SLIDE (s52 — replaces both slideWindowOnEmptyPlan and the REPLAN_NEAR_TARGET
+        // commit-on-approach): never aim a search at a target the bot ALREADY satisfies within the block
+        // tier's own goal tolerance (±1 horizontal / ±2 vertical). Such a search returns a FOUND
+        // 0-waypoint plan the follower can't walk (the 2026-07-06 starvation), and the old fixes either
+        // consumed that empty plan after paying for it (slideWindowOnEmptyPlan) or pre-empted it with a
+        // magic Chebyshev-3 approach radius. Instead: the block tier's own arrival tolerance IS the
+        // commit radius — the search itself would declare this target reached from here — so commit the
+        // step and slide the window forward BEFORE paying any search. Also covers the boundary-straddle
+        // bob (a portal 1 cell into the next region, "reached" 1 short). Bounded: each slide strictly
+        // advances committedIndex toward the skeleton tail. The GOAL target is excluded — arrival there
+        // is owned by onBotMoved's goal-tolerance check (→ COMPLETE).
+        while (!choice.pos.equals(goalFloor) && choice.step > committedIndex
+                && withinTolerance(botFloor, choice.pos)) {
+            committedIndex = choice.step;
+            windowStart = choice.step;
+            choice = targeting.target(skeleton, windowStart, windowLast());
+        }
+        final BlockPos target = choice.pos;
+        this.windowTargetStep = choice.step;
+        this.windowTargetKind = choice.kind;
         // No corridor envelope: the block-A* searches the full grid toward the near (~3-region) window target,
         // so it can take the REAL route even when that wanders a few regions off the coarse skeleton (the
         // skeleton is a hint, not a cage — the old corridor's job, capping the pillar flood, is now done by the
@@ -866,15 +747,15 @@ public final class PathPlan {
         // left alone (the 40-tick refresh timer would otherwise churn resubmits); anything else in flight
         // is superseded (latest-wins).
         if (executor != null) {
-            if (pending != null && !pending.isDone() && target.equals(pendingTarget)) {
+            if (async.pendingSearchToward(target)) {
                 // A boundary replan toward this same target is already in flight → skip. An in-flight
                 // PRE-PLAN toward it is also left alone WHILE the current plan is still walkable (the
                 // 40-tick refresh timer would otherwise routinely kill the precompute — review finding;
                 // the seam-reject → replan-from-actual fallback covers a stall that invalidated the
                 // prediction, one round-trip later). Only a genuinely planless bot preempts a pre-plan.
-                if (!pendingPreplan || blockPlan != null) return;
+                if (!async.pendingIsPreplan() || blockPlan != null) return;
             }
-            if (blockPlan != null && parkedPlan != null && target.equals(parkedTarget)) {
+            if (blockPlan != null && async.parkedFor(target)) {
                 return; // the precomputed result is already parked for this target — arrival adopts it
             }
             submit(botFloor, target, cuboidCap, baseline, false);
@@ -889,147 +770,125 @@ public final class PathPlan {
         // must not pay the per-search view construction twice (SHORT-guard discipline).
         final NavGridView grid = new NavGridView(level);
         this.blockPlan = BlockPathfinder.findPath(grid, botFloor, target, caps, null, cuboidCap, inventory,
-                startMode, baseline, regionFieldFor(target));
+                startMode, baseline, 0L, regionFieldFor(target), tolXZFor(target), tolYFor(target));
         this.lastPlanPartial = blockPlan != null && BlockPathfinder.lastWasPartial();
-        if (slideWindowOnEmptyPlan()) {
-            // Bounded recursion — see slideWindowOnEmptyPlan: each slide strictly advances committedIndex
-            // (≤ skeleton length), so a chain of already-satisfied windows resolves in this one call.
-            replanBlock();
-            return;
-        }
-        this.status = (blockPlan != null) ? PathStatus.RUNNING : PathStatus.BLOCKED;
+        this.status = resultStatus(blockPlan, BlockPathfinder.lastExpansions());
         if (Debug.ENABLED && blockPlan != null) {
             logBlockPlan();
         }
     }
 
     /**
-     * Consume a ZERO-waypoint FOUND result inside the driver (2026-07-06 starvation incident): an empty
-     * non-partial plan means the search's START cell already satisfied the window target's goal tolerance
-     * (±1 horizontal / ±2 vertical) — the bot is effectively AT the window target. The correct reaction is
-     * the same commit-and-slide that the commit-on-approach rule in {@link #onBotMoved} performs, NOT
-     * handing the follower an unwalkable 0-waypoint plan: the follower "consumes" that instantly
-     * ({@code waypointIndex >= path.size()} at index 0) and then starves, because {@code settledFloor} only
-     * re-anchors inside a steering step that never runs. Called at EVERY site where a search result becomes
-     * {@link #blockPlan}: the sync {@link #replanBlock} findPath, and the async boundary-replan and parked
-     * pre-plan adoptions in {@link #pollPending}. Returns {@code true} when it committed+slid
-     * ({@link #blockPlan} cleared — the caller must {@code replanBlock()} for the NEW window).
-     *
-     * <p><b>Bound</b>: a slide requires {@code windowTargetStep > committedIndex} and sets
-     * {@code committedIndex = windowTargetStep} — strictly monotone, and {@code windowTargetStep} never
-     * exceeds the skeleton's last index — so a replan→empty→slide chain terminates after at most
-     * {@code skeleton.size()-1} slides (the recursion/round-trip cap is the skeleton length by
-     * construction; no counter needed).
-     *
-     * <p><b>Exclusions</b>: a PARTIAL empty plan proves nothing about target proximity (a budget/guard
-     * truncation that kept only the start cell), so committing on it would falsely advance the window — it
-     * adopts as before. When the guard fails (target step already committed, e.g. the goal window whose
-     * arrival the {@link #onBotMoved} goal-tolerance check owns) the empty plan also stays adopted exactly
-     * as before; the follower-side consumed-plan recovery re-engages the boundary machinery.
+     * Map a search <b>result</b> to the driver status. Every site that installs a result as
+     * {@link #blockPlan} must come through here:
+     * <ul>
+     *   <li>non-null plan → RUNNING (and clears {@link #startDead}).</li>
+     *   <li>{@code null} with real exploration → BLOCKED + {@link #blockedGeneration}++ — a new fact about
+     *       the world; the driver's online repair consumes exactly one repair per such result (replaced
+     *       the old REPAIR_COOLDOWN throttle).</li>
+     *   <li>{@code null} with ≤1 expansion → BLOCKED + {@link #startDead} — the search died AT the start
+     *       (the bot's own feet/head cells emit no candidates: a buried bot). That proves nothing about
+     *       any skeleton hop, so it must NEVER feed the repair blacklist (doing so was an unbounded
+     *       repair→resubmit→fail churn at planner speed — the s52b log-flood); the follower self-rescues
+     *       instead (dig out, {@code BotNavigator.selfRescue}).</li>
+     * </ul>
      */
-    private boolean slideWindowOnEmptyPlan() {
-        if (blockPlan == null || !blockPlan.isEmpty() || lastPlanPartial) return false;
-        if (windowTargetPos == null || windowTargetStep <= committedIndex) return false;
-        committedIndex = windowTargetStep;
-        windowStart = windowTargetStep;
-        debounceIndex = -1;
-        debounceTicks = 0;
-        blockPlan = null; // never expose the 0-waypoint plan to the follower
-        return true;
+    private PathStatus resultStatus(BlockPathPlan plan, int expansions) {
+        if (plan != null) {
+            startDead = false;
+            return PathStatus.RUNNING;
+        }
+        startDead = expansions <= 1;
+        if (!startDead) blockedGeneration++;
+        return PathStatus.BLOCKED;
     }
 
-    /** Cancel any in-flight search and drop the parked pre-plan (superseded / plan cleared). */
+    /**
+     * Monotone counter of BLOCKED search <b>results</b> (each null-returning search with real exploration
+     * increments it once). The follower's repair step keys on this: one {@link #repairBlocked} attempt per
+     * new BLOCKED result — identical inputs deterministically fail identically, so re-attempting between
+     * results is pure waste, and each attempt consumes the result by blacklisting a hop and re-searching.
+     * (s52: replaced the REPAIR_COOLDOWN tick throttle.)
+     */
+    public int blockedGeneration() {
+        return blockedGeneration;
+    }
+
+    /** Whether the last BLOCKED came from a START-DEAD search (≤1 expansion — see {@link #resultStatus}).
+     *  The follower branches to self-rescue instead of hop repair. Cleared by any adopted plan. */
+    public boolean startDead() {
+        return startDead;
+    }
+
+    private int blockedGeneration;
+    private boolean startDead;
+
+    /** Build this submission's {@link SearchRequest} and hand it to the {@link AsyncWindowSearch mailbox}
+     *  (which supersedes any in-flight search and, for a boundary replan, drops the parked pre-plan). */
     private void submit(BlockPos fromFloor, BlockPos target, RegionBound cuboidCap,
                         EditSnapshot seed, boolean preplan) {
-        if (pending != null) pending.cancel();
-        // A fresh submission supersedes any parked precompute: the parked plan was predicated on the
-        // PREVIOUS plan's end cell and remaining edits, both stale once a new search replaces that plan.
-        // Without this, a stale parked plan could later overwrite the fresh adoption (review finding).
-        if (!preplan) parkedPlan = null;
         // regionFieldFor(target): the snapshot must carry the field rooted at THIS submission's target —
         // covers both the boundary replan and the P4 pre-plan (which targets windowTargetPos, so the root
         // matches the cached field from the last replanBlock and this is a cheap equals hit).
-        pending = executor.submit(new SearchRequest(level, fromFloor, target, caps, inventory, startMode,
-                cuboidCap, seed, executor.budgetNanos(), regionFieldFor(target)));
-        pendingStart = fromFloor;
-        pendingTarget = target;
-        pendingPreplan = preplan;
+        async.submit(new SearchRequest(level, fromFloor, target, caps, inventory, startMode,
+                cuboidCap, seed, executor.budgetNanos(), regionFieldFor(target),
+                tolXZFor(target), tolYFor(target)), fromFloor, target, preplan);
+    }
+
+    /** The goal-arrival tolerance for a search toward {@code target}: the caller's {@link #goalTolXZ} when
+     *  the target IS the real goal, else the default (window hops need no exactness). */
+    private int tolXZFor(BlockPos target) {
+        return target.equals(goalFloor) ? goalTolXZ : BlockPathfinder.DEFAULT_GOAL_TOL_XZ;
+    }
+
+    private int tolYFor(BlockPos target) {
+        return target.equals(goalFloor) ? goalTolY : BlockPathfinder.DEFAULT_GOAL_TOL_Y;
     }
 
     /**
      * Drain the in-flight search if it finished (tick thread). Called from {@link #onBotMoved} — which
      * the follower only invokes at a settled boundary, so mid-plan adoption is boundary-gated by
      * construction — and from {@link #pollWhenPlanless}, the planless-bot exception (nothing to un-adopt).
-     * The splice contract's accept+adopt steps (DESIGN-background-pathfinding.md §5/§7):
+     * The splice contract's accept+adopt steps (DESIGN-background-pathfinding.md §5/§7): the
+     * {@link AsyncWindowSearch mailbox} classifies the finished handle
+     * ({@link AsyncWindowSearch#drainPending}) and tests the parked pre-plan's seam
+     * ({@link AsyncWindowSearch#pollParked}); the DECISIONS — adopt / BLOCKED / resubmit from the actual
+     * floor — happen here, keeping the driver the sole writer of
+     * {@link #blockPlan}/{@link #lastPlanPartial}/{@link #status}:
      * <ul>
      *   <li><b>Boundary replan</b> result: adopt if the bot is still within seam tolerance of the cell the
      *       search started from AND the window target hasn't moved; otherwise resubmit from the actual
      *       floor (the same recovery the escape hatches use). A {@code null} result = BLOCKED, exactly the
-     *       sync path's semantics.</li>
+     *       sync path's semantics. An executor-rejected handle also retries — NOT a search verdict, never
+     *       BLOCKED (that blacklists a real skeleton hop — review finding).</li>
      *   <li><b>Pre-plan</b> result (P4): PARK it — the bot hasn't reached the predicted start yet. Each
      *       boundary visit re-tests the parked seam; on accept it's adopted with no search pause at all,
      *       on target-change it's dropped (the window moved on).</li>
      * </ul>
      */
     private void pollPending(BlockPos actualFloor) {
-        if (pending != null && pending.isDone()) {
-            PlanHandle done = pending;
-            pending = null;
-            boolean preplan = pendingPreplan;
-            BlockPos from = pendingStart;
-            BlockPos toward = pendingTarget;
-            if (done.wasRejected()) {
-                // Executor hiccup (queue full / worker threw / cancelled-skip) — NOT a search verdict.
-                // Never map to BLOCKED (that blacklists a real skeleton hop — review finding): retry.
-                if (preplan) {
-                    preplanAttemptedTarget = null; // the attempt didn't run; allow another
-                } else {
-                    replanBlock();
-                }
-            } else if (preplan) {
-                if (done.plan() != null) {
-                    parkedPlan = done.plan();
-                    parkedPartial = done.wasPartial();
-                    parkedStart = from;
-                    parkedTarget = toward;
-                }
-                // A failed (null) pre-plan is dropped — and preplanAttemptedTarget stays set, so we don't
-                // re-attempt the same doomed precompute every boundary tick; the boundary replan searches
-                // for real when the bot arrives.
-            } else {
-                SpliceSeam seam = new SpliceSeam(from, startMode, EditSnapshot.EMPTY);
-                if (!seam.accepts(actualFloor) || !toward.equals(windowTargetPos)) {
-                    replanBlock(); // drifted past tolerance / window moved — plan from where we really are
-                } else {
-                    this.blockPlan = done.plan();
-                    this.lastPlanPartial = blockPlan != null && done.wasPartial();
-                    if (slideWindowOnEmptyPlan()) {
-                        // Async: replanBlock submits the NEXT window's search — a chain of already-
-                        // satisfied windows costs one search round trip per window, never a stall.
-                        replanBlock();
-                    } else {
-                        this.status = (blockPlan != null) ? PathStatus.RUNNING : PathStatus.BLOCKED;
-                        if (Debug.ENABLED && blockPlan != null) logBlockPlan();
-                    }
-                }
-            }
+        switch (async.drainPending(actualFloor, windowTargetPos, startMode)) {
+            case RETRY:
+                // Executor hiccup / drifted past seam tolerance / window moved — plan from where we
+                // really are (the mailbox never decides; see AsyncWindowSearch.Drain).
+                replanBlock();
+                break;
+            case RESULT:
+                this.blockPlan = async.resultPlan();
+                this.lastPlanPartial = blockPlan != null && async.resultPartial();
+                this.status = resultStatus(blockPlan, async.resultExpansions());
+                if (Debug.ENABLED && blockPlan != null) logBlockPlan();
+                break;
+            default: // NONE — nothing finished / pre-plan parked or dropped internally
+                break;
         }
         // Parked pre-plan adoption: the no-pause splice. Adopt only when the bot has actually arrived at
         // the predicted start (seam accept) and the window target is still the parked one.
-        if (parkedPlan != null) {
-            if (!windowTargetPos.equals(parkedTarget)) {
-                parkedPlan = null; // the window moved on while we walked — stale precompute, drop it
-            } else if (new SpliceSeam(parkedStart, startMode, EditSnapshot.EMPTY).accepts(actualFloor)) {
-                this.blockPlan = parkedPlan;
-                this.lastPlanPartial = parkedPartial;
-                parkedPlan = null;
-                if (slideWindowOnEmptyPlan()) {
-                    replanBlock(); // same empty-plan consumption as the boundary-replan adoption above
-                } else {
-                    this.status = PathStatus.RUNNING;
-                    if (Debug.ENABLED) logBlockPlan();
-                }
-            }
+        if (async.pollParked(actualFloor, windowTargetPos, startMode)) {
+            this.blockPlan = async.resultPlan();
+            this.lastPlanPartial = async.resultPartial();
+            this.status = resultStatus(blockPlan, async.resultExpansions()); // parked plans are never null
+            if (Debug.ENABLED) logBlockPlan();
         }
     }
 
@@ -1041,9 +900,9 @@ public final class PathPlan {
      * stops a failed/parked precompute from being re-submitted every boundary tick.
      */
     public boolean wantsPreplan() {
-        return executor != null && pending == null && parkedPlan == null
+        return executor != null && async.quiet()
                 && status == PathStatus.RUNNING && skeleton != null && windowTargetPos != null
-                && !windowTargetPos.equals(preplanAttemptedTarget);
+                && !async.preplanAttempted(windowTargetPos);
     }
 
     /**
@@ -1057,7 +916,7 @@ public final class PathPlan {
         if (!wantsPreplan()) return;
         if (predictedFloor.equals(botFloor)) return;
         this.startMode = liveMode; // same per-tick pose refresh onBotMoved does; the search seeds from it
-        preplanAttemptedTarget = windowTargetPos;
+        async.markPreplanAttempt(windowTargetPos);
         submit(predictedFloor, windowTargetPos, cuboidCapBox(windowTargetPos), remainingEdits, true);
     }
 
@@ -1069,14 +928,12 @@ public final class PathPlan {
      * other drain — is boundary-gated by the caller. Also refreshes {@link #botFloor} so a
      * rejected-seam resubmit searches from the bot's LIVE cell, not the stale ctor cell.
      *
-     * <p>{@code planConsumed} extends the same exception to a CONSUMED follower plan (every waypoint
-     * walked — 2026-07-06 incident): a consumed plan has no move in flight either, so a finished async
-     * result may be adopted at tick rate there too, instead of waiting on a settled boundary the follower
-     * may never re-anchor (only the caller knows its waypoint cursor, hence the flag rather than a
-     * {@link #blockPlan} test). False keeps the original planless-only semantics.
+     * <p>(A CONSUMED follower plan needs no special case here — s52: plan consumption is a first-class
+     * settle event in the driver, so a consumed plan drains through the normal boundary-gated
+     * {@link #onBotMoved} the same tick it settles.)
      */
-    public void pollWhenPlanless(BlockPos liveFloor, boolean planConsumed) {
-        if (executor == null || (blockPlan != null && !planConsumed)) return;
+    public void pollWhenPlanless(BlockPos liveFloor) {
+        if (executor == null || blockPlan != null) return;
         if (status == PathStatus.COMPLETE || status == PathStatus.FAILED || skeleton == null) return;
         this.botFloor = liveFloor;
         pollPending(liveFloor);
@@ -1084,47 +941,12 @@ public final class PathPlan {
 
     /** Stop caring about any in-flight search (the owner cleared/replaced this plan). */
     public void cancelPending() {
-        if (pending != null) {
-            pending.cancel();
-            pending = null;
-        }
-        parkedPlan = null;
+        async.cancel();
     }
 
-    /**
-     * Dump the returned block plan's SHAPE — the first ~10 steps as {@code move d(dx,dy,dz) -> floor [brk/plc]},
-     * plus the total cost and whether it's a best-effort PARTIAL. The per-step delta makes a pathological route
-     * legible at a glance: a plan that goes DOWN then back UP (a MineDown that undoes a Pillar) shows as
-     * {@code d(0,-1,0)} followed by {@code d(0,+1,0)} — the signature we're hunting. Cold (one dump per replan,
-     * under {@link Debug#ENABLED}); reads the plan in place, no allocation beyond the string.
-     */
+    /** Dump the returned block plan's SHAPE (see {@link SkeletonDump#logBlockPlan}). Cold, {@link Debug#ENABLED} only. */
     private void logBlockPlan() {
-        final StringBuilder sb = new StringBuilder();
-        sb.append("[Orebit] block plan ").append(blockPlan.size()).append("wp cost=")
-                .append(String.format("%.1f", blockPlan.cost()))
-                .append(lastPlanPartial ? " PARTIAL" : " FULL")
-                .append(" from ").append(compactPos(botFloor)).append(':');
-        BlockPos prev = botFloor;
-        final int lim = Math.min(blockPlan.size(), 10);
-        for (int i = 0; i < lim; i++) {
-            final BlockPos floor = blockPlan.waypoint(i).below(); // waypoint = floor.above() (the stand position)
-            final int dx = floor.getX() - prev.getX();
-            final int dy = floor.getY() - prev.getY();
-            final int dz = floor.getZ() - prev.getZ();
-            sb.append("\n  ").append(i).append(' ')
-                    .append(blockPlan.movement(i).getClass().getSimpleName())
-                    .append(" d(").append(dx).append(',').append(dy).append(',').append(dz).append(") ->")
-                    .append(compactPos(floor));
-            final StepEdits e = blockPlan.edits(i);
-            if (e != null && (e.breakCount() > 0 || e.placeCount() > 0)) {
-                sb.append(" [brk=").append(e.breakCount()).append(" plc=").append(e.placeCount()).append(']');
-            }
-            prev = floor;
-        }
-        if (blockPlan.size() > lim) {
-            sb.append("\n  ... +").append(blockPlan.size() - lim).append(" more");
-        }
-        OrebitCommon.LOGGER.info(sb.toString());
+        SkeletonDump.logBlockPlan(this);
     }
 
     /** Whether the current window's block plan is a best-effort PARTIAL (didn't reach the window target). */
@@ -1257,7 +1079,7 @@ public final class PathPlan {
                     RegionAddress.regionX(target.getX(), 0),
                     RegionAddress.regionY(target.getY(), 0, minY),
                     RegionAddress.regionZ(target.getZ(), 0), 3);
-            field = RegionPathfinder.costToGoalField(regionGrid, minY, target,
+            field = RegionPathfinder.costToGoalField(regionGrid, minY, target, botFloor,
                     caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), regionMine,
                     regionPlace, box);
         } catch (Throwable t) {
@@ -1303,347 +1125,6 @@ public final class PathPlan {
         return new RegionBound(minX - CORRIDOR_MARGIN, maxX + CORRIDOR_MARGIN,
                 minBY - CORRIDOR_VMARGIN, maxBY + CORRIDOR_VMARGIN,
                 minZ - CORRIDOR_MARGIN, maxZ + CORRIDOR_MARGIN);
-    }
-
-    /**
-     * The current window's block target (HPA-IMPLEMENTATION.md §9; HPA-FRAGMENTS.md §6/§S4). If the goal's
-     * level-0 region is within the window (goal in window), the real {@code goalFloor} (never projected). Else,
-     * for a <b>fragment-model</b> skeleton, the <b>farthest window step that yields a usable target cell</b>,
-     * walking far→near. A portal is only the bbox-center of a fragment's face footprint, so the centroid can
-     * land in solid rock (the A→B bounce) <i>or</i> in mid-air with no floor (an {@code air-no-floor} portal —
-     * the descent/ascent flood: the block tier can't stand at a point it only falls through, so it floods the
-     * open cave). A centroid is used directly when {@link #isUsableTarget usable}, or when it is BURIED in
-     * {@link NavBlock#isBreakable breakable} solid and the bot can break (raw {@link TargetKind#DIG} — the
-     * block A* digs to it, preserving the far step's routing information rather than degrading to a near
-     * snap; unbreakable/protected solids keep the snap — no search can ever mine to those); otherwise we
-     * {@link #snapInFootprint snap} to a real standable cell within the portal's footprint bbox. Whether a
-     * mid-air cell is acceptable is {@link #airTargetOk caps + direction}-aware (a place-capable bot climbing
-     * upward may target air; everyone else needs standable ground). For a <b>center-model</b> skeleton (coarse
-     * branch) or when no window step yields a cell, the far region's center projected to a standable floor.
-     */
-    private BlockPos windowTarget() {
-        final int last = windowLast();
-        // Goal in window? The goal region is the skeleton's tail iff reachedGoalRegion; treat "goal region
-        // index ≤ last" by checking whether any window region equals the goal region.
-        if (skeleton.reachedGoalRegion()) {
-            // Fragment-aware guard (FRAGMENT_AWARE_GOAL_WINDOW): the goal is the skeleton TAIL's (region,fragment).
-            // A region-only match is a false positive when the window contains the goal region at a DIFFERENT
-            // fragment (goal = a separate pocket of the start's own region, reached via a loop) — it targets the
-            // goal directly and unconfines the search into a flood. Requiring the fragment match falls through to
-            // the near-window portal. Default off keeps that flood reproducible for pruning research.
-            final boolean fragAware = FRAGMENT_AWARE_GOAL_WINDOW && skeleton.isFragmentModel();
-            final int goalFrag = fragAware ? skeleton.fragmentId(skeleton.size() - 1) : -1;
-            for (int i = windowStart; i <= last; i++) {
-                if (skeleton.rx(i) == goalRX && skeleton.ry(i) == goalRY && skeleton.rz(i) == goalRZ
-                        && (!fragAware || skeleton.fragmentId(i) == goalFrag)) {
-                    windowTargetStep = i;
-                    windowTargetKind = TargetKind.GOAL;
-                    return goalFloor;
-                }
-            }
-        }
-        // Fragment model: aim at the FARTHEST window portal that is occupiable. A portal is only the stored
-        // bbox CENTROID (lossy) — when it lands in rock we don't give up, because the real opening is still
-        // recoverable from the nav grid: snapToOccupiable scans the step's region for the nearest real cell.
-        // So we prefer, far→near, per step: (1) a region-committed dig → raw; (2) a usable centroid → raw;
-        // (3) a centroid BURIED in breakable solid, bot can break → raw (dig to it — see below); else (4) record the
-        // step's snapped real cell and continue nearer. Only if NO window step yields a raw target does the
-        // farthest snap win, and only when even that fails do we fall back to the center projection. The far
-        // target carries the skeleton's ROUTING information — snapping destroys it, so raw wins over snap even
-        // when the raw cell is buried.
-        if (skeleton.isFragmentModel()) {
-            final NavGridView grid = new NavGridView(level);
-            BlockPos snappedFallback = null; // a snapped cell from the farthest unusable portal, if any
-            int snappedStep = last;
-            for (int i = last; i > windowStart; i--) {
-                if (!skeleton.hasPortal(i)) {
-                    continue;
-                }
-                final BlockPos p = skeleton.portalCell(i);
-                // DIG-THROUGH crossing (PERF-DESIGN-region-dig-through.md §5): the portal cell is buried in solid
-                // — the region tier committed to mining through this face. Pass it straight through (like the
-                // GOAL branch), NOT rejecting/snapping it: the block A* digs to a buried target within its
-                // isGoal tolerance and prices break-through under canBreak. Skipping isUsableTarget/snap here is
-                // exactly what lets an INTERMEDIATE dig-through be realized instead of relocated to the near
-                // wall face (defeating the dig). TargetKind.DIG covers BOTH this region-committed case and the
-                // lossy-centroid buried case below.
-                if (skeleton.isDig(i)) {
-                    windowTargetStep = i;
-                    windowTargetKind = TargetKind.DIG;
-                    return p;
-                }
-                final boolean airOK = airTargetOk(i);
-                if (isUsableTarget(grid, p, airOK)) {
-                    windowTargetStep = i;
-                    windowTargetKind = TargetKind.PORTAL;
-                    return p; // the stored centroid is itself a usable target — best case
-                }
-                // BURIED centroid + break-capable bot (2026-07-06 incident): the centroid landed in solid rock
-                // without the region tier committing a dig (the lossy bbox center just missed the opening — or
-                // the whole face footprint is rock). Snapping here can DESTROY the far step's routing value:
-                // when every far footprint is unsnappable (a buried stretch), the surviving snappedFallback is
-                // the NEAREST crossing's face cell — sometimes 1 block from the bot, which produced a FOUND
-                // 0-waypoint empty plan and starved the driver. A break-capable bot doesn't need the snap: treat
-                // the buried centroid exactly like the isDig branch — raw DIG target, reached within the block
-                // A*'s goal tolerance under break pricing. The re-rooted region field handles a buried root too
-                // (costToGoalField's goalDigSeeds seeds the reachable pockets around a solid root, and when the
-                // flood can't engage it falls back to nearest-centroid seeding — it never fails on solid). The
-                // cell is guaranteed BUILT here (isUsableTarget short-circuits unbuilt cells to usable), so
-                // !passable really means solid rock, not an unloaded read. A no-break bot keeps the snap
-                // fallback: a raw buried target would be unreachable for it. isBreakable gates the same way
-                // (review finding): the derived BREAKABLE bit excludes vanilla-unbreakable (bedrock — nether
-                // roof/floor centroids) and owner-PROTECTED solids, cells the block A* can NEVER generate
-                // break edits for — aiming raw at one just floods the budget into a wall face, then falsely
-                // BLOCKED-blacklists a realizable hop. Those centroids keep the snap (the pre-incident path
-                // to the real opening); it also skips fluids (lava centroid ≠ rock to dig).
-                final long dCentroid = grid.descriptorAt(p.getX(), p.getY(), p.getZ());
-                if (caps.canBreak() && !NavBlock.isPassable(dCentroid) && NavBlock.isBreakable(dCentroid)) {
-                    windowTargetStep = i;
-                    windowTargetKind = TargetKind.DIG;
-                    return p;
-                }
-                // Not usable (buried in rock, or a mid-air cell we can't / shouldn't stand at): recover a real
-                // cell by scanning ONLY this portal's footprint bbox (§S4) — clamped to the fragment opening,
-                // so it's fast and never snaps into a different fragment. Require a STANDABLE cell unless an
-                // airborne target is acceptable here (airOK ⇒ place-capable + climbing on, §thought-3).
-                if (snappedFallback == null) {
-                    BlockPos snapped = snapInFootprint(grid, i, p, !airOK);
-                    if (snapped != null) {
-                        snappedFallback = snapped;
-                        snappedStep = i;
-                    }
-                }
-            }
-            if (snappedFallback != null) {
-                windowTargetStep = snappedStep;
-                windowTargetKind = TargetKind.SNAPPED;
-                return snappedFallback;
-            }
-            // FREE-FALL EXTENSION (HPA-FRAGMENTS.md §S4): the whole window held no standable cell — typically an
-            // all-air column (step off a ledge and drop through empty regions to the ground far below). There is
-            // no useful place to stop mid-fall, but the bot can just FALL the whole way, so we extend the horizon
-            // DOWN the committed skeleton past the window to the first standable cell — the landing — and aim
-            // there. The block tier's Fall reaches it in (essentially) one move AND enforces the bot's own
-            // maxFallDistance, so a drop too deep to survive simply fails here (→ repair) rather than being
-            // wrongly committed. Gated on STRICTLY descending: you can only cheaply fall to a far target going
-            // down, so we stop the instant the skeleton stops dropping (never aim the search at a far up/lateral
-            // cell). Iterative, bounded by the skeleton length and the first floor found.
-            for (int i = last + 1; i < skeleton.size() && skeleton.ry(i) < skeleton.ry(i - 1); i++) {
-                if (!skeleton.hasPortal(i)) {
-                    continue;
-                }
-                final BlockPos p = skeleton.portalCell(i);
-                if (isUsableTarget(grid, p, false)) { // standable / unbuilt (no air target mid-fall)
-                    windowTargetStep = i;
-                    windowTargetKind = TargetKind.EXTENDED;
-                    return p;
-                }
-                final BlockPos snapped = snapInFootprint(grid, i, p, true); // require the standable landing floor
-                if (snapped != null) {
-                    windowTargetStep = i;
-                    windowTargetKind = TargetKind.EXTENDED;
-                    return snapped;
-                }
-            }
-        }
-        windowTargetStep = last;
-        windowTargetKind = TargetKind.CENTER;
-        BlockPos center = skeleton.centerOf(last);
-        BlockPos floor = projectToStandableFloor(center);
-        return (floor != null) ? floor : center;
-    }
-
-    /**
-     * Whether an AIRBORNE (non-standable) window target is acceptable at skeleton step {@code i}: only when the
-     * bot can <b>place</b> (so it can pillar up to / hold an air cell) AND a climb is coming — either the next
-     * crossing rises ({@code ry(i+1) > ry(i)}, immediate climb) OR the one after it does ({@code ry(i+2) > ry(i)},
-     * the 45° staircase: lateral now, up next), so the airborne height feeds that climb (§thought-3). A no-place
-     * bot can't reach an air cell at all (and never has an upward-air hop — the region tier excludes those), and a
-     * purely lateral/downward stretch gets no benefit from being airborne, so both prefer a standable target.
-     *
-     * <p>No separate "not descending next" guard is needed: regions are 6-connected, so {@code ry} changes by at
-     * most ±1 per step, which means {@code ry(i+2) > ry(i)} can only hold when {@code ry(i+1) >= ry(i)} (you can't
-     * climb two regions of height in one move) — so a {@code ry(i+1) < ry(i)} (descend-next) step makes <i>both</i>
-     * disjuncts false. Keeping the {@code ry(i+1)} disjunct (rather than {@code ry(i+2)} alone) preserves the
-     * up-then-back-down "transit layer" case (rise to swap to a disjoint lower fragment). Lookahead reads the
-     * committed skeleton beyond the window; the bounds checks make it false near the skeleton's tail.
-     */
-    private boolean airTargetOk(int i) {
-        if (!caps.canPlace()) {
-            return false;
-        }
-        final int n = skeleton.size();
-        final int ryi = skeleton.ry(i);
-        return (i + 1 < n && skeleton.ry(i + 1) > ryi)   // immediate climb
-                || (i + 2 < n && skeleton.ry(i + 2) > ryi); // staircase: lateral now, climb next
-    }
-
-    /**
-     * Whether {@code p} is directly usable as a block-A* target. A real <b>standable</b> floor (with headroom)
-     * always is; a <b>water</b> cell always is (the bot can swim there — no floor or capability needed); a bare
-     * <b>passable</b> (air) cell is usable only when {@code airOK} (we intend to climb up to it); an
-     * <b>unbuilt</b> cell counts as usable (optimistic frontier — the block tier resolves real geometry on
-     * approach). Buried-in-rock and (when {@code !airOK}) dry mid-air cells are NOT usable → the caller snaps.
-     */
-    private boolean isUsableTarget(NavGridView grid, BlockPos p, boolean airOK) {
-        final int x = p.getX(), y = p.getY(), z = p.getZ();
-        if (!grid.built(x, y, z)) {
-            return true;
-        }
-        final long desc = grid.descriptorAt(x, y, z);
-        if (NavBlock.isStandable(desc) && NavBlock.isPassable(grid.descriptorAt(x, y + 1, z))) {
-            return true;
-        }
-        // A swimmable WATER cell is occupiable — every bot can swim (no place/break/climb needed), so an
-        // underwater opening (passable but not standable, i.e. "air-no-floor" under the surface) is a perfectly
-        // good target, NOT a mid-air cell to reject. Without this the window target snapped down to the seafloor
-        // (or flooded the center fallback), making the block tier dive/flood instead of swimming to the portal.
-        // SWIMMABLE water specifically (full water + no collision), not merely "water present" — a waterlogged
-        // solid (water fluid but a collision shape, e.g. a waterlogged fence) is an obstacle you can't float
-        // through, so it must NOT count as a target.
-        if (NavBlock.isSwimmableWater(desc)) {
-            return true;
-        }
-        return airOK && NavBlock.isPassable(desc);
-    }
-
-    /**
-     * Recover a real target cell for a portal whose centroid isn't usable (HPA-FRAGMENTS.md §S4). Scans <b>only
-     * the portal's footprint bbox</b> — the two in-face axes clamped to the stored footprint (so we never snap
-     * into a different fragment, and it's far fewer cells than the whole 16³ region), while the perpendicular
-     * axis scans the full region height so an air opening's standable floor BELOW it is found. Returns the cell
-     * nearest the centroid that is a standable floor with headroom; when {@code !requireStandable} (an airborne
-     * target is allowed here) it falls back to the nearest passable cell. {@code null} when the bbox holds no
-     * such cell (the caller then tries a nearer step, else the center projection). Cold path, one bbox scan per
-     * unusable target on replan.
-     */
-    private BlockPos snapInFootprint(NavGridView grid, int step, BlockPos near, boolean requireStandable) {
-        final int s = RegionAddress.LEAF_SIZE;
-        final int x0 = skeleton.rx(step) << RegionAddress.LEAF_BITS;
-        final int y0 = minY + (skeleton.ry(step) << RegionAddress.LEAF_BITS);
-        final int z0 = skeleton.rz(step) << RegionAddress.LEAF_BITS;
-        // The footprint of this step's entrance fragment, on the face it's entered from.
-        final int face = entranceFace(step);
-        final RegionFragments rf = regionGrid.fragmentRecord(0, skeleton.rx(step), skeleton.ry(step),
-                skeleton.rz(step));
-        // The virtual goal node has no real fragment record — snap within the whole region (NO_FACE) rather than
-        // indexing rf.footprint with the sentinel id. (In practice the goal-in-window branch fires before a virtual
-        // tail is portal-snapped, but guard defensively against an AIOOBE.)
-        final int packed = (rf != null && !rf.isUniform()
-                && !RegionPathfinder.isVirtualGoal(skeleton.fragmentId(step)))
-                ? rf.footprint(skeleton.fragmentId(step), face) : RegionFragments.NO_FACE;
-        int uMin = 0, uMax = s - 1, vMin = 0, vMax = s - 1;
-        if (packed != RegionFragments.NO_FACE) {
-            uMin = RegionFragments.footprintMinU(packed); uMax = RegionFragments.footprintMaxU(packed);
-            vMin = RegionFragments.footprintMinV(packed); vMax = RegionFragments.footprintMaxV(packed);
-        }
-        // Map the (U,V) in-face axes to world ranges per face; the perpendicular axis scans the full region.
-        // In-face axes (RegionFragments): ±X → (Y,Z); ±Y → (X,Z); ±Z → (X,Y).
-        int xMin = x0, xMax = x0 + s - 1, yMin = y0, yMax = y0 + s - 1, zMin = z0, zMax = z0 + s - 1;
-        switch (face >> 1) {
-            case 0: yMin = y0 + uMin; yMax = y0 + uMax; zMin = z0 + vMin; zMax = z0 + vMax; break; // ±X (perp X)
-            case 1: xMin = x0 + uMin; xMax = x0 + uMax; zMin = z0 + vMin; zMax = z0 + vMax; break; // ±Y (perp Y)
-            default: xMin = x0 + uMin; xMax = x0 + uMax; yMin = y0 + vMin; yMax = y0 + vMax; break; // ±Z (perp Z)
-        }
-        final int nx = near.getX(), ny = near.getY(), nz = near.getZ();
-        int bx = 0, by = 0, bz = 0;
-        long bestStand = Long.MAX_VALUE;
-        BlockPos bestPass = null;
-        long bestPassD = Long.MAX_VALUE;
-        for (int y = yMin; y <= yMax; y++) {
-            for (int z = zMin; z <= zMax; z++) {
-                for (int x = xMin; x <= xMax; x++) {
-                    if (!grid.built(x, y, z)) {
-                        continue;
-                    }
-                    final long d = sq(x - nx) + sq(y - ny) + sq(z - nz);
-                    final long desc = grid.descriptorAt(x, y, z);
-                    if (NavBlock.isStandable(desc) && NavBlock.isPassable(grid.descriptorAt(x, y + 1, z))) {
-                        if (d < bestStand) {
-                            bestStand = d; bx = x; by = y; bz = z;
-                        }
-                    } else if (!requireStandable && NavBlock.isPassable(desc) && d < bestPassD) {
-                        bestPassD = d; bestPass = new BlockPos(x, y, z);
-                    }
-                }
-            }
-        }
-        if (bestStand != Long.MAX_VALUE) {
-            return new BlockPos(bx, by, bz);
-        }
-        return requireStandable ? null : bestPass;
-    }
-
-    /**
-     * The face of skeleton step {@code i}'s region that faces the previous step {@code i-1} — the side the bot
-     * ENTERS this region from, where its portal footprint lives. Face encoding (matching {@link RegionAddress}):
-     * {@code 0=−X, 1=+X, 2=−Y, 3=+Y, 4=−Z, 5=+Z}. (Adjacent skeleton regions differ by ±1 on exactly one axis.)
-     */
-    private int entranceFace(int i) {
-        final int dx = skeleton.rx(i) - skeleton.rx(i - 1);
-        final int dy = skeleton.ry(i) - skeleton.ry(i - 1);
-        final int dz = skeleton.rz(i) - skeleton.rz(i - 1);
-        if (dx > 0) return 0;
-        if (dx < 0) return 1;
-        if (dy > 0) return 2;
-        if (dy < 0) return 3;
-        if (dz > 0) return 4;
-        return 5;
-    }
-
-    private static long sq(int v) {
-        return (long) v * v;
-    }
-
-    /**
-     * Whether {@code p} is a usable block-A* target — i.e. NOT buried in solid rock. A fragment portal cell is
-     * the bbox center of a face footprint and can land in solid when the opening is non-convex (§9); aiming the
-     * block tier at a sealed cell is the A→B bounce. Usable = built and either passable itself (an air /
-     * fall-through cell) or a standable floor with a passable cell just above (room to stand). An <b>unbuilt</b>
-     * cell counts as usable (optimistic — the block tier resolves real geometry on approach via its live read).
-     */
-    private boolean notBuried(NavGridView grid, BlockPos p) {
-        final int x = p.getX(), y = p.getY(), z = p.getZ();
-        if (!grid.built(x, y, z)) {
-            return true;
-        }
-        if (NavBlock.isPassable(grid.descriptorAt(x, y, z))) {
-            return true;
-        }
-        return NavBlock.isStandable(grid.descriptorAt(x, y, z))
-                && NavBlock.isPassable(grid.descriptorAt(x, y + 1, z));
-    }
-
-    /**
-     * Project a region center down to a standable floor cell within that center's level-0 vertical region
-     * (HPA-IMPLEMENTATION.md §9). Scans the 16-tall region column straddling {@code center.y}, nearest-first,
-     * for a built cell whose descriptor is {@link NavBlock#isStandable standable}. Returns {@code null} if the
-     * column has no standable floor (the caller then uses the raw center). Reads through a fresh
-     * {@link NavGridView}; allocation here is bounded (one view, one scan) and happens only on replan.
-     */
-    private BlockPos projectToStandableFloor(BlockPos center) {
-        final NavGridView grid = new NavGridView(level);
-        final int cx = center.getX();
-        final int cz = center.getZ();
-        // The level-0 region this center belongs to, and that region's vertical block span [y0, y0+16).
-        final int ry = RegionAddress.regionY(center.getY(), 0, minY);
-        final int y0 = minY + (ry << RegionAddress.LEAF_BITS);
-        final int y1 = y0 + RegionAddress.LEAF_SIZE;
-        // Search outward from the center y so we land on the closest standable floor.
-        final int cy = center.getY();
-        for (int d = 0; d < RegionAddress.LEAF_SIZE; d++) {
-            int yDown = cy - d;
-            if (yDown >= y0 && yDown < y1 && grid.built(cx, yDown, cz)
-                    && NavBlock.isStandable(grid.descriptorAt(cx, yDown, cz))) {
-                return new BlockPos(cx, yDown, cz);
-            }
-            int yUp = cy + d;
-            if (d != 0 && yUp >= y0 && yUp < y1 && grid.built(cx, yUp, cz)
-                    && NavBlock.isStandable(grid.descriptorAt(cx, yUp, cz))) {
-                return new BlockPos(cx, yUp, cz);
-            }
-        }
-        return null;
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -1716,15 +1197,19 @@ public final class PathPlan {
     }
 
     /**
-     * The block tier's goal tolerance (BlockPathfinder.findPath: within 1 block horizontally, 2 vertically of
-     * {@code goalFloor}). Mirrored here so the driver completes exactly when the windowed block plan would.
+     * The FINAL goal's arrival tolerance — the caller's {@link #goalTolXZ}/{@link #goalTolY} (s52), mirrored
+     * from the tolerance the GOAL-target block searches run with, so the driver completes exactly when the
+     * goal-window block plan would. Historical callers get ±1/±2; drop collection runs 0/0.
      */
     private boolean withinGoalTolerance(BlockPos floor) {
-        return withinTolerance(floor, goalFloor);
+        return Math.abs(floor.getX() - goalFloor.getX()) <= goalTolXZ
+                && Math.abs(floor.getZ() - goalFloor.getZ()) <= goalTolXZ
+                && Math.abs(floor.getY() - goalFloor.getY()) <= goalTolY;
     }
 
-    /** The block tier's arrival tolerance (±1 horizontal, ±2 vertical) of an arbitrary target — used for the
-     *  final goal and for committing the sliding window when the bot reaches the window target. */
+    /** The block tier's DEFAULT arrival tolerance (±1 horizontal, ±2 vertical) of an arbitrary target —
+     *  the window-slide commit radius (intermediate window targets always use the default; only the final
+     *  goal carries the caller's tolerance). */
     private static boolean withinTolerance(BlockPos floor, BlockPos target) {
         return Math.abs(floor.getX() - target.getX()) <= 1
                 && Math.abs(floor.getZ() - target.getZ()) <= 1

@@ -140,5 +140,12 @@ public final class OrebitCommon {
             // whole server is going away) — either way the bot is never removed off-thread.
             ((ServerLevel) Worlds.of(player)).getServer().execute(() -> BotManager.removeBotFor(player));
         });
+
+        // Headless end-to-end scenario harness (the :fabric:<ver>:runAutotest run config): spawns one
+        // bot on a known-seed dedicated server, drives one goto, writes a result file, halts. INERT
+        // unless the JVM was launched with -Dorebit.autotest (register() is a single property read in
+        // production). Registered LAST deliberately: its SERVER_STARTED hook must run after the config /
+        // mining-table / warm-up / planner-pool installs above (loader events fire in registration order).
+        HeadlessAutotest.register(events);
     }
 }

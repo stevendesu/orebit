@@ -31,8 +31,21 @@ import net.minecraft.server.level.ServerLevel;
  * @param budgetNanos the wall-clock search budget ({@code 0} = node-cap only)
  * @param field       the region-informed cost-to-goal heuristic field, built on the tick thread at submit and
  *                    read-only (write-once) on the worker, or {@code null} (no region heuristic)
+ * @param goalTolXZ   goal-arrival tolerance, horizontal Chebyshev (s52: the caller's definition of done —
+ *                    {@link BlockPathfinder#DEFAULT_GOAL_TOL_XZ} for "get near", 0 for "stand ON the cell")
+ * @param goalTolY    goal-arrival tolerance, vertical
  */
 public record SearchRequest(ServerLevel level, BlockPos startFloor, BlockPos target, BotCaps caps,
                             MovementContext.InventoryView inventory, int startMode, RegionBound cuboidCap,
-                            EditSnapshot baseline, long budgetNanos, RegionCostField field) {
+                            EditSnapshot baseline, long budgetNanos, RegionCostField field,
+                            int goalTolXZ, int goalTolY) {
+
+    /** Historical shape — the default ±1/±2 goal tolerance. */
+    public SearchRequest(ServerLevel level, BlockPos startFloor, BlockPos target, BotCaps caps,
+                         MovementContext.InventoryView inventory, int startMode, RegionBound cuboidCap,
+                         EditSnapshot baseline, long budgetNanos, RegionCostField field) {
+        this(level, startFloor, target, caps, inventory, startMode, cuboidCap, baseline, budgetNanos, field,
+                com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder.DEFAULT_GOAL_TOL_XZ,
+                com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder.DEFAULT_GOAL_TOL_Y);
+    }
 }

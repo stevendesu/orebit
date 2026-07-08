@@ -9,7 +9,7 @@ import com.orebit.mod.worldmodel.hpa.RegionAddress;
  * {@link com.orebit.mod.worldmodel.hpa.CostPyramid CostPyramid} on the <b>same</b> fixed-grid implicit octree
  * ({@link RegionAddress}; find-mine-resources design §3). Where {@code CostPyramid} stores nav-cost/connectivity
  * per region, this stores <b>how many of each indexed resource</b> a region holds, as a log₂ histogram
- * ({@link Log2Codec}) — one byte per indexed column ({@link ResourceClasses#COLUMN_COUNT} = 23).
+ * ({@link Log2Codec}) — one byte per indexed column ({@link ResourceClasses#COLUMN_COUNT}).
  *
  * <p>One {@code ResourcePyramid} instance exists per dimension ({@code RegionGrid} owns it alongside its
  * {@code CostPyramid}). A row is addressed by {@code (level, rx, ry, rz)} (see {@link RegionAddress}); each level

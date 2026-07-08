@@ -146,8 +146,8 @@ public final class ConfigKeys {
      * (DESIGN-background-pathfinding.md). The tick thread submits a search and adopts the result at the
      * same settled boundary plans already swap at; searches stop costing tick time entirely, and the
      * wall-clock budget below replaces the node cap as the effective search limit. Plans arrive 1–3 ticks
-     * after they're requested (the bot keeps walking its current plan meanwhile). Default {@code false}
-     * (today's synchronous behaviour, byte-identical). Changing it requires a server restart.
+     * after they're requested (the bot keeps walking its current plan meanwhile). Default {@code true};
+     * set {@code false} for the old synchronous tick-thread behaviour. Changing it requires a server restart.
      */
     public static final String PATHING_ASYNC = "pathing.async";
     /**

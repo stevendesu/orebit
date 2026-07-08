@@ -23,6 +23,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.Strategy;
 
 /**
  * Headless proof of the {@code Climb} movement (ladders / vines): a sealed stone maze where a climbable
@@ -154,8 +155,7 @@ class ClimbTest {
 
     private static PalettedContainer<BlockState> solidSection() {
         PalettedContainer<BlockState> s = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, Blocks.AIR.defaultBlockState(),
-                PalettedContainer.Strategy.SECTION_STATES);
+                Blocks.AIR.defaultBlockState(), Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         BlockState stone = Blocks.STONE.defaultBlockState();
         for (int x = 0; x < 16; x++) {
             for (int y = 0; y < 16; y++) {
@@ -176,8 +176,7 @@ class ClimbTest {
     /** A one-chunk synthetic grid: section0 at y 0..15, an optional section1 at y 16..31, air above. */
     private static NavGridView view(NavSection s0, NavSection s1) {
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
-                Block.BLOCK_STATE_REGISTRY, Blocks.AIR.defaultBlockState(),
-                PalettedContainer.Strategy.SECTION_STATES);
+                Blocks.AIR.defaultBlockState(), Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
         NavSection airSection = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(airStates, true, airSection.getTraversalGrid());
 

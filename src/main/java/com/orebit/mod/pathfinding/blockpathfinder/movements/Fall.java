@@ -147,7 +147,10 @@ public final class Fall implements Movement {
         // surcharges: the drop column (above) and the step-off body cells (nx, y+1..y+2, the two
         // cells the flags at (nx,y,nz) describe; zero-read when the bits are clear).
         float cost = BASE_COST + depth * PER_BLOCK
-                + transit + ctx.bodyTransitCost(flags, nx, y, nz);
+                + transit + ctx.bodyTransitCost(flags, nx, y, nz)
+                // Landing-floor contact damage (magma — standable since s52b): coordinate form reads the
+                // floor descriptor ONLY for a mortal bot; an immune bot pays zero reads here.
+                + ctx.floorHazardCost(nx, fy, nz);
         if (depth > safeFall) {
             cost += (depth - safeFall) * hpCost; // ≈1 HP per excess block × ticks-per-HP
         }
