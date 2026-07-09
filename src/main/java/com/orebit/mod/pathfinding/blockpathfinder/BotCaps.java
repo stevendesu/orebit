@@ -78,7 +78,7 @@ public record BotCaps(
         int maxBreakHardness,
         /**
          * May mine <b>vanilla-unbreakable</b> blocks (negative destroy time — bedrock, barriers, end
-         * portal frames, …) at the fixed {@link MiningModel#UNBREAKABLE_STANDIN_TICKS} stand-in cost
+         * portal frames, …) at the tool-derived {@link MiningModel#unbreakableTicks} stand-in cost
          * ({@code mining.allowUnbreakable}, default {@code false}). Its OWN gate, deliberately NOT
          * subject to {@link #maxBreakHardness}: the quantized 255 sentinel encodes "destroy time &lt; 0",
          * which doesn't order against real hardness values, so capping it there would be meaningless.

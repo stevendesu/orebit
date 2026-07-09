@@ -955,11 +955,15 @@ public final class MovementContext {
     public float breakCost(long d) {
         InventoryView inv = inventory;
         // A vanilla-unbreakable block (reachable only via the mining.allowUnbreakable arm of breakable/
-        // breakableThrough) has NO physical mining time — the resident tables hold the UNMINEABLE sentinel
-        // — so it is priced at the fixed policy stand-in the executor's grind actually spends (parity in
-        // time, not just in permission). One extract + compare, only on the (rare) break-folding path.
+        // breakableThrough) has NO physical mining time — the resident tables hold the UNMINEABLE sentinel —
+        // so it is priced at the tool-derived stand-in the executor's grind actually spends (parity in time,
+        // not just permission): mining.unbreakableHardness through the pickaxe formula at the bot's best
+        // pickaxe tier, so a diamond pick prices cheaper than a stone one. No snapshot (headless/trace) ⇒
+        // bare-hand tier. One extract + compare, only on the (rare) break-folding path.
         if (NavBlock.hardness(d) == UNBREAKABLE_HARDNESS) {
-            return MiningModel.UNBREAKABLE_STANDIN_TICKS + (inv != null ? inv.breakBaseCost() : 0f);
+            int tier = inv != null ? inv.mining().bestTierOrdinal(NavBlock.Tool.PICKAXE.ordinal())
+                                   : MiningModel.Tier.BARE.ordinal();
+            return MiningModel.unbreakableTicks(tier) + (inv != null ? inv.breakBaseCost() : 0f);
         }
         return inv == null ? MiningModel.bareHandTicks(d)
                 : inv.mining().ticksFor(d) + inv.breakBaseCost();

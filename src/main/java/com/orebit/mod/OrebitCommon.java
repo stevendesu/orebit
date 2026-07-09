@@ -45,7 +45,8 @@ public final class OrebitCommon {
         // never recomputing mining time per node (favour-cpu-over-ram). Re-baked on /bot config reload too
         // (ConfigLoader.reload) so a changed mining-time model takes effect without a restart.
         events.onServerStarted(server -> MiningModel.buildTable(
-                ConfigLoader.config().ticksByHardness(), ConfigLoader.config().ticksToMineFlat()));
+                ConfigLoader.config().ticksByHardness(), ConfigLoader.config().ticksToMineFlat(),
+                ConfigLoader.config().unbreakableHardness()));
 
         // Boot-time pathfinder JIT warm-up (internal_docs/PERF-DESIGN-warmup-searches.md): ~500 synthetic
         // searches over a private in-memory fixture so the first REAL search doesn't run interpreted/C1-cold
