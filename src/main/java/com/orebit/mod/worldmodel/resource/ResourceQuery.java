@@ -163,6 +163,46 @@ public final class ResourceQuery {
         return acc;
     }
 
+    /**
+     * The approximate log₂ tally of {@code column} in a <b>box of half-width {@code radius} centered on
+     * {@code (px,pz)}</b>, summed over the <b>full vertical column</b> — the "how much is near me" reading the
+     * {@code /bot report} compass shows at each scale. It folds ({@link Log2Codec#merge}) every interned cell at
+     * {@code level} that overlaps the horizontal box, across every vertical region index, so ores far below the
+     * player still count.
+     *
+     * <h2>Why a box-sum, not the single containing cell</h2>
+     * Reading the one grid cell the anchor sits in makes the number lurch every time the anchor crosses a cell
+     * boundary — most jarringly at the world origin, where standing on {@code (1,1)} vs {@code (−1,−1)} lands in
+     * different cells two blocks apart. Because a fixed grid <i>always</i> has that discontinuity, we don't try
+     * to re-center the grid (a centered quadtree cannot nest cleanly — a cell centered on 0 must split at 0);
+     * instead the <b>query</b> is centered on the player. A box centered on {@code (px,pz)} shifts smoothly with
+     * the player, so two anchors a few blocks apart cover almost the same cells and report almost the same count
+     * — stable near the origin, where players spend most of their time. The window spans a few cells per axis, so
+     * a boundary crossing swaps only a fraction of the coverage rather than the whole answer.
+     *
+     * <p>Approximate by design (log₂ buckets, and the box is snapped to the cell grid so its true coverage is
+     * within a cell of {@code radius}). Cold (command cadence); absent cells are skipped with no allocation.
+     * Returns the raw log₂ byte (decode with {@link Log2Codec#decode}); {@code 0} if nothing known in range.
+     */
+    public static byte windowLog2(ResourcePyramid p, int px, int pz, int level, int radius, int column) {
+        if (p == null || column < 0 || column >= ResourcePyramid.COLUMNS) return 0;
+        final int rxLo = RegionAddress.regionX(px - radius, level);
+        final int rxHi = RegionAddress.regionX(px + radius, level);
+        final int rzLo = RegionAddress.regionZ(pz - radius, level);
+        final int rzHi = RegionAddress.regionZ(pz + radius, level);
+        final int vert = RegionAddress.verticalRegions(level); // full dimension height (1 at/above OCTREE_TOP)
+        byte acc = 0;
+        for (int rx = rxLo; rx <= rxHi; rx++) {
+            for (int rz = rzLo; rz <= rzHi; rz++) {
+                for (int ry = 0; ry < vert; ry++) {
+                    final int row = p.rowIfPresent(level, rx, ry, rz);
+                    if (row >= 0) acc = Log2Codec.merge(acc, p.getLog2(level, row, column));
+                }
+            }
+        }
+        return acc;
+    }
+
     /** Squared distance from region {@code (level,rx,ry,rz)}'s center block to the anchor (long, no overflow). */
     private static long distSq(int level, int rx, int ry, int rz, int minY, int ax, int ay, int az) {
         final long dx = (long) RegionAddress.centerX(level, rx) - ax;
