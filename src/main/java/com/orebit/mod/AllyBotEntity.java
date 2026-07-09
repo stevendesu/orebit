@@ -25,6 +25,7 @@ import com.orebit.mod.platform.WorldEdits;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
+import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
@@ -299,6 +300,14 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // Stage-1 mining test hook: while a /bot mine target is set, request it each tick until it's gone, then
         // report and clear. (Stage 2 replaces this debug field with each Movement's reconcile driving the break.)
         final ServerLevel level = (ServerLevel) Worlds.of(this);
+
+        // Flush barrier (PERF-DESIGN-navgrid-edit-batching.md §4.4): drain the level's deferred
+        // block-edit queue before this tick's mode dispatch, so the region-tier reads that do NOT go
+        // through a NavGridView — the lazy LeafCostComputer/FragmentLeafComputer mini-pathfinds
+        // triggered during region planning read NavStore sections directly — see every change fired
+        // earlier this tick. Sync block searches are covered again by the NavGridView ctor barrier
+        // (then a clean no-op). One static int test per bot per tick when clean.
+        NavGridUpdater.flush(level);
         if (debugMineTarget != null) {
             if (level.getBlockState(debugMineTarget).isAir()) {
                 chat("[bot] mined " + compact(debugMineTarget));

@@ -82,6 +82,13 @@ public final class NavGridView {
     private final NavSection[][] ccVals = new NavSection[CC_CAP][]; // null slot = cold (never looked up)
 
     public NavGridView(ServerLevel level) {
+        // Flush barrier (PERF-DESIGN-navgrid-edit-batching.md §4.4): every sync block search constructs
+        // its view here, so draining the level's deferred block-edit queue first is what preserves the
+        // read-your-writes contract the Freshness note above promises — including the bot's own
+        // break/place edits fired earlier this tick. One static int test when clean, against a per-search
+        // setup bill of 6k–40k ns. The synthetic/test ctor below and background() deliberately do NOT
+        // flush: no live level to drain (and the JMH benchmarks must stay off this path).
+        NavGridUpdater.flush(level);
         this.level = level;
         this.minY = LevelBounds.minY(level);
         this.chunks = NavStore.chunksOf(level);

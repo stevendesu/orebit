@@ -743,7 +743,7 @@ public final class RegionPathfinder {
         int pendingMarked = 0;     // reached-but-unsettled rows in marked regions (phase-2 termination gate)
         boolean earlyExit = false;
 
-        final RegionCostField field = new RegionCostField(bound, minY, grid, grx, gry, grz);
+        final RegionCostField field = new RegionCostField(bound, minY, grx, gry, grz);
         float maxSettled = 0f;     // the frontier floor: max settled g (== last settled g, Dijkstra order)
         int settles = 0;
         int expansions = 0;
@@ -797,6 +797,9 @@ public final class RegionPathfinder {
             }
         }
         field.setFloor(maxSettled);
+        // Bake EXACT membership slabs for the ≥2-reached-slot regions (a 4 KB record-label copy each, on this
+        // build thread) so costAt's slot resolution reads only field-owned arrays — see RegionCostField.
+        field.bakeSlabs(grid);
         final int[] stats = LAST_FIELD_STATS.get();
         stats[0] = settles;
         stats[1] = earlyExit ? 1 : 0;
