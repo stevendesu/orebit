@@ -41,8 +41,8 @@ import net.minecraft.world.level.chunk.Strategy;
  * (mirroring how these suites deliberately never bake the global {@link MiningModel} table).
  *
  * <p><b>{@code mining.allowUnbreakable}</b> rides {@link BotCaps#allowUnbreakable}: the vanilla-
- * unbreakable sentinel (hardness 255) becomes breakable at the fixed {@link
- * MiningModel#UNBREAKABLE_STANDIN_TICKS} stand-in — its own axis (not subject to {@code
+ * unbreakable sentinel (hardness 255) becomes breakable at the tool-derived {@link
+ * MiningModel#unbreakableTicks} stand-in — its own axis (not subject to {@code
  * maxBreakHardness}), with PROTECTED always winning.
  *
  * <p>The search course reuses {@code PassThroughHazardTest}'s sealed-stone maze shape: a straight
@@ -150,8 +150,11 @@ class ProtectedBlockPolicyTest {
         assertFalse(plain.breakable(bedrock), "without the opt-in the sentinel stays unmineable");
         assertTrue(grinder.breakable(bedrock),
                 "mining.allowUnbreakable opts in — NOT gated by maxBreakHardness (cap is 0 here: its own axis)");
-        assertEquals(MiningModel.UNBREAKABLE_STANDIN_TICKS, grinder.breakCost(bedrock), 1e-4f,
-                "priced at the fixed stand-in the executor's grind actually spends (parity in time)");
+        // No inventory snapshot on this grinder → the tool-derived stand-in falls back to the bare-hand tier
+        // (the same value the executor's grind spends, parity in time). A better pickaxe would price cheaper.
+        assertEquals(MiningModel.unbreakableTicks(MiningModel.Tier.BARE.ordinal()),
+                grinder.breakCost(bedrock), 1e-4f,
+                "priced at the tool-derived stand-in the executor's grind actually spends (parity in time)");
 
         // Protected ALWAYS wins, even over the opt-in.
         NavBlock.applyProtected(s -> s.is(Blocks.BEDROCK));

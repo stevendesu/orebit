@@ -78,19 +78,27 @@ public final class MiningModel {
     public static final short UNMINEABLE = Short.MAX_VALUE;
 
     /**
-     * The fixed stand-in mining time (ticks) for a <b>vanilla-unbreakable</b> block (negative destroy
-     * time — quantized hardness 255: bedrock, barriers, end portal frames, …) when the owner opted in via
-     * {@code mining.allowUnbreakable}. Vanilla defines NO mining time for these (the -1 hardness can't
-     * feed the tick formula), so this is a policy constant, not physics: <b>2400 ticks = 2 minutes</b> per
-     * block. Rationale: an order of magnitude above the hardest legitimate dig with the best tool
-     * (obsidian × diamond pick ≈ 188 ticks) so the planner treats it as an extreme last resort — the
-     * break-even detour is {@code 2400 / 4.633 ≈ 518} walk-blocks — while staying well below the
-     * bare-hand-obsidian worst case (5000 ticks) and short enough that the executor's grind actually
-     * completes in tolerable real time. Used by BOTH sides (parity): the planner's
-     * {@link MovementContext#breakCost} charges it, and the executor's {@code BotMining} accumulates
-     * progress at {@code 1/this} per tick, so the planned cost is the time actually spent.
+     * Default {@code mining.unbreakableHardness}: the synthetic pseudo-hardness assigned to
+     * <b>vanilla-unbreakable</b> blocks (bedrock, barriers, end portal frames — no real destroy time) when
+     * the owner opts in via {@code mining.allowUnbreakable}. It is fed through the SAME vanilla mining
+     * formula real blocks use — assuming the {@link NavBlock.Tool#PICKAXE PICKAXE} category with a correct
+     * tool required (every vanilla-unbreakable block is pickaxe-family) — so a better pickaxe tier digs
+     * faster and bare hands are drastically slower. NOT stored in the 8-bit descriptor hardness field (that
+     * stays pinned to the {@code 255} sentinel that IDENTIFIES an unbreakable block), so it may exceed 255.
+     *
+     * <p>The default {@code 3200} reproduces the historical fixed cost for the common case — a diamond
+     * pickaxe grinds one block in {@code 3200/5 · 20 · 1.5 / 8 = 2400} ticks (2 minutes) — while a worse tool
+     * is slower and bare hands far slower still, keeping unbreakable mining an extreme last resort the planner
+     * routes around whenever any cheaper path exists. (Obsidian, the hardest REAL block, is hardness ~250 for
+     * comparison.)
      */
-    public static final int UNBREAKABLE_STANDIN_TICKS = 2400;
+    public static final int DEFAULT_UNBREAKABLE_HARDNESS = 3200;
+
+    /**
+     * The active {@code mining.unbreakableHardness} (set at {@link #buildTable(boolean, int, int)}). Read by
+     * {@link #unbreakableTicks(int)} / {@link #unbreakableFastestTicks()} on the cold break-cost paths.
+     */
+    private static int unbreakableHardness = DEFAULT_UNBREAKABLE_HARDNESS;
 
     /**
      * The resident table: {@code TICKS[navtype][tier]} = mining ticks for that block with that tier of tool.
@@ -148,10 +156,13 @@ public final class MiningModel {
      *
      * @param hardnessModel {@code mining.ticksByHardness} — true = real per-hardness/tool ticks; false = flat
      * @param ticksToMineFlat the constant per-block mine ticks when {@code !hardnessModel} (clamped ≥ 0)
+     * @param unbreakableHardness {@code mining.unbreakableHardness} — the synthetic pseudo-hardness the
+     *        {@code allowUnbreakable} stand-in ({@link #unbreakableTicks}) derives its cost from (clamped ≥ 1)
      */
-    public static void buildTable(boolean hardnessModel, int ticksToMineFlat) {
+    public static void buildTable(boolean hardnessModel, int ticksToMineFlat, int unbreakableHardness) {
         flatModel = !hardnessModel;
         flatTicks = Math.max(0, ticksToMineFlat);
+        MiningModel.unbreakableHardness = Math.max(1, unbreakableHardness);
 
         // (1) Navtype-keyed table.
         int n = NavBlock.navtypeCount();
@@ -182,9 +193,14 @@ public final class MiningModel {
         TICKS_BY_FIELDS = f;
     }
 
-    /** Convenience: build with the hardness-derived model (the default; used where no config is threaded). */
+    /** Convenience overload keeping the default unbreakable stand-in ({@link #DEFAULT_UNBREAKABLE_HARDNESS}). */
+    public static void buildTable(boolean hardnessModel, int ticksToMineFlat) {
+        buildTable(hardnessModel, ticksToMineFlat, DEFAULT_UNBREAKABLE_HARDNESS);
+    }
+
+    /** Convenience: hardness-derived model + default unbreakable hardness (used where no config is threaded). */
     public static void buildTable() {
-        buildTable(true, 0);
+        buildTable(true, 0, DEFAULT_UNBREAKABLE_HARDNESS);
     }
 
     /**
@@ -280,6 +296,38 @@ public final class MiningModel {
         for (int i = 1; i < row.length; i++) {
             if (row[i] < min) min = row[i];
         }
+        return min;
+    }
+
+    /**
+     * Break ticks for a <b>vanilla-unbreakable</b> block ({@code mining.allowUnbreakable}) mined with a
+     * pickaxe of the given {@link Tier} ordinal. Vanilla defines no mining time for these, so the cost is
+     * derived from the configured {@code mining.unbreakableHardness} through the same closed form the real
+     * mining table uses — {@link NavBlock.Tool#PICKAXE PICKAXE} category, correct-tool-required — so a
+     * diamond/netherite pick digs faster and bare hands ({@link Tier#BARE}) pay the vanilla 5× no-harvest
+     * penalty. Never returns {@link #UNMINEABLE}: by opt-in the block IS mineable, at this stand-in cost.
+     * Both the planner ({@link MovementContext#breakCost}) and the executor ({@code BotMining}) call this with
+     * the bot's best pickaxe tier, so the planned cost equals the time actually spent (parity). Off the hot
+     * path — only the rare break-folding / grind path.
+     */
+    public static int unbreakableTicks(int tierOrdinal) {
+        Tier tier = Tier.values()[tierOrdinal];
+        boolean matches = tier != Tier.BARE;                    // pickaxe category is always a "real" tool
+        float speed = matches ? tier.speed : 1.0f;
+        float harvestMult = matches ? HARVEST_OK : HARVEST_NO;  // tool-required: no matching tool ⇒ 5×
+        int t = (int) Math.ceil(unbreakableHardness / 5.0f * 20.0f * harvestMult / speed);
+        return Math.max(1, t);
+    }
+
+    /**
+     * The minimum unbreakable break ticks across every {@link Tier} — the best tool's time. The admissible
+     * lower bound the {@link com.orebit.mod.pathfinding.blockpathfinder.cuboid.GoalForcedCost} forced
+     * unbreakable-grind face needs (a forced-cost heuristic must never EXCEED the true cost, since the bot
+     * might carry the fastest pickaxe). Cold — once per search.
+     */
+    public static int unbreakableFastestTicks() {
+        int min = Integer.MAX_VALUE;
+        for (int i = 0; i < Tier.COUNT; i++) min = Math.min(min, unbreakableTicks(i));
         return min;
     }
 

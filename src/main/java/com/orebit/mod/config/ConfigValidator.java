@@ -73,6 +73,7 @@ public final class ConfigValidator {
                 weightNonNeg(props, ConfigKeys.MINING_BREAK_BASE_COST, d.breakBaseCost()),
                 protectedBlocks(props, ConfigKeys.MINING_PROTECTED_BLOCKS, d.protectedBlocks()),
                 bool(props, ConfigKeys.MINING_ALLOW_UNBREAKABLE, d.allowUnbreakable()),
+                intClamped(props, ConfigKeys.MINING_UNBREAKABLE_HARDNESS, d.unbreakableHardness(), 1, 10_000_000),
                 // pathing
                 intClamped(props, ConfigKeys.PATHING_SYNC_SEARCH_BUDGET_NODES, d.maxNodes(), 1, Integer.MAX_VALUE),
                 weight(props, ConfigKeys.PATHING_GREEDY_WEIGHT, d.greedyWeight()),

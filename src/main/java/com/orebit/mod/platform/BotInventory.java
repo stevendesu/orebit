@@ -367,6 +367,26 @@ public final class BotInventory {
         bot.drop(stack, false);
     }
 
+    /**
+     * Toss every carried stack the {@code filter} accepts into the world (the {@code /bot drop} verb) and
+     * return the total item COUNT dropped. Each matching slot is emptied and its whole stack thrown via the
+     * vanilla {@code ServerPlayer.drop} (which gives the thrown item a self-pickup delay, so the bot won't
+     * instantly vacuum it back and the owner can grab it). Uses only the version-stable container verbs
+     * ({@code getContainerSize}/{@code getItem}/{@code setItem}) + {@code drop}, so it stays in core with no
+     * overlay. Cold — a command action over one bot's inventory, never a hot path.
+     */
+    public int dropMatching(java.util.function.Predicate<ItemStack> filter) {
+        int dropped = 0;
+        for (int i = 0, n = inv.getContainerSize(); i < n; i++) {
+            ItemStack s = inv.getItem(i);
+            if (s.isEmpty() || !filter.test(s)) continue;
+            inv.setItem(i, ItemStack.EMPTY); // empty the slot first, then throw the captured stack
+            dropped += s.getCount();
+            bot.drop(s, false);
+        }
+        return dropped;
+    }
+
     /** The wrapped bot (for callers that need the raw {@link ServerPlayer}, e.g. to equip before mining). */
     public ServerPlayer bot() {
         return bot;

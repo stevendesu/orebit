@@ -105,6 +105,16 @@ public final class ConfigKeys {
      * Default {@code false}.
      */
     public static final String MINING_ALLOW_UNBREAKABLE = "mining.allowUnbreakable";
+    /**
+     * {@code int >= 1} — the synthetic pseudo-hardness assigned to vanilla-unbreakable blocks (bedrock,
+     * barriers, portal frames — no real destroy time) when {@link #MINING_ALLOW_UNBREAKABLE} is on. It feeds
+     * the SAME mining-time formula real blocks use, assuming a pickaxe (correct-tool-required), so a better
+     * pickaxe tier digs faster and bare hands are drastically slower; both the planner's cost and the
+     * executor's grind rate derive from it (parity). On the same quantized scale as real blocks (obsidian, the
+     * hardest, is ~250) but may exceed 255 to make unbreakable mining a stronger deterrent. Default {@code
+     * 3200} — a diamond pickaxe grinds one block in ~2400 ticks (2 minutes), matching the old fixed cost.
+     */
+    public static final String MINING_UNBREAKABLE_HARDNESS = "mining.unbreakableHardness";
 
     // ---- pathing: the A* search knobs (carried on BotCaps into BlockPathfinder) ---------------------
     /**

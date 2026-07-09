@@ -76,6 +76,7 @@ mining.ticksToMineFlat  = 0
 mining.breakBaseCost    = 0.0
 mining.protectedBlocks  =
 mining.allowUnbreakable = false
+mining.unbreakableHardness = 3200
 ```
 
 | Key | Default | What it does |
@@ -87,7 +88,8 @@ mining.allowUnbreakable = false
 | `mining.ticksToMineFlat` | `0` | The fixed time, in game ticks, to mine one block when `ticksByHardness` is `false`. `0` means instant. Ignored when `ticksByHardness` is `true`. |
 | `mining.breakBaseCost` | `0.0` | A flat surcharge (in ticks) added to **every break the planner considers**, on top of the real mining time — the mining-side mirror of `placement.placeBaseCost`. It's a behavioral "reluctance to edit the world": raise it and the bot detours around obstacles (and wades through berry bushes) it would otherwise punch through; at `0` breaks are priced at mining time alone. |
 | `mining.protectedBlocks` | *(empty)* | A comma-separated list of block ids and `#`-prefixed block tags the bot must **never break** — nor destroy by placing over — e.g. `minecraft:chest, #minecraft:beds`. Enforced both when planning (routes go *around* protected blocks) and again at the moment of breaking. Malformed entries warn and are skipped. **Changing this list needs a server restart** to fully apply (the planner caches block classifications); the at-the-moment-of-breaking refusal applies immediately on reload. See [Breaking & Placing](world_edits.md#protected-blocks). |
-| `mining.allowUnbreakable` | `false` | If `true`, the bot may "mine" vanilla-unbreakable blocks (bedrock, barriers, end portal frames — anything with negative destroy time) at a fixed stand-in cost of **2400 ticks (2 minutes) per block**: it stands and grinds the full 2 minutes, then the block breaks. Independent of `mining.maxHardness` (unbreakable is its own axis, not "very hard"); `mining.protectedBlocks` always wins. |
+| `mining.allowUnbreakable` | `false` | If `true`, the bot may "mine" vanilla-unbreakable blocks (bedrock, barriers, end portal frames — anything with negative destroy time) at the tool-derived cost set by `mining.unbreakableHardness` below: it stands and grinds that long, then the block breaks. Independent of `mining.maxHardness` (unbreakable is its own axis, not "very hard"); `mining.protectedBlocks` always wins. |
+| `mining.unbreakableHardness` | `3200` | The pretend "hardness" of those unbreakable blocks (they have none in vanilla) when `allowUnbreakable` is on. It feeds the normal mining-time formula assuming a pickaxe, so a **better pickaxe digs faster** and bare hands are far slower. Same scale as real blocks (obsidian, the hardest, is ~250) but may go past 255 to make unbreakable mining a stronger deterrent. The default `3200` works out to ~2 minutes per block with a diamond pickaxe. |
 
 ### Pathfinding — how the bot plans routes
 

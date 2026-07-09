@@ -107,13 +107,17 @@ Bedrock, barriers, end portal frames — anything vanilla gives a negative destr
 tracks whatever the running version considers unbreakable). By default the bot treats
 them as walls.
 
-`mining.allowUnbreakable = true` opts the bot into "mining" them anyway, at a fixed
-stand-in price of **2400 ticks (2 minutes) per block** — vanilla defines no time, so
-the price is policy: roughly 10× the hardest legitimate dig, and a break-even of
-2400 ÷ 4.633 ≈ **518 walk-blocks of detour** before the grind is ever worth it. The
-executor keeps the parity promise literally: the bot stands there grinding for the
-full 2 minutes, crack overlay advancing one stage every 12 seconds, then forces the
-break — the planner's price is the executor's time. This is its own gate, deliberately
+`mining.allowUnbreakable = true` opts the bot into "mining" them anyway, at a
+**tool-derived** stand-in price — vanilla defines no time, so the price is policy.
+`mining.unbreakableHardness` (default `3200`) is a pretend hardness fed through the
+normal mining-time formula assuming a pickaxe, so a **better pickaxe digs faster**
+(a diamond pickaxe lands on ~2400 ticks / 2 minutes at the default; a stone one is
+slower, bare hands far slower still). The default keeps unbreakable mining an extreme
+last resort — a break-even of ~518 walk-blocks of detour with a diamond pick — that
+the planner routes around whenever any cheaper path exists. The executor keeps the
+parity promise literally: the bot stands there grinding for exactly the priced time,
+crack overlay advancing, then forces the break — the planner's price is the executor's
+time, both scaled by the bot's pickaxe tier. This is its own gate, deliberately
 independent of `mining.maxHardness` (unbreakable isn't "very hard"; it's a different
 axis), and `mining.protectedBlocks` always overrides it: a protected bedrock stays.
 

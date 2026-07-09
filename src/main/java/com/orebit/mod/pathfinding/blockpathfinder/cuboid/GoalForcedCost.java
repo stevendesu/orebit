@@ -313,11 +313,12 @@ public final class GoalForcedCost {
                         // Real mining time of the BEST possible tool (admissible lower bound — the probe has no
                         // bot inventory, and over-estimating would refuse the optimal route) plus the search's
                         // flat per-break surcharge (every real folded break pays the same base, so the bound
-                        // holds). An unbreakable-grind substrate uses the fixed stand-in instead (the exact
-                        // per-block price breakCost charges — the tables hold only the UNMINEABLE sentinel
-                        // for it). Resident-table scan, off the per-node hot path (probe runs once per search).
+                        // holds). An unbreakable-grind substrate uses the tool-derived stand-in's FASTEST-tier
+                        // time instead (the tables hold only the UNMINEABLE sentinel for it) — the fastest
+                        // pickaxe's cost, so the bound stays admissible whatever the bot actually carries.
+                        // Resident-table scan, off the per-node hot path (probe runs once per search).
                         float mineTicks = digGeom ? MiningModel.fastestTicks(desc)
-                                : MiningModel.UNBREAKABLE_STANDIN_TICKS;
+                                : MiningModel.unbreakableFastestTicks();
                         float breakStep = MineDown.COST + mineTicks + digBreakBase;
                         float premium = breakStep - OCTILE_FLOOR;
                         if (premium > 0f && (!haveBest || premium < bestPremium)) {
