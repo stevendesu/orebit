@@ -528,17 +528,48 @@ public final class NavSectionBuilder {
                 below == null ? null : below.getTraversalGrid(), lx, ly, lz);
     }
 
+    // Per-thread batch scratch for patchCells: a 4096-bit changed-cell set (one bit per section-local
+    // cell) + a last-wins final-navtype slot per cell. Cleared per call (64 longs); the navtype slots
+    // need no clearing (the bitmap gates every read).
+    private static final ThreadLocal<long[]> BATCH_BITS = ThreadLocal.withInitial(() -> new long[64]);
+    private static final ThreadLocal<short[]> BATCH_NAV = ThreadLocal.withInitial(() -> new short[4096]);
+
     /**
      * Patch a BATCH of cell changes in ONE section — the drain-side seam of the deferred block-edit
      * queue (PERF-DESIGN-navgrid-edit-batching.md §4.2/§4.3; the drain groups pending cells by section
-     * and hands each group here with its column neighbours). The CURRENT body is the trivial sequential
-     * loop over {@link #patchCell(NavSection, NavSection, NavSection, int, int, int, short)} —
-     * semantically exactly {@code count} block changes arriving in sequence, so correctness is inherited
-     * from the single-cell contract (each patch starts from a fully-consistent grid and leaves one; any
-     * order is correct). The Phase-2 batching work (per-section phased drain: navtype writes, then ONE
-     * amortized scratch fill + flag windows, then ordered depth repairs) replaces THIS method's
-     * internals, so the {@code BatchEditBenchmark} shapes — which call only this seam — compare
-     * algorithm against algorithm, never benchmark against benchmark.
+     * and hands each group here with its column neighbours). This is the <b>Phase-2 phased drain</b> —
+     * the §2 scratch amortization: where the sequential loop paid one full {@link #fillScratch}
+     * (≈4.8k descriptor reads) per changed cell, the batch pays ONE per section (plus one for the
+     * below-seam pass when any bottom-row cell changed), because flags are a pure function of the FINAL
+     * navtype field and can be recomputed after all navtype writes land.
+     * <ul>
+     *   <li><b>Dedup</b>: events fold last-wins into a per-cell final navtype (the same fold the enqueue
+     *       queue already does — repeated here so the seam keeps the "N changes arriving in sequence"
+     *       contract for any caller), and cells whose final navtype equals the resident one are dropped
+     *       (a net no-op recomputes byte-identical values — the {@code NavGridEpochTest} claim).</li>
+     *   <li><b>P1</b>: per remaining cell (any order — each iteration starts from a depth-consistent
+     *       grid and leaves one, the single-cell inheritance argument): write its navtype (with stale
+     *       flags — the {@code patchCell} idiom) and immediately run its depth repairs
+     *       ({@link #patchFloorGap}/{@link #patchRunUp}). Depth maintenance deliberately stays
+     *       interleaved per cell rather than phased: §4.3's "ordered P3 after all navtype writes" is
+     *       UNSOUND under the repairs' 15-cell cap — with two same-column changes both resident, the
+     *       first cell's propagation carries both changes' influence but truncates at the cap on a
+     *       non-fixpoint frontier, and the second cell's own repair then early-outs on the
+     *       freshly-written prefix, never reaching the stale tail (caught by
+     *       {@code BatchDrainIdentityTest}; cap+saturation is only sound for a SINGLE un-repaired
+     *       change, which the sequential regime guarantees). Depth was never the amortization target —
+     *       the doc's §2 shows the fixpoints don't double-work laterally — so this costs nothing the
+     *       batch was buying.</li>
+     *   <li><b>P2</b>: ONE {@code fillScratch} over the final field + one {@link #recomputeWindow} per
+     *       changed cell, then — when any {@code ly <} {@link NavFlags#OVERSCAN_ROWS} cell changed —
+     *       ONE below-seam scratch fill (the below grid with this just-patched grid as its overscan) +
+     *       the inverse window per low cell, exactly the single-cell seam contract amortized per
+     *       section-pair.</li>
+     * </ul>
+     * Final grid state is byte-identical to the sequential loop (depth: P1 IS the sequential regime,
+     * one cell at a time from a consistent grid; flags = f(final navtypes) on the union of windows
+     * either way, and flags read only navtypes, never depth — the {@code BatchDrainIdentityTest}
+     * guard); intermediate states differ, made unobservable by the §4.4 flush barriers.
      *
      * <p>{@code packedCells[i]} is the section-local cell {@code (ly << 8) | (lz << 4) | lx} (the
      * {@link TraversalGrid} linear-index order); {@code navtypes[i]} its already-interned new navtype;
@@ -547,9 +578,73 @@ public final class NavSectionBuilder {
      */
     public static void patchCells(NavSection section, NavSection above, NavSection below,
                                   short[] packedCells, short[] navtypes, int count) {
+        final TraversalGrid grid = section.getTraversalGrid();
+        final TraversalGrid aboveGrid = above == null ? null : above.getTraversalGrid();
+        final TraversalGrid belowGrid = below == null ? null : below.getTraversalGrid();
+        final long[] bits = BATCH_BITS.get();
+        final short[] finalNav = BATCH_NAV.get();
+        Arrays.fill(bits, 0L);
+
+        // Last-wins fold: later events for the same cell overwrite earlier ones (the navtype is a pure
+        // function of the block state, so this IS "the deferred patch sees the final state").
         for (int i = 0; i < count; i++) {
-            final int p = packedCells[i];
-            patchCell(section, above, below, p & 15, (p >> 8) & 15, (p >> 4) & 15, navtypes[i]);
+            final int p = packedCells[i] & 0xFFF;
+            finalNav[p] = navtypes[i];
+            bits[p >>> 6] |= 1L << (p & 63);
+        }
+
+        // P1 + net-no-op filter: per changed cell — dropping cells whose final navtype already sits in
+        // the grid (a one-tick toggle: nothing any window or depth sweep reads has changed) — write the
+        // final navtype (stale flags; P2 fixes them) and repair the depth nibbles IMMEDIATELY, so every
+        // repair runs against a grid with exactly ONE un-repaired change (the sequential single-cell
+        // regime the 15-cell cap + saturation argument is sound for — see the method doc).
+        int changed = 0;
+        boolean anyLow = false;
+        for (int w = 0; w < 64; w++) {
+            long b = bits[w];
+            while (b != 0) {
+                final int p = (w << 6) | Long.numberOfTrailingZeros(b);
+                b &= b - 1;
+                final int lx = p & 15, ly = p >>> 8, lz = (p >>> 4) & 15;
+                final int nav = finalNav[p] & 0xFFFF;
+                if (nav == grid.navtype(lx, ly, lz)) {
+                    bits[w] &= ~(1L << (p & 63));
+                    continue;
+                }
+                grid.set(lx, ly, lz, nav, grid.flags(lx, ly, lz));
+                patchFloorGap(grid, aboveGrid, lx, ly, lz);
+                patchRunUp(grid, aboveGrid, belowGrid, lx, ly, lz);
+                changed++;
+                anyLow |= ly < NavFlags.OVERSCAN_ROWS;
+            }
+        }
+        if (changed == 0) return;
+
+        // P2: one scratch fill over the FINAL field, then the inverse-footprint window per changed cell
+        // (overlapping windows recompute a shared cell twice — idempotent, flags are a pure function of
+        // the scratch). Then the amortized below-seam pass: one refill AS THE BELOW SECTION SEES IT and
+        // the inverse window per bottom-row cell (rows 13+ly..15 of the below grid — the exact footprint
+        // whose flags read this section through their upward overscan).
+        final long[] desc = DESC_SCRATCH.get();
+        fillScratch(desc, grid, aboveGrid);
+        for (int w = 0; w < 64; w++) {
+            long b = bits[w];
+            while (b != 0) {
+                final int p = (w << 6) | Long.numberOfTrailingZeros(b);
+                b &= b - 1;
+                recomputeWindow(grid, desc, p & 15, p >>> 8, (p >>> 4) & 15);
+            }
+        }
+        if (anyLow && belowGrid != null) {
+            fillScratch(desc, belowGrid, grid);
+            for (int w = 0; w < (NavFlags.OVERSCAN_ROWS * 256) >> 6; w++) { // words 0..11 = ly 0..2
+                long b = bits[w];
+                while (b != 0) {
+                    final int p = (w << 6) | Long.numberOfTrailingZeros(b);
+                    b &= b - 1;
+                    recomputeWindow(belowGrid, desc, p & 15, (p >>> 8) + NavSection.SIZE, (p >>> 4) & 15);
+                }
+            }
         }
     }
 
