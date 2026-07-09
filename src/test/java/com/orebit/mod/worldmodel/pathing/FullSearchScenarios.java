@@ -49,6 +49,14 @@ import net.minecraft.world.level.chunk.Strategy;
  *       step), not the goal — the cascade / window-target walk. (An approximation of the full
  *       {@code PathPlan.windowTarget}, which the HANDOFF explicitly scopes to "the Nth waypoint, good enough for
  *       a perf bench"; the {@code PathPlan}-driver injection is a deferred follow-up.)</li>
+ *   <li><b>HONEYCOMB</b> — GOAL_NOT_IN_WINDOW's confined tunnel walk through a <b>multi-fragment cave belt</b>:
+ *       every corridor region carries 4 fragments (the through-tunnel + 3 sealed side pockets), placed so the
+ *       nearest-centroid membership probe provably MIS-assigns tunnel cells near the region's ±X ends to a
+ *       sealed (hence never-reached) pocket — every such {@code RegionCostField.costAt} read pays the
+ *       k-fragment centroid loop AND the 63-slot {@code cheapestReachedSlot} fallback scan
+ *       (PERF-AUDIT-region-field §3 items 4–5). The ONLY scenario whose reads exercise multi-fragment slot
+ *       resolution; GOAL_IN_WINDOW / GOAL_NOT_IN_WINDOW route through single-fragment regions and never touch
+ *       either path (counter-verified, s54).</li>
  * </ul>
  *
  * <h2>House style</h2>
@@ -62,7 +70,7 @@ public final class FullSearchScenarios {
     private FullSearchScenarios() {}
 
     /** The named full-search fixtures. */
-    public enum Scenario { GOAL_IN_WINDOW, GOAL_NOT_IN_WINDOW }
+    public enum Scenario { GOAL_IN_WINDOW, GOAL_NOT_IN_WINDOW, HONEYCOMB }
 
     /** Dimension floor for every fixture (world y 0 = the bottom of region ry 0). */
     static final int MINY = 0;
@@ -194,6 +202,7 @@ public final class FullSearchScenarios {
         switch (scenario) {
             case GOAL_IN_WINDOW:     return goalInWindow();
             case GOAL_NOT_IN_WINDOW: return goalNotInWindow();
+            case HONEYCOMB:          return honeycomb();
             default: throw new IllegalArgumentException("unknown scenario: " + scenario);
         }
     }
@@ -243,6 +252,40 @@ public final class FullSearchScenarios {
         // solid volume to the node cap. This scenario is the window-target WALK, so a pure walker is both correct
         // and what keeps the tunnel confining.
         return new Fixture(Scenario.GOAL_NOT_IN_WINDOW, sections, grid, start, goal, BotCaps.DEFAULT, false);
+    }
+
+    /**
+     * HONEYCOMB — the GOAL_NOT_IN_WINDOW walk (same carved through-tunnel z 6..9 × y 1..3, chunks 0..6, goal ~6
+     * regions east, no-break walker, window target = the {@code WINDOW_STEP}-th waypoint) through a
+     * <b>multi-fragment cave belt</b>: every corridor region additionally carries three SEALED side pockets
+     * (same y 1..3 band, floor y=0), so its {@link com.orebit.mod.worldmodel.hpa.RegionFragments} record holds
+     * <b>4 kept fragments</b> — in flood-seed order (y, then z, then x): #0 the +X-face pocket (x 13..15,
+     * z 0..2), #1 the tunnel, #2 the interior pocket (x 6..9, z 11..14, touching no face), #3 the −X-face pocket
+     * (x 0..2, z 12..14).
+     *
+     * <p><b>Why this exercises the §3 read pathology</b> (PERF-AUDIT-region-field): every
+     * {@code RegionCostField.costAt} read in the belt runs the 4-fragment nearest-centroid loop
+     * ({@code fragmentOf} — 4 × 6-face footprint decodes + divisions). The pocket centroids sit at the face
+     * openings — (15,1,1) for #0, (0,1,13) for #3 vs the tunnel's (7,1,7) — so a tunnel cell near a region's
+     * ±X end is Manhattan-CLOSER to a pocket centroid (e.g. local (0,1,9): 4 to pocket #3 vs 9 to the tunnel)
+     * and the probe mis-assigns it. Mid-corridor pockets are sealed from everything (their face footprints meet
+     * the neighbour chunk's solid rock; the interior pocket touches no face at all), so the goal-rooted Dijkstra
+     * never reaches their slots and every mis-assigned read ALSO pays the 63-slot {@code cheapestReachedSlot}
+     * fallback scan before recovering the tunnel slot's gradient. The end chunks' edge pockets border unauthored
+     * (optimistic-air) regions and may be reached through them — irrelevant, the belt's middle does the work.
+     */
+    private static Fixture honeycomb() {
+        ConcurrentHashMap<Long, NavSection[]> sections = new ConcurrentHashMap<>();
+        NavSection[] belt = honeycombColumn();
+        for (int cx = 0; cx <= 6; cx++) {
+            sections.put(NavStore.key(cx, 0), belt);
+        }
+        RegionGrid grid = RegionGrid.headless(MINY, sections);
+        BlockPos start = new BlockPos(8, 0, 8);    // chunk 0, in the carved passage
+        BlockPos goal = new BlockPos(104, 0, 8);   // chunk 6 (region x6) — beyond a ~3-region window
+        // A no-break WALKER for the same reason as GOAL_NOT_IN_WINDOW: confinement (and it keeps the sealed
+        // pockets sealed — a dig-capable field build would reach them and defuse the fallback path).
+        return new Fixture(Scenario.HONEYCOMB, sections, grid, start, goal, BotCaps.DEFAULT, false);
     }
 
     // ===================================================================================================
@@ -297,6 +340,34 @@ public final class FullSearchScenarios {
             for (int z = 0; z < 16; z++) {
                 for (int y = 0; y < 16; y++) {
                     boolean carve = z >= 6 && z <= 9 && y >= 1 && y <= 3; // the 4-wide × 3-tall passage
+                    if (!carve) {
+                        low.set(x, y, z, stone);
+                    }
+                }
+            }
+        }
+        NavSection[] col = { section(low, false), airSection(), airSection(), airSection() };
+        NavSectionBuilder.computeDepth(col);
+        return col;
+    }
+
+    /**
+     * The HONEYCOMB belt column: the {@link #tunnelColumn()} carve (z 6..9, y 1..3) PLUS three sealed pockets in
+     * the same y band — see {@link #honeycomb()} for the fragment ids and the centroid-steal geometry. All
+     * pockets keep the solid floor at y=0 (occupiable ⇒ kept fragments); the solid gaps (x 3..5 / z 10, and the
+     * z 3..5 band) keep the four carves mutually disconnected within the region.
+     */
+    private static NavSection[] honeycombColumn() {
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        PalettedContainer<BlockState> low = newStates(); // section 0 = world y 0..15
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                for (int y = 0; y < 16; y++) {
+                    boolean carve = y >= 1 && y <= 3
+                            && ((z >= 6 && z <= 9)                          // the through-tunnel
+                            || (x >= 13 && z <= 2)                          // +X-face pocket (frag #0)
+                            || (x >= 6 && x <= 9 && z >= 11 && z <= 14)     // interior pocket (frag #2)
+                            || (x <= 2 && z >= 12 && z <= 14));             // −X-face pocket (frag #3)
                     if (!carve) {
                         low.set(x, y, z, stone);
                     }
