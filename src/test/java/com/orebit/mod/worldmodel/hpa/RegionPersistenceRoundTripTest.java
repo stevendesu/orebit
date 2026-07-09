@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 
 import com.orebit.mod.worldmodel.persistence.CostPyramidCodec;
 import com.orebit.mod.worldmodel.persistence.ResourcePyramidCodec;
+import com.orebit.mod.worldmodel.resource.ResourceClasses;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
 /**
@@ -151,7 +152,7 @@ public class RegionPersistenceRoundTripTest {
     @Test
     void resourcePyramid_levelZeroTallies_roundTrip() throws IOException {
         ResourcePyramid src = new ResourcePyramid();
-        int cols = ResourcePyramid.COLUMNS;
+        int cols = ResourceClasses.COLUMN_COUNT;
 
         // Row A: a couple of non-zero columns (a typical ore-bearing section).
         int a = src.rowFor(0, 7, 1, -3);
