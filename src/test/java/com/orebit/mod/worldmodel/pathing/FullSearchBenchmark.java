@@ -46,6 +46,10 @@ import net.minecraft.server.Bootstrap;
  *       search — the "come into the cave pocket" path.</li>
  *   <li><b>GOAL_NOT_IN_WINDOW</b> — an open goal ~6 regions off; the block target is a skeleton waypoint portal.
  *       Exercises the long reverse-Dijkstra field + the window-target walk.</li>
+ *   <li><b>HONEYCOMB</b> — the same walk through a 4-fragment-per-region cave belt whose sealed side pockets
+ *       steal the nearest-centroid membership probe: the only scenario whose {@code costAt} reads exercise the
+ *       multi-fragment centroid loop + the 63-slot fallback scan (PERF-AUDIT-region-field §3 items 4–5) — the
+ *       primary microscope for any change to {@code RegionCostField} slot resolution.</li>
  * </ul>
  *
  * <p>Allocation discipline (CLAUDE.md perf model): the fixture (shared section map + region grid + start/goal +
@@ -67,7 +71,7 @@ import net.minecraft.server.Bootstrap;
 @Fork(2) // overridden to forks(0) by BenchmarkRunnerTest (must stay in the bootstrapped-MC JVM)
 public class FullSearchBenchmark {
 
-    @Param({"GOAL_IN_WINDOW", "GOAL_NOT_IN_WINDOW"})
+    @Param({"GOAL_IN_WINDOW", "GOAL_NOT_IN_WINDOW", "HONEYCOMB"})
     private String scenario;
 
     private FullSearchScenarios.Fixture fixture;

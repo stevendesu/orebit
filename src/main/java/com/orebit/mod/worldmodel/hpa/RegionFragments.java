@@ -91,6 +91,19 @@ public final class RegionFragments {
      */
     private final int[] footprint = new int[MAX_FRAGMENTS * 6];
 
+    /** Cells in a leaf-scale label slab ({@link RegionAddress#LEAF_SIZE 16}³ — labels are leaf-only). */
+    private static final int LEAF_CELLS = RegionAddress.LEAF_SIZE * RegionAddress.LEAF_SIZE * RegionAddress.LEAF_SIZE;
+
+    /**
+     * Per-cell kept-fragment label slab ({@code (ly<<8)|(lz<<4)|lx} index; kept id or {@code -1} — the exact
+     * {@link FragmentBuilder#labelAll} contract), emitted by the leaf build's own flood
+     * (PERF-DESIGN-label-slab-membership §2). Lazily allocated on the first multi-fragment build and reused
+     * across rebuilds; {@link #labeled} gates whether the current content is valid (a rebuild that drops to
+     * ≤1 fragment, collapses, or a hand-seeded record leaves it {@code false}).
+     */
+    private byte[] labels;
+    private boolean labeled;
+
     /** Reset to an empty record at flood grid side {@code G} (clears all fragments). */
     void reset(int G) {
         this.kind = KIND_MIXED;
@@ -99,6 +112,7 @@ public final class RegionFragments {
         this.fragmentCount = 0;
         this.collapsed = false;
         this.gridSize = G;
+        this.labeled = false;
         Arrays.fill(faceMask, (byte) 0);
         Arrays.fill(footprint, NO_FACE);
     }
@@ -110,6 +124,16 @@ public final class RegionFragments {
     void setPassFrac(int nibble) { this.passFrac = nibble; }
     void setFragmentCount(int n) { this.fragmentCount = n; }
     void setCollapsed(boolean c) { this.collapsed = c; }
+
+    /** The label slab to write into (allocating it on first touch) — {@link FragmentBuilder#build} only;
+     *  content is not published until {@link #setLabeled}. Leaf-scale ({@value #LEAF_CELLS} cells). */
+    byte[] labelScratch() {
+        if (labels == null) labels = new byte[LEAF_CELLS];
+        return labels;
+    }
+
+    /** Publish/retract the label slab (set by {@link FragmentBuilder#build} after the flood decides). */
+    void setLabeled(boolean l) { this.labeled = l; }
 
     /** Record one fragment's faces + packed footprints. {@code packed[face]} = {@link #NO_FACE} when unset. */
     void setFragment(int frag, int faceMaskBits, int[] packedByFace) {
@@ -142,6 +166,17 @@ public final class RegionFragments {
 
     /** True iff this is a uniform kind (SOLID/AIR/WATER) — no fragment records by construction. */
     public boolean isUniform() { return kind != KIND_MIXED; }
+
+    /**
+     * The per-cell kept-fragment label slab this record's own build flood emitted, or {@code null} when none
+     * is valid (uniform / collapsed / ≤1 kept fragment / hand-seeded record / coarse level). Index
+     * {@code (ly<<8)|(lz<<4)|lx}; value = kept id (0..{@value #MAX_FRAGMENTS}-1) or {@code -1} for a cell in
+     * no kept fragment — byte-identical to {@link FragmentBuilder#fragmentContaining}'s per-cell answers.
+     * <b>Mutable with the record</b> (a leaf rebuild overwrites in place, single-threaded on the
+     * tick/maintenance thread): consumers that outlive the build tick must COPY, not alias
+     * ({@code RegionCostField.bakeSlabs} does).
+     */
+    public byte[] labels() { return labeled ? labels : null; }
 
     /** The 6-bit face mask of fragment {@code frag} (bit f set ⇒ it reaches face f). */
     public int faceMask(int frag) { return faceMask[frag] & 0x3F; }

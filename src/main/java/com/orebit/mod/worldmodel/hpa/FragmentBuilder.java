@@ -109,6 +109,16 @@ public final class FragmentBuilder {
         // 2) MIXED: flood the passable cells, filter by occupiability, cap, extract footprints.
         out.setKind(RegionFragments.KIND_MIXED);
 
+        // Leaf-scale label emission (PERF-DESIGN-label-slab-membership §2): the flood below visits every
+        // passable cell anyway and the queue holds exactly one component's cells at a time, so stamping each
+        // KEPT component's kept id gives the exact labelAll() slab for free (no second flood). Committed via
+        // setLabeled only when ≥2 fragments survive un-collapsed — single-fragment membership is trivial and
+        // a collapsed region answers -1 everywhere (fragmentContaining's contract). Leaf grids only: the slab
+        // index contract is the 16³ (ly<<8)|(lz<<4)|lx form, and coarse levels have no cell-membership consumer.
+        final boolean emitLabels = G == MAX_G;
+        final byte[] cellLabels = emitLabels ? out.labelScratch() : null;
+        if (emitLabels) Arrays.fill(cellLabels, 0, cells, (byte) -1);
+
         final int gbits = Integer.numberOfTrailingZeros(G);
         final int g2bits = gbits * 2;
         final int gmask = G - 1;
@@ -187,6 +197,11 @@ public final class FragmentBuilder {
                     }
                 }
                 out.setFragment(kept, faceMaskBits, packed);
+                if (emitLabels) {
+                    // The queue holds exactly this component's cells (0..tail) — stamp them with the kept id
+                    // (the labelAll() stamping idiom).
+                    for (int q = 0; q < tail; q++) cellLabels[queue[q]] = (byte) kept;
+                }
             } else {
                 collapsed = true;                      // over cap → collapse to a uniform mass
             }
@@ -199,6 +214,9 @@ public final class FragmentBuilder {
         } else {
             // kept in 0..MAX_FRAGMENTS. 0 = occupiability stripped every component (uniform mine-through mass).
             out.setFragmentCount(kept);
+        }
+        if (emitLabels && !collapsed && kept >= 2) {
+            out.setLabeled(true); // reset() already retracted; publish only the useful multi-fragment slab
         }
     }
 

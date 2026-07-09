@@ -92,6 +92,18 @@ public final class OrebitCommon {
         // that overlay lands this is inert. Retires the follower's per-replan refreshNavData shim.
         NavGridUpdater.register();
 
+        // Deferred block-edit drain, the world-tick-end catch-all flush barrier
+        // (PERF-DESIGN-navgrid-edit-batching.md §4.4): NavGridUpdater queues tracked block changes
+        // instead of patching inline; the read paths drain on entry (NavGridView ctor, bot tick start),
+        // and this catch-all guarantees the queue is empty across tick boundaries (bounded memory; next
+        // tick starts clean). ORDER IS LOAD-BEARING: this MUST be registered BEFORE the
+        // HpaMaintenance::flush hook below — its leaf recomputes read the patched grids, and the loader
+        // seams fire world-tick-end listeners in registration order (Fabric's END_WORLD_TICK is an
+        // array-backed event invoked in registration order; the Forge/NeoForge bridges register a single
+        // handler per callback on an ordered bus the same way). One static int test per level per tick
+        // when clean.
+        events.onWorldTickEnd(NavGridUpdater::flush);
+
         // HPA* region-tier maintenance (PRD §6.3–6.5 Phase 3; HPA-IMPLEMENTATION.md §10/§12 "3f"):
         // attach the block-change listener that marks the containing level-0 leaf dirty so the cost
         // pyramid stays live as the world changes. Like NavGridUpdater, this is inert until the

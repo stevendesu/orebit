@@ -304,6 +304,78 @@ public class FragmentBuilderTest {
     }
 
     // ===================================================================================================
+    // BUILD-EMITTED LABELS (PERF-DESIGN-label-slab-membership §2) — build()'s own flood stamps the record's
+    // label slab; where published (≥2 kept, un-collapsed) it must equal fragmentContaining cell-for-cell,
+    // and it must NOT be published for the trivial/degenerate records.
+    // ===================================================================================================
+    @Test
+    void buildLabels_matchFragmentContainingEverywhere() {
+        boolean[] passable = new boolean[CELLS];
+        boolean[] standable = new boolean[CELLS];
+        carveTunnel(passable, standable, 4);
+        carveTunnel(passable, standable, 12);
+        RegionFragments rf = build(passable, standable);
+
+        byte[] labels = rf.labels();
+        assertTrue(labels != null, "a 2-fragment build publishes its label slab");
+        for (int i = 0; i < CELLS; i++) {
+            assertEquals(FragmentBuilder.fragmentContaining(passable, standable, G, i), labels[i],
+                    "build-emitted labels diverge from fragmentContaining at cell " + i);
+        }
+    }
+
+    @Test
+    void buildLabels_unpublishedForTrivialRecords() {
+        // Single fragment: membership is trivial (no slab consumer) ⇒ not published.
+        boolean[] passable = new boolean[CELLS];
+        boolean[] standable = new boolean[CELLS];
+        carveTunnel(passable, standable, 4);
+        assertEquals(null, build(passable, standable).labels(), "1 kept fragment ⇒ no label slab");
+
+        // Over-cap collapse: the stored record holds no fragments ⇒ not published (all--1 contract).
+        boolean[] ocPass = new boolean[CELLS];
+        boolean[] ocStand = new boolean[CELLS];
+        for (int x = 1; x < G; x += 2)
+            for (int z = 1; z < G; z += 2) {
+                ocStand[idx(x, 0, z)] = true;
+                ocPass[idx(x, 1, z)] = true;
+                ocPass[idx(x, 2, z)] = true;
+            }
+        assertEquals(null, build(ocPass, ocStand).labels(), "collapsed ⇒ no label slab");
+
+        // Uniform fast-path (all solid) ⇒ not published.
+        boolean[] soPass = new boolean[CELLS];
+        boolean[] soStand = new boolean[CELLS];
+        for (int i = 0; i < CELLS; i++) soStand[i] = true;
+        assertEquals(null, build(soPass, soStand).labels(), "uniform SOLID ⇒ no label slab");
+
+        // A rebuild that DROPS to one fragment must retract a previously published slab (reset()).
+        RegionFragments reused = new RegionFragments();
+        int passCount = 0, standCount = 0, solidCount = 0;
+        long hardness = 0;
+        boolean[] twoPass = new boolean[CELLS];
+        boolean[] twoStand = new boolean[CELLS];
+        carveTunnel(twoPass, twoStand, 4);
+        carveTunnel(twoPass, twoStand, 12);
+        for (int i = 0; i < CELLS; i++) {
+            if (twoPass[i]) passCount++; else { solidCount++; hardness += 8; }
+            if (twoStand[i]) standCount++;
+        }
+        FragmentBuilder.build(twoPass, twoStand, G, passCount, standCount, 0, hardness, solidCount, reused);
+        assertTrue(reused.labels() != null, "two tunnels ⇒ published");
+        passCount = standCount = solidCount = 0; hardness = 0;
+        boolean[] onePass = new boolean[CELLS];
+        boolean[] oneStand = new boolean[CELLS];
+        carveTunnel(onePass, oneStand, 4);
+        for (int i = 0; i < CELLS; i++) {
+            if (onePass[i]) passCount++; else { solidCount++; hardness += 8; }
+            if (oneStand[i]) standCount++;
+        }
+        FragmentBuilder.build(onePass, oneStand, G, passCount, standCount, 0, hardness, solidCount, reused);
+        assertEquals(null, reused.labels(), "rebuild to 1 fragment retracts the slab");
+    }
+
+    // ===================================================================================================
     // UNIFORM fast-paths — all-solid, all-air, all-water.
     // ===================================================================================================
     @Test
