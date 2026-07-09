@@ -46,23 +46,27 @@ public final class ResourcePyramid {
     static final int COLUMNS = ResourceClasses.COLUMN_COUNT;
 
     /**
-     * The highest level the <b>resource</b> layer rolls up to / is queried at — {@link RegionAddress#MAX_LEVEL}
-     * (22, a ~67M-block cell), i.e. <b>true-global</b>, in deliberate contrast to the region A* tier which caps
-     * at {@link RegionAddress#MAX_COARSE_LEVEL} (6, a 1024-block cell).
+     * The highest level the <b>resource</b> layer rolls up to / is queried at — <b>true-global</b>, in
+     * deliberate contrast to the region A* tier which caps at {@link RegionAddress#MAX_COARSE_LEVEL} (6, a
+     * 1024-block cell).
      *
-     * <p><b>Why 22.</b> A level-22 cell is {@code 16 << 22 ≈ 67M} blocks/side, so the entire ±30M-block world
-     * border is covered by at most 4 top cells straddling the origin. A "what have I seen anywhere" fold
-     * therefore reads only a handful of interned rows at this level ({@link ResourceQuery#globalLog2}). The extra
-     * levels are cheap: the roll-up ({@link ResourceMerger}) is a per-column log₂-SUM with damping, so a single
-     * populated leaf touches one ancestor per level and stops the instant a parent's vector is unchanged; and the
-     * pyramid is sparse (a level's table is lazily allocated, only ancestors of populated leaves are interned).
+     * <p><b>Why 21, not the addressing root {@link RegionAddress#MAX_LEVEL} (22).</b> A level-21 cell is
+     * {@code 16 << 21 ≈ 33.5M} blocks/side — the <b>smallest</b> cell that spans the ±30M-block world border — so
+     * the whole world tiles into at most <b>4 top cells</b> (a 2×2 grid straddling the origin; 0 is a grid
+     * boundary at every level, so there is never a single world cell). Level 22 (~67M) would be the <b>same</b> 4
+     * quadrant cells with each extending ~37M blocks into empty space: no extra resolution, no consolidation — a
+     * purely redundant roll-up level. Crossing between the 4 quadrants is handled on the <b>query</b> side by the
+     * neighbourhood scan ({@link ResourceQuery}'s 3×3 ascend, {@link ResourceQuery#windowLog2}), not by a taller
+     * pyramid, so 21 is the last meaningful level. A "what have I seen anywhere" fold reads only those ≤4 rows
+     * ({@link ResourceQuery#globalLog2}).
      *
-     * <p>The region A* tier is <b>unaffected</b>: {@code CostPyramid}/{@code RegionPathfinder} plan against
-     * {@link RegionAddress#MAX_COARSE_LEVEL} and never touch these upper resource levels — a taller pyramid there
-     * would be dead search weight (see {@link RegionAddress#MAX_COARSE_LEVEL}), but for the resource compass the
-     * upper levels are exactly the "resources seen far away" the player wants surfaced.
+     * <p>The levels above {@link RegionAddress#MAX_COARSE_LEVEL} are cheap: the roll-up ({@link ResourceMerger})
+     * is a per-column log₂-SUM with damping (a single populated leaf touches one ancestor per level and stops the
+     * instant a parent's vector is unchanged), and the pyramid is sparse (levels lazily allocated, only ancestors
+     * of populated leaves interned). The region A* tier is <b>unaffected</b>: {@code CostPyramid}/{@code
+     * RegionPathfinder} plan against {@link RegionAddress#MAX_COARSE_LEVEL} and never touch these upper levels.
      */
-    public static final int RESOURCE_TOP_LEVEL = RegionAddress.MAX_LEVEL;
+    public static final int RESOURCE_TOP_LEVEL = 21;
 
     /** Initial per-level map capacity (power of two); grows by doubling at 3/4 load. */
     private static final int INITIAL_MAP_CAP = 256;
