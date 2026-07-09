@@ -26,6 +26,11 @@ public final class FabricPlatformEvents implements PlatformEvents {
     }
 
     @Override
+    public void onServerStopping(Consumer<MinecraftServer> callback) {
+        ServerLifecycleEvents.SERVER_STOPPING.register(callback::accept);
+    }
+
+    @Override
     public void onPlayerJoin(Consumer<ServerPlayer> callback) {
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> callback.accept(handler.getPlayer()));
     }
