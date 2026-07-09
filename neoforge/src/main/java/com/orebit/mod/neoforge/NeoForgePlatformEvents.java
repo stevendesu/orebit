@@ -17,6 +17,7 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.level.ChunkEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.LevelTickEvent;
 
 /**
@@ -33,6 +34,11 @@ public final class NeoForgePlatformEvents implements PlatformEvents {
     @Override
     public void onServerStarted(Consumer<MinecraftServer> callback) {
         NeoForge.EVENT_BUS.addListener((ServerStartedEvent event) -> callback.accept(event.getServer()));
+    }
+
+    @Override
+    public void onServerStopping(Consumer<MinecraftServer> callback) {
+        NeoForge.EVENT_BUS.addListener((ServerStoppingEvent event) -> callback.accept(event.getServer()));
     }
 
     @Override

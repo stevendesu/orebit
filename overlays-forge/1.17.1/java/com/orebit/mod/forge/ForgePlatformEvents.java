@@ -18,6 +18,7 @@ import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.world.ChunkEvent;
 import net.minecraftforge.fmlserverevents.FMLServerStartedEvent;
+import net.minecraftforge.fmlserverevents.FMLServerStoppingEvent;
 
 /**
  * Bridges legacy-Forge game-bus events to the loader-agnostic {@link PlatformEvents} seam.
@@ -36,6 +37,11 @@ public final class ForgePlatformEvents implements PlatformEvents {
     @Override
     public void onServerStarted(Consumer<MinecraftServer> callback) {
         MinecraftForge.EVENT_BUS.addListener((FMLServerStartedEvent event) -> callback.accept(event.getServer()));
+    }
+
+    @Override
+    public void onServerStopping(Consumer<MinecraftServer> callback) {
+        MinecraftForge.EVENT_BUS.addListener((FMLServerStoppingEvent event) -> callback.accept(event.getServer()));
     }
 
     @Override
