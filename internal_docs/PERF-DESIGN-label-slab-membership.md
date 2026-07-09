@@ -1,8 +1,9 @@
 # PERF-DESIGN: label-slab EXACT fragment membership in `RegionCostField` slot resolution
 
-> **STATUS: RATIFIED-DIRECTION (owner pre-approved pursuing this, gated on measurement).**
-> HANDOFF menu item 1. Implemented s54; keep/revert decided by the §6 paired interleaved A/B
-> (≥3% on the field-guided FullSearch scenarios, flat guards). Design-review-first satisfied by
+> **STATUS: ADOPTED (s54, 2026-07-09 — measured, KEPT).** Owner pre-approved pursuing this
+> (RATIFIED-DIRECTION, HANDOFF menu item 1), gated on measurement; the §8 paired interleaved
+> A/B cleared the bar: **HONEYCOMB −12.3%** (targeted; expansions 254 → 101 from honest
+> guidance), GOAL scenarios −0.9/−1.7%, every guard flat. Design-review-first satisfied by
 > the owner's standing ratification of the direction; the semantic delta below is the part that
 > would otherwise need a fresh sign-off, so it is called out explicitly.
 
@@ -151,6 +152,70 @@ two REACHED slots, or used to fall back. Enumerated:
   fragment built leaf (favor-CPU-over-RAM: negligible against the nav grid).
 - Reverting is one `git revert` (all changes in one commit).
 
-## §8 Measured (s54, 2026-07-09) — filled in after the A/B
+## §8 Measured (s54, 2026-07-09) — **KEPT**
 
-See PERF-RESULTS / the s54 session report for the paired interleaved numbers and the verdict.
+Paired interleaved A/B (A = `098e66c`, B = `acd6fa1`), sweeps A1,B1,A2,B2 each running
+FullSearch → Pathfinder SHORT (pinned) → Pathfinder MULTI (pinned) → RegionPathfinder →
+RegionFieldBuild. JMH avgt cnt 6, µs/op, ± = 99.9% CI, forks=0 harness, fresh test-worker JVM
+per invocation, JDK 21, active node 1.21.11.
+
+### FullSearchBenchmark (targeted)
+
+| Scenario | A1 | B1 | A2 | B2 | A mean | B mean | Δ B vs A |
+|---|---|---|---|---|---|---|---|
+| GOAL_IN_WINDOW | 937.7 ±4.5 | 932.7 ±8.2 | 929.9 ±7.5 | 917.5 ±6.1 | 933.80 | 925.09 | −0.9% |
+| GOAL_NOT_IN_WINDOW | 796.6 ±13.9 | 772.8 ±9.1 | 772.2 ±14.6 | 769.2 ±22.5 | 784.41 | 771.02 | −1.7% |
+| **HONEYCOMB** | 826.8 ±7.8 | 721.2 ±4.8 | 813.5 ±6.6 | 717.4 ±13.4 | 820.19 | 719.30 | **−12.3%** |
+
+HONEYCOMB's dry-run sanity: expansions 254 (A) → **101** (B), plan 39 steps and FIND on both
+sides — the win is part read-path (no centroid loop / fallback scan), part BEHAVIOR (exact
+membership stops +X-end tunnel cells reading the sealed pocket's understated optimistic-air
+cost, so the field pulls harder). GOAL_IN/NOT_IN expansions identical (15/245) — the §3
+byte-identity class held exactly.
+
+### Guards (all flat)
+
+| Bench / scenario | A runs | B runs | A mean | B mean | Δ |
+|---|---|---|---|---|---|
+| Pathfinder SHORT | 13.850, 13.403 | 13.631, 13.320 | 13.627 | 13.476 | −1.1% (session drift, monotone across all 4 runs) |
+| Pathfinder MULTI | 245.5, 243.8, **246.0, 245.5** | 248.9, 249.2, **246.5, 246.1** | 245.20 | 247.66 | +1.0%* |
+| Region OPEN_CAVERN | 0.800, 0.800 | 0.803, 0.799 | 0.800 | 0.801 | +0.1% |
+| Region SEALED_DIG | 0.240, 0.240 | 0.242, 0.240 | 0.240 | 0.241 | +0.4% |
+| Region MULTI_FRAGMENT | 0.442, 0.437 | 0.441, 0.435 | 0.440 | 0.438 | −0.3% |
+| Region LONG_CASCADE | 5.925, 5.921 | 5.999, 5.917 | 5.923 | 5.958 | +0.6% |
+| Region ZERO_CAP | 0.507, 0.505 | 0.483, 0.512 | 0.506 | 0.498 | −1.7% (known-jittery) |
+
+\* MULTI's first two B runs read +1.8%; MULTI executes ZERO changed code (block tier only,
+field null), so per the pinned-rerun rule two extra interleaved pairs were run (the bold
+values): +0.2% and +0.2% — the delta did not reproduce; verdict FLAT. (Cross-session context:
+the PRE-baseline A itself read 249.9/248.3 — identical code wobbles ±1–2% between sessions.)
+
+### RegionFieldBuildBenchmark (build-side guard — 16 combos, µs/op, A/B means over 2 runs each)
+
+| box | scenario | term | A mean | B mean | Δ |
+|---|---|---|---|---|---|
+| 3 | SURFACE | EXHAUST | 87.25 | 87.39 | +0.2% |
+| 3 | SURFACE | FATSKEL | 90.94 | 90.80 | −0.2% |
+| 3 | BURIED | EXHAUST | 49.50 | 49.30 | −0.4% |
+| 3 | BURIED | FATSKEL | 53.23 | 52.61 | −1.2% |
+| 5 | SURFACE | EXHAUST | 182.39 | 177.28 | −2.8%† |
+| 5 | SURFACE | FATSKEL | 177.57 | 173.43 | −2.3%† |
+| 5 | BURIED | EXHAUST | 142.32 | 136.37 | −4.2%† |
+| 5 | BURIED | FATSKEL | 114.71 | 112.13 | −2.3%† |
+| 7 | SURFACE | EXHAUST | 479.20 | 474.40 | −1.0% |
+| 7 | SURFACE | FATSKEL | 389.80 | 387.59 | −0.6% |
+| 7 | BURIED | EXHAUST | 444.67 | 437.18 | −1.7% |
+| 7 | BURIED | FATSKEL | 302.31 | 300.17 | −0.7% |
+| 10 | SURFACE | EXHAUST | 1550.79 | 1547.30 | −0.2% |
+| 10 | SURFACE | FATSKEL | 1263.54 | 1262.36 | −0.1% |
+| 10 | BURIED | EXHAUST | 1534.13 | 1518.25 | −1.0% |
+| 10 | BURIED | FATSKEL | 1050.39 | 1047.78 | −0.2% |
+
+† The A1 sweep ran hot on the box-5 combos (first RegionFieldBuild sweep of the session, e.g.
+5/BUR/EXH A1 = 147.4 vs PRE-baseline 136.3 and A2 = 137.3) — the honest read is FLAT, not a B
+win. No combo regressed: the feared bake/bookkeeping cost is invisible on this
+single-fragment world, as designed.
+
+**Verdict against the decision rule:** HONEYCOMB −12.3% ≫ the 3% bar on the targeted
+field-guided scenario; both other FullSearch scenarios flat-to-better; every guard flat.
+**KEPT** (commit `acd6fa1`). Tests 223/0 green, no pre-existing pin moved.
