@@ -66,6 +66,14 @@ public class BotManager {
         // flavor replays it — loadPlayerData(nameAndId) → Entity.load(ValueInput) — before place.
         BotSpawn.place(server, bot);
 
+        // Respawn semantics: /bot spawn exists to bring back a DEAD bot, but BotSpawn.place just restored the
+        // bot's saved <uuid>.dat — which, for a bot that died, carries Health=0 (LivingEntity persists Health).
+        // A clientless bot can't drive the vanilla death-screen respawn, so without this it comes back dead and
+        // dies again on its first tick (the white "poof"). Vanilla's own respawn builds a FRESH entity and calls
+        // ServerPlayer.restoreFrom(old, keepAll=false), whose death branch is literally setHealth(getMaxHealth());
+        // reviveIfDead() applies that same operation (a no-op for a live/returning bot). See PlayerList.respawn.
+        bot.reviveIfDead();
+
         // Complete the join the way a real client would: mark the bot's connection "client-loaded". As of
         // 1.21.11, ServerPlayer.isInvulnerableTo() returns true while connection.hasClientLoaded() is false
         // (the world-streaming grace period) — and a clientless fake player never sends that signal, so
