@@ -77,19 +77,30 @@ public final class RegionCostField {
     /** √2, the octile diagonal factor for the intra-region distance-to-exit term (mirrors {@link RegionPathfinder}). */
     private static final float SQRT2 = 1.4142135f;
 
-    /** Per-thread 3-int scratch for the nearest-centroid fragment probe in {@link #costAt}. */
-    private static final ThreadLocal<int[]> CENT = ThreadLocal.withInitial(() -> new int[3]);
-    private static final ThreadLocal<int[]> TMP = ThreadLocal.withInitial(() -> new int[3]);
-
     private final int minRx, minRy, minRz;
     private final int dimX, dimY, dimZ;
     private final int minY;
-    private final RegionGrid grid;
     private final float[] cost;
     // Per-slot goalward exit opening (world cell of the crossing toward the Dijkstra parent) + onward cost (that
     // parent's cost-to-goal). Only meaningful where cost[i] < UNREACHED; the gradient term reads them in costAt.
     private final int[] exitX, exitY, exitZ;
     private final float[] onward;
+    // ---- Slot-resolution bake (PERF-DESIGN-label-slab-membership) — all indexed by regionIndex ----------
+    /**
+     * Per-region EXACT membership slab (a build-time defensive copy of the leaf record's
+     * {@link RegionFragments#labels()}), present only for regions with ≥2 reached fragment slots — the only
+     * regions where membership changes the answer. {@code null} rows resolve via {@link #cheapSlot}.
+     */
+    private final byte[][] slabs;
+    /**
+     * Per-region cheapest reached slot (argmin over the region's settled fragment slots, lower slot index on
+     * ties — the old fallback scan's order), {@code -1} when none settled. Maintained incrementally by
+     * {@link #record}; for a ≤1-reached region it IS the resolution (every old resolution path collapsed to
+     * the single reached slot or the frontier floor), so {@link #costAt} pays no per-read scan.
+     */
+    private final int[] cheapSlot;
+    /** Per-region count of distinct reached fragment slots — {@link #bakeSlabs}' ≥2 gate. */
+    private final byte[] reachedFrags;
     // The goal's level-0 region cell — the anchor of the cheb × MIN_CROSS distance term (class Javadoc).
     private final int goalRx, goalRy, goalRz;
     /**
@@ -106,7 +117,7 @@ public final class RegionCostField {
      */
     int[] chainRegions;
 
-    RegionCostField(RegionPathfinder.RegionBox b, int minY, RegionGrid grid, int goalRx, int goalRy, int goalRz) {
+    RegionCostField(RegionPathfinder.RegionBox b, int minY, int goalRx, int goalRy, int goalRz) {
         this.minRx = b.minRx;
         this.minRy = b.minRy;
         this.minRz = b.minRz;
@@ -114,17 +125,21 @@ public final class RegionCostField {
         this.dimY = b.maxRy - b.minRy + 1;
         this.dimZ = b.maxRz - b.minRz + 1;
         this.minY = minY;
-        this.grid = grid;
         this.goalRx = goalRx;
         this.goalRy = goalRy;
         this.goalRz = goalRz;
-        int slots = dimX * dimY * dimZ * MAX_FRAGMENTS;
+        int regions = dimX * dimY * dimZ;
+        int slots = regions * MAX_FRAGMENTS;
         this.cost = new float[slots];
         this.exitX = new int[slots];
         this.exitY = new int[slots];
         this.exitZ = new int[slots];
         this.onward = new float[slots];
+        this.slabs = new byte[regions][];
+        this.cheapSlot = new int[regions];
+        this.reachedFrags = new byte[regions];
         java.util.Arrays.fill(cost, UNREACHED);
+        java.util.Arrays.fill(cheapSlot, -1);
     }
 
     /** Set the frontier floor (the maximum settled cost) — written once by the producing Dijkstra at termination. */
@@ -149,21 +164,50 @@ public final class RegionCostField {
         int f = frag < 0 ? 0 : (frag >= MAX_FRAGMENTS ? MAX_FRAGMENTS - 1 : frag);
         int i = ri * MAX_FRAGMENTS + f;
         if (g < cost[i]) {
+            if (cost[i] >= UNREACHED) reachedFrags[ri]++;   // first settle of this slot
             cost[i] = g;
             exitX[i] = ex; exitY[i] = ey; exitZ[i] = ez;
             onward[i] = onwardCost;
+            // Maintain the per-region argmin (lower slot index on cost ties — the old fallback scan's order).
+            int cs = cheapSlot[ri];
+            if (cs < 0 || g < cost[cs] || (g == cost[cs] && i < cs)) cheapSlot[ri] = i;
+        }
+    }
+
+    /**
+     * Bake EXACT per-cell fragment membership into the field (PERF-DESIGN-label-slab-membership §2): for every
+     * box region with ≥2 reached fragment slots — the only regions where membership changes {@link #costAt}'s
+     * answer — copy the leaf record's build-time label slab ({@link RegionFragments#labels()}) into a
+     * field-owned row of {@link #slabs}. The copy (4 KB, ~0.2 µs) keeps the published field self-contained:
+     * a later leaf rebuild mutates the record, never this snapshot, so planner-pool readers touch only
+     * field-owned arrays. A region whose record carries no valid slab (hand-seeded, unresident, rebuilt to
+     * ≤1 fragment) stays {@code null} and degrades to the {@link #cheapSlot} resolution. Called once by the
+     * producing Dijkstra ({@code costToGoalField}) at build termination, on the build (tick) thread — the
+     * same thread family that mutates the records, so the read here adds no cross-thread exposure.
+     */
+    void bakeSlabs(RegionGrid grid) {
+        final int regions = reachedFrags.length;
+        for (int ri = 0; ri < regions; ri++) {
+            if ((reachedFrags[ri] & 0xFF) < 2) continue;
+            int ix = ri % dimX, iz = (ri / dimX) % dimZ, iy = ri / (dimX * dimZ);
+            RegionFragments rf = grid.fragmentRecord(0, minRx + ix, minRy + iy, minRz + iz);
+            byte[] labels = rf == null ? null : rf.labels();
+            if (labels != null) slabs[ri] = labels.clone();
         }
     }
 
     /**
      * The goal cost-to-reach for the level-0 region fragment enclosing world cell {@code (wx,wy,wz)}. Region
      * mapping mirrors {@link com.orebit.mod.worldmodel.hpa.RegionAddress} at level 0: {@code rx = wx>>4},
-     * {@code rz = wz>>4}, {@code ry = (wy - minY)>>4}. The cell's fragment is resolved by nearest-centroid
-     * membership ({@link RegionPathfinder#fragmentOf}); if that specific fragment was never reached, the field
-     * falls back to the cheapest reached fragment of the region (robust where nearest-centroid disagrees with
-     * the Dijkstra's fragment ids). The returned value is the {@link #record recorded} slot's {@code onward}
-     * cost PLUS the octile distance from the cell to that slot's goalward exit opening — the intra-region
-     * gradient, in region units.
+     * {@code rz = wz>>4}, {@code ry = (wy - minY)>>4}. Slot resolution
+     * (PERF-DESIGN-label-slab-membership; reads only field-owned arrays — no ThreadLocals, no pyramid probe):
+     * a region with a baked membership slab (≥2 reached fragment slots) resolves the cell to its EXACT kept
+     * fragment by one byte read, falling back to the region's cheapest reached slot when the cell's fragment
+     * was never reached (or the cell sits in no kept fragment); a region without a slab reads its
+     * precomputed cheapest reached slot directly — for ≤1 reached slot that answer is identical to the old
+     * nearest-centroid-then-fallback resolution, without the per-read centroid math. The returned value is
+     * the {@link #record recorded} slot's {@code onward} cost PLUS the octile distance from the cell to that
+     * slot's goalward exit opening — the intra-region gradient, in region units.
      *
      * <p>When no settled slot resolves — the region lies outside the field's box, or the (possibly
      * fat-skeleton-terminated) Dijkstra never settled any of its fragments — the query returns the
@@ -174,17 +218,29 @@ public final class RegionCostField {
         int rx = wx >> 4, ry = (wy - minY) >> 4, rz = wz >> 4;
         int ri = regionIndex(rx, ry, rz);
         if (ri < 0) return floorAt(rx, ry, rz);
-        int frag = RegionPathfinder.fragmentOf(grid, rx, ry, rz, wx, wy, wz, CENT.get(), TMP.get());
-        if (frag < 0) frag = 0;
-        else if (frag >= MAX_FRAGMENTS) frag = MAX_FRAGMENTS - 1;
-        int slot = ri * MAX_FRAGMENTS + frag;
-        if (cost[slot] >= UNREACHED) {
-            // Fallback: the cheapest reached fragment of this region (nearest-centroid disagreed with the flood).
-            slot = cheapestReachedSlot(ri);
-            if (slot < 0) return floorAt(rx, ry, rz);
-        }
+        int slot = resolveSlot(ri, wx, wy, wz);
+        if (slot < 0) return floorAt(rx, ry, rz);
         // Intra-region gradient: distance to the goalward exit opening + that exit's onward cost-to-goal.
         return octileToExit(wx - exitX[slot], wy - exitY[slot], wz - exitZ[slot]) + onward[slot];
+    }
+
+    /**
+     * Resolve the settled slot answering a query in box region row {@code ri} (see {@link #costAt}), or
+     * {@code -1} when none of the region's fragment slots settled (⇒ frontier floor). Package-private so the
+     * membership unit test can pin the resolution (the {@link #rawCost} idiom).
+     */
+    int resolveSlot(int ri, int wx, int wy, int wz) {
+        byte[] slab = slabs[ri];
+        if (slab != null) {
+            int frag = slab[(((wy - minY) & 15) << 8) | ((wz & 15) << 4) | (wx & 15)];
+            if (frag >= 0) {
+                int slot = ri * MAX_FRAGMENTS + frag;
+                if (cost[slot] < UNREACHED) return slot;
+            }
+            // Cell in no kept fragment, or its fragment never reached → the cheapest reached slot (which a
+            // ≥2-reached region always has).
+        }
+        return cheapSlot[ri];
     }
 
     /**
@@ -201,6 +257,16 @@ public final class RegionCostField {
     }
 
     /**
+     * Test seam (the {@link #rawCost} idiom): the settled slot {@link #costAt} would resolve for world cell
+     * {@code (wx,wy,wz)} — {@code slot % MAX_FRAGMENTS} is the fragment id — or {@code -1} when the query
+     * falls to the frontier floor. Production reads go through {@link #costAt}.
+     */
+    int resolvedSlotAt(int wx, int wy, int wz) {
+        int ri = regionIndex(wx >> 4, (wy - minY) >> 4, wz >> 4);
+        return ri < 0 ? -1 : resolveSlot(ri, wx, wy, wz);
+    }
+
+    /**
      * Raw settled cost of slot {@code (rx,ry,rz,frag)} — {@link #UNREACHED} when unsettled or out of box.
      * Package-private test seam (the fat-skeleton invariant tests compare exhaustive vs early-exit builds
      * slot-by-slot); production reads go through {@link #costAt}.
@@ -209,17 +275,6 @@ public final class RegionCostField {
         int ri = regionIndex(rx, ry, rz);
         if (ri < 0 || frag < 0 || frag >= MAX_FRAGMENTS) return UNREACHED;
         return cost[ri * MAX_FRAGMENTS + frag];
-    }
-
-    /** The cheapest reached fragment slot of region row {@code ri}, or {@code -1} if none was settled. */
-    private int cheapestReachedSlot(int ri) {
-        int base = ri * MAX_FRAGMENTS;
-        int best = -1;
-        float bestCost = UNREACHED;
-        for (int i = base; i < base + MAX_FRAGMENTS; i++) {
-            if (cost[i] < bestCost) { bestCost = cost[i]; best = i; }
-        }
-        return best;
     }
 
     /**
