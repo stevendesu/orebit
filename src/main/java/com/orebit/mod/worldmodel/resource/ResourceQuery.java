@@ -18,26 +18,31 @@ import net.minecraft.server.level.ServerLevel;
  *
  * <h2>Algorithm (design §6)</h2>
  * <ol>
- *   <li><b>Ascend from the anchor's leaf.</b> Walk levels 0..{@link ResourcePyramid#RESOURCE_TOP_LEVEL} of the
- *       region <i>containing the anchor</i>; stop at the tightest level whose region has a decoded count
- *       {@code >= minCount} for the column. If no level up to the coarsest ancestor holds enough (or the
- *       column is empty there), return empty — the caller reports "none known nearby".</li>
- *   <li><b>Best-first descend</b> from that ancestor with a min-heap keyed by <b>squared distance from the
+ *   <li><b>Ascend the anchor's neighbourhood.</b> Walk levels 0..{@link ResourcePyramid#RESOURCE_TOP_LEVEL},
+ *       at each looking at the anchor's cell <i>and its ±1 neighbours per axis</i> (a 3×3×3 box); stop at the
+ *       tightest level where some neighbour cell has a decoded count {@code >= minCount} for the column, and
+ *       seed the descend from every such cell. Reading the neighbourhood — not just the single containing cell —
+ *       lets the search cross a region boundary the anchor abuts, the <b>world origin included</b> (region 0 and
+ *       region -1 share no ancestor). If no level up to the top holds enough, return empty ("none known
+ *       nearby").</li>
+ *   <li><b>Best-first descend</b> from the seeded cells with a min-heap keyed by <b>squared distance from the
  *       region center to the anchor</b> (nearest first — the "near me / near P" ranking; {@code minCount} is
  *       the quantity filter). Pop the nearest node: at level 0 emit a {@link ResourceHit} (decoded count +
  *       the region's center block); otherwise push each child that has an interned row and a decoded count
  *       {@code >= minCount}. Continue until {@code maxResults} hits or the heap drains.</li>
  * </ol>
  *
- * <p>The descend is a pure octree/quadtree tree walk from a single ancestor — every node has exactly one
- * parent, so no node is reachable twice and <b>no visited set is needed</b>. The octree&rarr;quadtree
- * child-count transition is handled by {@link RegionAddress#childCount} / {@link RegionAddress#childRY}
- * (8 children at/below {@link RegionAddress#OCTREE_TOP}, 4 above), matching {@link ResourceMerger}.
+ * <p>The descend is a pure octree/quadtree tree walk. The seed cells are distinct cells at one level, so their
+ * subtrees are disjoint and every node still has exactly one parent — no node is reachable twice and <b>no
+ * visited set is needed</b>. The octree&rarr;quadtree child-count transition is handled by {@link
+ * RegionAddress#childCount} / {@link RegionAddress#childRY} (8 children at/below {@link RegionAddress#OCTREE_TOP},
+ * 4 above), matching {@link ResourceMerger}.
  *
  * <p><b>Ordering is approximate-nearest.</b> A coarse region's center distance is not a strict lower bound
  * on its contained level-0 centers (a child near the anchor edge can be nearer than the parent center), so
- * hits are emitted in a best-first-by-center order rather than a strictly sorted one. Because milestone 1
- * confines the search to the anchor's own coarse ancestor the approximation is tight in practice.
+ * hits are emitted in a best-first-by-center order rather than a strictly sorted one. Because the search stops
+ * at the tightest level whose neighbourhood holds the resource, the seeded box is only a few cells across and
+ * the approximation is tight in practice.
  *
  * <p><b>Scratch.</b> The priority queue is a <b>pooled per-thread struct-of-arrays binary min-heap</b>
  * ({@link Heap}, {@code long} keys + parallel {@code int} coord arrays, grow-by-doubling) held in a
@@ -46,14 +51,13 @@ import net.minecraft.server.level.ServerLevel;
  * planner thread later needs the async-nav epoch discipline (design §8.4).
  *
  * <h2>Reach (design §8.2)</h2>
- * The ascend now climbs to {@link ResourcePyramid#RESOURCE_TOP_LEVEL} (= {@link RegionAddress#MAX_LEVEL}, a
- * ~67M-block cell), so the drill-down reaches <b>true-global</b> within the top cell that contains the anchor:
- * a resource the bot classified anywhere in that cell (not just within its 1024-block
- * {@link RegionAddress#MAX_COARSE_LEVEL} ancestor) is now found. <b>Known limitation:</b> the descend is a
- * single-ancestor tree walk, so a resource across the world-origin split — in a <i>sibling</i> top cell from
- * the anchor's — is not crossed into; near the origin that can hide a resource just over the axis. Widening
- * the ascend to fold sibling top cells is an acceptable follow-up. Prospecting into <i>unloaded</i> chunks
- * (walk-and-scan) remains a separate later arc — the compass only knows loaded/classified regions.
+ * The neighbourhood ascend climbs to {@link ResourcePyramid#RESOURCE_TOP_LEVEL} (= {@link
+ * RegionAddress#MAX_LEVEL}, a ~67M-block cell), so the drill-down reaches <b>true-global</b>: a resource the
+ * bot classified anywhere — including <b>across the world-origin split</b>, in a sibling top cell (the 3×3
+ * neighbourhood straddles the origin at every level, so region 0 and region -1 are searched together) — is
+ * found, not only resources within the anchor's own 1024-block {@link RegionAddress#MAX_COARSE_LEVEL} ancestor.
+ * Prospecting into <i>unloaded</i> chunks (walk-and-scan) remains a separate later arc — the compass only knows
+ * loaded/classified regions.
  */
 public final class ResourceQuery {
 
@@ -93,28 +97,24 @@ public final class ResourceQuery {
         if (p == null || column < 0 || column >= ResourcePyramid.COLUMNS || maxResults <= 0) return hits;
         final int need = Math.max(1, minCount);
 
-        // 1. Ascend from the anchor's leaf to the TIGHTEST ancestor (containing the anchor) holding >= need.
-        //    Ascend to RESOURCE_TOP_LEVEL (true-global), not MAX_COARSE_LEVEL — a resource seen far from the
-        //    anchor lives in a coarser ancestor than the 1024-block level-6 cell.
-        int sLevel = -1, sRx = 0, sRy = 0, sRz = 0;
-        for (int lvl = 0; lvl <= ResourcePyramid.RESOURCE_TOP_LEVEL; lvl++) {
-            final int rx = RegionAddress.regionX(ax, lvl);
-            final int rz = RegionAddress.regionZ(az, lvl);
-            final int ry = RegionAddress.regionY(ay, lvl, minY);
-            final int row = p.rowIfPresent(lvl, rx, ry, rz);
-            if (row < 0) continue; // no built region here — try one level coarser
-            if (Log2Codec.decode(p.getLog2(lvl, row, column)) >= need) {
-                sLevel = lvl; sRx = rx; sRy = ry; sRz = rz;
-                break;
-            }
-        }
-        if (sLevel < 0) return hits; // none known/loaded near the anchor (caller reports it)
-
-        // 2. Best-first descend from that ancestor, nearest-center-first.
+        // 1. Ascend the anchor's NEIGHBOURHOOD (its cell ± 1 per axis — a 3×3×3 box) level by level, stopping at
+        //    the tightest level where some neighbour cell holds >= need, and seed the descend from ALL such
+        //    neighbour cells. Reading a neighbourhood rather than only the single containing cell is what lets
+        //    the search cross a region boundary the anchor sits against — the WORLD ORIGIN included, where region
+        //    0 and region -1 share NO ancestor at all (0 is a grid boundary at every level), so a single-ancestor
+        //    ascend could never reach a resource just across it. The 3×3 straddles any nearby boundary, and
+        //    ascending grows it, so farther resources are still reached (2-cells-away at level L is within ±1 at
+        //    L+1). Ascend to RESOURCE_TOP_LEVEL (true-global). The seeds are distinct cells at one level ⇒
+        //    disjoint subtrees ⇒ no duplicate hits (no visited set needed).
         final Heap heap = HEAP.get();
-        heap.clear();
-        heap.push(distSq(sLevel, sRx, sRy, sRz, minY, ax, ay, az), sLevel, sRx, sRy, sRz);
+        boolean found = false;
+        for (int lvl = 0; lvl <= ResourcePyramid.RESOURCE_TOP_LEVEL; lvl++) {
+            heap.clear();
+            if (seedNeighborhood(p, heap, lvl, ax, ay, az, minY, column, need)) { found = true; break; }
+        }
+        if (!found) return hits; // none known/loaded near the anchor (caller reports it)
 
+        // 2. Best-first descend from the seeded neighbour cells, nearest-center-first.
         while (heap.size > 0 && hits.size() < maxResults) {
             heap.popMin();
             final int lvl = heap.oLevel, rx = heap.oRx, ry = heap.oRy, rz = heap.oRz;
@@ -143,6 +143,37 @@ public final class ResourceQuery {
             }
         }
         return hits;
+    }
+
+    /**
+     * Push every cell in the anchor's 3×3×3 neighbourhood at {@code level} that holds {@code >= need} of
+     * {@code column} onto {@code heap} (keyed by its center-distance to the anchor), returning whether any was
+     * pushed. The neighbourhood — the anchor's cell ± 1 on each axis — is what makes {@link #find}
+     * boundary-crossing: a resource just over a region edge (the world origin included) sits in a neighbour
+     * cell, not the anchor's own. Vertical neighbours are clamped to the dimension's region rows
+     * ({@link RegionAddress#verticalRegions}); at/above {@code OCTREE_TOP} there is a single vertical row so only
+     * {@code ry == 0} is visited. Absent cells (no interned row) are skipped.
+     */
+    private static boolean seedNeighborhood(ResourcePyramid p, Heap heap, int level,
+            int ax, int ay, int az, int minY, int column, int need) {
+        final int aRx = RegionAddress.regionX(ax, level);
+        final int aRz = RegionAddress.regionZ(az, level);
+        final int aRy = RegionAddress.regionY(ay, level, minY);
+        final int ryLo = Math.max(0, aRy - 1);
+        final int ryHi = Math.min(RegionAddress.verticalRegions(level) - 1, aRy + 1);
+        boolean any = false;
+        for (int rx = aRx - 1; rx <= aRx + 1; rx++) {
+            for (int rz = aRz - 1; rz <= aRz + 1; rz++) {
+                for (int ry = ryLo; ry <= ryHi; ry++) {
+                    final int row = p.rowIfPresent(level, rx, ry, rz);
+                    if (row < 0) continue;
+                    if (Log2Codec.decode(p.getLog2(level, row, column)) < need) continue;
+                    heap.push(distSq(level, rx, ry, rz, minY, ax, ay, az), level, rx, ry, rz);
+                    any = true;
+                }
+            }
+        }
+        return any;
     }
 
     /**

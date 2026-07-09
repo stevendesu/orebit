@@ -100,6 +100,23 @@ public class ResourceQueryTest {
         assertTrue(tooMany.isEmpty(), "a minCount above any aggregate returns no hits");
     }
 
+    @Test
+    void findCrossesTheWorldOrigin() {
+        ResourcePyramid p = new ResourcePyramid();
+        // The resource sits in region (-1,*,-1) — x,z in [-16,0). The anchor at world (8,8,8) is in region
+        // (0,*,0), one region across the origin. Regions 0 and -1 share NO common ancestor (0 is a grid
+        // boundary at every level), so the old single-ancestor ascend could never reach it. The 3x3
+        // neighbourhood ascend covers rx/rz in {-1,0,1}, so it does.
+        seed(p, -1, 0, -1, COL, 4);
+
+        List<ResourceQuery.ResourceHit> hits =
+                ResourceQuery.find(p, MIN_Y, COL, /*ax*/ 8, /*ay*/ 8, /*az*/ 8, /*minCount*/ 1, /*maxResults*/ 5);
+
+        assertEquals(1, hits.size(), "the resource just across the world origin is found");
+        assertEquals(-1, hits.get(0).rx(), "the hit is region (-1,*,-1)");
+        assertEquals(-1, hits.get(0).rz());
+    }
+
     // ---- windowLog2: the player-centered box sum the /bot report compass shows ------------------------
 
     @Test
