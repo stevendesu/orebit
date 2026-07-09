@@ -17,6 +17,7 @@ import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.level.ChunkEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
+import net.minecraftforge.event.server.ServerStoppingEvent;
 
 /**
  * Bridges Forge game-bus events to the loader-agnostic {@link PlatformEvents} seam.
@@ -33,6 +34,11 @@ public final class ForgePlatformEvents implements PlatformEvents {
     @Override
     public void onServerStarted(Consumer<MinecraftServer> callback) {
         ServerStartedEvent.BUS.addListener(event -> callback.accept(event.getServer()));
+    }
+
+    @Override
+    public void onServerStopping(Consumer<MinecraftServer> callback) {
+        ServerStoppingEvent.BUS.addListener(event -> callback.accept(event.getServer()));
     }
 
     @Override

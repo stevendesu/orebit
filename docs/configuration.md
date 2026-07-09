@@ -115,6 +115,21 @@ pathing.asyncSearchBudgetMs   = 250
 | `pathing.maxThreads` | `2` | How many background planner threads to run when `pathing.async` is on (clamped to your core count minus two). All bots share the pool — raise it on a server with many bots to keep their plans snappy, lower it to `1` on a constrained host. Trades bot responsiveness against server CPU headroom, like view-distance. Requires a restart to change. |
 | `pathing.asyncSearchBudgetMs` | `250` | The wall-clock budget, in milliseconds, for one background path search — with `pathing.async` on, *time* replaces the node cap as the effective search limit (the node cap remains as a memory backstop). A search that runs out of budget returns its best partial path; the bot moves that way and replans, converging on far goals. Bigger budgets escape bigger dead-ends at the cost of slower worst-case planning — the server tick is never stalled either way. |
 
+### World memory — surviving a restart
+
+The bot remembers the coarse shape of terrain it has explored (for long-range routing) and where it saw
+resources (for `/bot report`). That memory is saved into the world folder so it survives a server restart —
+important for a server that stops when idle and restarts often. It's saved automatically on a clean shutdown;
+the one knob below only controls a background safety-save in between.
+
+```properties
+hpa.persistIntervalTicks = 6000
+```
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `hpa.persistIntervalTicks` | `6000` | How often (in server ticks, 20 = 1 second) to re-save that memory in the background as crash insurance, and only for worlds that changed since the last save. The real save happens on a clean server stop no matter what this is set to — this is just a safety net for a hard crash. `6000` ≈ 5 minutes. Set `0` to turn the periodic safety-save off (the shutdown save still runs). The data lives in `<world>/orebit/<dimension>/` and is treated as a cache — if a file is ever corrupted it's simply ignored and rebuilt as you explore. |
+
 ### Survival — is the bot mortal?
 
 ```properties

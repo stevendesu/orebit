@@ -23,6 +23,17 @@ import net.minecraft.world.level.chunk.ChunkAccess;
 public interface PlatformEvents {
     void onServerStarted(Consumer<MinecraftServer> callback);
 
+    /**
+     * Fires when the server is shutting down (a graceful stop — Fabric {@code SERVER_STOPPING},
+     * Forge/NeoForge {@code ServerStoppingEvent}), on the server thread after the tick loop has
+     * halted, so a listener can flush per-level state to disk with no concurrent writer. Default
+     * no-op so a loader/era not yet wired (and any impl relying on another flush trigger, e.g. the
+     * periodic {@code onWorldTickEnd} flush) still compiles — mirroring {@link #onChunkUnload} /
+     * {@link #onRegisterCommands}. Used by {@link com.orebit.mod.worldmodel.persistence.RegionPersistence}
+     * for the authoritative world-model flush (the primary trigger for the idle-auto-stop restart case).
+     */
+    default void onServerStopping(Consumer<MinecraftServer> callback) {}
+
     void onPlayerJoin(Consumer<ServerPlayer> callback);
 
     void onPlayerDisconnect(Consumer<ServerPlayer> callback);

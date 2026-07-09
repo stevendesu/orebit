@@ -3,7 +3,28 @@
 
 # DESIGN — Gap B: World-Model Persistence (HPA-IMPLEMENTATION.md §11)
 
-**Status: DESIGN / SCOPING. Not yet implemented.** Persisting the per-`ServerLevel` region tier (`CostPyramid` fragment records + `ResourcePyramid` resource tallies) to disk so the bot's memory of explored terrain survives a level-unload / server restart. This is the single deferred remainder of the HPA arc (§11) and the `§8.1` deferral of the find-mine-resources arc.
+**Status: IMPLEMENTED (core; eager-load + stop-flush + periodic dirty flush).** Persisting the per-`ServerLevel` region tier (`CostPyramid` fragment records + `ResourcePyramid` resource tallies) to disk so the bot's memory of explored terrain survives a level-unload / server restart. This closes the single deferred remainder of the HPA arc (§11) and the `§8.1` deferral of the find-mine-resources arc.
+
+> **Implementation note (deviates from §4/§5 of the scoping below — a deliberate, owner-locked simplification).**
+> The shipped design uses **per-dimension plain blob files, NOT region sharding** (§4), and **eager load at
+> `SERVER_STARTED` + flush at `SERVER_STOPPING` + a budgeted periodic dirty flush**, NOT lazy per-shard load
+> (§5). The clean-shutdown flush is the primary trigger (the target auto-stops when idle). Sharding / lazy load
+> stay an explicit FUTURE optimization; the friend-server data set is small.
+>
+> Shipped surface:
+> - `worldmodel/persistence/RegionPersistence` — the orchestrator (load-all / flush-all / periodic tick / dirty
+>   set / path resolution), mirroring `BotManager`'s portable world-save file I/O.
+> - `worldmodel/persistence/CostPyramidCodec` + `ResourcePyramidCodec` — headless-testable `OutputStream`/
+>   `InputStream` codecs (magic + version header, gzip body; cost reuses `CostCodec.packRegion`/`unpackRegion`,
+>   resource writes sparse `(col, log2)` pairs). Only level-0 leaves are persisted; `mergeUp*` is replayed on load.
+> - `platform/PlatformEvents.onServerStopping` (default no-op) wired in every loader impl (Fabric
+>   `SERVER_STOPPING`; Forge/NeoForge `ServerStoppingEvent`) — §5.1's missing lifecycle seam, now closed.
+> - `hpa.persistIntervalTicks` config key (default 6000; `0` disables the periodic flush).
+> - Headless round-trip test: `RegionPersistenceRoundTripTest`.
+>
+> Concurrency (§9) is honoured by construction: all load/flush runs on the tick thread (or after it halts), so
+> nothing races a planner search or a pyramid array grow. Files are a cache (§5/§7): bad magic / version / IO →
+> treated as absent; live-built leaves are never clobbered by a decode.
 
 ---
 

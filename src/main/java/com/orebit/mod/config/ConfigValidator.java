@@ -84,7 +84,9 @@ public final class ConfigValidator {
                 // Upper clamps are sanity rails only: maxThreads is re-clamped to [1, cores-2] at pool
                 // start (the host's core count isn't known here), and a >10s search budget is a config typo.
                 intClamped(props, ConfigKeys.PATHING_MAX_THREADS, d.maxThreads(), 1, 64),
-                intClamped(props, ConfigKeys.PATHING_ASYNC_SEARCH_BUDGET_MS, d.asyncSearchBudgetMs(), 1, 10_000));
+                intClamped(props, ConfigKeys.PATHING_ASYNC_SEARCH_BUDGET_MS, d.asyncSearchBudgetMs(), 1, 10_000),
+                // hpa: 0 disables the periodic flush; upper rail is a sanity cap (~9.5 days) against a typo.
+                intClamped(props, ConfigKeys.HPA_PERSIST_INTERVAL_TICKS, d.persistIntervalTicks(), 0, 16_000_000));
     }
 
     // ---- per-type parse + clamp (each warns through the sink and never throws) ----------------------
