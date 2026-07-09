@@ -786,6 +786,23 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     // versions; overriding hurt() is not — it split into hurtServer/hurtClient at 1.21.5).
 
     /**
+     * Bring the bot back to life after {@code /bot spawn} restored a DEAD saved profile (see the call in
+     * {@link BotManager#spawnBotFor}). A no-op unless the bot is actually dead, so a live/returning bot keeps
+     * its state. This reproduces the observable state of vanilla's respawn, which never revives in place — it
+     * builds a fresh entity and copies from the old one via {@code ServerPlayer.restoreFrom(old, false)}, whose
+     * death branch is {@code setHealth(getMaxHealth())}. We reuse-and-reload instead of constructing fresh, so
+     * the death fields the reload dragged back in are reset explicitly: {@code Health} (persisted, comes back 0)
+     * and {@code deathTime} (persisted). {@code dead} is transient (never in NBT) so a freshly-constructed
+     * bot already has it {@code false}; it's reset too as belt-and-suspenders in case the load path evolves.
+     */
+    void reviveIfDead() {
+        if (this.getHealth() > 0.0F) return;
+        this.setHealth(this.getMaxHealth());
+        this.deathTime = 0;
+        this.dead = false;
+    }
+
+    /**
      * Breath: suppress air loss when {@code survival.needsBreath} is off (the default) so the bot never drowns
      * and its bubbles stay full; when on, defer to vanilla. {@code decreaseAirSupply} is the per-tick hook
      * {@code LivingEntity.baseTick} calls while submerged.
