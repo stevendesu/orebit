@@ -21,64 +21,74 @@ import net.minecraft.server.level.ServerLevel;
 
 /**
  * {@code /bot report} — a cold, read-only diagnostic that dumps the bot's <b>resource knowledge</b> (the
- * "compass"): for every tracked resource it has seen, how much sits in the nested region the bot occupies
- * at a few pyramid levels, from the immediate neighbourhood out to the coarsest ("global") tally. The
- * numeric complement to {@link FindCommand}: where {@code /bot find} localises ONE resource to nearby 16³
- * regions, this gives the at-a-glance abundance table across ALL resources and distance scales.
+ * "compass"): for every tracked resource it has ever seen, an at-a-glance abundance table across a few
+ * distance scales around the player, out to a whole-world total. The numeric complement to {@link
+ * FindCommand}: where {@code /bot find} localises ONE resource to nearby 16³ regions to go mine, this shows
+ * ALL resources and how much sits near / far / everywhere.
  *
  * <h2>What the numbers mean</h2>
- * The resource data plane is the per-dimension {@link ResourcePyramid} on the fixed-grid implicit octree
- * ({@link RegionAddress}): a log₂ histogram of how many of each indexed resource ({@link ResourceClasses}
- * column) a region holds, rolled up so a parent's count is the log₂-sum of its children (all the way to
+ * The data plane is the per-dimension {@link ResourcePyramid} — a log₂ histogram ({@link Log2Codec}) of how
+ * many of each indexed resource ({@link ResourceClasses} column) each region of the fixed-grid octree
+ * ({@link RegionAddress}) holds, rolled up so a parent's count is the log₂-sum of its children (to
  * {@link ResourcePyramid#RESOURCE_TOP_LEVEL} — true-global — unlike the region A* tier which caps at
- * {@link RegionAddress#MAX_COARSE_LEVEL}). The first three columns read the count for the <b>region containing
- * the bot</b> at one level — and because those regions nest (a level-2 cell contains the bot's level-1 cell,
- * etc.), the counts grow left-to-right; the last column is the whole-world fold:
+ * {@link RegionAddress#MAX_COARSE_LEVEL}).
+ *
+ * <p>The three near/mid/far columns are <b>player-centered box sums</b> ({@link ResourceQuery#windowLog2}):
+ * each folds every cell overlapping a box of the given radius centered on the bot, over the <b>full vertical
+ * column</b> (so ores far below still count). Centering the <i>query</i> on the player — rather than reading
+ * the single grid cell the bot sits in — is what keeps the numbers stable near the world origin: a fixed grid
+ * always jumps at cell boundaries (most visibly at 0,0, where standing on {@code 1,1} vs {@code −1,−1} would
+ * otherwise land in different cells), and a centered quadtree cannot fix that (a cell centered on 0 must split
+ * at 0), so we center the box instead. The last column is the whole-world total:
  * <ul>
- *   <li>{@code l1} — the {@value #NEAR_SIDE}-block region ({@link #LEVELS}[0]) around the bot: what's right here;</li>
- *   <li>{@code l2} / {@code l3} — medium / far (64 / 128 blocks);</li>
+ *   <li>{@code near} — within ~{@value #NEAR_RADIUS} blocks (a starter base);</li>
+ *   <li>{@code mid}  — within ~{@value #MID_RADIUS} blocks (an end-game base);</li>
+ *   <li>{@code far}  — within ~{@value #FAR_RADIUS} blocks (about as far as most players ever explore);</li>
  *   <li>{@code global} — {@link ResourceQuery#globalLog2}: everything the bot has explored <b>this session,
- *       anywhere</b> (a fold over the top-level rows, not the bot's containing cell). This is <b>not saved
- *       across a server restart yet</b> — the compass forgets on shutdown until the persistence arc lands.</li>
+ *       anywhere</b> (a fold over the top-level rows). <b>Not saved across a server restart yet</b> — the
+ *       compass forgets on shutdown until the persistence arc lands.</li>
  * </ul>
- * Counts are approximate (log₂ buckets — {@link Log2Codec}); values over 1024 are shown as {@code ~2^n} to
- * stay compact. Only resources with a nonzero global tally are listed (the rest are simply unmapped so far —
- * the compass only knows what has been loaded/classified).
+ * Counts are approximate (log₂ buckets; the box is also snapped to the cell grid). Values over 1024 are shown
+ * as {@code ~2^n} to stay compact. Only resources with a nonzero global tally are listed.
  */
 public final class ReportCommand implements BotCommand {
 
-    /** The nested containing-cell levels shown (near/med/far). Sizes: 16&lt;&lt;level blocks/side. The last
-     *  report column is NOT a pyramid level — it is the true-global fold ({@link ResourceQuery#globalLog2}). */
-    private static final int[] LEVELS = { 1, 2, 3 };
-    /** Column headers: the three nested levels + the whole-world "global" fold. */
-    private static final String[] HEADS = { "l1", "l2", "l3", "global" };
-    /** The finest shown region's side in blocks ({@code 16 << LEVELS[0]}) — for the doc/legend. */
-    private static final int NEAR_SIDE = RegionAddress.LEAF_SIZE << 1;
-    /** Index of the global byte within each {@code e[]} row ({@code col} at 0, then the nested levels). */
-    private static final int GLOBAL_IDX = LEVELS.length + 1;
+    // Scale radii (blocks) and the pyramid level whose cells the box-sum reads. Radius = 2 × cell side, so each
+    // box is ~4 cells wide → a boundary crossing swaps only a fraction of the coverage (stable-ish). Tunable.
+    private static final int NEAR_RADIUS = 64;    // level 1 (32-block cells) — starter base
+    private static final int MID_RADIUS  = 512;   // level 4 (256-block cells) — end-game base
+    private static final int FAR_RADIUS  = 8192;  // level 8 (4096-block cells) — a lifetime of exploration
 
-    private static final String ROW_FMT = "%-15s %6s %6s %6s %6s";
+    /** Per-scale (level, radius), coarsest last; parallel to the near/mid/far headers. */
+    private static final int[] SCALE_LEVEL  = { 1, 4, 8 };
+    private static final int[] SCALE_RADIUS = { NEAR_RADIUS, MID_RADIUS, FAR_RADIUS };
+    /** Column headers: the three player-centered scales + the whole-world fold. */
+    private static final String[] HEADS = { "near", "mid", "far", "global" };
+    /** Index of the global byte within each gathered {@code e[]} row ({@code col} at 0, then the scales). */
+    private static final int GLOBAL_IDX = SCALE_LEVEL.length + 1;
+
+    private static final String ROW_FMT = "%-15s %6s %6s %6s %7s";
 
     @Override
     public void contribute(LiteralArgumentBuilder<CommandSourceStack> bot) {
         bot.then(Commands.literal("report").executes(ctx -> OrebitCommands.act(ctx, (b, player, src) -> {
             final ServerLevel level = (ServerLevel) Worlds.of(b);
-            final RegionGrid grid = RegionGrid.of(level);
-            final ResourcePyramid pyramid = grid.resourcePyramid();
-            final int minY = grid.minY();
+            final ResourcePyramid pyramid = RegionGrid.of(level).resourcePyramid();
             final BlockPos at = b.blockPosition();
+            final int px = at.getX(), pz = at.getZ();
 
-            // Gather every resource the bot knows about (nonzero global tally), with its per-level bytes.
-            final List<int[]> rows = new ArrayList<>(); // {col, e[l1], e[l2], e[l3], e[global]}
+            // Gather every resource the bot knows about (nonzero global tally), with its per-scale window sums.
+            final List<int[]> rows = new ArrayList<>(); // {col, near, mid, far, global}
             for (int col = 0; col < ResourceClasses.COLUMN_COUNT; col++) {
-                final int[] e = new int[LEVELS.length + 2];
+                final int global = ResourceQuery.globalLog2(pyramid, col) & 0xFF;
+                if (global == 0) continue; // resource never seen anywhere → omit
+                final int[] e = new int[SCALE_LEVEL.length + 2];
                 e[0] = col;
-                for (int i = 0; i < LEVELS.length; i++) {
-                    e[i + 1] = countByte(pyramid, minY, at, LEVELS[i], col) & 0xFF;
+                for (int i = 0; i < SCALE_LEVEL.length; i++) {
+                    e[i + 1] = ResourceQuery.windowLog2(pyramid, px, pz, SCALE_LEVEL[i], SCALE_RADIUS[i], col) & 0xFF;
                 }
-                // The last column is the whole-world fold, not the bot's containing cell (true-global).
-                e[GLOBAL_IDX] = ResourceQuery.globalLog2(pyramid, col) & 0xFF;
-                if (e[GLOBAL_IDX] > 0) rows.add(e); // only list resources the compass has actually seen
+                e[GLOBAL_IDX] = global;
+                rows.add(e);
             }
 
             if (rows.isEmpty()) {
@@ -90,25 +100,16 @@ public final class ReportCommand implements BotCommand {
             // Most-abundant first (by the global tally; larger log₂ byte == larger count).
             rows.sort((a, c) -> Integer.compare(c[GLOBAL_IDX], a[GLOBAL_IDX]));
 
-            CommandFeedback.send(src, "Resource knowledge — l1/l2/l3 = the " + NEAR_SIDE
-                    + "/64/128-block region you're in, global = everything explored this session anywhere "
-                    + "(not saved across restart yet). Counts approximate.");
+            CommandFeedback.send(src, "Resource knowledge around you — near/mid/far = within ~" + NEAR_RADIUS
+                    + "/" + MID_RADIUS + "/" + FAR_RADIUS + " blocks (full depth); global = everything explored "
+                    + "this session anywhere (not saved across restart yet). Counts approximate.");
             CommandFeedback.send(src, String.format(ROW_FMT, "resource", HEADS[0], HEADS[1], HEADS[2], HEADS[3]));
             for (int[] e : rows) {
                 CommandFeedback.send(src, String.format(ROW_FMT,
                         ResourceClasses.nameOfColumn(e[0]),
-                        fmt(e[1]), fmt(e[2]), fmt(e[3]), fmt(e[4])));
+                        fmt(e[1]), fmt(e[2]), fmt(e[3]), fmt(e[GLOBAL_IDX])));
             }
         })));
-    }
-
-    /** The raw log₂ byte of {@code col} in the {@code level}-region containing {@code at}, or 0 if unmapped. */
-    private static byte countByte(ResourcePyramid p, int minY, BlockPos at, int level, int col) {
-        final int rx = RegionAddress.regionX(at.getX(), level);
-        final int rz = RegionAddress.regionZ(at.getZ(), level);
-        final int ry = RegionAddress.regionY(at.getY(), level, minY);
-        final int row = p.rowIfPresent(level, rx, ry, rz);
-        return row < 0 ? 0 : p.getLog2(level, row, col);
     }
 
     /**

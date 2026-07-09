@@ -99,4 +99,32 @@ public class ResourceQueryTest {
                 ResourceQuery.find(p, MIN_Y, COL, AX, AY, AZ, /*minCount*/ 1_000_000, /*maxResults*/ 5);
         assertTrue(tooMany.isEmpty(), "a minCount above any aggregate returns no hits");
     }
+
+    // ---- windowLog2: the player-centered box sum the /bot report compass shows ------------------------
+
+    @Test
+    void windowSumsBoxAndIsStableAcrossOrigin() {
+        ResourcePyramid p = new ResourcePyramid();
+        seed(p, 0, 0, 0, COL, 4);    // a region in the +,+ quadrant, touching the origin
+        seed(p, -1, 0, -1, COL, 4);  // the diagonally-opposite region across the origin
+
+        // A ~64-block box at level 1 centered just PLUS of the origin and just MINUS of it both cover BOTH
+        // regions, so the windowed count is identical — the origin no longer splits the reading. (The old
+        // single-cell read landed (1,1) in region (0,*,0) and (-1,-1) in region (-1,*,-1): different answers.)
+        byte plus  = ResourceQuery.windowLog2(p, 1, 1, /*level*/ 1, /*radius*/ 64, COL);
+        byte minus = ResourceQuery.windowLog2(p, -1, -1, /*level*/ 1, /*radius*/ 64, COL);
+        assertEquals(plus, minus, "windows a few blocks either side of the origin agree (stable)");
+        assertEquals(8, Log2Codec.decode(plus), "both regions (4+4) folded into the ~8 bucket");
+    }
+
+    @Test
+    void windowCountsFullVerticalColumn() {
+        ResourcePyramid p = new ResourcePyramid();
+        seed(p, 0, 5, 0, COL, 4); // a vein deep in the column (vertical index 5), not at the surface
+
+        // windowLog2 folds EVERY vertical region index, so a deep vein counts regardless of the player's Y
+        // (the method takes no Y at all — "how much is near me" means the whole column).
+        byte w = ResourceQuery.windowLog2(p, 0, 0, /*level*/ 1, /*radius*/ 64, COL);
+        assertEquals(4, Log2Codec.decode(w), "the deep vein is summed (full-depth window)");
+    }
 }
