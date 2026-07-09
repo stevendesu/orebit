@@ -45,6 +45,25 @@ public final class ResourcePyramid {
      *  {@link ResourceClasses} class-init (which touches the MC registry), so the pure data tests stay MC-free. */
     static final int COLUMNS = ResourceClasses.COLUMN_COUNT;
 
+    /**
+     * The highest level the <b>resource</b> layer rolls up to / is queried at — {@link RegionAddress#MAX_LEVEL}
+     * (22, a ~67M-block cell), i.e. <b>true-global</b>, in deliberate contrast to the region A* tier which caps
+     * at {@link RegionAddress#MAX_COARSE_LEVEL} (6, a 1024-block cell).
+     *
+     * <p><b>Why 22.</b> A level-22 cell is {@code 16 << 22 ≈ 67M} blocks/side, so the entire ±30M-block world
+     * border is covered by at most 4 top cells straddling the origin. A "what have I seen anywhere" fold
+     * therefore reads only a handful of interned rows at this level ({@link ResourceQuery#globalLog2}). The extra
+     * levels are cheap: the roll-up ({@link ResourceMerger}) is a per-column log₂-SUM with damping, so a single
+     * populated leaf touches one ancestor per level and stops the instant a parent's vector is unchanged; and the
+     * pyramid is sparse (a level's table is lazily allocated, only ancestors of populated leaves are interned).
+     *
+     * <p>The region A* tier is <b>unaffected</b>: {@code CostPyramid}/{@code RegionPathfinder} plan against
+     * {@link RegionAddress#MAX_COARSE_LEVEL} and never touch these upper resource levels — a taller pyramid there
+     * would be dead search weight (see {@link RegionAddress#MAX_COARSE_LEVEL}), but for the resource compass the
+     * upper levels are exactly the "resources seen far away" the player wants surfaced.
+     */
+    public static final int RESOURCE_TOP_LEVEL = RegionAddress.MAX_LEVEL;
+
     /** Initial per-level map capacity (power of two); grows by doubling at 3/4 load. */
     private static final int INITIAL_MAP_CAP = 256;
 

@@ -29,8 +29,12 @@ import com.orebit.mod.worldmodel.hpa.RegionAddress;
  * <h2>House style</h2>
  * Pure static; no per-call allocation past warmup — the child gather, accumulator and compare buffers are
  * thread-local reused {@code byte[COLUMNS]} scratch (the merge runs single-threaded on the tick/maintenance
- * thread, like the nav roll-up). Rolls up only to {@link RegionAddress#MAX_COARSE_LEVEL} (no world-root node),
- * matching {@code PyramidMerger.mergeUpFragments}.
+ * thread, like the nav roll-up). Unlike the nav {@code PyramidMerger.mergeUpFragments} (which stops at
+ * {@link RegionAddress#MAX_COARSE_LEVEL} because the region A* never plans above it), the resource layer rolls
+ * up to {@link ResourcePyramid#RESOURCE_TOP_LEVEL} (= {@link RegionAddress#MAX_LEVEL}) — <b>true-global</b>, so
+ * the compass ({@code /bot report}) can surface resources the bot saw arbitrarily far away. The extra levels are
+ * cheap: damping stops each single-leaf walk the instant an ancestor's vector is unchanged, and only ancestors
+ * of populated leaves are ever interned.
  */
 public final class ResourceMerger {
 
@@ -52,8 +56,9 @@ public final class ResourceMerger {
     public static void mergeUpTallies(ResourcePyramid p, int level0Rx, int level0Ry, int level0Rz) {
         int childLevel = 0;
         int crx = level0Rx, cry = level0Ry, crz = level0Rz;
-        // Roll up only to MAX_COARSE_LEVEL — no world-root node (find-mine-resources §5; RegionAddress).
-        while (childLevel < RegionAddress.MAX_COARSE_LEVEL) {
+        // Roll up to RESOURCE_TOP_LEVEL (true-global) — higher than the region A*'s MAX_COARSE_LEVEL so the
+        // compass can surface resources seen anywhere; damping keeps the extra levels cheap (§5; RegionAddress).
+        while (childLevel < ResourcePyramid.RESOURCE_TOP_LEVEL) {
             int parentLevel = childLevel + 1;
             int prx = RegionAddress.parentRX(crx);
             int prz = RegionAddress.parentRZ(crz);
