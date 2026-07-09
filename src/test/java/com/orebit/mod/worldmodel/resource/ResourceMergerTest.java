@@ -15,8 +15,9 @@ import com.orebit.mod.worldmodel.hpa.RegionAddress;
  *   <li>a parent column is the per-column {@link Log2Codec}-sum of its children, each column independent;</li>
  *   <li>the phase-3 0-identity fix — a column empty in every child stays <b>0</b> at the parent (no phantom
  *       counts);</li>
- *   <li>the walk climbs through the octree levels (≤5, 8 children) and the quadtree transition (level 6, 4
- *       children) up to {@link RegionAddress#MAX_COARSE_LEVEL} and no further (no world-root);</li>
+ *   <li>the walk climbs through the octree levels (≤5, 8 children) and the quadtree transition (levels ≥6, 4
+ *       children) all the way to {@link ResourcePyramid#RESOURCE_TOP_LEVEL} — the resource layer is
+ *       <b>true-global</b> (unlike the region A*'s {@link RegionAddress#MAX_COARSE_LEVEL} cap);</li>
  *   <li>the damping early-out leaves an unchanged parent untouched yet never drops a real change.</li>
  * </ul>
  *
@@ -61,20 +62,25 @@ public class ResourceMergerTest {
     }
 
     @Test
-    void rollsUpThroughCoarseLevelsToMaxCoarse() {
+    void rollsUpThroughAllLevelsToTrueGlobal() {
         ResourcePyramid p = new ResourcePyramid();
         setLeaf(p, 0, 0, 0, DIAMOND, 8); // encode(8) = 4
         ResourceMerger.mergeUpTallies(p, 0, 0, 0);
 
         // A single populated leaf: each single-child ancestor carries the same count up, exercising the octree
-        // (levels 1..5, childCount 8) and the octree→quadtree transition (level 6, childCount 4).
-        for (int lvl = 1; lvl <= RegionAddress.MAX_COARSE_LEVEL; lvl++) {
+        // (levels 1..5, childCount 8), the octree→quadtree transition (level 6, childCount 4) and — now that the
+        // resource layer is true-global — every quadtree level above MAX_COARSE_LEVEL up to RESOURCE_TOP_LEVEL.
+        for (int lvl = 1; lvl <= ResourcePyramid.RESOURCE_TOP_LEVEL; lvl++) {
             int r = p.rowIfPresent(lvl, 0, 0, 0);
             assertTrue(r >= 0, "ancestor at level " + lvl + " must be interned by the walk");
             assertEquals(4, p.getLog2(lvl, r, DIAMOND) & 0xFF, "diamond carries up unchanged at level " + lvl);
         }
-        assertEquals(0, p.rowCount(RegionAddress.MAX_COARSE_LEVEL + 1),
-                "the roll-up must stop at MAX_COARSE_LEVEL (no world-root node)");
+        // The roll-up reaches the true-global top and stops there (RESOURCE_TOP_LEVEL == RegionAddress.MAX_LEVEL,
+        // the top of the level table, so there is no level above it to intern).
+        assertEquals(RegionAddress.MAX_LEVEL, ResourcePyramid.RESOURCE_TOP_LEVEL,
+                "the resource layer rolls up to the addressing root (true-global)");
+        assertTrue(p.rowCount(ResourcePyramid.RESOURCE_TOP_LEVEL) >= 1,
+                "the true-global top level carries the tally");
     }
 
     @Test
@@ -92,15 +98,15 @@ public class ResourceMergerTest {
         ResourceMerger.mergeUpTallies(p, 0, 0, 0);
         assertEquals(5, p.getLog2(1, pr, DIAMOND) & 0xFF, "re-merging an unchanged leaf must leave the parent at 5");
 
-        // A REAL change to leaf A must propagate past the early-out, all the way to the coarse root.
+        // A REAL change to leaf A must propagate past the early-out, all the way to the true-global top.
         int a = p.rowIfPresent(0, 0, 0, 0);
         p.setLog2(0, a, DIAMOND, Log2Codec.encode(4096)); // encode 13
         ResourceMerger.mergeUpTallies(p, 0, 0, 0);
         assertEquals(13, p.getLog2(1, pr, DIAMOND) & 0xFF, "the parent = merge(13, 4) = 13 after the change");
 
-        int top = p.rowIfPresent(RegionAddress.MAX_COARSE_LEVEL, 0, 0, 0);
-        assertTrue(top >= 0, "the coarse-root ancestor exists");
-        assertEquals(13, p.getLog2(RegionAddress.MAX_COARSE_LEVEL, top, DIAMOND) & 0xFF,
-                "the change must reach MAX_COARSE_LEVEL");
+        int top = p.rowIfPresent(ResourcePyramid.RESOURCE_TOP_LEVEL, 0, 0, 0);
+        assertTrue(top >= 0, "the true-global top ancestor exists");
+        assertEquals(13, p.getLog2(ResourcePyramid.RESOURCE_TOP_LEVEL, top, DIAMOND) & 0xFF,
+                "the change must reach RESOURCE_TOP_LEVEL (true-global)");
     }
 }

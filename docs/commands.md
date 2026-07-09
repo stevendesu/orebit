@@ -20,7 +20,7 @@ simple goal, not from an elaborate command grammar.
 | `/bot find <resource>` | Report the nearest known concentration of a resource — see [Finding & Gathering](gathering.md). |
 | `/bot gather <resource> [count]` | Go get it: find, path, mine, and come back with the goods. |
 | `/bot drop <what>` | Toss items on the ground for you to pick up. `<what>` tab-completes: `all`, `resources` (ores/ingots/gems/logs), `tools`, `trash` (everything that isn't a resource, tool, or armor), or a specific resource name (`iron`, `diamond`, `gold`, `wood`, …). Dropped items get a short pickup delay so the bot doesn't vacuum them back. |
-| `/bot report` | Dump the bot's resource knowledge (the "compass") as a table: each resource it has mapped, with approximate counts in the region around you at a few scales — `l1`/`l2`/`l3` (the 32/64/128-block region you're in) out to `l4+` (the global 1024-block tally). Big numbers show as `~2^n`. See [Finding & Gathering](gathering.md). |
+| `/bot report` | Dump the bot's resource knowledge (the "compass") as a table: each resource it has mapped, with approximate counts at a few scales — `l1`/`l2`/`l3` (the 32/64/128-block region you're in) out to `global` (everything it has explored **this session, anywhere** — even resources it walked past thousands of blocks away). Big numbers show as `~2^n`. The `global` tally is not saved across a server restart yet. See [Finding & Gathering](gathering.md). |
 | `/bot config <…>` | Read or reload the bot's [configuration](configuration.md) without a server restart. |
 
 The bot is a real server-side player, so `follow` / `come` / `goto` are not teleports —
