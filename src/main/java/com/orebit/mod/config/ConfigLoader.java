@@ -112,7 +112,7 @@ public final class ConfigLoader {
         // OrebitCommon's onServerStarted builds them right after this install with the same config — so we
         // skip (ready() is false), avoiding a double bake.
         if (MiningModel.ready()) {
-            MiningModel.buildTable(c.ticksByHardness(), c.ticksToMineFlat());
+            MiningModel.buildTable(c.ticksByHardness(), c.ticksToMineFlat(), c.unbreakableHardness());
             if (remapped > 0) {
                 // ready() == true means this is a RELOAD: nav grids already built still hold the old
                 // navtypes, so the PLANNER won't fully see the list change until chunks rebuild.
@@ -224,10 +224,16 @@ public final class ConfigLoader {
             line(w, "# to rebuild) to fully apply -- protected-ness is baked into the cached nav data; the");
             line(w, "# hard refusal to break applies immediately on /bot config reload.");
             kv(w, ConfigKeys.MINING_PROTECTED_BLOCKS, d.protectedBlocks().spec());
-            line(w, "# Bot may mine vanilla-UNBREAKABLE blocks (bedrock, barriers, end portal frames, ...) at a");
-            line(w, "# fixed, very large time cost (~2 minutes per block). A separate axis from mining.maxHardness");
-            line(w, "# (which only ranges over breakable blocks); mining.protectedBlocks always overrides.");
+            line(w, "# Bot may mine vanilla-UNBREAKABLE blocks (bedrock, barriers, end portal frames, ...) at the");
+            line(w, "# tool-derived cost below. A separate axis from mining.maxHardness (which only ranges over");
+            line(w, "# breakable blocks); mining.protectedBlocks always overrides.");
             kv(w, ConfigKeys.MINING_ALLOW_UNBREAKABLE, d.allowUnbreakable());
+            line(w, "# Pseudo-hardness for those unbreakable blocks (>= 1) when allowUnbreakable=true -- they have");
+            line(w, "# no real destroy time, so this synthetic value feeds the normal mining formula (assuming a");
+            line(w, "# pickaxe): a better pickaxe tier digs faster, bare hands far slower. Same quantized scale as");
+            line(w, "# real blocks (obsidian, the hardest, is ~250) but may exceed 255 for a stronger deterrent.");
+            line(w, "# Default 3200 = ~2 minutes per block with a diamond pickaxe (matching the old fixed cost).");
+            kv(w, ConfigKeys.MINING_UNBREAKABLE_HARDNESS, d.unbreakableHardness());
             line(w, "");
 
             line(w, "# --- pathing: the A* search knobs ---");

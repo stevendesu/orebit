@@ -1,6 +1,7 @@
 package com.orebit.mod.config;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 
 import net.minecraft.world.level.block.Block;
@@ -64,6 +65,7 @@ public record Config(
         float breakBaseCost,
         ProtectedBlocks protectedBlocks,
         boolean allowUnbreakable,
+        int unbreakableHardness,
         // ---- pathing ----
         int maxNodes,
         float greedyWeight,
@@ -85,7 +87,7 @@ public record Config(
             /* survival   */ false, false, false,
             /* placement  */ true, false, Blocks.COBBLESTONE, 1.0f, MovementContext.PLACE_BASE_COST,
             /* mining     */ true, false, BotCaps.UNBREAKABLE, true, 0, 0.0f,
-                             ProtectedBlocks.EMPTY, false,
+                             ProtectedBlocks.EMPTY, false, MiningModel.DEFAULT_UNBREAKABLE_HARDNESS,
             /* pathing    */ BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT,
                              BotCaps.DEFAULT_COST_PER_HITPOINT, true, 1500,
                              /* async ON by default (searches run off the tick thread → no 10k-node flood);
@@ -172,10 +174,18 @@ public record Config(
 
     // {@link #allowUnbreakable} (mining group, auto-generated accessor) opts the bot into mining
     // vanilla-unbreakable blocks (negative destroy time — bedrock, barriers, end portal frames, ...) at the
-    // fixed MiningModel.UNBREAKABLE_STANDIN_TICKS cost. Rides into BotCaps.allowUnbreakable (a
+    // tool-derived MiningModel.unbreakableTicks cost. Rides into BotCaps.allowUnbreakable (a
     // move-generation fact) AND is read by the executor (BotMining's stand-in grind, mayBreak). Its own
     // gate — NOT subject to mining.maxHardness (the 255 sentinel doesn't order against real hardness);
     // mining.protectedBlocks always overrides. Default false = today's behaviour.
+
+    // {@link #unbreakableHardness} (mining group, auto-generated accessor) is the synthetic pseudo-hardness
+    // the allowUnbreakable stand-in derives its cost from (vanilla-unbreakable blocks have no real destroy
+    // time). Threaded into MiningModel.buildTable, where MiningModel.unbreakableTicks feeds it through the
+    // normal pickaxe mining formula — so the planner cost and the executor grind rate both scale with the
+    // bot's pickaxe tier (parity), a diamond pick faster than a stone one. Default 3200 ≈ 2 minutes with a
+    // diamond pickaxe (matching the old fixed cost). Not in BotCaps — MiningModel holds it as a bake-time
+    // static, read only on the cold break-cost paths.
 
     // {@link #warmup} / {@link #warmupBudgetMs} (pathing group, auto-generated accessors) gate the
     // boot-time synthetic warm-up searches (worldmodel.pathing.NavWarmup, PERF-DESIGN-warmup-searches.md):

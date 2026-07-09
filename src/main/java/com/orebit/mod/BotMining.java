@@ -10,6 +10,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
 /**
@@ -108,16 +109,19 @@ public final class BotMining {
 
         float per = state.getDestroyProgress(bot, level, target);
         // Vanilla reports zero progress for an unbreakable block (negative destroy time). mayBreak above
-        // already refused it unless mining.allowUnbreakable — so an opted-in bot GRINDS it at the fixed
-        // stand-in rate (the same UNBREAKABLE_STANDIN_TICKS the planner's breakCost charged: parity in
-        // time, not just permission). Without the opt-in per <= 0 can no longer occur here.
+        // already refused it unless mining.allowUnbreakable — so an opted-in bot GRINDS it at the tool-derived
+        // stand-in rate the planner's breakCost charged (parity in time, not just permission): the bot's best
+        // PICKAXE tier — measured against a canonical pickaxe block (STONE), the very same probe the planner's
+        // inventory snapshot uses — sets the speed, so a diamond pick grinds faster; mining.unbreakableHardness
+        // tunes the base. Without the opt-in per <= 0 can no longer occur here.
         boolean grind = per <= 0.0f;
         if (grind) {
             if (!cfg.allowUnbreakable()) { // defensive: mayBreak should have caught it
                 stop(level);
                 return;
             }
-            per = 1.0f / MiningModel.UNBREAKABLE_STANDIN_TICKS;
+            int tier = MiningModel.classifyTier(inv.bestDestroySpeed(Blocks.STONE.defaultBlockState()));
+            per = 1.0f / MiningModel.unbreakableTicks(tier);
         }
         progress += per;
         if (progress >= 1.0f) {
