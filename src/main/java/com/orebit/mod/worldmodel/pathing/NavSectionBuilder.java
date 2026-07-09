@@ -528,6 +528,31 @@ public final class NavSectionBuilder {
                 below == null ? null : below.getTraversalGrid(), lx, ly, lz);
     }
 
+    /**
+     * Patch a BATCH of cell changes in ONE section — the drain-side seam of the deferred block-edit
+     * queue (PERF-DESIGN-navgrid-edit-batching.md §4.2/§4.3; the drain groups pending cells by section
+     * and hands each group here with its column neighbours). The CURRENT body is the trivial sequential
+     * loop over {@link #patchCell(NavSection, NavSection, NavSection, int, int, int, short)} —
+     * semantically exactly {@code count} block changes arriving in sequence, so correctness is inherited
+     * from the single-cell contract (each patch starts from a fully-consistent grid and leaves one; any
+     * order is correct). The Phase-2 batching work (per-section phased drain: navtype writes, then ONE
+     * amortized scratch fill + flag windows, then ordered depth repairs) replaces THIS method's
+     * internals, so the {@code BatchEditBenchmark} shapes — which call only this seam — compare
+     * algorithm against algorithm, never benchmark against benchmark.
+     *
+     * <p>{@code packedCells[i]} is the section-local cell {@code (ly << 8) | (lz << 4) | lx} (the
+     * {@link TraversalGrid} linear-index order); {@code navtypes[i]} its already-interned new navtype;
+     * {@code count} the live prefix of both arrays (drain buffers are reused across drains, never
+     * resized per call — no allocation on this path).
+     */
+    public static void patchCells(NavSection section, NavSection above, NavSection below,
+                                  short[] packedCells, short[] navtypes, int count) {
+        for (int i = 0; i < count; i++) {
+            final int p = packedCells[i];
+            patchCell(section, above, below, p & 15, (p >> 8) & 15, (p >> 4) & 15, navtypes[i]);
+        }
+    }
+
     /** Standability of a grid cell from its resident navtype (the exact predicate the floorGap encodes). */
     private static boolean standableAt(TraversalGrid g, int x, int y, int z) {
         return NavBlock.isStandable(NavBlock.descriptor((short) g.navtype(x, y, z)));
