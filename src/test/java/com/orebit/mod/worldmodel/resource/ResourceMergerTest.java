@@ -75,10 +75,17 @@ public class ResourceMergerTest {
             assertTrue(r >= 0, "ancestor at level " + lvl + " must be interned by the walk");
             assertEquals(4, p.getLog2(lvl, r, DIAMOND) & 0xFF, "diamond carries up unchanged at level " + lvl);
         }
-        // The roll-up reaches the true-global top and stops there (RESOURCE_TOP_LEVEL == RegionAddress.MAX_LEVEL,
-        // the top of the level table, so there is no level above it to intern).
-        assertEquals(RegionAddress.MAX_LEVEL, ResourcePyramid.RESOURCE_TOP_LEVEL,
-                "the resource layer rolls up to the addressing root (true-global)");
+        // RESOURCE_TOP_LEVEL is the coarsest MEANINGFUL level: the SMALLEST whose cell spans the ±30M world
+        // border, so the whole world tiles into at most a 2x2 grid of top cells. Going higher (toward the
+        // addressing root RegionAddress.MAX_LEVEL) would be the SAME 4 quadrant cells with each extending into
+        // empty space — redundant, since the query-side neighbourhood scan already crosses between quadrants.
+        final long worldMax = 29_999_984L; // MC world-border max coordinate
+        assertTrue(ResourcePyramid.RESOURCE_TOP_LEVEL < RegionAddress.MAX_LEVEL,
+                "the resource top is below the addressing root (the root would be a redundant level)");
+        assertTrue(RegionAddress.sideOf(ResourcePyramid.RESOURCE_TOP_LEVEL) >= worldMax,
+                "a top cell spans the world half-extent (<=4 quadrant cells tile the world)");
+        assertTrue(RegionAddress.sideOf(ResourcePyramid.RESOURCE_TOP_LEVEL - 1) < worldMax,
+                "and it is the SMALLEST such level");
         assertTrue(p.rowCount(ResourcePyramid.RESOURCE_TOP_LEVEL) >= 1,
                 "the true-global top level carries the tally");
     }
