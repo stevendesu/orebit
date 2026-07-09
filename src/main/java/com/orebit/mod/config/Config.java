@@ -74,7 +74,9 @@ public record Config(
         int warmupBudgetMs,
         boolean asyncPathing,
         int maxThreads,
-        int asyncSearchBudgetMs) {
+        int asyncSearchBudgetMs,
+        // ---- hpa (persisted region tier) ----
+        int persistIntervalTicks) {
 
     /**
      * The all-defaults configuration — reproduces TODAY's hardcoded follower behaviour exactly (break +
@@ -93,7 +95,8 @@ public record Config(
                              /* async ON by default (searches run off the tick thread → no 10k-node flood);
                               * 2 planner threads; 250 ms/async-search budget. Sync (async=false) keeps the
                               * node cap = pathing.syncSearchBudgetNodes (DEFAULT_MAX_NODES). */
-                             true, 2, 250);
+                             true, 2, 250,
+            /* hpa        */ 6000);
 
     /**
      * The capability gate the block-tier A* reads, derived from the placement / mining / pathing knobs

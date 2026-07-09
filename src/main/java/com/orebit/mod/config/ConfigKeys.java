@@ -176,4 +176,14 @@ public final class ConfigKeys {
      * is never stalled either way (these searches run off the tick thread). Default {@code 250}.
      */
     public static final String PATHING_ASYNC_SEARCH_BUDGET_MS = "pathing.asyncSearchBudgetMs";
+
+    // ---- hpa: the persisted region tier (routing fragments + resource tallies) ----------------------
+    /**
+     * {@code int} — how often (in server ticks) the background crash-insurance flush re-writes each dimension's
+     * persisted HPA region tier ({@code <world>/orebit/<dim>/hpa.bin} + {@code res.bin}), and only when that
+     * dimension changed since its last flush. This is a SAFETY NET only: the authoritative flush happens on a
+     * graceful server stop regardless. {@code 0} (or negative) disables the periodic flush (stop flush still
+     * runs). Default {@code 6000} (≈ 5 minutes at 20 t/s), matching vanilla autosave feel.
+     */
+    public static final String HPA_PERSIST_INTERVAL_TICKS = "hpa.persistIntervalTicks";
 }

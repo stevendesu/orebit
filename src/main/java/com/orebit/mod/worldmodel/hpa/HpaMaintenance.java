@@ -9,6 +9,7 @@ import com.orebit.mod.platform.BlockChangeEvents;
 import com.orebit.mod.platform.LevelBounds;
 import com.orebit.mod.worldmodel.pathing.NavSection;
 import com.orebit.mod.worldmodel.pathing.NavStore;
+import com.orebit.mod.worldmodel.persistence.RegionPersistence;
 import com.orebit.mod.worldmodel.resource.ResourceMerger;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
@@ -146,6 +147,9 @@ public final class HpaMaintenance {
         final RegionGrid grid = RegionGrid.of(level);
         final CostPyramid pyramid = grid.pyramid();
         final ResourcePyramid resources = grid.resourcePyramid();
+        // A chunk's leaves (re)built ⇒ this dimension has unflushed region-tier changes. Mark it for the next
+        // periodic/stop persistence flush (DESIGN-worldmodel-persistence.md §5.2). Cold: once per chunk build.
+        RegionPersistence.markDirty(level);
         for (int ry = 0; ry < column.length; ry++) {
             if (column[ry] == null) continue;
             buildLeafSafe(level, pyramid, chunkX, ry, chunkZ); // note the (rx, rz, ry) order inside
@@ -288,6 +292,8 @@ public final class HpaMaintenance {
 
             processed++;
         }
+        // Block-change-driven leaf recomputes also dirty the dimension for persistence (§5.2).
+        if (processed > 0) RegionPersistence.markDirty(level);
     }
 
     /**

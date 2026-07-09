@@ -270,6 +270,14 @@ public final class ConfigLoader {
             line(w, "# best partial path; the bot moves that way and replans. Bigger = escapes bigger dead-ends,");
             line(w, "# longer worst-case plan latency (the tick itself is never stalled -- these run off-thread).");
             kv(w, ConfigKeys.PATHING_ASYNC_SEARCH_BUDGET_MS, d.asyncSearchBudgetMs());
+            line(w, "");
+
+            line(w, "# --- hpa: the persisted region tier (survives a server restart) ---");
+            line(w, "# How often (in server ticks) to re-write each dimension's persisted routing/resource data");
+            line(w, "# as CRASH INSURANCE, and only when it changed. The authoritative flush happens on a graceful");
+            line(w, "# server stop regardless of this. 0 disables the periodic flush (stop flush still runs).");
+            line(w, "# Default 6000 (~5 minutes at 20 ticks/second).");
+            kv(w, ConfigKeys.HPA_PERSIST_INTERVAL_TICKS, d.persistIntervalTicks());
         } catch (IOException e) {
             OrebitCommon.LOGGER.warn("[Orebit] could not write default config {} — using defaults in memory",
                     file, e);
