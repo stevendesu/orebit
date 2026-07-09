@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.config.ConfigLoader;
+import com.orebit.mod.platform.DimensionId;
 import com.orebit.mod.worldmodel.hpa.CostPyramid;
 import com.orebit.mod.worldmodel.hpa.PyramidMerger;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
@@ -42,7 +43,7 @@ import net.minecraft.world.level.storage.LevelResource;
  *   &lt;world&gt;/orebit/&lt;dim&gt;/hpa.bin   cost-pyramid level-0 leaves   (CostPyramidCodec)
  *   &lt;world&gt;/orebit/&lt;dim&gt;/res.bin   resource-pyramid level-0 tallies (ResourcePyramidCodec)
  * </pre>
- * where {@code <dim>} is {@code level.dimension().location().toString()} (e.g. {@code minecraft:overworld})
+ * where {@code <dim>} is the dimension id (e.g. {@code minecraft:overworld}, via the {@link DimensionId} seam)
  * sanitized to a single filesystem-safe directory name ({@code minecraft_overworld}).
  *
  * <h2>Lifecycle (§5, locked decisions)</h2>
@@ -300,12 +301,12 @@ public final class RegionPersistence {
     }
 
     /**
-     * The dimension id string, e.g. {@code "minecraft:overworld"}. Only {@code .toString()} is called on the
-     * location so the {@code ResourceLocation}/{@code Identifier} <i>type</i> is never named (it was renamed at
-     * 1.21.11) — the whole expression compiles unchanged across the matrix.
+     * The dimension id string, e.g. {@code "minecraft:overworld"}, through the {@link DimensionId} platform
+     * seam — {@code ResourceKey.location()} was renamed to {@code identifier()} at the 1.21.11 deobfuscation,
+     * so the version-divergent call is hidden behind the overlay.
      */
     private static String dimensionId(ServerLevel level) {
-        return level.dimension().location().toString();
+        return DimensionId.of(level);
     }
 
     /** Map a dimension id to one flat, filesystem-safe directory name (Windows-safe: {@code :}/{@code /} → {@code _}). */
