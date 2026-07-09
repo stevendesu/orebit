@@ -26,6 +26,15 @@ public final class FabricPlatformEvents implements PlatformEvents {
     }
 
     @Override
+    public void onServerStopping(Consumer<MinecraftServer> callback) {
+        // Era-owned edit on the mc-1.21 branch (mirrors the 26-era override on `main`): the world-model
+        // persistence flush needs a graceful-stop hook here, and SERVER_STOPPING is old, stable Fabric API.
+        // This override lives on this branch, not `core`, so `git merge core` never touches it (the same
+        // era-ownership rule the divergent onChunkLoad/onWorldTickEnd wirings rely on).
+        ServerLifecycleEvents.SERVER_STOPPING.register(callback::accept);
+    }
+
+    @Override
     public void onPlayerJoin(Consumer<ServerPlayer> callback) {
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> callback.accept(handler.getPlayer()));
     }
