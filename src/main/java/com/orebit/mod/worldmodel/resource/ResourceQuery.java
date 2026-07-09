@@ -18,7 +18,7 @@ import net.minecraft.server.level.ServerLevel;
  *
  * <h2>Algorithm (design §6)</h2>
  * <ol>
- *   <li><b>Ascend from the anchor's leaf.</b> Walk levels 0..{@link RegionAddress#MAX_COARSE_LEVEL} of the
+ *   <li><b>Ascend from the anchor's leaf.</b> Walk levels 0..{@link ResourcePyramid#RESOURCE_TOP_LEVEL} of the
  *       region <i>containing the anchor</i>; stop at the tightest level whose region has a decoded count
  *       {@code >= minCount} for the column. If no level up to the coarsest ancestor holds enough (or the
  *       column is empty there), return empty — the caller reports "none known nearby".</li>
@@ -45,11 +45,15 @@ import net.minecraft.server.level.ServerLevel;
  * thread for milestone 1 (single-threaded, safe alongside the tick-thread pyramid writes); moving it to a
  * planner thread later needs the async-nav epoch discipline (design §8.4).
  *
- * <h2>Milestone-1 bound (design §8.2)</h2>
- * The search is confined to the {@link RegionAddress#MAX_COARSE_LEVEL} ancestor(s) that <i>contain the
- * anchor</i> — a level-6 quadtree cell is {@code 16 << 6 = 1024} blocks/axis — i.e. resources near the
- * anchor within loaded/known (built) regions. Wider global prospecting (unloaded-chunk scanning,
- * walk-and-scan) is a later arc.
+ * <h2>Reach (design §8.2)</h2>
+ * The ascend now climbs to {@link ResourcePyramid#RESOURCE_TOP_LEVEL} (= {@link RegionAddress#MAX_LEVEL}, a
+ * ~67M-block cell), so the drill-down reaches <b>true-global</b> within the top cell that contains the anchor:
+ * a resource the bot classified anywhere in that cell (not just within its 1024-block
+ * {@link RegionAddress#MAX_COARSE_LEVEL} ancestor) is now found. <b>Known limitation:</b> the descend is a
+ * single-ancestor tree walk, so a resource across the world-origin split — in a <i>sibling</i> top cell from
+ * the anchor's — is not crossed into; near the origin that can hide a resource just over the axis. Widening
+ * the ascend to fold sibling top cells is an acceptable follow-up. Prospecting into <i>unloaded</i> chunks
+ * (walk-and-scan) remains a separate later arc — the compass only knows loaded/classified regions.
  */
 public final class ResourceQuery {
 
@@ -90,8 +94,10 @@ public final class ResourceQuery {
         final int need = Math.max(1, minCount);
 
         // 1. Ascend from the anchor's leaf to the TIGHTEST ancestor (containing the anchor) holding >= need.
+        //    Ascend to RESOURCE_TOP_LEVEL (true-global), not MAX_COARSE_LEVEL — a resource seen far from the
+        //    anchor lives in a coarser ancestor than the 1024-block level-6 cell.
         int sLevel = -1, sRx = 0, sRy = 0, sRz = 0;
-        for (int lvl = 0; lvl <= RegionAddress.MAX_COARSE_LEVEL; lvl++) {
+        for (int lvl = 0; lvl <= ResourcePyramid.RESOURCE_TOP_LEVEL; lvl++) {
             final int rx = RegionAddress.regionX(ax, lvl);
             final int rz = RegionAddress.regionZ(az, lvl);
             final int ry = RegionAddress.regionY(ay, lvl, minY);
@@ -137,6 +143,24 @@ public final class ResourceQuery {
             }
         }
         return hits;
+    }
+
+    /**
+     * The <b>true-global</b> log₂ tally of {@code column} — the {@link Log2Codec#merge} fold of that column over
+     * <b>every</b> interned row at {@link ResourcePyramid#RESOURCE_TOP_LEVEL}. Because a level-22 cell is
+     * ~67M blocks, the ±30M world border spans at most 4 such top cells (straddling the origin), so this reads
+     * only a handful of rows — the "everything the compass has seen anywhere" number, independent of where the
+     * anchor is. Returns the raw log₂ byte (decode with {@link Log2Codec#decode}); {@code 0} if nothing known.
+     */
+    public static byte globalLog2(ResourcePyramid p, int column) {
+        if (p == null || column < 0 || column >= ResourcePyramid.COLUMNS) return 0;
+        final int top = ResourcePyramid.RESOURCE_TOP_LEVEL;
+        final int rows = p.rowCount(top);
+        byte acc = 0;
+        for (int row = 0; row < rows; row++) {
+            acc = Log2Codec.merge(acc, p.getLog2(top, row, column));
+        }
+        return acc;
     }
 
     /** Squared distance from region {@code (level,rx,ry,rz)}'s center block to the anchor (long, no overflow). */
