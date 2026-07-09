@@ -85,6 +85,12 @@ start. Out-of-range or unparseable individual values are clamped/defaulted with 
 | `pathing.maxThreads` | int `>= 1` | `2` | Background planner **pool size** when `async=true`. Clamped to a `[1, 64]` sanity rail at parse, then **re-clamped to `[1, cores − 2]` at pool start** (the host core count isn't known at validate time). Bots share the pool; raise it on a multi-tenant server (many bots) to cut search tail latency, lower it to `1` on a constrained host — like view-distance, it trades bot responsiveness against server CPU headroom. **Requires a server restart to change.** | `pathing.maxThreads=4` |
 | `pathing.searchBudgetMs` | int `>= 1` | `40` | Wall-clock budget (ms) per background search when `async=true` — the **time-based cap that replaces `pathing.maxNodes`** as the effective search limit (checked every 256 pops; `pathing.maxNodes` degrades to `TIME_MODE_NODE_BACKSTOP` ≈ 262k, a memory-only backstop). A search that exhausts the budget returns its best partial path — the bot walks it and replans, converging on far goals (an in-game 13.6k-node search FOUND past the old 10k node cap). Bigger budgets escape bigger dead-ends at the cost of longer worst-case plan latency (the tick is never stalled either way). Sync mode (`async=false`) ignores this — the node cap rules. | `pathing.searchBudgetMs=80` |
 
+### `hpa.*` — the persisted region tier
+
+| Key | Type / range | Default | Meaning | Example |
+| --- | --- | --- | --- | --- |
+| `hpa.persistIntervalTicks` | int `>= 0` | `6000` | Cadence (server ticks) of the background crash-insurance flush of the persisted HPA region tier (`<world>/orebit/<dim>/hpa.bin` cost fragments + `res.bin` resource tallies; `DESIGN-worldmodel-persistence.md`), and only for dimensions marked dirty since their last flush. **A safety net only** — the authoritative flush runs on a graceful `SERVER_STOPPING` regardless (the primary trigger for the idle-auto-stop deployment). `0` disables the periodic flush (stop flush still runs). Not read into `BotCaps`; read per tick by `RegionPersistence.tick`. Persisted files are a **cache** — a bad magic / version / IO error treats the file as absent and the live world rebuilds it. Load is eager at `SERVER_STARTED` (all dimensions, tick thread, replaying `mergeUp*`); only level-0 leaves are stored. | `hpa.persistIntervalTicks=1200` |
+
 ## Mapping to `BotCaps`
 
 `Config.toBotCaps()` folds the placement / mining / pathing knobs into the capability gate the block-tier A\*

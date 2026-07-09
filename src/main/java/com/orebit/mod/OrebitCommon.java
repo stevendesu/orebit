@@ -10,6 +10,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
 import com.orebit.mod.platform.PlatformEvents;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.HpaMaintenance;
+import com.orebit.mod.worldmodel.persistence.RegionPersistence;
 import com.orebit.mod.worldmodel.pathing.ChunkNavLoader;
 import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
 import com.orebit.mod.worldmodel.pathing.NavReclaim;
@@ -72,6 +73,26 @@ public final class OrebitCommon {
                 PlanExecutor.start(ConfigLoader.config().maxThreads(), ConfigLoader.config().asyncSearchBudgetMs());
             }
         });
+
+        // World-model persistence (DESIGN-worldmodel-persistence.md): eager-load every dimension's persisted
+        // HPA region tier (cost fragments + resource tallies) at server start so the bot's memory of explored
+        // terrain survives a restart — the point of the Exaroton-style idle-auto-stop deployment. Registered
+        // AFTER ConfigLoader::load (loadAll itself needs no config, but the periodic flush below reads
+        // hpa.persistIntervalTicks). SERVER_STARTED runs on the tick thread before any player joins, so the
+        // interning + coarse-level replay race nothing. Missing/corrupt files rebuild from the live world.
+        events.onServerStarted(RegionPersistence::loadAll);
+
+        // The authoritative flush: on a graceful stop, after the tick loop halts (no concurrent writer), write
+        // every explored dimension's region tier. This is the PRIMARY persistence trigger for the auto-stop /
+        // restart deployment (clean shutdown). Loaders not wiring onServerStopping (the interface default is a
+        // no-op) still get crash-insurance from the periodic flush below.
+        events.onServerStopping(RegionPersistence::flushAll);
+
+        // Budgeted periodic flush (crash insurance): once per level-tick advance a per-dimension counter and,
+        // every hpa.persistIntervalTicks, re-write only dimensions marked dirty since the last flush. Wired for
+        // ALL loaders/eras here (unlike onServerStopping), so even an impl that leaves onServerStopping on the
+        // default no-op still persists recent state. Cheap when clean (one counter bump + a dirty-set test).
+        events.onWorldTickEnd(RegionPersistence::tick);
 
         // NavSection retirement drain (DESIGN-background-pathfinding.md §4.1): once per level-tick, advance
         // the reclamation epoch and return retired sections to the pool once no in-flight background search
