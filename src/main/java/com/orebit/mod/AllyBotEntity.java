@@ -794,8 +794,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      * the death fields the reload dragged back in are reset explicitly: {@code Health} (persisted, comes back 0)
      * and {@code deathTime} (persisted). {@code dead} is transient (never in NBT) so a freshly-constructed
      * bot already has it {@code false}; it's reset too as belt-and-suspenders in case the load path evolves.
+     *
+     * <p>Public so the {@code overlays/1.21.9} {@code BotSpawn} can call it BETWEEN the .dat load and
+     * {@code placeNewPlayer} — that ordering is what fixes the intermittent client death-render (the spawn
+     * metadata is snapshotted synchronously inside {@code placeNewPlayer}, so health must be restored first).
      */
-    void reviveIfDead() {
+    public void reviveIfDead() {
         if (this.getHealth() > 0.0F) return;
         this.setHealth(this.getMaxHealth());
         this.deathTime = 0;
