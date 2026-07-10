@@ -743,7 +743,8 @@ public final class RegionPathfinder {
         int pendingMarked = 0;     // reached-but-unsettled rows in marked regions (phase-2 termination gate)
         boolean earlyExit = false;
 
-        final RegionCostField field = new RegionCostField(bound, minY, grx, gry, grz);
+        final RegionCostField field = new RegionCostField(bound, minY, grx, gry, grz,
+                goalFloor.getX(), goalFloor.getY(), goalFloor.getZ());
         float maxSettled = 0f;     // the frontier floor: max settled g (== last settled g, Dijkstra order)
         int settles = 0;
         int expansions = 0;

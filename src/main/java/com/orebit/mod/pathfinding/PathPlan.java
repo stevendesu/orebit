@@ -89,8 +89,19 @@ import net.minecraft.server.level.ServerLevel;
  */
 public final class PathPlan {
 
-    /** Number of consecutive skeleton regions the window spans (HPA-IMPLEMENTATION.md §9). */
-    public static final int WINDOW = 3;
+    /**
+     * Number of consecutive skeleton regions the window spans (HPA-IMPLEMENTATION.md §9). <b>4</b> (was 3):
+     * the region graph is 6-connected, so a goal that is a 3-axis DIAGONAL from the bot (Chebyshev 1) has a
+     * <b>4-region</b> L-shaped skeleton (up → over → across); a 3-region window left that goal one hop past the
+     * horizon, so {@code goalInWindow} was false and the window aimed at an intermediate CORNER portal off the
+     * direct diagonal — the bot detoured to the region centre before doubling back (the sand-dune / origin
+     * short-path wander). A 4-region window contains the whole such skeleton, so the goal is targeted directly.
+     * The cost is a longer worst-case block search (an extra ~16-block region span, worst-case cornerwise ~45
+     * more waypoints), affordable now that the region-refined heuristic + forced-cost premium + macro cuboids
+     * hold the flood pathologies that made a tight window necessary — verified no flood/partial regression on
+     * the headless region/full-search suite. Stopgap until the movement executor is reliable enough to re-tune.
+     */
+    public static final int WINDOW = 4;
 
     /**
      * Horizontal corridor slack in blocks, added to the window's <b>region bounds</b> (not the bot's current

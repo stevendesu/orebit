@@ -103,6 +103,9 @@ public final class RegionCostField {
     private final byte[] reachedFrags;
     // The goal's level-0 region cell — the anchor of the cheb × MIN_CROSS distance term (class Javadoc).
     private final int goalRx, goalRy, goalRz;
+    // The goal WORLD cell (the field root) — the anchor of costAt's octile-to-goal gradient + per-region
+    // detour-penalty offset (see costAt). Distinct from the region coords above, which quantize to 16³.
+    private final int goalX, goalY, goalZ;
     /**
      * The frontier floor: the maximum settled cost at the producing Dijkstra's termination — a provable lower
      * bound on every unsettled in-box slot's true field value (Dijkstra settles in nondecreasing {@code g};
@@ -117,7 +120,8 @@ public final class RegionCostField {
      */
     int[] chainRegions;
 
-    RegionCostField(RegionPathfinder.RegionBox b, int minY, int goalRx, int goalRy, int goalRz) {
+    RegionCostField(RegionPathfinder.RegionBox b, int minY, int goalRx, int goalRy, int goalRz,
+                    int goalX, int goalY, int goalZ) {
         this.minRx = b.minRx;
         this.minRy = b.minRy;
         this.minRz = b.minRz;
@@ -128,6 +132,9 @@ public final class RegionCostField {
         this.goalRx = goalRx;
         this.goalRy = goalRy;
         this.goalRz = goalRz;
+        this.goalX = goalX;
+        this.goalY = goalY;
+        this.goalZ = goalZ;
         int regions = dimX * dimY * dimZ;
         int slots = regions * MAX_FRAGMENTS;
         this.cost = new float[slots];
@@ -220,8 +227,23 @@ public final class RegionCostField {
         if (ri < 0) return floorAt(rx, ry, rz);
         int slot = resolveSlot(ri, wx, wy, wz);
         if (slot < 0) return floorAt(rx, ry, rz);
-        // Intra-region gradient: distance to the goalward exit opening + that exit's onward cost-to-goal.
-        return octileToExit(wx - exitX[slot], wy - exitY[slot], wz - exitZ[slot]) + onward[slot];
+        // Merged gradient (owner-ratified — the origin short-path wander fix). The value is the octile straight
+        // to the GOAL — which carries the local DIRECTION toward the goal, never toward the region's portal —
+        // plus this region's DETOUR PENALTY: how much longer the real topological route from the region's
+        // goalward exit is than the straight line, {@code onward − octile(exit→goal)} (≥ 0, since {@code onward}
+        // is the real cost and octile a lower bound). So an open on-route region reads ≈ plain octile-to-goal
+        // (a clean straight gradient), while a cave/dead-end region reads HIGH (large penalty) and is
+        // deprioritised — flood-prevention without a boundary-anchored pull.
+        //
+        // = octile(cell→goal) + onward − octile(exit→goal). ADMISSIBLE: by the triangle inequality
+        // octile(cell→goal) ≤ octile(cell→exit) + octile(exit→goal), so this ≤ octile(cell→exit) + onward, the
+        // true via-exit cost. The OLD form was exactly that upper bound (octile(cell→exit) + onward), which
+        // anchored the gradient on the portal (shared-face centre) and OVERESTIMATED the straight cost — so
+        // max(octile, field) steered the greedy block search to the portal (the (-9,-60,-1) wander) or up
+        // toward a portal at a higher Y (the spurious 2-block pillar).
+        float octGoal = octileToExit(wx - goalX, wy - goalY, wz - goalZ);
+        float detour = onward[slot] - octileToExit(exitX[slot] - goalX, exitY[slot] - goalY, exitZ[slot] - goalZ);
+        return detour > 0f ? octGoal + detour : octGoal;
     }
 
     /**

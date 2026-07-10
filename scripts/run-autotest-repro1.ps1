@@ -18,7 +18,6 @@ param(
     [string]$Start = "",
     [string]$Goal = "",
     [int]$BudgetTicks = 0,
-    [int]$StartDelay = 0,
     [switch]$BotDebug,
     # -Trace: dump EVERY A* search's full expansion trace to run/autotest/orebit-autotest-trace-<n>.txt
     # (one numbered file per search; analyze with internal_docs/trace_analysis.py). Trace runs are SLOW
@@ -30,7 +29,7 @@ $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot            # scripts/ -> repo root
 $runDir = Join-Path $repo "run\autotest"
-$templates = Join-Path $PSScriptRoot "autotest"
+$templates = Join-Path $PSScriptRoot "autotest-repro1"
 $resultFile = Join-Path $runDir "orebit-autotest-result.properties"
 
 # ---- 1. Deterministic run-dir state ----------------------------------------------------------
@@ -53,7 +52,6 @@ $gradleArgs = @(":fabric:${McVersion}:runAutotest")
 if ($Start -ne "")    { $gradleArgs += "-Porebit.autotest.start=$Start" }
 if ($Goal -ne "")     { $gradleArgs += "-Porebit.autotest.goal=$Goal" }
 if ($BudgetTicks -gt 0) { $gradleArgs += "-Porebit.autotest.budgetTicks=$BudgetTicks" }
-if ($StartDelay -gt 0) { $gradleArgs += "-Porebit.autotest.startDelayTicks=$StartDelay" }
 if ($BotDebug)        { $gradleArgs += "-Porebit.autotest.debug=true" }
 if ($Trace)           { $gradleArgs += "-Porebit.autotest.trace=true" }
 
