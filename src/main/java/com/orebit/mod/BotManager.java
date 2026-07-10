@@ -68,10 +68,19 @@ public class BotManager {
 
         // Respawn semantics: /bot spawn exists to bring back a DEAD bot, but BotSpawn.place just restored the
         // bot's saved <uuid>.dat — which, for a bot that died, carries Health=0 (LivingEntity persists Health).
-        // A clientless bot can't drive the vanilla death-screen respawn, so without this it comes back dead and
-        // dies again on its first tick (the white "poof"). Vanilla's own respawn builds a FRESH entity and calls
-        // ServerPlayer.restoreFrom(old, keepAll=false), whose death branch is literally setHealth(getMaxHealth());
-        // reviveIfDead() applies that same operation (a no-op for a live/returning bot). See PlayerList.respawn.
+        // A clientless bot can't drive the vanilla death-screen respawn, so without a revive it comes back dead
+        // and dies again on its first tick (the white "poof"). Vanilla's own respawn builds a FRESH entity and
+        // calls ServerPlayer.restoreFrom(old, keepAll=false), whose death branch is literally
+        // setHealth(getMaxHealth()); reviveIfDead() applies that same operation (a no-op for a live/returning
+        // bot). See PlayerList.respawn.
+        //
+        // On 1.21.9+ (incl. 26.x) the overlays/1.21.9 BotSpawn already revived the bot BEFORE placeNewPlayer —
+        // load-bearing, because placeNewPlayer snapshots the spawn metadata synchronously, so a Health=0 there
+        // reaches observers as the initial value and the client renders the death animation (the intermittent
+        // red/twitch). So this call is a no-op there (health already restored). It remains the revive for the
+        // ≤1.21.8 flavors, whose placeNewPlayer loads the .dat INTERNALLY (no seam to revive before the spawn
+        // snapshot without a mixin); on those versions the server state is correct (no poof) even though the
+        // pre-1.21.9 spawn-metadata race is not addressed here.
         bot.reviveIfDead();
 
         // Complete the join the way a real client would: mark the bot's connection "client-loaded". As of
