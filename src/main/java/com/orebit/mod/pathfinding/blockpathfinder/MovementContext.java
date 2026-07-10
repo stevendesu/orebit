@@ -182,7 +182,7 @@ public final class MovementContext {
      * The search's single <b>primary travel axis</b> {@code P} ({@link Axes#AXIS_X}/{@link Axes#AXIS_Y}/
      * {@link Axes#AXIS_Z}) — the dominant start→goal approach direction, computed once per pathfind. Only a
      * macro-aware movement whose own travel axis equals {@code P} extracts a cuboid and emits a macro jump;
-     * a movement travelling any other axis takes its plain micro step (Option B, {@code CUBOID-PERF-OPTIONS.md}).
+     * a movement travelling any other axis takes its plain micro step (Option B).
      * This pins per-node extraction to ONE axis instead of up to three (Pillar/MineDown → Y, the Traverse
      * cardinals → X and Z), so a uniform region is extracted once per search, not once per axis. Defaults to
      * {@link Axes#AXIS_X}; meaningful only when {@link #cuboids} is non-null.

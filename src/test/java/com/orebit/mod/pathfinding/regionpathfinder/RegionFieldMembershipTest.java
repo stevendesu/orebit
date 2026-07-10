@@ -15,7 +15,7 @@ import net.minecraft.SharedConstants;
 import net.minecraft.server.Bootstrap;
 
 /**
- * Pins {@link RegionCostField}'s label-slab EXACT slot resolution (PERF-DESIGN-label-slab-membership) over
+ * Pins {@link RegionCostField}'s label-slab EXACT slot resolution (label-slab membership) over
  * the HONEYCOMB full-search fixture — the scenario built (s54) precisely because its sealed side pockets
  * steal the old nearest-centroid membership probe. Assertions:
  * <ul>

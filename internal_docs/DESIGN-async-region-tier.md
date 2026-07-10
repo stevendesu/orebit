@@ -5,8 +5,8 @@
 > to the already-async block-tier window searches) on the planner pool. Maintenance
 > (`HpaMaintenance`, `ChunkNavLoader`, `NavReclaim`) stays tick-side per the owner's scoping. Every
 > phase below awaits owner ratification item-by-item (§6). Extends
-> `DESIGN-background-pathfinding.md` (the shipped s44 block-tier pattern); measured numbers from
-> `PERF-RESULTS-2026-07-07-s53.md` and `PERF-DESIGN-field-fat-skeleton.md` §5.
+> `DESIGN-background-pathfinding.md` (the shipped s44 block-tier pattern); measured numbers now live in
+> `docs/Optimizations/12_field_build.md` and git history.
 
 ---
 
@@ -35,7 +35,7 @@ and `repairBlocked` (`PathPlan.java:1005`). Per call (`PathPlan.java:696–779`)
 | Step | Where | Cost |
 |---|---|---|
 | `WindowTargeting.target` — fresh **live** `NavGridView` + footprint/snap scans | `WindowTargeting.java:83–197` (view at `:112`) | ~0.6 µs view setup (SETUP bench) + bounded ≤16³ bbox scans — µs |
-| **`regionFieldFor(target)` — the region cost-field build** (goal dig-flood seed + reverse Dijkstra), rebuilt whenever the window target moves; cached by root otherwise | `PathPlan.java:1068–1091` → `RegionPathfinder.costToGoalField` (`RegionPathfinder.java:689–804`), dig-flood seed at `:712` | **~90 µs (3³) … ~1.07–1.34 ms (10³); production-minimum 7³ box ≈ 310–400 µs** (fat-skeleton B-FAT, PERF-DESIGN-field-fat-skeleton.md §5). This is THE bill: pre-fix it was 90.8% of FullSearch wall time (s53 JFR §7a) |
+| **`regionFieldFor(target)` — the region cost-field build** (goal dig-flood seed + reverse Dijkstra), rebuilt whenever the window target moves; cached by root otherwise | `PathPlan.java:1068–1091` → `RegionPathfinder.costToGoalField` (`RegionPathfinder.java:689–804`), dig-flood seed at `:712` | **~90 µs (3³) … ~1.07–1.34 ms (10³); production-minimum 7³ box ≈ 310–400 µs** (fat-skeleton B-FAT, docs/Optimizations/12_field_build.md). This is THE bill: pre-fix it was 90.8% of FullSearch wall time (s53 JFR §7a) |
 | Async submit: `SearchRequest` snapshot + mailbox bookkeeping | `PathPlan.java:828–836`; `AsyncWindowSearch.java:83–90` | negligible |
 | (sync mode only) `new NavGridView(level)` + the block search itself | `PathPlan.java:771–773` | already solved by s44 async |
 

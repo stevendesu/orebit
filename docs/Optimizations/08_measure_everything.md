@@ -6,31 +6,50 @@ It doesn't. Those chapters are the survivors. This one is about what the work lo
 like once the obvious wins are gone: you form a hypothesis that sounds *completely
 convincing*, you build it, you measure it — and most of the time it's slower. The
 skill stops being "know the tricks" and becomes "build instruments that tell you the
-truth, and believe them over your own reasoning." Below are five ideas that all
+truth, and believe them over your own reasoning." Below are six ideas that all
 sounded right. One survived.
 
-## The mental model: two currencies
+## The mental model: two currencies, and the edge between them
 
 First, the frame that makes the failures make sense. A modern CPU lives in two
 currencies:
 
-- **Arithmetic is nearly free.** A core retires several simple operations per
-  *nanosecond* — adds, shifts, masks, compares cost almost nothing, and the CPU
-  happily runs several of them in parallel behind the scenes.
-- **Memory is the tax.** Data already in the L1 cache arrives in about a nanosecond.
-  Data that has to come from main memory takes on the order of a *hundred times*
-  longer, and the core mostly just waits.
+- **A single arithmetic op is nearly free.** A core retires several simple operations
+  per *nanosecond* — adds, shifts, masks, compares — and happily runs several of them
+  in parallel behind the scenes.
+- **A single memory read is the tax — when it misses cache.** Data already in L1
+  arrives in about a nanosecond; data that has to come from main memory takes on the
+  order of a *hundred times* longer, and the core mostly just waits.
 
-That ratio is why this project's data structures look the way they do: the
-[fingerprint table](block_fingerprints.md) that fits in L1, the
-[packed grids](../worldmodel.md) that trade a little RAM for flat array reads, the
-[allocation-free search state](pathfinding_hot_path.md). Spend cheap arithmetic
-(shift-and-mask) to avoid expensive memory (pointer chasing), and default to spending
-RAM to save CPU — 30 MB is nothing on a Minecraft server; a stalled core is not.
+If that were the whole story the rule would be trivial: spend arithmetic freely, never
+wait on memory. But look at what one node expansion actually does. It reads around a
+hundred cells — and for *each* one it runs a pile of arithmetic: shift-and-mask a dozen
+navigation properties out of a packed descriptor, score the heuristic, price every
+candidate movement. **Hundreds of arithmetic ops *and* ~a hundred reads, per node,
+millions of nodes per search** — neither side of the ledger is small. The search
+doesn't sit safely on the memory-bound side; it balances right on the **line between
+memory-bound and CPU-bound.**
 
-But — and this is the part that bites — every optimization *buys* savings in one
-currency by *spending* in another, and the exchange rate is nowhere near as obvious
-as it looks:
+That edge is the whole reason this chapter exists, because on it the "obvious" trades
+stop being obvious. *Recompute it instead of storing it* spends arithmetic to save
+memory — a win if you're memory-bound, a loss if the extra math tips you over the CPU
+edge. *Cache it instead of recomputing* does the exact reverse, and can tip you the
+other way. Either trade can land on either side of the fence, and which side is not
+something you can reason out in advance.
+
+And when you *do* spend memory to save CPU, it has to be the right *kind* of memory.
+Cheap memory is **linear, ordered, and L1-resident**: read sequentially, the hardware
+prefetcher runs ahead and hides the latency entirely; kept small enough to live in L1,
+every fetch is back to a nanosecond. It's why the project's data structures look the way
+they do — the [fingerprint table](03_block_fingerprints.md) sized to fit in L1, the
+[packed grids](../worldmodel.md) swept as flat arrays. Break either property — scatter
+the reads at random, or grow the table past the cache — and what you added is
+main-memory traffic, the most expensive thing there is. Small, flat, sequentially
+scanned arrays are the whole game; a "smarter" structure that trades them for
+pointer-chasing has spent the very currency it meant to save.
+
+So every optimization here buys savings in one currency by spending in another, and the
+exchange rate is nowhere near as obvious as it looks:
 
 - **Allocation vs. arithmetic.** Avoiding an allocation is usually worth quite a lot
   of arithmetic, because allocation's real price is paid later, by the garbage
@@ -80,7 +99,7 @@ permanent watch:
 The rule: a candidate must win somewhere and regress *nowhere* — including the
 guards.
 
-## Five convincing ideas
+## Six convincing ideas
 
 ### The Hilbert curve: better locality, 2–3× slower
 
@@ -118,7 +137,7 @@ rest of its geometry — so the lazy version skips a large fraction of the reads
 eager version faithfully performs. We were doing *more* memory work, not the same
 work sooner. And the latency we hoped to hide was already being hidden: a modern
 out-of-order core runs far ahead of the "current" instruction and overlaps those
-scattered lazy reads on its own, provided (as [earlier chapters](block_reading.md)
+scattered lazy reads on its own, provided (as [earlier chapters](01_block_reading.md)
 arranged) they're simple array loads it can see through. The CPU's own speculation
 was already extracting the win; ours just added the waste.
 
@@ -140,7 +159,7 @@ simpler to read. We kept the two plain arrays.
 ### The hybrid chunk cache: killed by the guard, +3.6%
 
 Fourth: a redesign of the per-search chunk cache (the one from
-[the hot-path chapter](pathfinding_hot_path.md)) that layered a faster front cache
+[the hot-path chapter](05_pathfinding_hot_path.md)) that layered a faster front cache
 over the existing table. On the big, hard scenarios it measured fine — maybe a hair
 ahead, within noise.
 
@@ -152,13 +171,40 @@ mostly *small* searches. A benchmark suite is a set of claims about what your re
 workload looks like, and the least glamorous scenario in ours is the one that
 vetoed the change. Reverted.
 
+### Gating the edit-diff probe: killed by p = 0.000
+
+Once a search path carries even one planned block edit — a block it means to break or
+place — *every* geometry read has to consult the [edit diff](07_cuboid_macro_movements.md)
+first, in case that cell is one the plan changes: a hash probe on a hundred-plus reads per
+node, which a profile put at **49% of the warm edit-heavy scenario**. Ninety-nine percent
+of those probes find nothing.
+
+The fix looked airtight. A path's planned edits trail *behind* it — you dig where you've
+been, not where you're going — so at each node expansion, compute *once* whether the
+node's read neighborhood can possibly intersect the edits' bounding box. If not (surely
+the common case?), set one flag and let every read skip the probe entirely: one box test
+per node replacing a hundred per-read gates.
+
+Benchmarked: **flat.** Not "small win" — flat, both variants (a careful three-component
+envelope and a simpler single padded box).
+
+A throwaway counting probe explained it, brutally: the fraction of node expansions whose
+reads were disjoint from the edit box was **0.000 in every scenario**. On the 10,001-node
+edit-heavy flood, 9,559 expansions carried edits and *zero* were disjoint. The intuition
+was simply false — the search's edit-carrying shapes are pillar and dig fronts, and a
+pillaring node **stands on the block it just placed**. Its own edit is at distance zero.
+The trailing-edits picture describes a bot walking away from finished work, not a search
+*reasoning about* work in progress. Both variants were deleted; the one thing worth
+keeping was the probe's number — any future gate has to track per-edit locality, not a
+whole-path box.
+
 ### The survivor: adaptive edit scanning, −40%
 
 One idea made it. It came straight out of profiler data rather than first
 principles — which is probably not a coincidence.
 
 When a macro move validates its jump, it has to check that no planned block edit
-sits inside a box of cells (see [the macro chapter](cuboid_macro_movements.md)).
+sits inside a box of cells (see [the macro chapter](07_cuboid_macro_movements.md)).
 The original code swept the box cell by cell, probing the edit table for each — one
 hash probe per cell. Fine when the box is a few cells. But on dig-heavy searches the
 profiler showed these sweeps eating a serious share of the whole search: a wide box
@@ -182,9 +228,10 @@ guards clean. Kept.
 | Eager neighbor prefetch | hide memory latency | **+7% to +26%** | reverted |
 | Heap key packing | halve heap traffic | flat | reverted (simpler code wins) |
 | Hybrid chunk cache | faster hot lookups | **+3.6% on SHORT** | reverted — guard veto |
+| Edit-diff probe gate | skip a redundant hash probe | flat (p = 0.000) | reverted |
 | Adaptive edit scanning | fix a measured hot spot | **−40% edit-heavy** | **kept** |
 
-One survivor in five, and the one that survived was the one that started from a
+One survivor in six, and the one that survived was the one that started from a
 profiler reading instead of a plausible theory. That's the honest shape of
 performance work past the easy wins. The failures weren't dumb ideas — every one of
 them is a real technique that genuinely works *somewhere*. They just didn't work

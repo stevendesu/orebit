@@ -94,7 +94,7 @@ need *one* temporary object, over and over, in a tight loop. We call it a
 never reallocating.
 
 You've actually already met one. In the
-[chapter on reading blocks](block_reading.md) we replaced `new BlockPos(x, y, z)`
+[chapter on reading blocks](01_block_reading.md) we replaced `new BlockPos(x, y, z)`
 inside a loop with a single `BlockPos.Mutable` that we `.set(x, y, z)` on each
 pass. That mutable position is a scratch pad. We allocate it once, then reuse the
 same chunk of memory thousands of times.
@@ -126,4 +126,4 @@ That "allocates nothing" is the recurring theme, and it reaches its full
 expression in the pathfinder's innermost loop — where we threw out Java's
 standard `HashMap` and `PriorityQueue` entirely to keep the Garbage Collector out
 of the hot path. That story is worth a page of its own:
-[**Pathfinding on a Tick Budget**](pathfinding_hot_path.md).
+[**Pathfinding on a Tick Budget**](05_pathfinding_hot_path.md).

@@ -1,10 +1,10 @@
 # Paying for the Map
 
-[The last chapter](region_heuristic.md) ended in a good place: the block search reads a
+[The last chapter](11_region_heuristic.md) ended in a good place: the block search reads a
 cost-to-goal field computed from the region map, and stops flooding walls it can't see
 around. This chapter is about the bill. The field is rebuilt every time the search's
 window target moves, and a per-re-plan cost is a hot path by another name — the
-[SHORT-search lesson](measure_everything.md) all over again, one level up: work that
+[SHORT-search lesson](08_measure_everything.md) all over again, one level up: work that
 amortizes beautifully over a big search dominates the common small one.
 
 We assumed the field build was cheap. It was not. This is the chapter where the house
@@ -29,7 +29,7 @@ itself — honest work. The other half traced to a single question asked badly:
 
 ## The question we kept re-answering
 
-The [dig-flood](region_heuristic.md#the-goal-that-belongs-to-no-region) walks outward
+The [dig-flood](11_region_heuristic.md#the-goal-that-belongs-to-no-region) walks outward
 from a buried goal through breakable rock, and every time it breaks into open space it
 must name the pocket it entered — that pocket becomes a seed of the field. The code
 answered by **re-deriving the pocket from scratch on every touch**: scan the region's
@@ -102,7 +102,7 @@ costs a few microseconds, accepted and documented.
 
 ## The one that didn't survive
 
-The campaign ended the way [Measure Everything](measure_everything.md) says campaigns
+The campaign ended the way [Measure Everything](08_measure_everything.md) says campaigns
 end. With the field now consulted on every node pop, the per-pop heuristic recompute
 looked like the next obvious target — cache the value computed at relax time, read it
 back at pop time, save a whole field lookup per expansion. Mechanically sound,

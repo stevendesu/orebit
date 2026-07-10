@@ -30,14 +30,14 @@ public final class OrebitCommon {
     private OrebitCommon() {}
 
     public static void init(PlatformEvents events) {
-        // Owner capability config (PRD §10 Phase 1a / AGENCY-LAYER-PLAN): load config/orebit.properties
+        // Owner capability config (PRD §10 Phase 1a): load config/orebit.properties
         // from the run dir once the server is up (the MinecraftServer is the loader-agnostic anchor the
         // ConfigDir seam reads the run dir from), generating a commented default file on first run. This
         // installs the active Config + the derived BotCaps the pathfinder and follower read; defaults
         // reproduce today's behaviour, so nothing changes until the owner edits the file.
         events.onServerStarted(ConfigLoader::load);
 
-        // Mining tick/feasibility table (PRD §10 Phase 1c-1d / AGENCY-LAYER-PLAN "Tool use" + "Tick costs"):
+        // Mining tick/feasibility table (PRD §10 Phase 1c-1d):
         // precompute the resident mining-tick tables ONCE the block registry (and thus the NavBlock navtype
         // table) is populated. Referencing MiningModel.buildTable() forces NavBlock's static-init first, so
         // the tables cover every navtype/field-key. Threads the loaded mining-time config (ticksByHardness /
@@ -49,9 +49,9 @@ public final class OrebitCommon {
                 ConfigLoader.config().ticksByHardness(), ConfigLoader.config().ticksToMineFlat(),
                 ConfigLoader.config().unbreakableHardness()));
 
-        // Boot-time pathfinder JIT warm-up (internal_docs/PERF-DESIGN-warmup-searches.md): ~500 synthetic
+        // Boot-time pathfinder JIT warm-up (worldmodel.pathing.NavWarmup): ~500 synthetic
         // searches over a private in-memory fixture so the first REAL search doesn't run interpreted/C1-cold
-        // (~16 ms for a 2-node search — PERF-PROFILE-2026-07.md S1 — landing on a live player tick, since the
+        // (~16 ms for a 2-node search — landing on a live player tick, since the
         // bot spawns on join). SYNCHRONOUS on the server thread deliberately: JIT warmth is JVM-global, but
         // the ThreadLocal search scratch and the unsynchronized NavSectionPool are tick-thread-confined.
         // Registered AFTER ConfigLoader::load (reads the pathing.warmup keys + the owner's real BotCaps) and

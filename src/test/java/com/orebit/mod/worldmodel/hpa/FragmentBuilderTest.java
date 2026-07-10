@@ -304,7 +304,7 @@ public class FragmentBuilderTest {
     }
 
     // ===================================================================================================
-    // BUILD-EMITTED LABELS (PERF-DESIGN-label-slab-membership §2) — build()'s own flood stamps the record's
+    // BUILD-EMITTED LABELS (label-slab membership) — build()'s own flood stamps the record's
     // label slab; where published (≥2 kept, un-collapsed) it must equal fragmentContaining cell-for-cell,
     // and it must NOT be published for the trivial/degenerate records.
     // ===================================================================================================

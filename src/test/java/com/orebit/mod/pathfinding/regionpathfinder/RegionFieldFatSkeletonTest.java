@@ -38,7 +38,7 @@ import net.minecraft.server.Bootstrap;
  *       guidance).</li>
  * </ol>
  * Also prints the per-fixture settle savings (the early exit's whole point) as the recorded evidence for the
- * PERF-DESIGN-field-fat-skeleton.md measurement section.
+ * docs/Optimizations/12_field_build.md measurement section.
  */
 class RegionFieldFatSkeletonTest {
 

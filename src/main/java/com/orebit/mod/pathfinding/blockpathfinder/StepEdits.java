@@ -15,7 +15,7 @@ import net.minecraft.core.BlockPos;
  *
  * <p><b>Pooled during search, copied out for a returned plan.</b> A build-heavy search expands thousands
  * of edit-bearing edges, so allocating a fresh set per accepted edge was the dominant remaining allocator
- * (≈97% of it — see docs/Optimizations/pathfinding_hot_path.md). Instead the search hands each accepted
+ * (≈97% of it — see docs/Optimizations/05_pathfinding_hot_path.md). Instead the search hands each accepted
  * edge a reusable instance from a per-search arena ({@link BlockPathfinder}'s {@code EditPool}) and
  * {@link #load}s its cells from the movement's accumulator — zero allocation in steady state. The count is
  * a field, not the array length, precisely so the backing buffers can be reused/grown. The few edits on

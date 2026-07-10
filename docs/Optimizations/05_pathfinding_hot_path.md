@@ -5,40 +5,58 @@ before it has to start the next tick. Go over budget and the server can't keep
 up: the world stutters, and you get the dreaded "Can't keep up! Is the server
 overloaded?" in the console.
 
-Pathfinding has to live inside that budget, and it is not cheap. To find a route,
-the A\* search explores a frontier of candidate positions — thousands of them for a
-hard path — examining each one's surroundings before deciding where to step next.
-Each of those positions is a *node*, and the search visits them one after another
-in a tight loop.
+Pathfinding has to live inside that budget, and it is not cheap. To find a route, the
+bot runs **A\***, the classic shortest-path search — and since the rest of this book
+leans on it, here it is in a paragraph. A\* explores outward from the start one **node**
+at a time, a node being a candidate position the bot could stand in. Each node is scored
+by two numbers: **`g`**, the cost of the route that reached it so far, and **`h`**, a
+*heuristic* — a cheap, educated guess at the cost still ahead to the goal. A\* always
+expands the node with the smallest **`f = g + h`** (its best estimate of a whole path
+through that point), looks at the moves leading out of it, and repeats. That heuristic is
+what makes A\* *smart*: a good guess aims the search straight at the goal, while a poor
+one — or none at all — leaves it flooding outward in every direction. A hard search runs
+through thousands of these nodes, one after another in a tight loop, and this chapter is
+about making each one cheap to visit.
 
-Where that loop runs is a design decision still in motion. Today the search runs
-inline on the server's tick thread, so it has to finish inside the budget; longer
-term we plan to move it onto a background thread that can spread a single search
-across several ticks. But notice that the *per-node* cost matters under either
-plan — inline, it decides how much of the 50ms you burn; in the background, it
-decides how many ticks the bot stands around thinking, and how much CPU it steals
-from everything else while it does. Cheaper nodes are a win no matter where the
-loop ends up living.
+That loop can run in one of two places, and Orebit has moved between them. It once
+ran inline on the server's tick thread, where it had to finish inside the 50ms
+budget; today it runs on a background thread that can spread a single search across
+several ticks — a story with [its own chapter](10_background_pathfinding.md). But
+the *per-node* cost matters under either arrangement: on the tick thread it decides
+how much of the 50ms you burn; in the background it decides how many ticks the bot
+stands around thinking, and how much CPU it steals from everything else while it
+does. Cheaper nodes are a win no matter where the loop lives.
 
-So the arithmetic that governs everything is brutally simple:
+So the arithmetic that governs everything is simple:
 
-$$\text{search time} = \text{nodes visited} \times \text{cost per node}$$
+$$\text{search time} = \text{startup cost} + (\text{nodes visited} \times \text{cost per node})$$
 
-If a node costs 7 microseconds and a hard search visits 10,000 of them, that's
-**70 milliseconds** — more than an entire tick's worth of work for one bot
-deciding where to walk. We have two levers. We can visit fewer nodes (that's the
-job of a good heuristic and, eventually, hierarchical pathfinding), or we can make
-each node cheaper. This page is about the second lever, and it turns out there was
-a *lot* of room.
+The startup cost is the fixed price of getting a search off the ground — allocating
+the scratch arrays, hash maps, and chunk caches it works in — paid once before the
+first node. It's real, and it dominates the short, everyday searches. But on a
+*hard* path the second term runs away with everything: if a node costs 7
+microseconds and a hard search visits 10,000 of them, that's **70 milliseconds** —
+more than an entire tick's worth of work for one bot deciding where to walk. We have
+two levers on that term. We can visit fewer nodes — the job of a sharper heuristic
+and of the [hierarchical, two-tier search](../pathfinding.md) that plans the coarse
+route first — or we can make each node cheaper. This page is about the second lever,
+and it turns out there was a *lot* of room.
 
 ## Measuring the damage
 
 The first thing I did was instrument the search to print one line per path: how
 many nodes it visited, how long it took, and the time-per-node that falls out of
 dividing the two. Then I asked the bot to do something genuinely hard — climb and
-dig its way up through terrain — and watched the numbers.
+dig its way up through terrain.
 
-They were ugly:
+That kind of route isn't just walking. To get through a wall the bot *breaks*
+blocks; to climb a face it *places* them, pillaring up. Each such move carries an
+**edit** — the handful of cells it would change — which the search records so that
+later moves along the same path plan against the world as it *will* be, not as it
+looks now. That's the `+edits` marker in the timing line below, and those little
+edit records turn out to matter a great deal for performance — so hold onto the idea.
+
+The numbers were ugly:
 
 ```
 path TIMING: 10001 nodes in 80247 us (8024 ns/node) +edits -> FAIL-budget
@@ -50,7 +68,7 @@ the numbers jumped around from run to run: one search would clock 7,000 ns/node,
 the next 8,500, the next 7,400. Inconsistent *and* slow.
 
 Now, here's the part that should make you suspicious. We worked very hard, in the
-[chapter on reading blocks](block_reading.md), to get the actual cost of reading a
+[chapter on reading blocks](01_block_reading.md), to get the actual cost of reading a
 cell's data down to single-digit nanoseconds. The data lookup at the very bottom
 of a node expansion is about **7 nanoseconds**. So where did the *other ~7,993
 nanoseconds* go?
@@ -63,58 +81,36 @@ of code.
 
 ## The hidden cost of a `HashMap`
 
-A textbook A\* keeps a few bookkeeping structures. It needs to remember the best
-cost found so far to reach each cell (`gScore`), and which cell each cell was
-reached *from* so it can rebuild the path at the end (`cameFrom`). The obvious,
-every-tutorial-does-it way to write that in Java is with maps:
+That innocent-looking line is a map lookup. A textbook A\* leans on them: it
+remembers the best cost found so far to reach each cell (`gScore`), and which cell
+each was reached *from* so it can rebuild the route at the end (`cameFrom`) — and
+every cell read *also* has to look up which chunk holds that cell's data, through
+yet another map. All of them are keyed by a block position, which Minecraft hands us
+as a single packed `long`. And a `HashMap<Long, …>` can't store a primitive `long`:
+it silently **boxes** every key into a throwaway `Long` object on the heap just to
+hash it. (The full anatomy of that tax — flexible, general-purpose, and quietly slow
+in a tight loop — and the map we built to escape it got the
+[previous chapter](04_custom_hash_map.md) all to itself.)
 
-```java
-Map<Long, Float> gScore   = new HashMap<>();
-Map<Long, Long>  cameFrom = new HashMap<>();
-```
-
-Our cells are identified by a `long` — Minecraft packs a block's X, Y, and Z into
-a single 64-bit integer. So a key is a `long`, and looking up a cell's cost is
-just `gScore.get(key)`. Clean, readable, correct.
-
-It's also a trap, and the trap is a Java feature called **autoboxing**.
-
-A Java `HashMap` cannot store primitives like `long` or `float`. It can only
-store *objects*. So when you write `gScore.get(key)` with a `long` key, Java
-quietly wraps that primitive in a `Long` *object* — it "boxes" it — so the map
-has something object-shaped to hash. That wrapper is a tiny allocation on the
-heap.
-
-Java does keep a cache of pre-made `Long` objects to soften this... but only for
-small values, from −128 to 127. Our keys are block positions packed into 64 bits
-— gigantic numbers, nowhere near that cache. So **every single map operation
-allocates a brand-new `Long` on the heap.** And `HashMap<Long, Float>` boxes the
-*value* too, so a `gScore.put` mints a fresh `Long` *and* a fresh `Float`.
-
-Remember the lesson from [reusing memory](reusing_memory.md): allocation is slow,
-and the garbage it creates wakes up the Garbage Collector, which is slower still.
-Now picture doing it on every cell read — about a hundred times per node — across
-four separate maps, ten thousand nodes deep. We weren't reading the world. We
-were feeding the Garbage Collector a firehose of tiny short-lived objects, and
-paying for it twice: once to allocate them, and again, later and unpredictably,
-when the collector ran to sweep them up.
-
-That second cost is exactly why the timings *jittered*. A search that happened to
-trigger a garbage-collection pause mid-flight measured slower than one that
-didn't. The inconsistency wasn't noise — it was the Garbage Collector showing up
-at random moments to clean up our mess.
+Now do that roughly a hundred times per node, across several maps, ten thousand
+nodes deep. We weren't so much reading the world as feeding the Garbage Collector a
+firehose of tiny short-lived objects — and paying for it twice: once to allocate
+them, and again, later and unpredictably, when the collector woke to sweep them
+away. That second cost is exactly why the timings *jittered*: a search that happened
+to trigger a collection mid-flight measured slower than one that didn't. The
+inconsistency wasn't noise — it was the collector showing up at random moments to
+clean up after us.
 
 So the plan is: **get the allocation out of the loop entirely.** No boxing, no
-per-node objects, nothing for the collector to do. Let's go structure by
-structure.
+per-node objects, nothing for the collector to do. Let's go structure by structure.
 
 ## Fix #1: stop re-deriving the chunk on every read
 
-Before we even touch the maps, there's an easy win in how we locate a cell's
-data. Every cell read had to find which chunk the cell lived in and pull that
-chunk's nav data out of a store. That store is a map keyed by chunk —
-so, naturally, *another* boxed-`long` lookup. Two of them, in fact, plus the box,
-on every one of the ~100 reads per node.
+Before we even touch the search's own bookkeeping maps, there's an easy win in how
+we locate a cell's data. Every cell read had to find which chunk the cell lived in
+and pull that chunk's nav data out of a store. That store is the chunk map the
+diagnosis just named — so, naturally, *another* boxed-`long` lookup on every one of
+the ~100 reads per node.
 
 But here's the thing about those hundred reads: they're not scattered across the
 world. The cells a single node examines are all clustered right around that node,
@@ -172,7 +168,7 @@ still need a map... just one that doesn't box. So we wrote our own: an
 **open-addressing** `long`-to-`int` map built from two flat arrays, with no
 `Entry` objects and no boxing anywhere in sight. It's the linchpin of the whole
 rewrite — and it has a couple of genuinely clever tricks in it — so it gets
-[a page of its own](custom_hash_map.md).
+[a page of its own](04_custom_hash_map.md).
 
 The exact same idea handles the search's frontier — the queue of positions
 waiting to be explored, ordered by most-promising-first. Java's `PriorityQueue`
@@ -213,7 +209,7 @@ has a hard 50ms deadline, a cost you can plan around is worth as much as a low
 one. There's a bonus here, too: a garbage-collection pause in Java stops *every*
 thread, not just the one that made the garbage. So keeping the search
 allocation-free protects the rest of the server from its mess — which matters all
-the more if the search later moves to a background thread of its own.
+the more now that the search runs on a background thread of its own.
 
 ## A loose end the benchmark caught
 
@@ -234,8 +230,12 @@ allocation mostly costs you *later*, when the collector runs — so the bytes do
 show up next to the nanoseconds. To actually see them we built a proper
 [JMH](https://github.com/openjdk/jmh) benchmark: drive a search over a synthetic,
 in-memory world, headless and repeatable, with an *allocation* profiler that
-reports bytes-per-search instead of time. The number was damning — for a loop
-we'd declared allocation-free:
+reports bytes-per-search instead of time. We ran it on the scenario we lean on most,
+**TOWER** — the bot building a thirty-block pillar straight up through open air.
+It's the build-heavy case by design: every step up *places* a block, so it works the
+edit-tracking machinery harder than any plain walk, which makes it the sharpest lens
+for the allocation — and, later, the CPU — we're hunting. The number it reported was
+damning, for a loop we'd declared allocation-free:
 
 ```
 TOWER  gc.alloc.rate.norm   5,791,820 B/op
@@ -245,10 +245,12 @@ TOWER  gc.alloc.rate.norm   5,791,820 B/op
 residual chunk lookup, minting a `Long` on every chunk-boundary crossing.
 
 The fix is the same trick the search maps already used, applied one level out. The
-single-slot cache grows into a small **open-addressed `long`-keyed cache** of every
-chunk the search has touched, so a chunk key is boxed at most *once* — on its first
-visit — and every later crossing back into it is a plain array read. (It's the
-[custom hash map](custom_hash_map.md) again, this time mapping chunk → sections.)
+single-slot cache grows into a small **open-addressed `long`-keyed cache** — a few
+hundred slots, comfortably more than the distinct chunks any one bounded search
+visits — holding *every* chunk the search has touched, not just the last one. A
+chunk key is now boxed at most *once*, on its first visit, and every later crossing
+back into it is a plain array read. (It's the
+[custom hash map](04_custom_hash_map.md) again, this time mapping chunk → sections.)
 The benchmark confirmed it immediately:
 
 | per single TOWER search | before | after |
@@ -368,7 +370,8 @@ mods lean on the same standard-library structures we started with — and pay th
 same tax. By keeping the Garbage Collector out of the hot path entirely, that
 budget goes to actually finding paths instead of cleaning up after ourselves.
 
-And we're not done. The per-node cost is now low *and* steady, which means the
-next lever — visiting *fewer* nodes — is where the next big wins are hiding: a
-sharper heuristic now, and hierarchical pathfinding later. But that's a story for
-[another page](fewer_nodes.md).
+And we're not done. The per-node cost is now low *and* steady, which means the next
+lever — visiting *fewer* nodes — is where the next big wins are hiding: a sharper
+heuristic, and a [hierarchical search](../pathfinding.md) that plans the coarse route
+first so the fine search never floods a wall it can't see around. That's the story
+the [next page](06_fewer_nodes.md) picks up.

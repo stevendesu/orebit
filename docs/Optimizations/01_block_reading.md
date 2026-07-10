@@ -29,7 +29,7 @@ This __works__, the problem is that **it's slow**.
 
 To benchmark how slow, I ran a script that read 100 blocks randomly within a
 5 chunk radius of the player and averaged the time to read. Running this on my
-M1 16-inch 2021 Macbook Pro, it takes around 3000000 nanoseconds __per block__!
+M1 16-inch 2021 Macbook Pro, it takes around 3,000,000 nanoseconds __per block__!
 
 That's 3 milliseconds to read the data from a single block. Imagine trying to
 scan the entire world to find diamonds, or reading multiple blocks in order to
@@ -117,7 +117,7 @@ Reading a single X, Y, Z value from the Packed Integer Array involves:
 **Palette Types:**
 
  * Singular Palette: contains a single block state. For example, all blocks in
-   the chunk section are AIR
+   the chunk section are STONE
     * Just returns the single block state
  * Array Palette: contains an array of block states
     * Once you have the index for a particular block, you simply access that
@@ -127,7 +127,8 @@ Reading a single X, Y, Z value from the Packed Integer Array involves:
     * Truthfully I don't know why or when this is preferred by the MineCraft
       engine, but I __do__ know that internally it also uses an array
  * IdList Palette: contains an array of block IDs
-    * Again, I don't really know why or when this is preferred
+    * This is used when the number of distinct block types in a chunk section
+      exceeds 256
 
 For the most part reading from these palettes always comes down to a simple
 array lookup. However the `.get()` method often also checks that the index
@@ -164,13 +165,11 @@ it up? Well there's a few tricks we have up our sleeves.
 
 ### 1. We only read chunks after generation
 
-![Profiler results](./block_reading_1.png)
-
 During block searches (e.g. "find diamond ores") and pathfinding (e.g. "go to
 position 1500, 70, -800") Orebit does not read BlockState data from the world.
 Instead, we rely on two separate representations of the world that are optimized
-for these two tasks: [Regions](../data_model/regions) and
-[NavBlock Grids](../data_model/navblock_grids).
+for these two tasks: [Regions](../worldmodel.md#region-level) and
+[NavBlock Grids](../worldmodel.md#block-level).
 
 The only time we read BlockState data is when we're building or updating these
 two data structures, which we only do *immediately after a chunk has been
@@ -180,15 +179,13 @@ in the "last 4 chunks touched" cache, so we avoid the cost of chunk loading.
 To benchmark this performance I updated my code. Instead of reading 100 blocks
 randomly within 5 chunks of the player, I read 100 blocks randomly in the last
 chunk that was generated. On the same hardware this immediately reduced the time
-to read a block to 1700 nanoseconds. That's a __1,846x speedup__!
+to read a block to 1700 nanoseconds. That's a __1,765x speedup__!
 
 The lesson is that if you're reading multiple blocks from the same chunk, you
 can amortize the cost of chunk loading over all of the blocks read -- making it
 essentially zero.
 
 ### 2. We can bypass World-level checks
-
-![Profiler results](./block_reading_2.png)
 
 Because we're hooking into chunk generation and updates, we have an instance of
 the Chunk already available to us. This means we can skip straight to the last
@@ -214,8 +211,6 @@ nanoseconds. That's another __2.4x speedup__!
 But we can keep going:
 
 ### 3. Eliminate memory allocation
-
-![Profiler results](./block_reading_3.png)
 
 Some amount of time is spent allocating memory for the BlockPos object that
 we're creating. However reading the actual BlockState doesn't require this
@@ -287,8 +282,6 @@ With this new code avoiding memory allocation *and* branching, we're down to
 But... can we do *even better*?
 
 ### 4. Avoiding megamorphism
-
-![Profiler results](./block_reading_4.png)
 
 Here is where things start to get really tricky. Remember when I said that
 reading a palette was slow due to megamorphism? Well we can fix this!
@@ -405,8 +398,8 @@ Benchmarking all cases:
    nanoseconds. A __43x speedup__!
  * When using a BiMapPalette, the average time to read a block is down to 27
    nanoseconds. A __22x speedup__!
- * In my testing I didn't see an IdListPalette, so I don't know when these are
-   used.
+ * In my testing I didn't see an IdListPalette, so I assume these basically
+   never generate naturally and require player builds
 
 Given that 60% of ChunkSections are using SingularPalette, the average time to
 read a block is now:
@@ -417,8 +410,6 @@ This is a __62x speedup__ over the previous best case! But... the question
 remains... *can we do better*?
 
 ### 5. Limit reflective access
-
-![Profiler results](./block_reading_5.png)
 
 We pay a cost every time we access a field via reflection. Reflection requires
 Java to introspect about its own bytecode at runtime, eliminating many potential
@@ -480,3 +471,21 @@ subclasses, not four, meaning our method call is bimorphic and the JIT is able
 to handle this for us.
 
 But I do have a few ideas...
+
+## The whole journey, in one table
+
+Each row is measured on the same hardware (M1 16-inch 2021 MacBook Pro), averaging
+the time to read a single block. The final three rows are per-palette measurements
+weighted by how often each palette type actually shows up (≈60% single, 20% array,
+20% bi-map).
+
+| # | Technique | ns / block | Speedup (vs. prev) |
+|---|---|---:|---:|
+| — | `world.getBlockState()` — the baseline | 3,000,000 | — |
+| 1 | Read only *after* chunk generation (stay inside the 4-chunk cache) | 1,700 | ~1,765× |
+| 2 | Bypass world-level checks — read the `ChunkSection` directly | 700 | 2.4× |
+| 3 | Reuse one `BlockPos.Mutable` (kill per-read allocation *and* branching) | 600 | 1.17× |
+| 4 | Reflect into the palette + type-switch (kill megamorphic dispatch) | 9.7 | 62× |
+| 5 | `storage.forEach` sequential scan (one reflective access per section) | 6.7 | 1.44× |
+
+**Net: ~3,000,000 ns → 6.7 ns per block — a ~450,000× speedup.**

@@ -76,14 +76,14 @@ start. Out-of-range or unparseable individual values are clamped/defaulted with 
 
 | Key | Type | Default | Effect | Example |
 |---|---|---|---|---|
-| `pathing.maxNodes` | int `> 0` | `10000` | A\* node-expansion ceiling per search. → `BotCaps.maxNodes`. Higher = can route farther at a slower worst case; lower = bails sooner (partial-path return then walks + replans). | `pathing.maxNodes=20000` |
+| `pathing.syncSearchBudgetNodes` | int `> 0` | `10000` | A\* node-expansion ceiling per search. → `BotCaps.maxNodes`. Higher = can route farther at a slower worst case; lower = bails sooner (partial-path return then walks + replans). | `pathing.syncSearchBudgetNodes=20000` |
 | `pathing.greedyWeight` | float `>= 1.0` | `2.0` | Heuristic greediness weight (multiplies the tick-unit octile). `1.0` = admissible/optimal/slow; higher beelines (far fewer nodes, paths no longer guaranteed optimal). → `BotCaps.greedyWeight`. | `pathing.greedyWeight=3.0` |
 | `pathing.costPerHitpoint` | float `>= 0.0` | `100.0` | **The ONE damage-pricing knob**: ticks the planner considers 1 HP of damage to be worth. → `BotCaps.costPerHitpoint`. Every damage-as-cost term is priced in it: the pass-through hazard surcharge (`MovementContext.cellTransitCost` — 1 HP per damaging body cell transited: fire, berry bush, powder snow) and the fall-damage penalty (`Fall`/`Parkour` — 1 HP per block dropped past `safeFallDistance`). **Break-even intuition:** 1 HP buys `costPerHitpoint / 4.633` walk-blocks of detour (≈ 21.6 at the default), so 4 hazard cells justify an ~86-block detour. The pre-unification hardcodes (40/hazard-cell, 10/excess-fall-block) bought only ~9 / ~2 blocks — a bush MAZE was rationally plowed through lethally because cumulative death was never priced. Raise for a more self-preserving bot; only meaningful with `survival.takesDamage=true` (an immune bot's damage terms are zero). Ratified successor (not built): a cumulative health-aware damage *budget* per path. | `pathing.costPerHitpoint=500` |
-| `pathing.warmup` | boolean | `true` | Run a short synthetic pathfinder warm-up at server start (`NavWarmup`, `internal_docs/PERF-DESIGN-warmup-searches.md`): ~250-500 searches over a private in-memory fixture, SYNCHRONOUS in the `SERVER_STARTED` hook (before any player can join), so the bot's FIRST real search doesn't run JIT-cold (a one-time ~16-30 ms tick stall otherwise; measured ~0.7 ms with warm-up, E5 harness). Costs ~0.4-0.6 s of startup wall-clock only — boot-only, zero effect on any search after boot. NOT read into `BotCaps`; read once by `OrebitCommon`'s hook. | `pathing.warmup=false` |
+| `pathing.warmup` | boolean | `true` | Run a short synthetic pathfinder warm-up at server start (`NavWarmup`): ~250-500 searches over a private in-memory fixture, SYNCHRONOUS in the `SERVER_STARTED` hook (before any player can join), so the bot's FIRST real search doesn't run JIT-cold (a one-time ~16-30 ms tick stall otherwise; measured ~0.7 ms with warm-up, E5 harness). Costs ~0.4-0.6 s of startup wall-clock only — boot-only, zero effect on any search after boot. NOT read into `BotCaps`; read once by `OrebitCommon`'s hook. | `pathing.warmup=false` |
 | `pathing.warmupBudgetMs` | int `>= 0` | `1500` | Hard wall-clock cap (ms) on that warm-up pass; it usually stops earlier (plateau detection on the short-search mean, min 4 / max 8 rounds — typically ~380-530 ms). `0` disables the warm-up entirely. | `pathing.warmupBudgetMs=3000` |
-| `pathing.async` | boolean | `false` | Run window searches on the **background planner pool** instead of the server tick thread (s44; `internal_docs/DESIGN-background-pathfinding.md`). The tick thread submits a `SearchRequest` and adopts the result at the **same settled boundary** plans already swap at, so searches stop costing tick time (measured complex-path tick ~8-16 ms sync → ~3 ms async); plans arrive 1-3 ticks after they're requested (the bot keeps walking its current plan meanwhile). `false` = today's synchronous behaviour, **byte-identical** to pre-s44. **Requires a server restart to change** (the pool is built once at init; `/bot config reload` won't rebuild it). NOT read into `BotCaps` — consumed by `PathPlan`/`PlanExecutor`. | `pathing.async=true` |
+| `pathing.async` | boolean | `true` | Run window searches on the **background planner pool** instead of the server tick thread (s44; `internal_docs/DESIGN-background-pathfinding.md`). The tick thread submits a `SearchRequest` and adopts the result at the **same settled boundary** plans already swap at, so searches stop costing tick time (measured complex-path tick ~8-16 ms sync → ~3 ms async); plans arrive 1-3 ticks after they're requested (the bot keeps walking its current plan meanwhile). `false` = today's synchronous behaviour, **byte-identical** to pre-s44. **Requires a server restart to change** (the pool is built once at init; `/bot config reload` won't rebuild it). NOT read into `BotCaps` — consumed by `PathPlan`/`PlanExecutor`. | `pathing.async=false` |
 | `pathing.maxThreads` | int `>= 1` | `2` | Background planner **pool size** when `async=true`. Clamped to a `[1, 64]` sanity rail at parse, then **re-clamped to `[1, cores − 2]` at pool start** (the host core count isn't known at validate time). Bots share the pool; raise it on a multi-tenant server (many bots) to cut search tail latency, lower it to `1` on a constrained host — like view-distance, it trades bot responsiveness against server CPU headroom. **Requires a server restart to change.** | `pathing.maxThreads=4` |
-| `pathing.searchBudgetMs` | int `>= 1` | `40` | Wall-clock budget (ms) per background search when `async=true` — the **time-based cap that replaces `pathing.maxNodes`** as the effective search limit (checked every 256 pops; `pathing.maxNodes` degrades to `TIME_MODE_NODE_BACKSTOP` ≈ 262k, a memory-only backstop). A search that exhausts the budget returns its best partial path — the bot walks it and replans, converging on far goals (an in-game 13.6k-node search FOUND past the old 10k node cap). Bigger budgets escape bigger dead-ends at the cost of longer worst-case plan latency (the tick is never stalled either way). Sync mode (`async=false`) ignores this — the node cap rules. | `pathing.searchBudgetMs=80` |
+| `pathing.asyncSearchBudgetMs` | int `>= 1` | `250` | Wall-clock budget (ms) per background search when `async=true` — the **time-based cap that replaces `pathing.syncSearchBudgetNodes`** as the effective search limit (checked every 256 pops; `pathing.syncSearchBudgetNodes` degrades to `TIME_MODE_NODE_BACKSTOP` ≈ 262k, a memory-only backstop). A search that exhausts the budget returns its best partial path — the bot walks it and replans, converging on far goals (an in-game 13.6k-node search FOUND past the old 10k node cap). Bigger budgets escape bigger dead-ends at the cost of longer worst-case plan latency (the tick is never stalled either way). Sync mode (`async=false`) ignores this — the node cap rules. | `pathing.asyncSearchBudgetMs=300` |
 
 ### `hpa.*` — the persisted region tier
 
@@ -99,7 +99,7 @@ threads per search:
 - `canBreak = mining.canMine`, `maxBreakHardness = mining.maxHardness`,
   `allowUnbreakable = mining.allowUnbreakable`
 - `canPlace = placement.canPlace`
-- `maxNodes = pathing.maxNodes`, `greedyWeight = pathing.greedyWeight`
+- `maxNodes = pathing.syncSearchBudgetNodes`, `greedyWeight = pathing.greedyWeight`
 - `costPerHitpoint = pathing.costPerHitpoint` — the unified ticks-per-HP damage price every
   damage-as-cost term reads (hazard transit + fall damage)
 - `jumpHeight = 1` (fixed; not yet an owner knob)
@@ -131,7 +131,7 @@ surcharge), so mortality is a move-generation fact too.
 - **Exception — the `pathing.async` trio needs a restart:** `pathing.async` and `pathing.maxThreads` size
   and build the background planner pool **once at init**, so a `/bot config reload` cannot switch sync↔async
   or resize the pool (the reload does drain the pool before rebaking the shared cost tables — see
-  `internal_docs/DESIGN-background-pathfinding.md`). `pathing.searchBudgetMs` is read per search, so a reload
+  `internal_docs/DESIGN-background-pathfinding.md`). `pathing.asyncSearchBudgetMs` is read per search, so a reload
   does change it live while async is already on — but toggling async itself is restart-only.
 - **When it takes effect on the bot:** the follower reads the live `ConfigLoader` cache **per replan**
   (`caps()` → `ConfigLoader.botCaps()`, `placeBlock()` → `ConfigLoader.config().conjuredBlockState()`), so a
@@ -143,13 +143,13 @@ surcharge), so mortality is a move-generation fact too.
 `ConfigValidator` parses each key into the typed `Config`, emitting a one-line warning for anything it has to
 fix, and never failing the load:
 
-- `pathing.maxNodes` clamped to `>= 1`.
+- `pathing.syncSearchBudgetNodes` clamped to `>= 1`.
 - `pathing.greedyWeight` clamped to `>= 1.0`.
 - `pathing.costPerHitpoint` clamped to `>= 0.0` (the `weightNonNeg` helper).
 - `pathing.warmupBudgetMs` clamped to `0..60000`.
 - `pathing.maxThreads` clamped to `1..64` (a sanity rail — the real `[1, cores − 2]` clamp happens at pool
   start, where the host core count is known).
-- `pathing.searchBudgetMs` clamped to `1..10000` (a >10 s per-search budget is treated as a config typo).
+- `pathing.asyncSearchBudgetMs` clamped to `1..10000` (a >10 s per-search budget is treated as a config typo).
 - `pathing.async` is a boolean (defaults to `Config.DEFAULT` on anything that isn't exactly `true`/`false`).
 - `mining.maxHardness` clamped to `0..255`.
 - `mining.ticksToMineFlat` clamped to `>= 0`.

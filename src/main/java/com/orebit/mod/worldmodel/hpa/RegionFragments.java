@@ -97,7 +97,7 @@ public final class RegionFragments {
     /**
      * Per-cell kept-fragment label slab ({@code (ly<<8)|(lz<<4)|lx} index; kept id or {@code -1} — the exact
      * {@link FragmentBuilder#labelAll} contract), emitted by the leaf build's own flood
-     * (PERF-DESIGN-label-slab-membership §2). Lazily allocated on the first multi-fragment build and reused
+     * (label-slab membership). Lazily allocated on the first multi-fragment build and reused
      * across rebuilds; {@link #labeled} gates whether the current content is valid (a rebuild that drops to
      * ≤1 fragment, collapses, or a hand-seeded record leaves it {@code false}).
      */

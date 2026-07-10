@@ -62,14 +62,14 @@ public final class CuboidExtractor {
     private CuboidExtractor() {}
 
     // The extractor's vertical scans are short-circuited by the resident runUp nibble — the per-cell
-    // "consecutive same-navtype cells above" count (PERF-DESIGN-runup-nibble.md): (1) rectUniform's
+    // "consecutive same-navtype cells above" count (docs/Optimizations/09_depth_nibbles.md): (1) rectUniform's
     // per-section Y-spans collapse to one bottom-row scan plus a run-chain per column, and (2) the
     // Y-travel stage-2 UPWARD extension is computed in one slab pass (runSkipUp) instead of one
     // whole-slab scan per layer. The RESULTING BOX IS BYTE-IDENTICAL (the run memoizes the exact
     // navtype-equality the legacy compares evaluate, over the same committed navtypes; UNKNOWN — a
     // single-section grid that never ran computeDepth — falls back to the legacy scan). Measured:
     // ~75–80% of the extraction bill removed = −30…−36% total search time on cuboid-bearing scenarios
-    // (PERF-RESULTS-2026-07-03.md §E4).
+    // (docs/Optimizations/09_depth_nibbles.md).
 
     /**
      * Fill {@code out} with the directional maximal cuboid containing {@code (sx,sy,sz)} for {@code travelAxis}
@@ -216,7 +216,7 @@ public final class CuboidExtractor {
     }
 
     // ------------------------------------------------------------------------------------------------
-    // Edge / slab uniformity probes (CUBOID-PERF-OPTIONS §A — "bulk, section-local, memory-order scan").
+    // Edge / slab uniformity probes (the bulk uniformity primitive — "bulk, section-local, memory-order scan").
     //
     // Each probe is a rectangle in the (travelAxis, a, b) OFFSET basis relative to the start cell. Rather
     // than test one cell at a time (the old per-cell `cellOk` → `packedAt` → re-resolve-the-section path,
@@ -270,7 +270,7 @@ public final class CuboidExtractor {
     }
 
     /**
-     * <b>The bulk uniformity primitive (CUBOID-PERF-OPTIONS §A).</b> Given an inclusive rectangle in the
+     * <b>The bulk uniformity primitive.</b> Given an inclusive rectangle in the
      * {@code (travelAxis, a, b)} offset basis — travel offsets {@code [tLoR..tHiR]}, axis-{@code a} offsets
      * {@code [aLoR..aHiR]}, axis-{@code b} offsets {@code [bLoR..bHiR]}, all relative to the start cell —
      * answer whether <i>every</i> cell of the mapped world rectangle is in-corridor, built, and of navtype

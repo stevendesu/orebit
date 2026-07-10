@@ -34,7 +34,7 @@ Key decisions:
   server owner [protected it](world_edits.md#protected-blocks)?") is one
   array read and a shift-and-mask. The full story of the fingerprint — including the
   speculative field that cost half the table — is in
-  [Block Fingerprints](Optimizations/block_fingerprints.md).
+  [Block Fingerprints](Optimizations/03_block_fingerprints.md).
 - **The grid entry is one `short` per cell**, holding *both* resolutions the planner
   reads: the low **10 bits** are the navtype index (1024 possible — ~1.7× headroom
   over the measured count), and the high **6 bits** are precomputed
@@ -50,7 +50,7 @@ Key decisions:
   macro-movement layer's uniform-cuboid proofs). Keeping it a *separate* array —
   rather than widening the hot `short` — is deliberate: the millions-of-reads path
   keeps its cache density, and only depth's few consumers touch the second array.
-  The measurements are in [Depth Nibbles](Optimizations/depth_nibbles.md).
+  The measurements are in [Depth Nibbles](Optimizations/09_depth_nibbles.md).
 
 This per-block nav data is **recomputed when a chunk loads** (deterministic, sub-ms
 per chunk) rather than saved to disk, and patched in place when a block changes
@@ -97,7 +97,7 @@ What each region stores:
   never cheaper than walking the same distance** for any tool. (An earlier flat,
   tool-blind dig cost priced soft dirt below a walk, which had the bot happily tunnel
   straight down through a hillside instead of strolling to the cave mouth twenty
-  blocks over. The [region-heuristic chapter](Optimizations/region_heuristic.md)
+  blocks over. The [region-heuristic chapter](Optimizations/11_region_heuristic.md)
   follows where honest dig-versus-walk costs lead.) The recomputed block layer still
   supplies final exactness on approach.
 - **A pyramid of coarser levels** — parent regions merge their children's fragments,
@@ -115,12 +115,16 @@ Two more pieces round out the layer:
   it, not in a global portal table (technical players build tens of thousands). The
   bot uses the index to follow its owner across dimensions: find the nearest known
   portal, path to it, walk in.
-- **Resource octree** *(planned)* — per region, a sparse count histogram over tracked
+- **Resource octree** — per region, a sparse count histogram over tracked
   resource classes (ores, logs, chests, crops), rolled up the same pyramid, so "find
   the nearest diamonds" ascends until a super-region contains some, then descends
-  into the densest children. This is the piece that will back commands like *mine
-  diamonds*; it isn't built yet.
+  into the densest children. This backs [`/bot find` and `/bot gather`](gathering.md)
+  and the `/bot report` abundance compass, and it's tallied in the *same* single
+  classify pass that builds the nav grid — so it costs no extra world scan.
 
-The fine nav grid costs no disk at all (recomputed). The coarse layer is designed to
-persist within a **~6–8% per dimension** budget of save-file size; today it is
-rebuilt lazily as chunks load, and persistence lands with the resource layer.
+The fine nav grid costs no disk at all (recomputed). The coarse layer **persists**:
+each dimension's cost and resource pyramids are written to `<world>/orebit/<dim>/` as
+compact gzip blobs (within a **~6–8% per dimension** budget of save-file size),
+eager-loaded at server start and flushed on stop, so a restart doesn't have to
+re-explore. The files are treated as a cache — if one is missing or corrupt, the layer
+simply rebuilds from the live world.
