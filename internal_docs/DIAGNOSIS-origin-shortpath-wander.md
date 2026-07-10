@@ -52,13 +52,21 @@ goal (skeleton index 3) is **one hop past the window horizon** ⇒ `goalInWindow
 (clean, 18 nodes — the heuristic is innocent here), commits, then heads east to the goal. The built-nav
 skeleton dump made this unambiguous.
 
-**Fix (Chebyshev shortcut in `WindowTargeting.target`).** Test goal-in-window by **Chebyshev region distance**
-from the window start, not skeleton index: if `1 ≤ cheb(windowStart, goalRegion) ≤ WINDOW`, target the real
-goal directly (one bounded search; the region field keeps it from flooding). `cheb ≥ 1` so the same-region
-different-fragment loop still falls to the fragment-aware index test. File: `WindowTargeting.java`.
+**Fix SHIPPED: `WINDOW` 3 → 4 (`PathPlan.WINDOW`).** A 4-region window fully contains a 4-region L-skeleton,
+so the goal falls inside the window and is targeted directly by the normal index test. Cost = a longer
+worst-case block search (owner's bound: ~135 blocks = 3 regions × ~45 cornerwise waypoints), affordable now
+that the region-refined heuristic + forced-cost premium + macro cuboids hold the flood pathologies a tight
+window guarded. Treat as a **stopgap** until the movement executor is reliable, then revisit (parked idea:
+snap the final window target to the cell nearest the goal rather than mid-air/ground).
+
+**Rejected alternative — a Chebyshev-distance goal-in-window test** (`1 ≤ cheb(windowStart, goalRegion) ≤
+WINDOW` → target the goal directly). Owner vetoed it as unsafe: a Chebyshev-1 goal **behind a barrier** that
+needs a long detour would wrongly target the goal directly and flood — the `cheb ≥ 1` guard only excludes the
+same-region loop, not the barrier case. `WINDOW=4` has no such risk (the index test still respects the real
+skeleton). `WindowTargeting.java` is therefore **unchanged**.
 
 **Verified (clean rebuild):** first plan targets the GOAL, `goalInWindow=true`, bot goes `540→543→544`
-monotonically, no detour, PASS.
+monotonically, no detour, all searches ≤9 nodes (no flood), PASS; full `:1.21.11:test` 233/0.
 
 ## Bug 3 — first plan on UNBUILT nav (harness-exposed, separate)
 
