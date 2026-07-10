@@ -1,5 +1,6 @@
 package com.orebit.mod.platform;
 
+import com.orebit.mod.AllyBotEntity;
 import com.orebit.mod.FakeClientConnection;
 import com.orebit.mod.OrebitCommon;
 import net.minecraft.nbt.CompoundTag;
@@ -43,6 +44,18 @@ public final class BotSpawn {
                      new ProblemReporter.ScopedCollector(bot.problemPath(), OrebitCommon.LOGGER)) {
                 bot.load(TagValueInput.create(reporter, server.registryAccess(), tag.get()));
             }
+        }
+        // Revive a DEAD-loaded bot BEFORE placeNewPlayer — this ordering is load-bearing for the client
+        // render. placeNewPlayer synchronously broadcasts the spawn (level.addNewPlayer → ChunkMap.addEntity
+        // → new TrackedEntity → ServerEntity captures entity.getEntityData().getNonDefaultValues() and
+        // updatePlayers() sends it NOW), so the INITIAL metadata observers receive is snapshotted here. A bot
+        // that died carries Health=0 in its .dat; reviving after placeNewPlayer (as BotManager also does, for
+        // the ≤1.21.8 flavors) is too late — the spawn already went out with Health=0, and the Health=20 update
+        // only follows ~1 tick later, so the client can tick the entity's death animation (deathTime, which
+        // never resets on heal) in that gap → the intermittent red/tilt/twitch. Reviving here makes the spawn
+        // snapshot carry full health. No-op for a live/returning bot (reviveIfDead guards on health≤0).
+        if (bot instanceof AllyBotEntity ally) {
+            ally.reviveIfDead();
         }
         server.getPlayerList().placeNewPlayer(
             new FakeClientConnection(),

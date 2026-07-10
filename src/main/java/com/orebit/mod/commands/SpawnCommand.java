@@ -26,19 +26,6 @@ import net.minecraft.server.level.ServerPlayer;
  *
  * <p>Doesn't route through {@link OrebitCommands#act} — that helper reports "no bot" and bails, which
  * is precisely the state this command exists to fix.
- *
- * <p><b>The teardown and the fresh spawn MUST be on separate ticks</b> (the corpse removal runs now,
- * inline; the spawn is deferred one tick via {@code server.execute}). Both in one tick sends the client
- * a single burst that tears down and rebuilds the SAME player UUID at once ({@code PlayerInfoRemove} +
- * {@code RemoveEntities(oldId)} immediately followed by {@code PlayerInfoAdd} + {@code AddEntity(newId)}),
- * which it intermittently races — leaving the just-removed dead entity's death animation bound to the
- * render (owner-observed red tint + twitch after a kill→respawn; a relog rebuilds clean). Deferring the
- * spawn puts its {@code AddEntity} in the NEXT tick's ChunkMap pass (which has already run when
- * {@code runAllTasks} drains this task), so the client gets a clean "entity removed" tick then a clean
- * "entity added" tick — never a same-UUID swap in one flush. Vanilla's own respawn dodges this a
- * different way (a surgical entity-only swap with no player-info churn), but that path hard-codes
- * {@code new ServerPlayer} and would drop the bot brain. This is the same deferral {@code onPlayerJoin}
- * already uses for the exact same reason (racing a client-side transition).
  */
 public final class SpawnCommand implements BotCommand {
 
@@ -52,10 +39,8 @@ public final class SpawnCommand implements BotCommand {
                 CommandFeedback.send(source, "Your bot is alive and well.");
                 return 0;
             }
-            BotManager.removeBotFor(player); // no-op if none registered; clears the corpse otherwise NOW
-            // Fresh spawn on the NEXT tick — separated from the teardown above so the client never
-            // processes a same-UUID remove+add in one packet flush (see the class Javadoc).
-            source.getServer().execute(() -> BotManager.spawnBotFor(player));
+            BotManager.removeBotFor(player); // no-op if none registered; clears the corpse otherwise
+            BotManager.spawnBotFor(player);
             CommandFeedback.send(source, "Bot respawned.");
             return 1;
         }));
