@@ -40,8 +40,8 @@ public class TraversalGrid {
     public static final int NAVTYPE_CAPACITY = NAVTYPE_MASK + 1;
     private static final int FLAGS_MASK = 0x3F; // high 6 bits
 
-    // ---- Depth-nibble side array (E3 floorGap + E4 runUp — PERF-DESIGN-navgrid-widening.md §3,
-    //      PERF-DESIGN-runup-nibble.md). A PARALLEL byte[4096] beside the hot short[] — deliberately NOT a
+    // ---- Depth-nibble side array (E3 floorGap + E4 runUp — docs/Optimizations/09_depth_nibbles.md).
+    //      A PARALLEL byte[4096] beside the hot short[] — deliberately NOT a
     //      widened cell: widening would double the extractor's bulk-scan bytes and halve grid L1 density to
     //      serve fields read a handful of times per pop. Low nibble = floorGap (distance to the first
     //      standable cell strictly below, chunk-column-exact); high nibble = runUp (consecutive same-navtype

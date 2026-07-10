@@ -69,7 +69,7 @@ slides. `RegionEdgeBlacklist` = directed crossing blacklist for event-driven rep
 no-fallback view), polls a `PlanHandle` (volatile-done mailbox; `wasRejected` → retry, not blacklist);
 per-thread epoch stamps feed `NavReclaim`. `SpliceSeam` = seed→accept→adopt handoff between two
 independently computed plans at a settled boundary, with the earlier plan's unexecuted edits folded as
-an `EditSnapshot` baseline. `pathing.async` default false = byte-identical sync.
+an `EditSnapshot` baseline. `pathing.async` default TRUE; `false` = byte-identical sync.
 - Files: `pathfinding/async/PlanExecutor.java`, `PlanHandle.java`, `SearchRequest.java`,
   `pathfinding/splice/SpliceSeam.java`
 - Entry: `PlanExecutor.start` from `OrebitCommon.init` (when async); submit/poll from `PathPlan`.

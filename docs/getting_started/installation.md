@@ -16,7 +16,7 @@ Orebit requires a mod loader:
 
 Download the latest version of Orebit from the
 [releases page](https://github.com/stevendesu/orebit/releases). Then
-extract the contents of the zip file into your `mods` folder. To find your
+drop the single `.jar` file into your `mods` folder. To find your
 `mods` folder:
 
  * On Windows, it is located at `%AppData%/.minecraft/mods`

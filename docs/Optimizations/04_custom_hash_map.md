@@ -11,9 +11,8 @@ bothered, and the two small tricks that make it punch above its weight.
 
 ## Why not just use `HashMap`?
 
-The short version — told in full over in
-[Pathfinding on a Tick Budget](pathfinding_hot_path.md) — is that
-`HashMap<Long, …>` has a hidden cost: **boxing.**
+The short answer is a hidden cost called **boxing** — and it's worth understanding
+in full, because it's the whole reason this map exists.
 
 A `HashMap` can only store objects, not primitives. So every time you look
 something up with a `long` key, Java silently wraps that primitive in a `Long`
@@ -21,7 +20,7 @@ something up with a `long` key, Java silently wraps that primitive in a `Long`
 huge 64-bit numbers, well outside the tiny range of values Java keeps pre-made —
 so every single lookup mints a brand-new throwaway object. Do that a few million
 times in one pathfinding search and you've buried the
-[Garbage Collector](reusing_memory.md) in short-lived trash, which it then has to
+[Garbage Collector](02_reusing_memory.md) in short-lived trash, which it then has to
 stop and sweep up at unpredictable moments.
 
 There's a second, quieter cost too. A `HashMap` resolves collisions — two keys
@@ -174,4 +173,4 @@ owning these ~40 lines instead of reaching for `HashMap<Long, …>`, we get:
 Add it up and this little structure is a big part of how the pathfinder's per-node
 cost fell from ~8,000 nanoseconds to ~1,290 — and later, once the last hidden
 allocations were chased out, to ~950 — the story told in full over in
-[Pathfinding on a Tick Budget](pathfinding_hot_path.md).
+[Pathfinding on a Tick Budget](05_pathfinding_hot_path.md).

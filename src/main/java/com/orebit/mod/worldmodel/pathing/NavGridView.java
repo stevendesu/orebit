@@ -65,7 +65,7 @@ public final class NavGridView {
     // the tick thread). This single slot only catches CONSECUTIVE same-chunk reads, though — a flood that
     // weaves across chunk boundaries thousands of times missed it every crossing, and {@code chunks.get}
     // takes {@code Object}, so each miss BOXED the primitive long key onto the heap (the same boxing the
-    // custom open-addressed maps elsewhere were built to avoid — docs/Optimizations/custom_hash_map.md).
+    // custom open-addressed maps elsewhere were built to avoid — docs/Optimizations/04_custom_hash_map.md).
     private long cacheChunkKey = Long.MIN_VALUE; // sentinel: nothing cached yet
     private NavSection[] cacheSections;          // sections for cacheChunkKey (null = that chunk isn't built)
 
@@ -200,7 +200,7 @@ public final class NavGridView {
      * The raw packed-grid backing array (one {@code short} per cell, {@link TraversalGrid#raw()}) of the
      * {@link NavSection} covering world cell {@code (x,y,z)}, or {@code null} if that section isn't built
      * (unloaded radius or {@code y} out of vertical range). This is the <b>bulk-scan seam</b> for the
-     * cuboid extractor (CUBOID-PERF-OPTIONS §A): a caller that walks a whole section-aligned sub-rectangle
+     * cuboid extractor (the bulk uniformity primitive): a caller that walks a whole section-aligned sub-rectangle
      * resolves the section's array <i>once</i> here and then indexes it directly with the section-local
      * linear index {@code ((y&15)<<8) | ((z&15)<<4) | (x&15)} (see {@link TraversalGrid}), turning a
      * per-cell {@link #packedAt} (which re-resolves the section and re-derives the index every call) into a

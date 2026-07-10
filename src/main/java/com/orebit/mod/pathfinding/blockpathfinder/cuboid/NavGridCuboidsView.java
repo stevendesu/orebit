@@ -40,7 +40,7 @@ import net.minecraft.core.BlockPos;
  * speculative-edit case (without it a macro could jump through a cell the path just placed/broke) even though
  * it almost never fires (a goal-ward jump is ahead of the edits the path made behind it).
  *
- * <h2>Forward-only edit-shrink (Option D — CUBOID-PERF-OPTIONS.md)</h2>
+ * <h2>Forward-only edit-shrink (Option D)</h2>
  * A macro jump always travels from the start cell in one {@code (travelAxis, sign)} direction. An edit the
  * path placed/broke <i>behind</i> the start cell along that direction is never traversed by the forward jump,
  * so it can never invalidate it. {@link #cuboidAt} therefore takes the travel {@code sign} and the shrink only

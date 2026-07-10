@@ -85,7 +85,7 @@ public final class RegionCostField {
     // parent's cost-to-goal). Only meaningful where cost[i] < UNREACHED; the gradient term reads them in costAt.
     private final int[] exitX, exitY, exitZ;
     private final float[] onward;
-    // ---- Slot-resolution bake (PERF-DESIGN-label-slab-membership) — all indexed by regionIndex ----------
+    // ---- Slot-resolution bake (label-slab membership) — all indexed by regionIndex ----------
     /**
      * Per-region EXACT membership slab (a build-time defensive copy of the leaf record's
      * {@link RegionFragments#labels()}), present only for regions with ≥2 reached fragment slots — the only
@@ -182,7 +182,7 @@ public final class RegionCostField {
     }
 
     /**
-     * Bake EXACT per-cell fragment membership into the field (PERF-DESIGN-label-slab-membership §2): for every
+     * Bake EXACT per-cell fragment membership into the field (label-slab membership): for every
      * box region with ≥2 reached fragment slots — the only regions where membership changes {@link #costAt}'s
      * answer — copy the leaf record's build-time label slab ({@link RegionFragments#labels()}) into a
      * field-owned row of {@link #slabs}. The copy (4 KB, ~0.2 µs) keeps the published field self-contained:
@@ -207,7 +207,7 @@ public final class RegionCostField {
      * The goal cost-to-reach for the level-0 region fragment enclosing world cell {@code (wx,wy,wz)}. Region
      * mapping mirrors {@link com.orebit.mod.worldmodel.hpa.RegionAddress} at level 0: {@code rx = wx>>4},
      * {@code rz = wz>>4}, {@code ry = (wy - minY)>>4}. Slot resolution
-     * (PERF-DESIGN-label-slab-membership; reads only field-owned arrays — no ThreadLocals, no pyramid probe):
+     * (label-slab membership; reads only field-owned arrays — no ThreadLocals, no pyramid probe):
      * a region with a baked membership slab (≥2 reached fragment slots) resolves the cell to its EXACT kept
      * fragment by one byte read, falling back to the region's cheapest reached slot when the cell's fragment
      * was never reached (or the cell sits in no kept fragment); a region without a slab reads its

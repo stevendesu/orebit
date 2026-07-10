@@ -31,7 +31,7 @@ import net.minecraft.world.level.chunk.Strategy;
  * Prices {@link NavSectionBuilder#patchCell} — the per-block-change nav-grid maintenance that runs on
  * EVERY server-side block change in a tracked chunk (crop growth, pistons, TNT, other players — not just
  * the bot's edits). This is the invalidation-cost gate for the floorGap/runUp depth nibbles
- * (PERF-DESIGN-navgrid-widening.md §6.3): the nibble maintenance adds an upward floorGap sweep (≤15
+ * (docs/Optimizations/09_depth_nibbles.md): the nibble maintenance adds an upward floorGap sweep (≤15
  * cells, ≤1 seam into {@code above}) and a downward runUp sweep (≤15 cells, ≤1 seam into {@code below})
  * to each patch. Regression bar (from the adoption measurement): nibble maintenance cost ≤ +10% ns/patch
  * on every scenario (measured worst +1.8%), and the absolute ns/patch × a hostile storm rate

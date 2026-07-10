@@ -48,11 +48,12 @@ quota is met, the bot stops and tells you rather than wandering forever.
 
 Because gather reuses the general navigation, everything the pathfinder knows comes along
 for free — it will drop off a cliff into a cave if that's the cheap way down to the ore,
-dig through a wall if [its tools make that cheaper](Optimizations/region_heuristic.md) than
+dig through a wall if [its tools make that cheaper](Optimizations/11_region_heuristic.md) than
 walking around, and route around lava if it's mortal. The gathering behaviour *is* the
 pathfinding behaviour, pointed at a block the bot found itself.
 
-> **On the roadmap.** The resource census currently lives in memory and is rebuilt as
-> the bot explores; persisting it across restarts (so a returning bot remembers where the
-> diamonds were) is planned. Prospecting *unloaded* chunks — reasoning about ore the bot
-> has never seen — is a later step.
+> **On the roadmap.** The per-region resource census now **persists** across restarts
+> (written beside the region cost layer), so a returning bot remembers where the diamonds
+> were without re-exploring. What's still ahead: the session-global abundance tally shown
+> by `/bot report` is rebuilt each run, and prospecting *unloaded* chunks — reasoning about
+> ore the bot has never seen — is a later step.

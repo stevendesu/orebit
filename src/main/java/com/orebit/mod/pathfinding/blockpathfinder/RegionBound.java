@@ -53,7 +53,7 @@ public final class RegionBound {
     }
 
     // The inclusive corridor faces, exposed so a bulk scan (the cuboid extractor's section-aligned
-    // uniformity probe — CUBOID-PERF-OPTIONS §A) can CLIP a world rectangle into integer loop bounds ONCE
+    // uniformity probe) can CLIP a world rectangle into integer loop bounds ONCE
     // (max with minX, min with maxX, …) instead of calling {@link #allows} per cell — a corridor-clipped
     // empty range then needs no per-cell membership test at all. Read-only views of the immutable faces.
 

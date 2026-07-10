@@ -25,7 +25,9 @@ DELETED in s36 in favor of the fragment model (`HPA-FRAGMENTS.md`) + cascade (`H
 - §9 `PathPlan` — sliding-window driver + the "wiggle rule" (commit hysteresis: a window region is
   committed only once the remaining block plan no longer revisits earlier skeleton regions).
 - §10 `AllyBotEntity` wiring (replaced the one-tier call).
-- §11 persistence (`SavedData`) — **still deferred; the one unimplemented remainder.**
+- §11 persistence — **SHIPPED** (`worldmodel/persistence/RegionPersistence`), but as per-dimension plain
+  gzip blob files (`<world>/orebit/<dim>/hpa.bin` + `res.bin`), NOT the `SavedData` this section originally
+  sketched. See `DESIGN-worldmodel-persistence.md`.
 - §12 incremental maintenance (dirty regions on block change → `HpaMaintenance`).
 - §13 milestone test / benchmark (`HpaMilestoneTest`).
 - §14 house-style constraints — no hot-path alloc, SoA, primitive keys (still binding law).

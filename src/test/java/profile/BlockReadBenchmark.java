@@ -39,7 +39,7 @@ import net.minecraft.world.level.chunk.SingleValuePalette;
 
 /**
  * Reconstructs the block-reading optimization journey from
- * docs/Optimizations/block_reading.md as a rigorous JMH benchmark, so we can get
+ * docs/Optimizations/01_block_reading.md as a rigorous JMH benchmark, so we can get
  * trustworthy, warmed-up ns/block numbers for the three read strategies that
  * survive the "bypass the World API" step:
  *

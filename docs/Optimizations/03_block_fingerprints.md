@@ -1,4 +1,4 @@
-In the [chapter on reading blocks](block_reading.md) we got the cost of reading a
+In the [chapter on reading blocks](01_block_reading.md) we got the cost of reading a
 single block down to a handful of nanoseconds. But a pathfinder doesn't ask about
 a block *once* — it asks the same handful of questions about the same cells over
 and over: *can I stand here? walk through it? break it? is it lava?* Even at a few

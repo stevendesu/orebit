@@ -15,8 +15,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
 /**
- * A clean, version-stable view over the ally bot's <b>real</b> vanilla inventory (PRD §10 Phase 1b/1c,
- * AGENCY-LAYER-PLAN "Inventory" + "Tool use"). The bot is a {@link
+ * A clean, version-stable view over the ally bot's <b>real</b> vanilla inventory (PRD §10 Phase 1b/1c). The bot is a {@link
  * com.orebit.mod.FakePlayerEntity} extends {@link ServerPlayer}, i.e. a genuine {@code ServerPlayer} with a
  * real {@link Inventory} that vanilla {@code ItemEntity} pickup already fills (the bot literally picks up
  * dropped items as it walks over them — observed in-game). So there is <b>no synthetic inventory</b>: this

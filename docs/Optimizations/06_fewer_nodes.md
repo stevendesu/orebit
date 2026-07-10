@@ -3,7 +3,7 @@ Our bot could not cross an open field.
 Point it at a goal a thousand-odd blocks away over flat ground and the search would
 grind through its entire budget — ten thousand candidate positions — and then give up,
 leaving the bot standing there. (Why ten thousand? At roughly 950 nanoseconds per
-position — see the [previous chapter](pathfinding_hot_path.md) — that's about 9.5
+position — see the [previous chapter](05_pathfinding_hot_path.md) — that's about 9.5
 milliseconds, nearly a fifth of the server's 50 ms tick. Let one bot's thinking grow
 past that and it starts stealing time from everything else, so we cap it.) Ten thousand
 positions is an absurd amount of thinking for a walk across a meadow, and that absurdity
@@ -11,33 +11,40 @@ is what this page is about: the long, iterative hunt for *why* the search looked
 many places it didn't need to, and how we taught it to stop.
 
 The previous chapter made each candidate position cheap to examine — about 950
-nanoseconds, down from 8,000. But the total time a search takes is two factors
-multiplied together:
+nanoseconds, down from 8,000. But the per-node price is only part of the bill:
 
-$$\text{search time} = \text{nodes visited} \times \text{cost per node}$$
+$$\text{search time} = \text{startup cost} + (\text{nodes visited} \times \text{cost per node})$$
 
-That page hammered the right-hand factor. This one is the story of the left — because
-the cheapest position is the one you never look at. By the end, that field falls in
+That page hammered the cost *per node*. The startup cost — building the search's scratch
+structures once, before the first node — is a fixed fee that matters most for short
+searches. This page is about the middle factor, the **node count**, because the cheapest
+position is the one you never look at. By the end, that field falls in
 about **fifteen hundred** positions, and a shorter test we lean on to watch each fix
 land tightens all the way to **fifty-three** — one position examined per step of the
 path it returns.
 
 ## How A\* decides what to look at
 
-For every candidate position, A\* tracks two numbers: **`g`**, the cost to *get here*
-from the start, and **`h`**, a *heuristic* guess at the cost still ahead to the goal. It
-always expands the candidate with the smallest **`f = g + h`** — its best guess at the
-total cost of a path through that point.
+Recall the rule from [the hot-path chapter](05_pathfinding_hot_path.md): A\* always
+expands the node with the smallest **`f = g + h`**, where **`g`** is the cost already
+spent to reach it and **`h`** is the heuristic's guess at the cost still ahead. This
+chapter is the story of that **`h`**.
 
-Almost everything lives in `h`. If `h` is `0` you've got Dijkstra's algorithm: no guess,
+Almost everything lives in it. If `h` is `0` you've got Dijkstra's algorithm: no guess,
 so the search swells outward in every direction like ripples in a pond. A good `h` turns
 those ripples into an arrow aimed at the goal.
 
 One more thing matters: **what a move costs.** Not every move is equal, and we measure
-them all in the same currency. Stepping to an adjacent block costs **1**. Breaking a
-block that's in the way costs **2**. Placing a block — to bridge a gap or build a step
-up — costs **4**. Walking is cheap; rearranging the world is expensive. Hold onto that
-`1 / 2 / 4`, because the distance between those numbers drives half of what follows.
+them all in one honest currency — **game ticks** (20 to a second), each move priced at
+the real time it takes (the full table is in [Movements](../movements.md)). A plain step
+to an adjacent block is the yardstick: **~4.6 ticks**. Breaking a block in the way costs
+its real **mining time**. And placing a block — to bridge a gap or build a step up —
+costs a base fee *plus the time you'll spend mining it back out someday*: with a stone
+pickaxe, placing cobblestone runs about **20 ticks** (a 6-tick base plus ~15 to remove it
+later), so it's the priciest thing the bot routinely does. Walking is cheap; rearranging
+the world is dear. The heuristic is scored in the same ticks — remaining distance times
+that ~4.6-tick walk cost — so `g` and `h` compare apples to apples. Hold onto the gap
+between a ~4.6-tick step and a ~20-tick placement; it drives half of what follows.
 
 ## The test bench
 
@@ -63,16 +70,16 @@ was wrong; the bot was right.
 ## Fix #1: make climbing worth considering
 
 The first trouble was going *up*. Picture a goal one block higher than the bot, with no
-stairs leading to it. To reach it the bot has to build a step — place a block, hop onto
-it. That costs **6** (4 for block place, 1 to move up, 1 to move forward). For a target
-further in the air the cost was worse because you have to place no only the block you
-will stand on, but the block the supports it. Two blocks plus two movements (up +
-forward) and building a single step-up costs about **10**. But the heuristic only knows
-*distance*, and "one block up" is almost no distance at all. So to the search, building
-that step looked absurdly expensive next to simply walking. Strolling nine blocks
-sideways (cost 9) to go hunting for a natural ramp scored *better* than building the
-step right where it stood (cost 10). The bot would wander the neighborhood looking for
-a slope rather than build the obvious staircase.
+stairs leading to it. To reach it the bot has to build a step — place a block, jump onto
+it. That step costs about **25 ticks**: the ~4.6-tick hop plus the ~20-tick placement
+(remember, most of that placement fee is the time the bot will spend mining the cobble
+back out later). But the heuristic only knows *distance*, and "one block up" is almost no
+distance at all — the goal barely got closer. So to the search, building that step looked
+absurdly expensive for the progress it bought, and it went hunting for a cheaper way up.
+Twenty-five ticks buys five or six blocks of walking, so the bot would stroll five or six
+blocks sideways looking for a natural ramp *before* it would agree to build the obvious
+staircase right where it stood — and with a weaker pickaxe, closer to nine. It wandered
+the neighborhood looking for a slope rather than build one.
 
 The fix was to put a thumb on the scale: treat vertical distance as worth more than
 horizontal. Any move that closed the gap to a goal above (or below) earned extra
@@ -153,7 +160,7 @@ clumsy 7-move path at `W = 3`. Two was the sweet spot.
 
 This is also where we tore out Fix #1. We'd been inflating vertical distance to coax the
 bot into building — but that was medicating a symptom. The real insight: **going up
-isn't expensive; placing the block is** — and that cost (4, remember) already lives on
+isn't expensive; placing the block is** — and that ~20-tick cost already lives on
 the move itself. Vertical distance is just distance. So we dropped the vertical weighting
 for honest, equal-axis 3D octile and let the place cost do the discouraging. Two payoffs
 at once: the bot stopped wandering for ramps *and* stopped over-building, because a built
@@ -242,17 +249,26 @@ open air, a player hovering 30 blocks overhead with no terrain to climb.
 It's a pointed irony. The hand-tuned vertical weighting from Fix #1, for all its faults,
 *did* coax the bot up a pillar — and we deliberately tore it out in Fix #4 for honest
 distance. So the tower is the one case our cleanup made worse. But the answer isn't to
-bring the hack back. The heuristic measures *distance*, and on the tower the bot is
-already directly below the goal — zero horizontal distance, so the straight-line trick
-has nothing to grip — while the true cost is 30 expensive placements `h` simply cannot
-see. The search fans out hunting a cheaper natural route, the very same instinct that
-finds the clever way around a wall, and there isn't one.
+bring the hack back. Look at what the honest heuristic sees: the bot is directly below the
+goal — zero horizontal distance, so the straight-line trick has nothing to grip — while
+the true cost is thirty ~25-tick placements `h` cannot see. Each pillar step raises `g` by
+~25 while dropping `h` by barely one block's worth, so the *total* `f` climbs as the bot
+builds. And A\* always expands its lowest-`f` node — so the instant a half-built pillar
+gets pricey, the search abandons it and starts a fresh one from the cell next door, which
+looks cheaper only because it hasn't started paying yet.
 
-The honest fix isn't more heuristic cleverness; it's to stop demanding a *complete* path
-before the bot will move at all. A search that returns its **best partial progress** when
-it runs out of budget — walk as far as you got, then think again from there — sidesteps
-the problem entirely, and it's the same machinery that will let us path across tens of
-thousands of blocks by planning the route in segments. That, plus hierarchical
-(region-level) pathfinding to thin the count another order of magnitude, is the next
-chapter. The per-position cost is low and the heuristic is sharp; the frontier moves up
-now to the *shape of the search itself*.
+And here's the compounding cruelty. We just measured that the bot will wander five to nine
+blocks before it agrees to *one* placement — so it would genuinely rather wander three
+cells and pillar once than stand still and pillar twice. Faced with a 30-tall climb it
+spreads the cost outward instead of upward, stubbing a partial pillar at every floor cell
+in a widening **cone**. The search doesn't fail for lack of speed; it drowns in half-built
+pillars.
+
+The honest fix *is* more heuristic cleverness — the very opposite of a hand-tuned hack. If
+the only way to the goal is to build straight up, that build cost isn't optional; it's
+*forced* — and a heuristic taught to charge for it up front would stop treating the
+vertical as free distance and stop fanning out. Teaching `h` to see that **forced cost**,
+and collapsing the whole uniform pillar into a single big move so the search never crawls
+it cell by cell, is the [next chapter](07_cuboid_macro_movements.md). The per-position cost
+is low and the heuristic is sharp; the frontier moves up now to the *shape of the search
+itself*.

@@ -360,8 +360,8 @@ public final class NavSectionBuilder {
     }
 
     /**
-     * <b>Pass 3 of the column build (the floorGap/runUp depth nibbles — PERF-DESIGN-navgrid-widening.md
-     * §2/§3, PERF-DESIGN-runup-nibble.md):</b> fill the parallel depth byte of every cell in the chunk
+     * <b>Pass 3 of the column build (the floorGap/runUp depth nibbles —
+     * docs/Optimizations/09_depth_nibbles.md):</b> fill the parallel depth byte of every cell in the chunk
      * column. Two single-direction sweeps, each one navtype read + one table/compare + one nibble store
      * per cell, carrying per-column state across sections:
      * <ul>

@@ -89,7 +89,7 @@ loom {
     }
 }
 
-// ---- Headless autotest run config (internal_docs/RESEARCH-headless-gametest.md §3.3) --------------
+// ---- Headless autotest run config -----------------------------------------------------------------
 // A dedicated-SERVER run that arms the common-src HeadlessAutotest hook (-Dorebit.autotest) in its own
 // run dir (run/autotest), so the scenario's seed/world/config never collide with the interactive run/.
 // Loom's server() preset appends the `nogui` program arg itself (bytecode-verified on Arch Loom

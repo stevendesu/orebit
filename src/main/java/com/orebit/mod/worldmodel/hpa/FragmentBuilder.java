@@ -109,7 +109,7 @@ public final class FragmentBuilder {
         // 2) MIXED: flood the passable cells, filter by occupiability, cap, extract footprints.
         out.setKind(RegionFragments.KIND_MIXED);
 
-        // Leaf-scale label emission (PERF-DESIGN-label-slab-membership §2): the flood below visits every
+        // Leaf-scale label emission (label-slab membership): the flood below visits every
         // passable cell anyway and the queue holds exactly one component's cells at a time, so stamping each
         // KEPT component's kept id gives the exact labelAll() slab for free (no second flood). Committed via
         // setLabeled only when ≥2 fragments survive un-collapsed — single-fragment membership is trivial and
