@@ -259,6 +259,16 @@ public class BotManager {
         // Via the level, not Entity.getServer() (removed in MC 1.21.9).
         MinecraftServer server = ((ServerLevel) Worlds.of(bot)).getServer();
         if (server != null) {
+            // Never PERSIST a dead bot. PlayerList.remove SAVES the bot's <uuid>.dat on the way out; a dead
+            // corpse would write Health=0, and the NEXT spawn's synchronous metadata snapshot (inside
+            // placeNewPlayer — see BotSpawn/overlays 1.21.9) would then reach observers as Health=0, driving
+            // the intermittent client death-render (red/tilt/twitch). Reviving here means the .dat always
+            // carries full health, which fixes the snapshot on EVERY version — including ≤1.21.8, whose
+            // placeNewPlayer loads the .dat INTERNALLY (no load-time seam to revive without a mixin). No-op
+            // for a live bot. The load-side reviveIfDead (spawnBotFor + the 1.21.9 overlay) stays as defence
+            // for a .dat that went to disk dead by another route (e.g. an autosave during the ~1s death window
+            // then a crash, so this clean-removal save never ran).
+            bot.reviveIfDead();
             server.getPlayerList().remove(bot);
         }
     }
