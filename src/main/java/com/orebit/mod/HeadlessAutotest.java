@@ -77,7 +77,8 @@ public final class HeadlessAutotest {
         Scenario scenario = new Scenario(
                 cell("orebit.autotest.start", "-3,125,-28"),
                 cell("orebit.autotest.goal", "201,-28,90"),
-                Integer.getInteger("orebit.autotest.budgetTicks", 24_000));
+                Integer.getInteger("orebit.autotest.budgetTicks", 24_000),
+                Integer.getInteger("orebit.autotest.startDelayTicks", 0));
         events.onServerStarted(scenario::start);
         events.onWorldTickEnd(scenario::tick);
         OrebitCommon.LOGGER.info("[Orebit/autotest] armed: start={} goal={} budget={}t",
@@ -107,6 +108,11 @@ public final class HeadlessAutotest {
         final BlockPos start;
         final BlockPos goal;
         final int budgetTicks;
+        /** Ticks to let the world/nav grid settle AFTER spawn before issuing the goto (diagnostic seam): the
+         *  first plan otherwise fires at tick 1 on an UNBUILT nav grid, where both tiers read the optimistic-AIR
+         *  default and the block search floods through phantom air. 0 = the historical spawn-tick goto. */
+        final int startDelayTicks;
+        boolean goalIssued;
 
         MinecraftServer server;
         FakePlayerEntity owner;   // synthetic, never world-placed (see class javadoc)
@@ -119,10 +125,11 @@ public final class HeadlessAutotest {
         BufferedWriter traceOut;  // the CURRENT per-search file (BlockPathfinder.TRACE_OUT aliases it)
         int traceSearches;
 
-        Scenario(BlockPos start, BlockPos goal, int budgetTicks) {
+        Scenario(BlockPos start, BlockPos goal, int budgetTicks, int startDelayTicks) {
             this.start = start;
             this.goal = goal;
             this.budgetTicks = budgetTicks;
+            this.startDelayTicks = startDelayTicks;
         }
 
         /**
@@ -170,10 +177,17 @@ public final class HeadlessAutotest {
                 // anyway so a rerun against a dirty run dir can never smuggle items in.
                 bot.getInventory().clearContent();
                 bot.getInventory().setItem(0, new ItemStack(Items.STONE_PICKAXE));
-                // The same internal call /bot goto makes (GotoCommand -> comeTo): COME once, then STAY.
-                bot.comeTo(goal);
-                OrebitCommon.LOGGER.info("[Orebit/autotest] bot spawned at {} heading to {}",
-                        compact(bot.blockPosition()), compact(goal));
+                // The same internal call /bot goto makes (GotoCommand -> comeTo): COME once, then STAY. Deferred
+                // by startDelayTicks so the nav grid can build first (else the tick-1 plan floods on unbuilt nav).
+                if (startDelayTicks <= 0) {
+                    bot.comeTo(goal);
+                    goalIssued = true;
+                    OrebitCommon.LOGGER.info("[Orebit/autotest] bot spawned at {} heading to {}",
+                            compact(bot.blockPosition()), compact(goal));
+                } else {
+                    OrebitCommon.LOGGER.info("[Orebit/autotest] bot spawned at {}; deferring goto {} by {}t (nav settle)",
+                            compact(bot.blockPosition()), compact(goal), startDelayTicks);
+                }
             } catch (Throwable t) {
                 OrebitCommon.LOGGER.error("[Orebit/autotest] scenario setup threw", t);
                 finish("FAIL", "setup threw " + t.getClass().getSimpleName() + " (see log)");
@@ -192,6 +206,20 @@ public final class HeadlessAutotest {
 
             if (!bot.isAlive()) {
                 finish("FAIL", "bot died");
+                return;
+            }
+
+            // Deferred goto (startDelayTicks): sit at spawn until the nav grid around the bot has built, THEN
+            // issue the goal — so the traced searches run on real terrain, isolating a heuristic pathology from
+            // the tick-1 unbuilt-nav flood. Skip the arrival poll entirely until the goal exists.
+            if (!goalIssued) {
+                if (ticks < startDelayTicks) {
+                    return;
+                }
+                bot.comeTo(goal);
+                goalIssued = true;
+                OrebitCommon.LOGGER.info("[Orebit/autotest] goal issued at tick {} (after {}t settle) heading to {}",
+                        ticks, startDelayTicks, compact(goal));
                 return;
             }
 
