@@ -3,6 +3,32 @@ site_url: https://stevendesu.github.io/orebit
 docs_dir: .
 site_dir: ../docs_site
 repo_url: https://github.com/stevendesu/orebit
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting_started/installation.md
+      - Supported Versions: getting_started/supported_versions.md
+  - World Model: worldmodel.md
+  - Pathfinding: pathfinding.md
+  - Movements: movements.md
+  - World Edits: world_edits.md
+  - Gathering: gathering.md
+  - Commands: commands.md
+  - Configuration: configuration.md
+  - Optimizations:
+      - Optimizations/index.md
+      - Reading Blocks: Optimizations/01_block_reading.md
+      - Reusing Memory: Optimizations/02_reusing_memory.md
+      - Block Fingerprints: Optimizations/03_block_fingerprints.md
+      - A Custom Hash Map: Optimizations/04_custom_hash_map.md
+      - The Pathfinding Hot Path: Optimizations/05_pathfinding_hot_path.md
+      - Fewer Nodes: Optimizations/06_fewer_nodes.md
+      - Cuboid Macro-Movements: Optimizations/07_cuboid_macro_movements.md
+      - Measure Everything: Optimizations/08_measure_everything.md
+      - Depth Nibbles: Optimizations/09_depth_nibbles.md
+      - Off the Tick Thread: Optimizations/10_background_pathfinding.md
+      - Teaching the Block Search the Map: Optimizations/11_region_heuristic.md
+      - Paying for the Map: Optimizations/12_field_build.md
 theme:
   name: material
   icon:

@@ -40,13 +40,13 @@ Two robustness rules matter in practice:
 Within the current window of the skeleton, A\* runs over the recomputed nav grid,
 expanding **movements** (below). This search is the hot path, and it's been through
 several rounds of measured optimization — the
-[hot-path](Optimizations/pathfinding_hot_path.md),
-[fewer-nodes](Optimizations/fewer_nodes.md),
-[macro-movement](Optimizations/cuboid_macro_movements.md), and
-[depth-nibble](Optimizations/depth_nibbles.md) chapters tell that story in full.
+[hot-path](Optimizations/05_pathfinding_hot_path.md),
+[fewer-nodes](Optimizations/06_fewer_nodes.md),
+[macro-movement](Optimizations/07_cuboid_macro_movements.md), and
+[depth-nibble](Optimizations/09_depth_nibbles.md) chapters tell that story in full.
 (Even the *first* search after boot is covered: the server warms the pathfinder up on
 synthetic terrain at startup — `pathing.warmup` — so no player pays the JIT compiler's
-one-time ~22 ms bill.) By default it runs **[off the server tick entirely](Optimizations/background_pathfinding.md)**,
+one-time ~22 ms bill.) By default it runs **[off the server tick entirely](Optimizations/10_background_pathfinding.md)**,
 on a pool of background worker threads with a wall-clock time budget instead of a node
 cap — so a big flood no longer has to fit between two frames (`pathing.async`, on by
 default; set it `false` for the old synchronous tick-thread search). The
@@ -68,8 +68,8 @@ load-bearing pieces:
   neighbourhood of the route it found, and any region it never settled reads a provable
   lower bound anchored on the goal rather than a blank — so the guidance never simply
   runs out at the edge of the map, even when the search is forced into a wide detour.
-  The [region-heuristic chapter](Optimizations/region_heuristic.md) tells the whole
-  story; [what building that field costs](Optimizations/field_build.md) got its own
+  The [region-heuristic chapter](Optimizations/11_region_heuristic.md) tells the whole
+  story; [what building that field costs](Optimizations/12_field_build.md) got its own
   chapter.
 - **A goal premium that respects building.** Distance heuristics are blind to the
   fact that a goal floating over open air must be *built to* — so the search adds the

@@ -1,15 +1,44 @@
 # Off the Tick Thread
 
-Every optimization so far has been about making the search *cheap* — fewer nodes, fewer
-nanoseconds per node, no allocation. This chapter is about a different lever: making the
-search *not the server's problem*. Because no matter how cheap a node gets, a big enough
-search still doesn't fit in a Minecraft tick.
+Every optimization so far has gone after the search *itself* — fewer nodes, fewer
+nanoseconds per node, no allocation. This chapter is the first that leaves the algorithm
+alone and goes after the two things *around* it: the **environment** the search runs in,
+and the **time budget** it runs against. Because no matter how tight the algorithm gets,
+a *cold* search stalls before it's fast, and a big *warm* one still doesn't fit in a
+Minecraft tick.
+
+## The cold first search: warm the engine before anyone's watching
+
+The first externality is the JVM itself. One latency no steady-state benchmark ever
+showed: the *first* search after a server boots took **21.8 ms at the median** (p90
+30 ms) — against ~1.3 ms for the second and under a millisecond once warm. Memory wasn't
+the culprit: the allocation audit put the search scratch at ~41 KB on first touch, and
+pre-allocating it would save only *microseconds*. The 22 ms is the JVM — classloading
+plus *interpreting* the whole pathfinder the first time it runs, before the JIT has
+compiled any of it — and it lands squarely on a live player's tick.
+
+Only running the real code warms it, so that became the fix: at server start, before any
+player can join, the pathfinder runs a few hundred synthetic searches over a private
+in-memory fixture (~50 KB of hand-built sections in production shapes — short walks,
+budget floods, wall climbs, water crossings — chosen for *branch coverage* rather than
+speed). Rounds repeat until search times plateau, capped at 1.5 s of wall clock. Measured
+on a fresh-JVM harness, ten runs per arm:
+
+| | first search p50 | p90 | boot cost |
+| --- | ---: | ---: | ---: |
+| without warm-up | 21.8 ms | 30.0 ms | — |
+| with warm-up | **0.67 ms** | 0.81 ms | 475 ms median |
+
+A **32× improvement** in the one latency a player actually feels first — and honestly
+measured, since the timed first search is a terrain shape the warm-up never literally
+ran. It buys nothing at steady state; it simply moves the JIT's unavoidable warm-up out
+of the first player's way. On by default (`pathing.warmup`, `pathing.warmupBudgetMs`).
 
 ## The tick is a hard 50 ms, and search was spending it
 
 A Minecraft server runs at twenty ticks a second: **50 ms per tick**, shared by every
 mob, block update, and player in the world. Whatever the pathfinder spends, everything
-else does without. [The hot-path chapter](pathfinding_hot_path.md) is the story of getting
+else does without. [The hot-path chapter](05_pathfinding_hot_path.md) is the story of getting
 a search node down to ~400–700 ns so a flood *fits* — but "fits" was always a compromise.
 A warm window search runs 0.1 ms on a short hop and 4–16 ms on a flood or an edit-heavy
 pillar. Sixteen milliseconds is a *third of the tick*, gone, on one bot deciding where to
@@ -22,7 +51,7 @@ how clever the bot could be. A goal that needed twelve thousand positions to sol
 simply unsolvable, not because the search couldn't do it but because it wasn't allowed to
 do it *between two frames*.
 
-[Fewer Nodes](fewer_nodes.md) named the way out: return your best partial progress and
+[Fewer Nodes](06_fewer_nodes.md) named the way out: return your best partial progress and
 plan the route in segments. Both of those want the same thing underneath — a search that
 runs on **its own time**, not the server's.
 
@@ -33,7 +62,7 @@ when it's done. What makes it cheap is that the search was *already* built for i
 before we needed it.
 
 Two properties fell into place. The search's scratch — its node table, its heap, its edit
-pool — was already [thread-local](reusing_memory.md): each thread that runs a search gets
+pool — was already [thread-local](02_reusing_memory.md): each thread that runs a search gets
 its own isolated arena that grows once and serves forever. And the nav grid the search
 reads, the `NavStore`, was already a per-level concurrent map. So a pool of worker threads
 needs no new locking on the hot path; each worker gets a private search arena for free and
@@ -58,7 +87,7 @@ view-distance.
 Concurrency has exactly one place it can hurt you here, and it's worth telling in full
 because the fix is prettier than the bug.
 
-The nav grid recycles memory aggressively — a [pooling pattern](reusing_memory.md) from
+The nav grid recycles memory aggressively — a [pooling pattern](02_reusing_memory.md) from
 the single-threaded days. When a chunk unloads, its `NavSection` objects go straight back
 into a pool; the next chunk to load pops one, zero-fills it, and refills it with *its own*
 blocks. Perfectly safe when one thread does everything in order. Lethal the moment a worker
@@ -125,7 +154,7 @@ actually reaches the boundary, if its real position agrees with the prediction (
 small tolerance), the pre-computed plan is adopted with **no pause at all** — the bot flows
 through the seam. A prediction that turns out wrong is simply parked and retested at each
 boundary; it never churns mid-window. This is Baritone's no-boundary-pause splicing, sitting
-on the window-and-boundary machinery the [region tier](region_heuristic.md) already gave us
+on the window-and-boundary machinery the [region tier](11_region_heuristic.md) already gave us
 — and the same splice primitive is what a future cross-dimension portal router will reuse
 unchanged.
 
@@ -135,7 +164,7 @@ The headline: on the complex paths that used to hitch, tick time dropped from **
 about 3 ms** — the search left the tick, so the tick stopped paying for it. And the ceiling
 lifted: searches that couldn't finish in a frame now finish on their own time.
 
-Held to the [house benchmark protocol](measure_everything.md), the change measured
+Held to the [house benchmark protocol](08_measure_everything.md), the change measured
 **neutral** on the synchronous path — the per-node deadline check and the request plumbing
 are free, sign-flipping across interleaved pairs at well under a percent. That's the result
 you want from an architectural change: it moves the work, it doesn't tax the work.

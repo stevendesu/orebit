@@ -87,14 +87,14 @@ public final class Fall implements Movement {
                 continue;
             }
 
-            // floorGap fast path (PERF-DESIGN-navgrid-widening.md §4): the resident nibble answers "where
+            // floorGap fast path (docs/Optimizations/09_depth_nibbles.md): the resident nibble answers "where
             // is the first standable cell below" in one read — trusted only when it is maintained (not
             // UNKNOWN — column-built grids always are; single-section test grids aren't) AND no path edit
             // can intersect the cells the scan would have read ((nx, y-maxDrop..y-1, nz) — the verify loop
             // below cell y stays edit-aware either way). The gap is the memoized result of the EXACT scan
             // predicate (NavBlock.isStandable over the same resident navtypes), so each branch reproduces
             // the legacy scan's outcome byte-for-byte; UNKNOWN or overlapping edits fall through to the
-            // legacy loop. Measured: FLOOD −5.1% / CLIFFS −4.3% / TOWER −3.4% (PERF-RESULTS-2026-07-03.md).
+            // legacy loop. Measured: FLOOD −5.1% / CLIFFS −4.3% / TOWER −3.4% (docs/Optimizations/09_depth_nibbles.md).
             int scanFrom = y - 2;
             int fg = ctx.floorGapAt(nx, y, nz);
             if (fg != TraversalGrid.DEPTH_UNKNOWN

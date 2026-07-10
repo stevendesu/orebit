@@ -71,7 +71,7 @@ import net.minecraft.world.level.chunk.Strategy;
  *       and any FUTURE cross-search persistent structures warm. A future "persist base cuboids across
  *       searches" change must show its win here; a persistence bug (stale data leaking across searches)
  *       shows here as a wrong-cost/wrong-time anomaly relative to SHORT + UPOVER_OPEN measured alone.
- *   <li><b>SETUP</b> — the DIRECT per-search-setup probe (PERF-DESIGN-cold-start-bench.md): a fresh
+ *   <li><b>SETUP</b> — the DIRECT per-search-setup probe: a fresh
  *       {@link NavGridView} per op searching to a goal already inside {@code isGoal}'s arrival tolerance
  *       (start {@code (8,0,8)} → goal {@code (9,0,9)}: within 1 horizontally), so the FIRST pop terminates
  *       the search — {@code lastExpansions() == 0}, zero relaxations, empty plan. What remains inside the
@@ -85,7 +85,7 @@ import net.minecraft.world.level.chunk.Strategy;
  *       growth cap ({@code confineBound == null}, {@code cuboidBound != null} — the live window replan's
  *       exact parameter shape), so the op ALSO pays {@code NavGridCuboidsView} construction and the
  *       one-shot {@code GoalForcedCost.probe} (goal-face cuboid extractions — the 38-45%-of-small-searches
- *       item in PERF-PROFILE-2026-07.md). SHORT passes {@code bound == null}, so the probe early-outs and
+ *       item in the perf profile). SHORT passes {@code bound == null}, so the probe early-outs and
  *       NO existing scenario measured this. SETUP_MACRO − SETUP ≈ the macro-context + goal-probe bill.
  *   <li><b>FLOOD</b> — the WARM EDIT-HEAVY guard (the perf profile's S3 shape, which no other scenario
  *       reproduces since macro collapse shrank TOWER to ~28 pops): an unreachable goal above the built
@@ -186,7 +186,7 @@ public class PathfinderBenchmark {
                 setupSanityDryRun(SETUP_CORRIDOR);
                 break;
             case "FLOOD":
-                // The WARM EDIT-HEAVY guard (PERF-PROFILE-2026-07 §2's "WARM FLOOD" probe, promoted): an
+                // The WARM EDIT-HEAVY guard (the perf profile's "WARM FLOOD" probe, promoted): an
                 // UNREACHABLE goal far above the fixture's built ceiling (the shared column ends at y=63;
                 // cells above are unbuilt, so no candidate is ever relaxed there), with NO corridor — no
                 // cuboid view ⇒ no macro collapse, no goal-forced-cost premium. Every column's pillar climb
@@ -203,7 +203,7 @@ public class PathfinderBenchmark {
                 floodSanityDryRun();
                 break;
             case "CLIFFS":
-                // The Fall-heavy guard (PERF-DESIGN-navgrid-widening.md §7.3): descending terraced open
+                // The Fall-heavy guard (docs/Optimizations/09_depth_nibbles.md): descending terraced open
                 // terrain — chunk-aligned 12-block cliffs stepping down toward the goal — so standing pops
                 // ride terrace edges whose cardinals are deep open columns and Fall's per-cardinal down-scan
                 // is the dominant read volume (TOWER macro-collapses to ~28 pops and OPEN is flat, so no

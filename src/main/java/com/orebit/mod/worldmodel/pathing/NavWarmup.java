@@ -15,11 +15,11 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.Blocks;
 
 /**
- * Boot-time JIT warm-up for the block-tier pathfinder ({@code internal_docs/PERF-DESIGN-warmup-searches.md}).
+ * Boot-time JIT warm-up for the block-tier pathfinder.
  *
  * <p><b>Why:</b> the first real search after boot runs the whole pathfinder class graph interpreted /
- * C1-cold (~16 ms for a 2-node search, {@code PERF-PROFILE-2026-07.md} S1) and the first <i>big</i> search
- * is still ~61% JIT warm-up (S2) — and because the bot spawns on player join in FOLLOW, that cold cost
+ * C1-cold (~16 ms for a 2-node search) and the first <i>big</i> search
+ * is still ~61% JIT warm-up — and because the bot spawns on player join in FOLLOW, that cold cost
  * lands on a live player tick. Only a real execution of the real code warms it, so this runs ~500 synthetic
  * searches over a private, hand-built section map at {@code SERVER_STARTED}, before any player can join.
  *

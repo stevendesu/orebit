@@ -1,36 +1,73 @@
 # Teaching the Block Search the Map
 
-[Fewer Nodes](fewer_nodes.md) ended on a cliff we hadn't crossed — **the tower**, a
-goal reachable only by pillaring straight up into open air — and named the fix:
-"hierarchical (region-level) pathfinding to thin the count another order of magnitude."
-This is that chapter. It turns out the region tier does more than shrink the search;
-handed to the block planner correctly, it becomes a *map the fine search can read*, and
-that changes what "hard" even means.
+Everything up to here has been about A\*: making each node cheap, visiting fewer of
+them, jumping whole runs at once, moving the search off the tick. Put together, they took
+the block search about as far as a block search can go. But "as far as A\* can go" still
+isn't far enough. Point the bot at a goal a few hundred blocks off, or one tucked behind
+the wrong kind of terrain, and even a fast, lean, greedy A\* fans out into tens of
+thousands of positions and quits. To go further we need a different *kind* of help — not a
+faster search, but a **map**.
 
-## The block search is topology-blind
+## The standard fix: plan the route before you walk it
 
-The block A\* is guided by a heuristic — 3D octile distance to the goal, scaled by the
-greed weight. That heuristic is a straight-line estimate, and a straight line knows
-nothing about walls.
+The way out is older than this project and isn't ours: **hierarchical pathfinding**, HPA\*
+in the literature. Solve the problem twice, at two zoom levels.
 
-Picture the goal on the far side of a thin stone wall, or at the bottom of a cave whose
-only entrance is twenty blocks the other way, or — the case that started this — a chunk
-of buried ore with no open face at all. Octile points the bot **straight at the goal**
-every time. So the search fans out toward the goal, hits the wall, and starts hunting
-for a cheaper natural way through — the very same instinct that finds the clever route
-around an obstacle, except here it fans across the whole open volume because the
-straight-line estimate keeps insisting the goal is *right there*. On the flood scenario
-that named this arc, the block search burned past **forty thousand candidate positions**
-looking for a way to a goal it could have reached by walking around one corner.
+First, zoom out. Carve the world into a coarse grid of **regions** — Orebit's are 16-block
+cubes — and build a small graph whose nodes are regions and whose edges say "you can get
+from this region to that neighbour, and roughly what it costs." A search over *that* graph
+is tiny: a route across five hundred blocks is a few dozen region-hops, not thousands of
+block-steps. It can't place a single footstep, but it knows the shape of the answer — "up
+through this pocket, across three regions, down into that cave." Call that rough route the
+**skeleton**.
 
-The maddening part is that we already know the way around. The
-[region tier](../worldmodel.md#region-level) plans over a coarse graph of the world; by
-the time the block search starts, a *region skeleton* already exists that says, in
-effect, "up through this pocket, over one region, down into the cave." The block search
-just never asks. The skeleton bounds *where* it searches (the sliding window), but inside
-that window the heuristic is still the topology-blind octile.
+Then zoom back in. The block A\* never solves the whole journey at once; it only ever
+solves the next little hop — from where the bot stands to a **window target** a few
+regions along the skeleton. Reach it, slide the window forward, search again. A single
+five-thousand-node search that would flood and fail becomes something like a *hundred*
+short fifty-node searches, each one easy, because each is aimed at a target that is close
+and — thanks to the skeleton — guaranteed to lie in the right direction.
 
-So the fix is not more heuristic cleverness. It's to let the fine search **read the
+None of that is novel; it's the textbook hierarchical trick, and Orebit's
+[region tier](../worldmodel.md#region-level) and [two-tier driver](../pathfinding.md) are
+an ordinary implementation of it. What *this* chapter is about is the part the textbook
+doesn't hand you — the cases where, even with a skeleton in place, the block search still
+drowned.
+
+## Where it still drowned: the swamps
+
+The skeleton fixed the problem of *scale*. It did not fix a subtler one, and two cases
+made it vivid.
+
+**A pillar with a splinter in it.** Send the bot to a goal hanging in open air and it
+should just pillar straight up — and [the macro layer](07_cuboid_macro_movements.md) makes
+it do exactly that, *as long as the air column is uniform*, because a clean cuboid lets
+the forced-cost heuristic see the whole expensive climb at once. Drop a single floating
+oak log into that column, though, and the cuboid can't span it. The forced-cost proof
+shatters into scraps too short to matter, the heuristic goes back to reading "goal is
+straight up, that's cheap," and the cone of half-built pillars floods right back — undone
+by one stray block.
+
+**A cave it won't go down.** Point the bot at a goal at the bottom of a cave whose mouth
+is off to one side. Octile points it *straight* at the goal — through the ceiling — so it
+fans out across the whole open sky above the cave, which is vast and costs almost nothing
+to wade through, hunting for a way down that isn't there. It will happily explore an
+entire above-ground region before it tries the entrance twenty blocks over.
+
+Both are the same disease. The skeleton hands the block search a window target — a
+short-term goal, guaranteed to lie in the right direction — but says nothing about the
+most efficient *way* to reach it. So inside the window the search is back to
+topology-blind octile, and it pours itself into whatever is cheapest to flood: the open
+sky, the wrong side of a wall, the flat plain above a cave. Those are **swamps** — big
+volumes that cost nothing to wade into and get you no closer to the goal. On the flood
+scenario that named this arc, the block search burned past **forty thousand candidate
+positions** filling a swamp it could have skipped by reading a single number.
+
+Because we already *have* that number. The [region tier](../worldmodel.md#region-level)
+that drew the skeleton can price any region's true cost-to-goal — it knows the sky loops
+the long way around and the cave mouth is the short way in. The fine search just never
+asks. The skeleton bounds *where* it searches; inside that window the heuristic stays
+blind. So the fix isn't more heuristic cleverness — it's to let the fine search **read the
 coarse map**.
 
 ## A cost-to-goal field
@@ -58,7 +95,7 @@ and never goal-tests (it floods the whole box), and that it runs shortest-first 
 heuristic suppressed. One coarse flood per window re-plan; then every one of the block
 search's millions of heuristic reads is a single array lookup. (What that one flood
 actually *costs* turned out to be a story of its own — the
-[next chapter](field_build.md).)
+[next chapter](12_field_build.md).)
 
 There's a calibration subtlety worth a sentence. The forward region search prices a
 pillar-up dear and a fall cheap on a *compressed* scale that's self-consistent for
@@ -89,7 +126,7 @@ region's goalward exit it reads the onward cost. And out at the far corner of a 
 reads high, because from there you really do have to cross to the exit first. The block
 search feels the slope and threads toward the opening instead of pooling.
 
-One honest note, because [Measure Everything](measure_everything.md) is the house
+One honest note, because [Measure Everything](08_measure_everything.md) is the house
 religion: the gradient found a genuinely *cheaper* path on the flood scenario (cost 825
 versus the flat field's 888, and the move mix flipped from digging down to climbing up
 and over) — but it did **not** cut the expansion count. Traced honestly, that's
@@ -162,32 +199,6 @@ encoded as a single goal node so the search's goal *test* never changes. *V* is 
 search-only fiction: it never enters a stored region record, and the handful of consumers
 that read a skeleton step's fragment learn to skip the sentinel. The bot walks to the near
 pocket and digs the last blocks; the loop is gone.
-
-## The bug that wasn't: it was never turned on
-
-The most humbling discovery came late. We'd built the field, the gradient, the place model,
-the dig-flood — measured them all in the `/bot trace` diagnostic — and the live bot's
-behaviour *hadn't changed at all*. Following it, it took the same path as before every
-time.
-
-The heuristic was **trace-only**. The field was handed to the search through a static hook
-that only the trace command set; the real sync and background searches ran with it null,
-which is byte-identical to no region heuristic whatsoever. Every improvement in this
-chapter had been landing in a diagnostic and nowhere else.
-
-Wiring it live meant carrying the field as data instead of a static: the search gained a
-field parameter (null stays byte-identical), the [background search](background_pathfinding.md)'s
-request record carries it — built on the tick thread where it can read the world, then
-read-only on the worker, which is safe because each field is written once and never touched
-again — and the two-tier driver builds one per **window target**, rooted at the cell that
-search actually aims for and cached until the target moves. That root matters more than it
-sounds: the first live wiring built the field once per plan, rooted at the *final* goal, and
-handed that same field to every window search — so a window search deep in a cave was
-gradient-guided toward a goal hundreds of blocks past its own target, read a start heuristic
-sixty times its honest octile, and flooded tens of thousands of nodes chasing the wrong
-attractor. A gradient is only as good as its root; each search gets one rooted at its own
-goal. It's a small change that only exists because we'd been grading our homework against
-an answer key the student never saw.
 
 ## What honest costs buy you
 

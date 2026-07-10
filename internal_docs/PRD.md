@@ -382,7 +382,7 @@ Adopt Baritone's **tick-based** model (its strongest part; ours was unspecified)
 
 - **Block-level (as built): weighted, not admissible.** The "stay admissible because
   the hierarchy handles scale" bet did not survive contact — even windowed searches
-  drowned in equal-cost route ties (see `docs/Optimizations/fewer_nodes.md`). The
+  drowned in equal-cost route ties (see `docs/Optimizations/06_fewer_nodes.md`). The
   shipped heuristic is symmetric 3D octile × `greedyWeight` (config, default 2.0),
   plus a tiny straight-line tie-break, plus the **admissible `GoalForcedCost`
   premium** (cheapest-goal-face forced build/dig cost, far-face excluded with the
@@ -487,7 +487,7 @@ ascends the pathological open-air pillar (incl. the floating-block case). Built:
 - **Block tier + movements + macro-ops + partial-path** (was Phase 4's block half) — alloc-free
   `BlockPathfinder`, the Tier-1 `Movement` set, cuboid macro-collapse + the `GoalForcedCost` premium, and
   `PARTIAL_PATH` (ON) as the structural net for heuristic terrain blind spots. Specs:
-  `internal_docs/MACRO-IMPLEMENTATION.md`, `CUBOID-PERF-OPTIONS.md`.
+  `internal_docs/MACRO-IMPLEMENTATION.md`.
 
 **Carried forward (designed in the old plan, NOT built — mapped into part B):** the tick-based cost model +
 inventory snapshot (old Phase 4 cost half) → **Phase 1**; the resource octree + resource search (old Phase 2)
@@ -500,7 +500,7 @@ mining tick model; mining is now executed timed-and-vanilla by `BotMining`). Cap
 inventory) → **tick-based costs** (Baritone-style: break time derived from the tool, place cost incl. the
 consumed block). Makes the pathfinder's costs real (today they're arbitrary magic numbers) and is the keystone
 the useful commands depend on. The hard design decision is **consumables-along-path** — a finite, depleting
-block/tool budget vs the alloc-free hot path. Detail + the per-rung seams: **`internal_docs/AGENCY-LAYER-PLAN.md`.**
+block/tool budget vs the alloc-free hot path. The per-rung seams are detailed in the phased build plan below.
 
 **Phase 2 — Far-goal / exploration robustness + HPA\* driver bugs.** ← the next arc. Several distinct
 HPA*-tier issues surfaced during the Phase-1 cross-version smoke test (2026-06-26), in rough priority:
@@ -567,8 +567,7 @@ region path vs A*-exact block path, so a region-vs-block disagreement is visible
 **Phase 6 — Deferred pathfinding-quality** (opportunistic; composes WITH partial-path, doesn't replace it).
 A stronger forced-cost premium; **dominance/symmetry pruning** (the real anti-flood endgame — a *pruning rule*,
 so it has no admissibility constraint, unlike the heuristic); the high-weight "dig out of the trap" escalation
-(reads `BotCaps`, so it lands after Phase 1's config/tools); the SoA cuboid cache (`CUBOID-PERF-OPTIONS.md`
-option C). None blocking — each makes floods rarer and partial paths better.
+(reads `BotCaps`, so it lands after Phase 1's config/tools); the SoA cuboid cache (Option C). None blocking — each makes floods rarer and partial paths better.
 
 **Phase 7 — The agent brain + integration** (the original end-to-end vision; all stubs today; only sensible
 once the bot is a capable, configurable agent — Phases 1 + 4). In dependency order:

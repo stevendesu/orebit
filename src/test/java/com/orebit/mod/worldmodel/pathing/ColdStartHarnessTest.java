@@ -14,7 +14,7 @@ import net.minecraft.SharedConstants;
 import net.minecraft.server.Bootstrap;
 
 /**
- * E5 cold-start harness ({@code internal_docs/PERF-DESIGN-warmup-searches.md} §7): measures the JIT-COLD
+ * E5 cold-start harness: measures the JIT-COLD
  * first {@code findPath} wall-clock in a FRESH JVM — the one number the steady-state JMH suite cannot see
  * by construction (forks=0 reuses a warmed JVM; warm-up iterations exist precisely to exclude it).
  *

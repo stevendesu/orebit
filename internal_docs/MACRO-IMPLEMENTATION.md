@@ -19,7 +19,7 @@
 - §2 `Axes` — direction vocabulary. §3 `Cuboid` — the reusable box.
 - §4 `CuboidExtractor` — THE core: directional maximal cuboid, 2 stages (grow a 2-D slab orthogonal to
   travel, then extend along the travel axis); since accelerated by the E4 runUp nibble
-  (`PERF-DESIGN-runup-nibble.md`).
+  (`docs/Optimizations/09_depth_nibbles.md`).
 - §5 `NavGridCuboidsView` — per-search query seam (cuboid cache + PathEdits overlay + edit-shrink).
 - §6 `MacroJump` — the jump-length arithmetic (the single home of both non-negotiables).
 - §7 `GoalForcedCost` — the admissible goal-cuboid forced-cost heuristic (MACRO-MOVEMENTS §4); since s42

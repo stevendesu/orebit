@@ -2,7 +2,7 @@ package com.orebit.mod.config;
 
 /**
  * The single source of truth for the flat, namespaced property keys in {@code config/orebit.properties}
- * (PRD §10 Phase 1a / AGENCY-LAYER-PLAN "Capability config"). Every key the owner can set appears here
+ * (PRD §10 Phase 1a). Every key the owner can set appears here
  * exactly once, so {@link ConfigLoader} (read + default-file generation), {@link ConfigValidator} (range
  * checks), and any future doc/GUI tooling all name the same string — no stringly-typed drift between the
  * file format, the parser, and the validator.

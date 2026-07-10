@@ -3,7 +3,7 @@ package com.orebit.mod.pathfinding.blockpathfinder;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 /**
- * The tool / mining-speed model (PRD §10 Phase 1c, AGENCY-LAYER-PLAN "Tool use") — turns "how fast does
+ * The tool / mining-speed model (PRD §10 Phase 1c) — turns "how fast does
  * <i>this</i> bot mine <i>this</i> block" into a resident table read the A* hot path can do in array
  * indexing, never a per-node vanilla {@code getDestroySpeed} call.
  *

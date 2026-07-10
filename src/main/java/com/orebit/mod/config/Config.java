@@ -10,7 +10,7 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /**
  * The validated, immutable snapshot of every owner-facing capability knob loaded from {@code
- * config/orebit.properties} (PRD §10 Phase 1a / AGENCY-LAYER-PLAN "Capability config"). One {@code
+ * config/orebit.properties} (PRD §10 Phase 1a). One {@code
  * Config} is the in-memory source of truth the rest of the agency layer reads: the pathfinder gets a
  * {@link BotCaps} via {@link #toBotCaps()}, the follower gets its conjured-block + survival flags via the
  * accessors below. {@link ConfigLoader} produces it (parse → validate); {@link ConfigValidator}
@@ -191,7 +191,7 @@ public record Config(
     // static, read only on the cold break-cost paths.
 
     // {@link #warmup} / {@link #warmupBudgetMs} (pathing group, auto-generated accessors) gate the
-    // boot-time synthetic warm-up searches (worldmodel.pathing.NavWarmup, PERF-DESIGN-warmup-searches.md):
+    // boot-time synthetic warm-up searches (worldmodel.pathing.NavWarmup):
     // ~500 searches over a private in-memory fixture at SERVER_STARTED so the first REAL search doesn't
     // run JIT-cold (~16 ms). warmup=false is the off-switch; warmupBudgetMs is the hard wall-clock cap on
     // the pass (default 1500). Boot-only — read once in OrebitCommon's onServerStarted hook, never per

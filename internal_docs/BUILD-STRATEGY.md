@@ -176,89 +176,41 @@ newest-era-authored call that doesn't exist on an older era fails loudly, not si
 - **Release**: tag the commit that produced each published build; aggregate all eras' JARs into one
   release. (Replaces the single `chiseledBuild`.)
 
-## 8. Current state & sequencing
+## 8. Current state (settled)
 
-**The `core` split is DONE (step 1, session 7).** The former single `master` (Stonecutter+Architectury
-spanning MC 1.20.1→1.21.11 on Architectury Loom 1.13.469 / Gradle 8.12.1 — 45 JARs green) is now two
-branches:
-- **`core`** — version-portable logic + overlays + `versions/*/gradle.properties` + build-script
-  logic. Holds no toolchain values; **not buildable** (a missing `era.properties` makes Gradle fail
-  fast with a clear message).
-- **`main`** — `core` + a single commit adding the era-owned `era.properties` (the ≤1.21.11 era).
-  The newest/current era; intended GitHub default.
+**The `core` split is DONE.** The former single `master` (Stonecutter + Architectury, MC 1.20.1→1.21.11
+on Architectury Loom 1.13.469 / Gradle 8.12.1 — 45 JARs green) is now the toolless **`core`** trunk plus
+two era branches:
 
-**Externalization mechanism (settled at the split):** the per-era toolchain values live in a
-root-level **`era.properties`** (era-owned; absent on `core`):
-- `loom.version` — read in `settings.gradle.kts`'s `pluginManagement { resolutionStrategy { eachPlugin
-  { useVersion(...) } } }` (the block reads the file inline via `settingsDir`, since the
-  pluginManagement preamble can't see the script-body helpers). `stonecutter.gradle.kts` declares
-  `id("dev.architectury.loom") apply false` with no literal version.
-- `mc.versions.{common,fabric,neoforge,forge}` — comma-separated, sorted ascending; `settings.gradle.kts`
-  feeds them to `versions()`/`branch()` via an `eraList(key)` helper. The loader-coverage policy
-  comments stay on `core` (portable).
-- `java.version` — recorded for reference; the Java source/target LEVEL is still derived from the MC
-  version in the build scripts (portable, stays on `core`).
-- The **Gradle wrapper version** (`gradle/wrapper/gradle-wrapper.properties`) is era-owned by nature —
-  `core` never edits it, so merges never conflict on it.
-- The Stonecutter **active marker** (`stonecutter active "…"`) is tool-managed dev-state, set to the
-  newest in-era version (1.21.11). **1.21.4 is no longer special** anywhere.
+- **`mc-1.21`** — `core` + `era.properties` for the 1.17.1→1.21.11 Architectury era (Fabric + Forge +
+  NeoForge ≥1.21).
+- **`main`** — `core` + `era.properties` for the 26.x Fabric-only era (pure Fabric Loom 1.17.12 /
+  Gradle 9.5 / JDK 25); the GitHub default. **Shipped** — the 26.2 jar builds and is runtime-verified.
 
-**Remaining sequencing (do NOT branch prematurely):**
-1. ✅ **Done:** record the strategy; execute the `core` split (`core` + `main`).
-2. ✅ **Done (session 8): proved the model backward.** Result below.
-3. **Then forward to 26.x** once JDK 25 is installed (new era branch becomes the default).
+**Toolchain externalization (settled at the split):** the per-era values live in a root **`era.properties`**
+(era-owned, absent on `core`): `loom.version` (injected via `settings.gradle.kts`'s pluginManagement
+`resolutionStrategy`), `mc.versions.{common,fabric,neoforge,forge}` (the Stonecutter matrix, sorted
+ascending), `java.version` (reference only — the real source/target LEVEL is derived per-MC-version in the
+build scripts, which stay on `core`). The Gradle wrapper version and the Stonecutter active marker are
+era-owned by nature, so `core` merges never conflict on them. **1.21.4 is no longer special** anywhere.
 
-### 8.1 Backward probe result (session 8) — the wall is 1.13.2; current era reaches 1.14.4
+**Version-floor findings (proved by `chiseledCompileCommon` probes):**
 
-Probed with `chiseledCompileCommon` on a scratch branch, appending older MC versions to
-`mc.versions.common`:
+- **Compile floor = the Mojang-mappings floor, 1.14.4.** Loom 1.13.469 + official Mojang maps resolve and
+  reach `compileJava` for every version 1.14.4→1.21.11 (the Java *level* is not a compile wall — JDK 21
+  emits older bytecode via `--release`; only old-MC *runClient* needs an older run JDK).
+- **The wall is 1.13.2 and below** — `officialMojangMappings()` has no maps before 1.14.4, compounded by
+  the 1.13 Flattening (block id+metadata, not BlockState/PalettedContainer — PRD §9 "second port"). So
+  pre-1.14 is a separate era needing a different mappings source (Yarn/MCP) *and* a block-layer port —
+  deferred (the 1.12.2 stretch).
+- **Shipped floor = 1.17.1**, runtime-verified in-game (Fabric 1.17.1 / 1.18.1 / 1.19 / 1.19.3 / 1.20 /
+  1.20.1; Forge 1.17.1; the rest of the Forge matrix is a rolling runtime pass). **Java is per-version,
+  NOT per-era** (`<1.20.5 → JDK 17`, `≥1.20.5 → JDK 21`, `≥26 → JDK 25`); a different run JDK is a
+  per-version toolchain concern inside one era, not grounds for a new era branch.
+- **≤1.16.5 deferred** — a deep 1.14–1.16 entity/block API shim cascade (rotation setters → methods at
+  1.17, `Entity.discard`, `Block.defaultDestroyTime`, dripstone/cave-vine classes, `Material`-based tool
+  detection) plus a log4j logging shim (1.16.5 predates slf4j); common-compile-only value. Partial
+  prototype on the local `scratch/backward-probe` branch.
 
-- **The current toolchain has NO wall down to 1.14.4.** Loom 1.13.469 / Gradle 8.12.1 / official
-  Mojang mappings resolve and set up Minecraft and reach `compileJava` for **every version
-  1.14.4 → 1.21.11**. The era's compile floor is the **Mojang-mappings floor (1.14.4)** — much
-  further back than the originally guessed Java/Fabric walls (the Java *level* is not a compile wall:
-  JDK 21 emits older bytecode via `--release`; old-MC *runClient* would need an older JDK, but
-  building/compiling does not).
-- **The wall is 1.13.2 and below**, and it is **not** a normal toolchain bump: `officialMojangMappings()`
-  fails at configuration (`Failed to find official mojang mappings for 1.13.2` — Mojang first
-  published maps for 1.14.4), **compounded** by the **1.13 Flattening** (block id+metadata, not
-  BlockState/PalettedContainer — PRD §9 "second port"). So pre-1.14 is a separate era requiring a
-  **different mappings source (Yarn/MCP)** *and* a block-layer port — deliberately deferred (the
-  1.12.2 stretch). **No placeholder branch was cut** (it couldn't build); the wall is documented here
-  instead.
-- **Current era extended (common) to 1.17.1 and landed.** The re-baselined overlay chain + new
-  platform shims make the loader-agnostic common source compile on **1.17.1, 1.18.2, 1.19.2, 1.19.4**
-  (existing 1.20.1–1.21.11 unregressed). Portable work on `core`; `mc.versions.common` extension on
-  `main`. **Loader matrices unchanged** — per-loader builds for the backward range (their
-  `versions/<ver>/gradle.properties` + loader-event overlays) are follow-up.
-- **≤1.16.5 not yet done.** It is a deep cascade of 1.14–1.16 entity/block API shims (rotation setters
-  became methods at 1.17, `Entity.discard`/`remove`, `Block.defaultDestroyTime`, dripstone/cave-vines
-  classes, `Material`-based tool detection) and is **common-compile-only value** (a runnable ≤1.16.5
-  jar also needs a log4j logging shim — 1.16.5 predates slf4j). A partial prototype is preserved on
-  the local `scratch/backward-probe` branch. See HANDOFF "NEXT" for the remaining shim list.
-
-This validated the whole Model C loop **backward**: author on `core` → `git merge core` into the era
-branch → per-era `chiseledCompileCommon` green, with toolchain values untouched on `core`.
-
-### 8.2 Runtime pass to 1.17.1 (session 9) — Fabric + Forge actually launch
-
-Extended the era to **1.17.1** as real, shippable per-loader builds (not just common compile) and
-runtime-tested in-game. Floor is **1.17.1** (1.17.0 dropped: no viable fabric-api, Forge skipped it);
-**1.20.0 added**. Fabric matrix is contiguous 1.17.1→1.21.11; Forge matches minus its skips; NeoForge
-floor stays 1.21.
-
-- **Java is per-version, NOT per-era.** Added a Gradle **Java toolchain** (`<1.20.5 → JDK 17`,
-  `≥1.20.5 → JDK 21`); both Temurin JDKs installed. A different *run* JDK is a per-version toolchain
-  concern handled inside one era — it does NOT warrant a new era branch (an era is a Loom/Gradle wall).
-  Loom honors the toolchain for compile but launches runs on the daemon JDK, so the Forge run JVM is
-  pinned via `javaLauncher` (old-Forge modlauncher ASM can't read Java 21 → "major version 65").
-- **Loader-version metadata are per-version deps, not toolchain values** — `deps.fabric_api`,
-  `deps.forge_loader`, `deps.parchment` vary freely per version within the era.
-- **Fragile loader-specific surfaces fixed** (the fake-player network stack the PRD flagged):
-  Fabric — drop fabric-api's transitive fabric-loader, and depend on mod-id `fabric` (not `fabric-api`);
-  Forge — re-baseline `overlays-forge` to 1.17.1 with `1.18`/`1.19` flavors (ServerStartedEvent move,
-  world→level rename), template `mods.toml` loaderVersion/range from the Forge major, and make the bot's
-  socketless `FakeClientConnection` survive Forge's `placeNewPlayer` network path (`fml:netversion`
-  attr + a `"packet_handler"`-named handler).
-- **Verified in-game:** Fabric 1.17.1/1.18.1/1.19/1.19.3/1.20/1.20.1; **Forge 1.17.1**. Remaining Forge
-  versions are the user's in-progress runtime pass. ≤1.16.5 and the 26.x (Java 25) era remain deferred.
+This validated the Model C loop in both directions: author on `core` → `git merge core` into each era
+branch → per-era build/compile green, with toolchain values never touched on `core`.

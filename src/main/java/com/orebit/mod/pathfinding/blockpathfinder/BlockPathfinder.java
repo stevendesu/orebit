@@ -159,7 +159,7 @@ public final class BlockPathfinder {
      * <p><b>Why on now (the design call):</b> the heuristic (the goal-forced-cost premium) is the strong lever
      * for the open-air pillar, but ANY admissible heuristic has terrain blind spots — a single floating block
      * inside the goal cuboid's slab caps the forced-cost premium, re-opening the horizontal cone (diagnosed +
-     * reproduced: {@code docs/Optimizations/cuboid_macro_movements.md}, the offset-pillar case). Such blind
+     * reproduced: {@code docs/Optimizations/07_cuboid_macro_movements.md}, the offset-pillar case). Such blind
      * spots are a generic, infinite class (overhangs, canopies, floating islands), not an exotic corner, so
      * patching the heuristic per-terrain is whack-a-mole. Partial-path is the structural net that makes the
      * search robust to all of them at once (the Baritone model: time-/budget-boxed best-so-far + replan). It
@@ -199,12 +199,12 @@ public final class BlockPathfinder {
     public static boolean MACRO_MOVES = true;
 
     // NOTE (E1/E2, 2026-07): a per-pop edit-bbox relevance gate was implemented, measured, and DELETED
-    // per protocol (design doc deleted post-refutation; rationale in PERF-RESULTS-2026-07-03.md §E1/E2):
+    // per protocol (design doc deleted post-refutation; rationale in docs/Optimizations/08_measure_everything.md):
     // a counter probe put the envelope-disjoint pop
     // fraction at p = 0.000 in every scenario — the pillar-flood pop stands ON its own placed block, so
     // "edits trail behind the path" is false for every shape the search produces and both gate variants
     // measured FLAT. Any future gate needs per-row/incremental chain bboxes or a recent-edits-only
-    // overlay, not a whole-chain bbox. See PERF-RESULTS-2026-07-03.md §E1/E2.
+    // overlay, not a whole-chain bbox. See docs/Optimizations/08_measure_everything.md.
 
     /**
      * Minimum heuristic improvement (how much closer to the goal the closest-approach node is than the start)
@@ -261,7 +261,7 @@ public final class BlockPathfinder {
      * reusing one drives the steady state to zero per-search allocation. {@link ThreadLocal}, not a
      * static singleton, so a future off-tick background pathfinding thread gets its own with no contention.
      */
-    // NOTE (E5, 2026-07): the PERF-DESIGN-warmup-searches.md §5 eager-size one-liner (512,1024 → 8192,8192)
+    // NOTE (E5, 2026-07): the eager-size one-liner (512,1024 → 8192,8192)
     // was implemented, measured, and REVERTED per protocol: Nodes.reset() clears the map by Arrays.fill
     // over its CAPACITY, so an eager 8192-slot map costs every flood-free search ~+28 KB of fill —
     // a confirmed +4-7% on the pinned SHORT guard (13.08/13.48 vs 12.66/12.54 us, interleaved fresh-JVM
@@ -734,7 +734,7 @@ public final class BlockPathfinder {
         // capped macros.
         final NavGridCuboidsView cuboids = (MACRO_MOVES && cuboidBound != null)
                 ? new NavGridCuboidsView(grid, ctx.pathEdits(), cuboidBound) : null;
-        // Primary travel axis P (Option B, CUBOID-PERF-OPTIONS.md): the dominant start→goal approach axis, so
+        // Primary travel axis P (Option B): the dominant start→goal approach axis, so
         // only the movements travelling P extract a cuboid per node (the other axes take their micro step) —
         // pinning per-node extraction to one axis instead of up to three. argmax(|dx|,|dy|,|dz|) with tie-break
         // X > Z > Y (the kept axis then also has the best linear-scan locality — X is the contiguous grid axis,
@@ -1094,7 +1094,7 @@ public final class BlockPathfinder {
     }
 
     /**
-     * The search's primary travel axis {@code P} (Option B, {@code CUBOID-PERF-OPTIONS.md}): the axis with the
+     * The search's primary travel axis {@code P} (Option B): the axis with the
      * largest start→goal delta — the dominant approach direction whose long uniform runs actually warrant macro
      * collapse. Returns one of {@link Axes#AXIS_X}/{@link Axes#AXIS_Y}/{@link Axes#AXIS_Z}. <b>Tie-break order
      * X &gt; Z &gt; Y</b>: on equal deltas the kept axis also has the best linear-scan locality (X is the

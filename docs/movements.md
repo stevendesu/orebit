@@ -69,7 +69,7 @@ place a step block to climb where none exists; Descend may dig one out.
 **Pillar** — jump and place a block beneath yourself, gaining one block of height in
 the same column. Costs 4.633 plus the placement charge — at the default
 `placement.placeBaseCost = 6.0`, about **10.6 ticks per block of height**. Long climbs
-are collapsed by the [macro-movement layer](Optimizations/cuboid_macro_movements.md)
+are collapsed by the [macro-movement layer](Optimizations/07_cuboid_macro_movements.md)
 into a single multi-block candidate. At execution time Pillar runs as a **phase plan**
 (jump → place under yourself → land), with every phase's requirements re-checked
 against the live world each tick — if the footing never took and the bot fell back
@@ -90,7 +90,7 @@ into the cave over the 5-block one, and an invulnerable bot (`survival.takesDama
 false`) drops any depth for free. Every cell the drop passes through is also priced
 (falling *through* a berry bush still pricks). Finding the landing used to mean
 scanning the column downward cell by cell; the nav grid now stores a per-cell
-["distance to the floor below" nibble](Optimizations/depth_nibbles.md) that answers it
+["distance to the floor below" nibble](Optimizations/09_depth_nibbles.md) that answers it
 in one read.
 
 ## Climbing

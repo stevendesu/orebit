@@ -19,8 +19,7 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.Strategy;
 
 /**
- * Correctness harness for the E3/E4 depth nibbles (PERF-DESIGN-navgrid-widening.md §2/§6,
- * PERF-DESIGN-runup-nibble.md §2/§4): every cell's stored {@code floorGap} / {@code runUp} must equal a
+ * Correctness harness for the E3/E4 depth nibbles (docs/Optimizations/09_depth_nibbles.md): every cell's stored {@code floorGap} / {@code runUp} must equal a
  * brute-force scan over the column's resident navtypes — after the column build, after targeted
  * {@code patchCell} mutations (placing/removing floors mid-column, at both vertical-seam rows), and after
  * a random patch storm. The fixture deliberately includes a FENCE floor (collision but NOT standable — the

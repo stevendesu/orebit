@@ -25,7 +25,7 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.Strategy;
 
 /**
- * Guard for Option D (forward-only edit-shrink — CUBOID-PERF-OPTIONS.md §D). The speculative edit-shrink in
+ * Guard for Option D (forward-only edit-shrink). The speculative edit-shrink in
  * {@link NavGridCuboidsView#cuboidAt} now only scans the FORWARD half of the box along the macro jump's travel
  * direction. This test pins the two invariants of that change:
  *

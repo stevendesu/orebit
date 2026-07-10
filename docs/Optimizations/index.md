@@ -5,32 +5,36 @@ structures, and techniques used to achieve these goals.
 
 They read best in order — each chapter builds on the ones before it:
 
-1. [Reading Blocks](block_reading.md) — getting a single block read from
+1. [Reading Blocks](01_block_reading.md) — getting a single block read from
    milliseconds down to nanoseconds.
-2. [Reusing Memory](reusing_memory.md) — why allocation is the quiet enemy, and
+2. [Reusing Memory](02_reusing_memory.md) — why allocation is the quiet enemy, and
    the pooling patterns used against it.
-3. [Block Fingerprints](block_fingerprints.md) — precomputing every answer the
+3. [Block Fingerprints](03_block_fingerprints.md) — precomputing every answer the
    pathfinder will ever ask about a block into one packed 64-bit value.
-4. [A Custom Hash Map](custom_hash_map.md) — the ~40-line open-addressed map that
+4. [A Custom Hash Map](04_custom_hash_map.md) — the ~40-line open-addressed map that
    underpins the allocation-free search.
-5. [The Pathfinding Hot Path](pathfinding_hot_path.md) — making each search node
+5. [The Pathfinding Hot Path](05_pathfinding_hot_path.md) — making each search node
    ~10× cheaper and, more importantly, predictable.
-6. [Fewer Nodes](fewer_nodes.md) — teaching the search to visit less: greed,
+6. [Fewer Nodes](06_fewer_nodes.md) — teaching the search to visit less: greed,
    tie-breaks, and honest distance.
-7. [Cuboid Macro-Movements](cuboid_macro_movements.md) — collapsing uniform runs
+7. [Cuboid Macro-Movements](07_cuboid_macro_movements.md) — collapsing uniform runs
    into single big jumps, and the two bugs that froze the game.
-8. [Measure Everything](measure_everything.md) — the benchmark protocol, and five
-   convincing optimization ideas of which four made things slower.
-9. [Depth Nibbles](depth_nibbles.md) — the next campaign under that protocol: a
-   perfect-sounding gate killed by p = 0.000, two nibbles that erased a third of
-   cuboid-heavy search time, and a 32× fix for the first-search stall.
-10. [Off the Tick Thread](background_pathfinding.md) — moving the search onto
-    background workers so a big flood no longer has to fit between two frames, and
-    the epoch trick that makes recycled memory safe to read concurrently.
-11. [Teaching the Block Search the Map](region_heuristic.md) — the payoff Fewer
-    Nodes promised: feeding the coarse region tier's cost-to-goal down into the
-    block heuristic so the fine search stops flooding walls, and the virtual goal
-    node that lets a bot dig straight to a buried target.
-12. [Paying for the Map](field_build.md) — the bill for that heuristic: the profiler
+8. [Measure Everything](08_measure_everything.md) — the benchmark protocol, and six
+   convincing optimization ideas, only one of which survived the benchmark.
+9. [Depth Nibbles](09_depth_nibbles.md) — profiling first: the search's time went into
+   vertical column scans (falls probing down for a landing, cuboids probing up for a box),
+   so two nibbles cache those facts — turning an O(n³) box scan into O(n²) and erasing
+   three-quarters of the extraction bill.
+10. [Off the Tick Thread](10_background_pathfinding.md) — the pivot from the search's
+    algorithm to its surroundings: warming the cold JVM before the first player's tick,
+    then moving the search onto background workers so a big flood no longer has to fit
+    between two frames — with the epoch trick that makes recycled memory safe to read
+    concurrently.
+11. [Teaching the Block Search the Map](11_region_heuristic.md) — a primer on HPA\*
+    (plan a coarse skeleton, solve short hops), then the real problem: the block search
+    still floods "swamps" that are cheap to wade into, so feed the region tier's
+    cost-to-goal into the block heuristic — plus the virtual goal node that lets a bot
+    dig straight to a buried target.
+12. [Paying for the Map](12_field_build.md) — the bill for that heuristic: the profiler
     finds 90% of a full search in the map build, a question answered once per region
     instead of once per cell, and a flood that learns to stop when it knows the way.
