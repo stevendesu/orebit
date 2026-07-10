@@ -106,7 +106,7 @@ loom {
             vmArg("-Dorebit.autotest=true")
             // CLI overrides ride gradle -P properties into the JVM:
             //   ./gradlew :fabric:1.21.11:runAutotest "-Porebit.autotest.budgetTicks=48000"
-            for (key in listOf("start", "goal", "budgetTicks", "debug", "trace")) {
+            for (key in listOf("start", "goal", "budgetTicks", "startDelayTicks", "debug", "trace")) {
                 val v = project.findProperty("orebit.autotest.$key")
                 if (v != null) vmArg("-Dorebit.autotest.$key=$v")
             }

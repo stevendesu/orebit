@@ -30,7 +30,7 @@ $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot            # scripts/ -> repo root
 $runDir = Join-Path $repo "run\autotest"
-$templates = Join-Path $PSScriptRoot "autotest"
+$templates = Join-Path $PSScriptRoot "autotest-repro2"
 $resultFile = Join-Path $runDir "orebit-autotest-result.properties"
 
 # ---- 1. Deterministic run-dir state ----------------------------------------------------------
