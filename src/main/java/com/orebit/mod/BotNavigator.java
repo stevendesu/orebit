@@ -208,6 +208,17 @@ final class BotNavigator {
         return path != null ? path.size() : -1;
     }
 
+    // The executing step's segment cells (from = previous waypoint / plan start, to = current waypoint) —
+    // diagnostic only, snapshot each driven tick. The parkour harness logs these to see the ACTUAL jump the
+    // planner routed (from/to cells) vs the intended one, e.g. a greedy diagonal corner-cut off a turn.
+    private int segFromX, segFromY, segFromZ, segToX, segToY, segToZ;
+    int segFromX() { return segFromX; }
+    int segFromY() { return segFromY; }
+    int segFromZ() { return segFromZ; }
+    int segToX() { return segToX; }
+    int segToY() { return segToY; }
+    int segToZ() { return segToZ; }
+
     /**
      * Drop the active two-tier driver and its exposed block plan (HPA-IMPLEMENTATION.md §10): a mode change
      * or a STAY hold invalidates the current goal, so the {@link PathPlan} built for it must not be ticked
@@ -787,6 +798,9 @@ final class BotNavigator {
                 : path.waypoint(waypointIndex - 1);
         BlockPos next = (waypointIndex + 1 < path.size()) ? path.waypoint(waypointIndex + 1) : null;
         cursor.set(segStart, wp, next);
+        // Diagnostic snapshot of the executing step's segment cells (read by the parkour harness / Debug only).
+        segFromX = segStart.getX(); segFromY = segStart.getY(); segFromZ = segStart.getZ();
+        segToX = wp.getX(); segToY = wp.getY(); segToZ = wp.getZ();
 
         // Execute the step. A CONVERTED move (has a phase plan) reconciles its geometry against the LIVE world
         // each tick — breaking/placing reactively via the PhaseRunner, no one-shot applyEdits, so a missed edit
