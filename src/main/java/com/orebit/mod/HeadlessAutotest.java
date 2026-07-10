@@ -75,7 +75,11 @@ public final class HeadlessAutotest {
             return;
         }
         Scenario scenario = new Scenario(
-                cell("orebit.autotest.start", "-3,125,-28"),
+                // Treetop of an extra-tall jungle tree in the DENSEST part of the canopy (owner-scouted on
+                // 1.21.11 for this seed) — a real "get down from the tree" descent through the leaf lattice.
+                // The old (-3,125,-28) was MID-AIR (the bot fell from spawn — never a valid scenario).
+                cell("orebit.autotest.start", "-32,134,153"),
+                // Inside a trial chamber ~240 blocks off (structure placement is version-stable for this seed).
                 cell("orebit.autotest.goal", "201,-28,90"),
                 Integer.getInteger("orebit.autotest.budgetTicks", 24_000),
                 Integer.getInteger("orebit.autotest.startDelayTicks", 0));
