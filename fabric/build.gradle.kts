@@ -112,6 +112,21 @@ loom {
             }
             isIdeConfigGenerated = false // CLI/script-driven; no IDE launch config needed
         }
+        // Parkour-movement diagnostic: a superflat server that arms the common-src ParkourCourse hook
+        // (-Dorebit.parkour) in its own run dir (run/parkour). Launch: ./gradlew :fabric:1.21.11:runParkour
+        // (after scripts/run-parkour.ps1 preps the run dir with a FLAT server.properties + jump-isolating
+        // orebit.properties). Mirrors the autotest config exactly.
+        create("parkour") {
+            server()
+            configName = "Orebit Parkour ($minecraft)"
+            runDir = "../../../run/parkour"
+            vmArg("-Dorebit.parkour=true")
+            for (key in listOf("debug")) {
+                val v = project.findProperty("orebit.parkour.$key")
+                if (v != null) vmArg("-Dorebit.parkour.$key=$v")
+            }
+            isIdeConfigGenerated = false
+        }
     }
 }
 

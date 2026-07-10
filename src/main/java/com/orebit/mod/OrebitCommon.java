@@ -181,5 +181,11 @@ public final class OrebitCommon {
         // production). Registered LAST deliberately: its SERVER_STARTED hook must run after the config /
         // mining-table / warm-up / planner-pool installs above (loader events fire in registration order).
         HeadlessAutotest.register(events);
+
+        // Headless parkour-movement diagnostic (the :fabric:<ver>:runParkour run config): builds a synthetic
+        // sky course and drives the bot through isolated single-jump challenges, logging trajectories. Same
+        // inert-unless-armed discipline (-Dorebit.parkour); registered after the autotest hook for the same
+        // registration-order reason.
+        ParkourCourse.register(events);
     }
 }

@@ -254,10 +254,13 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  * momentum-overshoot the fall-not-vertical work resolved for {@link Fall}; the follower drives converted
  * moves via the PhaseRunner, so Fall's own {@code steer} never applies here). Derivation on the method.
  * The airborne-ARMED {@code resetWhen} guard (armed by the airborne drive, disarmed by the runup drive)
- * is preserved exactly — see the v1 derivation on the method. Sprint is held for center-to-center
- * displacement ≥ 3.0 (the cardinal {@code g ≥ 2} rule, which the offset shapes interpolate) and for
- * every rising jump (the +1 landing eats ~½ block of range, so even g=1 wants the sprint reach). Landing
- * IN the gap (a missed falling jump) is the follower's grounded-stall recovery arm, as in v1.
+ * is preserved exactly — see the v1 derivation on the method. Sprint is REACH-AWARE: held for
+ * center-to-center displacement ≥ 3.0 (the cardinal {@code g ≥ 2} rule, which the offset shapes
+ * interpolate) and for every rising jump (the +1 landing eats ~½ block of range, so even g=1 wants the
+ * sprint reach) — EXCEPT a FALLING jump, which sprints only at {@code gap ≥ 3}: the drop buys airtime so a
+ * walk clears the shorter gaps, and the sprint-jump takeoff boost would otherwise carry the bot past a
+ * narrow landing (the fall2 overshoot; see {@link #plan}). Landing IN the gap (a missed falling jump) is
+ * the follower's grounded-stall recovery arm, as in v1.
  */
 public final class Parkour implements Movement {
 
@@ -835,11 +838,19 @@ public final class Parkour implements Movement {
         final double dist = Math.sqrt((double) (ddx * ddx + ddz * ddz));
         final double ux = ddx / dist;
         final double uz = ddz / dist;
-        // Sprint per center-to-center displacement ≥ the flat 2-gap's 3.0 — the cardinal g >= 2 rule,
-        // integer-exact as dx²+dz² ≥ 9; the offset shapes interpolate it ((2,±1)=√5 walks, (3,±1)=√10
-        // sprints). A rising jump sprints at every gap (the +1 landing eats ~½ block).
-        final boolean sprint = ddx * ddx + ddz * ddz >= 9 || ty > fy;
         final boolean falling = ty < fy;
+        // Sprint decision (REACH-AWARE). A RISING jump always sprints (the +1 landing eats ~½ block of
+        // reach). A FLAT / offset jump sprints at center-to-center displacement ≥ the flat 2-gap's 3.0 — the
+        // cardinal g >= 2 rule, integer-exact as dx²+dz² ≥ 9 (the offset shapes interpolate it: (2,±1)=√5
+        // walks, (3,±1)=√10 sprints). A FALLING jump is the exception: the drop buys extra airtime, so a
+        // WALK already clears the shorter gaps, and the sprint-jump +0.2 takeoff boost then carries the bot
+        // PAST a narrow ledge — the fall2 overshoot (trace-verified: a sprinted 2-gap fall lands ~1.4 blocks
+        // past a 1-wide pad and falls, while a walk lands on it; air-braking can't shed sprint momentum in
+        // the descent). So a falling jump sprints only when the gap is long enough to actually need the
+        // reach (gap ≥ 3 — a walk's ≈2.9-block reach covers gaps 1–2 with margin); shorter falls walk.
+        final int gap = Math.max(Math.abs(ddx), Math.abs(ddz)) - 1;
+        final boolean sprint = ty > fy
+                || (falling ? gap >= 3 : ddx * ddx + ddz * ddz >= 9);
         // Falling arcs only (all cardinal today — offset shapes are flat-only v1): the along-LINE
         // progress (from the takeoff cell centre) past which the bot's centre is OVER the landing column.
         // The landing centre sits at `dist` and its column begins ~0.5 before it — for a cardinal g-gap
