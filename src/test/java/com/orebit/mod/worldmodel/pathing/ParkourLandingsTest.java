@@ -39,9 +39,9 @@ import net.minecraft.world.level.chunk.Strategy;
  * <p><b>Positives.</b> Rising(+1) over a 2-gap with DEFAULT caps (no pillar available, no detour exists)
  * lands as exactly ONE Parkour waypoint at the STAND position {@code floor.above()}; a placing bot still
  * picks the 16.6-tick rising jump over a ~2-place bridge + step-up. Falling(−1) crosses a 3-gap AND the
- * owner-verified 4-gap; the parabola-derived deeper drops (−2/−3) and the rising 3-gap are in the same
- * one unconditional envelope (s52 — the AGGRESSIVE flag is gone; the rising 3-gap's in-game undershoot
- * is a takeoff-tuning pathology noted on {@code Parkour}'s envelope table, not a gate). Fall damage is a
+ * owner-verified 4-gap; the deeper drops (−2/−3) are in the same DERIVED envelope ({@code ParkourEnvelope}).
+ * The rising 3-gap is EXCLUDED — the derived envelope caps rising at 2 from a full-block takeoff, fixing
+ * the old hardcoded RISE_MAX=3 that offered an unmakeable jump the bot fell short of. Fall damage is a
  * COST, not a
  * blocker: shrinking {@code safeFallDistance} on an otherwise-identical bot raises the SAME route's plan
  * cost by exactly {@code (drop − safeFall) ·} {@link BotCaps#costPerHitpoint} (the unified damage knob —
@@ -108,19 +108,15 @@ class ParkourLandingsTest {
     }
 
     @Test
-    void risingThreeGapIsOffered() {
-        // 3-gap, landing floor y=6: parabola-legal and (s52) in the one unconditional envelope — the
-        // AGGRESSIVE flag is gone. The known in-game undershoot is a takeoff-tuning pathology to fix,
-        // not an envelope gate (see Parkour's class Javadoc).
+    void risingThreeGapIsNotOffered() {
+        // 3-gap, landing floor y=6 (a rising +1 landing): the DERIVED envelope caps rising at 2 from a
+        // full-block takeoff (ParkourEnvelope BASE row: rise 2). The old hardcoded RISE_MAX=3 OVER-offered
+        // this jump — the bot attempted it and fell SHORT in live runs. With rising-3 correctly excluded
+        // and no other route across the bottomless chasm (DEFAULT caps, no place), the search finds none.
         NavGridView grid = buildCourse(3, 6, null);
         BlockPos goal = new BlockPos(9, 6, 8);
         BlockPathPlan plan = BlockPathfinder.findPath(grid, START, goal, BotCaps.DEFAULT, CORRIDOR);
-        assertNotNull(plan, "the rising 3-gap should be offered (one envelope, always on)");
-        assertEquals(1, count(plan, MovementRegistry.PARKOUR),
-                "the rising 3-gap should be exactly one Parkour waypoint");
-        // Stand position above the +1 landing floor (8,6,8).
-        assertEquals(new BlockPos(8, 7, 8), waypointOf(plan, MovementRegistry.PARKOUR),
-                "the rising 3-gap's waypoint should be the stand position above the +1 landing floor");
+        assertNull(plan, "the rising 3-gap must NOT be offered (derived envelope caps rising at 2)");
     }
 
     @Test

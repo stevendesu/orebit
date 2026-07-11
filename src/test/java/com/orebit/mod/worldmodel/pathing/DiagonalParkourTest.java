@@ -43,8 +43,8 @@ import net.minecraft.world.level.chunk.Strategy;
  * displacement) and the owner-verified 2-gap each cross as exactly ONE DiagonalParkour waypoint at the
  * STAND position ({@code floor.above()}). Negatives: an oak fence on the floored corner ({@code topY ≈
  * 24} pokes into the arc's feet path) clips the jump — the very cell a plain solid floor passes; the
- * 3-gap ({@code 4.24}-block air span, at the physics limit) is offered unconditionally
- * (s52 — the family AGGRESSIVE flag is gone). Not
+ * 3-gap ({@code 4.24}-block air span) is EXCLUDED — the derived {@code ParkourEnvelope} caps the diagonal
+ * at 2 from a full-block takeoff (the old hardcoded MAX_GAP=3 offered an unmakeable jump). Not
  * testable headless: the √2 takeoff-trigger projection, corner-support kinematics (in-game pass).
  */
 class DiagonalParkourTest {
@@ -106,16 +106,14 @@ class DiagonalParkourTest {
     }
 
     @Test
-    void threeCellDiagonalGapIsOffered() {
-        // The 3-gap (4.24-block span, at the physics limit) ships in the one unconditional envelope
-        // (s52 — the family AGGRESSIVE flag is gone).
+    void threeCellDiagonalGapIsNotOffered() {
+        // The 3-gap (4.24-block air span, √20 ≈ 4.47 displacement) is beyond the flat sprint-jump reach:
+        // the DERIVED envelope caps the diagonal at 2 from a full-block takeoff (ParkourEnvelope BASE row:
+        // diag 2). The old hardcoded MAX_GAP=3 OVER-offered it (the real-play 90°-corner-cut the bot fell
+        // on); with it excluded and no other route across the diagonal chasm, the search finds none.
         NavGridView grid = buildCourse(3, false);
         BlockPathPlan plan = BlockPathfinder.findPath(grid, START, goal(3), BotCaps.DEFAULT, CORRIDOR);
-        assertNotNull(plan, "the 3-cell diagonal gap should be offered (one envelope, always on)");
-        assertEquals(1, count(plan, MovementRegistry.DIAGONAL_PARKOUR),
-                "the 3-gap jump should still be a single DiagonalParkour waypoint");
-        assertEquals(new BlockPos(9, 6, 9), waypointOf(plan, MovementRegistry.DIAGONAL_PARKOUR),
-                "the jump's waypoint should be the stand position above the landing floor");
+        assertNull(plan, "the 3-cell diagonal gap must NOT be offered (derived envelope caps diagonal at 2)");
     }
 
     // ---------------------------------------------------------------- helpers

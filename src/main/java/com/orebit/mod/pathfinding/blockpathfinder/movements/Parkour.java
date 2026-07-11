@@ -64,40 +64,39 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  * On open flat ground the whole move is still ONE read per direction (column 1 standable → break),
  * byte-identical to v1.
  *
- * <h2>The gap envelope — {@code maxGap[drop]} (owner in-game data; defaults = the owner-verified maxima)</h2>
- * The owner's manual testing: flat 3-gap possible; rising(+1) during a 1–3 gap; falling(−1) cleared a
- * 4-gap via the parabola; deeper drops gain range. The shipped defaults FOLLOW that hand-verified
- * envelope (the "less conservative, more jump-y" flip — the earlier one-block timing margin proved
- * unnecessary), and (s52) the FULL envelope ships unconditionally — the old compile-time AGGRESSIVE
- * flag is gone (owner ruling: consistent movements, no arbitrary gating; a row that misbehaves in-game
- * gets its pathology FIXED, not flag-hidden): flat 1–3, rising 1–3, falling drops −1..−3 gaps to 4:
+ * <h2>The gap envelope — DERIVED, takeoff-condition-parameterized ({@link ParkourEnvelope})</h2>
+ * The per-class gap caps are no longer hand-tuned constants; they are computed from closed-form MC
+ * ballistics in {@link ParkourEnvelope} (the model validated in {@code parkour_envelope_params.py}, which
+ * supersedes the prose {@code DESIGN-parkour-envelope.md} table). Each expansion reads ONE row
+ * {@code ParkourEnvelope.MAX_GAP[startTopY][gsfBucket][occBucket]} = {@code {flat, rise, fall1, fall2,
+ * fall3, diag}}, keyed on the takeoff conditions: the takeoff SURFACE height ({@link
+ * MovementContext#floorSurface}, or {@link MovementContext#directionalTopY} toward the jump for a stair),
+ * the slow-floor bucket (soul sand — {@link MovementContext#isSlow}), and the LIGHT through-slow body
+ * bucket (berry / powder snow — {@link MovementContext#bodyTransitLight}). Honey floors and cobweb body
+ * cells never reach the table — the {@code reducesJump}/{@code noJumpFromBody} gates above refuse them.
+ *
+ * <p><b>The BASE row</b> (full block, normal floor, no slow body — {@code MAX_GAP[16][0][0]}): flat 1–3,
+ * rising 1–2, falling drops −1..−3 gaps to 4, diagonal (in {@link DiagonalParkour}) 1–2. This is the fix
+ * for the old hardcoded envelope, which OVER-offered rising-3, flat-4 and diagonal-3 — jumps the physics
+ * cannot make (the bot attempted and fell). The derived cap of 2 for rising / diagonal, and the absence
+ * of any flat-4 row, come straight from the reach budget vs the {@link ParkourEnvelope#MAX_CLEARED_AIR}
+ * policy cap.
  *
  * <pre>
- *   landing      default   aggressive    physics bound (sprint ≈0.28 b/t, arc ticks below)
- *   flat   ( 0)  1–3       1–3           t12 → ~3.4 b  ⇒ 3-gap (owner-verified; a flat 4 is out of reach)
- *   rising (+1)  1–2       1–3           +1 floor intercepts the arc at ~t8–9, range ≈ flat −½ b
- *   falling(−1)  1–4       1–4           t14 → ~3.9 b + landing-edge slack ⇒ 4 (owner-verified)
- *   falling(−2)  —         1–4           t15 → ~4.2 b (parabola-derived, marginal — gated)
- *   falling(−3)  —         1–4           t17 → ~4.8 b (parabola-derived, marginal — gated)
+ *   condition (startTopY / gsf / occ)   flat  rise  fall−1/−2/−3  diag   why tighter
+ *   full 16 / normal / none  (BASE)      3     2     4 /4 /4       2      the reference envelope
+ *   slab  8 / normal / none              2     0     3 /4 /4       2      +0.5 effΔy eats the flat/rise reach
+ *   full 16 / soul   / none              2     1     2 /2 /3       1      0.4 speed factor cuts the H budget
+ *   full 16 / normal / berry             2     0     2 /3 /3       1      berry stuck-mult scales the whole arc
  * </pre>
  *
- * <p><b>Rising 3-gap — KNOWN pathology to fix at the source (in-game, 26.2).</b> The bot consistently
- * falls SHORT of a rising(+1) 3-gap landing in live runs, despite the row sitting inside the parabola
- * bound. Not the sprint FLAG ({@link #plan} asserts {@code setSprinting} in every driving phase); the
- * residual suspect is sprint SPEED at takeoff — a one-block runup from walk speed/rest hasn't reached
- * the ~0.28 b/t the envelope assumes, and the rising row's reach is the tightest (flat −½ b). The row
- * ships enabled anyway (s52): the fix is takeoff tuning (earlier sprint assert / longer runup demand),
- * not envelope-hiding. Future hunger tracking may make sprint-dependent rows caps-conditional at
- * runtime (no sprint below vanilla's food threshold).
- *
- * Parabola: vanilla jump {@code vy₀ = 0.42}, per-tick {@code vy ← (vy − 0.08) · 0.98} ⇒ feet return to 0
- * at ~t12 (apex +1.25 at t6), cross −1 at ~t14, −2 at ~t15, −3 at ~t17; horizontal sprint-jump ≈ 0.28 b/t.
- * Drops deeper than −3 are not offered even aggressively: the marginal range gain is ~1 block per 3–4
- * blocks of extra drop while landing precision (and the untuned positional takeoff) degrade — {@link Fall}
- * already owns deep descents off an edge. There is deliberately NO flat 4 row anywhere (the ~3.4-block
- * flat reach doesn't cover it; the 4-range belongs to the falling arcs alone). {@link #PARKOUR_MAX_GAP}
- * is <b>honored</b> as the flat row's cap exactly as in v1 (default 3, the verified maximum; lower it to
- * 2 to restore the old conservative flat row).
+ * <p>Physics recap (full derivation in {@link ParkourEnvelope}): vanilla jump {@code vy₀ = 0.42}, per-tick
+ * {@code vy ← (vy − 0.08)·0.98} ⇒ apex {@code y(6) ≈ 1.25} (= {@link MovementContext#JUMP_RISE}/16), feet
+ * return to 0 at ~t11, cross −1/−2/−3 at ~t13/t14/t16; sprint-jump horizontal reach follows the geometric
+ * sum {@code X(T)}. A lower takeoff surface folds into an effective Δy that shrinks every reach; a slow
+ * floor / slow body cell only ever REDUCES reach (never fabricates it — {@link ParkourEnvelope}'s clamp).
+ * Drops deeper than −3 are left to {@link Fall} off the near edge. {@link #PARKOUR_MAX_GAP} still NARROWS
+ * the derived flat cap (default 3 = the base maximum; lower it to 2 for a more conservative flat row).
  *
  * <h2>Clearance cell sets (derivations)</h2>
  * <b>Flat</b> (v1): takeoff head {@code y+3}; per gap column the node-level cell open (the SHAPE_OTHER
@@ -272,18 +271,13 @@ public final class Parkour implements Movement {
      */
     public static int PARKOUR_MAX_GAP = 3;
 
-    /** Rising(+1) gap cap. 3 = the full parabola-legal envelope (s52: always on). The rising 3-gap is
-     *  KNOWN to undershoot in live runs — sprint speed at takeoff, see the class Javadoc — a pathology
-     *  to fix in takeoff tuning, not to envelope-hide. */
-    private static final int RISE_MAX = 3;
-
     /**
-     * Falling gap caps by drop depth ({@code [drop]}, index 0 unused): drops 1–3, gaps to 4 (drop 1 is
-     * the owner-verified falling(−1) maximum; drops 2–3 parabola-derived — see the class Javadoc; s52:
-     * the full envelope ships unconditionally). The array LENGTH is the deepest drop offered; deeper
-     * landings are left to {@link Fall} off the near edge.
+     * The deepest DROP the falling class offers ({@code drop 1..3}); deeper landings are left to
+     * {@link Fall} off the near edge. The per-drop gap CAPS are no longer a hand-tuned constant — they are
+     * read per takeoff condition from {@link ParkourEnvelope#MAX_GAP} ({@link ParkourEnvelope#FALL1}…
+     * {@link ParkourEnvelope#FALL3}). This is only the scan depth (how many rows below to probe).
      */
-    private static final int[] FALL_MAX = {0, 4, 4, 4};
+    private static final int FALL_DEPTH = 3;
 
     /** Ticks for the approach step onto the takeoff edge — one walk step ({@link Traverse#FLAT_COST}). */
     public static final float RUNUP_COST = Traverse.FLAT_COST;
@@ -423,28 +417,47 @@ public final class Parkour implements Movement {
             }
         }
 
-        // Resolve the envelope once per expansion (field reads hoisted out of the per-column loop).
-        final int flatMax = Math.min(PARKOUR_MAX_GAP, COST.length - 1);
-        final int riseMax = RISE_MAX;
-        final int[] fallMax = FALL_MAX;
-        // Deepest drop actually allowed: the envelope table depth capped by the bot's max survivable fall.
-        final int capsDrop = Math.min(fallMax.length - 1, ctx.caps().maxFallDistance());
+        // Takeoff-condition key for the DERIVED envelope (ParkourEnvelope): the slow-floor bucket (soul
+        // sand — honey is already refused above) and the LIGHT through-slow body bucket (berry / powder
+        // snow — cobweb is already refused above). Both are direction-INDEPENDENT — hoist them. The takeoff
+        // SURFACE height is direction-dependent only for a stair (its high 16/16 half faces one edge), so a
+        // uniform (non-stair) floor hoists ONE table lookup; a stair recomputes it per cardinal.
+        final long floorDesc = ctx.descriptorAt(x, y, z);
+        final int gsfBucket = ctx.isSlow(floorDesc) ? 1 : 0;
+        final int occBucket = ctx.bodyTransitLight(x, y, z) ? 1 : 0;
+        final boolean stair = ctx.isStair(floorDesc);
+        final int[] uniformEnv = stair ? null
+                : ParkourEnvelope.MAX_GAP[ParkourEnvelope.index(ctx.floorSurface(x, y, z))]
+                        [gsfBucket][occBucket];
+
         final int safeFall = ctx.caps().safeFallDistance();
-        // The widest gap any still-capable falling row offers (rows are non-increasing-in-strictness, but
-        // computed generically so a table edit can't silently break the horizon).
-        int fallCap = 0;
-        for (int dr = 1; dr <= capsDrop; dr++) {
-            if (fallMax[dr] > fallCap) fallCap = fallMax[dr];
-        }
-        final int fallGapCap = fallCap;
-        // Scan horizon: the last column any landing class can still use (the transit-lazy walk pays one
-        // node-level read per column up to here, nothing more, until a landing is actually found).
-        final int maxGapAll = Math.max(flatMax, Math.max(riseMax, fallGapCap));
-        if (maxGapAll < 1) return;
+        // Deepest drop actually probed: the envelope's fall depth capped by the bot's max survivable fall.
+        final int capsDrop = Math.min(FALL_DEPTH, ctx.caps().maxFallDistance());
 
         for (int[] d : CARDINALS) {
+            // The direction's envelope row: a stair takeoff reads the surface toward THIS jump (its high
+            // half faces one edge), so soul-sand/berry-flat rows can differ per direction; a flat floor
+            // reuses the hoisted row (zero extra lookups).
+            int[] env = stair
+                    ? ParkourEnvelope.MAX_GAP[ParkourEnvelope.index(
+                            ctx.directionalTopY(floorDesc, d[0], d[1]))][gsfBucket][occBucket]
+                    : uniformEnv;
+            // The flat knob NARROWS the derived flat cap (and the cost table bounds it too); rise + fall +
+            // diag come straight from the table. Zero per-node math beyond the index — the row load folds.
+            int flatMax = Math.min(PARKOUR_MAX_GAP, Math.min(env[ParkourEnvelope.FLAT], COST.length - 1));
+            int riseMax = env[ParkourEnvelope.RISE];
+            // The widest gap any still-capable falling row offers (generic max, so a table edit is honored).
+            int fallGapCap = 0;
+            for (int dr = 1; dr <= capsDrop; dr++) {
+                int m = env[ParkourEnvelope.FALL1 + dr - 1];
+                if (m > fallGapCap) fallGapCap = m;
+            }
+            // Scan horizon for THIS direction: the last column any landing class can still use.
+            int maxGapAll = Math.max(flatMax, Math.max(riseMax, fallGapCap));
+            if (maxGapAll < 1) continue; // this takeoff condition offers no jump in this direction
+
             int found = scanDirection(ctx, x, y, z, d[0], d[1], out,
-                    flatMax, riseMax, fallMax, capsDrop, safeFall, fallGapCap, maxGapAll);
+                    flatMax, riseMax, env, capsDrop, safeFall, fallGapCap, maxGapAll);
             if (found == DIR_SAW_GAP && OFFSET_FALLBACK) {
                 // A genuine gap with NO aligned landing of any class — arm the (c,±1) offset fallback
                 // tier for this direction only (class Javadoc). Directions that landed, or that have no
@@ -471,7 +484,7 @@ public final class Parkour implements Movement {
      *         arms {@link #probeOffsets} in the caller.
      */
     private static int scanDirection(MovementContext ctx, int x, int y, int z, int dx, int dz,
-            CandidateSink out, int flatMax, int riseMax, int[] fallMax, int capsDrop, int safeFall,
+            CandidateSink out, int flatMax, int riseMax, int[] env, int capsDrop, int safeFall,
             int fallGapCap, int maxGapAll) {
         // The lazy-verification prefix cursor: gap columns 1..verified have proven transit prisms, whose
         // pass-through surcharge (summed column-ascending — the eager order) is verifiedTransit.
@@ -589,7 +602,7 @@ public final class Parkour implements Movement {
                         // Landing body (fy+1, fy+2) is proven passable by the arc verification below for
                         // dr == 1 (node-level cell + prism) and by the descended cells just walked for
                         // deeper drops.
-                        if (g <= fallMax[dr]) {
+                        if (g <= env[ParkourEnvelope.FALL1 + dr - 1]) {
                             long vs = verifyPrisms(ctx, x, y, z, dx, dz, verified, verifiedTransit, c);
                             if (vs == PRISM_BLOCKED) return found; // nothing farther can verify either
                             verified = (int) (vs >>> 32);
