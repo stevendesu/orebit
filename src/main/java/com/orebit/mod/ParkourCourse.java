@@ -16,10 +16,14 @@ import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.PlatformEvents;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.Half;
+import net.minecraft.world.level.block.state.properties.StairsShape;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -74,6 +78,10 @@ public final class ParkourCourse {
     /** PRECISION walkway length (perpendicular to the jump line) from the 1-wide landing to the goal. */
     private static final int WALK = 5;
 
+    /** Blocks of clearance above each stair floor for the staircase-trial ceiling (see {@code buildStairs}):
+     *  3 clear body cells — the cover that blocks a jump's apex head but not a step-assist's ~0.5 head-rise. */
+    private static final int STAIR_CEILING_GAP = 4;
+
     /** Ticks to let the WHOLE starting area's nav grid build before the first goto (chunk gen + nav build). */
     private static final int WARMUP_TICKS = 120;
     /** Ticks to let the local nav grid build after each subsequent teleport before issuing the goto. */
@@ -87,6 +95,12 @@ public final class ParkourCourse {
 
     private static final BlockState FLOOR = Blocks.STONE.defaultBlockState();
     private static final BlockState SLAB = Blocks.SMOOTH_STONE_SLAB.defaultBlockState();
+    /** A BOTTOM straight stair FACING EAST (+X): its HIGH 16/16 half is on +X, LOW 8/16 front on -X (verified
+     *  empirically, StairVoxelProbe). Climbing +X (or descending -X) walks its low front → high back. */
+    private static final BlockState STAIR_EAST = Blocks.STONE_STAIRS.defaultBlockState()
+            .setValue(BlockStateProperties.HORIZONTAL_FACING, Direction.EAST)
+            .setValue(BlockStateProperties.HALF, Half.BOTTOM)
+            .setValue(BlockStateProperties.STAIRS_SHAPE, StairsShape.STRAIGHT);
 
     public static void register(PlatformEvents events) {
         if (System.getProperty("orebit.parkour") == null) {
@@ -106,6 +120,8 @@ public final class ParkourCourse {
     private static final class Trial {
         final String name;
         boolean slabRunway;
+        boolean stairRun;               // a staircase-traversal trial (custom build + pass/fail), not a jump
+        int stairSteps;                 // number of stair blocks in the run
         final Approach approach;
         final int rdx, rdz;             // approach (runway) direction
         final int jdx, jdy, jdz;        // jump vector: takeoff cell -> landing cell
@@ -189,6 +205,7 @@ public final class ParkourCourse {
         int navRetries;
         boolean overallDone;
         boolean leftTakeoff;
+        boolean stairAirborne;      // (stair trials) the bot left the ground during the run — i.e. it JUMPED
         double takeoffSpeed = -1;   // position-delta horizontal speed the tick the bot left the ground
         boolean wasGrounded = true;
         double prevX, prevZ;
@@ -241,6 +258,14 @@ public final class ParkourCourse {
             slabCard("slabflat2", 3, 0, 0);           // slab takeoff, node-flat 2-gap (physically +0.5 rise)
             slabCard("slabflat3", 4, 0, 0);           // slab takeoff, node-flat 3-gap (the reach-reduction case)
             slabCard("slabrise1", 2, 1, 0);           // slab takeoff, rise+1 — expect the rise() gate to refuse
+            // ---- Staircase-traversal trials (directional-stair model) ----
+            // A run of BOTTOM stairs FACING=EAST, each +1 up and +1 over, under a ceiling. stairup climbs +X
+            // under a TIGHT 2-block ceiling (WALK fits, a JUMP's 3rd cell is blocked) — the discriminator that
+            // proves the walk-up must read as a step-assist, not an Ascend jump (bug 1). stairdown descends -X;
+            // its ceiling sits one higher (Descend's step-off needs 3 clear over the dest cell) so the DOWN
+            // move is never head-blocked — it isolates the feet-Y / reached model (bug 2), not the jump gate.
+            stairUp("stairup", 4);
+            stairDown("stairdown", 4);
         }
 
         /** The grid base (snake-ordered) for the trial at position {@code trials.size()}. */
@@ -276,6 +301,26 @@ public final class ParkourCourse {
             int[] b = nextBase();
             Trial t = new Trial(name, a, rdx, rdz, jdx, jdy, jdz, Template.REACH, false, b[0], b[1]);
             t.slabRunway = true;
+            trials.add(t);
+        }
+
+        /** Ascending staircase climbing +X: {@code steps} stairs, each +1 up/+1 over, under a tight 2-block
+         *  ceiling. The bot walks the flat runway then up the stairs to a goal on the top platform. */
+        void stairUp(String name, int steps) {
+            int[] b = nextBase();
+            Trial t = new Trial(name, Approach.WALKIN, 1, 0, steps, steps, 0, Template.REACH, false, b[0], b[1]);
+            t.stairRun = true;
+            t.stairSteps = steps;
+            trials.add(t);
+        }
+
+        /** Descending staircase walked -X and down: the bot starts on the top runway and walks down {@code steps}
+         *  stairs to a goal on the bottom platform. Its ceiling clears the down-step (see {@link #buildStairs}). */
+        void stairDown(String name, int steps) {
+            int[] b = nextBase();
+            Trial t = new Trial(name, Approach.WALKIN, -1, 0, -steps, -steps, 0, Template.REACH, false, b[0], b[1]);
+            t.stairRun = true;
+            t.stairSteps = steps;
             trials.add(t);
         }
 
@@ -342,6 +387,7 @@ public final class ParkourCourse {
             attemptTicks = 0;
             navRetries = 0;
             leftTakeoff = false;
+            stairAirborne = false;
             takeoffSpeed = -1;
             wasGrounded = true;
             prevX = tr.startX;
@@ -375,6 +421,8 @@ public final class ParkourCourse {
             attemptTicks++;
             trace(tr);
 
+            if (tr.stairRun) { tickStair(tr); return; }
+
             if (!bot.isAlive()) {
                 record(tr, "FAIL", "died");
                 return;
@@ -392,6 +440,47 @@ public final class ParkourCourse {
             if (bot.navigator().navGaveUp()) {
                 // Nav-not-yet-built after a teleport looks like a give-up; retry the goto a few times before
                 // calling it a real failure (the identical jump can pass once its grid finishes building).
+                if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
+                    navRetries++;
+                    bot.comeTo(tr.goal);
+                    return;
+                }
+                record(tr, "FAIL", "nav gave up (no route offered)");
+                return;
+            }
+            if (attemptTicks >= ATTEMPT_BUDGET) {
+                record(tr, "FAIL", "timeout");
+            }
+        }
+
+        /** Pass/fail for a staircase-traversal trial: unlike a jump, the bot spends the whole trial low on the
+         *  stairs, so the jump-centric proj/leftTakeoff/fell logic can't be reused. PASS = arrived (mode back to
+         *  STAY) at the goal height; FAIL = died, fell off the structure into the void, nav gave up, or timeout. */
+        void tickStair(Trial tr) {
+            if (!bot.isAlive()) {
+                record(tr, "FAIL", "died");
+                return;
+            }
+            // A step-assist WALK up/down stairs stays grounded; a JUMP leaves the ground. On the ASCENDING
+            // trial that is the whole discriminator: the pre-fix model reads each +0.5 stair riser as a +1.0
+            // Ascend and JUMPS the steps, so "reached the goal but went airborne on the way" is the mispriced
+            // walk-up and FAILS — the fix makes the bot walk it (grounded throughout).
+            boolean ascending = tr.jdy > 0;
+            if (!EntityState.onGround(bot)) stairAirborne = true;
+            if (bot.mode() == AllyBotEntity.Mode.STAY && bot.getY() > tr.landedFeetY - 1.5) {
+                if (ascending && stairAirborne) {
+                    record(tr, "FAIL", "climbed by jumping (walk-up mispriced as a jump)");
+                } else {
+                    record(tr, "PASS", "reached goal");
+                }
+                return;
+            }
+            int lowestFloor = Math.min(Y0, tr.landY); // runway (Y0) for stairup, bottom platform (landY) for down
+            if (bot.getY() < lowestFloor - 5) {        // missed the structure entirely — a real fall to the void
+                record(tr, "FAIL", "fell");
+                return;
+            }
+            if (bot.navigator().navGaveUp()) {
                 if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
                     navRetries++;
                     bot.comeTo(tr.goal);
@@ -490,6 +579,33 @@ public final class ParkourCourse {
                 place(tr.landX, tr.landY, tr.landZ);
                 int px = -tr.cdz, pz = tr.cdx;
                 for (int k = 1; k <= WALK; k++) place(tr.landX + k * px, tr.landY, tr.landZ + k * pz);
+            }
+            if (tr.stairRun) buildStairs(tr); // fill the diagonal staircase + its ceiling between the platforms
+        }
+
+        /** Fill the diagonal staircase (BOTTOM stairs FACING=EAST) between the takeoff cell and the landing,
+         *  plus a following ceiling. buildTile has already laid the flat runway (start level) and the 3-wide
+         *  REACH platform (end level); this bridges them with {@code stairSteps} stairs, each +1 over ({@code sx})
+         *  and +1 in Y ({@code sy}).
+         *
+         *  <p><b>Ceiling height = the bug-1 discriminator.</b> Each step is covered {@link #STAIR_CEILING_GAP}
+         *  blocks above its own floor (3 clear body cells). This is the one cover that separates a WALK from a
+         *  JUMP: a vanilla jump's apex raises the head ~3.05 blocks above the feet, so the apex head clips the
+         *  3-clear ceiling — while step-assist raises the head only ~0.5, which fits under it. So a bot that can
+         *  ONLY jump the steps (the pre-fix model, which reads each +0.5 stair riser as a +1.0 Ascend) tries to
+         *  jump, bonks the ceiling and never gains the step; a bot that reads the directional stair surface takes
+         *  the step-assist WALK and climbs. (A tighter 2-clear cover would block the walk too — vanilla's
+         *  step-assist transiently raises the head into the same source+3 cell a jump-block fills — so it can't
+         *  demonstrate a PASS; a looser 4-clear cover lets the jump through and stops discriminating.) */
+        void buildStairs(Trial tr) {
+            int sx = Integer.signum(tr.jdx);        // +1 = climb +X (stairup), -1 = walk -X down (stairdown)
+            int sy = Integer.signum(tr.jdy);        // +1 ascending, -1 descending
+            int n = tr.stairSteps;
+            for (int s = 1; s <= n; s++) {          // the stair blocks (the s=N cell coincides with landX/landY)
+                placeState(tr.takeoffX + sx * s, Y0 + sy * s, tr.baseZ, STAIR_EAST);
+            }
+            for (int s = 0; s <= n; s++) {          // ceiling over the takeoff cell + every stair (1-wide)
+                place(tr.takeoffX + sx * s, Y0 + sy * s + STAIR_CEILING_GAP, tr.baseZ);
             }
         }
 

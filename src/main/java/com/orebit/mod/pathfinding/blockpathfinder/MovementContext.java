@@ -77,6 +77,88 @@ public final class MovementContext {
         return NavBlock.isStandable(d) ? NavBlock.topY(d) : 16;
     }
 
+    // Stair FACING (NavBlock ordinal 0=N 1=E 2=S 3=W) as an (dx,dz) step — the side a BOTTOM stair's HIGH
+    // 16/16 half sits on (StairVoxelProbe). N=(0,-1) E=(1,0) S=(0,1) W=(-1,0).
+    private static final int[] FACING_DX = {0, 1, 0, -1};
+    private static final int[] FACING_DZ = {-1, 0, 1, 0};
+
+    /**
+     * The collision top surface (sixteenths) of floor descriptor {@code d} as seen from the horizontal
+     * edge {@code (edgeDx,edgeDz)} — the direction from THIS cell toward the neighbour whose transition is
+     * being priced. For a BOTTOM stair this is the DIRECTIONAL surface: {@code 16} when the high 16/16 half
+     * is on that edge (i.e. the edge points along the stair's FACING — see {@link NavBlock#stairFacing}),
+     * else {@code 8} (the low 8/16 front, and both perpendicular edges — the straight-stair approximation,
+     * corners ignored per v1 scope). For a TOP stair (flat 16/16 top) or any non-stair this is simply {@link
+     * NavBlock#topY} — so every non-stair call is byte-identical to the old scalar {@code topYOf}, and the
+     * stair branch is gated behind one predictable {@link NavBlock#isStair} test on the hot path.
+     */
+    public int directionalTopY(long d, int edgeDx, int edgeDz) {
+        if (NavBlock.isStair(d) && NavBlock.stairHalf(d) == 0) {
+            int f = NavBlock.stairFacing(d);
+            return (edgeDx == FACING_DX[f] && edgeDz == FACING_DZ[f]) ? 16 : 8;
+        }
+        return NavBlock.topY(d);
+    }
+
+    /**
+     * The START-side surface height toward edge {@code (edgeDx,edgeDz)} — {@link #floorSurface} made
+     * directional for a stair takeoff cell. Non-standable floors keep the {@code 16} float-node convention
+     * (water/climb starts); a standable stair reports its {@link #directionalTopY} toward the move; every
+     * other standable floor reports its plain {@code topY} (identical to {@code floorSurface}). One
+     * descriptor read (path-edit-aware), same as {@code floorSurface}.
+     */
+    public int floorSurfaceToward(int x, int y, int z, int edgeDx, int edgeDz) {
+        long d = descriptorAt(x, y, z);
+        return NavBlock.isStandable(d) ? directionalTopY(d, edgeDx, edgeDz) : 16;
+    }
+
+    /**
+     * Whether the TAKEOFF FLOOR cell {@code (x,y,z)} — the standable cell a jump move launches FROM, the
+     * same cell {@link #floorSurface} reads — is a {@link NavBlock#reducesJump REDUCED-JUMP} floor (honey
+     * block, jump factor 0.5): the jump apex there (~0.384 blocks) clears nothing, so every jump-takeoff
+     * movement ({@link com.orebit.mod.pathfinding.blockpathfinder.movements.Ascend}/{@code Pillar}/{@code
+     * Parkour}/{@code DiagonalParkour}) refuses at the top of its {@code candidates}. Reads the floor
+     * descriptor the SAME way {@link #floorSurface} does (path-edit-aware) so jump-factor and topY agree on
+     * the identical cell; an UNBUILT floor reads as air (jump factor 1.0), so this returns {@code false} —
+     * never gate on unknown. One descriptor read + bit test.
+     */
+    public boolean reducesJump(int x, int y, int z) {
+        return NavBlock.reducesJump(descriptorAt(x, y, z));
+    }
+
+    /**
+     * Whether the bot's TAKEOFF BODY space over floor {@code (x,y,z)} — the feet cell {@code (x,y+1,z)} and
+     * head cell {@code (x,y+2,z)} the bot occupies while standing here — holds a {@link NavBlock#TRANSIT_HEAVY
+     * HEAVY through-slow} block (cobweb, the only vanilla case). A cobweb the body is INSIDE applies vanilla's
+     * {@code stuckSpeedMultiplier} to the WHOLE move vector each tick — the Y component too ({@code
+     * Entity.move}: {@code vec3 = vec3.multiply(stuckSpeedMultiplier)}), and cobweb's Y multiplier is {@code
+     * 0.05} ({@code WebBlock.entityInside} → {@code new Vec3(0.25, 0.05, 0.25)}), so a jump's {@code 0.42}
+     * take-off velocity becomes {@code 0.021} — apex ~0.021 blocks, un-jumpable (owner-verified in-game: only
+     * step-assist leaves a cobweb, never a jump). So the jump-takeoff movements ({@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Ascend}/{@code Pillar}/{@code Parkour}/{@code
+     * DiagonalParkour}) refuse at the top of their {@code candidates}; the WALKING moves are deliberately not
+     * gated (walking / step-assist through cobweb is fine).
+     *
+     * <p>This is the BODY cell, distinct from {@link #reducesJump}'s FLOOR cell (honey, a solid block you
+     * stand ON): honey throttles jump power via {@code getJumpFactor}, cobweb throttles jump velocity via the
+     * stuck multiplier of the passable block you stand IN. Only HEAVY qualifies: the LIGHT through-slow blocks
+     * (sweet berry bush Y {@code 0.75} → apex ~0.76; powder snow Y {@code 1.5} → boosts) leave a jumpable
+     * apex, so this returns {@code false} for them — the existing HEAVY/LIGHT split IS the vertical-jump-kill
+     * discriminator, no new descriptor bit needed.
+     *
+     * <p>Hot-path lean: reads the floor cell's precomputed {@link NavFlags#SLOW_TRANSIT} prefilter first —
+     * the common (no through-slow block in the body) case is one bit test with ZERO extra grid reads. Only
+     * when that fires (rare) are the two body descriptors read to distinguish HEAVY (gate) from LIGHT (don't).
+     * The prefilter is column-local and seam-exact (see {@link #bodyTransitCost(int, int, int, int)}), and an
+     * UNBUILT floor reads flags {@code 0} → {@code false} (never gate on unknown), matching {@code
+     * reducesJump}.
+     */
+    public boolean noJumpFromBody(int x, int y, int z) {
+        if (!NavFlags.slowTransit(flagsAt(x, y, z))) return false;
+        return NavBlock.transitSlow(descriptorAt(x, y + 1, z)) == NavBlock.TRANSIT_HEAVY
+                || NavBlock.transitSlow(descriptorAt(x, y + 2, z)) == NavBlock.TRANSIT_HEAVY;
+    }
+
     /**
      * Sentinel a {@link #packedAt} read returns for an unbuilt cell — re-exported from {@link
      * NavGridView#UNBUILT} so a movement compares against it without importing the grid view.
@@ -570,6 +652,12 @@ public final class MovementContext {
     /** {@link #topYOf(int, int, int)} on an already-read descriptor (read-once form). */
     public int topYOf(long d) {
         return NavBlock.topY(d);
+    }
+
+    /** Whether an already-read descriptor is a stair — the one predictable gate the ground moves test before
+     *  taking the {@link #directionalTopY} branch (the common non-stair case is this single bit compare). */
+    public boolean isStair(long d) {
+        return NavBlock.isStair(d);
     }
 
     /** True if standing on the cell incurs a slow surface (soul sand / honey / cobweb / slime). */
