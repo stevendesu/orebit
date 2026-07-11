@@ -56,6 +56,8 @@ public final class Ascend implements Movement {
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
         if (ctx.mode() != MovementContext.MODE_STANDING) return; // jump-up — only while upright
         if (ctx.caps().jumpHeight() < 1) return;
+        if (ctx.reducesJump(x, y, z)) return; // honey-block floor: the jump apex clears nothing — can't take off
+        if (ctx.noJumpFromBody(x, y, z)) return; // cobweb body cell: the stuck multiplier kills take-off velocity
         int uy = y + 1;
 
         // Source facts are the same for all four directions — read once. The bot stands on (x,y,z) so its
@@ -64,20 +66,22 @@ public final class Ascend implements Movement {
         boolean srcClear = ctx.headroomProves(srcFlags, y, MovementContext.HEADROOM_JUMP);
         boolean srcRisky = MovementContext.risksEdit(srcFlags);
         // The START surface height (sixteenths) — a partial start (slab, top 8) eats into the jump
-        // budget: every rise below is measured from THIS surface (MovementContext.rise). floorSurface,
-        // not raw topY: a surface-swim node's water "floor" reads as 16 (feet at the cell boundary), so
-        // shore exits keep their historical geometry. Hoisted out of the direction loop (one read per
-        // expansion; the per-search chunk cache makes it an array index).
-        final int startTopY = ctx.floorSurface(x, y, z);
-        // A PLACED step is a full cube, so its top is a fixed rise of 32 − startTopY sixteenths (one block
-        // level up + a full 16 top). From a low partial start (startTopY < 12) that exceeds JUMP_RISE = 20,
-        // so the build-a-step arm is dead for the whole expansion — decided once, not per direction.
-        final boolean canGainPlacedStep =
-                MovementContext.rise(1, 16, startTopY) <= MovementContext.JUMP_RISE;
+        // budget: every rise below is measured from THIS surface (MovementContext.rise). Read the start
+        // descriptor ONCE and derive both the scalar surface (== floorSurface: a non-standable float node's
+        // water "floor" reads 16 so shore exits keep their geometry) and stair-ness. A stair takeoff's
+        // surface is DIRECTIONAL, so it's resolved per neighbour inside the loop.
+        final long startDesc = ctx.descriptorAt(x, y, z);
+        final int startTopY = ctx.standable(startDesc) ? ctx.topYOf(startDesc) : 16;
+        final boolean startStair = ctx.isStair(startDesc);
 
         for (int[] d : CARDINALS) {
             int nx = x + d[0];
             int nz = z + d[1];
+            // START surface toward this neighbour (directional on a stair). A PLACED step is a full cube, so
+            // its top is a fixed rise of 32 − sTop (one level up + a full 16 top); from a low partial start
+            // that exceeds JUMP_RISE, killing the build-a-step arm for this direction.
+            int sTop = startStair ? ctx.directionalTopY(startDesc, d[0], d[1]) : startTopY;
+            boolean canGainPlacedStep = MovementContext.rise(1, 16, sTop) <= MovementContext.JUMP_RISE;
 
             // The destination floor (nx,uy,nz) is read three ways below (standable, topY, flags) — resolve
             // its grid slot ONCE and derive each from it.
@@ -92,7 +96,9 @@ public final class Ascend implements Movement {
             // A missing floor is the build-a-step arm: the placed step is a full cube, gated once above.
             boolean dstStandable = ctx.standable(dstDesc);
             if (dstStandable) {
-                int rise = MovementContext.rise(1, ctx.topYOf(dstDesc), startTopY);
+                // Directional dest surface (the stair's edge facing back toward the start) — a stair step-up
+                // reads as an 8/16 rise (Traverse's step-assist owns it) instead of a spurious 16/16 jump.
+                int rise = MovementContext.rise(1, ctx.directionalTopY(dstDesc, -d[0], -d[1]), sTop);
                 if (rise <= MovementContext.STEP_ASSIST_MAX_RISE) continue; // Traverse's step-assist
                 if (rise > MovementContext.JUMP_RISE) continue;            // taller than one jump gains
             } else if (!canGainPlacedStep) {
