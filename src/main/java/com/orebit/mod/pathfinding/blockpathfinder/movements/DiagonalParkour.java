@@ -14,13 +14,16 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  * diagonal landings are deferred (the cardinal move covers most real terrain, and the diagonal corner
  * geometry composed with a height change needs its own in-game verification first).
  *
- * <h2>Envelope (owner in-game data)</h2>
+ * <h2>Envelope (DERIVED — {@link ParkourEnvelope#DIAG})</h2>
  * Diagonal gap {@code g} = open diagonal cells between takeoff and landing; the landing sits {@code g+1}
  * diagonal steps out, so the jump displacement is {@code (g+1)·√2} and the air span itself {@code g·√2}
- * blocks. The owner verified the 2-gap (a {@code 2·√2 ≈ 2.83}-block air span — inside the ~3-block flat
- * sprint-jump reach that makes the cardinal 3-gap possible); the 3-gap ({@code 4.24}-block span) is at
- * the physics limit and ships enabled (s52: the parkour family's AGGRESSIVE flag is gone — a row that
- * misbehaves gets its pathology fixed, not flag-hidden). Gaps 1–3, sprint for 2+.
+ * blocks. The cap is no longer a constant — it is the {@code diag} column of the per-takeoff-condition
+ * {@link ParkourEnvelope#MAX_GAP} row (keyed on surface height, soul-sand floor, berry body — same as the
+ * cardinal {@link Parkour}). The BASE cap (full block, normal floor, no slow body) is <b>2</b>: the
+ * owner-verified 2-gap ({@code 2·√2 ≈ 2.83}-block air span) is inside the flat sprint-jump reach, but the
+ * 3-gap ({@code 4.24}-block displacement √20 &gt; the flat reach) is beyond the physics and is NO LONGER
+ * offered — the old hardcoded {@code MAX_GAP = 3} over-offered a jump the bot attempted and fell (the
+ * corner-cut off a 90° turn). Sprint for gaps 2+.
  *
  * <h2>Clearance geometry — the transit prism + the corner pairs</h2>
  * Like cardinal {@link Parkour}, every gap cell needs its node-level cell open (the SHAPE_OTHER fence
@@ -85,10 +88,6 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  */
 public final class DiagonalParkour implements Movement {
 
-    /** Diagonal gap cap (open diagonal cells): 3 = the full physics-limit envelope (2 owner-verified;
-     *  s52: always on, no family flag). */
-    private static final int MAX_GAP = 3;
-
     /**
      * Ticks in the air by diagonal gap ({@code [g]}, index 0 unused) — the cardinal flat table
      * interpolated at displacement {@code (g+1)·√2} (derivation in the class Javadoc).
@@ -131,8 +130,25 @@ public final class DiagonalParkour implements Movement {
             }
         }
 
-        final int maxGap = MAX_GAP;
+        // The diagonal gap cap is DERIVED per takeoff condition (ParkourEnvelope#DIAG), exactly like the
+        // cardinal move's rows: soul-sand floor and berry body tighten it, and a lower takeoff surface
+        // (slab / stair edge) folds into the effective Δy. The buckets are direction-independent (hoist);
+        // the surface height is directional only for a stair (its high half faces one edge).
+        final long floorDesc = ctx.descriptorAt(x, y, z);
+        final int gsfBucket = ctx.isSlow(floorDesc) ? 1 : 0;
+        final int occBucket = ctx.bodyTransitLight(x, y, z) ? 1 : 0;
+        final boolean stair = ctx.isStair(floorDesc);
+        final int uniformDiag = stair ? -1
+                : ParkourEnvelope.MAX_GAP[ParkourEnvelope.index(ctx.floorSurface(x, y, z))]
+                        [gsfBucket][occBucket][ParkourEnvelope.DIAG];
+
         for (int[] d : DIAGONALS) {
+            int maxGap = stair
+                    ? ParkourEnvelope.MAX_GAP[ParkourEnvelope.index(
+                            ctx.directionalTopY(floorDesc, d[0], d[1]))][gsfBucket][occBucket]
+                            [ParkourEnvelope.DIAG]
+                    : uniformDiag;
+            if (maxGap < 1) continue; // this takeoff condition offers no diagonal jump
             scanDirection(ctx, x, y, z, d[0], d[1], out, maxGap);
         }
     }
