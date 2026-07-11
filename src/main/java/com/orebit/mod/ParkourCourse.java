@@ -86,6 +86,7 @@ public final class ParkourCourse {
     private static final int ATTEMPT_BUDGET = 400;
 
     private static final BlockState FLOOR = Blocks.STONE.defaultBlockState();
+    private static final BlockState SLAB = Blocks.SMOOTH_STONE_SLAB.defaultBlockState();
 
     public static void register(PlatformEvents events) {
         if (System.getProperty("orebit.parkour") == null) {
@@ -104,6 +105,7 @@ public final class ParkourCourse {
      *  with all world geometry precomputed from its base X band. */
     private static final class Trial {
         final String name;
+        boolean slabRunway;
         final Approach approach;
         final int rdx, rdz;             // approach (runway) direction
         final int jdx, jdy, jdz;        // jump vector: takeoff cell -> landing cell
@@ -235,6 +237,10 @@ public final class ParkourCourse {
             // momentum) is the root; if it passes -> the planner's corner-cut choice was.
             turn("turnflat2w", 3, 0, 0, true);
             turn("turnflat3w", 4, 0, 0, true);
+            // ---- Slab-takeoff reach trials ----
+            slabCard("slabflat2", 3, 0, 0);           // slab takeoff, node-flat 2-gap (physically +0.5 rise)
+            slabCard("slabflat3", 4, 0, 0);           // slab takeoff, node-flat 3-gap (the reach-reduction case)
+            slabCard("slabrise1", 2, 1, 0);           // slab takeoff, rise+1 — expect the rise() gate to refuse
         }
 
         /** The grid base (snake-ordered) for the trial at position {@code trials.size()}. */
@@ -257,6 +263,20 @@ public final class ParkourCourse {
             int rdx = jdx >= 0 ? 1 : -1;
             addTrial(name + ".walkin", Approach.WALKIN, rdx, 0, jdx, jdy, jdz, t, false);
             addTrial(name + ".rest", Approach.REST, rdx, 0, jdx, jdy, jdz, t, false);
+        }
+
+        /** Slab-takeoff variant of {@link #card}: the whole runway is bottom-slabs (surface +0.5). */
+        void slabCard(String name, int jdx, int jdy, int jdz) {
+            int rdx = jdx >= 0 ? 1 : -1;
+            addSlabTrial(name + ".walkin", Approach.WALKIN, rdx, 0, jdx, jdy, jdz);
+            addSlabTrial(name + ".rest", Approach.REST, rdx, 0, jdx, jdy, jdz);
+        }
+
+        void addSlabTrial(String name, Approach a, int rdx, int rdz, int jdx, int jdy, int jdz) {
+            int[] b = nextBase();
+            Trial t = new Trial(name, a, rdx, rdz, jdx, jdy, jdz, Template.REACH, false, b[0], b[1]);
+            t.slabRunway = true;
+            trials.add(t);
         }
 
         void diag(String name, int jdx, int jdy, int jdz) {
@@ -439,7 +459,8 @@ public final class ParkourCourse {
             for (int k = 0; k < RUN; k++) {
                 int cx = tr.baseX + k * tr.rdx;
                 int cz = tr.baseZ + k * tr.rdz;
-                if (tr.wideRunway) placeWide(cx, Y0, cz, tr.rdx, tr.rdz);
+                if (tr.slabRunway) placeState(cx, Y0, cz, SLAB);
+                else if (tr.wideRunway) placeWide(cx, Y0, cz, tr.rdx, tr.rdz);
                 else place(cx, Y0, cz);
             }
             if (tr.walled) {
@@ -474,6 +495,10 @@ public final class ParkourCourse {
 
         void place(int x, int y, int z) {
             level.setBlockAndUpdate(new BlockPos(x, y, z), FLOOR);
+        }
+
+        void placeState(int x, int y, int z, BlockState s) {
+            level.setBlockAndUpdate(new BlockPos(x, y, z), s);
         }
 
         /** Place a cell plus its two perpendicular neighbours (a 3-wide platform along {@code (ux,uz)}). */

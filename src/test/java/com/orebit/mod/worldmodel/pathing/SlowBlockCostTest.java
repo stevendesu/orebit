@@ -185,11 +185,18 @@ class SlowBlockCostTest {
     }
 
     /** The plan is a straight flat +X run ending near the goal; returns the blocks walked. Waypoints are
-     *  STAND positions (floorCell.above()), so a flat run over the y=0 floor holds waypoint y = start.y + 1. */
+     *  topY-aware STAND positions: {@code floorCell.above()} over a full-topped floor (stone, topY==16), the
+     *  floor cell ITSELF over a bottom-partial (soul sand's 14/16 box, topY&lt;16). Either flavour, a FLAT run
+     *  holds ONE constant elevation — so flatness is pinned as "every waypoint shares the run's Y", not a
+     *  hardcoded {@code floor.above()} (which only held for the full-block case and broke on soul sand). */
     private static int assertStraightRun(BlockPathPlan plan, BlockPos start) {
         BlockPos last = plan.waypoint(plan.size() - 1);
         assertEquals(start.getZ(), last.getZ(), "a straight +X run must not wander in Z; ended at " + last);
-        assertEquals(start.getY() + 1, last.getY(), "a flat run must not change level; ended at " + last);
+        int level = plan.waypoint(0).getY();
+        for (int i = 0; i < plan.size(); i++) {
+            assertEquals(level, plan.waypoint(i).getY(),
+                    "a flat run must not change level; waypoint " + i + " = " + plan.waypoint(i));
+        }
         int walked = last.getX() - start.getX();
         assertTrue(walked >= 10, "the run must cover the corridor (goal tolerance ±1); walked " + walked);
         return walked;

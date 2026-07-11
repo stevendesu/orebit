@@ -11,6 +11,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Axes;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.GoalForcedCost;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 
 import net.minecraft.core.BlockPos;
@@ -893,7 +894,7 @@ public final class BlockPathfinder {
                 if (commitRow != startRow) {
                     float commitH = relaxer.h(nodes.x[commitRow], nodes.y[commitRow], nodes.z[commitRow]);
                     if ((relaxer.h(sx, sy, sz) - commitH) > PARTIAL_MIN_PROGRESS) {
-                        BlockPathPlan partial = reconstruct(nodes, startRow, commitRow);
+                        BlockPathPlan partial = reconstruct(grid, nodes, startRow, commitRow);
                         LAST_PARTIAL_TL.get()[0] = true;
                         // Tag: "-seed" = the commit point is a seeded never-popped start child; "-irrev" = the
                         // guard truncated to an ancestor (ancestors were all popped, so the two are exclusive).
@@ -910,7 +911,7 @@ public final class BlockPathfinder {
             return null;
         }
 
-        BlockPathPlan plan = reconstruct(nodes, startRow, reachedRow);
+        BlockPathPlan plan = reconstruct(grid, nodes, startRow, reachedRow);
         if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
                 "FOUND-" + plan.size() + "wp", sx, sy, sz, gx, gy, gz);
         return plan;
@@ -1339,7 +1340,7 @@ public final class BlockPathfinder {
         }
     }
 
-    private static BlockPathPlan reconstruct(Nodes nodes, int startRow, int reachedRow) {
+    private static BlockPathPlan reconstruct(NavGridView grid, Nodes nodes, int startRow, int reachedRow) {
         List<Movement> tier1 = MovementRegistry.TIER1;
 
         // Collect the node rows from start to reached, in FORWARD order (the start cell itself is not a
@@ -1374,7 +1375,10 @@ public final class BlockPathfinder {
             if (j <= 1) {
                 // Single waypoint (the historical behaviour): floor cell's top = the bot's stand position.
                 // Read coords from the node arrays (the key now packs mode and no longer round-trips to a pos).
-                waypoints.add(new BlockPos(nx, ny + 1, nz));
+                // Feet-Y is topY-aware: floor.above() for a full-topped floor (topY==16 — full block / TOP
+                // slab), the floor cell ITSELF for a bottom-partial (BOTTOM slab / snow / carpet / plate),
+                // whose collision top is mid-cell so the bot's feet occupy the floor's own cell.
+                waypoints.add(new BlockPos(nx, feetYOf(grid, nx, ny, nz), nz));
                 moves.add(move);
                 // Copy out of the per-search arena: these edits ride home in the BlockPathPlan and are
                 // replayed by the follower over many ticks, while later searches reuse the arena slots.
@@ -1386,12 +1390,32 @@ public final class BlockPathfinder {
             int ux = Integer.signum(nx - px), uy = Integer.signum(ny - py), uz = Integer.signum(nz - pz);
             for (int k = 1; k <= j; k++) {
                 int fx = px + ux * k, fy = py + uy * k, fz = pz + uz * k; // floor cell of step k
-                waypoints.add(new BlockPos(fx, fy + 1, fz));             // floor.above() = stand position
+                waypoints.add(new BlockPos(fx, feetYOf(grid, fx, fy, fz), fz)); // topY-aware stand position
                 moves.add(move);
                 edits.add(edge == null ? null : sliceStep(edge, fx, fy, fz));
             }
         }
         return new BlockPathPlan(waypoints, moves, edits, nodes.g[reachedRow]);
+    }
+
+    /**
+     * The bot's feet-block Y for a floor cell {@code (fx,fy,fz)} — topY-aware. The search models nodes as
+     * FLOOR cells; the follower tracks the bot's FEET block ({@code blockPosition()}). For a full-topped
+     * floor (topY==16 — a full block or a TOP slab, whose collision surface is at the cell's top face) the
+     * feet sit in {@code floor.above()} (the historical {@code fy + 1}). For a BOTTOM-partial floor (bottom
+     * slab / snow layer / carpet / pressure plate / repeater, topY&lt;16 — collision surface mid-cell) the
+     * bot stands WITHIN the floor's own cell, so the feet block IS the floor cell ({@code fy}). Unbuilt or
+     * non-standable reads fall back to {@code fy + 1} (full-block behaviour → byte-identical to before).
+     * Cold path (one build per pathfind), so a per-waypoint grid read is fine.
+     */
+    private static int feetYOf(NavGridView grid, int fx, int fy, int fz) {
+        if (grid.built(fx, fy, fz)) {
+            long d = grid.descriptorAt(fx, fy, fz);
+            if (NavBlock.isStandable(d)) {
+                return fy + (NavBlock.topY(d) == 16 ? 1 : 0);
+            }
+        }
+        return fy + 1;
     }
 
     /**
