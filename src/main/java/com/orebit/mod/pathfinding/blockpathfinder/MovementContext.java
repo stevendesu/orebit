@@ -160,6 +160,27 @@ public final class MovementContext {
     }
 
     /**
+     * Whether the bot's TAKEOFF BODY space over floor {@code (x,y,z)} — the feet cell {@code (x,y+1,z)} and
+     * head cell {@code (x,y+2,z)} — holds a {@link NavBlock#TRANSIT_LIGHT LIGHT through-slow} block (sweet
+     * berry bush / powder snow): the {@code occBucket} input to {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.ParkourEnvelope}. A jump launched with a body
+     * cell inside a slow block loses horizontal reach (berry's {@code stuckSpeedMultiplier} scales the whole
+     * move vector), so the envelope reads a TIGHTER row — this predicate is that row's gate.
+     *
+     * <p>Prefiltered on the floor's {@link NavFlags#SLOW_TRANSIT} bit exactly like {@link #noJumpFromBody}
+     * (one bit test, zero grid reads in the common clear case); an UNBUILT floor reads flags {@code 0} →
+     * {@code false} (never gate on unknown). Powder snow is ALSO {@code TRANSIT_LIGHT}; pricing it with the
+     * berry row (marginally tighter) is deliberate and safe — a slow body cell may only ever REDUCE reach,
+     * never fabricate it (see {@code ParkourEnvelope}'s no-help clamp). {@link #noJumpFromBody} has already
+     * refused the HEAVY (cobweb) case before any jump move consults this, so a set prefilter here is LIGHT.
+     */
+    public boolean bodyTransitLight(int x, int y, int z) {
+        if (!NavFlags.slowTransit(flagsAt(x, y, z))) return false;
+        return NavBlock.transitSlow(descriptorAt(x, y + 1, z)) == NavBlock.TRANSIT_LIGHT
+                || NavBlock.transitSlow(descriptorAt(x, y + 2, z)) == NavBlock.TRANSIT_LIGHT;
+    }
+
+    /**
      * Sentinel a {@link #packedAt} read returns for an unbuilt cell — re-exported from {@link
      * NavGridView#UNBUILT} so a movement compares against it without importing the grid view.
      */

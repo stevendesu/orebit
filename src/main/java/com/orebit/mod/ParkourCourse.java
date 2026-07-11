@@ -95,6 +95,9 @@ public final class ParkourCourse {
 
     private static final BlockState FLOOR = Blocks.STONE.defaultBlockState();
     private static final BlockState SLAB = Blocks.SMOOTH_STONE_SLAB.defaultBlockState();
+    /** Soul sand: a full-block SLOW floor (speedFactor 0.4, jumpFactor 1.0 — NOT reduced-jump like honey),
+     *  so it reaches the envelope's soul-sand row and tightens the offered gaps. */
+    private static final BlockState SOUL = Blocks.SOUL_SAND.defaultBlockState();
     /** A BOTTOM straight stair FACING EAST (+X): its HIGH 16/16 half is on +X, LOW 8/16 front on -X (verified
      *  empirically, StairVoxelProbe). Climbing +X (or descending -X) walks its low front → high back. */
     private static final BlockState STAIR_EAST = Blocks.STONE_STAIRS.defaultBlockState()
@@ -120,6 +123,7 @@ public final class ParkourCourse {
     private static final class Trial {
         final String name;
         boolean slabRunway;
+        boolean soulRunway;             // soul-sand takeoff+runway (slow floor — tighter envelope row)
         boolean stairRun;               // a staircase-traversal trial (custom build + pass/fail), not a jump
         int stairSteps;                 // number of stair blocks in the run
         final Approach approach;
@@ -258,6 +262,15 @@ public final class ParkourCourse {
             slabCard("slabflat2", 3, 0, 0);           // slab takeoff, node-flat 2-gap (physically +0.5 rise)
             slabCard("slabflat3", 4, 0, 0);           // slab takeoff, node-flat 3-gap (the reach-reduction case)
             slabCard("slabrise1", 2, 1, 0);           // slab takeoff, rise+1 — expect the rise() gate to refuse
+            // ---- Soul-sand-takeoff reach trials (slow-floor envelope row) ----
+            // Soul sand is BOTH a slow floor (0.4 speed factor) AND a sunk block (collision top 14/16), so
+            // the derived envelope's flat cap off it is just 1 (ParkourEnvelope.MAX_GAP[14][soul][none] =
+            // flat 1). soulflat1 is inside that reduced cap -> the bot makes the OFFERED (reduced) jump;
+            // soulflat2 is EXCLUDED (flat 2 not offered from soul sand) -> nav must cleanly refuse (no route
+            // offered), never attempt-and-fall. The tile isolates the jump (bottomless drop on a miss), so a
+            // wrongly-offered flat-2 would FAIL(fell) while the correct behaviour is a clean nav-gave-up.
+            soulCard("soulflat1", 2, 0, 0);
+            soulCard("soulflat2", 3, 0, 0);
             // ---- Staircase-traversal trials (directional-stair model) ----
             // A run of BOTTOM stairs FACING=EAST, each +1 up and +1 over, under a ceiling. stairup climbs +X
             // under a TIGHT 2-block ceiling (WALK fits, a JUMP's 3rd cell is blocked) — the discriminator that
@@ -301,6 +314,22 @@ public final class ParkourCourse {
             int[] b = nextBase();
             Trial t = new Trial(name, a, rdx, rdz, jdx, jdy, jdz, Template.REACH, false, b[0], b[1]);
             t.slabRunway = true;
+            trials.add(t);
+        }
+
+        /** Soul-sand-takeoff variant of {@link #card}: the whole runway is soul sand (slow floor, 0.4 speed
+         *  factor), so the bot leaves the takeoff cell with the reduced horizontal budget the envelope's
+         *  soul-sand row assumes. */
+        void soulCard(String name, int jdx, int jdy, int jdz) {
+            int rdx = jdx >= 0 ? 1 : -1;
+            addSoulTrial(name + ".walkin", Approach.WALKIN, rdx, 0, jdx, jdy, jdz);
+            addSoulTrial(name + ".rest", Approach.REST, rdx, 0, jdx, jdy, jdz);
+        }
+
+        void addSoulTrial(String name, Approach a, int rdx, int rdz, int jdx, int jdy, int jdz) {
+            int[] b = nextBase();
+            Trial t = new Trial(name, a, rdx, rdz, jdx, jdy, jdz, Template.REACH, false, b[0], b[1]);
+            t.soulRunway = true;
             trials.add(t);
         }
 
@@ -549,6 +578,7 @@ public final class ParkourCourse {
                 int cx = tr.baseX + k * tr.rdx;
                 int cz = tr.baseZ + k * tr.rdz;
                 if (tr.slabRunway) placeState(cx, Y0, cz, SLAB);
+                else if (tr.soulRunway) placeState(cx, Y0, cz, SOUL);
                 else if (tr.wideRunway) placeWide(cx, Y0, cz, tr.rdx, tr.rdz);
                 else place(cx, Y0, cz);
             }
