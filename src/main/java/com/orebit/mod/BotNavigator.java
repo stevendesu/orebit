@@ -21,6 +21,7 @@ import com.orebit.mod.platform.Replaceable;
 import com.orebit.mod.platform.WorldEdits;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 import net.minecraft.core.BlockPos;
@@ -350,10 +351,11 @@ final class BotNavigator {
             // (onBotMoved / refreshWindow / async drain) runs this tick. Mid-fall is excluded — a falling
             // bot is still moving and lands (grounded) within ticks, and planning from an airborne floor
             // cell would anchor the next search in the air.
+            BlockPos currentFloor = floorOf(bot.blockPosition()); // topY-aware, computed once per drain tick
             if (path != null && waypointIndex >= path.size() && (bot.grounded() || bot.isInWater())) {
-                this.settledFloor = bot.blockPosition().below();
+                this.settledFloor = currentFloor;
             }
-            if (settledFloor != null && bot.blockPosition().below().equals(settledFloor)) {
+            if (settledFloor != null && currentFloor.equals(settledFloor)) {
                 pathPlan.onBotMoved(settledFloor, bot.currentStartMode());
                 boolean consumed = path != null && waypointIndex >= path.size() && !pathPlan.isComplete();
                 if (consumed || blockRefreshTicks <= 0) {
@@ -386,7 +388,7 @@ final class BotNavigator {
                 // submit — in particular never in sync mode and never twice per window target.
                 if (path != null && !path.isEmpty() && waypointIndex > path.size() / 2
                         && waypointIndex < path.size() && pathPlan.wantsPreplan()) {
-                    pathPlan.preplan(path.waypoint(path.size() - 1).below(),
+                    pathPlan.preplan(floorOf(path.waypoint(path.size() - 1)),
                             EditSnapshot.fromRemainingSteps(path, lastEditedIndex + 1),
                             bot.currentStartMode());
                 }
@@ -401,7 +403,7 @@ final class BotNavigator {
         // Double adoption with the boundary block is impossible: both compare against lastBlockPlanRef,
         // so whichever runs first swaps and the other no-ops on the same reference.
         if (pathPlan != null && path == null) {
-            BlockPos liveFloor = bot.blockPosition().below();
+            BlockPos liveFloor = floorOf(bot.blockPosition());
             pathPlan.pollWhenPlanless(liveFloor);
             BlockPathPlan adopted = pathPlan.currentBlockPlan();
             if (adopted != lastBlockPlanRef) {
@@ -551,7 +553,7 @@ final class BotNavigator {
      */
     private void replan(BlockPos goalFloor) {
         ServerLevel level = (ServerLevel) Worlds.of(bot);
-        BlockPos startFloor = bot.blockPosition().below();
+        BlockPos startFloor = floorOf(bot.blockPosition());
 
         // The two-tier driver is a large, freshly-built subsystem (region A* + leaf mini-pathfinds). A bug
         // in it must NOT crash the server tick — degrade to "no plan" (which falls back to the visible
@@ -753,8 +755,9 @@ final class BotNavigator {
                 waypointIndex = j + 1;
                 // A move just COMPLETED — this is the settled stand cell the driver commits/replans off (its
                 // edits are now applied). Advancing the anchor only here is what keeps a mid-move transient from
-                // triggering a boundary replan (see settledFloor). w is the stand position; below() = its floor.
-                this.settledFloor = w.below();
+                // triggering a boundary replan (see settledFloor). w is the stand position; floorOf() = its floor
+                // (topY-aware: on a bottom-partial the stand cell IS the floor, so floorOf != w.below()).
+                this.settledFloor = floorOf(w);
                 break;
             }
         }
@@ -777,10 +780,10 @@ final class BotNavigator {
                         + phaseRunner.phase() + "/" + phaseRunner.phases() + " (reached fired before done)");
             }
             activePlanStep = waypointIndex;
-            BlockPos toFloor = wp.below();
+            BlockPos toFloor = floorOf(wp);
             BlockPos fromFloor = (waypointIndex == 0)
-                    ? (planStartFloor != null ? planStartFloor : bot.blockPosition().below())
-                    : path.waypoint(waypointIndex - 1).below();
+                    ? (planStartFloor != null ? planStartFloor : floorOf(bot.blockPosition()))
+                    : floorOf(path.waypoint(waypointIndex - 1));
             MovePlan mp = movement.plan(fromFloor.getX(), fromFloor.getY(), fromFloor.getZ(),
                     toFloor.getX(), toFloor.getY(), toFloor.getZ());
             if (mp != null) phaseRunner.begin(mp); else phaseRunner.clear();
@@ -794,7 +797,7 @@ final class BotNavigator {
         // the controller can ease momentum into a turn. The cursor is reused (no per-tick allocation) and
         // converts to the feet-target frame the controller expects (block-centre xz, floor-cell-top y).
         BlockPos segStart = (waypointIndex == 0)
-                ? (planStartFloor != null ? planStartFloor : bot.blockPosition().below())
+                ? (planStartFloor != null ? planStartFloor : floorOf(bot.blockPosition()))
                 : path.waypoint(waypointIndex - 1);
         BlockPos next = (waypointIndex + 1 < path.size()) ? path.waypoint(waypointIndex + 1) : null;
         cursor.set(segStart, wp, next);
@@ -839,6 +842,32 @@ final class BotNavigator {
         } else {
             stuckTicks = 0;
         }
+    }
+
+    /**
+     * The floor cell a feet-block stands on, topY-aware. Byte-identical to {@code feetBlock.below()} EXCEPT
+     * when the feet cell is itself a standable partial floor (a bottom slab / snow layer / carpet / pressure
+     * plate / repeater), where the feet block IS the floor cell. The search models nodes as floor cells and
+     * builds waypoints as the topY-aware feet block ({@link BlockPathfinder} reconstruct); localization must
+     * invert that with the same rule or the settle anchor / phase-plan floor drifts a cell on partials.
+     */
+    private BlockPos floorOf(BlockPos feetBlock) {
+        return isStandableFloor(feetBlock) ? feetBlock : feetBlock.below();
+    }
+
+    /**
+     * Whether cell {@code pos} is itself a standable floor block (bottom slab / snow / carpet / plate — the
+     * bot's feet occupy it while standing). Reads the SAME classified nav descriptor the search reads (via
+     * the cheap {@link NavGridView#background} seam — a bare wrapper over the level's built {@code NavStore},
+     * no live {@code getBlockState}, no per-search setup bill), so {@link #floorOf} inverts exactly the
+     * {@code standable}/{@code topY} the waypoint feet-Y was built from ({@link BlockPathfinder} reconstruct).
+     * Unbuilt → {@code false} (→ {@link #floorOf} falls back to {@code below()}, today's behaviour). For a
+     * full block the bot's feet cell is AIR (not standable) → {@code below()} — unchanged.
+     */
+    private boolean isStandableFloor(BlockPos pos) {
+        NavGridView grid = NavGridView.background((ServerLevel) Worlds.of(bot));
+        return grid.built(pos.getX(), pos.getY(), pos.getZ())
+                && NavBlock.isStandable(grid.descriptorAt(pos.getX(), pos.getY(), pos.getZ()));
     }
 
     /**
