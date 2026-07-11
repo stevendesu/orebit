@@ -94,12 +94,17 @@ public final class Traverse implements Movement {
         // The START surface height (sixteenths): every rising-lip test below measures from this real
         // surface (a slab start is 8/16 lower than a full block). floorSurface, not raw topY — a
         // surface-swim node's water "floor" reads as 16 (feet at the cell boundary), so walking OUT of
-        // water onto the bank keeps its historical zero-lip geometry. Hoisted out of the direction loop
-        // — one read per expansion, served by the per-search chunk cache.
-        final int startTopY = ctx.floorSurface(x, y, z);
+        // water onto the bank keeps its historical zero-lip geometry. Read the start descriptor ONCE and
+        // derive both the scalar surface and stair-ness from it (one read per expansion, cache-served).
+        final long startDesc = ctx.descriptorAt(x, y, z);
+        final int startTopY = ctx.standable(startDesc) ? ctx.topYOf(startDesc) : 16; // == floorSurface
+        final boolean startStair = ctx.isStair(startDesc); // a stair start's surface is DIRECTIONAL per move
         for (int[] d : CARDINALS) {
             int nx = x + d[0];
             int nz = z + d[1];
+            // The START surface toward THIS neighbour: directional for a stair takeoff (high 16/16 on the
+            // FACING side, low 8/16 opposite), the hoisted scalar for everything else (byte-identical).
+            int sTop = startStair ? ctx.directionalTopY(startDesc, d[0], d[1]) : startTopY;
 
             // The same-level neighbour floor (nx,y,nz) drives both the flat-walk and the bridge case — read
             // its grid slot ONCE and derive built-ness / descriptor / flags from it (no second resolve).
@@ -118,7 +123,7 @@ public final class Traverse implements Movement {
             // too: a cuboid run is navtype-uniform, so within the run the lip is 0 — only the entry lip
             // from the start cell can differ, and it is exactly what's tested here.
             if (standable
-                    && MovementContext.rise(0, ctx.topYOf(pd), startTopY)
+                    && MovementContext.rise(0, ctx.directionalTopY(pd, -d[0], -d[1]), sTop)
                             <= MovementContext.STEP_ASSIST_MAX_RISE) {
                 int flags = MovementContext.flagsOf(p);
 
@@ -158,7 +163,7 @@ public final class Traverse implements Movement {
             if (pu != MovementContext.UNBUILT) {
                 long pud = ctx.descriptorOf(nx, uy, nz, pu);
                 if (ctx.standable(pud)
-                        && MovementContext.rise(1, ctx.topYOf(pud), startTopY)
+                        && MovementContext.rise(1, ctx.directionalTopY(pud, -d[0], -d[1]), sTop)
                                 <= MovementContext.STEP_ASSIST_MAX_RISE) {
                     int flags = MovementContext.flagsOf(pu);
                     EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
@@ -179,7 +184,7 @@ public final class Traverse implements Movement {
             // by the same auto-step budget (a slab start's 8/16 lip walks; a 2/16 plate start's 14/16
             // lip doesn't).
             if (built && !standable
-                    && MovementContext.rise(0, 16, startTopY) <= MovementContext.STEP_ASSIST_MAX_RISE) {
+                    && MovementContext.rise(0, 16, sTop) <= MovementContext.STEP_ASSIST_MAX_RISE) {
                 int flags = MovementContext.flagsOf(p);
                 EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
                 e.requireFloor(nx, y, nz);

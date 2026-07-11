@@ -117,6 +117,8 @@ public final class DiagonalParkour implements Movement {
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
         if (ctx.mode() != MovementContext.MODE_STANDING) return; // a running jump — only while upright
         if (ctx.caps().jumpHeight() < 1) return;
+        if (ctx.reducesJump(x, y, z)) return; // honey-block floor: the reduced jump apex clears no gap
+        if (ctx.noJumpFromBody(x, y, z)) return; // cobweb body cell: the stuck multiplier kills take-off velocity
 
         // Takeoff head-clearance (source y+3) — direction-independent, proven once (cardinal Parkour's
         // exact check; no break folding).

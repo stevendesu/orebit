@@ -82,6 +82,8 @@ public final class Pillar implements Movement {
         if (ctx.mode() != MovementContext.MODE_STANDING) return; // jump-and-place — only while upright
         BotCaps caps = ctx.caps();
         if (!caps.canPlace() || caps.jumpHeight() < 1) return;
+        if (ctx.reducesJump(x, y, z)) return; // honey-block floor: the jump apex clears nothing — can't pillar off
+        if (ctx.noJumpFromBody(x, y, z)) return; // cobweb body cell: the stuck multiplier kills take-off velocity
 
         int ny = y + 1; // new floor = the bot's current feet cell
         int packed = ctx.packedAt(x, ny, z);

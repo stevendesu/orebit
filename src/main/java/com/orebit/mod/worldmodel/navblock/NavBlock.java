@@ -23,6 +23,7 @@ import net.minecraft.world.level.block.StairBlock;
 import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.Half;
 import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
@@ -61,7 +62,13 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *   bits  width field
  *   0–4     5   topY        collision top surface, round(maxY*16), clamped 0..31
  *   5–7     3   shape       ShapeClass ordinal (EMPTY..OTHER) — see {@link #SHAPE_FULL} etc.
- *   8–13    6   (free)      reclaimed sturdy-faces mask — unread by pathfinding, cost ~half the table
+ *   8–9     2   stairFacing {@link StairBlock} horizontal FACING (0=N 1=E 2=S 3=W); 0 for non-stairs. On a
+ *                           BOTTOM stair the HIGH 16/16 half is on the FACING side, the LOW 8/16 front
+ *                           opposite (empirically verified, StairVoxelProbe), so a walk-up reads as a +0.5
+ *                           step-assist rather than a +1.0 jump — the movement layers directional-surface resolver.
+ *   10      1   stairHalf   {@link StairBlock} HALF (0=bottom 1=top); 0 for non-stairs. A TOP stair's top
+ *                           surface is flat 16/16 everywhere, so it needs no directional handling.
+ *   11–13   3   (free)      remainder of the reclaimed sturdy-faces mask — unread by pathfinding
  *   14–15   2   openable    0 none / 1 door / 2 trapdoor / 3 fence-gate
  *   16–17   2   fluid       00 none / 01 water / 11 lava (low bit = is-fluid, high = is-lava; water incl. waterlogged)
  *   18–19   2   surface     0 none / 1 slow / 2 slippery
@@ -89,6 +96,12 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           unprotected one — deliberate: navtypes conflate blocks, so protected-ness must
  *                           be part of the fingerprint for the planner to see it). The derived BREAKABLE
  *                           bit excludes it, so every planner break gate refuses in one bit test.
+ *   45      1   reducedJump a floor whose {@code Block.getJumpFactor()} is below 1.0 (honey block, 0.5 —
+ *                           the only vanilla case): standing on it caps the jump apex at ~0.384 blocks, so
+ *                           the jump-takeoff movements (Ascend / Pillar / Parkour / DiagonalParkour) refuse
+ *                           to launch from it. A base identity field (like {@code surface}/{@code portal}),
+ *                           read as one mask-and-test. Distinct from the {@code surface} SLOW field (soul
+ *                           sand / honey slow WALK speed, priced as a floor multiplier) — this is JUMP power.
  * </pre>
  */
 public final class NavBlock {
@@ -132,10 +145,13 @@ public final class NavBlock {
     public static final int TRANSIT_HEAVY = 2;
 
     // ---- Bit field shifts/masks --------------------------------------------------------------
-    // Bits 8–13 are FREE (formerly a 6-bit sturdy-faces mask, reclaimed — it was unread by pathfinding
-    // and cost ~half the navtype table, almost all of it stair facings; see the block-fingerprints doc).
+    // Bits 8–10 hold the stair facing (2) + half (1), populated ONLY for StairBlock states (0 elsewhere, so
+    // only stairs split navtypes); bits 11–13 remain FREE (the rest of the reclaimed 6-bit sturdy-faces mask,
+    // unread by pathfinding — see the block-fingerprints doc).
     private static final int TOP_Y_SHIFT = 0,  TOP_Y_MASK = 0x1F;
     private static final int SHAPE_SHIFT = 5,  SHAPE_MASK = 0x07;
+    private static final int STAIR_FACING_SHIFT = 8, STAIR_FACING_MASK = 0x03; // 0=N 1=E 2=S 3=W (stairs only)
+    private static final long STAIR_HALF_BIT = 1L << 10;                       // 0=bottom 1=top (stairs only)
     private static final int OPEN_SHIFT  = 14, OPEN_MASK  = 0x03;
     private static final int FLUID_SHIFT = 16, FLUID_MASK = 0x03;
     private static final int SURF_SHIFT  = 18, SURF_MASK  = 0x03;
@@ -150,6 +166,7 @@ public final class NavBlock {
     private static final int TRANSIT_SHIFT = 41, TRANSIT_MASK = 0x03; // bits 37–40 are the derived predicates
     private static final long PORTAL_BIT   = 1L << 43;                // nether-portal cell (base field, not derived)
     private static final long PROTECTED_BIT = 1L << 44;               // owner-protected: never break (base field)
+    private static final long REDUCED_JUMP_BIT = 1L << 45;            // reduced-jump floor: honey (base field)
 
     // ---- Precomputed predicate bits (37+) ----------------------------------------------------
     // Each is a PURE function of the fields above, so it adds ZERO navtypes (a function of existing bits
@@ -280,6 +297,15 @@ public final class NavBlock {
         // Blocks.NETHER_PORTAL exists under that name on every supported version (1.17.1→26.x), so no
         // platform adapter is needed — matching the direct Blocks.* references throughout this method.
         if (block == Blocks.NETHER_PORTAL)    d |= PORTAL_BIT;
+        if (reducesJump(block))               d |= REDUCED_JUMP_BIT;
+        // Stair facing/half — the directional standing-surface facts (bits 8–10), populated ONLY for stairs so
+        // only stair states split navtypes. A north/east/south/west stair now dedups per FACING (as the old
+        // per-Block sturdy-faces mask did), but bounded: stairs conflate across material, so this adds at most
+        // 4 facings × 2 halves × the distinct base stair descriptors (a few dozen navtypes, well within cap).
+        if (block instanceof StairBlock) {
+            d |= (long) stairFacingOrdinal(state) << STAIR_FACING_SHIFT;
+            if (state.getValue(BlockStateProperties.HALF) == Half.TOP) d |= STAIR_HALF_BIT;
+        }
         return withDerived(d);
     }
 
@@ -378,6 +404,32 @@ public final class NavBlock {
      */
     private static boolean isSlow(Block block) {
         return block.getSpeedFactor() < 0.999f;
+    }
+
+    /**
+     * A REDUCED-JUMP floor, classified from vanilla's own per-block jump-power factor ({@code
+     * Block.getJumpFactor()} — honey block is 0.5, everything else 1.0, so honey is the only vanilla
+     * case). Standing on such a floor caps the jump apex (~0.384 blocks — {@code getBlockJumpFactor}
+     * samples the feet block else the floor block, so a bot standing ON honey gets the honey factor);
+     * the jump movements refuse to take off from it. Mirrors {@link #isSlow}'s {@code getSpeedFactor}
+     * read (JUMP power here, WALK speed there) and auto-classifies any modded reduced-jump floor.
+     */
+    private static boolean reducesJump(Block block) {
+        return block.getJumpFactor() < 0.999f;
+    }
+
+    /**
+     * The 2-bit stair-facing ordinal (0=N 1=E 2=S 3=W) from a stair state's {@link
+     * BlockStateProperties#HORIZONTAL_FACING} — the FACING side is where a BOTTOM stair's HIGH 16/16 half
+     * sits (StairVoxelProbe). Every {@link StairBlock} carries HORIZONTAL_FACING on every supported version.
+     */
+    private static int stairFacingOrdinal(BlockState state) {
+        switch (state.getValue(BlockStateProperties.HORIZONTAL_FACING)) {
+            case EAST:  return 1;
+            case SOUTH: return 2;
+            case WEST:  return 3;
+            default:    return 0; // NORTH
+        }
     }
 
     /**
@@ -505,6 +557,13 @@ public final class NavBlock {
     public static int topY(long d)        { return (int) (d >>> TOP_Y_SHIFT) & TOP_Y_MASK; }
     /** ShapeClass ordinal — one of {@link #SHAPE_EMPTY}..{@link #SHAPE_OTHER}. */
     public static int shape(long d)        { return (int) (d >>> SHAPE_SHIFT) & SHAPE_MASK; }
+    /** Whether this cell is a stair ({@link #SHAPE_STAIR}) — the gate on the directional-surface path. */
+    public static boolean isStair(long d)  { return shape(d) == SHAPE_STAIR; }
+    /** Stair horizontal FACING ordinal (0=N 1=E 2=S 3=W); 0 for non-stairs. On a BOTTOM stair the HIGH
+     *  16/16 half is on the FACING side (StairVoxelProbe) — see the movement layers directional-surface resolver. */
+    public static int stairFacing(long d)  { return (int) (d >>> STAIR_FACING_SHIFT) & STAIR_FACING_MASK; }
+    /** Stair HALF: 0 = bottom (directional surface), 1 = top (flat 16/16 top — no directional handling). */
+    public static int stairHalf(long d)    { return (d & STAIR_HALF_BIT) != 0 ? 1 : 0; }
     /** Openable kind: 0 none, 1 door, 2 trapdoor, 3 fence-gate. */
     public static int openable(long d)     { return (int) (d >>> OPEN_SHIFT) & OPEN_MASK; }
     /** Fluid: 0 none, 1 water (incl. waterlogged), 3 lava (low bit = is-fluid, high bit = is-lava). */
@@ -519,6 +578,13 @@ public final class NavBlock {
     public static boolean hasGravity(long d)    { return (d & GRAVITY_BIT) != 0; }
     public static boolean isDamaging(long d)    { return (d & DAMAGE_BIT) != 0; }
     public static boolean isReplaceable(long d) { return (d & REPLACE_BIT) != 0; }
+    /**
+     * A REDUCED-JUMP floor — the block's {@link Block#getJumpFactor()} is below 1.0 (honey block, 0.5, the
+     * only vanilla case). Standing on it caps the jump apex at ~0.384 blocks, clearing nothing, so the
+     * jump-takeoff movements (Ascend / Pillar / Parkour / DiagonalParkour) refuse to launch from such a
+     * floor. A base identity field (packed in {@link #fingerprint}), read as one mask-and-test.
+     */
+    public static boolean reducesJump(long d)   { return (d & REDUCED_JUMP_BIT) != 0; }
     /** Quantized hardness: 255 = unbreakable, else round(destroyTime*5). */
     public static int hardness(long d)     { return (int) (d >>> HARD_SHIFT) & HARD_MASK; }
     /** Best-tool ordinal ({@link Tool}). */
