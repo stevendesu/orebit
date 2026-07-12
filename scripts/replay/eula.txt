@@ -1,0 +1,2 @@
+# Accepted for the local Orebit world-replay dev-server run (plain Loom run configs do not auto-accept).
+eula=true

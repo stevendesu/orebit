@@ -33,7 +33,7 @@ public final class GotoCommand implements BotCommand {
                             BlockPos target = ctx.getArgument("pos", Coordinates.class)
                                     .getBlockPos(ctx.getSource());
                             return OrebitCommands.act(ctx, (b, player, source) -> {
-                                b.comeTo(target);
+                                b.comeTo(target, 0.75, 0.75, 0);   // exact: reach the precise block
                                 CommandFeedback.send(source, "Bot heading to "
                                         + target.getX() + " " + target.getY() + " " + target.getZ() + ".");
                             });
