@@ -15,7 +15,8 @@
 
 param(
     [string]$McVersion = "1.21.11",
-    [switch]$BotDebug
+    [switch]$BotDebug,
+    [string]$GroundDrive = ""   # "" = build-default; "servo" | "legacy" (parkour bypasses drive(); no-regression A/B)
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,6 +43,7 @@ Copy-Item (Join-Path $templates "orebit.properties") (Join-Path $runDir "config\
 # ---- 2. Run -----------------------------------------------------------------------------------
 $gradleArgs = @(":fabric:${McVersion}:runParkour")
 if ($BotDebug) { $gradleArgs += "-Porebit.parkour.debug=true" }
+if ($GroundDrive -ne "") { $gradleArgs += "-Porebit.ground.drive=$GroundDrive" }
 
 Push-Location $repo
 try {

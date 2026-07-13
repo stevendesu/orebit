@@ -125,6 +125,9 @@ loom {
                 val v = project.findProperty("orebit.parkour.$key")
                 if (v != null) vmArg("-Dorebit.parkour.$key=$v")
             }
+            // Ground drive-strategy selector rides through so the parkour no-regression A/B can force it (parkour
+            // bypasses drive(), so it must be identical either way): ./gradlew :fabric:1.21.11:runParkour "-Porebit.ground.drive=servo"
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
             isIdeConfigGenerated = false
         }
         // Swimming-movement diagnostic: a superflat server that arms the common-src SwimCourse hook
@@ -140,6 +143,10 @@ loom {
                 val v = project.findProperty("orebit.swim.$key")
                 if (v != null) vmArg("-Dorebit.swim.$key=$v")
             }
+            // Ground drive-strategy selector rides through so the swim harness's ground-dominated Traverse
+            // bank-approaches/exits can be A/B'd against the ground velocity servo (Stage 2 broad verification):
+            //   ./gradlew :fabric:1.21.11:runSwim "-Porebit.ground.drive=servo"
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
             isIdeConfigGenerated = false
         }
         // Ground-movement (blue-ice / lava) diagnostic: a superflat server that arms the common-src IceCourse
@@ -155,6 +162,9 @@ loom {
                 val v = project.findProperty("orebit.ice.$key")
                 if (v != null) vmArg("-Dorebit.ice.$key=$v")
             }
+            // Ground drive-strategy selector rides through for the ground velocity-servo A/B (Stage 2):
+            //   ./gradlew :fabric:1.21.11:runIce "-Porebit.ground.drive=servo"
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
             isIdeConfigGenerated = false
         }
         // Real-world REPLAY diagnostic: a server that arms the common-src WorldReplay hook (-Dorebit.replay)

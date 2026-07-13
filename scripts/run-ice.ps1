@@ -16,7 +16,8 @@
 
 param(
     [string]$McVersion = "1.21.11",
-    [switch]$BotDebug
+    [switch]$BotDebug,
+    [string]$GroundDrive = ""   # "" = build-default; "servo" | "legacy" forces drive()'s land branch (Stage-2 A/B)
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,6 +44,7 @@ Copy-Item (Join-Path $templates "orebit.properties") (Join-Path $runDir "config\
 # ---- 2. Run -----------------------------------------------------------------------------------
 $gradleArgs = @(":fabric:${McVersion}:runIce")
 if ($BotDebug) { $gradleArgs += "-Porebit.ice.debug=true" }
+if ($GroundDrive -ne "") { $gradleArgs += "-Porebit.ground.drive=$GroundDrive" }
 
 Push-Location $repo
 try {

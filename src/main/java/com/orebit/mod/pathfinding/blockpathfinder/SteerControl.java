@@ -95,6 +95,16 @@ public final class SteerControl {
      *  is a hazard, so a harmless turn is never slowed. */
     static final double TURN_CRAWL_THROTTLE = 0.28;
 
+    /**
+     * A/B + revert switch for {@link #drive}'s LAND branch (the chokepoint the ground moves Traverse/Descend/
+     * Diagonal steer through): {@code "servo"} = the new input-only velocity {@link #groundServo} (hazard-aware
+     * target-velocity with reverse-thrust braking — holds a 1-wide blue-ice lane); {@code "legacy"} (default) =
+     * the old open-loop {@link #steerTowards} (full-forward look-ahead, overshoots on ice). Mirrors SprintSwim's
+     * {@code orebit.swim.bleed} servo A/B switch. Set {@code -Dorebit.ground.drive=servo} to enable. Momentum-
+     * critical moves (parkour arc, Ascend-climb, Fall-walkoff) call {@code steerTowards} DIRECTLY (bypassing
+     * {@code drive}) and are UNAFFECTED by this. */
+    private static final String GROUND_DRIVE = System.getProperty("orebit.ground.drive", "legacy");
+
     // ---- velocity-servo cruise (swimServo) constants -------------------------------------------------
     /**
      * Desired-speed CEILING (blocks/tick) for the velocity servo on a safe straight. Set ABOVE the sprint-swim
@@ -151,6 +161,35 @@ public final class SteerControl {
      * still held), so W stays pressed the whole time and a true throttle cut is never needed. Tiny, so the
      * residual forward trickle at a dead-stop corner is negligible. */
     static final double SERVO_FORWARD_MIN = 0.08;
+    /**
+     * GROUND velocity-servo desired-speed CEILING (blocks/tick) — the land counterpart of {@link #SERVO_CRUISE}.
+     * Set ABOVE the land-sprint terminal (~0.28 b/t) AND the plain-walk terminal (~0.216 b/t) so on ordinary
+     * friction the velocity error {@code desired - current} never goes negative and the servo saturates forward
+     * exactly like the open-loop walk — i.e. the servo NEVER slows the bot below its natural land speed, so it is
+     * a pure no-op on normal ground. On low-friction blue ice the natural coast blows PAST this ceiling, so there
+     * the servo bites: it reverse-thrusts to CAP the runaway ice momentum at the ceiling (safe straight) and the
+     * hazard ramp brings it down further into a corner — the whole point of the ground servo (hold a 1-wide ice
+     * lane instead of sliding off). No depth pitch (YAW-ONLY): land has no vertical swim control. */
+    static final double SERVO_GROUND_CRUISE = 0.35;
+    /**
+     * GROUND hazard-corner CROSS-TRACK return gain + cap (blocks/tick per block of cross-track). At a slippery
+     * hazard corner the two 1-wide legs' centerlines are offset 0.5 block in the perpendicular axis, so the bot
+     * enters the new leg with ~0.5 block of cross-track error. On near-frictionless ice a diagonal aim at the
+     * pivot gives almost NO centering thrust once the along speed is ramped low (the desired cross-velocity ≈ the
+     * bot's current), so the bot advances along the leg and clips the inside flank before it re-centres. These
+     * drive a DEDICATED cross-track return term — {@code min(CAP, GAIN*cte)} toward the centerline, INDEPENDENT of
+     * the (low) along speed — the ice lane-hold lever. Capped so a recovered bot doesn't fling past centre into
+     * the FAR flank (the reverse-brake mops up the residual). */
+    static final double SERVO_CROSS_GAIN = 0.75;
+    static final double SERVO_CROSS_CAP  = 0.13;
+    /**
+     * GROUND hazard-corner ALONG-track HALT scale: the cross-track error (blocks) at which the along-track advance
+     * is throttled to its floor factor, so a badly off-centre bot RE-CENTRES before advancing down the new leg
+     * (rather than sliding along it into the inside flank). {@code alongFactor = max(HALT_FLOOR, 1 - cte/CTE_HALT)}
+     * — full along when centred, ~floor when a full corner-offset off. The bot never dead-stops (it is still
+     * sliding cross-track toward centre — legal input, not a stall). */
+    static final double SERVO_CTE_HALT   = 0.40;
+    static final double SERVO_ALONG_HALT_FLOOR = 0.0;
 
     // ---- per-call geometry scratch (single bot per tick → one reusable instance) ---------------------
 
@@ -490,6 +529,128 @@ public final class SteerControl {
         b.setForward((float) fwd);
     }
 
+    /**
+     * GROUND <b>velocity SERVO</b> horizontal drive (YAW-ONLY) — the land counterpart of {@link #swimServo}, the
+     * input-only velocity-feedback alternative to the open-loop {@link #steerTowards} the ground moves
+     * (Traverse/Descend/Diagonal) drive through {@link #drive}. Where {@code steerTowards} just faces the
+     * look-ahead pursuit point and holds full forward — which on low-friction blue ice lets the carried momentum
+     * coast the bot off a 1-wide path at a corner into the flanking lava/void — this closes the loop on the bot's
+     * ACTUAL momentum: it computes a horizontal velocity ERROR {@code desired - current}, FACES along that error,
+     * and presses forward in proportion to its magnitude, so ice friction is fought with forward thrust to HOLD a
+     * capped speed and an overshoot is killed with REVERSE thrust (the error points up-track → the yaw flips 180°
+     * → the W key becomes a brake — essential on ice, where merely releasing forward coasts forever). No velocity
+     * is ever written; only look + forward, exactly as a player steers. NO depth pitch (land is 2-D).
+     *
+     * <ul>
+     *   <li><b>Desired direction</b> = the pursuit vector {@code (G.q - bot)} from {@link #computeGeom} (along-track
+     *       advance + cross-track return toward the centerline), blended near a turn toward the NEXT leg with an
+     *       OUTSIDE racing-line bias ({@link #CORNER_BLEND_MAX}/{@link #CORNER_RACING_BIAS}) so the bot rounds the
+     *       corner wide and keeps its hitbox off the inside flank — identical geometry to {@link #swimServo}.</li>
+     *   <li><b>Desired speed</b> = {@link #SERVO_GROUND_CRUISE} on a safe straight (an unreachable ceiling on normal
+     *       ground → the servo is a no-op there; on ice it caps the runaway coast), ramped DOWN toward a hazardous
+     *       turn ({@code min(cruise, max(SERVO_TURN_FLOOR, SERVO_HAZARD_RAMP*dist))}) so the bot can't coast through
+     *       into a flank hazard, clamped to a creep FLOOR so a run of corners holds a crawl rather than dead-stopping.
+     *       The ground hazard is LAVA <i>or</i> a would-fall VOID ({@link #groundOvershootHazard}/
+     *       {@link #groundFlankHazard} — the overshoot cell has no standable floor: the bot would walk off the
+     *       1-wide ice into the pit).</li>
+     * </ul>
+     * A degenerate (vertical/in-place) segment collapses to {@link #recenterOnTarget}, exactly like
+     * {@link #steerTowards}.
+     */
+    public static void groundServo(BotSteering b, SteerView p) {
+        computeGeom(b, p);                                 // ground: fixed look-ahead (gain 0), like steerTowards
+        if (G.segLen < EPS) {
+            recenterOnTarget(b, p);                        // no line to track → re-centre on the column
+            return;
+        }
+        double dirx = G.qx - b.x(), dirz = G.qz - b.z();   // pursuit direction (along-track + cross-track return)
+        double dl = Math.sqrt(dirx * dirx + dirz * dirz);
+        if (dl < EPS) { recenterOnTarget(b, p); return; }
+        dirx /= dl; dirz /= dl;
+
+        // Hazard-corner check FIRST — it selects the CORNERING LINE. The ground hazard is LAVA or a would-fall
+        // VOID; near it a wide racing line is fatal on near-frictionless ICE, where the momentum a blend injects
+        // toward the next leg PERSISTS (water drag bled it for swimServo; blue ice at slip 0.98 does not), sliding
+        // the 0.6 hitbox off the inside flank before the bot re-centres — the inside-corner cut.
+        boolean hazardCorner = groundOvershootHazard(b, p)
+                || (groundFlankHazard(b, p) && crossTrack(b, p) > FLANK_DRIFT);
+
+        // Desired VELOCITY (dvx,dvz): the servo tracks this against the bot's actual momentum below.
+        double cruise = SERVO_GROUND_CRUISE;
+        double dvx, dvz;
+        if (hazardCorner) {
+            // TIGHT ice line, in the LEG FRAME. Decompose desired velocity into ALONG-track (throttled low into the
+            // corner AND further throttled while off-centre, so the bot re-centres before advancing) + a DEDICATED
+            // CROSS-track return toward the centerline whose authority is INDEPENDENT of the low along speed. This
+            // is the ice lane-hold: a plain low-cruise diagonal aim gives near-zero centering thrust, so the bot
+            // slides along the new leg into the inside flank before re-centring (the retained-momentum inside cut).
+            double segx = p.tx() - p.sx(), segz = p.tz() - p.sz();
+            double sl = Math.sqrt(segx * segx + segz * segz);
+            double ux = segx / sl, uz = segz / sl;                       // leg unit (sl>EPS: G.segLen>=EPS above)
+            double along = (b.x() - p.sx()) * ux + (b.z() - p.sz()) * uz;
+            if (along < 0.0) along = 0.0; else if (along > sl) along = sl;
+            double fx = p.sx() + ux * along, fz = p.sz() + uz * along;   // nearest centerline point
+            double crx = fx - b.x(), crz = fz - b.z();                   // toward the centerline
+            double cte = Math.sqrt(crx * crx + crz * crz);
+
+            // ALONG speed: hazard ramp toward the near-face arrive point, floor-clamped, THEN scaled down by the
+            // cross-track error so a badly off-centre bot barely advances until it is back on the centerline.
+            double aimx = p.tx() - ux * TURN_ARRIVE_OFFSET, aimz = p.tz() - uz * TURN_ARRIVE_OFFSET;
+            double dcx = aimx - b.x(), dcz = aimz - b.z();
+            double alongSpeed = Math.min(SERVO_GROUND_CRUISE,
+                    Math.max(SERVO_TURN_FLOOR, SERVO_HAZARD_RAMP * Math.sqrt(dcx * dcx + dcz * dcz)));
+            double alongFactor = Math.max(SERVO_ALONG_HALT_FLOOR, 1.0 - cte / SERVO_CTE_HALT);
+            alongSpeed *= alongFactor;
+
+            // CROSS speed: strong return to the centerline, capped (the reverse-brake mops up any overshoot).
+            double crossSpeed = cte > EPS ? Math.min(SERVO_CROSS_CAP, SERVO_CROSS_GAIN * cte) : 0.0;
+            double cdirx = cte > EPS ? crx / cte : 0.0, cdirz = cte > EPS ? crz / cte : 0.0;
+
+            dvx = ux * alongSpeed + cdirx * crossSpeed;
+            dvz = uz * alongSpeed + cdirz * crossSpeed;
+            double dvl = Math.sqrt(dvx * dvx + dvz * dvz);
+            if (dvl > EPS) { dirx = dvx / dvl; dirz = dvz / dvl; }       // heading for the coast/deadband branch
+        } else {
+            if (p.hasNext()) {
+                // Safe corner: rotate the desired direction toward the next leg near the turn, with an OUTSIDE
+                // racing-line bias so the bot rounds WIDE for efficiency (harmless where no flank hazard).
+                double ndx = p.nx() - p.tx(), ndz = p.nz() - p.tz();
+                double nl = Math.sqrt(ndx * ndx + ndz * ndz);
+                if (nl > EPS) {
+                    ndx /= nl; ndz /= nl;
+                    double ccx = p.tx() - b.x(), ccz = p.tz() - b.z();
+                    double dCorner = Math.sqrt(ccx * ccx + ccz * ccz);
+                    double w = (CORNER_BLEND_DIST - dCorner) / CORNER_BLEND_DIST;
+                    if (w > CORNER_BLEND_MAX) w = CORNER_BLEND_MAX;
+                    if (w > 0.0) {
+                        double cross = dirx * ndz - dirz * ndx;
+                        double sgn = cross > 0 ? 1.0 : (cross < 0 ? -1.0 : 0.0);
+                        double outx = sgn * dirz, outz = -sgn * dirx;   // unit outward normal
+                        double bx = (1.0 - w) * dirx + w * ndx + CORNER_RACING_BIAS * w * outx;
+                        double bz = (1.0 - w) * dirz + w * ndz + CORNER_RACING_BIAS * w * outz;
+                        double bl = Math.sqrt(bx * bx + bz * bz);
+                        if (bl > EPS) { dirx = bx / bl; dirz = bz / bl; }
+                    }
+                }
+            }
+            dvx = dirx * cruise;                                         // safe: full-cruise pursuit heading
+            dvz = dirz * cruise;
+        }
+
+        // Velocity error = desired - current (horizontal). Face ALONG the error, thrust proportional to |error|:
+        // under-speed → forward thrust; overshoot → error points up-track → yaw flips → reverse-thrust brake.
+        double errx = dvx - b.velX();
+        double errz = dvz - b.velZ();
+        double emag = Math.sqrt(errx * errx + errz * errz);
+        if (emag < SERVO_DEADBAND) {
+            b.faceHorizontally(dirx, dirz);                // at speed: hold heading, coast
+            b.setForward(0.0f);
+        } else {
+            b.faceHorizontally(errx, errz);                // face the velocity error (forward thrust or reverse brake)
+            b.setForward((float) Math.min(1.0, SERVO_GAIN * emag));
+        }
+    }
+
     /** The current segment's horizontal travel frame into scratch {@code F}; false if degenerate (a dive/rise). */
     private static boolean travelFrame(SteerView p) {
         double cdx = p.tx() - p.sx(), cdz = p.tz() - p.sz();
@@ -525,6 +686,42 @@ public final class SteerControl {
     /** A hazard anywhere in the short swim-body column at {@code (x, y +/- 1, z)} (a bubble column spans water). */
     private static boolean hazardColumn(BotSteering b, int x, int y, int z) {
         return b.swimHazardAt(x, y, z) || b.swimHazardAt(x, y + 1, z) || b.swimHazardAt(x, y - 1, z);
+    }
+
+    /** GROUND overshoot hazard: whether barrelling PAST the turn waypoint in the current travel direction hits a
+     *  hazard (lava OR a would-fall void) within {@link #HAZARD_LOOKAHEAD} cells — the corner-overshoot slide off
+     *  a 1-wide path into the flank. The land counterpart of {@link #overshootHazard}. */
+    private static boolean groundOvershootHazard(BotSteering b, SteerView p) {
+        if (!travelFrame(p)) return false;
+        for (int k = 1; k <= HAZARD_LOOKAHEAD; k++) {
+            if (groundHazardColumn(b, F.cx + (int) Math.round(F.ux * k), F.cy, F.cz + (int) Math.round(F.uz * k))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** GROUND flank hazard: whether either cell one step perpendicular to travel (the lane flanks at the waypoint)
+     *  is a hazard (lava OR a would-fall void) — the 1-wide ice lane the bot must not drift off. Land counterpart
+     *  of {@link #flankHazard}. */
+    private static boolean groundFlankHazard(BotSteering b, SteerView p) {
+        if (!travelFrame(p)) return false;
+        int fx = (int) Math.round(-F.uz), fz = (int) Math.round(F.ux);   // rotate travel dir 90 deg
+        return groundHazardColumn(b, F.cx + fx, F.cy, F.cz + fz) || groundHazardColumn(b, F.cx - fx, F.cy, F.cz - fz);
+    }
+
+    /**
+     * A GROUND hazard at floor-cell {@code (x, y, z)} (where {@code y} is the waypoint FLOOR cell, feet at
+     * {@code y+1}): either LAVA anywhere in the body column (reusing {@link BotSteering#swimHazardAt}, which
+     * already covers lava/damaging fluid) OR a would-fall VOID — no standable floor within three blocks below
+     * the feet cell, so the bot would walk off the 1-wide path into the pit. The void probe tolerates a normal
+     * 1-2-block descent (a stair step below stays solid) so it only fires on a genuine drop-off.
+     */
+    private static boolean groundHazardColumn(BotSteering b, int x, int y, int z) {
+        if (b.swimHazardAt(x, y, z) || b.swimHazardAt(x, y + 1, z) || b.swimHazardAt(x, y - 1, z)) {
+            return true;                                              // lava / damaging fluid in the body column
+        }
+        return !b.solidAt(x, y, z) && !b.solidAt(x, y - 1, z) && !b.solidAt(x, y - 2, z); // would-fall void
     }
 
     /**
@@ -585,8 +782,10 @@ public final class SteerControl {
         if (b.inWater()) {
             swimTowards(b, p);
             holdDepth(b, p, 0.0);
+        } else if ("servo".equals(GROUND_DRIVE)) {
+            groundServo(b, p);            // input-only velocity servo (holds a 1-wide low-friction lane); A/B-gated
         } else {
-            steerTowards(b, p);
+            steerTowards(b, p);           // legacy open-loop walk (default)
         }
     }
 
