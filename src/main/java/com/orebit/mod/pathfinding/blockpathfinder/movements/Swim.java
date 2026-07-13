@@ -2,6 +2,7 @@ package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
+import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
@@ -113,7 +114,10 @@ public final class Swim implements Movement {
 
     @Override
     public boolean reached(BotSteering b, int wx, int wy, int wz) {
-        return reachedSwim(b, wx, wy, wz);
+        // A Swim cruise waypoint is a MODE_STANDING (upright) node — symmetric with SprintSwim.reached: only
+        // "reached" once the bot is NOT prone, so the cursor can't skip past the Surface transition (which
+        // re-establishes the upright pose) on the way out of a dive.
+        return !b.prone() && b.inWater() && reachedSwim(b, wx, wy, wz);
     }
 
     /**
@@ -128,6 +132,15 @@ public final class Swim implements Movement {
         SteerControl.holdDepth(b, path, 0.0);
     }
 
+    @Override
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+        MovePlan plan = new MovePlan();
+        plan.phase("paddle")
+                .drive((b, v) -> { SteerControl.swimTowardsDirectional(b, v); SteerControl.holdDepth(b, v, 0.0); })
+                .done(b -> reachedSwim(b, tx, ty + 1, tz));
+        return plan;
+    }
+
     /**
      * Vertical reach tolerance for the swim cursor (blocks of continuous Y). Kept under 1 so a vertical dive's
      * stacked waypoints (1 block apart) can't both be "reached" at once — that was the {@code ±1} block
@@ -138,10 +151,19 @@ public final class Swim implements Movement {
     /**
      * Swim cursor-advance test (shared with {@link SprintSwim}): horizontal cell match plus the bot's
      * <i>continuous</i> feet Y within {@link #REACHED_Y} of the held swim depth (feet on top of the floor cell,
-     * i.e. world {@code wy + 1}). Using continuous Y rather than the old ±1 <i>block</i> tolerance keeps a
-     * dive advancing one waypoint at a time instead of leapfrogging the column.
+     * i.e. world {@code wy + 1}), minus the pose's submersion {@code bias}. A PRONE move rides
+     * {@link SteerControl#SUBMERGE_BIAS} below the planned feet height to keep the short hitbox wet, so its
+     * reach window must centre on the depth it actually holds ({@code wy + 1 - bias}) — otherwise a submerged
+     * bot never lands inside the window and stalls. Upright moves pass bias 0 (the 3-arg overload).
+     * Using continuous Y rather than the old ±1 <i>block</i> tolerance keeps a dive advancing one waypoint at
+     * a time instead of leapfrogging the column.
      */
+    static boolean reachedSwim(BotSteering b, int wx, int wy, int wz, double bias) {
+        return b.footX() == wx && b.footZ() == wz && Math.abs(b.y() - (wy + 1.0 - bias)) < REACHED_Y;
+    }
+
+    /** Upright (bias-free) swim reach test — delegates to the bias-aware form with bias 0.0. */
     static boolean reachedSwim(BotSteering b, int wx, int wy, int wz) {
-        return b.footX() == wx && b.footZ() == wz && Math.abs(b.y() - (wy + 1.0)) < REACHED_Y;
+        return reachedSwim(b, wx, wy, wz, 0.0);
     }
 }

@@ -110,6 +110,10 @@ loom {
                 val v = project.findProperty("orebit.autotest.$key")
                 if (v != null) vmArg("-Dorebit.autotest.$key=$v")
             }
+            // Ground drive-strategy selector rides through so the end-to-end goto autotest can A/B the ground
+            // velocity servo on real terrain (Stage 2 broad verification):
+            //   ./gradlew :fabric:1.21.11:runAutotest "-Porebit.ground.drive=servo"
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
             isIdeConfigGenerated = false // CLI/script-driven; no IDE launch config needed
         }
         // Parkour-movement diagnostic: a superflat server that arms the common-src ParkourCourse hook
@@ -125,6 +129,64 @@ loom {
                 val v = project.findProperty("orebit.parkour.$key")
                 if (v != null) vmArg("-Dorebit.parkour.$key=$v")
             }
+            // Ground drive-strategy selector rides through so the parkour no-regression A/B can force it (parkour
+            // bypasses drive(), so it must be identical either way): ./gradlew :fabric:1.21.11:runParkour "-Porebit.ground.drive=servo"
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
+            isIdeConfigGenerated = false
+        }
+        // Swimming-movement diagnostic: a superflat server that arms the common-src SwimCourse hook
+        // (-Dorebit.swim) in its own run dir (run/swim). Launch: ./gradlew :fabric:1.21.11:runSwim
+        // (after scripts/run-swim.ps1 preps the run dir with a FLAT server.properties + swim-isolating
+        // orebit.properties). Mirrors the parkour config exactly.
+        create("swim") {
+            server()
+            configName = "Orebit Swim ($minecraft)"
+            runDir = "../../../run/swim"
+            vmArg("-Dorebit.swim=true")
+            for (key in listOf("debug", "bleed")) {
+                val v = project.findProperty("orebit.swim.$key")
+                if (v != null) vmArg("-Dorebit.swim.$key=$v")
+            }
+            // Ground drive-strategy selector rides through so the swim harness's ground-dominated Traverse
+            // bank-approaches/exits can be A/B'd against the ground velocity servo (Stage 2 broad verification):
+            //   ./gradlew :fabric:1.21.11:runSwim "-Porebit.ground.drive=servo"
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
+            isIdeConfigGenerated = false
+        }
+        // Ground-movement (blue-ice / lava) diagnostic: a superflat server that arms the common-src IceCourse
+        // hook (-Dorebit.ice) in its own run dir (run/ice). Launch: ./gradlew :fabric:1.21.11:runIce
+        // (after scripts/run-ice.ps1 preps the run dir with a FLAT server.properties + damage-on orebit.properties).
+        // Mirrors the parkour/swim configs exactly.
+        create("ice") {
+            server()
+            configName = "Orebit Ice ($minecraft)"
+            runDir = "../../../run/ice"
+            vmArg("-Dorebit.ice=true")
+            for (key in listOf("debug")) {
+                val v = project.findProperty("orebit.ice.$key")
+                if (v != null) vmArg("-Dorebit.ice.$key=$v")
+            }
+            // Ground drive-strategy selector rides through for the ground velocity-servo A/B (Stage 2):
+            //   ./gradlew :fabric:1.21.11:runIce "-Porebit.ground.drive=servo"
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
+            isIdeConfigGenerated = false
+        }
+        // Real-world REPLAY diagnostic: a server that arms the common-src WorldReplay hook (-Dorebit.replay)
+        // in its own run dir (run/replay), which LOADS the owner's "Swims" world (copied in by
+        // scripts/run-replay.ps1 — NOT a flat regen) and replays the reported-failing goto. Launch:
+        // ./gradlew :fabric:1.21.11:runReplay (after scripts/run-replay.ps1 preps the run dir + copies the world).
+        create("replay") {
+            server()
+            configName = "Orebit Replay ($minecraft)"
+            runDir = "../../../run/replay"
+            vmArg("-Dorebit.replay=true")
+            for (key in listOf("debug")) {
+                val v = project.findProperty("orebit.replay.$key")
+                if (v != null) vmArg("-Dorebit.replay.$key=$v")
+            }
+            // Swim cruise-strategy selector rides through to the real-world maze replay too (the swim servo A/B):
+            //   ./gradlew :fabric:1.21.11:runReplay "-Porebit.swim.bleed=servo"
+            project.findProperty("orebit.swim.bleed")?.let { vmArg("-Dorebit.swim.bleed=$it") }
             isIdeConfigGenerated = false
         }
     }

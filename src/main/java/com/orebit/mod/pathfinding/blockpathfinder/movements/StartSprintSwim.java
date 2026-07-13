@@ -2,6 +2,7 @@ package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
+import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
@@ -58,5 +59,23 @@ public final class StartSprintSwim implements Movement {
         SteerControl.swimTowards(b, path);
         b.setSprinting(true);
         SteerControl.holdDepth(b, path, SteerControl.SUBMERGE_BIAS);
+    }
+
+    @Override
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+        MovePlan plan = new MovePlan();
+        plan.phase("submerge")
+                .drive((b, v) -> {
+                    SteerControl.recenterOnTarget(b, v);    // horizontal servo to the initiation waypoint centre — eases to 0 at centre and re-pushes on overshoot, arresting the momentum coast past the column (mirrors parkour's landing recenter)
+                    b.setSprinting(true);                   // KEEP: needed to enter Pose.SWIMMING
+                    SteerControl.holdDepth(b, v, SteerControl.SUBMERGE_BIAS);    // KEEP: the sink that pushes the head under → prone
+                })
+                .done(BotSteering::prone);
+        return plan;
+    }
+
+    @Override
+    public boolean reached(BotSteering b, int wx, int wy, int wz) {
+        return b.prone() && b.footX() == wx && b.footZ() == wz;
     }
 }

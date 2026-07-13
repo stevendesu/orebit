@@ -2,6 +2,7 @@ package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
+import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
@@ -61,6 +62,17 @@ public final class SprintSwim implements Movement {
      */
     public static final float COST = 20f / 5.612f;
 
+    /**
+     * Cruise steering strategy selector (read once). Default is {@code "servo"}: the input-only velocity servo
+     * ({@link SteerControl#swimServo}) — velocity feedback + a hazard-aware target-velocity profile (full cruise
+     * on safe straights, ramping to a velocity-target creep floor at hazard corners) tracked by facing the
+     * velocity error with reverse-thrust braking, plus a smooth diagonal corner blend, an outward racing-line
+     * bias, and a client-legal forward-input floor (W never released while prone). It threads the owner's Swims
+     * maze faster than the position-based {@code "directional"} cruise while holding the swim harness 17/17. The
+     * {@code -Dorebit.swim.bleed=forward|centered|directional|servo} switch stays for future A/B comparison.
+     */
+    private static final String BLEED = System.getProperty("orebit.swim.bleed", "servo");
+
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
     @Override
@@ -98,7 +110,11 @@ public final class SprintSwim implements Movement {
 
     @Override
     public boolean reached(BotSteering b, int wx, int wy, int wz) {
-        return Swim.reachedSwim(b, wx, wy, wz);
+        // A SprintSwim cruise waypoint is a MODE_PRONE node: it is only truly "reached" once the bot has
+        // actually established the prone pose. Without this gate the follower's END->START cursor scan reports
+        // a downstream cruise node reached while the bot is still upright at the surface, skipping PAST the
+        // StartSprintSwim initiation waypoint (whose prone() gate then never runs) — so the bot never dives.
+        return b.prone() && Swim.reachedSwim(b, wx, wy, wz, SteerControl.SUBMERGE_BIAS);
     }
 
     /**
@@ -110,8 +126,26 @@ public final class SprintSwim implements Movement {
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
-        SteerControl.swimTowards(b, path);
+        SteerControl.swimPitched(b, path, SteerControl.SUBMERGE_BIAS);
         b.setSprinting(true);
         SteerControl.holdDepth(b, path, SteerControl.SUBMERGE_BIAS);
+    }
+
+    @Override
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+        MovePlan plan = new MovePlan();
+        plan.phase("swim")
+                .drive((b, v) -> {
+                    switch (BLEED) {
+                        case "forward":     SteerControl.swimPitched(b, v, SteerControl.SUBMERGE_BIAS); break;
+                        case "directional": SteerControl.swimPitchedDirectional(b, v, SteerControl.SUBMERGE_BIAS); break;
+                        case "servo":       SteerControl.swimServo(b, v, SteerControl.SUBMERGE_BIAS); break;
+                        default:            SteerControl.swimPitchedCentered(b, v, SteerControl.SUBMERGE_BIAS); break; // "centered"
+                    }
+                    b.setSprinting(true);
+                    SteerControl.holdDepth(b, v, SteerControl.SUBMERGE_BIAS);
+                })
+                .done(b -> Swim.reachedSwim(b, tx, ty + 1, tz, SteerControl.SUBMERGE_BIAS));
+        return plan;
     }
 }

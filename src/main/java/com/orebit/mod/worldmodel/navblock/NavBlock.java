@@ -14,6 +14,7 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.block.BaseEntityBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.BubbleColumnBlock;
 import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.FenceGateBlock;
@@ -102,6 +103,14 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           to launch from it. A base identity field (like {@code surface}/{@code portal}),
  *                           read as one mask-and-test. Distinct from the {@code surface} SLOW field (soul
  *                           sand / honey slow WALK speed, priced as a floor multiplier) — this is JUMP power.
+ *   46–47   2   bubble      bubble-column interior cell + its DRAG direction: 0 none / 1 up (soul-sand column,
+ *                           {@code DRAG_DOWN=false}, pushes entities up) / 2 down (magma column,
+ *                           {@code DRAG_DOWN=true}, drags entities down). A base identity field (like {@code
+ *                           portal}), detected from {@link net.minecraft.world.level.block.BubbleColumnBlock}
+ *                           at classification. A bubble column is water fluid + empty shape, so it WOULD read
+ *                           as swimmable — but the column's vertical push overrides swim depth control, so
+ *                           {@link #isSwimmableWater} now EXCLUDES bubbles (impassable → routed around). The
+ *                           direction is reserved for a future RideBubbleColumn move (ride the push up/down).
  * </pre>
  */
 public final class NavBlock {
@@ -144,6 +153,14 @@ public final class NavBlock {
     /** Severe through-slow (~0.05× speed): cobweb — near-stops the body, planner should route/mine around. */
     public static final int TRANSIT_HEAVY = 2;
 
+    // ---- Bubble-column class (2 bits, 46–47): a bubble column + its DRAG direction --------------
+    /** Not a bubble column. */
+    public static final int BUBBLE_NONE = 0;
+    /** Upward bubble column (soul-sand floor, {@code DRAG_DOWN=false}) — pushes entities up. */
+    public static final int BUBBLE_UP   = 1;
+    /** Downward bubble column (magma floor, {@code DRAG_DOWN=true}) — drags entities down. */
+    public static final int BUBBLE_DOWN = 2;
+
     // ---- Bit field shifts/masks --------------------------------------------------------------
     // Bits 8–10 hold the stair facing (2) + half (1), populated ONLY for StairBlock states (0 elsewhere, so
     // only stairs split navtypes); bits 11–13 remain FREE (the rest of the reclaimed 6-bit sturdy-faces mask,
@@ -167,6 +184,7 @@ public final class NavBlock {
     private static final long PORTAL_BIT   = 1L << 43;                // nether-portal cell (base field, not derived)
     private static final long PROTECTED_BIT = 1L << 44;               // owner-protected: never break (base field)
     private static final long REDUCED_JUMP_BIT = 1L << 45;            // reduced-jump floor: honey (base field)
+    private static final int BUBBLE_SHIFT = 46, BUBBLE_MASK = 0x03;   // bubble column + drag dir (base field)
 
     // ---- Precomputed predicate bits (37+) ----------------------------------------------------
     // Each is a PURE function of the fields above, so it adds ZERO navtypes (a function of existing bits
@@ -298,6 +316,11 @@ public final class NavBlock {
         // platform adapter is needed — matching the direct Blocks.* references throughout this method.
         if (block == Blocks.NETHER_PORTAL)    d |= PORTAL_BIT;
         if (reducesJump(block))               d |= REDUCED_JUMP_BIT;
+        // Bubble column: a water cell whose vertical push overrides swim control. Blocks.BUBBLE_COLUMN and
+        // BubbleColumnBlock.DRAG_DOWN are range-stable 1.17+, so no platform adapter is needed (matches the
+        // direct Blocks.* / NETHER_PORTAL references above). DRAG_DOWN=false → up (soul sand), true → down (magma).
+        if (block == Blocks.BUBBLE_COLUMN)
+            d |= (long) (state.getValue(BubbleColumnBlock.DRAG_DOWN) ? BUBBLE_DOWN : BUBBLE_UP) << BUBBLE_SHIFT;
         // Stair facing/half — the directional standing-surface facts (bits 8–10), populated ONLY for stairs so
         // only stair states split navtypes. A north/east/south/west stair now dedups per FACING (as the old
         // per-Block sturdy-faces mask did), but bounded: stairs conflate across material, so this adds at most
@@ -617,6 +640,17 @@ public final class NavBlock {
      */
     public static boolean isProtected(long d) { return (d & PROTECTED_BIT) != 0; }
     /**
+     * Bubble-column drag direction: {@link #BUBBLE_NONE} (not a bubble) / {@link #BUBBLE_UP} (soul-sand
+     * column, pushes up) / {@link #BUBBLE_DOWN} (magma column, drags down). A bubble column is water fluid +
+     * empty shape, so it would otherwise read as swimmable — but its vertical push overrides swim depth
+     * control, so {@link #isSwimmableWater} now treats it as impassable and the bot routes AROUND it. The
+     * direction is reserved for a future RideBubbleColumn move (deliberately ride the column up/down).
+     */
+    public static int bubbleDir(long d) { return (int) (d >>> BUBBLE_SHIFT) & BUBBLE_MASK; }
+    /** Whether this cell is a bubble column ({@link #bubbleDir} != 0) — impassable-to-swim (routed around);
+     *  direction reserved for a future RideBubbleColumn move. */
+    public static boolean isBubble(long d) { return bubbleDir(d) != 0; }
+    /**
      * Derived: water is present in this cell right now — a water source/flow <b>or</b> a <b>waterlogged
      * solid</b> (a waterlogged fence/stair has a water fluid state). This is the "would water flow if I edit
      * here" / fire-out / no-spawn concept; it is <b>NOT</b> "can the bot swim here" — a waterlogged fence holds
@@ -629,8 +663,14 @@ public final class NavBlock {
      * here). Distinct from {@link #isWaterloggedNow}: a waterlogged solid has water fluid but a collision shape,
      * so it is occupiable-as-water {@code false} (you can't float through a fence). Plants in water (kelp,
      * seagrass — empty shape, water fluid) ARE swimmable. Lava (fluid 3) is never swimmable.
+     *
+     * <p><b>Bubble columns are EXCLUDED</b> ({@link #isBubble}): a soul-sand/magma bubble column is water
+     * fluid + empty shape, but its vertical push overrides the swim depth autopilot (ejects the bot up or
+     * drags it under), so the planner treats it as impassable and routes AROUND it rather than swimming in.
+     * The column's drag direction ({@link #bubbleDir}) is preserved in the descriptor, reserved for a future
+     * RideBubbleColumn move that would deliberately ride the push.
      */
-    public static boolean isSwimmableWater(long d) { return fluid(d) == FLUID_WATER && isPassable(d); }
+    public static boolean isSwimmableWater(long d) { return fluid(d) == FLUID_WATER && isPassable(d) && !isBubble(d); }
 
     /** A swimmable LAVA cell (lava fluid, empty shape) — the lava analog of {@link #isSwimmableWater}.
      *  The swim layer admits these with the hard-coded lava adjustments (extra damage + extra slow —
