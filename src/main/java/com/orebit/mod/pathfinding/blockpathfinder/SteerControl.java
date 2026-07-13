@@ -764,12 +764,19 @@ public final class SteerControl {
         return b.swimHazardAt(x, y, z) || b.swimHazardAt(x, y + 1, z) || b.swimHazardAt(x, y - 1, z);
     }
 
-    /** A would-fall VOID at floor-cell {@code (x, y, z)}: no standable floor within three blocks below the feet
-     *  cell, so a bot walking here drops off the 1-wide path into the pit. Tolerates a normal 1-2-block step
-     *  (a stair below stays solid) so it only fires on a genuine drop-off. Gated by {@link #pathDropsAhead} at
-     *  the call sites so a PLANNED descent (the path's own drop) is not mistaken for an off-lane walk-off. */
+    /**
+     * A would-fall DROP-OFF at the overshoot cell {@code (x, y, z)} — a one-block DROP-HEIGHT check, not a
+     * downward scan. {@code y} is the overshoot cell's FEET/body level (air when a bot stands there, as
+     * {@link #groundLavaColumn}'s {@code y+1} body probe implies); the lane FLOOR is {@code y-1}. If that floor
+     * cell is standable the bot walks on level ground (drop 0); if it is absent the next possible floor is a
+     * full block lower at best, a drop of {@code >= 16/16} that exceeds the bot's step-assist
+     * ({@link MovementContext#STEP_ASSIST_MAX_RISE} = 9/16 ~ 0.56) — the bot would walk off the 1-wide path and
+     * can't step back up. So a single "is the lane floor here?" read is the whole test: it flags a
+     * recoverable-lip drop AND SUBSUMES a bottomless void (an infinite drop is just the limiting case of a drop
+     * past step-assist). Gated by {@link #pathDropsAhead} at the call sites so a PLANNED descent (the path's own
+     * drop) is not mistaken for an off-lane walk-off. */
     private static boolean groundVoidColumn(BotSteering b, int x, int y, int z) {
-        return !b.solidAt(x, y, z) && !b.solidAt(x, y - 1, z) && !b.solidAt(x, y - 2, z);
+        return !b.solidAt(x, y - 1, z);   // lane floor (one below feet) absent -> drop > step-assist (subsumes void)
     }
 
     /**
