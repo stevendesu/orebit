@@ -17,7 +17,8 @@
 param(
     [string]$McVersion = "1.21.11",
     [string]$SourceWorld = "",   # defaults to <repo>/run/saves/Swims
-    [switch]$BotDebug
+    [switch]$BotDebug,
+    [string]$Bleed = ""          # forwards -Porebit.swim.bleed (directional|servo|...) for the swim-servo A/B
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,10 +44,11 @@ if (Test-Path $world) {
     Remove-Item -Recurse -Force $world
 }
 Write-Host "[replay] copying owner's world: $SourceWorld -> $world"
-Copy-Item -Recurse -Force $SourceWorld $world
-# A stale session.lock from the copy is harmless (the server rewrites it), but drop it to be tidy.
-$lock = Join-Path $world "session.lock"
-if (Test-Path $lock) { Remove-Item -Force $lock }
+# robocopy (not Copy-Item) so an open server's held session.lock in the SOURCE doesn't abort the copy — we
+# skip it explicitly (the server rewrites its own lock anyway). /E recurse incl empty, /NFL/NDL/NJH/NJS quiet.
+$null = robocopy $SourceWorld $world /E /XF session.lock /NFL /NDL /NJH /NJS /NP
+if ($LASTEXITCODE -ge 8) { Write-Error "robocopy failed ($LASTEXITCODE)"; exit 2 }
+$global:LASTEXITCODE = 0   # robocopy uses low exit codes as success; reset so nothing downstream trips
 
 if (Test-Path $resultFile) { Remove-Item -Force $resultFile }
 Get-ChildItem -Path $runDir -Filter "orebit-replay-trace*.txt" -ErrorAction SilentlyContinue | Remove-Item -Force
@@ -58,6 +60,7 @@ Copy-Item (Join-Path $templates "orebit.properties") (Join-Path $runDir "config\
 # ---- 2. Run -----------------------------------------------------------------------------------
 $gradleArgs = @(":fabric:${McVersion}:runReplay")
 if ($BotDebug) { $gradleArgs += "-Porebit.replay.debug=true" }
+if ($Bleed -ne "") { $gradleArgs += "-Porebit.swim.bleed=$Bleed" }
 
 Push-Location $repo
 try {

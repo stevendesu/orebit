@@ -95,6 +95,63 @@ public final class SteerControl {
      *  is a hazard, so a harmless turn is never slowed. */
     static final double TURN_CRAWL_THROTTLE = 0.28;
 
+    // ---- velocity-servo cruise (swimServo) constants -------------------------------------------------
+    /**
+     * Desired-speed CEILING (blocks/tick) for the velocity servo on a safe straight. Set ABOVE the sprint-swim
+     * terminal (~0.26 b/t measured on a straight) so the velocity error {@code desired - current} stays large
+     * enough that the proportional forward key SATURATES to full ahead on every safe straight — i.e. the servo
+     * cruises a straight exactly as hard as the open-loop drive, and the clamp only ever bites inside the
+     * hazard-corner speed ramp (where {@code min(cruise, ramp*dist)} takes the ramp term). A pure-P servo can't
+     * hold a speed equal to its own ceiling (steady-state error), so the ceiling is deliberately unreachable. */
+    static final double SERVO_CRUISE = 0.35;
+    /** Servo forward-key gain: {@code forward = clamp(SERVO_GAIN * |velocityError|, 0, 1)}. Large enough that a
+     *  ~0.05 b/t error already saturates, so acceleration (under-speed) and braking (overshoot → reverse thrust)
+     *  are both crisp; the hazard speed ramp — not this gain — sets the arrival speed. */
+    static final double SERVO_GAIN = 18.0;
+    /** Servo dead-band (b/t): below this velocity error the servo coasts (forward 0) and merely holds heading —
+     *  bang-bang hysteresis so a bot at its desired velocity doesn't chatter the forward key on/off. */
+    static final double SERVO_DEADBAND = 0.02;
+    /** Hazard speed-ramp rate (b/t of desired speed per block of distance to the hazard corner): the desired
+     *  speed is {@code min(SERVO_CRUISE, SERVO_HAZARD_RAMP * distanceToCorner)}, so the bot decelerates smoothly
+     *  to ~0 as it reaches a hazardous turn instead of a cliff-stop. Only applied when the corner's overshoot is
+     *  a hazard (reusing {@link #overshootHazard}/{@link #flankHazard}); a harmless turn keeps full cruise. */
+    static final double SERVO_HAZARD_RAMP = 0.16;
+    /**
+     * Hazard-corner creep FLOOR (b/t): the velocity-servo counterpart of {@link #TURN_CRAWL_THROTTLE}. The
+     * hazard speed ramp is clamped to never target BELOW this, so at a run of consecutive hazard waypoints (a
+     * bubble-walled maze channel) the bot holds a steady crawl through the corners instead of dead-stopping at
+     * each one and paying a slow re-acceleration from standstill (the swimturn stall). Small enough that the
+     * crawl still can't overshoot a 1-wide lane into the flank column, large enough to keep the swim cursor
+     * advancing — the same "creep, never stall" balance {@link #TURN_CRAWL_THROTTLE} strikes as a throttle cap,
+     * but expressed as a target SPEED the servo actively holds (reverse-thrust included) rather than a cap. */
+    static final double SERVO_TURN_FLOOR = 0.11;
+    /**
+     * Corner-blend onset distance (blocks): within this range of the turn waypoint the servo's desired-velocity
+     * DIRECTION starts rotating from the current segment toward the NEXT one (the {@link SteerView} look-ahead),
+     * so the bot carries diagonal velocity through the corner (efficiency: no stop-and-go; client-portability:
+     * some forward is always held, keeping the prone-sprint pose client-legal). Beyond this the drive is pure
+     * current-segment pursuit (full-speed straight). */
+    static final double CORNER_BLEND_DIST = 1.3;
+    /** Max corner-blend weight toward the next leg (the {@code w} in {@code (1-w)*current + w*next}). */
+    static final double CORNER_BLEND_MAX = 0.55;
+    /**
+     * OUTSIDE racing-line bias: the corner blend also pushes the desired direction toward the OUTSIDE of the
+     * turn (the side opposite the turn), scaled by the same proximity weight, so the bot rounds the corner on a
+     * WIDER radius and keeps its 0.6-wide hitbox off the INSIDE flank/corner column (the clip that ejects a
+     * prone swimmer — the actual correctness concern, not going slow). Pure next-leg blending alone cuts to the
+     * inside; this outward term is what makes the diagonal safe near a bubble/lava flank. */
+    static final double CORNER_RACING_BIAS = 0.5;
+    /**
+     * Client-legal FORWARD-INPUT floor: the servo never fully releases the forward key (W) while the bot is
+     * prone-sprint-swimming and airborne (in water, not on ground). The vanilla CLIENT keeps the prone
+     * sprint-swim pose only while {@code hasForwardImpulse || onGround || shift}, so a future CLIENT-controlled
+     * bot must hold W to stay prone — this floor keeps the servo's input pattern portable to that case. It costs
+     * nothing on the server (there is no server-side deadband) and does NOT compromise braking: the servo brakes
+     * by REVERSE-THRUST (facing against its motion — the velocity error points up-track on an overshoot — with W
+     * still held), so W stays pressed the whole time and a true throttle cut is never needed. Tiny, so the
+     * residual forward trickle at a dead-stop corner is negligible. */
+    static final double SERVO_FORWARD_MIN = 0.08;
+
     // ---- per-call geometry scratch (single bot per tick → one reusable instance) ---------------------
 
     private static final class Geom {
@@ -318,6 +375,119 @@ public final class SteerControl {
                 || (flankHazard(b, p) && crossTrack(b, p) > FLANK_DRIFT);
         if (crawl) swimPitchedBraked(b, p, bias);                    // approaching danger -> crawl centred
         else swimPitched(b, p, bias);                                // safe -> full speed
+    }
+
+    /**
+     * Prone sprint-swim <b>velocity SERVO</b> horizontal drive — the input-only, velocity-feedback alternative
+     * to the position-based {@link #swimPitchedDirectional}. Instead of easing the forward key by DISTANCE to a
+     * waypoint (open-loop), it closes the loop on the bot's actual momentum: it computes a horizontal velocity
+     * ERROR {@code desired - current}, FACES along that error, and presses the forward key in proportion to its
+     * magnitude — so vanilla water drag is fought with forward thrust to HOLD speed, and an overshoot is killed
+     * with REVERSE thrust (the error points up-track → the yaw flips 180° → the W key becomes a brake). No
+     * velocity is ever written; only look + forward, exactly as a player steers.
+     *
+     * <ul>
+     *   <li><b>Desired direction</b> = the swim pursuit vector {@code (G.q - bot)} from {@link #computeGeom}
+     *       with the swim cross-track gain — along-track advance PLUS the cross-track return toward the lane
+     *       centerline, so the servo holds the 1-wide bubble lane the same way the cruise does.</li>
+     *   <li><b>Desired direction</b> also ROUNDS the corner: near a turn it blends toward the next leg with an
+     *       OUTSIDE racing-line bias ({@link #CORNER_BLEND_MAX}/{@link #CORNER_RACING_BIAS}) so the bot carries
+     *       diagonal velocity through the corner on a WIDE radius — efficiency (no stop-and-go) and keeping the
+     *       0.6-wide hitbox off the inside flank column (the clip = the ejection).</li>
+     *   <li><b>Desired speed</b> = a HAZARD-AWARE profile: {@link #SERVO_CRUISE} on a safe straight (unreachable
+     *       ceiling → forward saturates → full cruise), ramped DOWN as the bot nears a hazardous turn
+     *       ({@code min(cruise, max(SERVO_TURN_FLOOR, SERVO_HAZARD_RAMP * dist))}) so it can't coast through
+     *       into the flank hazard, but the ramp is clamped to a creep FLOOR ({@link #SERVO_TURN_FLOOR}) so a run
+     *       of consecutive hazard corners holds a steady crawl rather than dead-stopping and re-accelerating at
+     *       each one (the swimturn stall). Same {@link #overshootHazard}/{@link #flankHazard} probes as the
+     *       directional cruise.</li>
+     *   <li><b>Vertical</b> is unchanged from {@link #swimPitched}: the look PITCH aims at the depth target
+     *       {@code p.ty() - bias}, and the CALLER adds {@link #holdDepth} for the jump/sink. The servo owns only
+     *       horizontal momentum.</li>
+     * </ul>
+     * A degenerate (vertical) segment collapses to a pure depth pitch with no horizontal push, like
+     * {@link #swimPitched}.
+     */
+    public static void swimServo(BotSteering b, SteerView p, double bias) {
+        computeGeom(b, p, SWIM_CTE_GAIN);
+        double dy = (p.ty() - bias) - b.y();               // depth pitch target (same as swimPitched)
+        if (G.segLen < EPS) {                              // pure vertical: no horizontal servo, just dive/rise
+            b.faceTowards(0.0, dy, 0.0);
+            b.setForward(0.0f);
+            return;
+        }
+        // Desired travel DIRECTION: the pursuit vector (along-track + cross-track return toward the centerline).
+        double dirx = G.qx - b.x(), dirz = G.qz - b.z();
+        double dl = Math.sqrt(dirx * dirx + dirz * dirz);
+        if (dl < EPS) { b.faceTowards(0.0, dy, 0.0); b.setForward(0.0f); return; }
+        dirx /= dl; dirz /= dl;
+
+        // Smooth DIAGONAL corner: as the bot nears the turn waypoint, rotate the desired direction from this
+        // segment toward the NEXT one, with an OUTSIDE racing-line bias so it rounds WIDE and keeps the hitbox
+        // off the inside flank column (the clip = the ejection). Weight grows with proximity to the corner.
+        if (p.hasNext()) {
+            double ndx = p.nx() - p.tx(), ndz = p.nz() - p.tz();
+            double nl = Math.sqrt(ndx * ndx + ndz * ndz);
+            if (nl > EPS) {                                // next leg horizontal (a vertical dive doesn't blend)
+                ndx /= nl; ndz /= nl;
+                double ccx = p.tx() - b.x(), ccz = p.tz() - b.z();
+                double dCorner = Math.sqrt(ccx * ccx + ccz * ccz);
+                double w = (CORNER_BLEND_DIST - dCorner) / CORNER_BLEND_DIST;
+                if (w > CORNER_BLEND_MAX) w = CORNER_BLEND_MAX;
+                if (w > 0.0) {
+                    // Outward normal = the side OPPOSITE the turn. cross = dir × next (y-component): >0 left turn
+                    // (outside is right), <0 right turn (outside is left). Right-hand perp of dir is (dz,-dx).
+                    double cross = dirx * ndz - dirz * ndx;
+                    double sgn = cross > 0 ? 1.0 : (cross < 0 ? -1.0 : 0.0);
+                    double outx = sgn * dirz, outz = -sgn * dirx;   // unit outward normal
+                    double bx = (1.0 - w) * dirx + w * ndx + CORNER_RACING_BIAS * w * outx;
+                    double bz = (1.0 - w) * dirz + w * ndz + CORNER_RACING_BIAS * w * outz;
+                    double bl = Math.sqrt(bx * bx + bz * bz);
+                    if (bl > EPS) { dirx = bx / bl; dirz = bz / bl; }
+                }
+            }
+        }
+
+        // Desired SPEED: full cruise on a safe straight; ramp DOWN approaching a HAZARD corner, but clamp the
+        // ramp to a creep FLOOR so a maze channel of consecutive corners holds a crawl instead of stalling at
+        // each. The tight centerline pursuit above is the correctness lever (don't clip the column); the speed
+        // ramp just prevents an overshoot-through, and the floor keeps the corner from a full re-accel stall.
+        double cruise = SERVO_CRUISE;
+        boolean hazardCorner = overshootHazard(b, p) || (flankHazard(b, p) && crossTrack(b, p) > FLANK_DRIFT);
+        if (hazardCorner) {
+            double segx = p.tx() - p.sx(), segz = p.tz() - p.sz();
+            double sl = Math.sqrt(segx * segx + segz * segz);
+            double aimx = p.tx(), aimz = p.tz();
+            if (sl > EPS) {                                // near-face arrive point (as swimPitchedBraked aims)
+                aimx -= (segx / sl) * TURN_ARRIVE_OFFSET;
+                aimz -= (segz / sl) * TURN_ARRIVE_OFFSET;
+            }
+            double dcx = aimx - b.x(), dcz = aimz - b.z();
+            // Hazard speed-ramp, clamped to the creep FLOOR: at a run of consecutive hazard corners (a maze
+            // channel) the target never drops below SERVO_TURN_FLOOR, so the bot holds a steady crawl through
+            // the turns instead of dead-stopping and paying a slow re-accel from standstill (the swimturn stall).
+            double ramp = Math.max(SERVO_TURN_FLOOR, SERVO_HAZARD_RAMP * Math.sqrt(dcx * dcx + dcz * dcz));
+            cruise = Math.min(SERVO_CRUISE, ramp);
+        }
+
+        // Velocity error = desired - current (horizontal). Face ALONG the error, thrust proportional to |error|:
+        // under-speed → forward thrust; overshoot → error points up-track → yaw flips → reverse-thrust brake.
+        double errx = dirx * cruise - b.velX();
+        double errz = dirz * cruise - b.velZ();
+        double emag = Math.sqrt(errx * errx + errz * errz);
+        double fwd;
+        if (emag < SERVO_DEADBAND) {
+            b.faceTowards(dirx, dy, dirz);                 // at speed: hold heading + depth pitch, coast
+            fwd = 0.0;
+        } else {
+            b.faceTowards(errx / emag, dy, errz / emag);   // unit error dir → stable depth-pitch reference
+            fwd = Math.min(1.0, SERVO_GAIN * emag);
+        }
+        // Client-legal forward-input floor: never release W while prone + in water + airborne (a client keeps
+        // the prone pose only with hasForwardImpulse held). Braking is by facing (reverse-thrust) above, so W
+        // stays held — this floor just guarantees it's never exactly 0. Grounded/out-of-water: no floor.
+        if (b.prone() && b.inWater() && !b.grounded()) fwd = Math.max(fwd, SERVO_FORWARD_MIN);
+        b.setForward((float) fwd);
     }
 
     /** The current segment's horizontal travel frame into scratch {@code F}; false if degenerate (a dive/rise). */

@@ -27,6 +27,17 @@ public interface BotSteering {
     double y();
     double z();
 
+    /**
+     * The bot's current velocity ({@code getDeltaMovement}) components, entity-space blocks/tick — the
+     * feedback signal for the velocity servo ({@link SteerControl#swimServo}). The input-based follower never
+     * WRITES velocity (that is vanilla physics' job); these are read-only so a move can steer against the bot's
+     * ACTUAL momentum (thrust to hold speed against drag, reverse-thrust to brake an overshoot) instead of
+     * open-loop guessing from position alone.
+     */
+    double velX();
+    double velY();
+    double velZ();
+
     /** The bot's feet block X (its {@code blockPosition().getX()}) — for the {@link Movement#reached} test. */
     int footX();
     int footY();

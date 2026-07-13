@@ -16,7 +16,8 @@
 
 param(
     [string]$McVersion = "1.21.11",
-    [switch]$BotDebug
+    [switch]$BotDebug,
+    [string]$Bleed = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,6 +44,7 @@ Copy-Item (Join-Path $templates "orebit.properties") (Join-Path $runDir "config\
 # ---- 2. Run -----------------------------------------------------------------------------------
 $gradleArgs = @(":fabric:${McVersion}:runSwim")
 if ($BotDebug) { $gradleArgs += "-Porebit.swim.debug=true" }
+if ($Bleed -ne "") { $gradleArgs += "-Porebit.swim.bleed=$Bleed" }
 
 Push-Location $repo
 try {

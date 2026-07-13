@@ -63,12 +63,15 @@ public final class SprintSwim implements Movement {
     public static final float COST = 20f / 5.612f;
 
     /**
-     * Cruise steering strategy selector (read once). Default is {@code "directional"}: the A/B-validated
-     * production cruise — full-throttle on straights, center-brake only into turns — which fixes the swimmaze
-     * bubble-column ejection while never regressing the straight-line case. The
-     * {@code -Dorebit.swim.bleed=forward|centered|directional} switch stays for future A/B comparison.
+     * Cruise steering strategy selector (read once). Default is {@code "servo"}: the input-only velocity servo
+     * ({@link SteerControl#swimServo}) — velocity feedback + a hazard-aware target-velocity profile (full cruise
+     * on safe straights, ramping to a velocity-target creep floor at hazard corners) tracked by facing the
+     * velocity error with reverse-thrust braking, plus a smooth diagonal corner blend, an outward racing-line
+     * bias, and a client-legal forward-input floor (W never released while prone). It threads the owner's Swims
+     * maze faster than the position-based {@code "directional"} cruise while holding the swim harness 17/17. The
+     * {@code -Dorebit.swim.bleed=forward|centered|directional|servo} switch stays for future A/B comparison.
      */
-    private static final String BLEED = System.getProperty("orebit.swim.bleed", "directional");
+    private static final String BLEED = System.getProperty("orebit.swim.bleed", "servo");
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
@@ -136,6 +139,7 @@ public final class SprintSwim implements Movement {
                     switch (BLEED) {
                         case "forward":     SteerControl.swimPitched(b, v, SteerControl.SUBMERGE_BIAS); break;
                         case "directional": SteerControl.swimPitchedDirectional(b, v, SteerControl.SUBMERGE_BIAS); break;
+                        case "servo":       SteerControl.swimServo(b, v, SteerControl.SUBMERGE_BIAS); break;
                         default:            SteerControl.swimPitchedCentered(b, v, SteerControl.SUBMERGE_BIAS); break; // "centered"
                     }
                     b.setSprinting(true);

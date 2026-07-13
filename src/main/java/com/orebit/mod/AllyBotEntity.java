@@ -681,6 +681,10 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     @Override public double y() { return this.getY(); }
     @Override public double z() { return this.getZ(); }
 
+    @Override public double velX() { return this.getDeltaMovement().x; }
+    @Override public double velY() { return this.getDeltaMovement().y; }
+    @Override public double velZ() { return this.getDeltaMovement().z; }
+
     @Override public int footX() { return this.blockPosition().getX(); }
     @Override public int footY() { return this.blockPosition().getY(); }
     @Override public int footZ() { return this.blockPosition().getZ(); }

@@ -170,6 +170,9 @@ loom {
                 val v = project.findProperty("orebit.replay.$key")
                 if (v != null) vmArg("-Dorebit.replay.$key=$v")
             }
+            // Swim cruise-strategy selector rides through to the real-world maze replay too (the swim servo A/B):
+            //   ./gradlew :fabric:1.21.11:runReplay "-Porebit.swim.bleed=servo"
+            project.findProperty("orebit.swim.bleed")?.let { vmArg("-Dorebit.swim.bleed=$it") }
             isIdeConfigGenerated = false
         }
     }
