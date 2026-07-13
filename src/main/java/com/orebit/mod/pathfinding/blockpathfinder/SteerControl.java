@@ -97,13 +97,16 @@ public final class SteerControl {
 
     /**
      * A/B + revert switch for {@link #drive}'s LAND branch (the chokepoint the ground moves Traverse/Descend/
-     * Diagonal steer through): {@code "servo"} = the new input-only velocity {@link #groundServo} (hazard-aware
-     * target-velocity with reverse-thrust braking — holds a 1-wide blue-ice lane); {@code "legacy"} (default) =
-     * the old open-loop {@link #steerTowards} (full-forward look-ahead, overshoots on ice). Mirrors SprintSwim's
-     * {@code orebit.swim.bleed} servo A/B switch. Set {@code -Dorebit.ground.drive=servo} to enable. Momentum-
+     * Diagonal steer through): {@code "servo"} (default) = the input-only velocity {@link #groundServo} (hazard-
+     * aware target-velocity with reverse-thrust braking — holds a 1-wide blue-ice lane); {@code "legacy"} = the
+     * old open-loop {@link #steerTowards} (full-forward look-ahead, overshoots on ice). Mirrors SprintSwim's
+     * {@code orebit.swim.bleed} servo A/B switch. Set {@code -Dorebit.ground.drive=legacy} to revert. Momentum-
      * critical moves (parkour arc, Ascend-climb, Fall-walkoff) call {@code steerTowards} DIRECTLY (bypassing
-     * {@code drive}) and are UNAFFECTED by this. */
-    private static final String GROUND_DRIVE = System.getProperty("orebit.ground.drive", "legacy");
+     * {@code drive}) and are UNAFFECTED by this. Promoted to default after the walk-off-void hazard was made
+     * off-path/overshoot-directional (a planned Descent no longer mistaken for a void to avoid) and broad
+     * re-verification: HeadlessAutotest descends off the start ledge + progresses at parity with legacy, ice
+     * iceturn PASS, swim harness 17/17, parkour unregressed (43/53, identical planner-refusals to legacy). */
+    private static final String GROUND_DRIVE = System.getProperty("orebit.ground.drive", "servo");
 
     // ---- velocity-servo cruise (swimServo) constants -------------------------------------------------
     /**
@@ -688,40 +691,85 @@ public final class SteerControl {
         return b.swimHazardAt(x, y, z) || b.swimHazardAt(x, y + 1, z) || b.swimHazardAt(x, y - 1, z);
     }
 
-    /** GROUND overshoot hazard: whether barrelling PAST the turn waypoint in the current travel direction hits a
-     *  hazard (lava OR a would-fall void) within {@link #HAZARD_LOOKAHEAD} cells — the corner-overshoot slide off
-     *  a 1-wide path into the flank. The land counterpart of {@link #overshootHazard}. */
+    /**
+     * GROUND overshoot hazard: whether barrelling PAST the turn waypoint in the current travel direction hits a
+     * hazard within {@link #HAZARD_LOOKAHEAD} cells — the corner-overshoot slide off a 1-wide path into the
+     * flank. The land counterpart of {@link #overshootHazard}, with one descent-aware distinction between its two
+     * hazard kinds:
+     * <ul>
+     *   <li><b>LAVA</b> ({@link #groundLavaColumn}) is ALWAYS a hazard — a lava pit ahead must brake the bot
+     *       whether the path turns or dives (this is what keeps iceturn safe).</li>
+     *   <li><b>VOID</b> ({@link #groundVoidColumn}) is a hazard ONLY when the path is NOT itself descending
+     *       straight ahead ({@link #pathDropsAhead}). A multi-block DESCENT the planner chose (a Descend/Fall
+     *       run) legitimately has no floor at the waypoint's y-level for the cells the path drops through — that
+     *       is the path's OWN trajectory, not an off-lane walk-off. Treating it as a void hazard braked the servo
+     *       to a halt on the ledge and it never stepped off (the froze-on-descent bug). So the void probe fires
+     *       only for an off-path overshoot into a drop the path does NOT take.</li>
+     * </ul>
+     */
     private static boolean groundOvershootHazard(BotSteering b, SteerView p) {
         if (!travelFrame(p)) return false;
+        boolean plannedDrop = pathDropsAhead(p);       // path descends straight ahead → the void ahead is planned
         for (int k = 1; k <= HAZARD_LOOKAHEAD; k++) {
-            if (groundHazardColumn(b, F.cx + (int) Math.round(F.ux * k), F.cy, F.cz + (int) Math.round(F.uz * k))) {
-                return true;
-            }
+            int hx = F.cx + (int) Math.round(F.ux * k);
+            int hz = F.cz + (int) Math.round(F.uz * k);
+            if (groundLavaColumn(b, hx, F.cy, hz)) return true;                 // lava: always a hazard
+            if (!plannedDrop && groundVoidColumn(b, hx, F.cy, hz)) return true; // void: only if NOT a planned descent
         }
         return false;
     }
 
-    /** GROUND flank hazard: whether either cell one step perpendicular to travel (the lane flanks at the waypoint)
-     *  is a hazard (lava OR a would-fall void) — the 1-wide ice lane the bot must not drift off. Land counterpart
-     *  of {@link #flankHazard}. */
+    /**
+     * GROUND flank hazard: whether either cell one step perpendicular to travel (the lane flanks at the waypoint)
+     * is a hazard — the 1-wide ice lane the bot must not drift off. Land counterpart of {@link #flankHazard}. As
+     * with {@link #groundOvershootHazard}, LAVA to the side is always a hazard, but a VOID to the side is NOT a
+     * hazard while the path is descending straight ahead ({@link #pathDropsAhead}) — a planned open-air descent
+     * has void all around by nature and must not be braked (the bot is deliberately dropping through it).
+     */
     private static boolean groundFlankHazard(BotSteering b, SteerView p) {
         if (!travelFrame(p)) return false;
         int fx = (int) Math.round(-F.uz), fz = (int) Math.round(F.ux);   // rotate travel dir 90 deg
-        return groundHazardColumn(b, F.cx + fx, F.cy, F.cz + fz) || groundHazardColumn(b, F.cx - fx, F.cy, F.cz - fz);
+        if (groundLavaColumn(b, F.cx + fx, F.cy, F.cz + fz) || groundLavaColumn(b, F.cx - fx, F.cy, F.cz - fz)) {
+            return true;                                                  // lava flank: always a hazard
+        }
+        if (pathDropsAhead(p)) return false;                             // planned descent: surrounding void is expected
+        return groundVoidColumn(b, F.cx + fx, F.cy, F.cz + fz) || groundVoidColumn(b, F.cx - fx, F.cy, F.cz - fz);
     }
 
     /**
-     * A GROUND hazard at floor-cell {@code (x, y, z)} (where {@code y} is the waypoint FLOOR cell, feet at
-     * {@code y+1}): either LAVA anywhere in the body column (reusing {@link BotSteering#swimHazardAt}, which
-     * already covers lava/damaging fluid) OR a would-fall VOID — no standable floor within three blocks below
-     * the feet cell, so the bot would walk off the 1-wide path into the pit. The void probe tolerates a normal
-     * 1-2-block descent (a stair step below stays solid) so it only fires on a genuine drop-off.
+     * Whether the planned path DESCENDS straight ahead past the current waypoint — the next leg drops to a lower
+     * waypoint while continuing in the current travel direction. When true, the void an overshoot/flank probe
+     * finds around the waypoint is the path's OWN planned descent (a Descend/Fall run the search chose), not an
+     * off-lane walk-off, so the void must NOT brake the bot. This is the off-path/overshoot-directional
+     * discriminator the lava probe doesn't need (lava ahead is always a hazard; an intended drop ahead is not):
+     * it distinguishes "the path goes down here" from "the void is off to the overshoot side." Requires
+     * {@link #travelFrame} to have populated {@code F} (uses the current travel direction {@code F.ux/F.uz}).
      */
-    private static boolean groundHazardColumn(BotSteering b, int x, int y, int z) {
-        if (b.swimHazardAt(x, y, z) || b.swimHazardAt(x, y + 1, z) || b.swimHazardAt(x, y - 1, z)) {
-            return true;                                              // lava / damaging fluid in the body column
-        }
-        return !b.solidAt(x, y, z) && !b.solidAt(x, y - 1, z) && !b.solidAt(x, y - 2, z); // would-fall void
+    private static boolean pathDropsAhead(SteerView p) {
+        if (!p.hasNext()) return false;                 // nothing planned beyond the waypoint → a real walk-off
+        if (p.ny() >= p.ty() - EPS) return false;       // next waypoint not below the current → no descent ahead
+        double ndx = p.nx() - p.tx(), ndz = p.nz() - p.tz();
+        double nl = Math.sqrt(ndx * ndx + ndz * ndz);
+        if (nl < EPS) return false;                     // next is a pure straight-DOWN drop AT the waypoint column
+                                                        //   (a Fall) — that is not "ahead"; overshooting forward
+                                                        //   past it IS an off-lane walk-off, so keep the void guard.
+        double dot = (F.ux * ndx + F.uz * ndz) / nl;    // next leg aligned with the current travel direction?
+        return dot >= STRAIGHT_DOT;                     // descends roughly straight ahead → planned (not a turn into a pit)
+    }
+
+    /** LAVA anywhere in the short ground body column at {@code (x, y..y+1, z)} plus the floor cell below (reusing
+     *  {@link BotSteering#swimHazardAt}, which already covers lava / damaging fluid). {@code y} is the waypoint
+     *  FLOOR cell, feet at {@code y+1}. Always a hazard — see {@link #groundOvershootHazard}. */
+    private static boolean groundLavaColumn(BotSteering b, int x, int y, int z) {
+        return b.swimHazardAt(x, y, z) || b.swimHazardAt(x, y + 1, z) || b.swimHazardAt(x, y - 1, z);
+    }
+
+    /** A would-fall VOID at floor-cell {@code (x, y, z)}: no standable floor within three blocks below the feet
+     *  cell, so a bot walking here drops off the 1-wide path into the pit. Tolerates a normal 1-2-block step
+     *  (a stair below stays solid) so it only fires on a genuine drop-off. Gated by {@link #pathDropsAhead} at
+     *  the call sites so a PLANNED descent (the path's own drop) is not mistaken for an off-lane walk-off. */
+    private static boolean groundVoidColumn(BotSteering b, int x, int y, int z) {
+        return !b.solidAt(x, y, z) && !b.solidAt(x, y - 1, z) && !b.solidAt(x, y - 2, z);
     }
 
     /**
