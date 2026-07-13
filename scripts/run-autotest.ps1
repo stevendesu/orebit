@@ -23,7 +23,8 @@ param(
     # -Trace: dump EVERY A* search's full expansion trace to run/autotest/orebit-autotest-trace-<n>.txt
     # (one numbered file per search; analyze with internal_docs/trace_analysis.py). Trace runs are SLOW
     # and the files are HUGE (per-node file I/O on the tick thread) -- diagnostic runs only.
-    [switch]$Trace
+    [switch]$Trace,
+    [string]$GroundDrive = ""   # "" = build-default; "servo" | "legacy" forces drive()'s land branch (Stage-2 A/B)
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,6 +57,7 @@ if ($BudgetTicks -gt 0) { $gradleArgs += "-Porebit.autotest.budgetTicks=$BudgetT
 if ($StartDelay -gt 0) { $gradleArgs += "-Porebit.autotest.startDelayTicks=$StartDelay" }
 if ($BotDebug)        { $gradleArgs += "-Porebit.autotest.debug=true" }
 if ($Trace)           { $gradleArgs += "-Porebit.autotest.trace=true" }
+if ($GroundDrive -ne "") { $gradleArgs += "-Porebit.ground.drive=$GroundDrive" }
 
 # gradlew.bat resolves the PROJECT from the current working directory, not from its own location --
 # invoked from elsewhere it would run this wrapper against a different repo's build. Pin the cwd.

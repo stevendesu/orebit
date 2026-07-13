@@ -17,7 +17,8 @@
 param(
     [string]$McVersion = "1.21.11",
     [switch]$BotDebug,
-    [string]$Bleed = ""
+    [string]$Bleed = "",
+    [string]$GroundDrive = ""   # "" = build-default; "servo" | "legacy" forces drive()'s land branch (Stage-2 A/B)
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,6 +46,7 @@ Copy-Item (Join-Path $templates "orebit.properties") (Join-Path $runDir "config\
 $gradleArgs = @(":fabric:${McVersion}:runSwim")
 if ($BotDebug) { $gradleArgs += "-Porebit.swim.debug=true" }
 if ($Bleed -ne "") { $gradleArgs += "-Porebit.swim.bleed=$Bleed" }
+if ($GroundDrive -ne "") { $gradleArgs += "-Porebit.ground.drive=$GroundDrive" }
 
 Push-Location $repo
 try {

@@ -110,6 +110,10 @@ loom {
                 val v = project.findProperty("orebit.autotest.$key")
                 if (v != null) vmArg("-Dorebit.autotest.$key=$v")
             }
+            // Ground drive-strategy selector rides through so the end-to-end goto autotest can A/B the ground
+            // velocity servo on real terrain (Stage 2 broad verification):
+            //   ./gradlew :fabric:1.21.11:runAutotest "-Porebit.ground.drive=servo"
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
             isIdeConfigGenerated = false // CLI/script-driven; no IDE launch config needed
         }
         // Parkour-movement diagnostic: a superflat server that arms the common-src ParkourCourse hook
