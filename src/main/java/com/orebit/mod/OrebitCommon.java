@@ -187,5 +187,24 @@ public final class OrebitCommon {
         // inert-unless-armed discipline (-Dorebit.parkour); registered after the autotest hook for the same
         // registration-order reason.
         ParkourCourse.register(events);
+
+        // Headless swimming-movement diagnostic (the :fabric:<ver>:runSwim run config): builds a grid of
+        // water tanks and drives the bot through isolated swim challenges (cross/dive/rise/prone-thread/
+        // bubble-column/kelp/fence), logging trajectories + water state. Same inert-unless-armed discipline
+        // (-Dorebit.swim); registered after the parkour hook for the same registration-order reason.
+        SwimCourse.register(events);
+
+        // Headless ground-movement (blue-ice / lava) diagnostic (the :fabric:<ver>:runIce run config): builds
+        // 1-wide blue-ice paths flanked by lethal lava-curtain walls and drives the bot across them, so the
+        // near-frictionless-turn OVERSHOOT (Traverse/Descend/Diagonal sliding off the path into the lava) is a
+        // clear PASS/FAIL. Same inert-unless-armed discipline (-Dorebit.ice); registered after the swim hook.
+        IceCourse.register(events);
+
+        // Headless REAL-WORLD replay diagnostic (the :fabric:<ver>:runReplay run config): loads the owner's
+        // hand-built "Swims" world (copied into world/ by scripts/run-replay.ps1, NOT regenerated) and replays
+        // the exact reported-failing sequence (/bot stay; /tp Dev_bot 14 -56 1; /bot goto -3 -56 1), tracing the
+        // trajectory + water state to reproduce the ejection the synthetic SwimCourse can't. Inert unless armed
+        // (-Dorebit.replay); registered last.
+        WorldReplay.register(events);
     }
 }

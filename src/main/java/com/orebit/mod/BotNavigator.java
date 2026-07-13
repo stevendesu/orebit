@@ -136,6 +136,14 @@ final class BotNavigator {
      *  arrival test, this goal is re-planned at EXACT (0/0) tolerance until arrival/clear/goal-move. */
     private boolean exactGoalEscalated;
 
+    /** DIAGNOSTIC (swim harness): which driveToward outcome branch ran this tick — STEER (following the
+     *  path), WAIT (no walkable plan), HOLD (gave up / window BLOCKED), COMPLETE (arrived). Label only,
+     *  no control-flow effect. */
+    private String driveState = "INIT";
+
+    /** The drive-state label set on the last {@link #driveToward} tick (see {@link #driveState}). */
+    String driveState() { return driveState; }
+
     // ---- closed-loop trajectory tracking (the follower steers along the planned LINE, not a point) ----
     /** Floor cell the current block plan/window started from — the first segment's start (waypoints are
      *  start-exclusive, so the segment before waypoint 0 begins here). Refreshed on replan / window swap. */
@@ -209,6 +217,12 @@ final class BotNavigator {
         return path != null ? path.size() : -1;
     }
 
+    /** The current window's block plan (or null with no plan) — for the swim harness's once-per-plan dump of
+     *  the full waypoint list + movement types (identity changes on each window-swap/replan). */
+    com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan currentPlan() {
+        return path;
+    }
+
     // The executing step's segment cells (from = previous waypoint / plan start, to = current waypoint) —
     // diagnostic only, snapshot each driven tick. The parkour harness logs these to see the ACTUAL jump the
     // planner routed (from/to cells) vs the intended one, e.g. a greedy diagonal corner-cut off a turn.
@@ -279,6 +293,7 @@ final class BotNavigator {
         // BELOW the target (it walks under a sky platform / the top of a staircase and quits) — it must
         // also match the target's height, which is what makes it actually climb to reach you.
         if (distXZ <= arriveDist && Math.abs(dy) <= arriveY) {
+            driveState = "COMPLETE";
             bot.setForward(0.0f);
             clearPlan(); // also resets the exact-goal escalation — this goal is DONE
             bot.lookAtPlayer(bot.owner());
@@ -424,9 +439,11 @@ final class BotNavigator {
         repairStep();
 
         if (path != null && waypointIndex < path.size()) {
+            driveState = "STEER";
             lastDriveState = null; // following a path again → re-announce the next non-following state
             steerAlongPath();
         } else if (navGaveUp || (pathPlan != null && pathPlan.status() == PathStatus.BLOCKED)) {
+            driveState = "HOLD";
             // HOLD when we either gave up OR a committed-skeleton window is momentarily BLOCKED (the region
             // repair reroutes next tick). Do NOT straight-line here: that ignores the planner and could walk
             // the bot off the very ledge the guard refused (the irreversible yeet). Straight-line stays only
@@ -434,6 +451,7 @@ final class BotNavigator {
             if (Debug.VERBOSE) driveStateLog(navGaveUp ? "HOLD (nav gave up)" : "HOLD (window BLOCKED)");
             bot.setForward(0.0f);
         } else {
+            driveState = "WAIT";
             // No walkable plan → WAIT. In async mode this branch is every tick a first/boundary search
             // is still in flight; the old straight-line fallback walked (and hopped) the bot toward the
             // raw goal during exactly those ticks — off ledges and floating platforms the planner would

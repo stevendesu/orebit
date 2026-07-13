@@ -33,7 +33,9 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
@@ -142,6 +144,11 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     private Mode mode = Mode.FOLLOW;
     private BlockPos comeTarget;    // fixed summon cell (owner's feet block at /bot come time)
+    // The current COME drive's arrival/planner tolerance. come/follow keep the loose no-overlap default;
+    // goto passes an EXACT tolerance (see comeTo overload) so the bot reaches the precise block.
+    private double comeArriveDist = BotNavigator.ARRIVE_DIST;
+    private double comeArriveY = BotNavigator.ARRIVE_Y;
+    private int comeGoalTol = BlockPathfinder.DEFAULT_GOAL_TOL_XZ;
 
     // ---- swim-pose transition diagnostic (Debug.VERBOSE) — see logSwimTransition() -------------------
     // Vanilla drops the prone Pose.SWIMMING the instant a tick sees !(isSprinting() && isInWater()), and can
@@ -235,8 +242,20 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     public void comeTo(BlockPos summonCell) {
         this.mode = Mode.COME;
         this.comeTarget = summonCell.immutable();
+        this.comeArriveDist = BotNavigator.ARRIVE_DIST;
+        this.comeArriveY = BotNavigator.ARRIVE_Y;
+        this.comeGoalTol = BlockPathfinder.DEFAULT_GOAL_TOL_XZ;
         navigator.clearPlan();
         portalFollower.resetPortalSeek();
+    }
+
+    /** Come to a cell with an explicit arrival tolerance. {@code goto} passes an EXACT tolerance so the bot
+     *  reaches the precise block; {@code come}/follow keep the loose no-overlap default. */
+    public void comeTo(BlockPos summonCell, double arriveDist, double arriveY, int goalTol) {
+        comeTo(summonCell);                 // reuse the existing setup (mode, target, clearPlan, resetPortalSeek)
+        this.comeArriveDist = arriveDist;
+        this.comeArriveY = arriveY;
+        this.comeGoalTol = goalTol;
     }
 
     /**
@@ -329,7 +348,8 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                 // a cell that means nothing in this level.
                 if (portalFollower.followThroughPortal()) break;
                 double tx = comeTarget.getX() + 0.5, ty = comeTarget.getY(), tz = comeTarget.getZ() + 0.5;
-                if (navigator.driveToward(tx, ty, tz, comeTarget.below())) setMode(Mode.STAY); // arrived
+                if (navigator.driveToward(tx, ty, tz, comeTarget.below(),
+                        comeArriveDist, comeArriveY, comeGoalTol, comeGoalTol)) setMode(Mode.STAY); // arrived
             }
             default -> { // FOLLOW
                 if (!portalFollower.followThroughPortal()) {
@@ -661,6 +681,10 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     @Override public double y() { return this.getY(); }
     @Override public double z() { return this.getZ(); }
 
+    @Override public double velX() { return this.getDeltaMovement().x; }
+    @Override public double velY() { return this.getDeltaMovement().y; }
+    @Override public double velZ() { return this.getDeltaMovement().z; }
+
     @Override public int footX() { return this.blockPosition().getX(); }
     @Override public int footY() { return this.blockPosition().getY(); }
     @Override public int footZ() { return this.blockPosition().getZ(); }
@@ -678,6 +702,21 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.setYRot(yaw);
         this.setYBodyRot(yaw);
         this.setYHeadRot(yaw);
+    }
+
+    @Override public boolean prone() { return this.isSwimming(); }
+
+    @Override
+    public void faceTowards(double dx, double dy, double dz) {
+        double horiz = Math.sqrt(dx * dx + dz * dz);
+        if (horiz > 1.0e-4) {
+            float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+            this.setYRot(yaw);
+            this.setYBodyRot(yaw);
+            this.setYHeadRot(yaw);
+        }
+        float pitch = (float) (-Math.toDegrees(Math.atan2(dy, horiz))); // dy<0 → look down → dive
+        this.setXRot(pitch);
     }
 
     /**
@@ -711,6 +750,18 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     @Override
     public boolean airAt(int x, int y, int z) {
         return !solidAt(x, y, z);
+    }
+
+    /** Live swim overshoot-hazard test: a bubble column (vertical drag breaches/ejects a prone swimmer) or
+     *  lava (damaging fluid). Reads the live level — the follower's hazard-aware corner brake affords it. */
+    @Override
+    public boolean swimHazardAt(int x, int y, int z) {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        scratchPos.set(x, y, z);
+        BlockState s = level.getBlockState(scratchPos);
+        if (s.is(Blocks.BUBBLE_COLUMN)) return true;                  // the drag column itself
+        if (s.is(Blocks.MAGMA_BLOCK) || s.is(Blocks.SOUL_SAND)) return true; // its source under the water
+        return level.getFluidState(scratchPos).is(FluidTags.LAVA);   // damaging fluid
     }
 
     /** Route a break request to the timed {@link BotMining} actuator (equip/face/swing/real-time/drops). */

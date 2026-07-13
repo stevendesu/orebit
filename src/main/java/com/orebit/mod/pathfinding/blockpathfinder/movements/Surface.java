@@ -2,6 +2,7 @@ package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
+import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
@@ -62,5 +63,23 @@ public final class Surface implements Movement {
     public void steer(BotSteering b, SteerView path) {
         SteerControl.swimTowards(b, path);
         SteerControl.holdDepth(b, path, 0.0);
+    }
+
+    @Override
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+        MovePlan plan = new MovePlan();
+        plan.phase("surface")
+                .drive((b, v) -> {
+                    b.setSprinting(false);
+                    SteerControl.swimTowards(b, v);
+                    SteerControl.holdDepth(b, v, 0.0);
+                })
+                .done(b -> !b.prone() && b.footX() == tx && b.footZ() == tz);
+        return plan;
+    }
+
+    @Override
+    public boolean reached(BotSteering b, int wx, int wy, int wz) {
+        return !b.prone() && b.footX() == wx && b.footZ() == wz;
     }
 }

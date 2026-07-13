@@ -27,6 +27,17 @@ public interface BotSteering {
     double y();
     double z();
 
+    /**
+     * The bot's current velocity ({@code getDeltaMovement}) components, entity-space blocks/tick — the
+     * feedback signal for the velocity servo ({@link SteerControl#swimServo}). The input-based follower never
+     * WRITES velocity (that is vanilla physics' job); these are read-only so a move can steer against the bot's
+     * ACTUAL momentum (thrust to hold speed against drag, reverse-thrust to brake an overshoot) instead of
+     * open-loop guessing from position alone.
+     */
+    double velX();
+    double velY();
+    double velZ();
+
     /** The bot's feet block X (its {@code blockPosition().getX()}) — for the {@link Movement#reached} test. */
     int footX();
     int footY();
@@ -53,6 +64,15 @@ public interface BotSteering {
 
     /** Aim the body + head yaw along a horizontal delta (folds the {@code atan2} the follower used to repeat). */
     void faceHorizontally(double dx, double dz);
+
+    /** Whether the bot is in the prone swimming pose (vanilla isSwimming() / Pose.SWIMMING) — the gate a
+     *  dive-init / surface transition holds on until the pose has actually flipped. */
+    boolean prone();
+
+    /** Aim yaw AND pitch toward a 3-D direction (prone sprint-swim: vanilla steers vertical velocity toward the
+     *  look-pitch via Player.travel). If the horizontal component is ~0, KEEP the current yaw (only set pitch) so
+     *  a vertical dive/rise doesn't spin the head. */
+    void faceTowards(double dx, double dy, double dz);
 
     /** Set the forward movement input ({@code zza}); {@code 1} = full ahead, {@code 0} = none. */
     void setForward(float zza);
@@ -98,4 +118,15 @@ public interface BotSteering {
     /** Place a footing block at {@code (x,y,z)} — the bot's configured/conjured or carried block, server-side,
      *  the instant a {@code Need.FOOTING} is unmet and the cell is placeable. */
     void place(int x, int y, int z);
+
+    /**
+     * Whether cell {@code (x,y,z)} is a swim <b>overshoot hazard</b> — a cell the follower must not let its
+     * momentum carry the prone bot into while cornering: a <b>bubble column</b> (whose vertical drag breaches
+     * a prone swimmer out of the water and ejects it) or <b>lava</b>/damaging fluid. Reads the LIVE level (the
+     * follower runs cold, at tick rate, with a large per-decision budget — unlike the pathfinder — so a handful
+     * of live block reads around the path each corner is affordable). This is the seam the hazard-aware corner
+     * brake ({@link SteerControl}) uses to decide whether a given turn's overshoot is DANGEROUS (brake to a
+     * crawl) or harmless (take the corner at full speed).
+     */
+    boolean swimHazardAt(int x, int y, int z);
 }
