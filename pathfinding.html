@@ -1,0 +1,1516 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://stevendesu.github.io/orebit/pathfinding.html">
+      
+      
+        <link rel="prev" href="worldmodel.html">
+      
+      
+        <link rel="next" href="movements.html">
+      
+      
+        
+      
+      
+      <link rel="icon" href="assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Pathfinding - Orebit</title>
+      
+    
+    
+      <link rel="stylesheet" href="assets/stylesheets/main.484c7ddc.min.css">
+      
+      
+
+
+    
+    
+      
+        <script src="https://unpkg.com/iframe-worker/shim"></script>
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL(".",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#pathfinding" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="index.html" title="Orebit" class="md-header__button md-logo" aria-label="Orebit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Orebit
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Pathfinding
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/stevendesu/orebit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="index.html" title="Orebit" class="md-nav__button md-logo" aria-label="Orebit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Orebit
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/stevendesu/orebit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="getting_started/installation.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="getting_started/supported_versions.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Supported Versions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="worldmodel.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    World Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pathfinding
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="pathfinding.html" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pathfinding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#region-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Region-level
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#block-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Block-level
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Block-level">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#movements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Movements
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#folded-interactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Folded interactions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cost-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost model
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#execution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="movements.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Movements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="world_edits.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    World Edits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="gathering.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Gathering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="commands.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="configuration.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="Optimizations/index.html" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Optimizations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_10" id="__nav_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Optimizations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/01_block_reading.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading Blocks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/02_reusing_memory.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reusing Memory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/03_block_fingerprints.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block Fingerprints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/04_custom_hash_map.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Custom Hash Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/05_pathfinding_hot_path.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The Pathfinding Hot Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/06_fewer_nodes.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fewer Nodes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/07_cuboid_macro_movements.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cuboid Macro-Movements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/08_measure_everything.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Measure Everything
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/09_depth_nibbles.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Depth Nibbles
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/10_background_pathfinding.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Off the Tick Thread
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/11_region_heuristic.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Teaching the Block Search the Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/12_field_build.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Paying for the Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#region-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Region-level
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#block-level" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Block-level
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Block-level">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#movements" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Movements
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#folded-interactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Folded interactions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cost-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost model
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#execution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Execution
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="pathfinding">Pathfinding</h1>
+<p>Orebit navigates with a <strong>two-tier hierarchical A*</strong>: a coarse <strong>region</strong> planner
+routes across the <a href="worldmodel.html#region-level">region grid</a> — out to goals
+thousands of blocks away — and a fine <strong>block</strong> planner computes the exact movements
+for the stretch the bot is currently crossing. This page documents how the tiers
+cooperate, the movement vocabulary, the cost model, and how a plan actually gets
+executed.</p>
+<h2 id="region-level">Region-level</h2>
+<p>The region planner runs A* over the fixed-grid cost pyramid, and it is <strong>stateful</strong>:
+a goal gets a <em>stack</em> of plans, one per pyramid level, each level navigating within a
+window handed down from the level above. The top level routes coarsely toward the
+goal; each finer level plans from the bot toward a sub-goal a few cells along its
+parent's route; the bottom level's output — an ordered list of regions, the <em>region
+skeleton</em> — is what the block planner follows.</p>
+<p>The point of the stack is <strong>re-planning only at the scale that changed</strong>. As the bot
+walks, each level checks a cheap question — "am I still inside my window?" — and only
+the level whose window the bot exited re-plans (the leaf level often, the coarse
+levels rarely). A medium-sized obstacle is re-routed at the level whose cells match
+its size, and the thousand-block macro route isn't re-derived twenty times a minute
+because the bot stepped around a tree. The top level <em>slides</em> toward far goals and
+<em>collapses</em> as the bot nears them, which is what lets one mechanism cover everything
+from "come here" to a cross-continent trek.</p>
+<p>Two robustness rules matter in practice:</p>
+<ul>
+<li><strong>Commit to the skeleton.</strong> Once the bot is executing a region route, near-equal
+  alternatives are not allowed to flip-flop it mid-route; the plan re-routes when
+  reality disagrees, not when a fresh search would score 2% cheaper.</li>
+<li><strong>Repair by blacklist.</strong> If a promised region crossing turns out unrealizable at
+  the block level (the coarse tier is optimistic about unexplored terrain — see the
+  world-model page), that specific crossing is blacklisted and the level re-plans
+  around it, escalating to coarser levels only if the local repair fails.</li>
+</ul>
+<h2 id="block-level">Block-level</h2>
+<p>Within the current window of the skeleton, A* runs over the recomputed nav grid,
+expanding <strong>movements</strong> (below). This search is the hot path, and it's been through
+several rounds of measured optimization — the
+<a href="Optimizations/05_pathfinding_hot_path.html">hot-path</a>,
+<a href="Optimizations/06_fewer_nodes.html">fewer-nodes</a>,
+<a href="Optimizations/07_cuboid_macro_movements.html">macro-movement</a>, and
+<a href="Optimizations/09_depth_nibbles.html">depth-nibble</a> chapters tell that story in full.
+(Even the <em>first</em> search after boot is covered: the server warms the pathfinder up on
+synthetic terrain at startup — <code>pathing.warmup</code> — so no player pays the JIT compiler's
+one-time ~22 ms bill.) By default it runs <strong><a href="Optimizations/10_background_pathfinding.html">off the server tick entirely</a></strong>,
+on a pool of background worker threads with a wall-clock time budget instead of a node
+cap — so a big flood no longer has to fit between two frames (<code>pathing.async</code>, on by
+default; set it <code>false</code> for the old synchronous tick-thread search). The
+load-bearing pieces:</p>
+<ul>
+<li><strong>Weighted search, not provably-optimal search.</strong> The heuristic is 3D octile
+  distance scaled by a configurable greed weight (default <code>2.0</code>), plus a microscopic
+  straight-line tie-break so the search threads obstacle fields instead of drowning
+  in equal-cost alternatives. A bot needs a good path <em>now</em>, not a certificate of
+  optimality.</li>
+<li><strong>A heuristic that can read the map.</strong> Octile distance is topology-blind — it
+  points straight at a goal behind a wall and floods the open volume hunting a way
+  through. So the block heuristic also consults the region tier: a goal-rooted flood
+  over the coarse graph yields a <strong>cost-to-goal estimate per region</strong>, and the search
+  takes the <em>larger</em> of it and the straight-line distance. A cell whose region loops
+  back to the goal now reads high and is deprioritised instead of flooded — and a
+  <em>buried</em> goal (an ore in no air pocket at all) is reached by seeding that flood from
+  the pockets that can dig to it. The flood itself stops as soon as it has priced the
+  neighbourhood of the route it found, and any region it never settled reads a provable
+  lower bound anchored on the goal rather than a blank — so the guidance never simply
+  runs out at the edge of the map, even when the search is forced into a wide detour.
+  The <a href="Optimizations/11_region_heuristic.html">region-heuristic chapter</a> tells the whole
+  story; <a href="Optimizations/12_field_build.html">what building that field costs</a> got its own
+  chapter.</li>
+<li><strong>A goal premium that respects building.</strong> Distance heuristics are blind to the
+  fact that a goal floating over open air must be <em>built to</em> — so the search adds the
+  provable placement cost of the forced climb below the goal into the estimate,
+  taking the cheapest of the goal's approachable faces (faces on the far side of the
+  approach are excluded, since reaching them means paying to pass the goal first —
+  with the vertical build face always kept, because a floating goal forces the climb
+  no matter where you come from).</li>
+<li><strong>Macro moves.</strong> Long uniform runs (a pillar up open air, a fall down a shaft, a
+  straight dig) are collapsed into single multi-block jumps, validated by a maximal
+  uniform cuboid rather than a blind 1-D scan.</li>
+<li><strong>A mutable-world overlay.</strong> Moves that break or place blocks change the world the
+  <em>rest of the path</em> must be planned against. Each candidate path carries a compact
+  diff of its planned edits, and every geometry read consults the diff before the
+  grid — so a later move correctly sees the block an earlier move plans to place.</li>
+<li><strong>Honest partial paths.</strong> When the search exhausts its budget, it returns its best
+  progress instead of failing — but truncated to the last <em>reversible</em> point, so a
+  bot that can't place blocks is never marched off a ledge it can't climb back from
+  on the strength of an unfinished plan.</li>
+</ul>
+<h3 id="movements">Movements</h3>
+<p>Each movement is a small strategy object that knows its geometry, computes its cost
+(in game ticks) for the search, and knows how to steer the bot through itself at
+execution time. The current vocabulary — see <a href="movements.html">Movements</a> for the full
+per-movement reference, with every cost constant and its derivation:</p>
+<table>
+<thead>
+<tr>
+<th style="text-align: left;">Movement</th>
+<th style="text-align: left;">Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: left;">Traverse</td>
+<td style="text-align: left;">Walk one block horizontally (step-assist onto slabs/stairs; may break or place to pass)</td>
+</tr>
+<tr>
+<td style="text-align: left;">Diagonal</td>
+<td style="text-align: left;">Move diagonally across a corner (with corner-clearance checks)</td>
+</tr>
+<tr>
+<td style="text-align: left;">Ascend</td>
+<td style="text-align: left;">Step up one block (jump, possibly placing a step)</td>
+</tr>
+<tr>
+<td style="text-align: left;">Descend</td>
+<td style="text-align: left;">Step down one block</td>
+</tr>
+<tr>
+<td style="text-align: left;">Fall</td>
+<td style="text-align: left;">Drop multiple blocks off an edge (damage priced as cost, capped at lethal)</td>
+</tr>
+<tr>
+<td style="text-align: left;">Pillar</td>
+<td style="text-align: left;">Jump and place beneath yourself — straight up in the same column</td>
+</tr>
+<tr>
+<td style="text-align: left;">MineDown</td>
+<td style="text-align: left;">Dig the block underfoot and drop one — straight down in the same column</td>
+</tr>
+<tr>
+<td style="text-align: left;">Climb</td>
+<td style="text-align: left;">Ascend or descend a ladder, vine, or scaffolding</td>
+</tr>
+<tr>
+<td style="text-align: left;">Parkour</td>
+<td style="text-align: left;">Sprint-jump a gap to a flat (1–3), rising (1–3), or falling (1–4) landing — plus offset landings one cell off the line</td>
+</tr>
+<tr>
+<td style="text-align: left;">DiagonalParkour</td>
+<td style="text-align: left;">The same running jump along a diagonal (gaps 1–3)</td>
+</tr>
+<tr>
+<td style="text-align: left;">Swim</td>
+<td style="text-align: left;">Paddle at the water surface (slow)</td>
+</tr>
+<tr>
+<td style="text-align: left;">Sprint-swim</td>
+<td style="text-align: left;">Fast prone swimming — the 3D underwater workhorse</td>
+</tr>
+<tr>
+<td style="text-align: left;">Start sprint-swim / Surface</td>
+<td style="text-align: left;">The transitions into and out of the prone swimming pose</td>
+</tr>
+</tbody>
+</table>
+<p>The last row is worth a note: sprint-swimming is <em>stateful</em> (you must be in deep
+water to start it, but can continue through shallows), so the search's node identity
+includes the bot's pose — going prone is a real search edge, not a bookkeeping trick.</p>
+<p><strong>Planned, extensible</strong> (added later through the same interface): Crawl (1-tall gaps),
+wall-clutch, boat/minecart. Profiling shows the movement-geometry logic is only ~4% of
+a node expansion, so the vocabulary can keep growing without the search getting fatter.</p>
+<p>Portals are handled above this vocabulary: known Nether portals are indexed per
+chunk, and when its owner changes dimension the bot paths to the nearest known portal
+and walks in.</p>
+<h3 id="folded-interactions">Folded interactions</h3>
+<p>Breaking blocks, placing blocks, and toggling doors / fence gates / trapdoors are
+<strong>not separate moves</strong> — they don't change your position. Instead they are folded
+into the movement that needs them, as edits that add cost and validity requirements:</p>
+<ul>
+<li><em>Traverse, breaking the block in the way</em> — costs the real mining time (block
+  hardness against the best tool in the bot's inventory), plus a configurable flat
+  surcharge per break (<code>mining.breakBaseCost</code> — a "reluctance to edit the world").</li>
+<li><em>Ascend / Pillar, placing a block beneath</em> — requires a block to place (from the
+  bot's real inventory, if the server configures it that way).</li>
+<li><em>Walking through a hazard, or punching it out first</em> — where a movement's body would
+  pass through a berry bush, cobweb, or fire cell, the planner prices both options at
+  the same node — the pass-through surcharge versus the real break time — and folds
+  whichever is cheaper. A sword-carrying bot cuts the web; a bare-handed one wades.</li>
+<li>Parkour and Fall, by contrast, are <strong>edit-free by rule</strong>: you can't mine or place
+  mid-jump, so a gap that would need it simply isn't a parkour candidate.</li>
+</ul>
+<p>The edits themselves execute like a player's — real mining time with the crack
+overlay, real drops and tool wear, and hard refusals for owner-protected blocks; see
+<a href="world_edits.html">Breaking &amp; Placing</a>.</p>
+<h3 id="cost-model">Cost model</h3>
+<p>Costs are in <strong>game ticks</strong> and parameterized on the bot's configured capabilities
+and inventory. Walking is cheapest; swimming is slower in exact proportion to
+vanilla's swim speeds; mining cost is the real vanilla mining time for the block and
+tool; hazards are <em>costs, not walls</em> — a mortal bot pays a stiff surcharge per
+fire or berry-bush cell it would pass through (an invulnerable one doesn't), cobwebs
+charge everyone the slowdown physics imposes, and a fall past the safe distance is
+priced by its damage rather than forbidden, up to the lethal cap. All damage shares
+one exchange rate — <code>pathing.costPerHitpoint</code>, ticks per hitpoint — so "how much is
+the bot's health worth" is a single number the server owner sets. Because every block
+is <em>technically</em> mineable, the engine reasons in cost, never hard "blocked/clear" —
+it just prefers walking down the hall to tunnelling through the wall. (The exceptions
+are deliberate: owner-<a href="world_edits.html#protected-blocks">protected blocks</a> are never
+broken at any price, and vanilla-unbreakable blocks are walls unless the server opts
+the bot into a two-minute-per-block grind.)</p>
+<p>Notably, the <strong>cost of placing a block is behavioral, not physical</strong>: placing is
+near-instant in-game, but a bot that scaffolds at every excuse is obnoxious, so
+placement carries a configurable reluctance (plus a premium scaled by how hard the
+placed block would be to mine back out — a bot carrying dirt and obsidian bridges
+with the dirt). Server owners can tune all of this; see
+<a href="configuration.html">Configuring Orebit</a>.</p>
+<h2 id="execution">Execution</h2>
+<p>A plan is worthless if the bot can't walk it, and Minecraft movement is too messy for
+"teleport along the waypoints." The bot is a real server-side player entity running
+the full vanilla player tick, and execution is deliberately <strong>reactive</strong>: every tick,
+each subsystem looks at what is <em>currently true</em> and drives toward what the plan
+wants, rather than trusting a remembered checklist.</p>
+<ul>
+<li><strong>Multi-step movements are phase plans.</strong> A pillar is "jump, then place under
+  yourself, then land"; a parkour jump is "run, take off, land." Movements that need
+  this declare an ordered list of phases, each with the geometry it must establish
+  (a cell that must be air, a cell that must be footing) and the inputs to hold. The
+  runner re-checks every requirement against the live world each tick — if a block
+  the plan believed broken is still there, it mines it again; if a pillar's footing
+  never took and the bot fell back down, the phase cursor resets and it re-attempts.</li>
+<li><strong>Mining takes real time.</strong> The bot digs like a player: equips its fastest tool,
+  faces the block, shows the crack overlay, and breaks the block on the exact tick
+  vanilla mining would — with proper drops, XP, and tool wear. A break continues
+  only while the mover keeps requesting it, exactly like holding the mouse button.</li>
+<li><strong>Re-planning is boundary-gated.</strong> The bot re-plans when it commits past a window
+  boundary or when the world genuinely invalidates the plan — not on a timer, and
+  not because a transient mid-jump position looked wrong.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": ".", "features": ["search.highlight", "search.share", "navigation.instant", "navigation.instant.prefetch", "navigation.path", "navigation.indexes"], "search": "assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

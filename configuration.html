@@ -1,0 +1,1656 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://stevendesu.github.io/orebit/configuration.html">
+      
+      
+        <link rel="prev" href="commands.html">
+      
+      
+        <link rel="next" href="Optimizations/index.html">
+      
+      
+        
+      
+      
+      <link rel="icon" href="assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Configuration - Orebit</title>
+      
+    
+    
+      <link rel="stylesheet" href="assets/stylesheets/main.484c7ddc.min.css">
+      
+      
+
+
+    
+    
+      
+        <script src="https://unpkg.com/iframe-worker/shim"></script>
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL(".",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#configuring-orebit" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="index.html" title="Orebit" class="md-header__button md-logo" aria-label="Orebit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Orebit
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Configuration
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/stevendesu/orebit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="index.html" title="Orebit" class="md-nav__button md-logo" aria-label="Orebit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Orebit
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/stevendesu/orebit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="getting_started/installation.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="getting_started/supported_versions.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Supported Versions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="worldmodel.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    World Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="pathfinding.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pathfinding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="movements.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Movements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="world_edits.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    World Edits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="gathering.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Gathering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="commands.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="configuration.html" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#where-the-file-lives" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where the file lives
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#applying-changes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Applying changes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Options
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Options">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#placement-can-the-bot-build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Placement — can the bot build?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mining-can-the-bot-dig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mining — can the bot dig?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pathfinding-how-the-bot-plans-routes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pathfinding — how the bot plans routes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#world-memory-surviving-a-restart" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        World memory — surviving a restart
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#survival-is-the-bot-mortal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Survival — is the bot mortal?
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#example-configurations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example configurations
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="Optimizations/index.html" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Optimizations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_10" id="__nav_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Optimizations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/01_block_reading.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading Blocks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/02_reusing_memory.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reusing Memory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/03_block_fingerprints.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block Fingerprints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/04_custom_hash_map.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Custom Hash Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/05_pathfinding_hot_path.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The Pathfinding Hot Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/06_fewer_nodes.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fewer Nodes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/07_cuboid_macro_movements.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cuboid Macro-Movements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/08_measure_everything.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Measure Everything
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/09_depth_nibbles.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Depth Nibbles
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/10_background_pathfinding.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Off the Tick Thread
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/11_region_heuristic.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Teaching the Block Search the Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="Optimizations/12_field_build.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Paying for the Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#where-the-file-lives" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Where the file lives
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#applying-changes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Applying changes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Options
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Options">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#placement-can-the-bot-build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Placement — can the bot build?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#mining-can-the-bot-dig" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mining — can the bot dig?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pathfinding-how-the-bot-plans-routes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pathfinding — how the bot plans routes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#world-memory-surviving-a-restart" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        World memory — surviving a restart
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#survival-is-the-bot-mortal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Survival — is the bot mortal?
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#example-configurations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Example configurations
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="configuring-orebit">Configuring Orebit</h1>
+<p>Orebit reads its settings from a single plain-text file, <strong><code>orebit.properties</code></strong>, so a
+server owner can decide exactly how capable — and how "fair" — their bots are.</p>
+<h2 id="where-the-file-lives">Where the file lives</h2>
+<p>The file is created automatically the first time Orebit runs, at:</p>
+<pre><code>config/orebit.properties
+</code></pre>
+<p>…inside your Minecraft directory — the same <code>config/</code> folder (next to <code>mods/</code>) that other
+mods use:</p>
+<table>
+<thead>
+<tr>
+<th>You're running…</th>
+<th>The file is at…</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>A single-player world</td>
+<td><code>&lt;your instance&gt;/config/orebit.properties</code></td>
+</tr>
+<tr>
+<td>A dedicated server</td>
+<td><code>&lt;server root&gt;/config/orebit.properties</code></td>
+</tr>
+</tbody>
+</table>
+<p>You don't have to create it yourself. On first launch Orebit writes the file with every
+option set to its default and a comment explaining each one. Open it in any text editor to
+make changes.</p>
+<h2 id="applying-changes">Applying changes</h2>
+<p>After you edit the file you can apply it <strong>without restarting</strong> by running:</p>
+<pre><code>/bot config reload
+</code></pre>
+<p>The new settings take effect on each bot's next path. (The command echoes the key values
+back so you can confirm they loaded.) The defaults are chosen so that, out of the box, a
+freshly configured bot behaves exactly as it does with no config at all — change only what
+you want to change.</p>
+<p>A few keys are exceptions. <code>pathing.async</code> and <code>pathing.maxThreads</code> (the background-planner
+switch and its thread-pool size) only take effect on a server restart. And
+<code>mining.protectedBlocks</code> is half-and-half: the reload makes the bot <em>refuse</em> to break
+newly-protected blocks immediately, but the planner keeps routing from cached block data
+until a restart (or until the affected chunks naturally rebuild) — see the key's entry
+below.</p>
+<h2 id="options">Options</h2>
+<p>The file is grouped into four sections. Every value below is the default.</p>
+<h3 id="placement-can-the-bot-build">Placement — can the bot build?</h3>
+<pre><code class="language-properties">placement.canPlace          = true
+placement.consumesBlocks    = false
+placement.conjuredBlock     = minecraft:cobblestone
+placement.removalCostWeight = 1.0
+placement.placeBaseCost     = 6.0
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>placement.canPlace</code></td>
+<td><code>true</code></td>
+<td>Whether the bot may place blocks at all (to bridge gaps or pillar up). Set <code>false</code> for a bot that only ever walks and climbs existing terrain.</td>
+</tr>
+<tr>
+<td><code>placement.consumesBlocks</code></td>
+<td><code>false</code></td>
+<td>If <code>true</code>, every block the bot places is taken from <strong>its own inventory</strong> — so it can only build as far as it has blocks, and it will run out. If <code>false</code>, it places an unlimited supply of a "conjured" block (below).</td>
+</tr>
+<tr>
+<td><code>placement.conjuredBlock</code></td>
+<td><code>minecraft:cobblestone</code></td>
+<td>The block placed when <code>consumesBlocks</code> is <code>false</code>. Any block id works (e.g. <code>minecraft:dirt</code>).</td>
+</tr>
+<tr>
+<td><code>placement.removalCostWeight</code></td>
+<td><code>1.0</code></td>
+<td>How strongly the bot avoids placing hard-to-remove blocks. Each placement is charged extra by the block's mine-out time × this weight, so with a mixed inventory it favors dirt/cobblestone over obsidian. <code>1.0</code> = full mine-out cost, <code>0</code> = disabled (placement cost ignores the block).</td>
+</tr>
+<tr>
+<td><code>placement.placeBaseCost</code></td>
+<td><code>6.0</code></td>
+<td>Flat cost (in ticks) charged per block placed (<code>&gt;= 0</code>). This is a <strong>behavioral penalty</strong>, not a physical place time — placing a block in-game is near-instant; the cost is the bot's "reluctance to place" (positioning/facing overhead plus a bias against needless scaffolding) that tilts it toward walking or digging around rather than building. <strong>Lower</strong> it for a more build-happy bot (it will pillar/bridge sooner); <strong>raise</strong> it to discourage placing.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="mining-can-the-bot-dig">Mining — can the bot dig?</h3>
+<pre><code class="language-properties">mining.canMine          = true
+mining.consumesTools    = false
+mining.maxHardness      = 255
+mining.ticksByHardness  = true
+mining.ticksToMineFlat  = 0
+mining.breakBaseCost    = 0.0
+mining.protectedBlocks  =
+mining.allowUnbreakable = false
+mining.unbreakableHardness = 3200
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mining.canMine</code></td>
+<td><code>true</code></td>
+<td>Whether the bot may break blocks to clear a path. Set <code>false</code> for a bot that always routes <em>around</em> obstacles instead of through them.</td>
+</tr>
+<tr>
+<td><code>mining.consumesTools</code></td>
+<td><code>false</code></td>
+<td>If <code>true</code>, mining wears down the bot's real tools (they can break). If <code>false</code>, tools never take damage.</td>
+</tr>
+<tr>
+<td><code>mining.maxHardness</code></td>
+<td><code>255</code></td>
+<td>The hardest block the bot is allowed to mine, on a <code>0</code>–<code>255</code> scale. <code>255</code> means "anything it can break." Lower it to keep a bot out of tough blocks — e.g. a small value lets it clear dirt and wood but not stone.</td>
+</tr>
+<tr>
+<td><code>mining.ticksByHardness</code></td>
+<td><code>true</code></td>
+<td>If <code>true</code>, harder blocks take realistically longer to mine (and a better tool is faster) — so the bot prefers routes through softer material. If <code>false</code>, every block takes the same fixed time (below).</td>
+</tr>
+<tr>
+<td><code>mining.ticksToMineFlat</code></td>
+<td><code>0</code></td>
+<td>The fixed time, in game ticks, to mine one block when <code>ticksByHardness</code> is <code>false</code>. <code>0</code> means instant. Ignored when <code>ticksByHardness</code> is <code>true</code>.</td>
+</tr>
+<tr>
+<td><code>mining.breakBaseCost</code></td>
+<td><code>0.0</code></td>
+<td>A flat surcharge (in ticks) added to <strong>every break the planner considers</strong>, on top of the real mining time — the mining-side mirror of <code>placement.placeBaseCost</code>. It's a behavioral "reluctance to edit the world": raise it and the bot detours around obstacles (and wades through berry bushes) it would otherwise punch through; at <code>0</code> breaks are priced at mining time alone.</td>
+</tr>
+<tr>
+<td><code>mining.protectedBlocks</code></td>
+<td><em>(empty)</em></td>
+<td>A comma-separated list of block ids and <code>#</code>-prefixed block tags the bot must <strong>never break</strong> — nor destroy by placing over — e.g. <code>minecraft:chest, #minecraft:beds</code>. Enforced both when planning (routes go <em>around</em> protected blocks) and again at the moment of breaking. Malformed entries warn and are skipped. <strong>Changing this list needs a server restart</strong> to fully apply (the planner caches block classifications); the at-the-moment-of-breaking refusal applies immediately on reload. See <a href="world_edits.html#protected-blocks">Breaking &amp; Placing</a>.</td>
+</tr>
+<tr>
+<td><code>mining.allowUnbreakable</code></td>
+<td><code>false</code></td>
+<td>If <code>true</code>, the bot may "mine" vanilla-unbreakable blocks (bedrock, barriers, end portal frames — anything with negative destroy time) at the tool-derived cost set by <code>mining.unbreakableHardness</code> below: it stands and grinds that long, then the block breaks. Independent of <code>mining.maxHardness</code> (unbreakable is its own axis, not "very hard"); <code>mining.protectedBlocks</code> always wins.</td>
+</tr>
+<tr>
+<td><code>mining.unbreakableHardness</code></td>
+<td><code>3200</code></td>
+<td>The pretend "hardness" of those unbreakable blocks (they have none in vanilla) when <code>allowUnbreakable</code> is on. It feeds the normal mining-time formula assuming a pickaxe, so a <strong>better pickaxe digs faster</strong> and bare hands are far slower. Same scale as real blocks (obsidian, the hardest, is ~250) but may go past 255 to make unbreakable mining a stronger deterrent. The default <code>3200</code> works out to ~2 minutes per block with a diamond pickaxe.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="pathfinding-how-the-bot-plans-routes">Pathfinding — how the bot plans routes</h3>
+<pre><code class="language-properties">pathing.syncSearchBudgetNodes = 10000
+pathing.greedyWeight          = 2.0
+pathing.costPerHitpoint       = 100.0
+pathing.warmup                = true
+pathing.warmupBudgetMs        = 1500
+pathing.async                 = true
+pathing.maxThreads            = 2
+pathing.asyncSearchBudgetMs   = 250
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pathing.syncSearchBudgetNodes</code></td>
+<td><code>10000</code></td>
+<td>How hard the bot searches before giving up on a single plan <strong>when <code>pathing.async</code> is off</strong> — the tick-thread search cap, counted in positions examined rather than milliseconds so a slow search can never freeze the server for its whole duration. Higher finds paths through more tangled terrain but costs more CPU per plan. With <code>pathing.async</code> on (the default), the time budget below is the effective limit instead and this cap is only a memory backstop.</td>
+</tr>
+<tr>
+<td><code>pathing.greedyWeight</code></td>
+<td><code>2.0</code></td>
+<td>How directly the bot beelines toward its goal. <code>1.0</code> finds the shortest possible route but searches slowly; higher values head straight at the goal and plan much faster, at the cost of slightly longer routes. Must be <code>1.0</code> or greater.</td>
+</tr>
+<tr>
+<td><code>pathing.costPerHitpoint</code></td>
+<td><code>100.0</code></td>
+<td>How many ticks of travel time the bot considers <strong>one hitpoint of damage</strong> to be worth (<code>&gt;= 0</code>). This single number prices <em>all</em> damage in the planner: walking through fire, berry bushes, or powder snow, and dropping farther than a safe fall — each expected hitpoint costs this many ticks. The intuition: one hitpoint buys roughly <code>costPerHitpoint / 4.6</code> blocks of detour, so at the default <code>100</code> the bot will walk about 22 blocks out of its way to avoid each point of damage — enough to route around a whole thicket of bushes rather than push through it. Raise it for a more self-preserving bot (it will take long detours and gentle descents); lower it for a daredevil that trades health for time. Only matters when <code>survival.takesDamage</code> is <code>true</code> — an invulnerable bot ignores damage entirely.</td>
+</tr>
+<tr>
+<td><code>pathing.warmup</code></td>
+<td><code>true</code></td>
+<td>Run a short synthetic pathfinder warm-up at server start, before any player can join, so the first <em>real</em> path isn't computed by a cold JIT compiler (a one-time ~22 ms tick stall otherwise; ~0.7 ms with the warm-up — <a href="Optimizations/09_depth_nibbles.html">the measurements</a>). Costs roughly half a second of startup wall-clock and nothing afterwards.</td>
+</tr>
+<tr>
+<td><code>pathing.warmupBudgetMs</code></td>
+<td><code>1500</code></td>
+<td>The hard wall-clock cap, in milliseconds, on that warm-up pass. It usually finishes early (it stops once search times plateau, typically ~400–500 ms); <code>0</code> disables the warm-up entirely.</td>
+</tr>
+<tr>
+<td><code>pathing.async</code></td>
+<td><code>true</code></td>
+<td>Compute paths on background threads instead of the server tick thread. Searches stop costing tick time entirely; a plan arrives a tick or two after it's requested, and the bot keeps walking its current plan meanwhile (it also pre-computes the next stretch before finishing the current one, so long walks don't pause at plan boundaries). Set <code>false</code> for the synchronous behaviour: searches run on the tick thread under the node cap above. Requires a server restart to change.</td>
+</tr>
+<tr>
+<td><code>pathing.maxThreads</code></td>
+<td><code>2</code></td>
+<td>How many background planner threads to run when <code>pathing.async</code> is on (clamped to your core count minus two). All bots share the pool — raise it on a server with many bots to keep their plans snappy, lower it to <code>1</code> on a constrained host. Trades bot responsiveness against server CPU headroom, like view-distance. Requires a restart to change.</td>
+</tr>
+<tr>
+<td><code>pathing.asyncSearchBudgetMs</code></td>
+<td><code>250</code></td>
+<td>The wall-clock budget, in milliseconds, for one background path search — with <code>pathing.async</code> on, <em>time</em> replaces the node cap as the effective search limit (the node cap remains as a memory backstop). A search that runs out of budget returns its best partial path; the bot moves that way and replans, converging on far goals. Bigger budgets escape bigger dead-ends at the cost of slower worst-case planning — the server tick is never stalled either way.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="world-memory-surviving-a-restart">World memory — surviving a restart</h3>
+<p>The bot remembers the coarse shape of terrain it has explored (for long-range routing) and where it saw
+resources (for <code>/bot report</code>). That memory is saved into the world folder so it survives a server restart —
+important for a server that stops when idle and restarts often. It's saved automatically on a clean shutdown;
+the one knob below only controls a background safety-save in between.</p>
+<pre><code class="language-properties">hpa.persistIntervalTicks = 6000
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>hpa.persistIntervalTicks</code></td>
+<td><code>6000</code></td>
+<td>How often (in server ticks, 20 = 1 second) to re-save that memory in the background as crash insurance, and only for worlds that changed since the last save. The real save happens on a clean server stop no matter what this is set to — this is just a safety net for a hard crash. <code>6000</code> ≈ 5 minutes. Set <code>0</code> to turn the periodic safety-save off (the shutdown save still runs). The data lives in <code>&lt;world&gt;/orebit/&lt;dimension&gt;/</code> and is treated as a cache — if a file is ever corrupted it's simply ignored and rebuilt as you explore.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="survival-is-the-bot-mortal">Survival — is the bot mortal?</h3>
+<pre><code class="language-properties">survival.takesDamage = false
+survival.hunger      = false
+survival.needsBreath = false
+</code></pre>
+<p>These decide whether the bot has a body that can be hurt. The bot runs the full vanilla
+player simulation, so when these are on, the mechanics are the real ones — not approximations.</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Default</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>survival.takesDamage</code></td>
+<td><code>false</code></td>
+<td>If <code>true</code>, the bot takes damage like a player — lava, fire, falls, cactus, mobs. This also changes how it <em>plans</em>: a mortal bot pays a steep path cost to walk through fire or a berry bush and treats big drops as expensive, so it routes around hazards an invulnerable bot would stroll through. How steep is one knob: <code>pathing.costPerHitpoint</code> (see Pathfinding above). <code>false</code> = invulnerable (hazards still cost it time, never health).</td>
+</tr>
+<tr>
+<td><code>survival.hunger</code></td>
+<td><code>false</code></td>
+<td>If <code>true</code>, the bot's food bar drains from activity like a player's. If <code>false</code>, it never gets hungry (and can always sprint). Note the bot doesn't yet feed itself — a hungry bot is your problem to keep fed.</td>
+</tr>
+<tr>
+<td><code>survival.needsBreath</code></td>
+<td><code>false</code></td>
+<td>If <code>true</code>, the bot's air depletes underwater and it can drown. If <code>false</code>, it can swim submerged indefinitely.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="example-configurations">Example configurations</h2>
+<p><strong>A pacifist guide</strong> — never digs, never builds, just finds its way through what's already
+there:</p>
+<pre><code class="language-properties">placement.canPlace = false
+mining.canMine     = false
+</code></pre>
+<p><strong>A survival-honest helper</strong> — mines and builds from its real inventory, with tool wear and
+realistic mining times, so it actually consumes resources like a player:</p>
+<pre><code class="language-properties">placement.consumesBlocks = true
+mining.consumesTools     = true
+mining.ticksByHardness   = true
+</code></pre>
+<p>With <code>consumesBlocks</code> on, the bot also prefers to spend its <em>cheapest-to-dig-out</em> blocks
+first — <code>placement.removalCostWeight</code> (default <code>1.0</code>) charges each placement by the placed
+block's mine-out time, so a bot carrying both dirt and obsidian bridges with the dirt. Raise
+it to disfavor hard blocks even more strongly; set it to <code>0</code> to ignore the block entirely.</p>
+<p>How eagerly the bot builds at all is <code>placement.placeBaseCost</code> (default <code>6.0</code>) — a flat
+behavioral penalty per placement (not a physical place time; placing is near-instant). At the
+default the bot will pillar or bridge a short distance rather than take a long detour. Lower it
+for a more build-happy bot; raise it to make the bot strongly prefer walking and digging over
+building scaffolding.</p>
+<p><strong>A fast pathfinder for big open worlds</strong> — beelines hard and gets more time to escape big
+dead-ends, accepting slightly less optimal routes:</p>
+<pre><code class="language-properties">pathing.greedyWeight        = 4.0
+pathing.asyncSearchBudgetMs = 500
+</code></pre>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": ".", "features": ["search.highlight", "search.share", "navigation.instant", "navigation.instant.prefetch", "navigation.path", "navigation.indexes"], "search": "assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,1858 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://stevendesu.github.io/orebit/Optimizations/01_block_reading.html">
+      
+      
+        <link rel="prev" href="index.html">
+      
+      
+        <link rel="next" href="02_reusing_memory.html">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Reading Blocks - Orebit</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+      
+
+
+    
+    
+      
+        <script src="https://unpkg.com/iframe-worker/shim"></script>
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#why-is-it-slow" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../index.html" title="Orebit" class="md-header__button md-logo" aria-label="Orebit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Orebit
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Reading Blocks
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/stevendesu/orebit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../index.html" title="Orebit" class="md-nav__button md-logo" aria-label="Orebit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Orebit
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/stevendesu/orebit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting_started/installation.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting_started/supported_versions.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Supported Versions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../worldmodel.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    World Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pathfinding.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pathfinding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../movements.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Movements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../world_edits.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    World Edits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gathering.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Gathering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../commands.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="index.html" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Optimizations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_10" id="__nav_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Optimizations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading Blocks
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="01_block_reading.html" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading Blocks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#why-is-it-slow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why is it slow?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#whew-thats-a-lot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Whew, that's a lot
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Whew, that&#39;s a lot">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-we-only-read-chunks-after-generation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. We only read chunks after generation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-we-can-bypass-world-level-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. We can bypass World-level checks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-eliminate-memory-allocation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Eliminate memory allocation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-avoiding-megamorphism" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Avoiding megamorphism
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-limit-reflective-access" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Limit reflective access
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#6-maybe" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Maybe...
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-whole-journey-in-one-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The whole journey, in one table
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="02_reusing_memory.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reusing Memory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="03_block_fingerprints.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block Fingerprints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="04_custom_hash_map.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Custom Hash Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="05_pathfinding_hot_path.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The Pathfinding Hot Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="06_fewer_nodes.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fewer Nodes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="07_cuboid_macro_movements.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cuboid Macro-Movements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="08_measure_everything.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Measure Everything
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="09_depth_nibbles.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Depth Nibbles
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="10_background_pathfinding.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Off the Tick Thread
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="11_region_heuristic.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Teaching the Block Search the Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="12_field_build.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Paying for the Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#why-is-it-slow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why is it slow?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#whew-thats-a-lot" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Whew, that's a lot
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Whew, that&#39;s a lot">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-we-only-read-chunks-after-generation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. We only read chunks after generation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-we-can-bypass-world-level-checks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. We can bypass World-level checks
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-eliminate-memory-allocation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Eliminate memory allocation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-avoiding-megamorphism" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Avoiding megamorphism
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-limit-reflective-access" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Limit reflective access
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#6-maybe" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Maybe...
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-whole-journey-in-one-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The whole journey, in one table
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="../index.html" class="md-path__link">
+        
+  <span class="md-ellipsis">
+    Home
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="index.html" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Optimizations
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+  <h1>Reading Blocks</h1>
+
+<p>The standard way to read data about a block in MineCraft is like so:</p>
+<pre><code>World world; // The MineCraft world
+int x, y, z; // The block you're interested in
+
+BlockPos blockPos = new BlockPos(x, y, z);
+BlockState state = world.getBlockState(blockPos);
+
+// Is Solid:
+state.isSolidBlock(world, blockPos);
+
+// Is Liquid:
+!state.getFluidState().isEmpty();
+
+// Is Climbable:
+state.isIn(BlockTags.CLIMBABLE);
+
+// Redstone Power:
+world.getReceivedStrongRedstonePower(blockPos);
+
+// Orientation:
+state.get(Properties.FACING);
+
+// etc...
+</code></pre>
+<p>This <strong>works</strong>, the problem is that <strong>it's slow</strong>.</p>
+<p>To benchmark how slow, I ran a script that read 100 blocks randomly within a
+5 chunk radius of the player and averaged the time to read. Running this on my
+M1 16-inch 2021 Macbook Pro, it takes around 3,000,000 nanoseconds <strong>per block</strong>!</p>
+<p>That's 3 milliseconds to read the data from a single block. Imagine trying to
+scan the entire world to find diamonds, or reading multiple blocks in order to
+calculate a path from A to B.</p>
+<h2 id="why-is-it-slow">Why is it slow?</h2>
+<p><img alt="Profiler results" src="block_reading_0.png" /></p>
+<p>The reason it's slow is that the code above is doing a lot of work. Let's dive
+into some of the things that are going on:</p>
+<ul>
+<li>We allocate a new <code>BlockPos</code> on the heap, waiting for the OS to find
+   avaialble memory.</li>
+<li>We check if the provided BlockPos is outside of the world's height limit.<ul>
+<li>This reads the <code>bottomY</code> (direct variable access, fairly fast)</li>
+<li>And <em>computes</em> the <code>topY</code> (requires one addition and one subtraction)</li>
+</ul>
+</li>
+<li>We determine which chunk the block is in<ul>
+<li>This is <em>fairly</em> fast, but still requires more math: a bit shift and a
+  "floor" operation, which is another comparison</li>
+<li>This bit shift + "floor" operation is done for X <strong>and</strong> Z coordinates</li>
+</ul>
+</li>
+<li>We check if the current thread is the "server" thread. If not, we queue up
+   the chunk load to be processed by the server thread</li>
+<li>We initialize a Profiler to measure how long chunk loading takes</li>
+<li>We combine the X and Z coordinates into a single 8-byte long integer with
+   more bit shifting and masking</li>
+<li>We check the last 4 loaded chunks to see if one of these is the one being
+   accessed. If it is, we return the chunk from cache<ul>
+<li><strong>This turns out to be a huge time saver later. See below</strong></li>
+</ul>
+</li>
+<li>We allocate a new <code>ChunkPos</code> on the heap, waiting one more for available
+   memory</li>
+<li>We determine if the chunk is fully generated or still processing. If still
+   processing, we defer reading until it's complete</li>
+<li>We calculate which Chunk <em>Section</em> the block is in</li>
+<li>We check if the Chunk Section is empty. If so, we return the default
+   BlockState for "AIR"</li>
+<li>We take the last 4 bits of the X, Y, and Z positions (the remainder when
+   dividing the positions by 16) to find the relative location within the
+   Chunk Section</li>
+<li>We defer to the "Paletted Container" to read the data in this X, Y, and Z
+   position</li>
+</ul>
+<p>At this point we still don't have the block data, but our code diverges a bit.
+Because a Paletted Container consists of two pieces of information:</p>
+<ol>
+<li>The "palette", containing a de-duplicated list of all blocks in the chunk
+    section.</li>
+<li>The "storage", containing a list of 4,096 indexes into this palette -- one
+    for each X, Y, and Z position.</li>
+</ol>
+<p>The reason the code diverges is because based on how many unique blocks are in
+a chunk section, we will use one of <strong>four</strong> different palette types, and one
+of <strong>two</strong> different storage types.</p>
+<p><strong>Storage Types:</strong></p>
+<ul>
+<li>Empty Storage: returns "0" for all positions. Very fast.</li>
+<li>Packed Integer Array: this is a bit more complex</li>
+</ul>
+<p>So here's how Packed Integer Array works:</p>
+<p>Suppose in your 4,096 block chunk section you have 25 <strong>distinct</strong> blocks. So
+most blocks are just air, grass, dirt, stone, etc. but there are a handful of
+less common blocks like oak logs, leaves, coal ore, flowers, etc.</p>
+<p>All numbers from 0 to 24 can be expressed using 5 bits, so we convert every
+block into a 5-bit index.</p>
+<p>Next we tightly stuff all of these 5-bit indexes together, cramming 12 blocks
+worth of data into a 64-bit (8-byte) long integer. That occupies 60 bits, with
+4 bits of wasted space.</p>
+<p>We create an array of these 64-bit "packed" integers, large enough to hold all
+4,096 blocks in our chunk section. In this case, 4096 / 12 = 341.33 so we need
+342 long integers.</p>
+<p>Reading a single X, Y, Z value from the Packed Integer Array involves:</p>
+<ol>
+<li>Check if the value is within the bounds of the array</li>
+<li>Figure out which long integer holds the desired bits</li>
+<li>Read that integer from RAM</li>
+<li>Mask out the desired bits</li>
+<li>Shift those bits into the desired position</li>
+</ol>
+<p><strong>Palette Types:</strong></p>
+<ul>
+<li>Singular Palette: contains a single block state. For example, all blocks in
+   the chunk section are STONE<ul>
+<li>Just returns the single block state</li>
+</ul>
+</li>
+<li>Array Palette: contains an array of block states<ul>
+<li>Once you have the index for a particular block, you simply access that
+  index in the array</li>
+</ul>
+</li>
+<li>BiMap Palette: contains a bi-directional hash map between integer and block
+   states<ul>
+<li>Truthfully I don't know why or when this is preferred by the MineCraft
+  engine, but I <strong>do</strong> know that internally it also uses an array</li>
+</ul>
+</li>
+<li>IdList Palette: contains an array of block IDs<ul>
+<li>This is used when the number of distinct block types in a chunk section
+  exceeds 256</li>
+</ul>
+</li>
+</ul>
+<p>For the most part reading from these palettes always comes down to a simple
+array lookup. However the <code>.get()</code> method often also checks that the index
+requested is within the bounds of the palette.</p>
+<p>Now here's where things get particularly bad:</p>
+<p>In Java, when a class method is overwritten by a child class, this is known as
+<em>polymorphism</em>. A call to <code>palette.get(x, y, z)</code> <strong>might</strong> dispatch execution to
+<code>SingularPalette.get()</code>, <code>ArrayPalette.get()</code>, <code>BiMapPalette.get()</code>, or
+<code>IdListPalette.get()</code>. We don't know which are compile time, so it has to
+determine which method to call at runtime.</p>
+<p>The Just-In-Time (JIT) compiler is <strong>really</strong> good at optimizing and inlining
+bytecode for method calls on-the-fly. This means that the first time you call
+a function you incur fuction-call overhead (pushing parameters on the stack,
+setting a return pointer, moving the instruction pointer, then unwinding the
+stack after the function returns) but on <em>subsequent</em> calls all of the code of
+the method <strong>just works</strong> without this overhead.</p>
+<p>The problem is that function inlining only works for monomorphic (one possible
+set of instructions) or bimorphic (two possible sets of instructions) methods.
+The moment there are three or more possible code paths (known as "megamorphic")
+that might need to be inlined, the JIT gives up and always dispatches a function
+call.</p>
+<p>So while most of what we've done up until now can be optimized to run as fast
+as possible, palette lookups are always eating this overhead cost.</p>
+<h2 id="whew-thats-a-lot">Whew, that's a lot</h2>
+<p>So now we know why <code>world.getBlockState()</code> is slow, but what can we do to speed
+it up? Well there's a few tricks we have up our sleeves.</p>
+<h3 id="1-we-only-read-chunks-after-generation">1. We only read chunks after generation</h3>
+<p>During block searches (e.g. "find diamond ores") and pathfinding (e.g. "go to
+position 1500, 70, -800") Orebit does not read BlockState data from the world.
+Instead, we rely on two separate representations of the world that are optimized
+for these two tasks: <a href="../worldmodel.html#region-level">Regions</a> and
+<a href="../worldmodel.html#block-level">NavBlock Grids</a>.</p>
+<p>The only time we read BlockState data is when we're building or updating these
+two data structures, which we only do <em>immediately after a chunk has been
+generated or modified</em>. This means that the chunks we're accessing are always
+in the "last 4 chunks touched" cache, so we avoid the cost of chunk loading.</p>
+<p>To benchmark this performance I updated my code. Instead of reading 100 blocks
+randomly within 5 chunks of the player, I read 100 blocks randomly in the last
+chunk that was generated. On the same hardware this immediately reduced the time
+to read a block to 1700 nanoseconds. That's a <strong>1,765x speedup</strong>!</p>
+<p>The lesson is that if you're reading multiple blocks from the same chunk, you
+can amortize the cost of chunk loading over all of the blocks read -- making it
+essentially zero.</p>
+<h3 id="2-we-can-bypass-world-level-checks">2. We can bypass World-level checks</h3>
+<p>Because we're hooking into chunk generation and updates, we have an instance of
+the Chunk already available to us. This means we can skip straight to the last
+few steps of reading our data, bypassing things like world height checks, thread
+safety checks, and ChunkPos calculation. This is done using code like so:</p>
+<pre><code>World world; // The world the chunk resides in
+Chunk chunk; // The chunk that just loaded
+int x, y, z; // The block you're interested in
+
+int minY = world.getBottomY();
+int sectionIndex = (y - minY) / 16;
+BlockPos blockPos = new BlockPos(x, y, z);
+BlockState state = chunkSections[sectionIndex].getBlockState(x &amp; 0x0F, y &amp; 0x0F, z &amp; 0x0F);
+state.isSolidBlock(world, blockPos);
+</code></pre>
+<p>I updated my code once again and moved it into the <code>CHUNK_LOAD</code> callback. With
+the latest changes the time to read a single block's data was down to 700
+nanoseconds. That's another <strong>2.4x speedup</strong>!</p>
+<p>But we can keep going:</p>
+<h3 id="3-eliminate-memory-allocation">3. Eliminate memory allocation</h3>
+<p>Some amount of time is spent allocating memory for the BlockPos object that
+we're creating. However reading the actual BlockState doesn't require this
+BlockPos any longer now that we're using the ChunkSection API. So why do we
+still need it?</p>
+<p>It turns out some blocks have behavior that changes at runtime. A good example
+of this is the piston arm. The piston arm may be solid, or may not be solid,
+depending on whether or not it's moving. In order to know if a <strong>particular</strong>
+piston arm is moving, we query the world for the specific piston arm at a
+specific location. Our world queries rely on these BlockPos values.</p>
+<p>The naive approach here may be to check for these blocks and avoid allocation of
+a BlockPos all together, with something like this:</p>
+<pre><code>BlockState state = ...;
+Block block = state.getBlock();
+
+if (block is PistonExtensionBlock) {
+    // Assume solid
+    return true;
+} else {
+    // Most blocks &quot;isSolidBlock&quot; methods don't actually read the &quot;world&quot; and
+    // &quot;pos&quot; parameters, instead returning static values
+    return state.isSolidBlock(null, null);
+}
+</code></pre>
+<p>Of course we need to extend this to more than just piston arms. The collection
+of all blocks that rely on the world and BlockPos to read solidity is:</p>
+<ul>
+<li><code>BlockWithEntity</code> -- includes piston arms, sculk sensors, and various others</li>
+<li><code>BambooBlock</code> -- the exact location <em>within</em> a block for bamboo is randomized</li>
+<li><code>PointedDripstone</code> -- same as bamboo</li>
+</ul>
+<p>I updated my code to check for these three block types and assume they were
+fully solid, eliminating the allocation of a BlockPos in memory. Now the time to
+read a single block is <strong>up</strong> to 900 nanoseconds! It's <strong>28.5% slower</strong>, what
+gives?</p>
+<p>Well it turns out branch prediction is hard. Every time our code hits this block
+it has to figure out whether we need to follow the left path or the right path,
+and we do this <em>per block</em>. So this isn't actually any faster.</p>
+<p>Can we do something else, though? Yes, we can! MineCraft provides a
+<code>BlockPos.Mutable</code> class! Using this we can allocate memory once and re-use it
+in our loop:</p>
+<pre><code>World world;
+BlockState state = ...;
+
+BlockPos.Mutable pos = new BlockPos.Mutable(0, 0, 0);
+
+// This time I'm actually showing the loop
+for (int i = 0; i &lt; 100; i++) {
+    int x = (random x in the chunk);
+    int y = (random y in the chunk section);
+    int z = (random z in the chunk);
+    pos.set(x, y, z);
+    sink = state.isSolidBlock(world, pos);
+}
+</code></pre>
+<p>With this new code avoiding memory allocation <em>and</em> branching, we're down to
+600 nanoseconds! A <strong>1.17x speedup</strong>!</p>
+<p>But... can we do <em>even better</em>?</p>
+<h3 id="4-avoiding-megamorphism">4. Avoiding megamorphism</h3>
+<p>Here is where things start to get really tricky. Remember when I said that
+reading a palette was slow due to megamorphism? Well we can fix this!</p>
+<p>We can access the "paletted container" of a Chunk Section like so:</p>
+<pre><code>PalettedContainer&lt;BlockState&gt; container = chunkSection.getBlockStateContainer();
+</code></pre>
+<p>This is an object that contains both the storage and palette for the raw block
+data. However, this data is private! So we don't normally have access to it.</p>
+<p>Through the power of reflection, we can fix this:</p>
+<pre><code>static {
+    try {
+        dataField = PalettedContainer.class.getDeclaredField(&quot;data&quot;);
+        dataField.setAccessible(true);
+
+        Class&lt;?&gt; dataClass = Class.forName(&quot;net.minecraft.world.chunk.PalettedContainer$Data&quot;);
+        storageField = dataClass.getDeclaredField(&quot;storage&quot;);
+        storageField.setAccessible(true);
+        paletteField = dataClass.getDeclaredField(&quot;palette&quot;);
+        paletteField.setAccessible(true);
+
+        Class&lt;?&gt; arrayPaletteClass = Class.forName(&quot;net.minecraft.world.chunk.ArrayPalette&quot;);
+        arrayField = arrayPaletteClass.getDeclaredField(&quot;array&quot;);
+        arrayField.setAccessible(true);
+
+        Class&lt;?&gt; biMapPaletteClass = Class.forName(&quot;net.minecraft.world.chunk.BiMapPalette&quot;);
+        biMapField = biMapPaletteClass.getDeclaredField(&quot;map&quot;);
+        biMapField.setAccessible(true);
+
+        Class&lt;?&gt; idListPaletteClass = Class.forName(&quot;net.minecraft.world.chunk.IdListPalette&quot;);
+        idListField = idListPaletteClass.getDeclaredField(&quot;idList&quot;);
+        idListField.setAccessible(true);
+    } catch (NoSuchFieldException | ClassNotFoundException e) {
+        throw new RuntimeException(&quot;Failed to initialize reflection fields&quot;, e);
+    }
+}
+
+public void processChunkSection(ChunkSection chunkSection, World world) {
+    PalettedContainer&lt;BlockState&gt; container = chunkSection.getBlockStateContainer();
+    Object data = dataField.get(container);
+    PaletteStorage storage = (PaletteStorage) storageField.get(data);
+    Palette&lt;BlockState&gt; palette = (Palette&lt;BlockState&gt;) paletteField.get(data);
+}
+</code></pre>
+<p>Now that we've hacked our way through Java's internals, we can add different
+code based on what type of ChunkSection we're processing:</p>
+<pre><code>switch (palette) {
+    case SingularPalette&lt;BlockState&gt; singularPalette -&gt; {
+        // All blocks are the same!
+        BlockState everyBlock = singularPalette.get(0);
+        for (int i = 0; i &lt; 100; i++) {
+            int x = ..., y = ..., z = ...;
+            pos.set(x, y, z);
+            sink = everyBlock.isSolidBlock(world, pos);
+        }
+    }
+    case ArrayPalette&lt;BlockState&gt; arrayPalette -&gt; {
+        Object[] array = (Object[]) arrayField.get(arrayPalette);
+        for (int i = 0; i &lt; 100; i++) {
+            int x = ..., y = ..., z = ...;
+            pos.set(x, y, z);
+            BlockState state = (BlockState) array[storage.get(x, y, z)];
+            sink = state.isSolidBlock(world, pos);
+        }
+    }
+    case BiMapPalette&lt;BlockState&gt; blockStateBiMapPalette -&gt; {
+        Int2ObjectBiMap&lt;BlockState&gt; map = (Int2ObjectBiMap&lt;BlockState&gt;) biMapField.get(blockStateBiMapPalette);
+        for (int i = 0; i &lt; 100; i++) {
+            int x = ..., y = ..., z = ...;
+            pos.set(x, y, z);
+            BlockState state = (BlockState) map.get(storage.get(x, y, z));
+            sink = state.isSolidBlock(world, pos);
+        }
+    }
+    case IdListPalette&lt;BlockState&gt; idListPalette -&gt; {
+        IndexedIterable&lt;BlockState&gt; idList = (IndexedIterable&lt;BlockState&gt;) idListField.get(idListPalette);
+        for (int i = 0; i &lt; 100; i++) {
+            int x = ..., y = ..., z = ...;
+            pos.set(x, y, z);
+            BlockState state = (BlockState) idList.get(storage.get(x, y, z));
+            sink = state.isSolidBlock(world, pos);
+        }
+    }
+    case null, default -&gt; {
+        throw new RuntimeException(&quot;Unexpected palette type: &quot; + palette);
+    }
+}
+</code></pre>
+<p>This seems like a lot of code and a lot of overkill, but it gives us two big
+wins:</p>
+<p>First, we have inlined the calls to <code>palette.get()</code>, so we now avoid function
+call overhead.</p>
+<p>Second, roughly 60% of all ChunkSections in MineCraft contain nothing but air
+(ChunkSections above Y = 80). This means that 60% of the time we will hit our
+SingularPalette, avoiding far <strong>more</strong> work.</p>
+<p>Benchmarking all cases:</p>
+<ul>
+<li>When using a SingularPalette, the average time to read a block is down to
+   2.5 nanoseconds. A <strong>240x speedup</strong>!</li>
+<li>When using an ArrayPalette, the average time to read a block is down to 14
+   nanoseconds. A <strong>43x speedup</strong>!</li>
+<li>When using a BiMapPalette, the average time to read a block is down to 27
+   nanoseconds. A <strong>22x speedup</strong>!</li>
+<li>In my testing I didn't see an IdListPalette, so I assume these basically
+   never generate naturally and require player builds</li>
+</ul>
+<p>Given that 60% of ChunkSections are using SingularPalette, the average time to
+read a block is now:</p>
+<p><span class="arithmatex">\(60% x 2.5 + 20% x 14 + 20% x 27 = 1.5 + 2.8 + 5.4 = 9.7\)</span> nanoseconds.</p>
+<p>This is a <strong>62x speedup</strong> over the previous best case! But... the question
+remains... <em>can we do better</em>?</p>
+<h3 id="5-limit-reflective-access">5. Limit reflective access</h3>
+<p>We pay a cost every time we access a field via reflection. Reflection requires
+Java to introspect about its own bytecode at runtime, eliminating many potential
+gains from the JIT compiler. While we were able to avoid megamorphism, we now
+incur the full wrath of unoptimized Java code for every single block we read.</p>
+<p>So what can we do? Are we at the end of our optimization journey?</p>
+<p>Not by a long shot!</p>
+<p>So far we've benchmarked <strong>random</strong> access to blocks in a ChunkSection. But when
+we're generating our NavBlock Grid and our Regions, we're going to <em>scan</em> the
+entire ChunkSection in order. This means that after reading one block, we know
+the next block we're going to read is always the next one in sequence.</p>
+<p>It just so happens that the <code>PaletteStorage</code> abstract class provides us with an
+iterator that will loop over all values in the ChunkSection in order. This means
+we only have to access the reflected field once, to call <code>.forEach</code>. After this,
+the iterator handles everything with beautifully optimized code:</p>
+<pre><code>// This example is just for ArrayPalette, but the same applies to all others
+case ArrayPalette&lt;BlockState&gt; arrayPalette -&gt; {
+    Object[] array = (Object[]) arrayField.get(palette);
+    storage.forEach(index -&gt; {
+        int x = ..., y = ..., z = ...;
+        pos.set(x, y, z);
+        BlockState state = (BlockState) array[index];
+        sink = state.isSolidBlock(world, pos);
+    });
+}
+</code></pre>
+<p>We're now no longer benchmarking the average time to read 100 random blocks, but
+the average time to read <strong>all</strong> blocks in a ChunkSection. Dividing this by
+4,096 gives us the average time per block. So what do our times look like now?</p>
+<ul>
+<li>SingularPalette: 3.5 nanoseconds</li>
+<li>In this case the cost of the iterator actually <em>increases</em> the time to read</li>
+<li>ArrayPalette: 10 nanoseconds</li>
+<li>BiMapPalette: 13 nanoseconds</li>
+<li>IdListPalette: <em>no data</em></li>
+</ul>
+<p>Our average read time per block is now:</p>
+<p><span class="arithmatex">\(60% x 3.5 + 20% x 10 + 20% x 13 = 2.1 + 2.0 + 2.6 = 6.7\)</span> nanoseconds.</p>
+<p>That's a <strong>1.44x speedup</strong> over the previous. But... <em>can we do better</em>?</p>
+<h3 id="6-maybe">6. Maybe...</h3>
+<p>PackedIntgerArray already has a very optimal <code>forEach</code> method that only loads
+each long integer once, then repeatedly shifts off values of the appropriate
+size in order to call our method once per value.</p>
+<p>Also recall that the JIT already optimizes and inlines functions if they are
+either monomorphic or bimorphic. In the case of PaletteStorage, we only have two
+subclasses, not four, meaning our method call is bimorphic and the JIT is able
+to handle this for us.</p>
+<p>But I do have a few ideas...</p>
+<h2 id="the-whole-journey-in-one-table">The whole journey, in one table</h2>
+<p>Each row is measured on the same hardware (M1 16-inch 2021 MacBook Pro), averaging
+the time to read a single block. The final three rows are per-palette measurements
+weighted by how often each palette type actually shows up (≈60% single, 20% array,
+20% bi-map).</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Technique</th>
+<th style="text-align: right;">ns / block</th>
+<th style="text-align: right;">Speedup (vs. prev)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>—</td>
+<td><code>world.getBlockState()</code> — the baseline</td>
+<td style="text-align: right;">3,000,000</td>
+<td style="text-align: right;">—</td>
+</tr>
+<tr>
+<td>1</td>
+<td>Read only <em>after</em> chunk generation (stay inside the 4-chunk cache)</td>
+<td style="text-align: right;">1,700</td>
+<td style="text-align: right;">~1,765×</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Bypass world-level checks — read the <code>ChunkSection</code> directly</td>
+<td style="text-align: right;">700</td>
+<td style="text-align: right;">2.4×</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Reuse one <code>BlockPos.Mutable</code> (kill per-read allocation <em>and</em> branching)</td>
+<td style="text-align: right;">600</td>
+<td style="text-align: right;">1.17×</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Reflect into the palette + type-switch (kill megamorphic dispatch)</td>
+<td style="text-align: right;">9.7</td>
+<td style="text-align: right;">62×</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>storage.forEach</code> sequential scan (one reflective access per section)</td>
+<td style="text-align: right;">6.7</td>
+<td style="text-align: right;">1.44×</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Net: ~3,000,000 ns → 6.7 ns per block — a ~450,000× speedup.</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["search.highlight", "search.share", "navigation.instant", "navigation.instant.prefetch", "navigation.path", "navigation.indexes"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

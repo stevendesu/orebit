@@ -1,0 +1,1659 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://stevendesu.github.io/orebit/Optimizations/08_measure_everything.html">
+      
+      
+        <link rel="prev" href="07_cuboid_macro_movements.html">
+      
+      
+        <link rel="next" href="09_depth_nibbles.html">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Measure Everything - Orebit</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+      
+
+
+    
+    
+      
+        <script src="https://unpkg.com/iframe-worker/shim"></script>
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#the-mental-model-two-currencies-and-the-edge-between-them" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../index.html" title="Orebit" class="md-header__button md-logo" aria-label="Orebit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Orebit
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Measure Everything
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/stevendesu/orebit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../index.html" title="Orebit" class="md-nav__button md-logo" aria-label="Orebit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Orebit
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/stevendesu/orebit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting_started/installation.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting_started/supported_versions.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Supported Versions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../worldmodel.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    World Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pathfinding.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pathfinding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../movements.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Movements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../world_edits.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    World Edits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gathering.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Gathering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../commands.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="index.html" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Optimizations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_10" id="__nav_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Optimizations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="01_block_reading.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading Blocks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="02_reusing_memory.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reusing Memory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="03_block_fingerprints.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block Fingerprints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="04_custom_hash_map.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Custom Hash Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="05_pathfinding_hot_path.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The Pathfinding Hot Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="06_fewer_nodes.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fewer Nodes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="07_cuboid_macro_movements.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cuboid Macro-Movements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Measure Everything
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="08_measure_everything.html" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Measure Everything
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-mental-model-two-currencies-and-the-edge-between-them" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The mental model: two currencies, and the edge between them
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-protocol-paired-interleaved-guarded" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The protocol: paired, interleaved, guarded
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#six-convincing-ideas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Six convincing ideas
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Six convincing ideas">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-hilbert-curve-better-locality-23-slower" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Hilbert curve: better locality, 2–3× slower
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#eager-neighbor-prefetch-7-to-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Eager neighbor prefetch: +7% to +26%
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#heap-key-packing-perfectly-flat" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Heap key packing: perfectly flat
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-hybrid-chunk-cache-killed-by-the-guard-36" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The hybrid chunk cache: killed by the guard, +3.6%
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gating-the-edit-diff-probe-killed-by-p-0000" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gating the edit-diff probe: killed by p = 0.000
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-survivor-adaptive-edit-scanning-40" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The survivor: adaptive edit scanning, −40%
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-scoreboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The scoreboard
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="09_depth_nibbles.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Depth Nibbles
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="10_background_pathfinding.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Off the Tick Thread
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="11_region_heuristic.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Teaching the Block Search the Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="12_field_build.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Paying for the Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-mental-model-two-currencies-and-the-edge-between-them" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The mental model: two currencies, and the edge between them
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-protocol-paired-interleaved-guarded" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The protocol: paired, interleaved, guarded
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#six-convincing-ideas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Six convincing ideas
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Six convincing ideas">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#the-hilbert-curve-better-locality-23-slower" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The Hilbert curve: better locality, 2–3× slower
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#eager-neighbor-prefetch-7-to-26" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Eager neighbor prefetch: +7% to +26%
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#heap-key-packing-perfectly-flat" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Heap key packing: perfectly flat
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-hybrid-chunk-cache-killed-by-the-guard-36" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The hybrid chunk cache: killed by the guard, +3.6%
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#gating-the-edit-diff-probe-killed-by-p-0000" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gating the edit-diff probe: killed by p = 0.000
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#the-survivor-adaptive-edit-scanning-40" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The survivor: adaptive edit scanning, −40%
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-scoreboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The scoreboard
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="../index.html" class="md-path__link">
+        
+  <span class="md-ellipsis">
+    Home
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="index.html" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Optimizations
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+  <h1>Measure Everything</h1>
+
+<p>Every chapter so far has ended with a bigger number: 6× here, 77% there, a
+ten-thousand-node cone collapsed to forty. It would be easy to walk away thinking
+optimization works like that — have idea, apply idea, collect speedup.</p>
+<p>It doesn't. Those chapters are the survivors. This one is about what the work looks
+like once the obvious wins are gone: you form a hypothesis that sounds <em>completely
+convincing</em>, you build it, you measure it — and most of the time it's slower. The
+skill stops being "know the tricks" and becomes "build instruments that tell you the
+truth, and believe them over your own reasoning." Below are six ideas that all
+sounded right. One survived.</p>
+<h2 id="the-mental-model-two-currencies-and-the-edge-between-them">The mental model: two currencies, and the edge between them</h2>
+<p>First, the frame that makes the failures make sense. A modern CPU lives in two
+currencies:</p>
+<ul>
+<li><strong>A single arithmetic op is nearly free.</strong> A core retires several simple operations
+  per <em>nanosecond</em> — adds, shifts, masks, compares — and happily runs several of them
+  in parallel behind the scenes.</li>
+<li><strong>A single memory read is the tax — when it misses cache.</strong> Data already in L1
+  arrives in about a nanosecond; data that has to come from main memory takes on the
+  order of a <em>hundred times</em> longer, and the core mostly just waits.</li>
+</ul>
+<p>If that were the whole story the rule would be trivial: spend arithmetic freely, never
+wait on memory. But look at what one node expansion actually does. It reads around a
+hundred cells — and for <em>each</em> one it runs a pile of arithmetic: shift-and-mask a dozen
+navigation properties out of a packed descriptor, score the heuristic, price every
+candidate movement. <strong>Hundreds of arithmetic ops <em>and</em> ~a hundred reads, per node,
+millions of nodes per search</strong> — neither side of the ledger is small. The search
+doesn't sit safely on the memory-bound side; it balances right on the <strong>line between
+memory-bound and CPU-bound.</strong></p>
+<p>That edge is the whole reason this chapter exists, because on it the "obvious" trades
+stop being obvious. <em>Recompute it instead of storing it</em> spends arithmetic to save
+memory — a win if you're memory-bound, a loss if the extra math tips you over the CPU
+edge. <em>Cache it instead of recomputing</em> does the exact reverse, and can tip you the
+other way. Either trade can land on either side of the fence, and which side is not
+something you can reason out in advance.</p>
+<p>And when you <em>do</em> spend memory to save CPU, it has to be the right <em>kind</em> of memory.
+Cheap memory is <strong>linear, ordered, and L1-resident</strong>: read sequentially, the hardware
+prefetcher runs ahead and hides the latency entirely; kept small enough to live in L1,
+every fetch is back to a nanosecond. It's why the project's data structures look the way
+they do — the <a href="03_block_fingerprints.html">fingerprint table</a> sized to fit in L1, the
+<a href="../worldmodel.html">packed grids</a> swept as flat arrays. Break either property — scatter
+the reads at random, or grow the table past the cache — and what you added is
+main-memory traffic, the most expensive thing there is. Small, flat, sequentially
+scanned arrays are the whole game; a "smarter" structure that trades them for
+pointer-chasing has spent the very currency it meant to save.</p>
+<p>So every optimization here buys savings in one currency by spending in another, and the
+exchange rate is nowhere near as obvious as it looks:</p>
+<ul>
+<li><strong>Allocation vs. arithmetic.</strong> Avoiding an allocation is usually worth quite a lot
+  of arithmetic, because allocation's real price is paid later, by the garbage
+  collector, at a moment you don't control.</li>
+<li><strong>Locality vs. arithmetic.</strong> Rearranging data so related things sit together in
+  memory saves cache misses — but the cleverer the arrangement, the more arithmetic
+  every single access pays to compute <em>where things are</em>. If the accesses were
+  mostly cache hits already, you've added cost and saved nothing.</li>
+<li><strong>Branches vs. everything.</strong> The CPU keeps its pipelines full by <em>predicting</em>
+  which way your <code>if</code>s will go. A branch that almost always goes one way is
+  essentially free; an unpredictable one, or extra speculative work the CPU starts
+  and throws away, quietly costs you capacity that no profiler line will ever be
+  labelled with.</li>
+</ul>
+<p>You cannot reason your way to which side of these trades a given change lands on.
+You have to measure. Which brings us to the instruments.</p>
+<h2 id="the-protocol-paired-interleaved-guarded">The protocol: paired, interleaved, guarded</h2>
+<p>The naive way to compare two builds is to benchmark the old one, benchmark the new
+one, and compare. The numbers you get that way are quietly poisoned: the JIT warms
+differently between runs, the machine's thermal and background-load state drifts,
+and a 3% real effect disappears under a 5% environmental wobble.</p>
+<p>So every candidate change here was judged by <strong>paired, interleaved runs</strong>: baseline
+and candidate executed back-to-back, alternating, in the same session — A, B, A, B —
+and compared pair by pair. Whatever the environment is doing, it's doing it to both
+builds, so the <em>difference</em> stays honest even when the absolute numbers wander.</p>
+<p>The second half of the protocol is about <em>what</em> you run. Our workhorse scenarios are
+hard searches — thousands of nodes, heavy digging and building — because that's
+where regressions in the inner loop show up loudest. But a search benchmark suite
+made only of hard searches has two blind spots, so two guard scenarios stand
+permanent watch:</p>
+<ul>
+<li><strong>SHORT — the cold-start guard.</strong> A trivially easy 28-block flat walk, ~30–60
+  nodes, that <em>includes the per-search setup</em> in the measurement, exactly as
+  production pays it on every re-plan. A ten-thousand-node search amortizes setup
+  down to nothing; the common-case tiny search is <em>mostly</em> setup. Any change that
+  makes per-search construction heavier shows up here and nowhere else.</li>
+<li><strong>MULTI — the persistence guard.</strong> Four consecutive searches (short, long, short,
+  long) in one measured operation, the way a live bot re-plans every couple of
+  seconds while its reusable scratch structures stay warm. A change that leaks state
+  from one search into the next shows up here as a wrong-cost anomaly relative to
+  the same searches measured alone.</li>
+</ul>
+<p>The rule: a candidate must win somewhere and regress <em>nowhere</em> — including the
+guards.</p>
+<h2 id="six-convincing-ideas">Six convincing ideas</h2>
+<h3 id="the-hilbert-curve-better-locality-23-slower">The Hilbert curve: better locality, 2–3× slower</h3>
+<p>The textbook pitch writes itself. Our grid cells are stored in plain row-major
+order, so two cells that are neighbors in the world can be far apart in memory. A
+<strong>Hilbert space-filling curve</strong> stores the world so that cells close in space stay
+close in memory — measurably better locality, beloved of databases and GIS systems.
+The pathfinder reads tight clusters of neighboring cells all day; surely it wants
+this.</p>
+<p>Benchmarked: <strong>2–3× slower.</strong> Not a few percent — catastrophically worse.</p>
+<p>This is the locality-vs-arithmetic trade landing on the wrong side, hard. Computing
+a Hilbert index is a genuine little computation (rounds of bit manipulation per
+lookup), replacing row-major's shift-and-mask, on <em>every one of the ~hundred reads
+per node</em>. And the misses it was supposed to save largely weren't there: the reads
+cluster inside one 16×16×16 section, whose data already fits in a few cache lines —
+the plain layout was already local <em>enough</em>. We paid real arithmetic to solve an
+imaginary memory problem. The better locality was real; it just wasn't worth
+anything.</p>
+<h3 id="eager-neighbor-prefetch-7-to-26">Eager neighbor prefetch: +7% to +26%</h3>
+<p>Second idea: we <em>know</em> roughly which cells a node expansion is going to read — the
+neighborhood right around the node — so gather them up front, in one tidy pass, and
+let the movement code read from a warm local buffer instead of scattering lookups
+through the loop. Batching reads is a classic; this is exactly the shape of loop
+it's advertised for.</p>
+<p>Benchmarked: <strong>7–26% slower</strong>, depending on scenario.</p>
+<p>The problem is that "roughly which cells" isn't "which cells." The movement code is
+full of early exits — a candidate that fails its first check never asks about the
+rest of its geometry — so the lazy version skips a large fraction of the reads the
+eager version faithfully performs. We were doing <em>more</em> memory work, not the same
+work sooner. And the latency we hoped to hide was already being hidden: a modern
+out-of-order core runs far ahead of the "current" instruction and overlaps those
+scattered lazy reads on its own, provided (as <a href="01_block_reading.html">earlier chapters</a>
+arranged) they're simple array loads it can see through. The CPU's own speculation
+was already extracting the win; ours just added the waste.</p>
+<h3 id="heap-key-packing-perfectly-flat">Heap key packing: perfectly flat</h3>
+<p>Third idea, smaller: the open set's binary heap keeps two parallel arrays — an
+<code>int</code> row and a <code>float</code> score — so every sift touches two cache lines where one
+could do. Pack both into a single <code>long</code> per entry and the heap's memory traffic
+halves. Cheap to build, obviously sound.</p>
+<p>Benchmarked: <strong>no measurable difference.</strong> Not better, not worse, run after paired
+run.</p>
+<p>The memory traffic we halved simply wasn't a bottleneck — the heap is small and hot,
+and it was hitting cache both ways. A flat result is still information: it tells you
+where the wall <em>isn't</em>, and it settles the argument in favor of whichever version is
+simpler to read. We kept the two plain arrays.</p>
+<h3 id="the-hybrid-chunk-cache-killed-by-the-guard-36">The hybrid chunk cache: killed by the guard, +3.6%</h3>
+<p>Fourth: a redesign of the per-search chunk cache (the one from
+<a href="05_pathfinding_hot_path.html">the hot-path chapter</a>) that layered a faster front cache
+over the existing table. On the big, hard scenarios it measured fine — maybe a hair
+ahead, within noise.</p>
+<p><strong>SHORT caught it: +3.6% on the cold-start scenario.</strong> The redesign made each
+search's setup slightly heavier, and only the guard scenario — the one where setup
+<em>is</em> the workload — could see it. The hard searches amortized the setup cost into
+invisibility, which is precisely why they can't be trusted alone: production is
+mostly <em>small</em> searches. A benchmark suite is a set of claims about what your real
+workload looks like, and the least glamorous scenario in ours is the one that
+vetoed the change. Reverted.</p>
+<h3 id="gating-the-edit-diff-probe-killed-by-p-0000">Gating the edit-diff probe: killed by p = 0.000</h3>
+<p>Once a search path carries even one planned block edit — a block it means to break or
+place — <em>every</em> geometry read has to consult the <a href="07_cuboid_macro_movements.html">edit diff</a>
+first, in case that cell is one the plan changes: a hash probe on a hundred-plus reads per
+node, which a profile put at <strong>49% of the warm edit-heavy scenario</strong>. Ninety-nine percent
+of those probes find nothing.</p>
+<p>The fix looked airtight. A path's planned edits trail <em>behind</em> it — you dig where you've
+been, not where you're going — so at each node expansion, compute <em>once</em> whether the
+node's read neighborhood can possibly intersect the edits' bounding box. If not (surely
+the common case?), set one flag and let every read skip the probe entirely: one box test
+per node replacing a hundred per-read gates.</p>
+<p>Benchmarked: <strong>flat.</strong> Not "small win" — flat, both variants (a careful three-component
+envelope and a simpler single padded box).</p>
+<p>A throwaway counting probe explained it, brutally: the fraction of node expansions whose
+reads were disjoint from the edit box was <strong>0.000 in every scenario</strong>. On the 10,001-node
+edit-heavy flood, 9,559 expansions carried edits and <em>zero</em> were disjoint. The intuition
+was simply false — the search's edit-carrying shapes are pillar and dig fronts, and a
+pillaring node <strong>stands on the block it just placed</strong>. Its own edit is at distance zero.
+The trailing-edits picture describes a bot walking away from finished work, not a search
+<em>reasoning about</em> work in progress. Both variants were deleted; the one thing worth
+keeping was the probe's number — any future gate has to track per-edit locality, not a
+whole-path box.</p>
+<h3 id="the-survivor-adaptive-edit-scanning-40">The survivor: adaptive edit scanning, −40%</h3>
+<p>One idea made it. It came straight out of profiler data rather than first
+principles — which is probably not a coincidence.</p>
+<p>When a macro move validates its jump, it has to check that no planned block edit
+sits inside a box of cells (see <a href="07_cuboid_macro_movements.html">the macro chapter</a>).
+The original code swept the box cell by cell, probing the edit table for each — one
+hash probe per cell. Fine when the box is a few cells. But on dig-heavy searches the
+profiler showed these sweeps eating a serious share of the whole search: a wide box
+is <em>thousands</em> of probes, to find at most a handful of edits.</p>
+<p>The fix: keep the edits in a dense list as well as a hash table, and make the scan
+<strong>adaptive</strong> — if the box's volume is smaller than the edit count, sweep the box; if
+the edit list is shorter, walk the list and test each edit against the box. Same
+answer either way, provably, byte-for-byte identical paths out — the choice is pure
+cost model, never behavior. Small-box checks stay exactly as fast as before; the
+pathological wide-box case collapses from O(volume) to O(edits).</p>
+<p>Benchmarked: <strong>−40% on the edit-heavy scenario</strong>, nothing lost anywhere else,
+guards clean. Kept.</p>
+<h2 id="the-scoreboard">The scoreboard</h2>
+<table>
+<thead>
+<tr>
+<th>Candidate</th>
+<th>Sounded like</th>
+<th style="text-align: right;">Measured</th>
+<th>Verdict</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Hilbert-curve layout</td>
+<td>better cache locality</td>
+<td style="text-align: right;"><strong>2–3× slower</strong></td>
+<td>reverted</td>
+</tr>
+<tr>
+<td>Eager neighbor prefetch</td>
+<td>hide memory latency</td>
+<td style="text-align: right;"><strong>+7% to +26%</strong></td>
+<td>reverted</td>
+</tr>
+<tr>
+<td>Heap key packing</td>
+<td>halve heap traffic</td>
+<td style="text-align: right;">flat</td>
+<td>reverted (simpler code wins)</td>
+</tr>
+<tr>
+<td>Hybrid chunk cache</td>
+<td>faster hot lookups</td>
+<td style="text-align: right;"><strong>+3.6% on SHORT</strong></td>
+<td>reverted — guard veto</td>
+</tr>
+<tr>
+<td>Edit-diff probe gate</td>
+<td>skip a redundant hash probe</td>
+<td style="text-align: right;">flat (p = 0.000)</td>
+<td>reverted</td>
+</tr>
+<tr>
+<td>Adaptive edit scanning</td>
+<td>fix a measured hot spot</td>
+<td style="text-align: right;"><strong>−40% edit-heavy</strong></td>
+<td><strong>kept</strong></td>
+</tr>
+</tbody>
+</table>
+<p>One survivor in six, and the one that survived was the one that started from a
+profiler reading instead of a plausible theory. That's the honest shape of
+performance work past the easy wins. The failures weren't dumb ideas — every one of
+them is a real technique that genuinely works <em>somewhere</em>. They just didn't work
+<em>here</em>, and the only way to know was to build them and let the instruments vote.</p>
+<p>The uncomfortable corollary is worth saying plainly: without the paired protocol and
+the guard scenarios, we would have shipped at least one of those regressions — with
+a confident comment above it explaining why it was faster.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["search.highlight", "search.share", "navigation.instant", "navigation.instant.prefetch", "navigation.path", "navigation.indexes"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

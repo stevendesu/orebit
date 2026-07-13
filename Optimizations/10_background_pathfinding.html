@@ -1,0 +1,1511 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://stevendesu.github.io/orebit/Optimizations/10_background_pathfinding.html">
+      
+      
+        <link rel="prev" href="09_depth_nibbles.html">
+      
+      
+        <link rel="next" href="11_region_heuristic.html">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Off the Tick Thread - Orebit</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+      
+
+
+    
+    
+      
+        <script src="https://unpkg.com/iframe-worker/shim"></script>
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#off-the-tick-thread" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../index.html" title="Orebit" class="md-header__button md-logo" aria-label="Orebit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Orebit
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Off the Tick Thread
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/stevendesu/orebit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../index.html" title="Orebit" class="md-nav__button md-logo" aria-label="Orebit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Orebit
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/stevendesu/orebit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting_started/installation.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting_started/supported_versions.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Supported Versions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../worldmodel.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    World Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pathfinding.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pathfinding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../movements.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Movements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../world_edits.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    World Edits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gathering.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Gathering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../commands.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="index.html" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Optimizations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_10" id="__nav_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Optimizations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="01_block_reading.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading Blocks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="02_reusing_memory.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reusing Memory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="03_block_fingerprints.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block Fingerprints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="04_custom_hash_map.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Custom Hash Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="05_pathfinding_hot_path.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The Pathfinding Hot Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="06_fewer_nodes.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fewer Nodes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="07_cuboid_macro_movements.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cuboid Macro-Movements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="08_measure_everything.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Measure Everything
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="09_depth_nibbles.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Depth Nibbles
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Off the Tick Thread
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="10_background_pathfinding.html" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Off the Tick Thread
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-cold-first-search-warm-the-engine-before-anyones-watching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The cold first search: warm the engine before anyone's watching
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-tick-is-a-hard-50-ms-and-search-was-spending-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The tick is a hard 50 ms, and search was spending it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#move-it-to-a-worker-almost-for-free" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Move it to a worker, almost for free
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-one-genuinely-dangerous-part" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The one genuinely dangerous part
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#once-its-off-tick-the-honest-budget-is-time" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Once it's off-tick, the honest budget is time
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#no-pause-at-the-seam" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        No pause at the seam
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-cost-and-what-it-bought" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it cost, and what it bought
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="11_region_heuristic.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Teaching the Block Search the Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="12_field_build.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Paying for the Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-cold-first-search-warm-the-engine-before-anyones-watching" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The cold first search: warm the engine before anyone's watching
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-tick-is-a-hard-50-ms-and-search-was-spending-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The tick is a hard 50 ms, and search was spending it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#move-it-to-a-worker-almost-for-free" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Move it to a worker, almost for free
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-one-genuinely-dangerous-part" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The one genuinely dangerous part
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#once-its-off-tick-the-honest-budget-is-time" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Once it's off-tick, the honest budget is time
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#no-pause-at-the-seam" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        No pause at the seam
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-cost-and-what-it-bought" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it cost, and what it bought
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="../index.html" class="md-path__link">
+        
+  <span class="md-ellipsis">
+    Home
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="index.html" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Optimizations
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="off-the-tick-thread">Off the Tick Thread</h1>
+<p>Every optimization so far has gone after the search <em>itself</em> — fewer nodes, fewer
+nanoseconds per node, no allocation. This chapter is the first that leaves the algorithm
+alone and goes after the two things <em>around</em> it: the <strong>environment</strong> the search runs in,
+and the <strong>time budget</strong> it runs against. Because no matter how tight the algorithm gets,
+a <em>cold</em> search stalls before it's fast, and a big <em>warm</em> one still doesn't fit in a
+Minecraft tick.</p>
+<h2 id="the-cold-first-search-warm-the-engine-before-anyones-watching">The cold first search: warm the engine before anyone's watching</h2>
+<p>The first externality is the JVM itself. One latency no steady-state benchmark ever
+showed: the <em>first</em> search after a server boots took <strong>21.8 ms at the median</strong> (p90
+30 ms) — against ~1.3 ms for the second and under a millisecond once warm. Memory wasn't
+the culprit: the allocation audit put the search scratch at ~41 KB on first touch, and
+pre-allocating it would save only <em>microseconds</em>. The 22 ms is the JVM — classloading
+plus <em>interpreting</em> the whole pathfinder the first time it runs, before the JIT has
+compiled any of it — and it lands squarely on a live player's tick.</p>
+<p>Only running the real code warms it, so that became the fix: at server start, before any
+player can join, the pathfinder runs a few hundred synthetic searches over a private
+in-memory fixture (~50 KB of hand-built sections in production shapes — short walks,
+budget floods, wall climbs, water crossings — chosen for <em>branch coverage</em> rather than
+speed). Rounds repeat until search times plateau, capped at 1.5 s of wall clock. Measured
+on a fresh-JVM harness, ten runs per arm:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th style="text-align: right;">first search p50</th>
+<th style="text-align: right;">p90</th>
+<th style="text-align: right;">boot cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>without warm-up</td>
+<td style="text-align: right;">21.8 ms</td>
+<td style="text-align: right;">30.0 ms</td>
+<td style="text-align: right;">—</td>
+</tr>
+<tr>
+<td>with warm-up</td>
+<td style="text-align: right;"><strong>0.67 ms</strong></td>
+<td style="text-align: right;">0.81 ms</td>
+<td style="text-align: right;">475 ms median</td>
+</tr>
+</tbody>
+</table>
+<p>A <strong>32× improvement</strong> in the one latency a player actually feels first — and honestly
+measured, since the timed first search is a terrain shape the warm-up never literally
+ran. It buys nothing at steady state; it simply moves the JIT's unavoidable warm-up out
+of the first player's way. On by default (<code>pathing.warmup</code>, <code>pathing.warmupBudgetMs</code>).</p>
+<h2 id="the-tick-is-a-hard-50-ms-and-search-was-spending-it">The tick is a hard 50 ms, and search was spending it</h2>
+<p>A Minecraft server runs at twenty ticks a second: <strong>50 ms per tick</strong>, shared by every
+mob, block update, and player in the world. Whatever the pathfinder spends, everything
+else does without. <a href="05_pathfinding_hot_path.html">The hot-path chapter</a> is the story of getting
+a search node down to ~400–700 ns so a flood <em>fits</em> — but "fits" was always a compromise.
+A warm window search runs 0.1 ms on a short hop and 4–16 ms on a flood or an edit-heavy
+pillar. Sixteen milliseconds is a <em>third of the tick</em>, gone, on one bot deciding where to
+put its feet — and a server owner wants twenty bots.</p>
+<p>Worse, the tick budget was a leash on the bot's <em>intelligence</em>. The way you let A* escape
+a hard local minimum — the tower, the maze — is to let it look at more positions. But
+"look at more" meant "spend more tick," so the node cap that stopped the jank also capped
+how clever the bot could be. A goal that needed twelve thousand positions to solve was
+simply unsolvable, not because the search couldn't do it but because it wasn't allowed to
+do it <em>between two frames</em>.</p>
+<p><a href="06_fewer_nodes.html">Fewer Nodes</a> named the way out: return your best partial progress and
+plan the route in segments. Both of those want the same thing underneath — a search that
+runs on <strong>its own time</strong>, not the server's.</p>
+<h2 id="move-it-to-a-worker-almost-for-free">Move it to a worker, almost for free</h2>
+<p>The plan is the obvious one: run the search on a background thread and adopt its result
+when it's done. What makes it cheap is that the search was <em>already</em> built for it, years
+before we needed it.</p>
+<p>Two properties fell into place. The search's scratch — its node table, its heap, its edit
+pool — was already <a href="02_reusing_memory.html">thread-local</a>: each thread that runs a search gets
+its own isolated arena that grows once and serves forever. And the nav grid the search
+reads, the <code>NavStore</code>, was already a per-level concurrent map. So a pool of worker threads
+needs no new locking on the hot path; each worker gets a private search arena for free and
+reads the shared grid without contention.</p>
+<p>The tick thread's job shrinks to a clean handoff. It packages an <strong>immutable request</strong> —
+start, target, the bot's capability gate, a <em>snapshot copy</em> of the inventory (never the
+live one), the search budget — and submits it to the pool. It gets back a small mailbox it
+polls. When a result lands, it's adopted at the exact same moment the follower already
+swaps plans: a settled window boundary. One search in flight per bot, newest-wins: a fresh
+request supersedes an older one that hasn't started. A worker that throws is caught
+per-request and the bot falls back to its normal "blocked, repair" path — a thread never
+dies with a search in its hands.</p>
+<p>The pool is sized for the real target, not the demo. The default is two threads, clamped to
+<em>cores − 2</em>, because the deployment that matters is a public server with twenty players and
+twenty bots, not one developer with one bot. Admins tune bot CPU the way they tune
+view-distance.</p>
+<h2 id="the-one-genuinely-dangerous-part">The one genuinely dangerous part</h2>
+<p>Concurrency has exactly one place it can hurt you here, and it's worth telling in full
+because the fix is prettier than the bug.</p>
+<p>The nav grid recycles memory aggressively — a <a href="02_reusing_memory.html">pooling pattern</a> from
+the single-threaded days. When a chunk unloads, its <code>NavSection</code> objects go straight back
+into a pool; the next chunk to load pops one, zero-fills it, and refills it with <em>its own</em>
+blocks. Perfectly safe when one thread does everything in order. Lethal the moment a worker
+thread is still reading the old section: it wouldn't read <em>stale</em> data (last tick's blocks,
+harmless — it replans anyway), it would read <em>another chunk's</em> data reinterpreted as this
+one's. Not a wrong path. An insane one.</p>
+<p>The reflex is to put every grid read behind a lock or an owner thread. That reflex is
+wrong: the search reads the grid <em>millions of times</em>, and a message hop or a lock on the
+per-read path would undo the entire hot-path chapter. The insight is that <strong>reads are
+fine</strong> — only <em>reclamation</em> is dangerous. So coordinate only the reclamation.</p>
+<p>The mechanism is a global epoch counter, bumped once per tick, and one published slot per
+worker thread. A worker stamps the current epoch when it starts a search and clears it when
+it finishes — two uncontended writes per search, nothing per node. When a chunk unloads,
+its displaced sections aren't recycled immediately; they're <strong>retired</strong> into a grace list
+tagged with the epoch they were retired in. Once a tick, the tick thread finds the oldest
+epoch any worker is still stamped with, and recycles only the batches retired strictly
+before it. A section can't be handed to a new chunk until every search that could still be
+holding it has finished. Mutation ownership never moves — the tick thread stays the sole
+writer and recycler; workers are pure readers who never touch a section that might be
+pulled out from under them.</p>
+<p>A companion rule closes the same door from the other side: the background grid view takes
+<em>no</em> live-world fallback. A vanilla chunk read isn't thread-safe, so a worker that probes
+outside the built nav data just sees air rather than reaching into the live world. The
+direction of that error is "the search plans a little less at the unexplored frontier,"
+never "the search plans through phantom terrain." When you can't be exact off-thread, be
+<em>optimistically bounded</em> — and let the replan on approach fix it.</p>
+<h2 id="once-its-off-tick-the-honest-budget-is-time">Once it's off-tick, the honest budget is time</h2>
+<p>The node cap — "stop after ten thousand positions" — was always a <em>proxy</em>. What we
+actually meant was "stop before you've spent too much tick." On a background thread there's
+no tick to spend, so we can say the real thing: <strong>stop after this many milliseconds</strong>.</p>
+<p>The search loop checks a deadline every 256 pops — one predictable branch, a clock read a
+fraction of a percent of the time — and returns its best partial when the clock runs out.
+The node cap doesn't disappear; it changes jobs. It becomes a pure <em>memory</em> backstop so a
+fast machine can't grow the node table without bound, and — importantly — a <strong>determinism
+switch</strong>: a deadline of zero means node-cap-only, byte-for-byte the old behaviour, which is
+what keeps the benchmarks and unit tests timing-independent. A search that <em>completes</em> under
+its deadline is identical to one that never had a deadline; the clock only decides where a
+<em>partial</em> truncates, and partials get replanned at the next boundary anyway. The
+nondeterminism is confined to the budget-exhaustion case that was already nondeterministic.</p>
+<p>The budget buys room the tick never could. At ~1500 ns a node, the default 250 ms budget
+is on the order of a hundred and fifty thousand positions — fifteen times the old cap —
+<em>without touching a single tick</em>. The floods that used to be unsolvable-between-frames now finish;
+in testing, a search that needed <strong>13,600 positions found its path</strong>, well past the old
+ten-thousand wall it would previously have died at.</p>
+<h2 id="no-pause-at-the-seam">No pause at the seam</h2>
+<p>The last piece is latency, not throughput. Adopting a finished search at a window boundary
+is great, but there's a beat where the bot reaches the boundary and waits for the next
+window's search — a stutter every few dozen blocks.</p>
+<p>So we plan ahead. Once the bot is more than halfway through the current window, the tick
+thread submits the <em>next</em> window's search early, starting from the boundary cell it can
+already predict, with the current plan's not-yet-applied edits folded in as a baseline so
+the new search prices the world as it will <em>be</em> when the bot gets there. When the bot
+actually reaches the boundary, if its real position agrees with the prediction (within a
+small tolerance), the pre-computed plan is adopted with <strong>no pause at all</strong> — the bot flows
+through the seam. A prediction that turns out wrong is simply parked and retested at each
+boundary; it never churns mid-window. This is Baritone's no-boundary-pause splicing, sitting
+on the window-and-boundary machinery the <a href="11_region_heuristic.html">region tier</a> already gave us
+— and the same splice primitive is what a future cross-dimension portal router will reuse
+unchanged.</p>
+<h2 id="what-it-cost-and-what-it-bought">What it cost, and what it bought</h2>
+<p>The headline: on the complex paths that used to hitch, tick time dropped from <strong>8–16 ms to
+about 3 ms</strong> — the search left the tick, so the tick stopped paying for it. And the ceiling
+lifted: searches that couldn't finish in a frame now finish on their own time.</p>
+<p>Held to the <a href="08_measure_everything.html">house benchmark protocol</a>, the change measured
+<strong>neutral</strong> on the synchronous path — the per-node deadline check and the request plumbing
+are free, sign-flipping across interleaved pairs at well under a percent. That's the result
+you want from an architectural change: it moves the work, it doesn't tax the work.</p>
+<p>It shipped <strong>off by default</strong> while it soaked, and now ships <strong>on</strong> (<code>pathing.async</code>) —
+the synchronous path is still there (<code>pathing.async = false</code>) and still byte-identical,
+which is exactly what made flipping the default low-risk. <code>pathing.maxThreads</code> sizes the
+pool; <code>pathing.asyncSearchBudgetMs</code> sets the wall-clock budget. See
+<a href="../configuration.html">Configuring Orebit</a>.</p>
+<p>The lesson is the inversion. Every prior chapter asked "how do we make this fit in the
+tick?" This one asked "why is this in the tick at all?" — and the answer was "no reason
+we couldn't fix." The tick budget was a constraint we'd been treating as a law of physics.
+It was just an address, and the search moved.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["search.highlight", "search.share", "navigation.instant", "navigation.instant.prefetch", "navigation.path", "navigation.indexes"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

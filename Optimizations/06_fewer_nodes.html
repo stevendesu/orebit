@@ -1,0 +1,1647 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://stevendesu.github.io/orebit/Optimizations/06_fewer_nodes.html">
+      
+      
+        <link rel="prev" href="05_pathfinding_hot_path.html">
+      
+      
+        <link rel="next" href="07_cuboid_macro_movements.html">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Fewer Nodes - Orebit</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+      
+
+
+    
+    
+      
+        <script src="https://unpkg.com/iframe-worker/shim"></script>
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#how-a-decides-what-to-look-at" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../index.html" title="Orebit" class="md-header__button md-logo" aria-label="Orebit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Orebit
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Fewer Nodes
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+          <a href="javascript:void(0)" class="md-search__icon md-icon" title="Share" aria-label="Share" data-clipboard data-clipboard-text="" data-md-component="search-share" tabindex="-1">
+            
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9a3 3 0 0 0-3 3 3 3 0 0 0 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.15c-.05.21-.08.43-.08.66 0 1.61 1.31 2.91 2.92 2.91s2.92-1.3 2.92-2.91A2.92 2.92 0 0 0 18 16.08"/></svg>
+          </a>
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/stevendesu/orebit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../index.html" title="Orebit" class="md-nav__button md-logo" aria-label="Orebit" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Orebit
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/stevendesu/orebit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../index.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting_started/installation.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting_started/supported_versions.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Supported Versions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../worldmodel.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    World Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../pathfinding.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pathfinding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../movements.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Movements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../world_edits.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    World Edits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../gathering.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Gathering
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../commands.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="index.html" class="md-nav__link ">
+              
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Optimizations
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_10" id="__nav_10_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Optimizations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="01_block_reading.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reading Blocks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="02_reusing_memory.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reusing Memory
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="03_block_fingerprints.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Block Fingerprints
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="04_custom_hash_map.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A Custom Hash Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="05_pathfinding_hot_path.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The Pathfinding Hot Path
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fewer Nodes
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="06_fewer_nodes.html" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fewer Nodes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#how-a-decides-what-to-look-at" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How A* decides what to look at
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-test-bench" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The test bench
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fix-1-make-climbing-worth-considering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fix #1: make climbing worth considering
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fix-2-break-ties-on-purpose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fix #2: break ties on purpose
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fix-3-let-it-cut-corners" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fix #3: let it cut corners
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fix-4-stop-proving-and-stop-lying-about-up" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fix #4: stop proving, and stop lying about "up"
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fix-5-the-field-that-still-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fix #5: the field that still failed
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-scoreboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The scoreboard
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-cliff-we-havent-crossed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The cliff we haven't crossed
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="07_cuboid_macro_movements.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cuboid Macro-Movements
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="08_measure_everything.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Measure Everything
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="09_depth_nibbles.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Depth Nibbles
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="10_background_pathfinding.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Off the Tick Thread
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="11_region_heuristic.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Teaching the Block Search the Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="12_field_build.html" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Paying for the Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#how-a-decides-what-to-look-at" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How A* decides what to look at
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-test-bench" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The test bench
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fix-1-make-climbing-worth-considering" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fix #1: make climbing worth considering
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fix-2-break-ties-on-purpose" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fix #2: break ties on purpose
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fix-3-let-it-cut-corners" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fix #3: let it cut corners
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fix-4-stop-proving-and-stop-lying-about-up" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fix #4: stop proving, and stop lying about "up"
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#fix-5-the-field-that-still-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fix #5: the field that still failed
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-scoreboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The scoreboard
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-cliff-we-havent-crossed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The cliff we haven't crossed
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="../index.html" class="md-path__link">
+        
+  <span class="md-ellipsis">
+    Home
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="index.html" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Optimizations
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+  <h1>Fewer Nodes</h1>
+
+<p>Our bot could not cross an open field.</p>
+<p>Point it at a goal a thousand-odd blocks away over flat ground and the search would
+grind through its entire budget — ten thousand candidate positions — and then give up,
+leaving the bot standing there. (Why ten thousand? At roughly 950 nanoseconds per
+position — see the <a href="05_pathfinding_hot_path.html">previous chapter</a> — that's about 9.5
+milliseconds, nearly a fifth of the server's 50 ms tick. Let one bot's thinking grow
+past that and it starts stealing time from everything else, so we cap it.) Ten thousand
+positions is an absurd amount of thinking for a walk across a meadow, and that absurdity
+is what this page is about: the long, iterative hunt for <em>why</em> the search looked at so
+many places it didn't need to, and how we taught it to stop.</p>
+<p>The previous chapter made each candidate position cheap to examine — about 950
+nanoseconds, down from 8,000. But the per-node price is only part of the bill:</p>
+<div class="arithmatex">\[\text{search time} = \text{startup cost} + (\text{nodes visited} \times \text{cost per node})\]</div>
+<p>That page hammered the cost <em>per node</em>. The startup cost — building the search's scratch
+structures once, before the first node — is a fixed fee that matters most for short
+searches. This page is about the middle factor, the <strong>node count</strong>, because the cheapest
+position is the one you never look at. By the end, that field falls in
+about <strong>fifteen hundred</strong> positions, and a shorter test we lean on to watch each fix
+land tightens all the way to <strong>fifty-three</strong> — one position examined per step of the
+path it returns.</p>
+<h2 id="how-a-decides-what-to-look-at">How A* decides what to look at</h2>
+<p>Recall the rule from <a href="05_pathfinding_hot_path.html">the hot-path chapter</a>: A* always
+expands the node with the smallest <strong><code>f = g + h</code></strong>, where <strong><code>g</code></strong> is the cost already
+spent to reach it and <strong><code>h</code></strong> is the heuristic's guess at the cost still ahead. This
+chapter is the story of that <strong><code>h</code></strong>.</p>
+<p>Almost everything lives in it. If <code>h</code> is <code>0</code> you've got Dijkstra's algorithm: no guess,
+so the search swells outward in every direction like ripples in a pond. A good <code>h</code> turns
+those ripples into an arrow aimed at the goal.</p>
+<p>One more thing matters: <strong>what a move costs.</strong> Not every move is equal, and we measure
+them all in one honest currency — <strong>game ticks</strong> (20 to a second), each move priced at
+the real time it takes (the full table is in <a href="../movements.html">Movements</a>). A plain step
+to an adjacent block is the yardstick: <strong>~4.6 ticks</strong>. Breaking a block in the way costs
+its real <strong>mining time</strong>. And placing a block — to bridge a gap or build a step up —
+costs a base fee <em>plus the time you'll spend mining it back out someday</em>: with a stone
+pickaxe, placing cobblestone runs about <strong>20 ticks</strong> (a 6-tick base plus ~15 to remove it
+later), so it's the priciest thing the bot routinely does. Walking is cheap; rearranging
+the world is dear. The heuristic is scored in the same ticks — remaining distance times
+that ~4.6-tick walk cost — so <code>g</code> and <code>h</code> compare apples to apples. Hold onto the gap
+between a ~4.6-tick step and a ~20-tick placement; it drives half of what follows.</p>
+<h2 id="the-test-bench">The test bench</h2>
+<p>You can't tune what you don't measure, so every change below was judged live, in-game,
+against the same four scenarios. They come up by name throughout:</p>
+<ul>
+<li><strong>The field</strong> — a flat world, walking from near spawn (around <code>x=30, z=60</code>) out to
+  <code>(1000, 1000)</code>. Not a clean 45° diagonal, which turns out to matter enormously. This
+  is the search that couldn't finish.</li>
+<li><strong>The hill</strong> — a normal generated world: a gentle slope up to a tree the bot must
+  climb, about 60 blocks away. Short and repeatable, so it's our main yardstick — most
+  of the running numbers below are this test.</li>
+<li><strong>The tower</strong> — a flat world with the goal floating 30 blocks straight up. The
+  pathological case we'll end on.</li>
+<li><strong>The cave</strong> — a little maze hand-built from bedrock, where the straight line to the
+  goal runs into a wall and the bot must back off and round a corner.</li>
+</ul>
+<p>That last one came with a lesson in test design: I built the cave to <em>force</em> a detour
+around the wall, but the wall was bedrock and the <em>floor</em> wasn't, so the bot took one
+look, tunneled straight <em>under</em> it, and popped up next to me in three moves. The test
+was wrong; the bot was right.</p>
+<h2 id="fix-1-make-climbing-worth-considering">Fix #1: make climbing worth considering</h2>
+<p>The first trouble was going <em>up</em>. Picture a goal one block higher than the bot, with no
+stairs leading to it. To reach it the bot has to build a step — place a block, jump onto
+it. That step costs about <strong>25 ticks</strong>: the ~4.6-tick hop plus the ~20-tick placement
+(remember, most of that placement fee is the time the bot will spend mining the cobble
+back out later). But the heuristic only knows <em>distance</em>, and "one block up" is almost no
+distance at all — the goal barely got closer. So to the search, building that step looked
+absurdly expensive for the progress it bought, and it went hunting for a cheaper way up.
+Twenty-five ticks buys five or six blocks of walking, so the bot would stroll five or six
+blocks sideways looking for a natural ramp <em>before</em> it would agree to build the obvious
+staircase right where it stood — and with a weaker pickaxe, closer to nine. It wandered
+the neighborhood looking for a slope rather than build one.</p>
+<p>The fix was to put a thumb on the scale: treat vertical distance as worth more than
+horizontal. Any move that closed the gap to a goal above (or below) earned extra
+heuristic credit, so climbing looked attractive enough that the bot would build when it
+had to instead of wandering off. It worked — and, as we'll see, it was also a hack we'd
+eventually tear out for something cleaner.</p>
+<h2 id="fix-2-break-ties-on-purpose">Fix #2: break ties on purpose</h2>
+<p>Classic A* tells you to expand the lowest-<code>f</code> candidate, but it says <em>nothing</em> about
+what to do when several candidates tie. Left to chance, the search picks among them
+arbitrarily — jittering around the frontier instead of flowing anywhere.</p>
+<p>So we gave it a rule: when <code>f</code> ties, prefer the candidate with the larger <strong><code>g</code></strong>. Since
+<code>f = g + h</code> is equal, more cost-spent means more progress made — it's the position
+<em>further along the path we've already started</em>. In plain terms: "these all look equally
+good, but we've already committed to this one, so keep going and see where it leads." The
+search now flows smoothly toward the goal along a single line, and only doubles back to
+reconsider the alternatives when it hits a position that costs <em>more</em> than the heuristic
+promised. Hold that last clause — it's the hinge the next two fixes turn on.</p>
+<h2 id="fix-3-let-it-cut-corners">Fix #3: let it cut corners</h2>
+<p>The bot could only step north, south, east, and west, and the real cost of that is
+subtle. To travel northeast it had to go north-then-east — but north-then-east lands on
+the <em>exact same block, for the exact same cost</em>, as east-then-north. The two routes are
+identical in value, so A* has no grounds to prefer either, and has to keep both alive.</p>
+<p>On flat ground the tie-breaker from Fix #2 papers over this — it just barrels along
+whichever route it started. But the instant the path meets something expensive — say,
+the tree at the end of the hill, which the bot has to climb — that one pricey move costs
+more than the heuristic predicted, and suddenly every one of those tied, set-aside
+routes looks like it <em>might</em> have been cheaper. <em>Maybe one of them led to a ramp that
+skips the tree entirely.</em> So A* goes back and checks them. The more tied routes there
+are, the more checking.</p>
+<p>Now, the reason we expected diagonals to <em>help</em> isn't just "a diagonal move is cheaper."
+It's that it takes <strong>fewer moves to arrive</strong>. Our hill path was 78 steps: roughly 50
+forward, 25 to the side, and 3 up the tree. Every one of those 78 is a position even a
+perfect search must touch. Let the bot move diagonally and 25 of those
+forward-and-sideways pairs collapse into 25 single diagonal steps — about 25 diagonal +
+25 forward + 3 climb ≈ <strong>53 steps</strong>. A shorter path is fewer positions to visit, full
+stop.</p>
+<p>But a diagonal move needs a ruler that counts it correctly. <strong>Manhattan distance</strong>
+(<code>|Δx| + |Δz|</code>) assumes you can only move along the axes, so it scores a diagonal as 2
+when it really costs <code>√2 ≈ 1.41</code>. Overcounting both breaks A*'s guarantee and actively
+misleads the search. The honest ruler is <strong>octile distance</strong> — go diagonally to eat the
+shorter axis, then straight for the rest:</p>
+<div class="arithmatex">\[h = (d_{max} - d_{min}) \cdot 1 + d_{min} \cdot \sqrt{2}\]</div>
+<p>We path in 3D, so we use the <strong>3D octile</strong> distance, the same idea with one more axis.
+Sort the three gaps <code>a ≤ b ≤ c</code>:</p>
+<div class="arithmatex">\[h = a\sqrt{3} + (b - a)\sqrt{2} + (c - b)\]</div>
+<p>So: diagonals in, octile ruler in. And the hill went from 209 positions to <strong>604</strong>. We
+had shortened the ideal path and <em>tripled</em> the work. That's the tied-routes mechanism
+biting exactly as described — diagonals handed the search far more equally-good ways to
+approach, and the tree-climb at the end sent it backtracking through all of them.</p>
+<h2 id="fix-4-stop-proving-and-stop-lying-about-up">Fix #4: stop proving, and stop lying about "up"</h2>
+<p>That 604 is the price of <em>optimality</em>. To guarantee the shortest path, A* has to rule
+out every alternative that might tie or beat it — and we'd just manufactured a glut of
+ties. But a bot following a player doesn't need a <em>provably</em> shortest path; it needs a
+good one, now. So we let the heuristic cheat — <strong>Weighted A*</strong>:</p>
+<div class="arithmatex">\[f = g + W \cdot h, \quad W = 2\]</div>
+<p>Multiplying <code>h</code> by <code>W &gt; 1</code> makes the search value <em>getting closer</em> over <em>staying
+provably cheapest</em>. It commits to its trajectory and stops fanning back through the
+set-aside routes every time it hits a bump. We landed on <code>W = 2</code> by sweeping it live: at
+<code>W = 1.5</code> it still wandered; at <code>W = 3</code> it got <em>too</em> greedy and refused sensible
+detours — on the cave, a route it solved in a tidy 3-move path at <code>W = 2</code> bloated to a
+clumsy 7-move path at <code>W = 3</code>. Two was the sweet spot.</p>
+<p>This is also where we tore out Fix #1. We'd been inflating vertical distance to coax the
+bot into building — but that was medicating a symptom. The real insight: <strong>going up
+isn't expensive; placing the block is</strong> — and that ~20-tick cost already lives on
+the move itself. Vertical distance is just distance. So we dropped the vertical weighting
+for honest, equal-axis 3D octile and let the place cost do the discouraging. Two payoffs
+at once: the bot stopped wandering for ramps <em>and</em> stopped over-building, because a built
+step now costs exactly what it costs — no thumb on the scale.</p>
+<p>The hill dropped from 604 to <strong>71</strong>.</p>
+<h2 id="fix-5-the-field-that-still-failed">Fix #5: the field that still failed</h2>
+<p>71 on the hill, paths clean. So we aimed at the field — <code>(1000, 1000)</code> from near spawn.
+It chewed through all ten thousand positions and failed.</p>
+<p>This one genuinely puzzled us, because the tie-breaker from Fix #2 <em>should</em> have just
+marched the bot straight across: commit to the diagonal, ride it to the goal, done in
+about a thousand positions. And on a truly empty field, it does exactly that. The catch
+was that our "flat" test world had structures left enabled — and a <strong>village</strong> sat
+squarely on the route. An obstacle is precisely the trigger from Fix #3: to get around
+the village the bot meets the same kind of expensive bump as the tree-climb, and starts
+asking whether one of its tied alternatives slips past on the <em>other</em> side.</p>
+<p>And here's the scale of "its tied alternatives." The field runs 970 east and 940 north —
+so nearly a 45° diagonal you'd think there's only one route. There isn't. The path is
+940 diagonal steps plus 30 plain east steps, and those 30 easts can be slotted in
+<em>anywhere</em> among the 970. The number of equally-cheap routes is</p>
+<div class="arithmatex">\[\binom{970}{30} \approx 9.6 \times 10^{56}\]</div>
+<p>— within spitting distance of the number of atoms in the solar system. The tie-breaker
+threads that incomprehensible space without complaint on open ground. But drop a village
+in the middle and the search has near-infinitely many equally-good ways to weave around
+it, and it drowns trying to weigh them.</p>
+<p>The fix is to hand the search a single <em>canonical</em> thread to prefer: among tied routes,
+favor the one that hugs the straight line from start to goal. We add a microscopic nudge
+to <code>h</code>, proportional to how far the position has strayed sideways from that line:</p>
+<pre><code class="language-java">// perpendicular distance from the start→goal line, via the 2D cross product
+float cross = Math.abs((x - sx) * (gz - sz) - (z - sz) * (gx - sx));
+return octile(...) + H_TIE * (cross * invLineLen);
+</code></pre>
+<p><code>H_TIE</code> is deliberately tiny — <code>0.001</code> — far too small to ever override a real cost
+difference, so it never argues the bot out of a genuinely cheaper route (the
+dig-under-the-wall detour still wins when it's actually shorter). All it does is settle
+<em>ties</em>: of those <code>9.6 × 10⁵⁶</code> equal routes, the ones on the straight line score a hair
+lower. Now there's always one preferred way to slip past an obstacle — the on-line one —
+and the search stops exploring both sides of every village.</p>
+<p>The hill dropped one last notch, 71 → <strong>53</strong>: one position examined per step of the
+path. And the field that could not be crossed now crosses in <strong>1,493</strong>.</p>
+<h2 id="the-scoreboard">The scoreboard</h2>
+<p>The hill test (the ~60-block climb to the tree), watched across every fix. The earliest
+numbers predate our instrumentation, so the first row is an estimate — but the path
+length is exact, and that's the number that tells the real story:</p>
+<table>
+<thead>
+<tr>
+<th>Step in the journey</th>
+<th style="text-align: right;">Positions visited</th>
+<th style="text-align: right;">Path length</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Plain A*, no tie-break</td>
+<td style="text-align: right;">~thousands (est.)</td>
+<td style="text-align: right;">78 steps</td>
+</tr>
+<tr>
+<td>Break ties toward the goal (Fix #2)</td>
+<td style="text-align: right;">209</td>
+<td style="text-align: right;">78 steps</td>
+</tr>
+<tr>
+<td>Add diagonals + the octile ruler (Fix #3)</td>
+<td style="text-align: right;"><strong>604</strong></td>
+<td style="text-align: right;">59 steps</td>
+</tr>
+<tr>
+<td>Greed + honest 3D distance (Fix #4)</td>
+<td style="text-align: right;">71</td>
+<td style="text-align: right;">53 steps</td>
+</tr>
+<tr>
+<td>Hug the straight line (Fix #5)</td>
+<td style="text-align: right;"><strong>53</strong></td>
+<td style="text-align: right;">53 steps</td>
+</tr>
+</tbody>
+</table>
+<p>Two things stand out. First, Fix #3 made the search <em>worse</em> (209 → 604) even as it made
+the <em>path</em> shorter — the tied-routes tax, paid in full. Second, the final row: <strong>53
+positions visited to return a 53-step path.</strong> That's the theoretical floor — one
+position per step, essentially nothing wasted. The bot walks straight at the goal.</p>
+<p>And the headline — the field that started all this:</p>
+<table>
+<thead>
+<tr>
+<th>Configuration</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Greedy <code>W = 2</code>, no tie-break</td>
+<td><strong>fails</strong> — 10,000 positions, drowns at the village</td>
+</tr>
+<tr>
+<td>...+ straight-line tie-break</td>
+<td><strong>1,493 positions</strong>, 1,490-step path, near-instant</td>
+</tr>
+</tbody>
+</table>
+<h2 id="the-cliff-we-havent-crossed">The cliff we haven't crossed</h2>
+<p>These fixes make A* fast and well-behaved across open and moderately complex terrain —
+almost everything a follow-bot meets. They are not magic, and there's one wall they
+leave standing: <strong>the tower</strong> — a goal reachable <em>only</em> by pillaring straight up into
+open air, a player hovering 30 blocks overhead with no terrain to climb.</p>
+<p>It's a pointed irony. The hand-tuned vertical weighting from Fix #1, for all its faults,
+<em>did</em> coax the bot up a pillar — and we deliberately tore it out in Fix #4 for honest
+distance. So the tower is the one case our cleanup made worse. But the answer isn't to
+bring the hack back. Look at what the honest heuristic sees: the bot is directly below the
+goal — zero horizontal distance, so the straight-line trick has nothing to grip — while
+the true cost is thirty ~25-tick placements <code>h</code> cannot see. Each pillar step raises <code>g</code> by
+~25 while dropping <code>h</code> by barely one block's worth, so the <em>total</em> <code>f</code> climbs as the bot
+builds. And A* always expands its lowest-<code>f</code> node — so the instant a half-built pillar
+gets pricey, the search abandons it and starts a fresh one from the cell next door, which
+looks cheaper only because it hasn't started paying yet.</p>
+<p>And here's the compounding cruelty. We just measured that the bot will wander five to nine
+blocks before it agrees to <em>one</em> placement — so it would genuinely rather wander three
+cells and pillar once than stand still and pillar twice. Faced with a 30-tall climb it
+spreads the cost outward instead of upward, stubbing a partial pillar at every floor cell
+in a widening <strong>cone</strong>. The search doesn't fail for lack of speed; it drowns in half-built
+pillars.</p>
+<p>The honest fix <em>is</em> more heuristic cleverness — the very opposite of a hand-tuned hack. If
+the only way to the goal is to build straight up, that build cost isn't optional; it's
+<em>forced</em> — and a heuristic taught to charge for it up front would stop treating the
+vertical as free distance and stop fanning out. Teaching <code>h</code> to see that <strong>forced cost</strong>,
+and collapsing the whole uniform pillar into a single big move so the search never crawls
+it cell by cell, is the <a href="07_cuboid_macro_movements.html">next chapter</a>. The per-position cost
+is low and the heuristic is sharp; the frontier moves up now to the <em>shape of the search
+itself</em>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["search.highlight", "search.share", "navigation.instant", "navigation.instant.prefetch", "navigation.path", "navigation.indexes"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="../javascripts/mathjax.js"></script>
+      
+        <script src="https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>
