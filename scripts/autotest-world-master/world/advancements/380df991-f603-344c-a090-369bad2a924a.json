@@ -1,0 +1,25 @@
+{
+  "minecraft:adventure/minecraft_trials_edition": {
+    "criteria": {
+      "minecraft_trials_edition": "2026-07-13 10:49:11 -0400"
+    },
+    "done": true
+  },
+  "minecraft:recipes/decorations/crafting_table": {
+    "criteria": {
+      "unlock_right_away": "2026-07-13 10:47:46 -0400"
+    },
+    "done": true
+  },
+  "minecraft:adventure/adventuring_time": {
+    "criteria": {
+      "minecraft:deep_dark": "2026-07-13 10:49:54 -0400",
+      "minecraft:sparse_jungle": "2026-07-13 10:47:47 -0400",
+      "minecraft:jungle": "2026-07-13 10:48:16 -0400",
+      "minecraft:dripstone_caves": "2026-07-13 10:50:04 -0400",
+      "minecraft:bamboo_jungle": "2026-07-13 10:49:51 -0400"
+    },
+    "done": false
+  },
+  "DataVersion": 4671
+}

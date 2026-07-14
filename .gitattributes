@@ -1,0 +1,3 @@
+# The autotest master world is binary Minecraft region/NBT data.
+# Never line-ending-normalize or text-diff it.
+scripts/autotest-world-master/** binary
