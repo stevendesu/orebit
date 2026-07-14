@@ -244,7 +244,7 @@ public final class NavSectionBuilder {
             short navtype = NavBlock.navtypeFor(palette[s]);
             slotToNavtype[s] = navtype & 0xFFFF;
             slotToDesc[s] = NavBlock.descriptor(navtype);
-            anyPortal |= NavBlock.isPortal(slotToDesc[s]); // the one-bit-test-per-palette-entry gate
+            anyPortal |= NavBlock.isNetherPortal(slotToDesc[s]); // nether-only gate (index feed); one bit-test per entry
             if (slotToColumn != null) {
                 int col = ResourceClasses.columnForBlock(palette[s].getBlock());
                 slotToColumn[s] = col;
@@ -256,7 +256,7 @@ public final class NavSectionBuilder {
         // so the per-cell pass never taxes the normal classify path.
         if (portalCells != null && anyPortal) {
             for (int i = 0; i < 4096; i++) {
-                if (NavBlock.isPortal(slotToDesc[slotScratch[i]])) portalCells.accept(i);
+                if (NavBlock.isNetherPortal(slotToDesc[slotScratch[i]])) portalCells.accept(i);
             }
         }
 

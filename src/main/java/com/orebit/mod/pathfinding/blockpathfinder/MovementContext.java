@@ -113,6 +113,35 @@ public final class MovementContext {
     }
 
     /**
+     * Whether the TAKEOFF FLOOR cell {@code (x,y,z)} is GENUINE SOLID FOOTING a running jump can launch
+     * from: {@link #standable} (a real solid top the bot stands ON) <b>AND</b> not a {@link
+     * NavBlock#isClimbable climbable} (ladder / scaffolding / vine family). A climbable is a CLIMBING
+     * state, not a ground state — vanilla gives NO {@code 0.42} horizontal launch off a ladder/vine: the
+     * jump key only climbs UP faster and horizontal input merely EJECTS the bot from the climbable, so a
+     * jump whose takeoff cell is a climbable is physically impossible. This is the single "you can only
+     * initiate a jump from solid ground" gate the jump-takeoff movements ({@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour}/{@code DiagonalParkour}) test at the
+     * top of {@code candidates}. Both conjuncts are load-bearing: a VINE (empty shape) is caught by
+     * {@code standable} (it is not solid-topped); a LADDER / SCAFFOLDING is a {@link NavBlock#SHAPE_OTHER}
+     * with a full-block collision top, so it reads {@code standable == true} and is caught ONLY by the
+     * {@code !climbable} term. Without this gate a mid-vine/-ladder node — which {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Climb} keeps at {@link #MODE_STANDING} — is
+     * silently offered a jump ({@link #floorSurface} even reports the {@code 16} full-block sentinel for a
+     * non-standable floor, so the envelope treats a vine takeoff as a full block).
+     *
+     * <p>Reads the floor descriptor the SAME way {@link #reducesJump} / {@link #floorSurface} do
+     * (path-edit-aware, so a PLACED floor reads as solid) — one descriptor read + two bit tests, hot-path
+     * lean. A standable NON-climbable floor (stone / slab / stair / farmland / soul sand / honey — honey
+     * is refused separately by {@link #reducesJump}) passes unchanged, so ordinary parkour is not
+     * narrowed; an UNBUILT floor reads air ⇒ not standable ⇒ {@code false} (never jump from unknown,
+     * matching the other takeoff gates).
+     */
+    public boolean solidFooting(int x, int y, int z) {
+        long d = descriptorAt(x, y, z);
+        return NavBlock.isStandable(d) && !NavBlock.isClimbable(d);
+    }
+
+    /**
      * Whether the TAKEOFF FLOOR cell {@code (x,y,z)} — the standable cell a jump move launches FROM, the
      * same cell {@link #floorSurface} reads — is a {@link NavBlock#reducesJump REDUCED-JUMP} floor (honey
      * block, jump factor 0.5): the jump apex there (~0.384 blocks) clears nothing, so every jump-takeoff
@@ -597,11 +626,36 @@ public final class MovementContext {
      * across predicates is wasteful).
      */
     public boolean passable(long d) {
-        // Geometric "nothing collides" (the precomputed bit) AND no fluid. The fluid exclusion lives HERE,
-        // at the movement layer, not in the bit: water is geometrically passable (you can float-walk it),
-        // but the WALK moves have no water cost, so a walker still treats a fluid cell as non-clear. The
-        // SWIM moves use water() (below) for the cells passable() rejects for being water.
-        return NavBlock.isPassable(d) && NavBlock.fluid(d) == 0;
+        // Geometric "nothing collides" (the precomputed bit) AND no fluid AND not a teleport portal. The fluid
+        // exclusion lives HERE, at the movement layer, not in the bit: water is geometrically passable (you can
+        // float-walk it), but the WALK moves have no water cost, so a walker still treats a fluid cell as
+        // non-clear. The SWIM moves use water() (below) for the cells passable() rejects for being water. The
+        // portal exclusion (mirroring isSwimmableWater subtracting isBubble) keeps the bot's body — feet, head,
+        // and every swept jump-arc prism cell — out of ALL teleport portals (nether/end/gateway), so the walker
+        // routes AROUND them and never grazes one mid-path; the nether follower enters via a manual walk-in that
+        // bypasses A*. This is the hottest predicate (read per node) — one branch-free AND on the loaded long.
+        return NavBlock.isPassable(d) && NavBlock.fluid(d) == 0 && !NavBlock.isPortal(d);
+    }
+
+    /**
+     * Can a running jump arc safely OVER this cell when it sits at the FLOOR level of a gap — the
+     * "arced over like flat ground" rule shared by the aligned, offset and diagonal parkour scans. True
+     * whenever the cell's collision top is no taller than a full block ({@code topY <= 16}): that covers
+     * every {@link #passable} cell (empty shape ⇒ {@code topY == 0}) PLUS the non-passable-but-short
+     * cells a sprint arc still clears — a fluid (a 1-wide lava/water pool has no collision box, {@code
+     * topY == 0}; the arc keeps the hitbox above it, zero contact), décor, and full-block / slab tops
+     * (jumped over like flat ground). A fence / wall (collision top ≈ 24) pokes above a full block into
+     * the feet path and is NOT jumpable.
+     *
+     * <p>This is deliberately LOOSER than {@link #passable} in exactly one way — it admits fluids — so it
+     * is correct for the floor OBSTACLE cell ONLY. The body-arc prism ({@code y+1..y+3}, the cells the
+     * hitbox actually flies through) must still be proven strictly {@link #passable} by the caller, or a
+     * tall lava/water column would read as jumpable and the bot would path through it and take damage.
+     * The collision-first / hazard-second rule: a floor cell blocks a jump only when its collision top
+     * clips the arc; a no-collision hazard (fluid, fire) is cleared by the arc and priced only on contact.
+     */
+    public boolean overJumpable(long d) {
+        return NavBlock.topY(d) <= 16; // full-block top; a fence/wall (~24) clips the feet path
     }
 
     /**

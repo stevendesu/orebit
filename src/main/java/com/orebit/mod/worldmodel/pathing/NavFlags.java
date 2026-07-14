@@ -127,10 +127,10 @@ public final class NavFlags {
 
         int flags = 0;
 
-        // HEADROOM: how many body cells above the floor are clear for a WALKER (passable AND fluid-free,
-        // so the value lines up with MovementContext.passable — water is not walk-clearance). Breaking a
-        // block in the way is the break modifier's job (it consults RISKY_EDIT); headroom is the raw
-        // clearance prefilter.
+        // HEADROOM: how many body cells above the floor are clear for a WALKER (passable AND fluid-free AND
+        // not a teleport portal, so the value lines up with MovementContext.passable — water is not
+        // walk-clearance, and a portal cell is a no-go the walker routes around). Breaking a block in the way
+        // is the break modifier's job (it consults RISKY_EDIT); headroom is the raw clearance prefilter.
         int headroom;
         if (!walkClear(a1)) headroom = HEADROOM_NONE;
         else if (!walkClear(a2)) headroom = HEADROOM_CRAWL;
@@ -183,9 +183,11 @@ public final class NavFlags {
         return idx < desc.length ? desc[idx] : AIR_DESC;
     }
 
-    /** Clear for a walking body: no collision AND no fluid (water/lava block a walker — swim is later). */
+    /** Clear for a walking body: no collision AND no fluid (water/lava block a walker — swim is later) AND
+     *  not a teleport portal (the walker routes around ALL portals). Kept byte-for-byte aligned with
+     *  {@code MovementContext.passable}, whose fast path this prefilters. */
     private static boolean walkClear(long d) {
-        return NavBlock.isPassable(d) && NavBlock.fluid(d) == 0;
+        return NavBlock.isPassable(d) && NavBlock.fluid(d) == 0 && !NavBlock.isPortal(d);
     }
 
     /** Nothing solid directly below — a gravity block here/above would fall. */
