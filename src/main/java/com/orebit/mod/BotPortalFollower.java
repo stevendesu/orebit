@@ -101,7 +101,7 @@ final class BotPortalFollower {
             // Descend to the BOTTOM portal cell of the column so the pathing goal floor (below it) is the
             // standable obsidian frame base. Live-world read (cold, a few cells, once per seek).
             BlockPos below = p.below();
-            while (NavBlock.isPortal(NavBlock.descriptorFor(level.getBlockState(below)))) {
+            while (NavBlock.isNetherPortal(NavBlock.descriptorFor(level.getBlockState(below)))) {
                 p = below;
                 below = p.below();
             }
@@ -146,7 +146,7 @@ final class BotPortalFollower {
         // Portal-broken check (state, not timer): the one fact that invalidates this whole terminal state,
         // read live — a single block read per tick.
         final ServerLevel level = (ServerLevel) Worlds.of(bot);
-        if (!NavBlock.isPortal(NavBlock.descriptorFor(level.getBlockState(portalTarget)))) {
+        if (!NavBlock.isNetherPortal(NavBlock.descriptorFor(level.getBlockState(portalTarget)))) {
             retryOrGiveUpPortal("the portal broke");
             return;
         }

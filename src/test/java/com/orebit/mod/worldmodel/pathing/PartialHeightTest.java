@@ -134,13 +134,15 @@ class PartialHeightTest {
         assertNotNull(BlockPathfinder.findPath(buildFlat(slab()), START,
                         new BlockPos(6, 5, 8), BotCaps.DEFAULT, CORRIDOR),
                 "sanity: an 8/16 same-level lip (slab → full) auto-steps");
-        // Repeater start (top 2/16) onto full-block floors: lip 14/16 > 9 — not auto-steppable. A
-        // 10..20/16 same-level lip IS physically jumpable (JUMP_RISE), but no movement emits a
-        // same-block-level jump today (the documented known gap), so the route must be null rather
-        // than silently walked.
+        // Repeater start (top 2/16) onto full-block floors: lip 14/16 > 9 — not auto-steppable by
+        // Traverse/Ascend (there is no same-block-level step move for a 10..20/16 lip). The fixture WALLS
+        // x=1 (buildFlat), so no parkour run-up cell exists to overfly the sunk repeater onto the lip — the
+        // ISSUE-3 jump-over (which WOULD escape an open repeater trap) is denied here — so the route is null,
+        // isolating the walk/step start-deficit rejection.
         assertNull(BlockPathfinder.findPath(buildFlat(lowPlate()), START,
                         new BlockPos(6, 5, 8), BotCaps.DEFAULT, CORRIDOR),
-                "a 14/16 same-level lip must not be walked flat (and no move offers the jump — known gap)");
+                "a 14/16 same-level lip must not be walked flat (no Traverse/Ascend covers it, and the "
+                        + "parkour jump-over is walled off in this fixture)");
     }
 
     // ---------------------------------------------------------------- Pillar full-start gate (rule 3)
@@ -223,8 +225,13 @@ class PartialHeightTest {
     private static NavGridView buildFlat(BlockState startFloor) {
         PalettedContainer<BlockState> s = solidStone();
         final int z = 8;
-        for (int x = 1; x <= 14; x++) {
-            if (x <= 2) s.set(x, 5, z, startFloor);
+        // Start ledge is the SINGLE cell x=2 (the START), WALLED at x=1 (solid, no body air). This denies a
+        // parkour any run-up cell from which the ISSUE-3 jump-over could overfly the low-partial START and
+        // land on the full-block lip at x=3 — the low partial IS a topY<12 sunk cell, so an OPEN approach now
+        // legitimately offers that jump (Traverse/Ascend still can't, which is the canon under test here). The
+        // seal isolates the walk/step start-deficit rule; the jump-over escape is proven in ParkourHazardJumpTest.
+        s.set(2, 5, z, startFloor);
+        for (int x = 2; x <= 14; x++) {
             for (int y = 6; y <= 12; y++) {
                 s.set(x, y, z, Blocks.AIR.defaultBlockState());
             }

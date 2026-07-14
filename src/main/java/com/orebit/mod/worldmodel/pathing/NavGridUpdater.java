@@ -129,8 +129,8 @@ public final class NavGridUpdater {
         // the old grid read while the grid was patched inline. Two descriptor bit-tests per block change —
         // the index mutates only when a portal actually toggles (vanishingly rare), and this path is
         // per-block-change, never per-A*-node.
-        boolean wasPortal = NavBlock.isPortal(NavBlock.descriptorFor(oldState));
-        boolean nowPortal = NavBlock.isPortal(NavBlock.descriptor(newNavtype));
+        boolean wasPortal = NavBlock.isNetherPortal(NavBlock.descriptorFor(oldState));
+        boolean nowPortal = NavBlock.isNetherPortal(NavBlock.descriptor(newNavtype));
         if (wasPortal != nowPortal) {
             if (nowPortal) NetherPortalIndex.add(server, pos.getX(), pos.getY(), pos.getZ());
             else NetherPortalIndex.removeCell(server, pos.getX(), pos.getY(), pos.getZ());

@@ -52,14 +52,43 @@ class NetherPortalIndexTest {
     @Test
     void portalBitSplitsNetherPortalIntoItsOwnNavtype() {
         long portal = NavBlock.descriptorFor(Blocks.NETHER_PORTAL.defaultBlockState());
-        assertTrue(NavBlock.isPortal(portal), "NETHER_PORTAL must carry the portal bit");
-        assertFalse(NavBlock.isPortal(NavBlock.descriptorFor(Blocks.AIR.defaultBlockState())));
-        assertFalse(NavBlock.isPortal(NavBlock.descriptorFor(Blocks.LADDER.defaultBlockState())));
-        assertFalse(NavBlock.isPortal(NavBlock.descriptorFor(Blocks.STONE.defaultBlockState())));
-        // v1 documented behaviour: portal cells stay passable to walkers (empty collision shape).
-        assertTrue(NavBlock.isPassable(portal), "portal cells remain passable in v1");
+        assertTrue(NavBlock.isNetherPortal(portal), "NETHER_PORTAL must carry the nether-portal bit (index feed)");
+        assertFalse(NavBlock.isNetherPortal(NavBlock.descriptorFor(Blocks.AIR.defaultBlockState())));
+        assertFalse(NavBlock.isNetherPortal(NavBlock.descriptorFor(Blocks.LADDER.defaultBlockState())));
+        assertFalse(NavBlock.isNetherPortal(NavBlock.descriptorFor(Blocks.STONE.defaultBlockState())));
+        // The cells still classify SHAPE_EMPTY (empty collision) — the walker avoidance is a MovementContext
+        // exclusion, not a shape change, so the raw geometry primitive is untouched.
+        assertTrue(NavBlock.isPassable(portal), "portal cells keep their empty collision shape");
         // The bit must split the portal out of the generic intangible navtype (distinct from air's).
         assertNotEquals(NavBlock.AIR, NavBlock.navtypeFor(Blocks.NETHER_PORTAL.defaultBlockState()));
+    }
+
+    /**
+     * The 2-bit portal field (low = any-portal for walker avoidance, high = is-nether for the index/follower):
+     * NETHER = both bits (11), END_PORTAL / END_GATEWAY = low bit only (01), everything else = none (00). The
+     * walker reads {@code isPortal} (routes around ALL); the nether index/follower read {@code isNetherPortal}
+     * (never chase an end portal).
+     */
+    @Test
+    void portalFieldEncodesNetherVsEnd() {
+        long nether = NavBlock.descriptorFor(Blocks.NETHER_PORTAL.defaultBlockState());
+        assertTrue(NavBlock.isPortal(nether));
+        assertTrue(NavBlock.isNetherPortal(nether));
+        assertFalse(NavBlock.isEndPortal(nether));
+
+        for (Block b : new Block[] { Blocks.END_PORTAL, Blocks.END_GATEWAY }) {
+            long d = NavBlock.descriptorFor(b.defaultBlockState());
+            assertTrue(NavBlock.isPortal(d), b + " must carry the any-portal bit (walker avoids it)");
+            assertFalse(NavBlock.isNetherPortal(d), b + " must NOT read as a nether portal (never chased)");
+            assertTrue(NavBlock.isEndPortal(d), b + " must read as an end portal (encoding 01)");
+        }
+
+        for (Block b : new Block[] { Blocks.AIR, Blocks.STONE, Blocks.OAK_SIGN }) {
+            long d = NavBlock.descriptorFor(b.defaultBlockState());
+            assertFalse(NavBlock.isPortal(d), b + " is not any portal");
+            assertFalse(NavBlock.isNetherPortal(d), b + " is not a nether portal");
+            assertFalse(NavBlock.isEndPortal(d), b + " is not an end portal");
+        }
     }
 
     // ---- (b) full-section classify: palette-gated collection ----------------------------------
@@ -88,6 +117,20 @@ class NetherPortalIndexTest {
         NavSection section = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(states, false, section.getTraversalGrid(),
                 cell -> fail("collector must not run for a portal-free palette (fast-path gate)"));
+    }
+
+    @Test
+    void endPortalIsNotCollectedIntoTheNetherIndex() {
+        // The nether index feeds portal-FOLLOW (the bot enters nether portals on purpose), so it gates on
+        // isNetherPortal — an END portal / gateway (any-portal but NOT nether) must never be indexed, or the
+        // follower would try to walk the bot into the End expecting a nether teleport.
+        PalettedContainer<BlockState> states = solidStoneSection();
+        states.set(3, 4, 5, Blocks.END_PORTAL.defaultBlockState());
+        states.set(3, 5, 5, Blocks.END_GATEWAY.defaultBlockState());
+
+        NavSection section = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(states, false, section.getTraversalGrid(),
+                cell -> fail("the nether index must not collect an END portal / gateway cell"));
     }
 
     @Test

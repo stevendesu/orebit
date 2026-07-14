@@ -5,6 +5,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 /**
  * Parkour — a running gap jump across {@code g} open columns (MOVEMENT-DESIGN Tier 1 parkour), now with
@@ -341,13 +342,6 @@ public final class Parkour implements Movement {
     private static final int OFFSET_C_LIMIT = 3;
 
     /**
-     * Collision-top bound (sixteenths) an offset-swept FLOOR cell may have ({@link DiagonalParkour}'s
-     * corner rule): a full block (16) is arced over like flat ground; a fence/wall (≈24) clips the feet
-     * path and rejects.
-     */
-    private static final int OFFSET_FLOOR_MAX_TOP_Y = 16;
-
-    /**
      * The static supercover tables — per shape {@code c}, the direction-local {@code (a, l)} pairs of
      * every swept gap column (class Javadoc derivation: {@code (k,0)} for {@code k = 1..c} plus
      * {@code (k,1)} for {@code k = 0..c−1}; the takeoff (0,0) and the landing (c,1) are excluded — each
@@ -404,6 +398,10 @@ public final class Parkour implements Movement {
         if (ctx.caps().jumpHeight() < 1) return;
         if (ctx.reducesJump(x, y, z)) return; // honey-block floor: the reduced jump apex clears no gap
         if (ctx.noJumpFromBody(x, y, z)) return; // cobweb body cell: the stuck multiplier kills take-off velocity
+        if (!ctx.solidFooting(x, y, z)) return; // a jump launches only from solid ground — a vine/ladder/
+        // scaffolding takeoff cell is a CLIMBING state (no 0.42 horizontal launch; input only ejects), not a
+        // ground jump. A climb node is MODE_STANDING and floorSurface reports the full-block sentinel, so
+        // WITHOUT this gate parkour is silently offered off a vine/ladder (the jungle vine→treetop pathology).
 
         // Takeoff head-clearance (source y+3) — direction-independent, proven once. The bot stands here so
         // its feet/head are clear; HEADROOM == JUMP iff y+3 is also clear. No break folding (you cannot
@@ -502,20 +500,47 @@ public final class Parkour implements Movement {
             long fd = ctx.descriptorOf(cx, y, cz, p);
 
             if (ctx.standable(fd)) {
-                // A standable node-level cell ends the direction (never overfly a ledge, v1) — but it can
-                // still be a landing: FLAT when its body is clear, or RISING when the "body blocker" at
-                // y+1 is itself a standable floor (the common raised ledge: a platform floor at y+1 ON
-                // solid ground — the floating-ledge form is the y+1 branch below).
+                // A standable node-level cell normally ENDS the direction (never overfly a ledge, v1) — it
+                // can still be a landing: FLAT when its body is clear, or RISING when the "body blocker" at
+                // y+1 is itself a standable floor (the common raised ledge: a platform floor at y+1 ON solid
+                // ground — the floating-ledge form is the y+1 branch below).
+                //
+                // ISSUE-3 jump-over trigger: an obstacle worth flying OVER (rather than dead-ending the scan)
+                // is treated as an OVERFLYABLE gap column so a landing BEYOND it is found — magma/campfire
+                // jumped clean, snow's +1 rising landing reached, a soul-sand/honey drag avoided. Three terms:
+                //   • DAMAGING (caps-gated) — a hazard floor (magma, campfire).
+                //   • topY < 12 — a SUNK block that TRAPS the walker: max ascend is JUMP_RISE = 20/16 = 1.25,
+                //     so stepping onto a cell whose top is T/16 drops you to T/16 and climbing out onto a +1
+                //     obstacle beyond (top 2.0) costs 2.0 − T/16, which is ≤ 1.25 exactly when T ≥ 12. So
+                //     topY ≥ 12 is always escapable by a plain Ascend (no jump-over owed — and this EXCLUDES
+                //     farmland / dirt-path (15) and soul sand's own height (14), avoiding discarded
+                //     candidates); topY < 12 (snow layer 2, low slab) traps → trigger.
+                //   • isSlow(fd) — a slow FLOOR (soul sand / honey, vanilla getSpeedFactor 0.4 → SURFACE_SLOW)
+                //     is worth jumping OVER to dodge the walk-speed multiplier; honey is a full block (topY 16)
+                //     so ONLY this term catches it. A* still decides via cost, so it is never unnecessary.
+                // A plain full non-damaging non-slow block (topY 16) triggers NOTHING → the scan still
+                // terminates, byte-identical to v1 for ordinary terrain. The walk-ONTO-this-cell candidate
+                // below is still emitted (now priced with the landing floor's own hazard via floorHazardCost),
+                // so A* gets BOTH the walk and the jump and picks the cheaper.
+                boolean trigger = (NavBlock.isDamaging(fd) && ctx.caps().takesDamage())
+                        || NavBlock.topY(fd) < 12
+                        || ctx.isSlow(fd);
+                // Overfly ONLY when the obstacle's body above is clear enough to fly through — the flat and
+                // g==0 sub-cases. A raised ledge (y+1 a standable floor) or otherwise blocked body cannot be
+                // overflown (you climb it or stop), so it keeps the v1 terminate even when triggering.
+                boolean overfly = false;
                 if (g >= 1) {
                     int flags = MovementContext.flagsOf(p);
                     if (ctx.headroomProves(flags, y, MovementContext.HEADROOM_WALK)) {
                         // Body proven clear in one bit test — a flat landing (rising is impossible: a
                         // standable y+1 would have zeroed the HEADROOM bits). Arc verified lazily here.
+                        overfly = trigger; // clear body ⇒ a triggering obstacle can be flown over
                         if (g <= flatMax) {
                             long vs = verifyPrisms(ctx, x, y, z, dx, dz, verified, verifiedTransit, g);
                             if (vs != PRISM_BLOCKED) {
                                 out.accept(cx, y, cz, COST[g] + Float.intBitsToFloat((int) vs)
-                                        + ctx.bodyTransitCost(flags, cx, y, cz));
+                                        + ctx.bodyTransitCost(flags, cx, y, cz)
+                                        + ctx.floorHazardCost(fd));
                                 found |= DIR_EMITTED;
                             }
                         }
@@ -525,6 +550,7 @@ public final class Parkour implements Movement {
                         if (p1 == MovementContext.UNBUILT) return found;
                         long d1 = ctx.descriptorOf(cx, y + 1, cz, p1);
                         if (ctx.passable(d1)) {
+                            overfly = trigger; // feet cell clear ⇒ a triggering obstacle can be flown over
                             if (g <= flatMax) {
                                 int p2 = ctx.packedAt(cx, y + 2, cz);
                                 if (p2 != MovementContext.UNBUILT
@@ -533,13 +559,17 @@ public final class Parkour implements Movement {
                                             verified, verifiedTransit, g);
                                     if (vs != PRISM_BLOCKED) {
                                         out.accept(cx, y, cz, COST[g] + Float.intBitsToFloat((int) vs)
-                                                + ctx.bodyTransitCost(flags, cx, y, cz));
+                                                + ctx.bodyTransitCost(flags, cx, y, cz)
+                                                + ctx.floorHazardCost(fd));
                                         found |= DIR_EMITTED;
                                     }
                                 }
                             }
                         } else if (g <= riseMax && ctx.standable(d1)) {
-                            // Raised-ledge rising form — verify the gap prisms, then the taller arc.
+                            // Raised-ledge rising form — verify the gap prisms, then the taller arc. The
+                            // body above is BLOCKED (a standable y+1), so this obstacle is a ledge you climb,
+                            // never overfly: overfly stays false (which also avoids re-emitting this same
+                            // rising landing via the floating-ledge branch below).
                             long vs = verifyPrisms(ctx, x, y, z, dx, dz, verified, verifiedTransit, g);
                             if (vs != PRISM_BLOCKED
                                     && emitRising(ctx, out, x, y, z, dx, dz, c, g,
@@ -547,14 +577,34 @@ public final class Parkour implements Movement {
                                 found |= DIR_EMITTED;
                             }
                         }
+                        // else: body blocked and not a rising ledge — cannot overfly (overfly stays false).
                     }
+                } else {
+                    // g == 0: the obstacle is ADJACENT to the takeoff (no parkour walk candidate — Traverse
+                    // owns the step onto it). A triggering adjacent obstacle is still overflown so a landing
+                    // beyond it is found (the snow-pit challenge starts here); a blocked body above is
+                    // rejected by the landing-beyond's own verifyPrisms, so no pre-read is owed here.
+                    overfly = trigger;
                 }
-                return found; // standable at node level always ends this direction's scan
+                if (!overfly) {
+                    return found; // full-block ledge / raised ledge / un-flyable body — end the direction
+                }
+                // Triggered + body clear: treat this obstacle as an overflyable gap column and CONTINUE the
+                // landing-beyond search. Skip the rising/falling detection below — those model an OPEN
+                // node-level cell (you can neither rise from nor descend THROUGH a column plugged by this
+                // standable obstacle); its y+1..y+3 transit prism is proven by the eventual landing's
+                // verifyPrisms exactly like any gap column, and a standable cell (topY<=16) is always
+                // overJumpable, so DIR_SAW_GAP is the only bookkeeping owed here.
+                found |= DIR_SAW_GAP;
+                continue;
             }
-            // Node-level cell must be open (the fence/wall exclusion — SHAPE_OTHER at y pokes into the
-            // transit space). A gap cell that's water/lava also fails passable — no jumping over an open
-            // fluid column's surface cell in v1.
-            if (!ctx.passable(fd)) return found;
+            // Node-level cell must be arc-safe as a FLOOR obstacle: open OR a no-taller-than-a-full-block
+            // collision top (overJumpable) — the same rule the offset/diagonal scans use. This deliberately
+            // admits a fluid gap cell: a 1-wide lava/water pool has no collision box, so the sprint arc
+            // clears it with the hitbox always above the fluid (zero contact). Only a fence/wall (topY ≈ 24)
+            // that pokes into the feet path blocks the jump. The body-arc prism (y+1..y+3) stays STRICT
+            // passable below, so a TALL lava/water column is still rejected there — no wading through fluid.
+            if (!ctx.overJumpable(fd)) return found;
             found |= DIR_SAW_GAP; // an OPEN gap column — arms the offset fallback if nothing ever emits
 
             // Floating-ledge RISING detection — the ONE cell above node level the lazy walk still
@@ -719,7 +769,8 @@ public final class Parkour implements Movement {
         // gap transit already accumulated, the raised row's transit, and the landing body priced off the
         // descriptors in hand (equivalent to the flags-gated bodyTransitCost, with zero extra reads).
         float cost = RUNUP_COST + (AIR_COST[g] - RISE_EARLY_TICKS) + COMMIT_PENALTY
-                + transit + riseTransit + ctx.cellTransitCost(d2) + ctx.cellTransitCost(d3);
+                + transit + riseTransit + ctx.cellTransitCost(d2) + ctx.cellTransitCost(d3)
+                + ctx.floorHazardCost(landDesc); // ISSUE-3: landing ON a damaging floor is priced too
         out.accept(cx, y + 1, cz, cost);
         return true;
     }
@@ -763,7 +814,7 @@ public final class Parkour implements Movement {
                 long fd = ctx.descriptorOf(tx, y, tz, p);
                 if (ctx.standable(fd)) {
                     emitOffset(ctx, out, x, y, z, dx, dz, lx, lz, c, tx, tz,
-                            MovementContext.flagsOf(p));
+                            MovementContext.flagsOf(p), fd);
                     break; // nearest-first: the side ends at its first standable cell, emitted or not
                 }
                 if (!ctx.passable(fd)) break; // fence at floor level — every farther cover rejects it
@@ -776,15 +827,16 @@ public final class Parkour implements Movement {
      * in hand). Landing body first — the flat rule: the resident HEADROOM fast path, else read
      * {@code y+1..y+2}; no break folding, a blocked/unbuilt cell kills the candidate — then the shape's
      * swept columns BACKWARDS over the arc via the static {@link #OFFSET_COVER} table: per column the
-     * floor cell must be arc-safe (passable or collision top ≤ {@link #OFFSET_FLOOR_MAX_TOP_Y} — the
-     * corner rule; geometry-only, unpriced) and the transit prism {@code y+1..y+3} passable, priced per
+     * floor cell must be arc-safe ({@link MovementContext#overJumpable} — the corner rule; geometry-only,
+     * unpriced) and the transit prism {@code y+1..y+3} passable, priced per
      * cell off the read-once descriptors in table order (a fixed summation order). UNBUILT stays strict
      * for every consulted cell. Cost is the precomputed displacement-interpolated {@link #OFFSET_COST}
      * plus the accrued transit plus the landing's flags-gated {@link MovementContext#bodyTransitCost}
-     * (the flat-landing precedent). Cold-ish, zero allocation.
+     * (the flat-landing precedent) plus its {@link MovementContext#floorHazardCost} (ISSUE-3: landing ON a
+     * damaging floor is priced in the same {@code costPerHitpoint} currency). Cold-ish, zero allocation.
      */
     private static void emitOffset(MovementContext ctx, CandidateSink out, int x, int y, int z,
-            int dx, int dz, int lx, int lz, int c, int tx, int tz, int flags) {
+            int dx, int dz, int lx, int lz, int c, int tx, int tz, int flags, long floorDesc) {
         // Landing body (feet y+1, head y+2) — flags fast path, then the real cells.
         if (!ctx.headroomProves(flags, y, MovementContext.HEADROOM_WALK)) {
             int p1 = ctx.packedAt(tx, y + 1, tz);
@@ -809,9 +861,9 @@ public final class Parkour implements Movement {
             int pf = ctx.packedAt(kx, y, kz);
             if (pf == MovementContext.UNBUILT) return;
             long df = ctx.descriptorOf(kx, y, kz, pf);
-            // Floor cell arc-safe: open, or solid no taller than a full block (arced over like flat
-            // ground — the DiagonalParkour corner rule; a fence's topY ≈ 24 clips the feet path).
-            if (!ctx.passable(df) && ctx.topYOf(df) > OFFSET_FLOOR_MAX_TOP_Y) return;
+            // Floor cell arc-safe: open/fluid, or solid no taller than a full block (arced over like flat
+            // ground — the shared corner rule; a fence's topY ≈ 24 clips the feet path).
+            if (!ctx.overJumpable(df)) return;
             for (int k = 1; k <= 3; k++) {
                 int pk = ctx.packedAt(kx, y + k, kz);
                 if (pk == MovementContext.UNBUILT) return;
@@ -820,7 +872,8 @@ public final class Parkour implements Movement {
                 transit += ctx.cellTransitCost(dk); // priced off the descriptor in hand (aligned rule)
             }
         }
-        out.accept(tx, y, tz, OFFSET_COST[c] + transit + ctx.bodyTransitCost(flags, tx, y, tz));
+        out.accept(tx, y, tz, OFFSET_COST[c] + transit + ctx.bodyTransitCost(flags, tx, y, tz)
+                + ctx.floorHazardCost(floorDesc)); // ISSUE-3: landing ON a damaging floor is priced too
     }
 
     /**

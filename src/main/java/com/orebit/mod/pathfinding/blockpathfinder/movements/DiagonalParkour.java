@@ -5,6 +5,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 /**
  * DiagonalParkour — a running gap jump along a DIAGONAL, to a same-level landing across {@code g} open
@@ -25,10 +26,37 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  * offered — the old hardcoded {@code MAX_GAP = 3} over-offered a jump the bot attempted and fell (the
  * corner-cut off a 90° turn). Sprint for gaps 2+.
  *
+ * <h2>Jump-OVER a single obstacle — fluids + hazards (FLAT only, ISSUE-3c; mirrors cardinal {@link Parkour})</h2>
+ * A diagonal gap cell no longer has to be strictly {@link MovementContext#passable}. Two admissions bring
+ * the cardinal move's jump-over capability to the diagonal, FLAT case only (rising diagonals stay out of
+ * scope):
+ * <ul>
+ *   <li>a NON-standable gap cell is a valid overflown column when it is {@link MovementContext#overJumpable}
+ *       ({@code topY <= 16}) rather than {@code passable} — so a 1-wide <b>lava/water pool</b> or short
+ *       décor is arced over (the sprint hitbox stays above a no-collision fluid); only a fence/wall
+ *       ({@code topY ≈ 24}) that pokes into the feet path still blocks. This is the SLL/LLL/LLS nether
+ *       corner-cut: a single {@code √2} jump from one solid corner to the opposite, the 3×3 minus the two
+ *       corners filled with lava (centre gap cell AND all four swept corner columns lava — every one
+ *       {@code overJumpable}, every body prism above proven air).</li>
+ *   <li>a STANDABLE obstacle worth flying over — the exact cardinal trigger
+ *       {@code (isDamaging && caps.takesDamage()) || topY < 12 || isSlow} (magma/campfire, a sunk snow/slab
+ *       trap, a soul-sand/honey slow floor) — is likewise treated as an overflyable gap column and the
+ *       scan CONTINUES past it to a landing beyond, while the walk-ONTO candidate still stands so A* picks
+ *       the cheaper. A plain full non-damaging non-slow block triggers nothing → the scan terminates,
+ *       byte-identical to v1 for ordinary diagonal terrain.</li>
+ * </ul>
+ * SAFETY: the overflown obstacle's OWN body prism {@code y+1..y+3} is proven strictly {@code passable} by
+ * the eventual landing's {@link #verifyArc} (each gap column {@code k = 1..g}), and each swept corner
+ * column's {@code y+1..y+3} by {@link #cornerColumnCost}, so a 2-tall lava/water column (obstacle + hazard
+ * at {@code y+1}) — whether in the diagonal line or in a corner — rejects the whole jump. Landings are now
+ * priced {@code + }{@link MovementContext#floorHazardCost} (caps-gated, {@code costPerHitpoint} currency),
+ * matching the cardinal change.
+ *
  * <h2>Clearance geometry — the transit prism + the corner pairs</h2>
- * Like cardinal {@link Parkour}, every gap cell needs its node-level cell open (the SHAPE_OTHER fence
- * exclusion) and the body prism {@code y+1..y+3} passable, and the first standable node-level cell ends
- * the scan (never overfly a ledge; at {@code c == 1} that ledge is plain {@link Diagonal}'s job). ON TOP
+ * Like cardinal {@link Parkour}, every gap cell needs its node-level cell {@link MovementContext#overJumpable
+ * arc-safe} (open / fluid / a full-block top — see the jump-over section) and the body prism
+ * {@code y+1..y+3} passable, and the first NON-triggering standable node-level cell ends the scan (never
+ * overfly a plain ledge; at {@code c == 1} that ledge is plain {@link Diagonal}'s job). ON TOP
  * of that, a diagonal transit clips <b>both corner columns of every cell-to-cell transition</b> — the
  * {@link Diagonal} corner rule extended along the whole jump: for the transition from diagonal cell
  * {@code t} to {@code t+1} the two columns {@code (x+dx·(t+1), z+dz·t)} and {@code (x+dx·t, z+dz·(t+1))}
@@ -106,10 +134,6 @@ public final class DiagonalParkour implements Movement {
     /** The same threshold in RAW {@code ux·Δx + uz·Δz} projection units ({@code = ALONG · √2}). */
     public static final double TAKEOFF_EDGE_RAW = TAKEOFF_EDGE_ALONG * 1.41421356;
 
-    /** Collision-top bound (sixteenths) a corner NODE-level cell may have: a full block (16) is arced
-     *  over; anything taller (fence/wall ≈ 24) clips the feet path. */
-    private static final int CORNER_MAX_TOP_Y = 16;
-
     private static final int[][] DIAGONALS = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
 
     @Override
@@ -118,6 +142,8 @@ public final class DiagonalParkour implements Movement {
         if (ctx.caps().jumpHeight() < 1) return;
         if (ctx.reducesJump(x, y, z)) return; // honey-block floor: the reduced jump apex clears no gap
         if (ctx.noJumpFromBody(x, y, z)) return; // cobweb body cell: the stuck multiplier kills take-off velocity
+        if (!ctx.solidFooting(x, y, z)) return; // solid ground only — a vine/ladder/scaffolding takeoff is a
+        // CLIMBING state (no horizontal launch), not a ground jump (cardinal Parkour's exact gate).
 
         // Takeoff head-clearance (source y+3) — direction-independent, proven once (cardinal Parkour's
         // exact check; no break folding).
@@ -174,39 +200,77 @@ public final class DiagonalParkour implements Movement {
             long fd = ctx.descriptorOf(cx, y, cz, p);
 
             if (ctx.standable(fd)) {
-                // A landing (c >= 2) or an ordinary Diagonal ledge (c == 1): never overfly it.
-                if (g >= 1 && g <= maxGap) {
-                    int flags = MovementContext.flagsOf(p);
-                    boolean clear = ctx.headroomProves(flags, y, MovementContext.HEADROOM_WALK);
-                    if (!clear) {
-                        int p1 = ctx.packedAt(cx, y + 1, cz);
-                        int p2 = ctx.packedAt(cx, y + 2, cz);
-                        clear = p1 != MovementContext.UNBUILT && p2 != MovementContext.UNBUILT
-                                && ctx.passable(ctx.descriptorOf(cx, y + 1, cz, p1))
-                                && ctx.passable(ctx.descriptorOf(cx, y + 2, cz, p2));
-                    }
-                    if (clear) {
-                        // Backwards arc verification (the lazy inversion): the gap prisms + the corner
-                        // pair of each crossed transition, in column order — deferred from the forward
-                        // walk to here, where a landing actually exists. NaN = a blocked/unbuilt cell
-                        // (UNBUILT is as strict as the eager walk for every consulted cell).
-                        float transit = verifyArc(ctx, x, y, z, dx, dz, g);
-                        if (!Float.isNaN(transit)) {
-                            // The corner pair of the FINAL transition (into the landing) — checked last,
-                            // it's the most expensive gate (8 reads).
-                            float corner = cornerPairCost(ctx, x + dx * c, z + dz * (c - 1),
-                                    x + dx * (c - 1), z + dz * c, y);
-                            if (corner >= 0f) {
-                                out.accept(cx, y, cz, RUNUP_COST + AIR_COST[g] + Parkour.COMMIT_PENALTY
-                                        + transit + corner + ctx.bodyTransitCost(flags, cx, y, cz));
-                            }
+                // ISSUE-3c jump-OVER trigger (FLAT diagonal — cardinal Parkour's exact trigger): a
+                // standable obstacle worth flying OVER (damaging hazard / sunk-trap / slow floor) is
+                // treated as an overflyable gap column so a landing BEYOND it is found — magma/campfire
+                // jumped clean (the nether corner-cut), a soul-sand/honey drag dodged. A plain full
+                // non-damaging non-slow block (topY 16) triggers NOTHING → the scan still terminates here,
+                // byte-identical to v1 for ordinary diagonal terrain. The three terms mirror {@link Parkour}:
+                //   • DAMAGING (caps-gated) — a hazard floor.
+                //   • topY < 12 — a SUNK block that TRAPS the walker (max ascend = JUMP_RISE 20/16; a cell
+                //     whose top is T/16 is escapable by a plain Ascend iff T >= 12, so only T < 12 traps).
+                //   • isSlow(fd) — a slow FLOOR worth jumping over the walk-speed multiplier (honey is a
+                //     full block, topY 16, so ONLY this term catches it).
+                boolean trigger = (NavBlock.isDamaging(fd) && ctx.caps().takesDamage())
+                        || NavBlock.topY(fd) < 12
+                        || ctx.isSlow(fd);
+                if (g == 0) {
+                    // c == 1: diagonally ADJACENT. No walk-onto parkour candidate (plain Diagonal owns the
+                    // step). A triggering adjacent obstacle is still overflown so a landing beyond it is
+                    // found; a blocked body above it is rejected by the landing-beyond's own verifyArc, so
+                    // no pre-read is owed here (cardinal Parkour's g == 0 rule).
+                    if (trigger) continue;
+                    return; // plain adjacent ledge — end the direction (v1: Diagonal steps onto it)
+                }
+                // g >= 1: BOTH the walk-ONTO landing here AND an overfly past a triggering obstacle need the
+                // body above (y+1,y+2) clear. HEADROOM_WALK proves it in one bit test on open terrain; a
+                // raised ledge (a standable y+1) or otherwise blocked body is climbed or stops the scan —
+                // never flown over — so a non-clear obstacle keeps the v1 terminate even when triggering.
+                int flags = MovementContext.flagsOf(p);
+                boolean clear = ctx.headroomProves(flags, y, MovementContext.HEADROOM_WALK);
+                if (!clear) {
+                    int p1 = ctx.packedAt(cx, y + 1, cz);
+                    int p2 = ctx.packedAt(cx, y + 2, cz);
+                    clear = p1 != MovementContext.UNBUILT && p2 != MovementContext.UNBUILT
+                            && ctx.passable(ctx.descriptorOf(cx, y + 1, cz, p1))
+                            && ctx.passable(ctx.descriptorOf(cx, y + 2, cz, p2));
+                }
+                if (g <= maxGap && clear) {
+                    // The walk-ONTO landing (c >= 2): emit whether or not we also overfly, so A* weighs
+                    // landing-on vs flying-past and picks the cheaper. Backwards arc verification (the lazy
+                    // inversion): the gap prisms + the corner pair of each crossed transition, in column
+                    // order. NaN = a blocked/unbuilt cell (UNBUILT is as strict as the eager walk).
+                    float transit = verifyArc(ctx, x, y, z, dx, dz, g);
+                    if (!Float.isNaN(transit)) {
+                        // The corner pair of the FINAL transition (into the landing) — checked last, it's
+                        // the most expensive gate (8 reads).
+                        float corner = cornerPairCost(ctx, x + dx * c, z + dz * (c - 1),
+                                x + dx * (c - 1), z + dz * c, y);
+                        if (corner >= 0f) {
+                            out.accept(cx, y, cz, RUNUP_COST + AIR_COST[g] + Parkour.COMMIT_PENALTY
+                                    + transit + corner + ctx.bodyTransitCost(flags, cx, y, cz)
+                                    + ctx.floorHazardCost(fd)); // fix #3: price the landing floor's hazard
                         }
                     }
                 }
-                return; // standable at node level always ends this direction's scan
+                // Overfly a triggering obstacle whose body above is clear (see the clear-gate comment): treat
+                // it as an overflyable gap column and CONTINUE the landing-beyond search. Its y+1..y+3 transit
+                // prism is re-proven by the eventual landing's verifyArc exactly like any gap column, and a
+                // standable cell is always overJumpable (topY <= 16), so nothing extra is owed here. FLAT
+                // only — no rising/falling detection (the column is plugged by this standable obstacle).
+                if (trigger && clear) continue;
+                return; // plain landing / raised ledge / un-flyable body — end the direction (v1)
             }
-            if (!ctx.passable(fd)) return; // fence/fluid at node level — blocked diagonal
-            if (c > maxGap) return;        // gap cell past the last possible landing — nothing farther
+            // A non-standable node-level cell is a GAP column when it is arc-safe as a FLOOR obstacle: open
+            // OR a no-taller-than-a-full-block collision top (overJumpable). This deliberately admits a FLUID
+            // gap cell — a 1-wide lava/water pool has no collision box, so the sprint arc clears it with the
+            // hitbox always above the fluid (zero contact) — the SLL/LLL/LLS nether course. Only a fence/wall
+            // (topY ≈ 24) that pokes into the feet path blocks the jump. The body-arc prism (y+1..y+3) above
+            // this cell stays STRICT passable in verifyArc, so a TALL lava/water column is still rejected
+            // there (no wading through fluid); the corner columns' prisms are likewise proven in
+            // cornerColumnCost, so a hazard column above a corner rejects too.
+            if (!ctx.overJumpable(fd)) return; // fence/wall at node level — blocked diagonal
+            if (c > maxGap) return;            // gap cell past the last possible landing — nothing farther
         }
     }
 
@@ -268,9 +332,9 @@ public final class DiagonalParkour implements Movement {
         int p = ctx.packedAt(x, y, z);
         if (p == MovementContext.UNBUILT) return -1f;
         long d = ctx.descriptorOf(x, y, z, p);
-        // Node level: open, or solid no taller than a full block (arced over like flat ground). A fence/
-        // wall (topY ≈ 24) pokes into the feet path and rejects. Geometry-only — unpriced.
-        if (!ctx.passable(d) && ctx.topYOf(d) > CORNER_MAX_TOP_Y) return -1f;
+        // Node level: open/fluid, or solid no taller than a full block (arced over like flat ground). A
+        // fence/wall (topY ≈ 24) pokes into the feet path and rejects. Geometry-only — unpriced.
+        if (!ctx.overJumpable(d)) return -1f;
         float t = 0f;
         for (int k = 1; k <= 3; k++) {
             int pk = ctx.packedAt(x, y + k, z);
