@@ -53,6 +53,17 @@ public final class RegionMineModel {
     /** The no-inventory baseline model — a stone-tier tool for every category (used by tests / headless plans). */
     public static final RegionMineModel DEFAULT = build(null);
 
+    /**
+     * The FORWARD-pass fixed dig model (FINDINGS-region-pillar-flood.md §1): a <b>wooden-pickaxe</b> economy used
+     * on the region A*'s forward pass <b>regardless of the bot's real inventory</b>. This makes the region
+     * skeleton <b>inventory-independent</b> (a bare-handed bot no longer over-prices digging relative to the
+     * tool-blind pillar cost — the asymmetry that let the flood pick a pillar-up-and-over partial), yet does not
+     * over-index on mining when the bot carries better gear (a diamond bot still prices the skeleton as wooden).
+     * A "safe bare minimum" most bots meet. The REVERSE cost-to-goal field keeps the bot's real tool-aware model
+     * (its job is to feed the block tier accurate costs), so this fixed model is the forward pass ONLY.
+     */
+    public static final RegionMineModel WOODEN = buildFixed(MiningModel.Tier.WOOD);
+
     /** Mine-units (in {@link RegionPathfinder#WALK_PER_BLOCK}) to break one solid block of each hardness nibble. */
     private final float[] unitsByNibble;
 
@@ -74,6 +85,24 @@ public final class RegionMineModel {
             final int cat = soft ? shovelCat : pickCat;
             final boolean toolRequired = !soft; // pickaxe blocks need the tool to harvest; dirt/sand do not
             final float realTicks = MiningModel.regionMineTicks(nib, cat, toolRequired, tierFor(snap, cat));
+            u[nib] = realTicks / WALK_REAL_TICKS;
+        }
+        return new RegionMineModel(u);
+    }
+
+    /**
+     * Build a <b>fixed-tier</b> model — every tool category mined with {@code tier}, ignoring any inventory
+     * snapshot. Inventory-independent (see {@link #WOODEN}); shares {@link #build}'s per-nibble tick math.
+     */
+    private static RegionMineModel buildFixed(MiningModel.Tier tier) {
+        final int pickCat = NavBlock.Tool.PICKAXE.ordinal();
+        final int shovelCat = NavBlock.Tool.SHOVEL.ordinal();
+        final float[] u = new float[NIBBLES];
+        for (int nib = 0; nib < NIBBLES; nib++) {
+            final boolean soft = nib <= SOFT_MAX_NIBBLE;
+            final int cat = soft ? shovelCat : pickCat;
+            final boolean toolRequired = !soft;
+            final float realTicks = MiningModel.regionMineTicks(nib, cat, toolRequired, tier);
             u[nib] = realTicks / WALK_REAL_TICKS;
         }
         return new RegionMineModel(u);
