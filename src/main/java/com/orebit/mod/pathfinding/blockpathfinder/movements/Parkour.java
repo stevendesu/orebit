@@ -386,9 +386,32 @@ public final class Parkour implements Movement {
     /**
      * How far past the takeoff cell's centre (blocks, along the jump axis) the bot runs before jumping —
      * leaves ~0.15 block behind the 0.3-half-width hitbox trailing edge, i.e. jump as late as possible
-     * without stepping off. Tune 0.30–0.40 in-game.
+     * without stepping off. Tune 0.30–0.40 in-game. (The Phase-4 sweep proved a UNIFORM earlier takeoff can't
+     * replace this + Fix 3 without breaking the max-reach + rest-start tiers — see takeoff-timing-sweep.md.)
      */
     public static final double TAKEOFF_EDGE = 0.35;
+
+    /**
+     * Fix 3 — HAZARDOUS gap-floor early-takeoff threshold (along-axis blocks). When the FIRST gap-floor cell
+     * just past the takeoff lip is a takeoff hazard ({@link com.orebit.mod.pathfinding.blockpathfinder.BotSteering#gapFloorHazardAt}
+     * — magma/lava damaging-on-contact, or honey jump-suppressing), the jump must fire BEFORE the bot's
+     * horizontal CENTER crosses the lip (along-proj {@code 0.5}) onto that block, because magma damage is
+     * center-based + needs {@code onGround} and honey's jump factor is read from the block under the center
+     * at launch. The runup trigger becomes PREDICTIVE — {@code proj + 3·vAlong ≥ this}. The {@code 3·vAlong}
+     * lookahead covers the MEASURED latency from the trigger crossing to the last grounded tick: TWO grounded
+     * ticks of runup→takeoff-drive→liftoff, plus one tick of trigger overshoot (the trace showed the jump
+     * input landing the bot airborne 3 ticks after the crossing — a hazard-trial run at {@code 2·v} still left
+     * the last grounded center at proj ≈ 0.58, one block over the magma). At {@code 3·v} the last grounded
+     * center lands at {@code ~[this−v, this]} &lt; {@code 0.5} for both walk and sprint (measured: the normal
+     * edge 0.35 leaves it at proj ≈ 0.82, well past the lip → the damage/suppress window). {@code 0.35} keeps
+     * a ≥0.15-block margin inside the lip while jumping as LATE as is safe (minimal reach cost — the servo
+     * recovers the rest). Non-hazard jumps are UNCHANGED ({@link #TAKEOFF_EDGE}), so every normal trial is
+     * byte-identical. */
+    public static final double HAZARD_TAKEOFF_LOOKAHEAD = 0.35;
+
+    /** Fix 3 predictive lookahead multiplier on the along-axis velocity (see {@link #HAZARD_TAKEOFF_LOOKAHEAD}
+     *  — the measured trigger→last-grounded latency is ~3 ticks). */
+    public static final double HAZARD_TAKEOFF_TICKS = 3.0;
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
@@ -522,6 +545,11 @@ public final class Parkour implements Movement {
                 // terminates, byte-identical to v1 for ordinary terrain. The walk-ONTO-this-cell candidate
                 // below is still emitted (now priced with the landing floor's own hazard via floorHazardCost),
                 // so A* gets BOTH the walk and the jump and picks the cheaper.
+                // INVARIANT this scan relies on (verified 1.21.11 Blocks.java): honey is the ONLY vanilla
+                // block with jumpFactor<1, and it ALSO has speedFactor 0.4, so `isSlow` already catches every
+                // vanilla jump-reducer — no separate `|| jumpReducing` term is needed to overfly (rather than
+                // launch weakly from) one. A MODDED jump-reducer that is NOT slow would slip through; add the
+                // term only if that ever matters. (Follower Fix 3 handles the takeoff-timing side of this.)
                 boolean trigger = (NavBlock.isDamaging(fd) && ctx.caps().takesDamage())
                         || NavBlock.topY(fd) < 12
                         || ctx.isSlow(fd);
@@ -898,6 +926,11 @@ public final class Parkour implements Movement {
     public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
         final int ddx = tx - fx;
         final int ddz = tz - fz;
+        // Fix 3: the FIRST gap-floor cell just past the takeoff lip (node level fy). A hazardous block here
+        // (magma/lava/honey) forces the early takeoff below. Cardinal → one axis is 0; for an offset/diagonal
+        // shape this is the diagonal first cell (the arc's own first over-flown column).
+        final int gapX = fx + Integer.signum(ddx);
+        final int gapZ = fz + Integer.signum(ddz);
         // The takeoff→landing line's NORMALIZED horizontal direction: the (c,±1) offset shapes make
         // (Δx,Δz) non-unit-axis, so the along-line progress projections below need a real unit vector.
         // ONE sqrt at plan BUILD time (cold — one MovePlan per waypoint step, the Pillar precedent); the
@@ -939,9 +972,18 @@ public final class Parkour implements Movement {
                     b.setSprinting(sprint);
                 })
                 // Takeoff trigger: grounded AND the bot's along-axis progress past the start-cell centre
-                // reaches TAKEOFF_EDGE — jump as late as possible without stepping off the lip.
-                .advanceWhen(b -> b.grounded()
-                        && ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5)) >= TAKEOFF_EDGE);
+                // reaches TAKEOFF_EDGE — jump as late as possible without stepping off the lip. Fix 3: when
+                // the first gap-floor cell is a takeoff hazard (magma/lava/honey), switch to the PREDICTIVE
+                // early trigger so the center never crosses the lip onto it on a grounded tick.
+                .advanceWhen(b -> {
+                    if (!b.grounded()) return false;
+                    double proj = ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5));
+                    if (b.gapFloorHazardAt(gapX, fy, gapZ)) {
+                        double vAlong = ux * b.velX() + uz * b.velZ();
+                        return proj + HAZARD_TAKEOFF_TICKS * vAlong >= HAZARD_TAKEOFF_LOOKAHEAD;
+                    }
+                    return proj >= TAKEOFF_EDGE;
+                });
         plan.phase("takeoff")
                 .drive((b, v) -> {
                     SteerControl.steerTowards(b, v);
@@ -968,18 +1010,49 @@ public final class Parkour implements Movement {
                 // the threshold essentially at touchdown, degrading to the v1 drive.
                 .drive((b, v) -> {
                     airborneOnce[0] = true; // arc is live → a grounded return to the start cell is a balk
-                    if (falling
-                            && ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5)) >= gapCleared) {
-                        b.setSprinting(false);
-                        SteerControl.recenterOnTarget(b, v);
+                    if (falling && b.slipperinessAt(tx, ty, tz) >= SteerControl.PARKOUR_ICE_SLIP) {
+                        // FALLING onto ICE (Phase 3) → the predictive servo for the WHOLE arc, exactly like
+                        // flat/rising (NO gapCleared gate). The gate opens only ~1 tick before touchdown on the
+                        // steep falling arc (measured: blue.fall.g4 descended at full sprint vx≈0.26 until proj
+                        // 4.5 = one tick from landing, then slid off unbraked), far too late to bleed the
+                        // momentum on a frictionless landing — the owner's #1 pathology. parkourAirborne handles
+                        // the falling arc natively (predicts touchdown at the LOWER surface ty+1) and its own
+                        // near-edge invariant is the gap guard: it only reverse-brakes when a full-reverse
+                        // touchdown still lands at/beyond the near edge, so it accelerates while short (clears
+                        // the gap) and brakes only as early as is safe — never into the gap. The aggressive
+                        // flag tightens the near-edge margin (more runway + earlier brake) for the reach-heavy
+                        // falling arc.
+                        SteerControl.parkourAirborne(b, v, ux, uz, tx, ty, tz, sprint, true);
+                    } else if (falling) {
+                        // FALLING onto NON-ICE → Fall's open-loop recenter drop-control, BYTE-IDENTICAL to
+                        // before (the stone fall trials falld*/fall*/ctl.fall must stay unchanged): full forward
+                        // until the centre clears the last gap column, then recenter onto the landing column.
+                        if (ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5)) >= gapCleared) {
+                            b.setSprinting(false);
+                            SteerControl.recenterOnTarget(b, v);
+                        } else {
+                            SteerControl.steerTowards(b, v);
+                            b.setSprinting(sprint);
+                        }
                     } else {
-                        SteerControl.steerTowards(b, v);
-                        b.setSprinting(sprint);
+                        // FLAT / RISING: the predictive landing servo (replaces open-loop full-forward) — air-
+                        // brake an overshoot, accelerate a shortfall, never brake short into the gap. Sprint held.
+                        SteerControl.parkourAirborne(b, v, ux, uz, tx, ty, tz, sprint);
                     }
                 })
                 .advanceWhen(b -> b.grounded()); // hold the arc phase until touchdown
         plan.phase("land")
-                .drive(SteerControl::recenterOnTarget)
+                // Brake to the desired point on the ground until grounded on the target cell. FLAT/RISING and
+                // FALLING-onto-ICE use the predictive servo (grounded, the predictor returns the live along-
+                // position → a reverse-brake toward the desired point, the ice-slide arrest); FALLING on NON-ICE
+                // keeps Fall's recenter (byte-identical stone behaviour).
+                .drive((b, v) -> {
+                    if (falling && b.slipperinessAt(tx, ty, tz) < SteerControl.PARKOUR_ICE_SLIP) {
+                        SteerControl.recenterOnTarget(b, v);
+                    } else {
+                        SteerControl.parkourAirborne(b, v, ux, uz, tx, ty, tz, sprint, falling);
+                    }
+                })
                 .done(b -> b.grounded()
                         && b.footX() == tx && b.footY() == ty + 1 && b.footZ() == tz);
         return plan;

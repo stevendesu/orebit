@@ -95,6 +95,12 @@ public final class ParkourCourse {
 
     private static final BlockState FLOOR = Blocks.STONE.defaultBlockState();
     private static final BlockState SLAB = Blocks.SMOOTH_STONE_SLAB.defaultBlockState();
+    /** MAGMA: a full-block DAMAGING floor (hurts an entity standing on it) — the takeoff-timing hazard the
+     *  planner OVERFLIES and Fix 3 must not let the bot stand on during runup. */
+    private static final BlockState MAGMA = Blocks.MAGMA_BLOCK.defaultBlockState();
+    /** HONEY: the only vanilla JUMP-SUPPRESSING block (jumpFactor 0.5) — also slow (speedFactor 0.4). The
+     *  planner overflies it (slow trigger); Fix 3 keeps the center off it so the launch reads full jumpFactor. */
+    private static final BlockState HONEY = Blocks.HONEY_BLOCK.defaultBlockState();
     /** Soul sand: a full-block SLOW floor (speedFactor 0.4, jumpFactor 1.0 — NOT reduced-jump like honey),
      *  so it reaches the envelope's soul-sand row and tightens the offered gaps. */
     private static final BlockState SOUL = Blocks.SOUL_SAND.defaultBlockState();
@@ -126,6 +132,11 @@ public final class ParkourCourse {
         boolean soulRunway;             // soul-sand takeoff+runway (slow floor — tighter envelope row)
         boolean stairRun;               // a staircase-traversal trial (custom build + pass/fail), not a jump
         int stairSteps;                 // number of stair blocks in the run
+        BlockState gapFloor;            // magma/honey placed in the FIRST gap cell (null = normal void gap)
+        boolean assertNoDamage;         // magma-overhang: PASS requires the bot took ZERO damage
+        boolean expectRefusal;          // beyond-envelope geometry the planner rightly declines -> PASS = clean refusal
+        String plannerGap;              // != null: a KNOWN PLANNER GAP — any FAIL uses this reason, counted apart
+        int gapFloorX, gapFloorZ;       // the first gap cell just past the takeoff lip (Fix 3 hazard site)
         final Approach approach;
         final int rdx, rdz;             // approach (runway) direction
         final int jdx, jdy, jdz;        // jump vector: takeoff cell -> landing cell
@@ -186,6 +197,17 @@ public final class ParkourCourse {
             double len = Math.sqrt((double) (jdx * jdx + jdz * jdz));
             this.ujx = jdx / len;
             this.ujz = jdz / len;
+            // The first gap cell just past the takeoff lip (node level Y0) — where an overhang/honey-in-gap
+            // trial places its hazard block, and the cell Fix 3's early-takeoff keeps the bot's center off.
+            this.gapFloorX = takeoffX + Integer.signum(jdx);
+            this.gapFloorZ = takeoffZ + Integer.signum(jdz);
+        }
+
+        /** Along the jump axis, the projection of the LANDING-cell centre from the takeoff centre (= the jump
+         *  displacement {@code sqrt(jdx²+jdz²)}). A honey-in-gap diagnostic's shortfall is this minus the max
+         *  projection the bot actually reached. */
+        double landCenterProj() {
+            return Math.sqrt((double) (jdx * jdx + jdz * jdz));
         }
 
         double proj(double x, double z) {
@@ -214,7 +236,9 @@ public final class ParkourCourse {
         boolean wasGrounded = true;
         double prevX, prevZ;
         String prevMove = "";
-        int passed, failed;
+        int passed, failed, plannerGap;   // plannerGap = intended RED reminders, counted apart from real fails
+        double minHealth;           // lowest HP seen this trial (magma-overhang damage detection)
+        double maxProj = -1e9;      // furthest along-jump-axis projection reached (honey-gap shortfall)
 
         Course() {
             buildTrialList();
@@ -279,6 +303,109 @@ public final class ParkourCourse {
             // move is never head-blocked — it isolates the feet-Y / reached model (bug 2), not the jump gate.
             stairUp("stairup", 4);
             stairDown("stairdown", 4);
+
+            // ==== PHASE 2 additions =========================================================================
+            // (A) FLAT PRECISION-on-stone — the REAL overshoot validation. flat1/flat2 above use a WIDE REACH
+            //     platform, so an overshoot still lands (masked). These single-block (1-wide landing, drop past
+            //     it) versions FALL on an overshoot, so they only pass if the airborne servo centres the landing.
+            //     flatp1 = displacement 2 (walk); flatp2 = displacement 3 (sprint).
+            cardPrec("flatp1", 2);
+            cardPrec("flatp2", 3);
+            // (B) OVERHANG hazards — the planner jumps OVER a floor-level magma / honey block (g2 flat, so the
+            //     jump-over is cheaper than walk-onto-then-jump and the planner routes the jump). Fix 3 fires the
+            //     jump before the center crosses the lip, so the bot never stands on the hazard. REACH landing —
+            //     the assertion is "no damage" (magma) / "still clears" (honey), not precision. The magma trial
+            //     is WALKIN-ONLY (the spec's "straight path"): a REST start teleported onto the takeoff cell
+            //     immediately adjacent to the magma has NO runway, so the unavoidable ~3-tick liftoff latency
+            //     carries the center onto the magma before it can leave the ground (sprint) — or a sneak/slow
+            //     start falls short of the gap. That is a PLANNER concern (don't offer a hazard-overfly from a
+            //     no-runup standstill), parallel to the honey-gap reach limit, not a follower fix. Honey needs
+            //     no such carve-out (no contact damage) and passes from both approaches.
+            overhang("magmaov", 3, MAGMA, true, false);   // walkin = real PASS (zero damage)
+            // magmaov.REST is a KNOWN PLANNER GAP: a REST start teleported onto the takeoff cell immediately
+            // adjacent to the magma has NO runway, so the unavoidable ~3-tick liftoff latency carries the center
+            // onto the magma (sprint → damage) or a slow/sneak start falls short — measured unmakeable by the
+            // follower (Phase 2). It's RED as a reminder that the planner should not offer a hazard-overfly from
+            // a no-runup standstill; it becomes an expected-refusal PASS once the planner arc stops offering it.
+            plannerGapTrial("magmaov.rest", Approach.REST, 3, 0, 0, Template.REACH, MAGMA, true,
+                    "PLANNER-GAP: hazard-overfly from no-runway standstill");
+            overhang("honeyov", 3, HONEY, false, true);   // both approaches = real PASS (jump clears)
+            // (C) HONEY-IN-FIRST-GAP-BLOCK across tiers (owner-requested). Honey in the first gap cell + a
+            //     single-block (PRECISION) landing so a miss FALLS. rise2/flat3/fall4 are KNOWN PLANNER GAPS —
+            //     the Phase-4 sweep proved honey-in-first-gap is unmakeable on a max-reach tier by ANY follower
+            //     takeoff timing (the shortfall is the honey reach cost, not the launch slash), so the envelope
+            //     should not offer them; they are RED reminders (become expected-refusal PASSes once the planner
+            //     stops offering them). diag2 has spare margin and CLEARS → it stays a REAL trial (PASS/FAIL).
+            honeyGap("hgap.rise2", 3, 1, 0, "PLANNER-GAP: honey-in-first-gap unmakeable on max-reach tier");
+            honeyGap("hgap.flat3", 4, 0, 0, "PLANNER-GAP: honey-in-first-gap unmakeable on max-reach tier");
+            honeyGap("hgap.fall4", 5, -1, 0, "PLANNER-GAP: honey-in-first-gap unmakeable on max-reach tier");
+            honeyGap("hgap.diag2", 3, 0, 3, null);   // real trial — the follower clears it
+            // ==== PHASE 2 negative-tests: the conservative-refusal invariant ================================
+            // The planner rightly DECLINES these beyond-envelope / reduced-takeoff geometries (owner-confirmed
+            // correct). Mark them expectRefusal so a CLEAN "nav gave up" scores PASS — and, crucially, a day the
+            // planner wrongly starts OFFERING one of these impossible jumps (bot leaps to its death) scores FAIL.
+            markRefusal("rise3.walkin", "rise3.rest",
+                    "diag3.walkin", "diag3.rest",
+                    "slabflat3.walkin", "slabflat3.rest",
+                    "slabrise1.walkin", "slabrise1.rest",
+                    "soulflat2.walkin", "soulflat2.rest");
+        }
+
+        /** Flat cardinal jump with the single-block PRECISION landing (overshoot falls), both precursors. */
+        void cardPrec(String name, int jdx) {
+            addTrial(name + ".walkin", Approach.WALKIN, 1, 0, jdx, 0, 0, Template.PRECISION, false);
+            addTrial(name + ".rest", Approach.REST, 1, 0, jdx, 0, 0, Template.PRECISION, false);
+        }
+
+        /** A flat jump OVER a hazard block ({@code gapState}) placed in the first gap cell. REACH landing;
+         *  {@code assertNoDamage} makes any HP loss a FAIL (the magma case). {@code restToo} adds the REST
+         *  precursor (dropped for magma — a no-runup standstill next to magma is a planner concern). */
+        void overhang(String name, int jdx, BlockState gapState, boolean assertNoDamage, boolean restToo) {
+            addHazardGapTrial(name + ".walkin", Approach.WALKIN, jdx, 0, 0, Template.REACH, gapState,
+                    assertNoDamage, null);
+            if (restToo) {
+                addHazardGapTrial(name + ".rest", Approach.REST, jdx, 0, 0, Template.REACH, gapState,
+                        assertNoDamage, null);
+            }
+        }
+
+        /** Honey-in-first-gap-block trial for one tier (walkin — the best-case approach speed, so a shortfall is
+         *  unambiguously a reach-budget problem). PRECISION landing so a short jump FALLS. {@code plannerGap} !=
+         *  null marks it a KNOWN-PLANNER-GAP (a fall scores FAIL with that reason, counted separately); null = a
+         *  real trial (fall = a real FAIL, clear = a real PASS). */
+        void honeyGap(String name, int jdx, int jdy, int jdz, String plannerGap) {
+            addHazardGapTrial(name, Approach.WALKIN, jdx, jdy, jdz, Template.PRECISION, HONEY, false, plannerGap);
+        }
+
+        /** A hazard-overfly trial that is a KNOWN PLANNER GAP (a REST magma-overhang): any FAIL is reported with
+         *  {@code plannerGap} as the reason and counted separately from real pass/fail. */
+        void plannerGapTrial(String name, Approach a, int jdx, int jdy, int jdz, Template t,
+                BlockState gapState, boolean assertNoDamage, String plannerGap) {
+            addHazardGapTrial(name, a, jdx, jdy, jdz, t, gapState, assertNoDamage, plannerGap);
+        }
+
+        void addHazardGapTrial(String name, Approach a, int jdx, int jdy, int jdz, Template t,
+                BlockState gapState, boolean assertNoDamage, String plannerGap) {
+            int rdx = jdx >= 0 ? 1 : -1;
+            int rdz = (jdz != 0 && jdx == 0) ? (jdz >= 0 ? 1 : -1) : 0;
+            // For a diagonal jump, approach along the diagonal (matches diag()); else along the jump axis.
+            if (jdx != 0 && jdz != 0) { rdx = 1; rdz = 1; }
+            int[] b = nextBase();
+            Trial tr = new Trial(name, a, rdx, rdz, jdx, jdy, jdz, t, false, b[0], b[1]);
+            tr.gapFloor = gapState;
+            tr.assertNoDamage = assertNoDamage;
+            tr.plannerGap = plannerGap;
+            trials.add(tr);
+        }
+
+        /** Mark the named trials (already added) as conservative-refusal negative-tests: a clean "nav gave up"
+         *  is their PASS; an offered route (attempt-and-fall, or reaching the goal) is their FAIL. */
+        void markRefusal(String... names) {
+            for (String n : names) {
+                for (Trial t : trials) {
+                    if (t.name.equals(n)) { t.expectRefusal = true; break; }
+                }
+            }
         }
 
         /** The grid base (snake-ordered) for the trial at position {@code trials.size()}. */
@@ -419,6 +546,8 @@ public final class ParkourCourse {
             stairAirborne = false;
             takeoffSpeed = -1;
             wasGrounded = true;
+            minHealth = bot.getMaxHealth();
+            maxProj = -1e9;
             prevX = tr.startX;
             prevZ = tr.startZ;
             prevMove = "";
@@ -452,17 +581,66 @@ public final class ParkourCourse {
 
             if (tr.stairRun) { tickStair(tr); return; }
 
+            double proj = tr.proj(bot.getX(), bot.getZ());
+            if (proj > maxProj) maxProj = proj;
+            double hp = bot.getHealth();
+            if (hp < minHealth) minHealth = hp;
+            if (proj > 0.6) leftTakeoff = true;
+
+            boolean fell = leftTakeoff && bot.getY() < tr.landedFeetY - 1.6;
+            boolean atGoal = bot.mode() == AllyBotEntity.Mode.STAY && bot.getY() > tr.landedFeetY - 1.5;
+
+            // A KNOWN-PLANNER-GAP trial (honey-in-first-gap max-reach tier, or the no-runway magma-overhang) is
+            // scored by the normal fell/atGoal logic below — but record() rewrites any FAIL to its PLANNER-GAP
+            // reason and counts it apart from real pass/fail (so it reads as an intended RED reminder, never a
+            // follower regression). It goes green only if the follower unexpectedly clears it (a real PASS).
+
+            // NEGATIVE-TEST: a beyond-envelope geometry the planner is EXPECTED to decline. A clean refusal
+            // (nav gave up, bot never took a route) is the PASS; an OFFERED route (it attempted+fell, or
+            // reached the goal) is the FAIL — that would mean the planner started offering an impossible jump.
+            if (tr.expectRefusal) {
+                if (!bot.isAlive() || fell) {
+                    record(tr, "FAIL", "route OFFERED then fell (expected a refusal)");
+                    return;
+                }
+                if (atGoal) {
+                    record(tr, "FAIL", "route OFFERED, reached goal (expected a refusal)");
+                    return;
+                }
+                if (bot.navigator().navGaveUp()) {
+                    if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
+                        navRetries++;
+                        bot.comeTo(tr.goal);
+                        return;
+                    }
+                    record(tr, "PASS", "correctly refused (no route offered)");
+                    return;
+                }
+                if (attemptTicks >= ATTEMPT_BUDGET) {
+                    record(tr, leftTakeoff ? "FAIL" : "PASS",
+                            leftTakeoff ? "left the takeoff cell without a clean refusal (timeout)"
+                                        : "refused (held at takeoff, no route taken)");
+                }
+                return;
+            }
+
             if (!bot.isAlive()) {
                 record(tr, "FAIL", "died");
                 return;
             }
-            double proj = tr.proj(bot.getX(), bot.getZ());
-            if (proj > 0.6) leftTakeoff = true;
-            if (bot.mode() == AllyBotEntity.Mode.STAY && bot.getY() > tr.landedFeetY - 1.5) {
-                record(tr, "PASS", "reached goal");
+            if (atGoal) {
+                // Magma-overhang: reaching the goal is not enough — any HP lost means the bot stood on the
+                // hazard during takeoff (Fix 3 failed), so that is a FAIL.
+                if (tr.assertNoDamage && minHealth < bot.getMaxHealth() - 0.01) {
+                    record(tr, "FAIL", String.format(Locale.ROOT,
+                            "reached goal but took %.1f damage (stood on the hazard)",
+                            bot.getMaxHealth() - minHealth));
+                } else {
+                    record(tr, "PASS", "reached goal");
+                }
                 return;
             }
-            if (leftTakeoff && bot.getY() < tr.landedFeetY - 1.6) {
+            if (fell) {
                 record(tr, "FAIL", "fell");
                 return;
             }
@@ -554,11 +732,23 @@ public final class ParkourCourse {
         }
 
         void record(Trial tr, String result, String reason) {
-            results.add(String.format(Locale.ROOT, "%s = %s (%s) takeoffSpd=%s finalY=%.2f",
+            // KNOWN-PLANNER-GAP: a FAIL on such a trial is an INTENDED RED reminder, not a follower regression —
+            // stamp it with the PLANNER-GAP: reason and count it apart from real pass/fail (finish() reports the
+            // three buckets separately). A PASS (the follower unexpectedly cleared it) counts as a real pass.
+            boolean gapFail = result.equals("FAIL") && tr.plannerGap != null;
+            if (gapFail) reason = tr.plannerGap + " (shortfall " + String.format(Locale.ROOT, "%.2f",
+                    tr.landCenterProj() - maxProj) + ")";
+            // maxProj / shortfall / minHP are the Phase-2 diagnostics (honey-gap reach shortfall + magma HP
+            // loss); harmless-but-uninformative for the stair/refusal trials.
+            String proj = maxProj <= -1e8 ? "n/a" : String.format(Locale.ROOT, "%.2f", maxProj);
+            String shortfall = maxProj <= -1e8 ? "n/a"
+                    : String.format(Locale.ROOT, "%.2f", tr.landCenterProj() - maxProj);
+            results.add(String.format(Locale.ROOT,
+                    "%s = %s (%s) takeoffSpd=%s finalY=%.2f maxProj=%s shortfall=%s minHP=%.1f",
                     tr.name, result, reason,
                     takeoffSpeed < 0 ? "n/a" : String.format(Locale.ROOT, "%.4f", takeoffSpeed),
-                    bot.getY()));
-            if (result.equals("PASS")) passed++; else failed++;
+                    bot.getY(), proj, shortfall, minHealth));
+            if (result.equals("PASS")) passed++; else if (gapFail) plannerGap++; else failed++;
             OrebitCommon.LOGGER.info("[Orebit/parkour] {} -> {} ({}) takeoffSpd={} finalY={}",
                     tr.name, result, reason,
                     takeoffSpeed < 0 ? "n/a" : String.format(Locale.ROOT, "%.3f", takeoffSpeed),
@@ -581,6 +771,12 @@ public final class ParkourCourse {
                 else if (tr.soulRunway) placeState(cx, Y0, cz, SOUL);
                 else if (tr.wideRunway) placeWide(cx, Y0, cz, tr.rdx, tr.rdz);
                 else place(cx, Y0, cz);
+            }
+            // PHASE 2: a hazard block in the FIRST gap cell (magma/honey overhang, honey-in-gap diagnostic).
+            // At node level Y0 (the arc passes over it); the planner overflies it, Fix 3 keeps the bot's center
+            // off it during the grounded runup.
+            if (tr.gapFloor != null) {
+                placeState(tr.gapFloorX, Y0, tr.gapFloorZ, tr.gapFloor);
             }
             if (tr.walled) {
                 // A 2-high wall along the +continuation side of the runway (every runway cell BEFORE the takeoff
@@ -663,7 +859,8 @@ public final class ParkourCourse {
                 kv(w, "reason", reason);
                 kv(w, "trials", trials.size());
                 kv(w, "passed", passed);
-                kv(w, "failed", failed);
+                kv(w, "failed", failed);                 // REAL follower failures (must be 0)
+                kv(w, "knownPlannerGap", plannerGap);    // intended RED reminders, NOT follower regressions
                 for (String line : results) {
                     w.write(line);
                     w.write('\n');
@@ -672,8 +869,8 @@ public final class ParkourCourse {
                 OrebitCommon.LOGGER.error("[Orebit/parkour] could not write {}", file, e);
             }
             try { if (trace != null) trace.close(); } catch (IOException ignored) { }
-            OrebitCommon.LOGGER.info("[Orebit/parkour] DONE ({}) — {} passed / {} failed of {} — halting",
-                    reason, passed, failed, trials.size());
+            OrebitCommon.LOGGER.info("[Orebit/parkour] DONE ({}) — {} passed / {} real-failed / {} known-planner-gap "
+                    + "of {} — halting", reason, passed, failed, plannerGap, trials.size());
             server.halt(false);
             Thread exiter = new Thread(() -> {
                 server.halt(true);

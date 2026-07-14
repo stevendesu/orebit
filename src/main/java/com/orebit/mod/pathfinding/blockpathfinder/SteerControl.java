@@ -654,6 +654,199 @@ public final class SteerControl {
         }
     }
 
+    // ---- parkour predictive-airborne servo constants (see parkourAirborne) ---------------------------
+    /** Vanilla sprint horizontal ground-accel (the {@code a} in the airborne recurrence); walk is {@link
+     *  #PARKOUR_A_WALK}. Both feed the arc predictor and match the follower's held sprint state. */
+    static final double PARKOUR_A_SPRINT = 0.026;
+    static final double PARKOUR_A_WALK = 0.02;
+    /** Airborne horizontal drag / vertical drag / gravity — the verified 1.21.11 constants (spec §physics):
+     *  {@code v←(v+0.98·a·dir)·0.91}, {@code vy←(vy−0.08)·0.98}, displacement uses {@code v_t}. */
+    static final double PARKOUR_H_DRAG = 0.91;
+    static final double PARKOUR_V_DRAG = 0.98;
+    static final double PARKOUR_GRAVITY = 0.08;
+    static final double PARKOUR_INPUT = 0.98; // the 0.98 multiplying the accel input in the recurrence
+    /** Predictor loop cap (ticks) — the longest shipped parkour arc is ~18 t (a −4 fall); 30 is slack. LATENT
+     *  cap: no shipped arc exceeds it, so it never truncates a real prediction; were a deeper-fall arc ever
+     *  offered, hitting the cap returns an early (shorter) along-position that only biases the servo toward
+     *  braking — and the bot still physically lands by gravity, so the cap can never cause an under-shoot. */
+    static final int PARKOUR_PREDICT_MAXT = 30;
+    /** Player half-width margin (blocks): "touchdown is on the cell" means the predicted along-axis landing
+     *  sits within {@code [Cn+MARGIN, Cf−MARGIN]} of the 1-wide landing cell (Cn/Cf = near/far edge). The
+     *  near-edge form {@code C−0.5+MARGIN} is the HARD floor the air-brake may never predict below (never
+     *  brake the bot short into the gap/void). */
+    static final double PARKOUR_CELL_MARGIN = 0.3;
+    /** Predicted-touchdown dead-band (blocks): within this of the desired along-axis point the servo neither
+     *  accelerates nor brakes (holds current along momentum) — hysteresis so it doesn't chatter thrust. */
+    static final double PARKOUR_PREDICT_DEAD = 0.15;
+    /** Along-axis desired-speed CEILING when the servo needs to ACCELERATE (predicted short): set above the
+     *  sprint terminal so the forward key saturates, exactly like {@link #SERVO_GROUND_CRUISE}. */
+    static final double PARKOUR_CRUISE = 0.35;
+    /** Landing-block friction at/above which the surface is treated as ICE (can't brake post-touchdown), so
+     *  the servo aims the cell CENTER/near-edge and brakes to arrive slow rather than carrying momentum to the
+     *  far edge. Public so the FALLING airborne handoff (Parkour) can gate the ice-only servo path on it. */
+    public static final double PARKOUR_ICE_SLIP = 0.98;
+    /** How far past the cell CENTER (blocks, toward the far edge) a colinear continuation (a chain jump onto
+     *  non-ice) aims its predicted touchdown — carries momentum for the next leg while staying within the cell
+     *  ({@code < 0.5−MARGIN}). Zero on ice / at a turn / on arrival (aim dead-center). */
+    static final double PARKOUR_CARRY_AHEAD = 0.2;
+    /** Tighter near-edge margin (blocks) for the FALLING-onto-ICE aggressive path ({@link
+     *  #parkourAirborne} 9-arg): smaller than the standard {@link #PARKOUR_CELL_MARGIN} half-width so the servo
+     *  lands the bot nearer the near edge (more cell runway) and brakes earlier — the extra bite a 4-gap fall
+     *  needs to arrest on a 1-wide frictionless cell. Kept a safe distance in from the edge; the full-reverse
+     *  invariant still guarantees touchdown never falls short of it into the gap. */
+    static final double PARKOUR_ICE_FALL_MARGIN = 0.15;
+
+    /**
+     * The parkour <b>predictive-airborne servo</b> — the closed-loop replacement for the open-loop "hold full
+     * forward + sprint to touchdown" airborne drive (DESIGN-parkour-envelope; the ice-overshoot / short-flat
+     * pathologies). Called every airborne (and, for flat/rising, land) tick by {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour#plan}/{@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour#plan} with the jump-axis unit
+     * {@code (ux,uz)} and the landing floor cell {@code (tx,ty,tz)}. It steers so the bot's PREDICTED along-axis
+     * touchdown hits a chosen point in the landing cell, air-braking an overshoot with reverse-thrust and
+     * accelerating a shortfall — input-only (look + forward), never a velocity write, exactly like the ground
+     * and swim servos.
+     *
+     * <h2>Per tick</h2>
+     * <ol>
+     *   <li><b>Arc predictor</b> ({@link #predictAlongTouchdown}, allocation-free ≤{@link #PARKOUR_PREDICT_MAXT}-tick
+     *       loop): integrate the verified 1.21.11 recurrence forward from the bot's current along-axis position
+     *       {@code s} / along-axis velocity {@code v} / height {@code y} / {@code vy} under a policy (dir
+     *       0/+1/−1) until the feet descend to the landing surface {@code ty+1}, returning the predicted
+     *       along-axis touchdown {@code P}.</li>
+     *   <li><b>Desired point</b> {@code D} (along-axis): the landing-cell CENTER {@code C} by default, shifted
+     *       toward the far edge by {@link #PARKOUR_CARRY_AHEAD} for a COLINEAR non-ice continuation (a chain —
+     *       carry momentum for the next leg), and pulled back to the NEAR edge ({@code C−0.5+}{@link
+     *       #PARKOUR_CELL_MARGIN}) for a PURE ARRIVAL on ICE (no next waypoint — the STOP case), where friction
+     *       won't arrest the touchdown speed so the servo must brake hardest and land furthest back to keep the
+     *       bot on the 1-wide cell. Read from {@link SteerView#hasNext}/{@code nx}/{@code nz} + the landing
+     *       block's {@link BotSteering#slipperinessAt slipperiness}.</li>
+     *   <li><b>Control law</b>: predicted {@code P} short of {@code D} → accelerate ({@link #PARKOUR_CRUISE}
+     *       forward); {@code P} past {@code D} → reverse-thrust brake, but ONLY if the predictor UNDER FULL
+     *       REVERSE still lands at/beyond the near-edge floor {@code C−0.5+}{@link #PARKOUR_CELL_MARGIN} — the
+     *       HARD INVARIANT that the brake never drops touchdown short into the gap/void. When braking would
+     *       undershoot, the servo COASTS (preserves reach) and brakes a later tick, once the shrinking airtime
+     *       makes a full-reverse touchdown land safely: this is what guarantees "brake as late as is safe,
+     *       never into the gap." Sprint stays ON the whole arc (the caller holds it) — {@code a=0.026} works in
+     *       reverse, so W is always pressed and the yaw alone flips forward↔brake.</li>
+     *   <li><b>Cross-axis</b> centering toward the landing column centerline ({@link #SERVO_CROSS_GAIN}/
+     *       {@link #SERVO_CROSS_CAP}, the ground-servo lever) folds into the desired velocity so a 1-wide
+     *       landing lane is held.</li>
+     * </ol>
+     * The desired point is ALWAYS inside the landing cell (a real, arc-verified landing), so reverse-thrust
+     * never aims the bot over a gap/lava column — the hazard-awareness the spec asks for falls out of "aim only
+     * inside the landing cell" plus the near-edge invariant. Cold (tick-rate), small doubles only.
+     */
+    public static void parkourAirborne(BotSteering b, SteerView p, double ux, double uz,
+                                       int tx, int ty, int tz, boolean sprint) {
+        parkourAirborne(b, p, ux, uz, tx, ty, tz, sprint, false);
+    }
+
+    /**
+     * As {@link #parkourAirborne(BotSteering, SteerView, double, double, int, int, int, boolean)} with an
+     * {@code iceFallAggressive} lever for the FALLING-onto-ICE case (Phase 3): a falling jump's reach momentum
+     * can't be fully bled inside a 1-wide zero-runout ice cell (the reach-vs-brake conflict), so on ICE it uses
+     * a TIGHTER near-edge margin ({@link #PARKOUR_ICE_FALL_MARGIN}) — the invariant floor drops, so the servo
+     * both starts reverse-braking EARLIER (more speed shed) and lands the bot FURTHER back on the cell (more
+     * runway to arrest the residual slide). Still safe: the invariant is a FULL-REVERSE prediction, so actual
+     * touchdown is guaranteed at/beyond the (tighter) near-edge floor — never into the gap. Flat/rising and
+     * non-ice pass {@code false} (the standard 0.3 margin), so their behaviour is unchanged.
+     */
+    public static void parkourAirborne(BotSteering b, SteerView p, double ux, double uz,
+                                       int tx, int ty, int tz, boolean sprint, boolean iceFallAggressive) {
+        final double accel = sprint ? PARKOUR_A_SPRINT : PARKOUR_A_WALK;
+        final double landY = ty + 1.0;                       // feet rest on the landing floor's top face
+        // Along-axis frame: s = along position, v = along velocity; cross-axis = 90 deg left of the jump axis.
+        final double s = b.x() * ux + b.z() * uz;
+        final double v = b.velX() * ux + b.velZ() * uz;
+        final double crossUx = -uz, crossUz = ux;
+        final double C = (tx + 0.5) * ux + (tz + 0.5) * uz;              // landing centre, along-axis
+        boolean ice = b.slipperinessAt(tx, ty, tz) >= PARKOUR_ICE_SLIP;
+        // Near-edge margin: the tighter falling-ice value when armed + on ice (max runway / earliest brake),
+        // else the standard player-half-width margin.
+        final double margin = (iceFallAggressive && ice) ? PARKOUR_ICE_FALL_MARGIN : PARKOUR_CELL_MARGIN;
+        final double cnSafe = C - 0.5 + margin;                        // hard near-edge floor (never predict below)
+
+        // Desired along-axis point: carry momentum toward the far edge for a colinear non-ice chain, else centre.
+        boolean colinear = false;
+        if (p.hasNext()) {
+            double ndx = p.nx() - p.tx(), ndz = p.nz() - p.tz();
+            double nl = Math.sqrt(ndx * ndx + ndz * ndz);
+            if (nl > EPS) colinear = (ndx * ux + ndz * uz) / nl >= STRAIGHT_DOT;
+        }
+        double d;
+        if (colinear && !ice) {
+            d = C + PARKOUR_CARRY_AHEAD;         // stone chain/sheet: carry momentum toward the next leg
+        } else if (ice && !p.hasNext()) {
+            // PURE ARRIVAL on a 1-wide ice cell (the STOP case, no next waypoint): friction won't stop the
+            // bot post-touchdown, so aim the NEAR edge — the servo brakes hardest/earliest (slowest safe
+            // landing) AND lands as far back as the invariant allows, giving the full cell width to arrest
+            // the residual slide. (A faster centre-aimed landing slides off the far edge — the g3 case.)
+            d = cnSafe;
+        } else {
+            d = C;                               // stone arrival/turn, ICE turn (has-next redirect bleeds it),
+                                                 // or ICE colinear chain (keep momentum for the next leg)
+        }
+        if (d > C + 0.5 - margin) d = C + 0.5 - margin; // keep the aim inside the cell
+
+        // Predict the neutral-coast touchdown, then choose the along-axis desired velocity.
+        double pNeutral = predictAlongTouchdown(s, v, b.y(), b.velY(), landY, 0, accel);
+        double desiredAlong;
+        if (pNeutral < d - PARKOUR_PREDICT_DEAD) {
+            desiredAlong = PARKOUR_CRUISE;                    // predicted short → accelerate forward
+        } else if (pNeutral > d + PARKOUR_PREDICT_DEAD) {
+            double pReverse = predictAlongTouchdown(s, v, b.y(), b.velY(), landY, -1, accel);
+            desiredAlong = (pReverse >= cnSafe) ? 0.0        // safe to brake to a stop-target (reverse-thrust)
+                                                : v;          // braking would undershoot into the gap → coast
+        } else {
+            desiredAlong = v;                                 // on target → hold current along momentum
+        }
+
+        // Cross-track return toward the landing centerline (independent of the along servo — the ice lane-hold).
+        double botCross = b.x() * crossUx + b.z() * crossUz;
+        double centerCross = (tx + 0.5) * crossUx + (tz + 0.5) * crossUz;
+        double crossErr = centerCross - botCross;
+        double desiredCross = Math.max(-SERVO_CROSS_CAP, Math.min(SERVO_CROSS_CAP, SERVO_CROSS_GAIN * crossErr));
+
+        // Desired velocity → velocity error → face along it, thrust proportional (reverse when the error is
+        // up-track). Same servo actuation as swimServo/groundServo, no depth pitch (parkour is a ballistic arc).
+        double dvx = ux * desiredAlong + crossUx * desiredCross;
+        double dvz = uz * desiredAlong + crossUz * desiredCross;
+        double errx = dvx - b.velX();
+        double errz = dvz - b.velZ();
+        double emag = Math.sqrt(errx * errx + errz * errz);
+        if (emag < EPS) {
+            b.faceHorizontally(ux, uz);
+            b.setForward(0.0f);
+        } else {
+            b.faceHorizontally(errx, errz);
+            b.setForward((float) Math.min(1.0, SERVO_GAIN * emag));
+        }
+        b.setSprinting(sprint);
+    }
+
+    /**
+     * The parkour arc predictor: integrate the verified 1.21.11 ballistic recurrence forward from
+     * {@code (s,v,y,vy)} under a fixed horizontal policy {@code dir} ({@code +1} face-forward, {@code −1}
+     * face-reverse/air-brake, {@code 0} neutral coast) until the feet descend to the landing surface
+     * {@code landY}, and return the predicted along-axis touchdown position. Allocation-free, ≤{@link
+     * #PARKOUR_PREDICT_MAXT} iterations. Recurrence (spec §physics): displacement into a tick uses {@code v_t}
+     * (before the drag multiply), {@code v←(v+0.98·a·dir)·0.91}, {@code y←y+vy}, {@code vy←(vy−0.08)·0.98}.
+     * The termination waits for a DESCENDING crossing ({@code vy<0}) so the rising half of the arc (feet still
+     * at/above {@code landY} just after take-off) doesn't false-trigger.
+     */
+    static double predictAlongTouchdown(double s, double v, double y, double vy,
+                                        double landY, int dir, double accel) {
+        for (int i = 0; i < PARKOUR_PREDICT_MAXT; i++) {
+            if (y <= landY && vy < 0.0) break;               // descended to the landing surface
+            s += v;                                          // move happens BEFORE the drag multiply (uses v_t)
+            v = (v + PARKOUR_INPUT * accel * dir) * PARKOUR_H_DRAG;
+            y += vy;
+            vy = (vy - PARKOUR_GRAVITY) * PARKOUR_V_DRAG;
+        }
+        return s;
+    }
+
     /** The current segment's horizontal travel frame into scratch {@code F}; false if degenerate (a dive/rise). */
     private static boolean travelFrame(SteerView p) {
         double cdx = p.tx() - p.sx(), cdz = p.tz() - p.sz();
