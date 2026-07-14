@@ -357,6 +357,14 @@ public final class DiagonalParkour implements Movement {
     public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
         final int ux = Integer.signum(tx - fx);
         final int uz = Integer.signum(tz - fz);
+        // The UNIT jump axis for the predictive airborne servo (the raw signum axis has magnitude √2, so the
+        // servo's along-axis projection needs it normalized; the takeoff trigger below keeps its raw-√2 form).
+        final double inv2 = 1.0 / 1.41421356;
+        final double uxn = ux * inv2, uzn = uz * inv2;
+        // Fix 3: the first diagonal gap-floor cell just past the takeoff corner (node level fy) — a hazardous
+        // block here (magma/lava/honey) forces the early takeoff below; threshold in the same RAW √2 units.
+        final int gapX = fx + ux, gapZ = fz + uz;
+        final double hazardRaw = Parkour.HAZARD_TAKEOFF_LOOKAHEAD * 1.41421356;
         final boolean sprint = Math.abs(tx - fx) - 1 >= 2; // diagonal: |Δx| == |Δz| == g+1
         final boolean[] airborneOnce = new boolean[1];
         MovePlan plan = new MovePlan();
@@ -368,8 +376,17 @@ public final class DiagonalParkour implements Movement {
                     SteerControl.steerTowards(b, v);
                     b.setSprinting(sprint);
                 })
-                .advanceWhen(b -> b.grounded()
-                        && ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5)) >= TAKEOFF_EDGE_RAW);
+                // Fix 3: hazardous diagonal gap-floor → predictive early takeoff (raw √2 units), else the
+                // normal late-corner trigger.
+                .advanceWhen(b -> {
+                    if (!b.grounded()) return false;
+                    double projRaw = ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5));
+                    if (b.gapFloorHazardAt(gapX, fy, gapZ)) {
+                        double vRaw = ux * b.velX() + uz * b.velZ();
+                        return projRaw + Parkour.HAZARD_TAKEOFF_TICKS * vRaw >= hazardRaw;
+                    }
+                    return projRaw >= TAKEOFF_EDGE_RAW;
+                });
         plan.phase("takeoff")
                 .drive((b, v) -> {
                     SteerControl.steerTowards(b, v);
@@ -380,12 +397,16 @@ public final class DiagonalParkour implements Movement {
         plan.phase("airborne")
                 .drive((b, v) -> {
                     airborneOnce[0] = true; // arc is live → a grounded return to the start cell is a balk
-                    SteerControl.steerTowards(b, v);
-                    b.setSprinting(sprint);
+                    // FLAT diagonal: the predictive landing servo (replaces open-loop full-forward) — air-brake
+                    // an overshoot, accelerate a shortfall, never brake short into the gap. Sprint held.
+                    SteerControl.parkourAirborne(b, v, uxn, uzn, tx, ty, tz, sprint);
                 })
                 .advanceWhen(b -> b.grounded()); // hold the arc inputs until touchdown
         plan.phase("land")
-                .drive(SteerControl::recenterOnTarget)
+                // Keep braking to the desired point via the same predictive servo until grounded on the target
+                // cell (once grounded the predictor returns the live along-position → a reverse-brake toward the
+                // cell centre, the ice-slide arrest).
+                .drive((b, v) -> SteerControl.parkourAirborne(b, v, uxn, uzn, tx, ty, tz, sprint))
                 .done(b -> b.grounded()
                         && b.footX() == tx && b.footY() == ty + 1 && b.footZ() == tz);
         return plan;

@@ -778,6 +778,36 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         return level.getFluidState(scratchPos).is(FluidTags.LAVA);   // damaging fluid
     }
 
+    /**
+     * Live landing-surface friction (see {@link BotSteering#slipperinessAt}) — the vanilla per-block
+     * slipperiness the parkour airborne servo reads to shape its air-brake. PORTABILITY: {@code
+     * Block.getFriction()} is the mojmap name from 1.17 onward (older Yarn called it {@code getSlipperiness});
+     * range-stable across this era's 1.17.1→1.21.11 targets, so the direct call is used with no platform
+     * adapter — if a pre-1.17 target is ever added, route this through a {@code platform/} seam like
+     * {@code BlockKinds}. */
+    @Override
+    public double slipperinessAt(int x, int y, int z) {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        scratchPos.set(x, y, z);
+        return level.getBlockState(scratchPos).getBlock().getFriction();
+    }
+
+    /**
+     * Live TAKEOFF-hazard probe (see {@link BotSteering#gapFloorHazardAt}) — magma/lava (damaging on
+     * contact) or honey (jump-suppressing, {@code jumpFactor < 1}). Soul sand is deliberately NOT a hazard
+     * here (slow but safe). PORTABILITY: {@code Block.getJumpFactor()} is the mojmap name from 1.17 on;
+     * range-stable across this era, direct call used (flag for a {@code platform/} seam if a pre-1.17 target
+     * is added, like {@link #slipperinessAt}). */
+    @Override
+    public boolean gapFloorHazardAt(int x, int y, int z) {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        scratchPos.set(x, y, z);
+        BlockState s = level.getBlockState(scratchPos);
+        if (s.is(Blocks.MAGMA_BLOCK)) return true;                       // damaging when stood on
+        if (level.getFluidState(scratchPos).is(FluidTags.LAVA)) return true; // damaging fluid
+        return s.getBlock().getJumpFactor() < 1.0f;                      // honey — jump-suppressing launch pad
+    }
+
     /** Route a break request to the timed {@link BotMining} actuator (equip/face/swing/real-time/drops). */
     @Override
     public void mine(int x, int y, int z) {

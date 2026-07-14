@@ -12,6 +12,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.PhaseRunner;
 import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.config.Config;
 import com.orebit.mod.config.ConfigLoader;
@@ -258,6 +260,29 @@ final class BotNavigator {
         this.navGaveUp = false;
     }
 
+    /**
+     * Whether a {@link Parkour}/{@link DiagonalParkour} jump is currently mid-execution — the active
+     * phase-plan step is a parkour move and the runner is executing it (runup → takeoff → airborne → land,
+     * before its {@code done} fires). Used by {@link #driveToward}'s arrival-preempt gate so a landing cell
+     * that is the goal doesn't kill the jump before touchdown (the ice-STOP undershoot). Purely STATE-based
+     * (no timers): once the land phase's {@code done} predicate fires, {@link #steerAlongPath} advances the
+     * cursor past this step the same tick, so the very next tick this returns false and COMPLETE may fire.
+     *
+     * <p>DEFERRED KNOWN RISK (owner-accepted, watch in-game): a TERMINAL parkour jump that mispredicts onto an
+     * unwalkable off-cell spot leaves this gate latched (the land {@code done} never fires because the bot never
+     * reaches the exact target cell) → COMPLETE stays suppressed → a possible wedge with no re-plan. This is
+     * DEFERRED per owner — revisit only if seen in-game. The pre-diff COMPLETE rescue (which fired COMPLETE on
+     * proximity regardless of an in-flight jump) is intentionally NOT restored here: it is the very
+     * mid-jump-preemption this gate exists to remove, so re-adding it would reintroduce the ice-STOP undershoot.
+     */
+    private boolean parkourJumpInFlight() {
+        if (!phaseRunner.active() || path == null || waypointIndex >= path.size()) {
+            return false;
+        }
+        Movement m = path.movement(waypointIndex);
+        return m instanceof Parkour || m instanceof DiagonalParkour;
+    }
+
     /** Drive toward {@code (tx,ty,tz)} with the default follow/come arrival tolerance ({@link #ARRIVE_DIST}/
      *  {@link #ARRIVE_Y}). Mining passes a tighter tolerance so it goes all the way to the target. */
     boolean driveToward(double tx, double ty, double tz, BlockPos goalFloor) {
@@ -292,7 +317,15 @@ final class BotNavigator {
         // Arrived only when close in 3D. Horizontal proximity alone would let the bot stop directly
         // BELOW the target (it walks under a sky platform / the top of a staircase and quits) — it must
         // also match the target's height, which is what makes it actually climb to reach you.
-        if (distXZ <= arriveDist && Math.abs(dy) <= arriveY) {
+        //
+        // ARRIVAL-PREEMPT GATE: a Parkour/DiagonalParkour landing cell can itself be the goal (the ice STOP
+        // case), and the bot enters the arrival radius mid-jump — during runup or airborne, before touchdown.
+        // Taking COMPLETE there zeroes forward + clears the plan, so the in-progress jump is killed and the bot
+        // coasts off the takeoff edge into the gap (the undershoot). State-based gate: while a parkour move is
+        // the active phase-plan step (i.e. mid-jump — runup/takeoff/airborne, not yet landed, since the phase
+        // runner advances past the step the moment its land `done` fires), DON'T preempt — let the plan's own
+        // `land.done()` finish the jump. COMPLETE fires on the next tick, once the step is consumed.
+        if (distXZ <= arriveDist && Math.abs(dy) <= arriveY && !parkourJumpInFlight()) {
             driveState = "COMPLETE";
             bot.setForward(0.0f);
             clearPlan(); // also resets the exact-goal escalation — this goal is DONE
