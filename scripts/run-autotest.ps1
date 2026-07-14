@@ -24,7 +24,30 @@ param(
     # (one numbered file per search; analyze with internal_docs/trace_analysis.py). Trace runs are SLOW
     # and the files are HUGE (per-node file I/O on the tick thread) -- diagnostic runs only.
     [switch]$Trace,
-    [string]$GroundDrive = ""   # "" = build-default; "servo" | "legacy" forces drive()'s land branch (Stage-2 A/B)
+    # -ProbeOnly: read-only worldgen dump of the start cell (column + 5x5 topSolidY + determinism signature)
+    # then halt -- NO bot, NO goto. Use with -MasterWorld + -Start to confirm a frozen world's start cell is
+    # a real canopy/floor before running the full descent. Output: run/autotest/orebit-autotest-startprobe.txt.
+    [switch]$ProbeOnly,
+    # -Barehanded: give the bot NO tools (default is one stone pickaxe). Bare-handed mining is far slower,
+    # raising the region-tier mine-through cost of a ground descent — the repro knob for the owner's
+    # pillar-to-the-sky (empty-air highway out-prices a dig-down descent).
+    [switch]$Barehanded,
+    # -Rtrace: run the full-cascade region trace (what /bot goto's region tier evaluates) into
+    # run/autotest/orebit-region-trace.txt, then halt. No goto. Combine with -Barehanded to capture the
+    # bare-handed pillar cascade (L1 flood level-tagged 'E <seq> L1'). Needs a master with the persisted HPA.
+    [switch]$Rtrace,
+    [string]$GroundDrive = "",   # "" = build-default; "servo" | "legacy" forces drive()'s land branch (Stage-2 A/B)
+    # -MasterWorld <path>: FROZEN-WORLD mode. Instead of seed-regenerating the world each run (which is
+    # non-deterministic for VEGETATION -- trees generate in parallel-chunk-gen order; proven by the
+    # startprobe: same seed -> 3 distinct tree layouts in 5 runs), copy a pristine, pre-generated master
+    # world into run/autotest/world every run. Minecraft only ever mutates the COPY, so the bot's broken
+    # leaves / placed blocks and MC's own session.lock/level.dat writes are discarded next run -- the master
+    # stays byte-identical, so every run starts from the exact same blocks. CAVEAT: the master must already
+    # contain every chunk the bot visits; a chunk absent from the master is generated on-the-fly from the
+    # world's seed -> back to non-deterministic vegetation. The start-AREA chunks (where the early tree-
+    # descent bug lives) are always covered if you explored to the tree; the full start->goal corridor needs
+    # pre-gen. "" = legacy seed-regen mode (backward compatible).
+    [string]$MasterWorld = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,8 +61,21 @@ $resultFile = Join-Path $runDir "orebit-autotest-result.properties"
 New-Item -ItemType Directory -Force -Path (Join-Path $runDir "config") | Out-Null
 $world = Join-Path $runDir "world"
 if (Test-Path $world) {
-    Write-Host "[autotest] deleting previous world (fresh gen from the pinned seed)"
+    Write-Host "[autotest] deleting previous run world (disposable copy)"
     Remove-Item -Recurse -Force $world
+}
+if ($MasterWorld -ne "") {
+    # FROZEN-WORLD mode: copy the pristine master in. The master itself is NEVER launched, so it stays
+    # byte-identical across runs -> deterministic blocks (no parallel-gen vegetation variance), and the
+    # bot's edits land only in this disposable copy.
+    if (-not (Test-Path $MasterWorld)) { Write-Error "master world not found: $MasterWorld"; exit 2 }
+    Write-Host "[autotest] FROZEN-WORLD mode: copying master '$MasterWorld' -> run world"
+    Copy-Item -Recurse -Force $MasterWorld $world
+    # A stale session.lock copied from the master (if it was ever launched) would block the server; drop it.
+    $lock = Join-Path $world "session.lock"
+    if (Test-Path $lock) { Remove-Item -Force $lock }
+} else {
+    Write-Host "[autotest] seed-regen mode: MC will freshly generate the world from the pinned seed"
 }
 if (Test-Path $resultFile) { Remove-Item -Force $resultFile }
 # Stale per-search trace files from a previous -Trace run would mix into this run's numbering.
@@ -57,6 +93,9 @@ if ($BudgetTicks -gt 0) { $gradleArgs += "-Porebit.autotest.budgetTicks=$BudgetT
 if ($StartDelay -gt 0) { $gradleArgs += "-Porebit.autotest.startDelayTicks=$StartDelay" }
 if ($BotDebug)        { $gradleArgs += "-Porebit.autotest.debug=true" }
 if ($Trace)           { $gradleArgs += "-Porebit.autotest.trace=true" }
+if ($ProbeOnly)       { $gradleArgs += "-Porebit.autotest.probeOnly=true" }
+if ($Barehanded)      { $gradleArgs += "-Porebit.autotest.barehanded=true" }
+if ($Rtrace)          { $gradleArgs += "-Porebit.autotest.rtrace=true" }
 if ($GroundDrive -ne "") { $gradleArgs += "-Porebit.ground.drive=$GroundDrive" }
 
 # gradlew.bat resolves the PROJECT from the current working directory, not from its own location --

@@ -50,3 +50,6 @@ logs/
 
 # Session-to-session continuity scratch (NOT source-controlled)
 /HANDOFF.md
+
+# Autotest master world — backed up on the autotest-world orphan branch, never in code history
+scripts/autotest-world-master/

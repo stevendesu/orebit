@@ -2,6 +2,7 @@ package com.orebit.mod;
 
 import com.mojang.authlib.GameProfile;
 import com.orebit.mod.pathfinding.PathPlan;
+import com.orebit.mod.pathfinding.regionpathfinder.HierarchicalRegionPlan;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionCostField;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionMineModel;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
@@ -589,7 +590,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         java.io.File file = new java.io.File("orebit-region-trace.txt"); // run dir
         try (java.io.BufferedWriter w = new java.io.BufferedWriter(new java.io.FileWriter(file))) {
             w.write("Orebit REGION A* trace  start=" + startFloor + "  goal=" + goalFloor + "  caps=" + caps
-                    + "  (direct level-0 fragment plan)\n");
+                    + "  (FULL CASCADE — what /bot goto evaluates; expansions level-tagged 'E <seq> L<level>')\n");
             if (skeletonDump != null) {
                 w.write("\n== live cascade skeleton (cross-check) ==\n" + skeletonDump + "\n");
             }
@@ -597,34 +598,47 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                     + " (pop), in order;  '  C <kind> -> x,y,z frag=<f> cost=<c> crossing=wx,wy,wz <OK|worse>'"
                     + " = a candidate edge it emitted. kinds: walk|air-fall|air-pillar|solid-mine|water-swim|"
                     + "collapsed|unbuilt|mine-sibling|mine-fallback|mine-solid|dig-through.\n\n");
-            RegionPathPlan rp;
             // Tool-aware region dig cost from the bot's real inventory (PERF-DESIGN region §5), so the trace's
             // dig breakdowns reflect the actual tools (null snapshot ⇒ the stone-tier RegionMineModel.DEFAULT).
             MovementContext.InventoryView traceInv = inventoryFeasibility();
             RegionMineModel mine = RegionMineModel.from(traceInv != null ? traceInv.mining() : null);
+            final int minY = grid.minY();
+            HierarchicalRegionPlan hier;
             RegionPathfinder.TRACE_OUT = w;
             RegionPathfinder.TRACE = true;
             try {
-                rp = RegionPathfinder.plan(level, grid, startFloor, goalFloor, caps, mine);
+                // Run the FULL cascade exactly as /bot goto does: the cap-safe top level plans toward the goal,
+                // each finer level plans toward the window sub-goal handed down from the level above. This is
+                // what a real goto evaluates — NOT a single unbounded direct-L0 search (which was the old
+                // trace). Each level's per-node flood is captured, level-tagged in the 'E <seq> L<level>' lines,
+                // so the TOP level's flooding (e.g. L1 up-and-over) is greppable: grep '^E .* L1 '.
+                hier = HierarchicalRegionPlan.build(grid, minY, startFloor, goalFloor, caps, mine);
             } finally {
                 RegionPathfinder.TRACE = false;
                 RegionPathfinder.TRACE_OUT = null;
             }
-            if (rp == null || rp.isEmpty()) {
-                w.write("\nRESULT: no skeleton (null/empty)\n");
-            } else {
-                StringBuilder sb = new StringBuilder("\nRESULT: " + rp.size() + " regions"
-                        + (rp.reachedGoalRegion() ? " (reached goal region)" : " (PARTIAL — goal not reached)")
-                        + "  L" + rp.level() + "\n");
-                for (int i = 0; i < rp.size(); i++) {
-                    sb.append("  [").append(i).append("] region=").append(rp.rx(i)).append(',')
-                            .append(rp.ry(i)).append(',').append(rp.rz(i));
-                    if (rp.isFragmentModel()) sb.append(" frag=").append(rp.fragmentId(i));
-                    if (rp.hasPortal(i)) sb.append(" crossing=").append(rp.portalCell(i));
+            // Per-level skeleton result (top→0): what each level committed to, so the flooded top level's
+            // partial (reachedGoal=false) is visible alongside its expansions above.
+            StringBuilder sb = new StringBuilder("\nRESULT: cascade top=L" + hier.topLevel()
+                    + (hier.isFailed() ? "  FAILED (no route — l0Skeleton null)" : "") + "\n");
+            for (int L = hier.topLevel(); L >= 0; L--) {
+                RegionPathPlan sk = hier.skeletonAt(L);
+                if (sk == null) {
+                    sb.append("  L").append(L).append(": (null)\n");
+                    continue;
+                }
+                sb.append("  L").append(L).append(": ").append(sk.size()).append(" regions")
+                        .append(sk.reachedGoalRegion() ? " (reached goal region)" : " (PARTIAL — goal not reached)")
+                        .append(" committed=").append(hier.committedAt(L)).append('\n');
+                for (int i = 0; i < sk.size(); i++) {
+                    sb.append("    [").append(i).append("] region=").append(sk.rx(i)).append(',')
+                            .append(sk.ry(i)).append(',').append(sk.rz(i));
+                    if (sk.isFragmentModel()) sb.append(" frag=").append(sk.fragmentId(i));
+                    if (sk.hasPortal(i)) sb.append(" crossing=").append(sk.portalCell(i));
                     sb.append('\n');
                 }
-                w.write(sb.toString());
             }
+            w.write(sb.toString());
         } catch (java.io.IOException e) {
             return "region trace FAILED: " + e;
         }

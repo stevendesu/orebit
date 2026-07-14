@@ -106,7 +106,7 @@ loom {
             vmArg("-Dorebit.autotest=true")
             // CLI overrides ride gradle -P properties into the JVM:
             //   ./gradlew :fabric:1.21.11:runAutotest "-Porebit.autotest.budgetTicks=48000"
-            for (key in listOf("start", "goal", "budgetTicks", "startDelayTicks", "debug", "trace")) {
+            for (key in listOf("start", "goal", "budgetTicks", "startDelayTicks", "debug", "trace", "probeOnly", "barehanded", "rtrace")) {
                 val v = project.findProperty("orebit.autotest.$key")
                 if (v != null) vmArg("-Dorebit.autotest.$key=$v")
             }
@@ -168,6 +168,21 @@ loom {
             }
             // Ground drive-strategy selector rides through for the ground velocity-servo A/B (Stage 2):
             //   ./gradlew :fabric:1.21.11:runIce "-Porebit.ground.drive=servo"
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
+            isIdeConfigGenerated = false
+        }
+        // Ice-parkour diagnostic: a superflat server that arms the common-src IceParkourCourse hook
+        // (-Dorebit.iceparkour) in its own run dir (run/iceparkour). Launch: ./gradlew :fabric:1.21.11:runIceParkour
+        // (after scripts/run-iceparkour.ps1 preps the run dir). Mirrors the ice/parkour configs exactly.
+        create("iceParkour") {
+            server()
+            configName = "Orebit IceParkour ($minecraft)"
+            runDir = "../../../run/iceparkour"
+            vmArg("-Dorebit.iceparkour=true")
+            for (key in listOf("debug", "brake")) {
+                val v = project.findProperty("orebit.iceparkour.$key")
+                if (v != null) vmArg("-Dorebit.iceparkour.$key=$v")
+            }
             project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
             isIdeConfigGenerated = false
         }
