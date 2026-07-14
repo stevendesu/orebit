@@ -129,4 +129,31 @@ public interface BotSteering {
      * crawl) or harmless (take the corner at full speed).
      */
     boolean swimHazardAt(int x, int y, int z);
+
+    /**
+     * The vanilla surface FRICTION (slipperiness) of the block at {@code (x,y,z)} — {@code 0.6} for ordinary
+     * ground, {@code 0.98} for ice / packed ice / frosted ice, {@code 0.989} for blue ice, {@code 0.8} for
+     * slime. This is the same per-block factor vanilla reads from the block a mover stands ON to size its
+     * horizontal drag, so a HIGH value ({@code >= 0.98}) means the bot cannot brake its carried momentum once
+     * it touches down. The parkour predictive-airborne servo ({@link SteerControl#parkourAirborne}) reads the
+     * LANDING block's slipperiness to decide how early/hard to air-brake and where in the cell to aim (center
+     * + arrive-slow on ice; a moderate landing speed is fine on stone). Reads the LIVE level — a cold,
+     * tick-rate follower read, the {@link #swimHazardAt} pattern. (Direct {@code Block.getFriction()} call;
+     * range-stable on the mojmap ≥1.17 API — see the portability note on the impl.)
+     */
+    double slipperinessAt(int x, int y, int z);
+
+    /**
+     * Whether the block at {@code (x,y,z)} is a TAKEOFF hazard the bot must not be grounded over — either
+     * DAMAGING on contact (magma block / lava, which {@code hurt}s an entity standing on it) or
+     * JUMP-SUPPRESSING (honey, whose {@code jumpFactor < 1} weakens a jump launched from over it). The
+     * parkour takeoff-timing fix ({@code Parkour}/{@code DiagonalParkour} runup) probes the FIRST gap-floor
+     * cell just past the takeoff lip with this and, when it is hazardous, fires the jump EARLY so the bot's
+     * center never crosses onto that block on a grounded tick (magma damage is center-based + requires
+     * {@code onGround}; honey's {@code getBlockJumpFactor} reads the block under the center at launch). Reads
+     * the LIVE level — a cold, tick-rate follower read, the {@link #swimHazardAt}/{@link #slipperinessAt}
+     * pattern. Deliberately EXCLUDES slow-but-safe floors (soul sand): those neither damage nor suppress the
+     * jump, so an early takeoff over them would only cost reach for nothing.
+     */
+    boolean gapFloorHazardAt(int x, int y, int z);
 }

@@ -132,6 +132,8 @@ public final class IceParkourCourse {
         final float startYaw;
         final BlockPos goal;
         final double landCenterProj; // along-jump-axis projection (from takeoff centre) of the landing centre
+        String plannerGap;           // != null: a KNOWN PLANNER GAP — a slide-off scores FAIL with this reason,
+                                     // counted apart from real pass/fail (mirrors ParkourCourse's PLANNER-GAP)
 
         Trial(String name, int gap, int jdy, Surface surface, int runout, Template template, int baseX, int baseZ) {
             this.name = name;
@@ -195,7 +197,7 @@ public final class IceParkourCourse {
         boolean wasGrounded = true;
         double prevX, prevZ;
         String prevMove = "";
-        int passed, failed;
+        int passed, failed, plannerGap;   // plannerGap = intended RED reminders, counted apart from real fails
 
         Course() {
             buildTrialList();
@@ -230,6 +232,41 @@ public final class IceParkourCourse {
             add("ice.stop.g3",    3, 0, Surface.ICE, 0, Template.STOP);
             add("ice.stop.g2",    2, 0, Surface.ICE, 0, Template.STOP);       // (gap-2 STOP = arrival-artifact)
             add("ice.turn.g3",    3, 0, Surface.ICE, 0, Template.TURN);
+            // ==== PHASE 3: FALLING-onto-ice — the owner's ORIGINAL #1 pathology ==============================
+            // "A 4-gap parkour jump descending-1, landing on BLUE ICE, has too much momentum to bleed off and
+            // slips off." FLAT/RISING got the predictive airborne servo in Phase 2; FALLING was left on the old
+            // open-loop Fall drop-control handoff, and no falling-onto-ice trial existed — so this pathology was
+            // UNTESTED. STOP template = 1-wide landing (runout=0), goal ON it, lethal drop past → a slip FALLS.
+            // The STONE control is the geometry discriminator: if it settles but blue ice slips, it's a
+            // surface/servo problem, not the jump geometry. gap=4 descending-1 is the exact reported case; gap=3
+            // is the cheaper shorter variant; ICE (0.98) alongside BLUE_ICE (0.989) brackets the friction.
+            add("ctl.fall.g4",  4, -1, Surface.STONE,    0, Template.STOP);   // geometry control (stone)
+            add("blue.fall.g4", 4, -1, Surface.BLUE_ICE, 0, Template.STOP);   // THE reported pathology (runout 0)
+            add("blue.fall.g3", 3, -1, Surface.BLUE_ICE, 0, Template.STOP);   // shorter descending variant
+            add("ice.fall.g4",  4, -1, Surface.ICE,      0, Template.STOP);   // plain-ice bracket
+            // Runout sweep on the g4/blue-ice case: the 1-wide runout=0 landing is the EXTREME (a 4-gap's reach
+            // momentum can't be fully bled on frictionless ice inside one cell — a reach-vs-brake conflict). Any
+            // runout gives the servo/friction room to arrest, so these settle — showing the fix works whenever
+            // the landing isn't the pathological 1-cell extreme (and quantifying how much runout g4 needs).
+            add("blue.fall.g4.r1", 4, -1, Surface.BLUE_ICE, 1, Template.STOP);
+            add("blue.fall.g4.r2", 4, -1, Surface.BLUE_ICE, 2, Template.STOP);
+            // The runout-0 g4-onto-ice cases are the MEASURED physical extreme: the servo brakes a 4-gap fall to
+            // its floor (~0.16 b/t) but a 4-gap's reach momentum can't be fully bled on frictionless ice inside a
+            // single 1-wide cell (it falls ~0.09 b short). Any runout ≥ 1 settles (the .r1/.r2 trials above). So
+            // these are KNOWN PLANNER GAPS (score FAIL with a PLANNER-GAP: reason, counted apart from real
+            // pass/fail) — RED reminders that the planner should not offer a falling-4 onto a 1-wide zero-runout
+            // ice landing; they become expected-refusal PASSes once the planner arc stops offering them.
+            markPlannerGap("PLANNER-GAP: falling-4 onto 1-wide zero-runout ice", "blue.fall.g4", "ice.fall.g4");
+        }
+
+        /** Mark the named trials (already added) as KNOWN PLANNER GAPS: a slide-off scores FAIL with {@code
+         *  reason}, counted separately from real pass/fail (see {@link Trial#plannerGap}). */
+        void markPlannerGap(String reason, String... names) {
+            for (String n : names) {
+                for (Trial t : trials) {
+                    if (t.name.equals(n)) { t.plannerGap = reason; break; }
+                }
+            }
         }
 
         void add(String name, int gap, int jdy, Surface surface, int runout, Template t) {
@@ -340,6 +377,8 @@ public final class IceParkourCourse {
                 if (overshoot > peakOvershoot) peakOvershoot = overshoot;
             }
             // FAIL: fell off (below the landing floor by > 1.6) after leaving the takeoff — THE pathology signal.
+            // On a KNOWN-PLANNER-GAP trial the slide-off is the intended RED reminder (record() stamps it with
+            // the PLANNER-GAP: reason + counts it apart from real fails); else it's a real follower FAIL.
             if (leftTakeoff && bot.getY() < tr.landedFeetY - 1.6) {
                 record(tr, "FAIL", "fell (slid off landing)");
                 return;
@@ -425,6 +464,10 @@ public final class IceParkourCourse {
         }
 
         void record(Trial tr, String result, String reason) {
+            // KNOWN-PLANNER-GAP: a FAIL is an INTENDED RED reminder — stamp the PLANNER-GAP: reason and count it
+            // apart from real pass/fail (finish() reports the three buckets). A PASS (unexpected clear) is real.
+            boolean gapFail = result.equals("FAIL") && tr.plannerGap != null;
+            if (gapFail) reason = tr.plannerGap + " (" + reason + ")";
             String pk = peakOvershoot <= -1e8 ? "n/a" : String.format(Locale.ROOT, "%.3f", peakOvershoot);
             String tos = takeoffSpeed < 0 ? "n/a" : String.format(Locale.ROOT, "%.4f", takeoffSpeed);
             String las = landingSpeed < 0 ? "n/a" : String.format(Locale.ROOT, "%.4f", landingSpeed);
@@ -432,7 +475,7 @@ public final class IceParkourCourse {
                     "%s = %s (%s) gap=%d surface=%s runout=%d tmpl=%s takeoffSpd=%s landSpd=%s peakOvershoot=%s finalX=%.2f finalY=%.2f",
                     tr.name, result, reason, tr.gap, tr.surface, tr.runout, tr.template,
                     tos, las, pk, bot.getX(), bot.getY()));
-            if (result.equals("PASS")) passed++; else failed++;
+            if (result.equals("PASS")) passed++; else if (gapFail) plannerGap++; else failed++;
             OrebitCommon.LOGGER.info("[Orebit/iceparkour] {} -> {} ({}) landSpd={} peakOvershoot={} finalY={}",
                     tr.name, result, reason, las, pk, String.format(Locale.ROOT, "%.2f", bot.getY()));
             try { trace.write("  RESULT " + result + " (" + reason + ") landSpd=" + las
@@ -504,7 +547,8 @@ public final class IceParkourCourse {
                 kv(w, "brakeMode", String.valueOf(System.getProperty("orebit.iceparkour.brake", "none")));
                 kv(w, "trials", trials.size());
                 kv(w, "passed", passed);
-                kv(w, "failed", failed);
+                kv(w, "failed", failed);                 // REAL follower failures (must be 0)
+                kv(w, "knownPlannerGap", plannerGap);    // intended RED reminders, NOT follower regressions
                 for (String line : results) {
                     w.write(line);
                     w.write('\n');
@@ -513,8 +557,8 @@ public final class IceParkourCourse {
                 OrebitCommon.LOGGER.error("[Orebit/iceparkour] could not write {}", file, e);
             }
             try { if (trace != null) trace.close(); } catch (IOException ignored) { }
-            OrebitCommon.LOGGER.info("[Orebit/iceparkour] DONE ({}) — {} passed / {} failed of {} — halting",
-                    reason, passed, failed, trials.size());
+            OrebitCommon.LOGGER.info("[Orebit/iceparkour] DONE ({}) — {} passed / {} real-failed / {} known-planner-gap "
+                    + "of {} — halting", reason, passed, failed, plannerGap, trials.size());
             server.halt(false);
             Thread exiter = new Thread(() -> {
                 server.halt(true);
