@@ -56,6 +56,9 @@ public class SteerControlTest {
         @Override public boolean swimHazardAt(int x, int y, int z) { return false; }
         @Override public void mine(int x, int y, int z) { }
         @Override public void place(int x, int y, int z) { }
+        // Parkour-servo seams (Phase 1-3) — stubbed: ordinary stone friction, no takeoff hazard.
+        @Override public double slipperinessAt(int x, int y, int z) { return 0.6; }
+        @Override public boolean gapFloorHazardAt(int x, int y, int z) { return false; }
     }
 
     /** A segment in feet-target world coordinates (no cell conversion — that's the follower's job). */
