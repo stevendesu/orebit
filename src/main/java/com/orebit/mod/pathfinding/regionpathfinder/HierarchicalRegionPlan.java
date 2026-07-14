@@ -49,6 +49,9 @@ public final class HierarchicalRegionPlan {
      */
     public static final int WINDOW_CELLS = 4;
 
+    /** §3b tube half-width (A/B re-applied for cold benchmarking). */
+    private static final int TUBE_MARGIN = 2;
+
     // ---- immutable navigation context ----------------------------------------------------------------
     private final RegionGrid grid;
     private final int minY;
@@ -208,6 +211,12 @@ public final class HierarchicalRegionPlan {
         // Re-plan the suffix exited..0 (levels above are untouched — their windows still contain the bot).
         final RegionPathPlan beforeL0 = levels[0].skeleton;
         if (!rederiveFromOrCoarser(exited, botFloor)) {
+            // §3a: a FLOOD (not a genuine no-route) means the search area outgrew this top — widen the lens with
+            // a full flood-aware rebuild (which escalates topLevel) before reporting FAILED.
+            if (RegionPathfinder.lastWasFlood()) {
+                rebuild(botFloor);
+                return failed || levels[0].skeleton != beforeL0;
+            }
             failed = true;
             return true; // l0Skeleton() now null → the driver reports FAILED
         }
@@ -238,6 +247,12 @@ public final class HierarchicalRegionPlan {
                 return true;
             }
         }
+        // §3a: the blacklist walk is exhausted. If the last re-plan FLOODED (an area problem, not a proven dead
+        // hop), widen the lens with a flood-aware rebuild (escalates topLevel) before the honest give-up.
+        if (RegionPathfinder.lastWasFlood()) {
+            rebuild(botFloor);
+            return !failed;
+        }
         failed = true;
         return false;
     }
@@ -246,12 +261,33 @@ public final class HierarchicalRegionPlan {
     // Building / re-planning the stack
     // ---------------------------------------------------------------------------------------------------
 
-    /** Full top-down descent from {@code botFloor} (HPA-CASCADE.md §3); sets {@link #failed} on a no-route. */
+    /**
+     * Full top-down descent from {@code botFloor} (HPA-CASCADE.md §3); sets {@link #failed} on a no-route.
+     *
+     * <p><b>§3a flood escalation (FINDINGS-region-pillar-flood.md §3).</b> The cap-safe top level is only
+     * "cap-safe" for a DIRECT route; a real route that must detour away-then-back (a wide obstacle, or the old
+     * free-void) can still blow the search area past {@link RegionPathfinder#maxChebAtLevel} at that level. When a
+     * per-level search aborts on the flood guard ({@link RegionPathfinder#lastWasFlood()}), we <b>widen the
+     * lens</b> — restart one level coarser (blacklisting NOTHING; the flood is an area problem, not a bad hop) —
+     * up to {@link RegionAddress#MAX_COARSE_LEVEL}. Iterative +1: the guard trips EARLY (first out-of-box pop, not
+     * the expansion backstop), so a failed attempt is cheap, and each coarser level both halves the span and
+     * enlarges the cap-safe radius, so it converges in a couple of steps at most. A flood still present at the
+     * coarsest level, or a genuine heap-drain no-route, is an honest FAIL.
+     */
     private void rebuild(BlockPos botFloor) {
-        this.topLevel = capSafeTop(botFloor);
         this.failed = false;
-        if (!rederiveSuffix(topLevel, botFloor)) {
-            this.failed = true;
+        int top = capSafeTop(botFloor);
+        while (true) {
+            this.topLevel = top;
+            if (rederiveSuffix(top, botFloor)) {
+                return; // routed
+            }
+            if (RegionPathfinder.lastWasFlood() && top < RegionAddress.MAX_COARSE_LEVEL) {
+                top++;   // §3a widen the lens (restart coarser, blacklist nothing)
+                continue;
+            }
+            this.failed = true; // genuine no-route, or flooded even at the coarsest level
+            return;
         }
     }
 
@@ -265,8 +301,11 @@ public final class HierarchicalRegionPlan {
     private boolean rederiveSuffix(int fromLevel, BlockPos botFloor) {
         BlockPos subGoal = (fromLevel >= topLevel) ? goal : handDown(levels[fromLevel + 1]);
         for (int L = fromLevel; L >= 0; L--) {
+            RegionPathfinder.RegionTube tube = (L < topLevel)
+                    ? new RegionPathfinder.RegionTube(levels[L + 1].skeleton, L + 1, L, TUBE_MARGIN)
+                    : null;
             RegionPathPlan skel = RegionPathfinder.planWithin(L, grid, minY, botFloor, subGoal, goal, caps,
-                    blacklists[L], mine);
+                    blacklists[L], mine, tube);
             if (skel == null) {
                 return false;
             }
