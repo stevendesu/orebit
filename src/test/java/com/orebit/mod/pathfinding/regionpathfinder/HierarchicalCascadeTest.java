@@ -92,7 +92,15 @@ public class HierarchicalCascadeTest {
     // ===================================================================================================
     @Test
     void onBotMoved_selectiveReplan_fineBeforeCoarse() {
-        HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, 0, new BlockPos(8, 4, 8), farGoalX(), CAPS);
+        // Beeline at SURFACE level (y≥63). The §2 unbuilt cost (Option B) prices below-sea-level lateral travel
+        // through UNKNOWN space at 2× so a long underground traversal RISES toward the surface band to cross —
+        // a reasonable prior when the cave structure is unknown (surface travel beats blind tunneling). This test
+        // exercises the selective-replan window math, not that routing choice, so it walks the bot along a flat
+        // surface-band beeline (63..128, where lateral cost is uniform) where a straight +X walk stays ON the
+        // skeleton — below the surface the risen skeleton would read the flat walk as a deviation.
+        final int y = 70;
+        HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, 0, new BlockPos(8, y, 8),
+                new BlockPos(8 + 1000, y, 8), CAPS);
         assertEquals(2, h.topLevel());
 
         RegionPathPlan l1Before = h.skeletonAt(1);
@@ -102,7 +110,7 @@ public class HierarchicalCascadeTest {
         // and re-plans, but L1/L2 do not. Step in 16-block (one L0 cell) increments so commit advances cleanly.
         boolean anyL0Replan = false;
         for (int x = 24; x <= 72; x += 16) { // up to +64 blocks from start (x=8)
-            boolean changed = h.onBotMoved(new BlockPos(x, 4, 8));
+            boolean changed = h.onBotMoved(new BlockPos(x, y, 8));
             anyL0Replan |= changed;
         }
         assertTrue(anyL0Replan, "crossing L0 cells must re-plan the L0 segment");
@@ -111,7 +119,7 @@ public class HierarchicalCascadeTest {
 
         // Now walk far enough to exhaust L1's window (≥128 blocks from start) → L1 re-plans (and L0 with it).
         for (int x = 88; x <= 200; x += 16) {
-            h.onBotMoved(new BlockPos(x, 4, 8));
+            h.onBotMoved(new BlockPos(x, y, 8));
         }
         assertNotSame(l1Before, h.skeletonAt(1), "exhausting L1's window must re-plan L1");
     }

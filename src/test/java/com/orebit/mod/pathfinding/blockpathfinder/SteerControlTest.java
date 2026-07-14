@@ -32,6 +32,9 @@ public class SteerControlTest {
         @Override public double x() { return x; }
         @Override public double y() { return y; }
         @Override public double z() { return z; }
+        @Override public double velX() { return 0; }
+        @Override public double velY() { return 0; }
+        @Override public double velZ() { return 0; }
         @Override public int footX() { return (int) Math.floor(x); }
         @Override public int footY() { return (int) Math.floor(y); }
         @Override public int footZ() { return (int) Math.floor(z); }
@@ -39,6 +42,10 @@ public class SteerControlTest {
         @Override public boolean inWater() { return inWater; }
         @Override public boolean inLava() { return false; }
         @Override public void faceHorizontally(double dx, double dz) { faceDx = dx; faceDz = dz; }
+        @Override public boolean prone() { return false; }
+        // Records the horizontal aim like faceHorizontally (pitch ignored) so the pure-geometry assertions on
+        // faceDx/faceDz hold whether SteerControl aims via faceHorizontally or the 3-D faceTowards.
+        @Override public void faceTowards(double dx, double dy, double dz) { faceDx = dx; faceDz = dz; }
         @Override public void setForward(float zza) { forward = zza; }
         @Override public void setSprinting(boolean s) { sprinting = s; }
         @Override public void setJumping(boolean j) { jumping = j; }
@@ -46,6 +53,7 @@ public class SteerControlTest {
         // Reconcile seam — unused by the pure-geometry SteerControl tests, stubbed to satisfy the interface.
         @Override public boolean solidAt(int x, int y, int z) { return false; }
         @Override public boolean airAt(int x, int y, int z) { return true; }
+        @Override public boolean swimHazardAt(int x, int y, int z) { return false; }
         @Override public void mine(int x, int y, int z) { }
         @Override public void place(int x, int y, int z) { }
     }

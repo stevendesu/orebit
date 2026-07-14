@@ -108,6 +108,48 @@ public final class RegionPathfinder {
     /** The ratified admissible heuristic (Euclidean region centers × min-cost-per-region). Strategy, not switch. */
     private static final RegionHeuristic HEURISTIC = new SimpleRegionHeuristic();
 
+    /**
+     * The fixed dig model the <b>forward</b> region A* prices with, regardless of the bot's real tool
+     * (FINDINGS-region-pillar-flood.md §1). A wooden-pickaxe economy keeps the skeleton inventory-independent so
+     * a bare-handed bot no longer over-prices digging relative to the tool-blind pillar cost (the asymmetry that
+     * fed the pillar-up-and-over flood partial). The REVERSE cost-to-goal field keeps the bot's real tool-aware
+     * model. Toggle to {@link RegionMineModel#DEFAULT} to price the forward pass as stone (the tests' baseline).
+     */
+    static final RegionMineModel FORWARD_MINE = RegionMineModel.WOODEN;
+
+    /**
+     * Per-thread flag: the last {@link #planLevelFragments} returned {@code null} because it tripped the §3a
+     * cap-safe FLOOD guard (a node expanded beyond {@link #maxChebAtLevel} of the start), NOT because the graph
+     * is genuinely disconnected. The {@link HierarchicalRegionPlan} cascade reads it via {@link #lastWasFlood()}
+     * to decide whether to WIDEN THE LENS (restart at a coarser level, blacklisting nothing) vs. give up. A
+     * 1-element array so the reset/set are heap-free on the search thread.
+     */
+    private static final ThreadLocal<boolean[]> LAST_WAS_FLOOD = ThreadLocal.withInitial(() -> new boolean[1]);
+
+    /** Whether the last {@link #planLevelFragments} on this thread aborted on the §3a cap-safe flood guard. */
+    public static boolean lastWasFlood() {
+        return LAST_WAS_FLOOD.get()[0];
+    }
+
+    /**
+     * §2 unbuilt-cost model selector. {@code true} = <b>Option B</b> (the default): the direction cost is
+     * Y-<b>banded</b> on vanilla sea level 63 / terrain ceiling 128 — below 63, lateral is 2× (cave networks are
+     * wiggly, so crossing unexplored underground is dear); in 63..128, up-2×/down-½×/lateral-1× (the surface band);
+     * above 128, down is ¼× and lateral 2× (you are above the terrain, so descend to it). {@code false} = Option A:
+     * the same up-2×/down-½×/lateral-1× direction switch WITHOUT the Y-banding.
+     *
+     * <p><b>Why B is the default.</b> Both cost the same couple of ALU ops (the doc's per-query cost concern was
+     * Option C's worldgen probe, which we do not do), so the choice is behavioral, not perf. B's below-sea-level
+     * lateral-2× penalty makes a long lateral traversal through UNKNOWN (unbuilt) space prefer to RISE toward the
+     * surface band to cross and descend at the end — which is a <b>reasonable prior when nothing is known about
+     * the cave structure</b> (surface travel beats blind tunneling), and it self-corrects to the real terrain as
+     * chunks load. (This surface-preference is why the {@code onBotMoved_selectiveReplan} cascade test beelines at
+     * surface level y≥63 — below it, the same-Y walk would leave the risen skeleton and read as a deviation.)
+     * Both options remove the free-void flood attractor equally well; the §3a guard is the hard flood guarantee,
+     * not this cost. Flip to A to price unbuilt traversal band-blind (a flat direction switch at every Y).
+     */
+    static boolean UNBUILT_Y_BANDED = true;
+
     // ---------------------------------------------------------------------------------------------------
     // Derived edge-cost constants (HPA-FRAGMENTS.md §2.2) — universal, per-block, NOT stored. Each is the
     // per-block ticks of one motion; an edge cost is the geometry (octile / Manhattan span / Δy) times these.
@@ -281,6 +323,10 @@ public final class RegionPathfinder {
                                                 int grx, int gry, int grz,
                                                 boolean canBreak, boolean canPlace, int safeFall,
                                                 RegionMineModel mine) {
+        // §1: the FORWARD skeleton prices digging with a fixed wooden-pickaxe economy (inventory-independent
+        // shape), NOT the caller's real tool. The `mine` param is retained for API symmetry with the reverse
+        // field (costToGoalField), which DOES use the bot's real tool.
+        final RegionMineModel fwdMine = FORWARD_MINE;
         grid.ensureLeaf(srx, sry, srz);
         grid.ensureLeaf(grx, gry, grz);
         final int startFrag = startFragment(grid, 0, srx, sry, srz, startFloor);
@@ -288,7 +334,7 @@ public final class RegionPathfinder {
         // Skeleton-side dig-flood: seed the goal as a virtual node reached from its dig pockets (the buried/walled
         // goal case). When it engages, the goal fragment is VIRTUAL_GOAL_FRAG and the trivial short-circuit is
         // skipped (even a start-pocket-adjacent goal routes through its dig edge). Falls back to nearest-centroid.
-        final DigSeedSet digSeeds = buildDigSeeds(grid, minY, goalFloor, canBreak, mine);
+        final DigSeedSet digSeeds = buildDigSeeds(grid, minY, goalFloor, canBreak, fwdMine);
         final int goalFrag = digSeeds != null ? VIRTUAL_GOAL_FRAG
                 : nearestFragment(grid, 0, grx, gry, grz, goalFloor);
 
@@ -303,7 +349,7 @@ public final class RegionPathfinder {
 
         return planLevelFragments(0, grid, minY, srx, sry, srz, startFrag,
                 startFloor.getX(), startFloor.getY(), startFloor.getZ(),
-                grx, gry, grz, goalFrag, true, canBreak, canPlace, safeFall, null, mine, digSeeds);
+                grx, gry, grz, goalFrag, true, canBreak, canPlace, safeFall, null, fwdMine, digSeeds, null);
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -318,9 +364,25 @@ public final class RegionPathfinder {
      * the vertical depth.
      */
     static int maxChebAtLevel(int level) {
-        double r = Math.sqrt((double) CAP_SAFE_NODES / RegionAddress.verticalRegions(level)) / 2.0;
-        int ri = (int) Math.floor(r);
-        return ri < 1 ? 1 : ri;
+        return MAX_CHEB_BY_LEVEL[level];
+    }
+
+    /**
+     * Precomputed {@link #maxChebAtLevel} for every planned level (0..{@link RegionAddress#MAX_COARSE_LEVEL}) —
+     * the value is a pure function of {@code level} (a {@code sqrt} over a per-level constant), so it is baked
+     * once at class-init rather than recomputed per search / per §3a flood check (the sqrt on the search path
+     * was a measurable region-tier cost).
+     */
+    private static final int[] MAX_CHEB_BY_LEVEL = computeMaxChebByLevel();
+
+    private static int[] computeMaxChebByLevel() {
+        int[] table = new int[RegionAddress.MAX_COARSE_LEVEL + 1];
+        for (int level = 0; level < table.length; level++) {
+            double r = Math.sqrt((double) CAP_SAFE_NODES / RegionAddress.verticalRegions(level)) / 2.0;
+            int ri = (int) Math.floor(r);
+            table[level] = ri < 1 ? 1 : ri;
+        }
+        return table;
     }
 
     /** Start→goal Chebyshev distance in level-{@code level} regions (vertical pinned to 0 above OCTREE_TOP). */
@@ -330,6 +392,16 @@ public final class RegionPathfinder {
         int sLy = (level >= RegionAddress.OCTREE_TOP) ? 0 : (sry >> level);
         int gLy = (level >= RegionAddress.OCTREE_TOP) ? 0 : (gry >> level);
         return Math.max(Math.abs(gLx - sLx), Math.max(Math.abs(gLy - sLy), Math.abs(gLz - sLz)));
+    }
+
+    /**
+     * Chebyshev distance (in level-L regions) from a popped node to the search start — the §3a flood radius test.
+     * Both coords are already at the search level (region coords straight off the node/start params); above
+     * {@link RegionAddress#OCTREE_TOP} the vertical is pinned to 0 by {@link RegionAddress#regionY}, so the raw
+     * axis diffs are correct without a per-level shift.
+     */
+    private static int chebFromStart(int crx, int cry, int crz, int srx, int sry, int srz) {
+        return Math.max(Math.abs(crx - srx), Math.max(Math.abs(cry - sry), Math.abs(crz - srz)));
     }
 
     /**
@@ -371,7 +443,7 @@ public final class RegionPathfinder {
                                             BlockPos botFloor, BlockPos subGoalWorld, BlockPos realGoal,
                                             BotCaps caps, RegionEdgeBlacklist blacklist) {
         return planWithin(level, grid, minY, botFloor, subGoalWorld, realGoal, caps, blacklist,
-                RegionMineModel.DEFAULT);
+                RegionMineModel.DEFAULT, null);
     }
 
     /**
@@ -381,7 +453,8 @@ public final class RegionPathfinder {
      */
     public static RegionPathPlan planWithin(int level, RegionGrid grid, int minY,
                                             BlockPos botFloor, BlockPos subGoalWorld, BlockPos realGoal,
-                                            BotCaps caps, RegionEdgeBlacklist blacklist, RegionMineModel mine) {
+                                            BotCaps caps, RegionEdgeBlacklist blacklist, RegionMineModel mine,
+                                            RegionTube tube) {
         final int sx = RegionAddress.regionX(botFloor.getX(), level);
         final int sz = RegionAddress.regionZ(botFloor.getZ(), level);
         final int sy = RegionAddress.regionY(botFloor.getY(), level, minY);
@@ -401,18 +474,22 @@ public final class RegionPathfinder {
         ensureNode(grid, level, gx, gy, gz);
         final int sFrag = startFragment(grid, level, sx, sy, sz, botFloor);
 
+        // §1: the FORWARD skeleton prices digging with a fixed wooden-pickaxe economy (inventory-independent);
+        // the caller's real `mine` is retained for API symmetry (the reverse cost-to-goal field uses it).
+        final RegionMineModel fwdMine = FORWARD_MINE;
+
         // Skeleton-side dig-flood, but only at LEVEL 0 (needs the leaf NavSection) AND only when this level's
         // clamped goal region IS the real goal region (reached) — a mid-route clamped sub-goal isn't the goal, so
         // its centroid fragment stays the target. Rooted at the REAL goal cell.
         final DigSeedSet digSeeds = (level == 0 && reached)
-                ? buildDigSeeds(grid, minY, realGoal, caps.canBreak(), mine) : null;
+                ? buildDigSeeds(grid, minY, realGoal, caps.canBreak(), fwdMine) : null;
         final int gFrag = digSeeds != null ? VIRTUAL_GOAL_FRAG
                 : nearestFragment(grid, level, gx, gy, gz, subGoalWorld);
 
         return planLevelFragments(level, grid, minY, sx, sy, sz, sFrag,
                 botFloor.getX(), botFloor.getY(), botFloor.getZ(),
                 gx, gy, gz, gFrag, reached, caps.canBreak(), caps.canPlace(), caps.safeFallDistance(),
-                blacklist, mine, digSeeds);
+                blacklist, fwdMine, digSeeds, tube);
     }
 
     /**
@@ -439,9 +516,10 @@ public final class RegionPathfinder {
                                                       boolean reachedGoalRegion,
                                                       boolean canBreak, boolean canPlace, int safeFall,
                                                       RegionEdgeBlacklist blacklist, RegionMineModel mine,
-                                                      DigSeedSet digSeeds) {
+                                                      DigSeedSet digSeeds, RegionTube tube) {
         final Nodes nodes = SEARCH.get();
         nodes.reset();
+        LAST_WAS_FLOOD.get()[0] = false; // §3a: cleared here; set only if the cap-safe flood guard trips below
 
         // Heuristic scale: SimpleRegionHeuristic is calibrated per LEVEL-0 region (COST_PER_REGION = one leaf
         // walk). At level L the derived edge costs scale with sideOf(L) = LEAF<<L, so scale h the same (×2^L)
@@ -463,6 +541,9 @@ public final class RegionPathfinder {
         boolean budgetHit = false;
         int bestRow = startRow;       // closest-to-goal node seen (min heuristic) — for the FAIL diagnostic
         float bestH = Float.MAX_VALUE;
+        // §3a: the cap-safe flood radius is constant for this search's level — hoist it out of the per-pop loop
+        // (maxChebAtLevel does a sqrt; computing it per expansion regressed the region bench ~20-30%).
+        final int floodRadius = maxChebAtLevel(level);
 
         while (nodes.heapSize > 0) {
             int current = nodes.pop();
@@ -479,12 +560,27 @@ public final class RegionPathfinder {
             final float hCur = nodes.f[current] - nodes.g[current];
             if (hCur < bestH) { bestH = hCur; bestRow = current; }
             if (++expansions > MAX_REGION_EXPANSIONS) { budgetHit = true; break; }
+            // §3a cap-safe FLOOD guard (FINDINGS-region-pillar-flood.md §3): the cap-safe box holds ≤
+            // CAP_SAFE_NODES cells, so a NON-flooding search never expands beyond maxChebAtLevel of the start.
+            // A pop past that radius means the search area blew its budget — a flood (the free-void or a wide
+            // obstacle the clamped goal can't be reached around inside the box). Abort and signal the cascade to
+            // WIDEN THE LENS (restart at a coarser level, blacklisting NOTHING — a valid region we merely reached
+            // while flooding, not a proven-bad hop). Returns null (no flood partial). Checked every 64 pops (like
+            // the block tier's periodic budget check): a flood does thousands of pops so it's still caught within
+            // 64 expansions of leaving the box, while the common small search pays only a mask-compare per pop
+            // (the per-pop Chebyshev math otherwise regressed the sub-µs region bench ~20%).
+            if (tube == null && (expansions & 63) == 0 && chebFromStart(crx, cry, crz, srx, sry, srz) > floodRadius) {
+                LAST_WAS_FLOOD.get()[0] = true;
+                if (TRACE) trace("FLOOD guard L" + level + ": pop region=" + crx + "," + cry + "," + crz
+                        + " exceeds maxCheb=" + floodRadius + " from start=" + srx + "," + sry + "," + srz);
+                return null;
+            }
 
             // Forward A* (dijkstra=false) keeps its behavioral PILLAR_PER_BLOCK; the pillarField arg is read only
             // on the reverse field edges, so the constant here is an inert placeholder.
             expandNode(nodes, current, expansions, grid, level, minY, grx, gry, grz,
                     startWx, startWy, startWz, canBreak, canPlace, safeFall, blacklist, mine,
-                    PILLAR_PER_BLOCK_FIELD, hScale, null, false);
+                    PILLAR_PER_BLOCK_FIELD, hScale, null, tube, false);
 
             // Skeleton-side dig-flood: if this popped node is a dig-reachable pocket of the (buried/walled) goal,
             // also offer a virtual edge into V at the pocket's dig cost — so the search can terminate by digging in
@@ -770,7 +866,7 @@ public final class RegionPathfinder {
             final int rowsBefore = nodes.count;
             expandNode(nodes, current, expansions, grid, 0, minY, grx, gry, grz,
                     goalFloor.getX(), goalFloor.getY(), goalFloor.getZ(),
-                    canBreak, canPlace, safeFall, null, mine, pillarField, 1.0f, bound, true);
+                    canBreak, canPlace, safeFall, null, mine, pillarField, 1.0f, bound, null, true);
             if (marking) {
                 // Phase 2: rows first reached by THIS expansion join the pending count if they sit in the fat
                 // skeleton (relaxFrag admits a fresh row exactly once — later relaxes reuse it).
@@ -906,6 +1002,35 @@ public final class RegionPathfinder {
         }
     }
 
+    /** §3b tube envelope (A/B re-applied for cold benchmarking): corridor within a Chebyshev margin of a coarse
+     *  skeleton path, confining a finer forward search. {@link #contains} is the per-relax admission test. */
+    static final class RegionTube {
+        private final RegionPathPlan skeleton;
+        private final int d;
+        private final int margin;
+        private final boolean checkY;
+
+        RegionTube(RegionPathPlan skeleton, int skeletonLevel, int searchLevel, int margin) {
+            this.skeleton = skeleton;
+            this.d = skeletonLevel - searchLevel;
+            this.margin = margin;
+            this.checkY = skeletonLevel < RegionAddress.OCTREE_TOP;
+        }
+
+        boolean contains(int rx, int ry, int rz) {
+            final int crx = rx >> d, crz = rz >> d;
+            final int cry = checkY ? (ry >> d) : 0;
+            for (int i = 0; i < skeleton.size(); i++) {
+                if (Math.abs(skeleton.rx(i) - crx) <= margin
+                        && Math.abs(skeleton.rz(i) - crz) <= margin
+                        && (!checkY || Math.abs(skeleton.ry(i) - cry) <= margin)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
     /**
      * The per-pop edge-emission body of the fragment search — the block-(A) intra-region mine-sibling edges and
      * the block-(B) six-face inter-region edges (dig-through / uniform-transit / portal-walk / mine-fallback /
@@ -920,7 +1045,7 @@ public final class RegionPathfinder {
                                    int grx, int gry, int grz, int startWx, int startWy, int startWz,
                                    boolean canBreak, boolean canPlace, int safeFall,
                                    RegionEdgeBlacklist blacklist, RegionMineModel mine, float pillarField,
-                                   float hScale, RegionBox bound, boolean dijkstra) {
+                                   float hScale, RegionBox bound, RegionTube tube, boolean dijkstra) {
         final int crx = nodes.x[current], cry = nodes.y[current], crz = nodes.z[current];
         final int fragA = nodes.frag[current];
         final int[] wa = nodes.wa; // our (fragA) boundary-opening center
@@ -950,7 +1075,7 @@ public final class RegionPathfinder {
                 float edge = mineCost(level, rfN, fragA, fragC, minY, crx, cry, crz, wa, wb, wc, mine);
                 // wa/wb now hold fragA/fragC centroids; wb is the mine-edge portal target.
                 boolean ok = relaxFrag(nodes, current, gCur, edge, crx, cry, crz, fragC,
-                        wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, ENTRY_INTERIOR, false, bound, dijkstra);
+                        wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, ENTRY_INTERIOR, false, bound, tube, dijkstra);
                 if (TRACE) {
                     traceCand("mine-sibling", crx, cry, crz, fragC, edge, wb[0], wb[1], wb[2], ok);
                     mineSpans(wa[0], wa[1], wa[2], wb[0], wb[1], wb[2], level, wc);
@@ -993,7 +1118,7 @@ public final class RegionPathfinder {
                     mineSpans(wa[0], wa[1], wa[2], wb[0], wb[1], wb[2], level, wc);
                     float edge = digCost(wc[0], wc[1], mine.unitsPerBlock(rfN.avgSolidHardness()));
                     boolean ok = relaxFrag(nodes, current, gCur, edge, dmx, dmy, dmz, 0,
-                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, dOpp, buried, bound, dijkstra);
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, dOpp, buried, bound, tube, dijkstra);
                     if (TRACE) {
                         traceCand("dig-through", dmx, dmy, dmz, 0, edge, wb[0], wb[1], wb[2], ok);
                         traceBreakdown("dig-through: " + digBreakdown(wc[0], wc[1],
@@ -1029,11 +1154,13 @@ public final class RegionPathfinder {
                 // no-place bot UP through the open cave void (the lip-ascent flood); it then finds a
                 // walkable ramp instead. (A place-capable bot keeps the dear PILLAR cost and may climb.)
                 if (!canPlace && rfM != null && rfM.kind() == RegionFragments.KIND_AIR && f != 2) continue;
-                // Uniform / collapsed / unbuilt neighbour: a single transit edge into its fragment 0.
-                float edge = uniformTransitCost(level, rfM, f, canPlace, safeFall, mine, pillarField, dijkstra);
+                // Uniform / collapsed / unbuilt neighbour: a single transit edge into its fragment 0. mry/minY let
+                // the §2 unbuilt cost Y-band the neighbour's centre-Y (computed lazily, only for a null record).
+                float edge = uniformTransitCost(level, rfM, f, canPlace, safeFall, mine, pillarField, dijkstra,
+                        mry, minY);
                 footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
                 boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
-                        wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
+                        wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, tube, dijkstra);
                 if (TRACE) traceCand(uniformKindLabel(rfM, f), mrx, mry, mrz, 0, edge,
                         wb[0], wb[1], wb[2], ok);
                 continue;
@@ -1061,7 +1188,7 @@ public final class RegionPathfinder {
                     float edge = walkCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, canPlace, safeFall, dijkstra, pillarField)
                             + walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall, dijkstra, pillarField);
                     boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, fb,
-                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, tube, dijkstra);
                     if (TRACE) {
                         traceCand("walk", mrx, mry, mrz, fb, edge, wb[0], wb[1], wb[2], ok);
                         traceBreakdown("traverse[" + walkBreakdown(wa[0] - entX, wa[1] - entY, wa[2] - entZ,
@@ -1083,7 +1210,7 @@ public final class RegionPathfinder {
                     float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall, dijkstra, pillarField)
                             + digCost(WALL_MINE_BLOCKS, 0, mineUnit);
                     boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, bestFrag,
-                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, tube, dijkstra);
                     if (TRACE) {
                         traceCand("mine-fallback", mrx, mry, mrz, bestFrag, edge, wb[0], wb[1], wb[2], ok);
                         traceBreakdown("walk[" + walkBreakdown(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2],
@@ -1095,7 +1222,7 @@ public final class RegionPathfinder {
                     footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
                     float edge = digCost(RegionAddress.sideOf(level), 0, mineUnit);
                     boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
-                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, dijkstra);
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, tube, dijkstra);
                     if (TRACE) traceCand("mine-solid", mrx, mry, mrz, 0, edge, wb[0], wb[1], wb[2], ok);
                 }
             }
@@ -1111,10 +1238,11 @@ public final class RegionPathfinder {
                                      int mrx, int mry, int mrz, int mFrag,
                                      int px, int py, int pz, int grx, int gry, int grz,
                                      float hScale, RegionEdgeBlacklist blacklist,
-                                     int entryFace, boolean dig, RegionBox bound, boolean dijkstra) {
+                                     int entryFace, boolean dig, RegionBox bound, RegionTube tube, boolean dijkstra) {
         // Bounded search (goal-rooted Dijkstra field): reject a target outside the search box BEFORE interning,
         // so out-of-box nodes never enter the table / heap (the field is confined to its bbox).
         if (bound != null && !bound.contains(mrx, mry, mrz)) return false;
+        if (tube != null && !tube.contains(mrx, mry, mrz)) return false;
         // The blacklist keys crossings PHYSICALLY (region, fragment) — a dead crossing is unrealizable
         // regardless of how the FROM region was entered (§2), so the online-repair probe uses the plain
         // physical key, NOT the entry-augmented search key.
@@ -1375,16 +1503,33 @@ public final class RegionPathfinder {
      * built {@link RegionFragments#KIND_AIR KIND_AIR} region (which keeps the directional pillar/fall chute).
      */
     private static float uniformTransitCost(int level, RegionFragments rfM, int f, boolean canPlace, int safeFall,
-                                            RegionMineModel mine, float pillarField, boolean reverse) {
-        // UNBUILT / unloaded (null record): we don't know what's there, so assume the best possible — free
-        // passage (a "teleporter" through the unknown). Returning ~0 keeps g flat across unloaded space, so the
-        // region A* degenerates to greedy-best-first and BEELINES at the goal instead of flooding the expansion
-        // budget (the long-range plan:NONE bug). The relaxFrag WALK floor still charges ~1 tick/region, so ties
-        // resolve toward the shorter optimistic route. Chunks load on approach → the leaf builds → a replan
-        // corrects to the real terrain (§6 online optimism). NOTE: this is deliberately MORE optimistic than a
-        // built all-air region below — unknown ≠ known-air; known air really does cost a pillar to climb.
+                                            RegionMineModel mine, float pillarField, boolean reverse,
+                                            int neighborRy, int minY) {
+        // UNBUILT / unloaded (null record): FINDINGS-region-pillar-flood.md §2. This was FREE (return 0) — the
+        // "teleporter through the unknown" — which DEFEATED the cap-safe area bound: a free field is cheaper than
+        // every real move, so the search floods the whole unloaded void (the pillar-to-ceiling bug: 83% of the
+        // flood was unbuilt transits). It is no longer free. An unbuilt region holds only worldgen terrain, so
+        // price it DIRECTIONALLY off admissible worldgen priors: going UP is dear (mine/pillar/stair-hunt — no
+        // player staircases exist in ungenerated terrain), going DOWN is easy (fall / half-cost mine-down),
+        // lateral is a walk. Direction is the exit face (reverse swaps its sense, mirroring the AIR chute below).
+        // Option B additionally Y-bands on sea level 63 / terrain ceiling 128 (see UNBUILT_Y_BANDED). This is
+        // still admissibly optimistic (a natural hill/cave MIGHT make the move cheaper) but no longer a free
+        // teleporter; the §3a flood guard is the hard backstop. Chunks load on approach → the leaf builds → a
+        // replan corrects to the real terrain (§6 online optimism).
         if (rfM == null) {
-            return 0f;
+            final int ef = reverse ? RegionAddress.opposite(f) : f; // face 2 = −Y (down), 3 = +Y (up), else lateral
+            final float base = RegionAddress.sideOf(level) * WALK_PER_BLOCK; // ≈ walk one region side (16 @ L0)
+            float upMul = 2f, downMul = 0.5f, latMul = 1f;                   // Option A (band-blind) defaults
+            if (UNBUILT_Y_BANDED) {
+                // Neighbour region centre-Y — computed only here (unbuilt + banded), never per built transit.
+                final int neighborWorldY = RegionAddress.centerY(level, neighborRy, minY);
+                if (neighborWorldY > 128) { downMul = 0.25f; latMul = 2f; }  // above terrain: air, easy down, few lateral floors
+                else if (neighborWorldY < 63) { downMul = 1f; latMul = 2f; } // below sea level: caves, wiggling lateral is dearer
+                // else the 63..128 band keeps the A defaults (up 2× / down ½× / lateral 1×)
+            }
+            if (ef == 3) return base * upMul;   // +Y exit = climbing UP out the top
+            if (ef == 2) return base * downMul; // −Y exit = descending DOWN out the bottom
+            return base * latMul;               // lateral crossing
         }
         // Spans scale with the level: a transit / mine-across covers the node's full side (sideH); an air shaft
         // is the node's full vertical extent (sideH in the octree, the PAD_HEIGHT slab in the quadtree).
