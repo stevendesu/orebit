@@ -69,7 +69,10 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           step-assist rather than a +1.0 jump — the movement layers directional-surface resolver.
  *   10      1   stairHalf   {@link StairBlock} HALF (0=bottom 1=top); 0 for non-stairs. A TOP stair's top
  *                           surface is flat 16/16 everywhere, so it needs no directional handling.
- *   11–13   3   (free)      remainder of the reclaimed sturdy-faces mask — unread by pathfinding
+ *   11      1   portal      ANY teleport portal — LOW bit of a 2-bit field (mirrors {@code fluid}: low = is-portal,
+ *                           high = is-nether). Base identity field, NOT derived. The walker routes AROUND any set cell.
+ *   12      1   netherPortal HIGH bit of the portal field: 00 none / 01 end (end_portal + end_gateway) / 11 nether / 10 unused.
+ *   13      1   (free)      remainder of the reclaimed sturdy-faces mask — unread by pathfinding
  *   14–15   2   openable    0 none / 1 door / 2 trapdoor / 3 fence-gate
  *   16–17   2   fluid       00 none / 01 water / 11 lava (low bit = is-fluid, high = is-lava; water incl. waterlogged)
  *   18–19   2   surface     0 none / 1 slow / 2 slippery
@@ -86,10 +89,8 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           0 none / 1 light (sweet berry bush, powder snow ~0.75×) / 2 heavy (cobweb ~0.05×).
  *                           Distinct from the {@code surface} slow field (bits 18–19), which prices standing
  *                           ON a slow floor (soul sand / honey); this prices moving THROUGH a slowing cell.
- *   43      1   portal      nether-portal interior cell — a base identity field (like climbable), NOT a
- *                           derived predicate. Splits NETHER_PORTAL out of the generic "intangible
- *                           unbreakable" navtype so the portal index / portal-follow can recognise it.
- *                           v1 leaves walker passability untouched (a path can still graze a portal).
+ *   43      1   (free)      formerly the nether-portal bit — the portal field moved down to bits 11–12 (widened
+ *                           to a 2-bit any-portal / is-nether field so the walker can route around ALL portals).
  *   44      1   protected   owner-protected block ({@code mining.protectedBlocks}) — the bot must NEVER
  *                           break it. A base identity field applied AFTER static-init by {@link
  *                           #applyProtected} (the list needs the loaded config + bound datapack tags), so
@@ -163,8 +164,9 @@ public final class NavBlock {
 
     // ---- Bit field shifts/masks --------------------------------------------------------------
     // Bits 8–10 hold the stair facing (2) + half (1), populated ONLY for StairBlock states (0 elsewhere, so
-    // only stairs split navtypes); bits 11–13 remain FREE (the rest of the reclaimed 6-bit sturdy-faces mask,
-    // unread by pathfinding — see the block-fingerprints doc).
+    // only stairs split navtypes); bits 11–12 hold the 2-bit portal field (any-portal / is-nether, see below);
+    // bit 13 remains FREE (the rest of the reclaimed 6-bit sturdy-faces mask, unread by pathfinding — see the
+    // block-fingerprints doc). Bit 43 is now also free (the portal marker moved down from it into 11–12).
     private static final int TOP_Y_SHIFT = 0,  TOP_Y_MASK = 0x1F;
     private static final int SHAPE_SHIFT = 5,  SHAPE_MASK = 0x07;
     private static final int STAIR_FACING_SHIFT = 8, STAIR_FACING_MASK = 0x03; // 0=N 1=E 2=S 3=W (stairs only)
@@ -180,8 +182,13 @@ public final class NavBlock {
     private static final int TOOL_SHIFT  = 32, TOOL_MASK  = 0x07;
     private static final long TOOLREQ_BIT  = 1L << 35;
     private static final long WLOGABLE_BIT = 1L << 36;
+    // Portal is a 2-bit field mirroring FLUID (low = "any teleport portal", high = "is nether portal"): 00 none /
+    // 01 end (end_portal + end_gateway) / 11 nether / 10 unused. The LOW bit is what the walker's passability gate
+    // subtracts (route around ALL portals); the HIGH bit is what the nether portal index / follower read (enter
+    // nether portals deliberately, never chase an end portal). Base identity fields, NOT derived.
+    private static final long PORTAL_BIT        = 1L << 11;           // any teleport portal (walker-avoidance low bit)
+    private static final long NETHER_PORTAL_BIT = 1L << 12;           // is-nether-portal (index/follower high bit)
     private static final int TRANSIT_SHIFT = 41, TRANSIT_MASK = 0x03; // bits 37–40 are the derived predicates
-    private static final long PORTAL_BIT   = 1L << 43;                // nether-portal cell (base field, not derived)
     private static final long PROTECTED_BIT = 1L << 44;               // owner-protected: never break (base field)
     private static final long REDUCED_JUMP_BIT = 1L << 45;            // reduced-jump floor: honey (base field)
     private static final int BUBBLE_SHIFT = 46, BUBBLE_MASK = 0x03;   // bubble column + drag dir (base field)
@@ -264,17 +271,41 @@ public final class NavBlock {
 
     /** Compute the packed descriptor for one block state. */
     private static long fingerprint(Block block, BlockState state) {
-        // Block-entity blocks, bamboo stalks and dripstone can NPE or mislead with a null
-        // world/pos collision query; force a full solid cube for them (matches the dedup study).
-        boolean special = block instanceof BaseEntityBlock
-                || BlockKinds.isBambooStalk(block)
-                || block instanceof PointedDripstoneBlock;
-
-        VoxelShape shape = special ? null : state.getCollisionShape(null, null);
+        // Bamboo stalks and pointed dripstone give a null-world collision query that NPEs or misleads, so
+        // they are forced to a full solid obstacle (matches the dedup study). Block-entity blocks were ALSO
+        // blanket-forced solid here — but that wrongly walled off the ZERO-COLLISION décor block entities
+        // (signs, banners): their collision shape is genuinely EMPTY (you walk through a sign like air), yet
+        // forcing SHAPE_FULL made them non-passable obstacles the planner broke-and-pillared around instead
+        // of parkouring past. So a block entity now consults its REAL collision shape: an EMPTY result is
+        // honoured (passable air, exactly like the block's geometry demands), while a NON-EMPTY null-context
+        // shape stays conservatively solid (context-dependent partials aren't trusted — chest/furnace/skull
+        // keep their prior full-cube fingerprint). A block entity whose query THROWS (shulker box, moving
+        // piston) is caught by the static-init loop and falls back to SOLID_FALLBACK, exactly as before.
+        boolean forceSolid = BlockKinds.isBambooStalk(block) || block instanceof PointedDripstoneBlock;
+        VoxelShape shape;
+        if (forceSolid) {
+            shape = null;
+        } else if (block instanceof BaseEntityBlock) {
+            // A block entity's null-context collision query can THROW (shulker box, moving piston) — the old
+            // blanket guard skipped the query entirely for these. Try it defensively: a throw or a NON-empty
+            // result keeps the conservative full cube (with the block's own hardness/tool, computed below —
+            // NOT SOLID_FALLBACK, so no error is counted and throwing states fingerprint exactly as before);
+            // only a genuine EMPTY collision (sign/banner décor) is honoured as passable air.
+            VoxelShape cs;
+            try {
+                cs = state.getCollisionShape(null, null);
+            } catch (Throwable t) {
+                cs = null;
+            }
+            shape = (cs == null || !cs.isEmpty()) ? null : cs;
+        } else {
+            shape = state.getCollisionShape(null, null);
+        }
+        boolean special = shape == null;
 
         int shapeClass = computeShape(block, state, shape, special);
         int topY = special ? 16
-                : (shape == null || shape.isEmpty()) ? 0
+                : shape.isEmpty() ? 0
                 : clamp((int) Math.round(shape.max(Direction.Axis.Y) * 16.0), 0, 31);
 
         FluidState fs = state.getFluidState();
@@ -312,9 +343,13 @@ public final class NavBlock {
         if (toolRequired)                     d |= TOOLREQ_BIT;
         if (state.hasProperty(BlockStateProperties.WATERLOGGED)) d |= WLOGABLE_BIT;
         d |= (long) (transitSlow(block) & TRANSIT_MASK) << TRANSIT_SHIFT;
-        // Blocks.NETHER_PORTAL exists under that name on every supported version (1.17.1→26.x), so no
-        // platform adapter is needed — matching the direct Blocks.* references throughout this method.
-        if (block == Blocks.NETHER_PORTAL)    d |= PORTAL_BIT;
+        // Teleport portals — a 2-bit field (low = any-portal for walker avoidance, high = is-nether for the
+        // index/follower). NETHER sets BOTH bits; END_PORTAL / END_GATEWAY set only the low any-portal bit, so
+        // the walker routes around them but the nether index never chases them. Explicit vanilla block IDs (no
+        // clean nether-vs-end interface exists); all range-stable 1.17.1→26.x, so no platform adapter — matching
+        // the direct Blocks.* references throughout this method.
+        if (block == Blocks.NETHER_PORTAL)    d |= PORTAL_BIT | NETHER_PORTAL_BIT;
+        if (block == Blocks.END_PORTAL || block == Blocks.END_GATEWAY) d |= PORTAL_BIT;
         if (reducesJump(block))               d |= REDUCED_JUMP_BIT;
         // Bubble column: a water cell whose vertical push overrides swim control. Blocks.BUBBLE_COLUMN and
         // BubbleColumnBlock.DRAG_DOWN are range-stable 1.17+, so no platform adapter is needed (matches the
@@ -622,14 +657,29 @@ public final class NavBlock {
      */
     public static int transitSlow(long d)  { return (int) (d >>> TRANSIT_SHIFT) & TRANSIT_MASK; }
     /**
-     * Nether-portal interior cell. Consumed by the portal discovery index
-     * ({@code worldmodel.pathing.NetherPortalIndex}) and the follower's portal-follow terminal state —
-     * never by the A* movements: portal cells classify {@link #SHAPE_EMPTY} (passable) and v1 deliberately
-     * leaves walker passability untouched, so a walking path can still graze a portal and accidentally
-     * teleport the bot; a follow-up may subtract {@code isPortal} from walker passability once
-     * portal-following exists to recover from it.
+     * ANY teleport portal — nether portal, end portal, OR end gateway (the LOW bit of the 2-bit portal
+     * field). Every such cell classifies {@link #SHAPE_EMPTY} (empty collision), so the raw geometry would
+     * let a walker graze it and get teleported; the movement layer therefore SUBTRACTS this from its
+     * body-occupancy gate ({@code MovementContext.passable}, mirroring the {@code isBubble} exclusion), so
+     * the A* walker routes AROUND every portal and never occupies one mid-path. Distinct from {@link
+     * #isNetherPortal}: the nether portal <i>index</i> / <i>follower</i> read that narrower bit to enter a
+     * nether portal DELIBERATELY (an end portal must only ever be avoided, never chased). A base identity
+     * field, not derived.
      */
     public static boolean isPortal(long d) { return (d & PORTAL_BIT) != 0; }
+    /**
+     * A NETHER portal specifically (the HIGH bit of the portal field ⇒ both bits set). The single reader the
+     * portal discovery index ({@code worldmodel.pathing.NetherPortalIndex}) and {@code BotPortalFollower}
+     * gate on — the follower enters nether portals on purpose, so it must not be fed end portals (which
+     * carry {@link #isPortal} but not this bit). One mask-and-test on the already-loaded long.
+     */
+    public static boolean isNetherPortal(long d) { return (d & NETHER_PORTAL_BIT) != 0; }
+    /**
+     * An END portal or end gateway (any-portal set, nether NOT set — encoding {@code 01}). The cold reader
+     * carries the negate; no live consumer needs it today (the walker avoids via {@link #isPortal}, the
+     * follower enters via {@link #isNetherPortal}), but it names the third portal case for completeness/tests.
+     */
+    public static boolean isEndPortal(long d) { return (d & (PORTAL_BIT | NETHER_PORTAL_BIT)) == PORTAL_BIT; }
     /**
      * Owner-protected block ({@code mining.protectedBlocks}) — the bot must NEVER break it. A base
      * identity field applied post-init by {@link #applyProtected}. The derived {@link #isBreakable
