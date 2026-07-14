@@ -158,24 +158,32 @@ public final class DiagonalParkour implements Movement {
 
         // The diagonal gap cap is DERIVED per takeoff condition (ParkourEnvelope#DIAG), exactly like the
         // cardinal move's rows: soul-sand floor and berry body tighten it, and a lower takeoff surface
-        // (slab / stair edge) folds into the effective Δy. The buckets are direction-independent (hoist);
-        // the surface height is directional only for a stair (its high half faces one edge).
+        // (slab / stair edge) folds into the effective Δy. occBucket + the takeoff-slow flag are
+        // direction-independent (hoist); the surface height is directional only for a stair.
         final long floorDesc = ctx.descriptorAt(x, y, z);
-        final int gsfBucket = ctx.isSlow(floorDesc) ? 1 : 0;
+        final boolean takeoffSlow = ctx.isSlow(floorDesc);
         final int occBucket = ctx.bodyTransitLight(x, y, z) ? 1 : 0;
         final boolean stair = ctx.isStair(floorDesc);
-        final int uniformDiag = stair ? -1
-                : ParkourEnvelope.MAX_GAP[ParkourEnvelope.index(ctx.floorSurface(x, y, z))]
-                        [gsfBucket][occBucket][ParkourEnvelope.DIAG];
+        final int surfIndex = stair ? -1 : ParkourEnvelope.index(ctx.floorSurface(x, y, z));
 
         for (int[] d : DIAGONALS) {
-            int maxGap = stair
-                    ? ParkourEnvelope.MAX_GAP[ParkourEnvelope.index(
-                            ctx.directionalTopY(floorDesc, d[0], d[1]))][gsfBucket][occBucket]
-                            [ParkourEnvelope.DIAG]
-                    : uniformDiag;
+            // REDUCED (gsf-0.4) row selection is PER-DIRECTION (mirrors cardinal Parkour): from the TAKEOFF
+            // cell OR the FIRST (diagonal) flyover cell — a honey/soul-sand first flyover eats the tick-1
+            // speedFactor-0.4 slash even from a normal takeoff, so it must plan under the reduced diag cap or
+            // the max-reach diag is offered but unmakeable. Only the FIRST flyover matters. Read diagonal
+            // column 1 ONCE here (it is scanDirection's own c==1 cell) and hand (p1,fd1) into the scan to
+            // REUSE rather than re-read — the fold that keeps this move's per-node read count at the pre-fix
+            // baseline (the up-front-probe form measured a JMH regression; a pure duplicate read). Same
+            // isSlow(fd) the flyover trigger uses; an unbuilt/absent first cell is not slow.
+            int fx = x + d[0], fz = z + d[1];
+            int p1 = ctx.packedAt(fx, y, fz);
+            long fd1 = p1 == MovementContext.UNBUILT ? 0L : ctx.descriptorOf(fx, y, fz, p1);
+            int gsfBucket = (takeoffSlow || (p1 != MovementContext.UNBUILT && ctx.isSlow(fd1))) ? 1 : 0;
+            int maxGap = ParkourEnvelope.MAX_GAP[stair
+                    ? ParkourEnvelope.index(ctx.directionalTopY(floorDesc, d[0], d[1])) : surfIndex]
+                    [gsfBucket][occBucket][ParkourEnvelope.DIAG];
             if (maxGap < 1) continue; // this takeoff condition offers no diagonal jump
-            scanDirection(ctx, x, y, z, d[0], d[1], out, maxGap);
+            scanDirection(ctx, x, y, z, d[0], d[1], out, maxGap, p1, fd1);
         }
     }
 
@@ -189,15 +197,25 @@ public final class DiagonalParkour implements Movement {
      * blocked sentinel (no boxing).
      */
     private static void scanDirection(MovementContext ctx, int x, int y, int z, int dx, int dz,
-            CandidateSink out, int maxGap) {
+            CandidateSink out, int maxGap, int col1P, long col1Fd) {
         for (int c = 1; c <= maxGap + 1; c++) {
             int cx = x + dx * c;
             int cz = z + dz * c;
             int g = c - 1;
 
-            int p = ctx.packedAt(cx, y, cz);
-            if (p == MovementContext.UNBUILT) return; // unknown cell — don't jump into/over it
-            long fd = ctx.descriptorOf(cx, y, cz, p);
+            // Column 1 was already read by the caller (for the reduced-diag-cap bucket) — REUSE (p1,fd1) here
+            // instead of re-reading (the read-fold that keeps this move's per-node read count at baseline).
+            int p;
+            long fd;
+            if (c == 1) {
+                p = col1P;
+                if (p == MovementContext.UNBUILT) return; // unknown cell — don't jump into/over it
+                fd = col1Fd;
+            } else {
+                p = ctx.packedAt(cx, y, cz);
+                if (p == MovementContext.UNBUILT) return;
+                fd = ctx.descriptorOf(cx, y, cz, p);
+            }
 
             if (ctx.standable(fd)) {
                 // ISSUE-3c jump-OVER trigger (FLAT diagonal — cardinal Parkour's exact trigger): a

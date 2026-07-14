@@ -135,6 +135,7 @@ public final class ParkourCourse {
         BlockState gapFloor;            // magma/honey placed in the FIRST gap cell (null = normal void gap)
         boolean assertNoDamage;         // magma-overhang: PASS requires the bot took ZERO damage
         boolean expectRefusal;          // beyond-envelope geometry the planner rightly declines -> PASS = clean refusal
+        String refuseNote;              // optional note appended to an expectRefusal PASS reason (e.g. "conservative")
         String plannerGap;              // != null: a KNOWN PLANNER GAP — any FAIL uses this reason, counted apart
         int gapFloorX, gapFloorZ;       // the first gap cell just past the takeoff lip (Fix 3 hazard site)
         final Approach approach;
@@ -331,15 +332,21 @@ public final class ParkourCourse {
                     "PLANNER-GAP: hazard-overfly from no-runway standstill");
             overhang("honeyov", 3, HONEY, false, true);   // both approaches = real PASS (jump clears)
             // (C) HONEY-IN-FIRST-GAP-BLOCK across tiers (owner-requested). Honey in the first gap cell + a
-            //     single-block (PRECISION) landing so a miss FALLS. rise2/flat3/fall4 are KNOWN PLANNER GAPS —
-            //     the Phase-4 sweep proved honey-in-first-gap is unmakeable on a max-reach tier by ANY follower
-            //     takeoff timing (the shortfall is the honey reach cost, not the launch slash), so the envelope
-            //     should not offer them; they are RED reminders (become expected-refusal PASSes once the planner
-            //     stops offering them). diag2 has spare margin and CLEARS → it stays a REAL trial (PASS/FAIL).
-            honeyGap("hgap.rise2", 3, 1, 0, "PLANNER-GAP: honey-in-first-gap unmakeable on max-reach tier");
-            honeyGap("hgap.flat3", 4, 0, 0, "PLANNER-GAP: honey-in-first-gap unmakeable on max-reach tier");
-            honeyGap("hgap.fall4", 5, -1, 0, "PLANNER-GAP: honey-in-first-gap unmakeable on max-reach tier");
-            honeyGap("hgap.diag2", 3, 0, 3, null);   // real trial — the follower clears it
+            //     single-block (PRECISION) landing so a miss FALLS. The PLANNER FIX (reduced gsf-0.4 envelope is
+            //     now selected when the FIRST flyover cell is slow, not only the takeoff cell) makes the planner
+            //     REFUSE these over-reduced-envelope tiers — so they are now EXPECTED-REFUSAL negative-tests
+            //     (nav gives up → the bot never attempts → PASS), like the 10 refusals below. Reduced caps
+            //     (surface 16 / gsf-0.4): flat 2, rise 1, fall 2/2/3, diag 1. rise2 (needs rise 2), flat3
+            //     (flat 3), fall4 (fall 4) exceed them; diag2 (needs diag 2) too — CONSERVATIVELY refused (a
+            //     gap-2 diag WAS makeable), owner-accepted over-conservatism. They flip to attempt-and-fall
+            //     FAIL only if the planner ever wrongly OFFERS one again.
+            honeyGap("hgap.rise2", 3, 1, 0);
+            honeyGap("hgap.flat3", 4, 0, 0);
+            honeyGap("hgap.fall4", 5, -1, 0);
+            honeyGap("hgap.diag2", 3, 0, 3);
+            markRefusal("hgap.rise2", "hgap.flat3", "hgap.fall4", "hgap.diag2");
+            markRefuseNote("hgap.diag2",
+                    "conservatively refused (gap-2 diag was makeable; owner-accepted over-conservatism)");
             // ==== PHASE 2 negative-tests: the conservative-refusal invariant ================================
             // The planner rightly DECLINES these beyond-envelope / reduced-takeoff geometries (owner-confirmed
             // correct). Mark them expectRefusal so a CLEAN "nav gave up" scores PASS — and, crucially, a day the
@@ -369,12 +376,11 @@ public final class ParkourCourse {
             }
         }
 
-        /** Honey-in-first-gap-block trial for one tier (walkin — the best-case approach speed, so a shortfall is
-         *  unambiguously a reach-budget problem). PRECISION landing so a short jump FALLS. {@code plannerGap} !=
-         *  null marks it a KNOWN-PLANNER-GAP (a fall scores FAIL with that reason, counted separately); null = a
-         *  real trial (fall = a real FAIL, clear = a real PASS). */
-        void honeyGap(String name, int jdx, int jdy, int jdz, String plannerGap) {
-            addHazardGapTrial(name, Approach.WALKIN, jdx, jdy, jdz, Template.PRECISION, HONEY, false, plannerGap);
+        /** Honey-in-first-gap-block trial for one tier (walkin). PRECISION landing so a short jump FALLS. The
+         *  planner now REFUSES these (reduced envelope on a slow first flyover), so the caller marks them
+         *  {@code expectRefusal} (nav gives up → PASS); a wrongly-OFFERED route that then falls scores FAIL. */
+        void honeyGap(String name, int jdx, int jdy, int jdz) {
+            addHazardGapTrial(name, Approach.WALKIN, jdx, jdy, jdz, Template.PRECISION, HONEY, false, null);
         }
 
         /** A hazard-overfly trial that is a KNOWN PLANNER GAP (a REST magma-overhang): any FAIL is reported with
@@ -405,6 +411,13 @@ public final class ParkourCourse {
                 for (Trial t : trials) {
                     if (t.name.equals(n)) { t.expectRefusal = true; break; }
                 }
+            }
+        }
+
+        /** Append a note to a refusal trial's PASS reason (e.g. hgap.diag2 is CONSERVATIVELY refused). */
+        void markRefuseNote(String name, String note) {
+            for (Trial t : trials) {
+                if (t.name.equals(name)) { t.refuseNote = note; break; }
             }
         }
 
@@ -613,7 +626,8 @@ public final class ParkourCourse {
                         bot.comeTo(tr.goal);
                         return;
                     }
-                    record(tr, "PASS", "correctly refused (no route offered)");
+                    record(tr, "PASS", "correctly refused (no route offered)"
+                            + (tr.refuseNote != null ? " — " + tr.refuseNote : ""));
                     return;
                 }
                 if (attemptTicks >= ATTEMPT_BUDGET) {

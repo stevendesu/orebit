@@ -438,31 +438,44 @@ public final class Parkour implements Movement {
             }
         }
 
-        // Takeoff-condition key for the DERIVED envelope (ParkourEnvelope): the slow-floor bucket (soul
-        // sand — honey is already refused above) and the LIGHT through-slow body bucket (berry / powder
-        // snow — cobweb is already refused above). Both are direction-INDEPENDENT — hoist them. The takeoff
-        // SURFACE height is direction-dependent only for a stair (its high 16/16 half faces one edge), so a
-        // uniform (non-stair) floor hoists ONE table lookup; a stair recomputes it per cardinal.
+        // Takeoff-condition key for the DERIVED envelope (ParkourEnvelope): the slow-floor bucket (gsf 0.4 —
+        // soul sand; honey floors are already refused above) and the LIGHT through-slow body bucket (berry /
+        // powder snow — cobweb is already refused above). occBucket + the takeoff-slow flag are
+        // direction-INDEPENDENT — hoist them. The takeoff SURFACE height is direction-dependent only for a
+        // stair (its high 16/16 half faces one edge), so a uniform (non-stair) floor hoists ONE surface index.
         final long floorDesc = ctx.descriptorAt(x, y, z);
-        final int gsfBucket = ctx.isSlow(floorDesc) ? 1 : 0;
+        final boolean takeoffSlow = ctx.isSlow(floorDesc);
         final int occBucket = ctx.bodyTransitLight(x, y, z) ? 1 : 0;
         final boolean stair = ctx.isStair(floorDesc);
-        final int[] uniformEnv = stair ? null
-                : ParkourEnvelope.MAX_GAP[ParkourEnvelope.index(ctx.floorSurface(x, y, z))]
-                        [gsfBucket][occBucket];
+        final int surfIndex = stair ? -1 : ParkourEnvelope.index(ctx.floorSurface(x, y, z));
 
         final int safeFall = ctx.caps().safeFallDistance();
         // Deepest drop actually probed: the envelope's fall depth capped by the bot's max survivable fall.
         final int capsDrop = Math.min(FALL_DEPTH, ctx.caps().maxFallDistance());
 
         for (int[] d : CARDINALS) {
+            // REDUCED (gsf-0.4) row selection is PER-DIRECTION: pick it from the TAKEOFF cell (soul sand) OR
+            // from the FIRST flyover cell (honey / soul sand at gap column 1). A NORMAL takeoff whose first
+            // flown-over block is slowing still eats the tick-1 speedFactor-0.4 slash, so the jump must plan
+            // under the reduced envelope — else the max-reach tiers are OFFERED but unmakeable. Only the FIRST
+            // flyover matters (the bot is still low there; deeper slow blocks clear above the read zone).
+            //
+            // Read gap column 1 ONCE here — it is scanDirection's own first access (its c==1 cell), so we hand
+            // (p1,fd1) into the scan to REUSE rather than re-read: the fold keeps the per-node read count at the
+            // pre-fix baseline (a separate up-front probe measured +3.4% OPEN / +4.2% CLIFFS on the JMH suite —
+            // a pure duplicate read; this fold recovers it). Same isSlow(fd) the flyover trigger uses; an
+            // unbuilt/absent first cell is not slow. ONE reduced bucket: either trigger flips it (over-
+            // conservative, not a double-slow row).
+            int fx = x + d[0], fz = z + d[1];
+            int p1 = ctx.packedAt(fx, y, fz);
+            long fd1 = p1 == MovementContext.UNBUILT ? 0L : ctx.descriptorOf(fx, y, fz, p1);
+            int gsfBucket = (takeoffSlow || (p1 != MovementContext.UNBUILT && ctx.isSlow(fd1))) ? 1 : 0;
             // The direction's envelope row: a stair takeoff reads the surface toward THIS jump (its high
             // half faces one edge), so soul-sand/berry-flat rows can differ per direction; a flat floor
-            // reuses the hoisted row (zero extra lookups).
-            int[] env = stair
-                    ? ParkourEnvelope.MAX_GAP[ParkourEnvelope.index(
-                            ctx.directionalTopY(floorDesc, d[0], d[1]))][gsfBucket][occBucket]
-                    : uniformEnv;
+            // reuses the hoisted surface index.
+            int[] env = ParkourEnvelope.MAX_GAP[stair
+                    ? ParkourEnvelope.index(ctx.directionalTopY(floorDesc, d[0], d[1])) : surfIndex]
+                    [gsfBucket][occBucket];
             // The flat knob NARROWS the derived flat cap (and the cost table bounds it too); rise + fall +
             // diag come straight from the table. Zero per-node math beyond the index — the row load folds.
             int flatMax = Math.min(PARKOUR_MAX_GAP, Math.min(env[ParkourEnvelope.FLAT], COST.length - 1));
@@ -478,7 +491,7 @@ public final class Parkour implements Movement {
             if (maxGapAll < 1) continue; // this takeoff condition offers no jump in this direction
 
             int found = scanDirection(ctx, x, y, z, d[0], d[1], out,
-                    flatMax, riseMax, env, capsDrop, safeFall, fallGapCap, maxGapAll);
+                    flatMax, riseMax, env, capsDrop, safeFall, fallGapCap, maxGapAll, p1, fd1);
             if (found == DIR_SAW_GAP && OFFSET_FALLBACK) {
                 // A genuine gap with NO aligned landing of any class — arm the (c,±1) offset fallback
                 // tier for this direction only (class Javadoc). Directions that landed, or that have no
@@ -506,7 +519,7 @@ public final class Parkour implements Movement {
      */
     private static int scanDirection(MovementContext ctx, int x, int y, int z, int dx, int dz,
             CandidateSink out, int flatMax, int riseMax, int[] env, int capsDrop, int safeFall,
-            int fallGapCap, int maxGapAll) {
+            int fallGapCap, int maxGapAll, int col1P, long col1Fd) {
         // The lazy-verification prefix cursor: gap columns 1..verified have proven transit prisms, whose
         // pass-through surcharge (summed column-ascending — the eager order) is verifiedTransit.
         int verified = 0;
@@ -517,10 +530,20 @@ public final class Parkour implements Movement {
             int cz = z + dz * c;
             int g = c - 1; // open columns overflown to land AT column c
 
-            // The column's node-level cell decides landing-vs-gap-vs-blocked — read its slot once.
-            int p = ctx.packedAt(cx, y, cz);
-            if (p == MovementContext.UNBUILT) return found; // unknown column — don't jump into/over it
-            long fd = ctx.descriptorOf(cx, y, cz, p);
+            // The column's node-level cell decides landing-vs-gap-vs-blocked. Column 1 was already read by the
+            // caller (for the reduced-envelope bucket) — REUSE (p1,fd1) here instead of re-reading it (the fold
+            // that keeps this move's per-node read count at the pre-flyover-fix baseline). c>=2 reads its slot.
+            int p;
+            long fd;
+            if (c == 1) {
+                p = col1P;
+                if (p == MovementContext.UNBUILT) return found; // unknown column — don't jump into/over it
+                fd = col1Fd;
+            } else {
+                p = ctx.packedAt(cx, y, cz);
+                if (p == MovementContext.UNBUILT) return found;
+                fd = ctx.descriptorOf(cx, y, cz, p);
+            }
 
             if (ctx.standable(fd)) {
                 // A standable node-level cell normally ENDS the direction (never overfly a ledge, v1) — it
