@@ -75,11 +75,15 @@ public final class HeadlessAutotest {
             return;
         }
         Scenario scenario = new Scenario(
-                // Treetop of an extra-tall jungle tree in the DENSEST part of the canopy (owner-scouted on
-                // 1.21.11 for this seed) — a real "get down from the tree" descent through the leaf lattice.
-                // The old (-3,125,-28) was MID-AIR (the bot fell from spawn — never a valid scenario).
-                cell("orebit.autotest.start", "-32,134,153"),
-                // Inside a trial chamber ~240 blocks off (structure placement is version-stable for this seed).
+                // Canopy top of a 25-block-tall jungle tree in the FROZEN master world (scripts/autotest-
+                // world-master/world; run via run-autotest.ps1 -MasterWorld). Feet at y=180 stand on the
+                // jungle-leaf floor at y=179; the trunk (jungle_log) runs y=177..153 to dirt/stone below —
+                // a real "get down from the tree" descent (fall / parkour to a lower tree / dig the trunk).
+                // NOTE: seed-regen worldgen is non-deterministic for VEGETATION (see
+                // DIAGNOSIS-worldgen-nondeterminism.md) — this cell is only valid against the FROZEN world,
+                // never a fresh seed-regen (where the tree may not exist and the cell is mid-air).
+                cell("orebit.autotest.start", "60,180,253"),
+                // Inside a trial chamber ~240 blocks off (owner-confirmed in the master world).
                 cell("orebit.autotest.goal", "201,-28,90"),
                 Integer.getInteger("orebit.autotest.budgetTicks", 24_000),
                 Integer.getInteger("orebit.autotest.startDelayTicks", 0));
@@ -164,6 +168,14 @@ public final class HeadlessAutotest {
             }
             try {
                 ServerLevel level = server.overworld();
+                // Read-only worldgen-determinism probe (-Dorebit.autotest.probeOnly=true): dump the start
+                // cell + a 5x5 neighborhood and HALT — no bot, no goto. Lets N fresh regenerations be diffed
+                // for tree placement/height stability (the treetop-vs-mid-air question). See probeStartCell.
+                if (Boolean.getBoolean("orebit.autotest.probeOnly")) {
+                    probeStartCell(level);
+                    finish("PROBE", "start-cell worldgen probe only (no bot spawned)");
+                    return;
+                }
                 owner = new FakePlayerEntity(server, level, new GameProfile(
                         UUID.nameUUIDFromBytes("OrebitAutotest:owner".getBytes(StandardCharsets.UTF_8)),
                         "Autotest"));
@@ -178,9 +190,24 @@ public final class HeadlessAutotest {
                 // The exact owner-specified start cell (spawnBotFor may have snapped to a nearby safe spot).
                 bot.setPos(start.getX() + 0.5, start.getY(), start.getZ() + 0.5);
                 // Exactly one stone pickaxe. A fresh dedicated-server bot has empty saved data, but clear
-                // anyway so a rerun against a dirty run dir can never smuggle items in.
+                // anyway so a rerun against a dirty run dir can never smuggle items in. With
+                // -Dorebit.autotest.barehanded=true the bot carries NOTHING — bare-handed mining is far slower,
+                // which raises the region-tier mine-through cost of a ground descent (repro of the owner's
+                // bare-handed pillar-to-the-sky: the empty-air highway out-prices a dig-down descent).
                 bot.getInventory().clearContent();
-                bot.getInventory().setItem(0, new ItemStack(Items.STONE_PICKAXE));
+                if (!Boolean.getBoolean("orebit.autotest.barehanded")) {
+                    bot.getInventory().setItem(0, new ItemStack(Items.STONE_PICKAXE));
+                }
+                // Region-cascade trace seam (-Dorebit.autotest.rtrace=true): run the FULL-cascade rtrace toward
+                // the goal (what /bot goto's region tier evaluates for THIS scenario — e.g. the bare-handed +
+                // persisted-HPA pillar) into orebit-region-trace.txt, level-tagged, then halt. No goto. Uses the
+                // goal FLOOR cell (goal.below()) to match the /bot come goalFloor convention.
+                if (Boolean.getBoolean("orebit.autotest.rtrace")) {
+                    String path = bot.regionTraceTo(new BlockPos(goal.getX(), goal.getY() - 1, goal.getZ()));
+                    OrebitCommon.LOGGER.info("[Orebit/autotest] region cascade trace written to {}", path);
+                    finish("RTRACE", "region cascade trace only (no goto)");
+                    return;
+                }
                 // The same internal call /bot goto makes (GotoCommand -> comeTo): COME once, then STAY. Deferred
                 // by startDelayTicks so the nav grid can build first (else the tick-1 plan floods on unbuilt nav).
                 if (startDelayTicks <= 0) {
@@ -196,6 +223,63 @@ public final class HeadlessAutotest {
                 OrebitCommon.LOGGER.error("[Orebit/autotest] scenario setup threw", t);
                 finish("FAIL", "setup threw " + t.getClass().getSimpleName() + " (see log)");
             }
+        }
+
+        /**
+         * Read-only worldgen-determinism dump (diagnostic seam, {@code -Dorebit.autotest.probeOnly=true}):
+         * force-generate the start chunks via {@code getBlockState} and record what worldgen produced at the
+         * start cell and a 5x5 XZ neighborhood, into {@code orebit-autotest-startprobe.txt}. NO bot spawn, NO
+         * goto — so each run is just fresh worldgen + a handful of block reads. Because the harness deletes
+         * the world every run and the seed is pinned, running this N times exercises N INDEPENDENT
+         * regenerations under an IDENTICAL load pattern: identical {@code signature=} lines ⇒ worldgen is
+         * deterministic here (any live-client variation came from a different chunk load ORDER, not RNG);
+         * differing signatures ⇒ genuine same-seed same-version worldgen non-determinism. The
+         * {@code topSolidY} grid shows the canopy silhouette / tree height; the exact start column shows
+         * whether the start cell sits on a trunk (robust) or an overhanging neighbor-chunk leaf (fragile).
+         */
+        void probeStartCell(ServerLevel level) {
+            int sx = start.getX();
+            int sz = start.getZ();
+            // Start-relative window: a few cells above the start (to see clearance) down well below it (to see
+            // the trunk/canopy the bot descends through and the ground under it). Covers a treetop at ANY Y.
+            final int yTop = start.getY() + 8;
+            final int yBot = start.getY() - 72;
+            StringBuilder sb = new StringBuilder(4096);
+            sb.append("# Orebit START-CELL worldgen probe (read-only; no bot)\n");
+            sb.append("start=").append(sx).append(',').append(start.getY()).append(',').append(sz).append('\n');
+            sb.append("column@start (y ").append(yTop).append("..").append(yBot).append("):\n");
+            for (int y = yTop; y >= yBot; y--) {
+                var st = level.getBlockState(new BlockPos(sx, y, sz));
+                sb.append("  y=").append(y).append(' ').append(st.isAir() ? "air" : st.toString()).append('\n');
+            }
+            // 5x5 topmost-solid-Y silhouette + a determinism signature folded over the WHOLE neighborhood cube.
+            sb.append("topSolidY grid (rows dz=+2..-2, cols dx=-2..+2):\n");
+            long sig = 1125899906842597L;
+            for (int dz = 2; dz >= -2; dz--) {
+                sb.append(" ");
+                for (int dx = -2; dx <= 2; dx++) {
+                    int topY = Integer.MIN_VALUE;
+                    for (int y = yTop; y >= yBot; y--) {
+                        var st = level.getBlockState(new BlockPos(sx + dx, y, sz + dz));
+                        String tok = st.isAir() ? "" : st.toString();
+                        sig = sig * 1099511628211L + tok.hashCode() + y * 31L + dx * 7L + dz;
+                        if (topY == Integer.MIN_VALUE && !st.isAir()) {
+                            topY = y;
+                        }
+                    }
+                    sb.append(String.format(Locale.ROOT, "%6d", topY));
+                }
+                sb.append('\n');
+            }
+            sb.append("signature=").append(Long.toHexString(sig)).append('\n');
+            Path file = ConfigDir.serverDir(server).resolve("orebit-autotest-startprobe.txt");
+            try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
+                w.write(sb.toString());
+            } catch (IOException e) {
+                OrebitCommon.LOGGER.error("[Orebit/autotest] could not write start-cell probe {}", file, e);
+            }
+            OrebitCommon.LOGGER.info("[Orebit/autotest] START-CELL PROBE signature={} (orebit-autotest-startprobe.txt)",
+                    Long.toHexString(sig));
         }
 
         /**

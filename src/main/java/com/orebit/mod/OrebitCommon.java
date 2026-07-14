@@ -200,6 +200,11 @@ public final class OrebitCommon {
         // clear PASS/FAIL. Same inert-unless-armed discipline (-Dorebit.ice); registered after the swim hook.
         IceCourse.register(events);
 
+        // Headless ICE-PARKOUR diagnostic (the :fabric:<ver>:runIceParkour run config): sprint-parkours the bot
+        // onto ICE/BLUE_ICE landings and measures whether it overshoots off the far end (momentum it can't brake
+        // on near-frictionless ground). Same inert-unless-armed discipline (-Dorebit.iceparkour).
+        IceParkourCourse.register(events);
+
         // Headless REAL-WORLD replay diagnostic (the :fabric:<ver>:runReplay run config): loads the owner's
         // hand-built "Swims" world (copied into world/ by scripts/run-replay.ps1, NOT regenerated) and replays
         // the exact reported-failing sequence (/bot stay; /tp Dev_bot 14 -56 1; /bot goto -3 -56 1), tracing the
