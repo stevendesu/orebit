@@ -78,6 +78,13 @@ public final class ParkourCourse {
     /** PRECISION walkway length (perpendicular to the jump line) from the 1-wide landing to the goal. */
     private static final int WALK = 5;
 
+    /** Honey honest-cross: landing-platform length (cells past the landing edge) — long enough to catch an
+     *  overshoot AND host the far goal, so a real crossing has runout and the goal is a genuine platform cell. */
+    private static final int HONEY_LAND_LEN = 6;
+    /** Honey honest-cross: how many cells PAST the landing edge the goal sits. Must exceed the 2.5-block
+     *  arrival radius measured from the honey lip, so a honey-edge teeter can never score "arrived". */
+    private static final int HONEY_GOAL_PAST = 3;
+
     /** Blocks of clearance above each stair floor for the staircase-trial ceiling (see {@code buildStairs}):
      *  3 clear body cells — the cover that blocks a jump's apex head but not a step-assist's ~0.5 head-rise. */
     private static final int STAIR_CEILING_GAP = 4;
@@ -133,6 +140,7 @@ public final class ParkourCourse {
         boolean stairRun;               // a staircase-traversal trial (custom build + pass/fail), not a jump
         int stairSteps;                 // number of stair blocks in the run
         BlockState gapFloor;            // magma/honey placed in the FIRST gap cell (null = normal void gap)
+        boolean fastEntry;              // owner-gate: force a full-SPRINT approach (real 3-stone run) into the jump
         boolean assertNoDamage;         // magma-overhang: PASS requires the bot took ZERO damage
         boolean expectRefusal;          // beyond-envelope geometry the planner rightly declines -> PASS = clean refusal
         String refuseNote;              // optional note appended to an expectRefusal PASS reason (e.g. "conservative")
@@ -150,7 +158,14 @@ public final class ParkourCourse {
         final int cdx, cdz;             // continuation axis (dominant horizontal of the jump vector)
         final boolean wideRunway;       // 3-wide straight runway (only when approach == continuation, cardinal)
         final boolean diagRunway;       // 1-wide diagonal runway strip
-        final BlockPos goal;
+        boolean ownerRepro;             // owner-gate: lay the owner's honey-flyover course (buildOwnerTile)
+        boolean honestCross;            // owner-gate: STRICT verdict — PASS requires a REAL airborne crossing that
+                                        //   lands on the far platform; goal pushed well past the landing so the
+                                        //   2.5-block arrival radius can't score a honey-edge teeter as "arrived".
+        boolean honeyRunup;             // owner-gate: WALKIN + full stone runway + fastEntry sprint-arrival (the
+                                        //   run-up twin — does the walk-off cross CLEANLY when it reaches the lip
+                                        //   at/near sprint, vs the standstill spawn that arrives at walk speed?).
+        BlockPos goal;                  // (non-final: ownerRepro overrides it to the owner's goto target cell)
         final double startX, startZ;
         final float startYaw;
         final double ujx, ujz;          // normalized horizontal jump direction (for along-line projection)
@@ -232,6 +247,8 @@ public final class ParkourCourse {
         int navRetries;
         boolean overallDone;
         boolean leftTakeoff;
+        boolean wentAirborne;       // (honestCross) the bot was airborne past the takeoff lip — a real walk-off
+        boolean reachedLanding;     // (honestCross) the bot stood on the far landing platform (dropped 1, past gap)
         boolean stairAirborne;      // (stair trials) the bot left the ground during the run — i.e. it JUMPED
         double takeoffSpeed = -1;   // position-delta horizontal speed the tick the bot left the ground
         boolean wasGrounded = true;
@@ -249,6 +266,12 @@ public final class ParkourCourse {
          *  OFFSET (c,±1) and 90°-TURN approaches hunt the real-play undershoot; the WALLED turn isolates whether
          *  that undershoot is the planner's diagonal corner-cut or the executor's misaligned-momentum takeoff. */
         void buildTrialList() {
+            // Fast-iteration gate: -Dorebit.parkour.owneronly builds ONLY the owner's exact in-game honey-flyover
+            // regression gate (NeoForge 1.21.11, 100% consistent void-fall) so a run is ~1 min instead of ~15.
+            if (System.getProperty("orebit.parkour.owneronly") != null) {
+                ownerRepro();
+                return;
+            }
             // Cardinal head-on (approach == jump == +X). name, jump(dx,dy,dz), template.
             card("flat1", 2, 0, 0, Template.REACH);
             card("flat2", 3, 0, 0, Template.REACH);
@@ -356,6 +379,61 @@ public final class ParkourCourse {
                     "slabflat3.walkin", "slabflat3.rest",
                     "slabrise1.walkin", "slabrise1.rest",
                     "soulflat2.walkin", "soulflat2.rest");
+
+            // ==== OWNER'S EXACT IN-GAME REPRODUCTION (NeoForge 1.21.11, 100% consistent void-fall) ============
+            // The permanent gate for the honey-flyover-without-runup void-fall. See ownerRepro() for the geometry.
+            ownerRepro();
+        }
+
+        /** Permanent regression gate: the owner's EXACT in-game honey-flyover failure, faithfully reproduced.
+         *
+         *  <p><b>Owner geometry</b> (VOID everywhere except 7 blocks; NeoForge 1.21.11; travel &minus;X):
+         *  <pre>
+         *    Y-56:  stone(83) stone(82) stone(81=spawn) HONEY(80)
+         *    Y-57:                                              stone(78) stone(77=goto) stone(76)
+         *    along -X:  81 stone(spawn) -> 80 HONEY -> 79 VOID gap -> 78 stone(land, 1 LOWER) -> 77 -> 76
+         *  </pre>
+         *  A honey-first-flyover, gap-2, descent-1 jump: the bot takes off from the SOLID stone (81), flies OVER
+         *  the honey (80, node-level) and the void gap (79), and must land on the stone (78) one block lower.
+         *  Crucially the bot spawns AT the takeoff cell (81), so it has essentially NO run-up (~1 block, 81&rarr;80)
+         *  and launches with very little speed. Owner: "jumping over the honey without sufficient speed and
+         *  falling into the void." A miss falls to its death = an unambiguous FAIL.
+         *
+         *  <p><b>HONEST GATE (2026-07-15).</b> These trials are now {@code honestCross}: PASS requires a REAL
+         *  airborne walk-off that DROPS onto the far landing platform and then reaches a goal pushed
+         *  {@link #HONEY_GOAL_PAST} cells PAST the landing edge — so a bot that merely teeters onto the honey
+         *  edge and lands inside the 2.5-block arrival radius no longer scores a (false) PASS. The landing
+         *  platform is extended ({@link #HONEY_LAND_LEN}) so an overshoot has runout and the far goal is real.
+         *  The bot crosses via WalkOff FROM the honey (Traverse onto the honey, then advance-2/descend-1) —
+         *  honey {@code reducesJump}-gates a jump, so WalkOff is the sole crosser; soul sand is NOT jump-gated,
+         *  so the plan Traverses onto it and JUMPS FROM it (Parkour), the decisive honey/soul control.
+         *
+         *  <p>Three trials: the owner's STANDSTILL spawn ({@code REST}, ~1-block run-up, arrives at walk speed),
+         *  a RUN-UP twin ({@code honeyRunup}: WALKIN + full stone runway + {@code fastEntry} sprint-arrival — does
+         *  a walk-off cross CLEANLY when it reaches the lip at sprint?), and the soul-sand jump-from-sand
+         *  positive control. */
+        void ownerRepro() {
+            ownerReproTrial("owner.honeyflyover", HONEY, false);       // standstill (owner's spawn) — the hard case
+            ownerReproTrial("owner.honeyflyover.runup", HONEY, true);  // run-up (sprint arrival) — is honey solved?
+            ownerReproTrial("owner.soulflyover", SOUL, false);         // control: jump-from-soul really crosses
+        }
+
+        /** One owner honey/soul crossing trial. {@code runup} = WALKIN + full stone runway + {@code fastEntry}
+         *  (arrive at the lip at sprint terminal); else {@code REST} at the takeoff (the owner's standstill). */
+        void ownerReproTrial(String name, BlockState gapBlock, boolean runup) {
+            int[] b = nextBase();
+            Trial t = new Trial(name, runup ? Approach.WALKIN : Approach.REST, -1, 0, -3, -1, 0,
+                    Template.REACH, false, b[0], b[1]);
+            t.ownerRepro = true;
+            t.honestCross = true;                                // strict: must really cross onto the far platform
+            t.honeyRunup = runup;
+            t.fastEntry = runup;                                 // pin sprint terminal on the approach to the lip
+            t.gapFloor = gapBlock;                               // honey/soul at the walk-off takeoff cell (owner's 80)
+            // Goal pushed HONEY_GOAL_PAST cells past the landing edge (owner's 78) — beyond the 2.5-block arrival
+            // radius from the honey, so ONLY a real crossing that stands on the landing platform can "arrive".
+            t.goal = new BlockPos(t.landX + HONEY_GOAL_PAST * t.cdx, t.landY + 1,
+                    t.landZ + HONEY_GOAL_PAST * t.cdz);
+            trials.add(t);
         }
 
         /** Flat cardinal jump with the single-block PRECISION landing (overshoot falls), both precursors. */
@@ -556,6 +634,8 @@ public final class ParkourCourse {
             attemptTicks = 0;
             navRetries = 0;
             leftTakeoff = false;
+            wentAirborne = false;
+            reachedLanding = false;
             stairAirborne = false;
             takeoffSpeed = -1;
             wasGrounded = true;
@@ -592,6 +672,19 @@ public final class ParkourCourse {
             attemptTicks++;
             trace(tr);
 
+            // owner-gate (honeyRunup): simulate the real-play FULL-SPRINT approach — while grounded in the
+            // pre-takeoff window, pin the horizontal velocity to sprint terminal along the jump axis + hold
+            // sprint, so the bot enters the jump on the flatter, honey-skimming arc (the harness's walk-terminal
+            // WALKIN entry clears the same jump; the real 3-stone run is a sprint). Only touches velocity/sprint.
+            if (tr.fastEntry && EntityState.onGround(bot)) {
+                double pj = tr.proj(bot.getX(), bot.getZ());
+                if (pj > -2.0 && pj < 0.45) {
+                    Vec3 dm = bot.getDeltaMovement();
+                    bot.setDeltaMovement(tr.ujx * 0.2806, dm.y, tr.ujz * 0.2806);
+                    bot.setSprinting(true);
+                }
+            }
+
             if (tr.stairRun) { tickStair(tr); return; }
 
             double proj = tr.proj(bot.getX(), bot.getZ());
@@ -602,6 +695,14 @@ public final class ParkourCourse {
 
             boolean fell = leftTakeoff && bot.getY() < tr.landedFeetY - 1.6;
             boolean atGoal = bot.mode() == AllyBotEntity.Mode.STAY && bot.getY() > tr.landedFeetY - 1.5;
+
+            // honestCross tracking: a REAL crossing goes AIRBORNE past the lip, then DROPS onto the far landing
+            // platform — Y falls to the landing floor (< landedFeetY+0.5, which EXCLUDES the honey top ≈
+            // landedFeetY+0.94) AND proj reaches the landing (past the gap, so a honey-edge teeter at proj≈1.6
+            // never qualifies). landCenterProj = the landing-cell-centre projection.
+            if (!EntityState.onGround(bot) && proj > 0.6) wentAirborne = true;
+            if (EntityState.onGround(bot) && bot.getY() < tr.landedFeetY + 0.5
+                    && proj >= tr.landCenterProj() - 0.6) reachedLanding = true;
 
             // A KNOWN-PLANNER-GAP trial (honey-in-first-gap max-reach tier, or the no-runway magma-overhang) is
             // scored by the normal fell/atGoal logic below — but record() rewrites any FAIL to its PLANNER-GAP
@@ -634,6 +735,43 @@ public final class ParkourCourse {
                     record(tr, leftTakeoff ? "FAIL" : "PASS",
                             leftTakeoff ? "left the takeoff cell without a clean refusal (timeout)"
                                         : "refused (held at takeoff, no route taken)");
+                }
+                return;
+            }
+
+            // HONEST HONEY/SOUL CROSSING (2026-07-15): PASS demands a REAL airborne walk-off/jump that DROPS
+            // onto the far landing platform AND reaches the far goal — a honey-edge teeter inside the 2.5-block
+            // arrival radius (the old false PASS) no longer counts, because the goal is HONEY_GOAL_PAST cells
+            // beyond the landing and reachedLanding requires the Y-drop + past-the-gap proj.
+            if (tr.honestCross) {
+                if (!bot.isAlive() || fell) {
+                    record(tr, "FAIL", String.format(Locale.ROOT,
+                            "fell into the void — under-reached (maxProj %.2f of %.2f)",
+                            maxProj, tr.landCenterProj()));
+                    return;
+                }
+                if (reachedLanding && atGoal) {
+                    record(tr, "PASS", String.format(Locale.ROOT,
+                            "real crossing onto the far landing (airborne=%s, maxProj %.2f)",
+                            wentAirborne, maxProj));
+                    return;
+                }
+                if (bot.navigator().navGaveUp()) {
+                    if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
+                        navRetries++;
+                        bot.comeTo(tr.goal);
+                        return;
+                    }
+                    record(tr, "FAIL", "nav gave up (no crossing offered)");
+                    return;
+                }
+                if (attemptTicks >= ATTEMPT_BUDGET) {
+                    record(tr, "FAIL", reachedLanding
+                            ? "reached the landing but never got to the far goal (timeout)"
+                            : String.format(Locale.ROOT,
+                                    "never crossed — teetered/short at maxProj %.2f of %.2f (shortfall %.2f), "
+                                    + "no airborne walk-off onto the landing",
+                                    maxProj, tr.landCenterProj(), tr.landCenterProj() - maxProj));
                 }
                 return;
             }
@@ -777,6 +915,7 @@ public final class ParkourCourse {
 
         /** Place a trial's blocks: runway + landing/goal geometry, one solid layer. Chunks sync-load on write. */
         void buildTile(Trial tr) {
+            if (tr.ownerRepro) { buildOwnerTile(tr); return; }
             // Runway along the approach direction, ending at the takeoff cell.
             for (int k = 0; k < RUN; k++) {
                 int cx = tr.baseX + k * tr.rdx;
@@ -847,6 +986,26 @@ public final class ParkourCourse {
             for (int s = 0; s <= n; s++) {          // ceiling over the takeoff cell + every stair (1-wide)
                 place(tr.takeoffX + sx * s, Y0 + sy * s + STAIR_CEILING_GAP, tr.baseZ);
             }
+        }
+
+        /** Lay the owner's EXACT 7-block honey-flyover course (see {@link #ownerRepro}) — nothing else, void all
+         *  around, so the geometry the bot sees is byte-for-byte the owner's in-game setup. rdx=-1 (travel -X):
+         *  takeoff cell = takeoffX (owner 81), two back stones behind it (owner 82,83), a single HONEY in the
+         *  first flyover cell (owner 80), a void gap (owner 79), then a 1-wide landing strip ONE block lower
+         *  (owner 78/77/76). */
+        void buildOwnerTile(Trial tr) {
+            int z = tr.takeoffZ;
+            // Runway of stone ending at the takeoff cell (owner 81). A honeyRunup trial lays the FULL RUN-cell
+            // runway (baseX..takeoffX) so a WALKIN spawn has real stone to sprint down before the honey; the
+            // standstill (REST) trial keeps the owner's short ~3-stone approach (81,82,83).
+            int backStones = tr.honeyRunup ? RUN : 3;
+            for (int k = 0; k < backStones; k++) place(tr.takeoffX - k * tr.rdx, Y0, z); // rdx=-1 ⇒ +X is "behind"
+            // The walk-off takeoff block (honey / soul sand — owner 80), node-level with the takeoff stone.
+            placeState(tr.gapFloorX, Y0, tr.gapFloorZ, tr.gapFloor);
+            // (the cell at gapFloorX+cdx == owner 79 is left VOID — the gap the walk-off crosses)
+            // Landing platform ONE block lower (owner 78,77,76,… at Y-57), along the -X continuation axis —
+            // extended (HONEY_LAND_LEN) so an overshoot has runout and the far honest goal is a real cell.
+            for (int k = 0; k <= HONEY_LAND_LEN; k++) place(tr.landX + k * tr.cdx, tr.landY, tr.landZ + k * tr.cdz);
         }
 
         void place(int x, int y, int z) {

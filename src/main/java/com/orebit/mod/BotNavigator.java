@@ -261,26 +261,53 @@ final class BotNavigator {
     }
 
     /**
-     * Whether a {@link Parkour}/{@link DiagonalParkour} jump is currently mid-execution — the active
-     * phase-plan step is a parkour move and the runner is executing it (runup → takeoff → airborne → land,
-     * before its {@code done} fires). Used by {@link #driveToward}'s arrival-preempt gate so a landing cell
-     * that is the goal doesn't kill the jump before touchdown (the ice-STOP undershoot). Purely STATE-based
-     * (no timers): once the land phase's {@code done} predicate fires, {@link #steerAlongPath} advances the
-     * cursor past this step the same tick, so the very next tick this returns false and COMPLETE may fire.
+     * Whether the plan is mid-execution of a COMMITTED move that has not yet settled — the move-agnostic
+     * generalization of the old {@code parkourJumpInFlight()} gate. A move flagged {@link
+     * Movement#commitsAcrossArrival()} (a jump: {@link Parkour}/{@link DiagonalParkour}; the no-jump {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.WalkOff WalkOff} crossing) is an irreversible airborne
+     * commitment — once its runup/takeoff/step-off begins the bot leaves the ground and can't stop mid-arc — so a
+     * landing cell that is itself the goal must NOT let {@link #driveToward}'s arrival-preempt gate zero forward +
+     * clear the plan before touchdown (the ice-STOP parkour undershoot; the WalkOff close-goal step-off).
      *
-     * <p>DEFERRED KNOWN RISK (owner-accepted, watch in-game): a TERMINAL parkour jump that mispredicts onto an
-     * unwalkable off-cell spot leaves this gate latched (the land {@code done} never fires because the bot never
-     * reaches the exact target cell) → COMPLETE stays suppressed → a possible wedge with no re-plan. This is
-     * DEFERRED per owner — revisit only if seen in-game. The pre-diff COMPLETE rescue (which fired COMPLETE on
-     * proximity regardless of an in-flight jump) is intentionally NOT restored here: it is the very
-     * mid-jump-preemption this gate exists to remove, so re-adding it would reintroduce the ice-STOP undershoot.
+     * <p>Move-NATURE, not a type test: reads the current step's {@code commitsAcrossArrival()} flag, so it covers
+     * every current and future committed move with no {@code instanceof} and no follower edit — an ordinary
+     * reversible move (Traverse/Diagonal/Ascend/Descend/Pillar/…) returns {@code false} and arrives normally, and
+     * (crucially) a Traverse macro run — which also drives via a multi-phase {@link PhaseRunner} plan — is NOT
+     * wrongly blocked. Purely STATE-based (no timers): once the committed move's {@code done} fires, {@link
+     * #steerAlongPath} advances the cursor past this step the same tick, so the next tick this reads the next
+     * (uncommitted) move — or {@code waypointIndex >= size} — and COMPLETE may fire.
+     *
+     * <p>DEFERRED KNOWN RISK (owner-accepted, watch in-game): a TERMINAL committed move that mispredicts onto an
+     * unwalkable off-cell spot leaves this gate latched (its {@code done} never fires because the bot never
+     * reaches the exact target cell) → COMPLETE stays suppressed → a possible wedge with no re-plan. DEFERRED per
+     * owner — revisit only if seen in-game. Firing COMPLETE on proximity regardless of an in-flight commitment is
+     * intentionally NOT done: that is the very mid-jump preemption this gate removes (the ice-STOP undershoot).
      */
-    private boolean parkourJumpInFlight() {
+    private boolean midCommittedMove() {
         if (!phaseRunner.active() || path == null || waypointIndex >= path.size()) {
             return false;
         }
-        Movement m = path.movement(waypointIndex);
-        return m instanceof Parkour || m instanceof DiagonalParkour;
+        return path.movement(waypointIndex).commitsAcrossArrival();
+    }
+
+    /**
+     * Whether the bot is standing IN or ON a damaging block (lava, fire, magma, campfire, cactus, wither rose,
+     * berry bush, powder snow) — read from the SAME background nav descriptor {@link #isStandableFloor} already
+     * uses (no new live/reflective read), checking both the feet cell (a damaging block the bot stands inside —
+     * fire/lava/berry) and the floor cell below it (a damaging block it stands on — magma/campfire). An "arrived"
+     * bot must not drop all inputs while over a damaging floor: keep the plan and keep moving to walk out of it.
+     * Unbuilt cells read AIR (not damaging) → allow arrival, the same permissive default {@link #isStandableFloor}
+     * takes when the grid can't answer.
+     */
+    private boolean onDamagingFloor() {
+        NavGridView grid = NavGridView.background((ServerLevel) Worlds.of(bot));
+        BlockPos feet = bot.blockPosition();
+        return isDamagingCell(grid, feet) || isDamagingCell(grid, floorOf(feet));
+    }
+
+    private static boolean isDamagingCell(NavGridView grid, BlockPos p) {
+        return grid.built(p.getX(), p.getY(), p.getZ())
+                && NavBlock.isDamaging(grid.descriptorAt(p.getX(), p.getY(), p.getZ()));
     }
 
     /** Drive toward {@code (tx,ty,tz)} with the default follow/come arrival tolerance ({@link #ARRIVE_DIST}/
@@ -318,14 +345,21 @@ final class BotNavigator {
         // BELOW the target (it walks under a sky platform / the top of a staircase and quits) — it must
         // also match the target's height, which is what makes it actually climb to reach you.
         //
-        // ARRIVAL-PREEMPT GATE: a Parkour/DiagonalParkour landing cell can itself be the goal (the ice STOP
-        // case), and the bot enters the arrival radius mid-jump — during runup or airborne, before touchdown.
-        // Taking COMPLETE there zeroes forward + clears the plan, so the in-progress jump is killed and the bot
-        // coasts off the takeoff edge into the gap (the undershoot). State-based gate: while a parkour move is
-        // the active phase-plan step (i.e. mid-jump — runup/takeoff/airborne, not yet landed, since the phase
-        // runner advances past the step the moment its land `done` fires), DON'T preempt — let the plan's own
-        // `land.done()` finish the jump. COMPLETE fires on the next tick, once the step is consumed.
-        if (distXZ <= arriveDist && Math.abs(dy) <= arriveY && !parkourJumpInFlight()) {
+        // ARRIVAL as a MOVE-AGNOSTIC state test: "arrived" (safe to drop ALL inputs) means the bot is in range
+        // AND in a state where stopping is safe AND not mid-commitment to a move that must finish. Three
+        // conditions beyond the range test, each covering a whole class rather than one move:
+        //   - grounded() || isInWater(): the two stable "stopping is safe" media — on the ground, or buoyant in
+        //     water (drop the inputs and you float, you don't fall). This EXCLUDES airborne (Parkour/WalkOff/Fall
+        //     mid-arc → not arrived, one check for any airborne move) while still letting a bot floating at a
+        //     water/swim goal arrive — grounded-only would leave it treading water at the goal forever, sinking
+        //     past a tight-tolerance mid-water goal (the swim `sink` regression). Mirrors the settle anchor below.
+        //   - !onDamagingFloor(): standing in/on lava/fire/magma/… → keep moving out, don't settle in it.
+        //   - !midCommittedMove(): an irreversible committed move (jump, walk-off) is mid-flight — a landing cell
+        //     that is itself the goal must not zero forward + clear the plan before touchdown (the ice-STOP
+        //     undershoot; the WalkOff close-goal step-off). State-based: the moment the move's `done` fires,
+        //     steerAlongPath advances the cursor past the step, so COMPLETE may fire the next tick.
+        boolean withinRange = distXZ <= arriveDist && Math.abs(dy) <= arriveY;
+        if (withinRange && (bot.grounded() || bot.isInWater()) && !onDamagingFloor() && !midCommittedMove()) {
             driveState = "COMPLETE";
             bot.setForward(0.0f);
             clearPlan(); // also resets the exact-goal escalation — this goal is DONE

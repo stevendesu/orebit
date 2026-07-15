@@ -16,6 +16,7 @@
 param(
     [string]$McVersion = "1.21.11",
     [switch]$BotDebug,
+    [switch]$OwnerOnly,         # build ONLY the owner's exact in-game honey-flyover reproduction (fast ~1 min run)
     [string]$GroundDrive = ""   # "" = build-default; "servo" | "legacy" (parkour bypasses drive(); no-regression A/B)
 )
 
@@ -43,6 +44,7 @@ Copy-Item (Join-Path $templates "orebit.properties") (Join-Path $runDir "config\
 # ---- 2. Run -----------------------------------------------------------------------------------
 $gradleArgs = @(":fabric:${McVersion}:runParkour")
 if ($BotDebug) { $gradleArgs += "-Porebit.parkour.debug=true" }
+if ($OwnerOnly) { $gradleArgs += "-Porebit.parkour.owneronly=true" }
 if ($GroundDrive -ne "") { $gradleArgs += "-Porebit.ground.drive=$GroundDrive" }
 
 Push-Location $repo

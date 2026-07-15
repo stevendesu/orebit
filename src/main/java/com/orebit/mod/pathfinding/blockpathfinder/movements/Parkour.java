@@ -438,44 +438,31 @@ public final class Parkour implements Movement {
             }
         }
 
-        // Takeoff-condition key for the DERIVED envelope (ParkourEnvelope): the slow-floor bucket (gsf 0.4 —
-        // soul sand; honey floors are already refused above) and the LIGHT through-slow body bucket (berry /
-        // powder snow — cobweb is already refused above). occBucket + the takeoff-slow flag are
-        // direction-INDEPENDENT — hoist them. The takeoff SURFACE height is direction-dependent only for a
-        // stair (its high 16/16 half faces one edge), so a uniform (non-stair) floor hoists ONE surface index.
+        // Takeoff-condition key for the DERIVED envelope (ParkourEnvelope): the slow-floor bucket (soul
+        // sand — honey is already refused above) and the LIGHT through-slow body bucket (berry / powder
+        // snow — cobweb is already refused above). Both are direction-INDEPENDENT — hoist them. The takeoff
+        // SURFACE height is direction-dependent only for a stair (its high 16/16 half faces one edge), so a
+        // uniform (non-stair) floor hoists ONE table lookup; a stair recomputes it per cardinal.
         final long floorDesc = ctx.descriptorAt(x, y, z);
-        final boolean takeoffSlow = ctx.isSlow(floorDesc);
+        final int gsfBucket = ctx.isSlow(floorDesc) ? 1 : 0;
         final int occBucket = ctx.bodyTransitLight(x, y, z) ? 1 : 0;
         final boolean stair = ctx.isStair(floorDesc);
-        final int surfIndex = stair ? -1 : ParkourEnvelope.index(ctx.floorSurface(x, y, z));
+        final int[] uniformEnv = stair ? null
+                : ParkourEnvelope.MAX_GAP[ParkourEnvelope.index(ctx.floorSurface(x, y, z))]
+                        [gsfBucket][occBucket];
 
         final int safeFall = ctx.caps().safeFallDistance();
         // Deepest drop actually probed: the envelope's fall depth capped by the bot's max survivable fall.
         final int capsDrop = Math.min(FALL_DEPTH, ctx.caps().maxFallDistance());
 
         for (int[] d : CARDINALS) {
-            // REDUCED (gsf-0.4) row selection is PER-DIRECTION: pick it from the TAKEOFF cell (soul sand) OR
-            // from the FIRST flyover cell (honey / soul sand at gap column 1). A NORMAL takeoff whose first
-            // flown-over block is slowing still eats the tick-1 speedFactor-0.4 slash, so the jump must plan
-            // under the reduced envelope — else the max-reach tiers are OFFERED but unmakeable. Only the FIRST
-            // flyover matters (the bot is still low there; deeper slow blocks clear above the read zone).
-            //
-            // Read gap column 1 ONCE here — it is scanDirection's own first access (its c==1 cell), so we hand
-            // (p1,fd1) into the scan to REUSE rather than re-read: the fold keeps the per-node read count at the
-            // pre-fix baseline (a separate up-front probe measured +3.4% OPEN / +4.2% CLIFFS on the JMH suite —
-            // a pure duplicate read; this fold recovers it). Same isSlow(fd) the flyover trigger uses; an
-            // unbuilt/absent first cell is not slow. ONE reduced bucket: either trigger flips it (over-
-            // conservative, not a double-slow row).
-            int fx = x + d[0], fz = z + d[1];
-            int p1 = ctx.packedAt(fx, y, fz);
-            long fd1 = p1 == MovementContext.UNBUILT ? 0L : ctx.descriptorOf(fx, y, fz, p1);
-            int gsfBucket = (takeoffSlow || (p1 != MovementContext.UNBUILT && ctx.isSlow(fd1))) ? 1 : 0;
             // The direction's envelope row: a stair takeoff reads the surface toward THIS jump (its high
             // half faces one edge), so soul-sand/berry-flat rows can differ per direction; a flat floor
-            // reuses the hoisted surface index.
-            int[] env = ParkourEnvelope.MAX_GAP[stair
-                    ? ParkourEnvelope.index(ctx.directionalTopY(floorDesc, d[0], d[1])) : surfIndex]
-                    [gsfBucket][occBucket];
+            // reuses the hoisted row (zero extra lookups).
+            int[] env = stair
+                    ? ParkourEnvelope.MAX_GAP[ParkourEnvelope.index(
+                            ctx.directionalTopY(floorDesc, d[0], d[1]))][gsfBucket][occBucket]
+                    : uniformEnv;
             // The flat knob NARROWS the derived flat cap (and the cost table bounds it too); rise + fall +
             // diag come straight from the table. Zero per-node math beyond the index — the row load folds.
             int flatMax = Math.min(PARKOUR_MAX_GAP, Math.min(env[ParkourEnvelope.FLAT], COST.length - 1));
@@ -491,7 +478,7 @@ public final class Parkour implements Movement {
             if (maxGapAll < 1) continue; // this takeoff condition offers no jump in this direction
 
             int found = scanDirection(ctx, x, y, z, d[0], d[1], out,
-                    flatMax, riseMax, env, capsDrop, safeFall, fallGapCap, maxGapAll, p1, fd1);
+                    flatMax, riseMax, env, capsDrop, safeFall, fallGapCap, maxGapAll);
             if (found == DIR_SAW_GAP && OFFSET_FALLBACK) {
                 // A genuine gap with NO aligned landing of any class — arm the (c,±1) offset fallback
                 // tier for this direction only (class Javadoc). Directions that landed, or that have no
@@ -519,7 +506,7 @@ public final class Parkour implements Movement {
      */
     private static int scanDirection(MovementContext ctx, int x, int y, int z, int dx, int dz,
             CandidateSink out, int flatMax, int riseMax, int[] env, int capsDrop, int safeFall,
-            int fallGapCap, int maxGapAll, int col1P, long col1Fd) {
+            int fallGapCap, int maxGapAll) {
         // The lazy-verification prefix cursor: gap columns 1..verified have proven transit prisms, whose
         // pass-through surcharge (summed column-ascending — the eager order) is verifiedTransit.
         int verified = 0;
@@ -530,20 +517,10 @@ public final class Parkour implements Movement {
             int cz = z + dz * c;
             int g = c - 1; // open columns overflown to land AT column c
 
-            // The column's node-level cell decides landing-vs-gap-vs-blocked. Column 1 was already read by the
-            // caller (for the reduced-envelope bucket) — REUSE (p1,fd1) here instead of re-reading it (the fold
-            // that keeps this move's per-node read count at the pre-flyover-fix baseline). c>=2 reads its slot.
-            int p;
-            long fd;
-            if (c == 1) {
-                p = col1P;
-                if (p == MovementContext.UNBUILT) return found; // unknown column — don't jump into/over it
-                fd = col1Fd;
-            } else {
-                p = ctx.packedAt(cx, y, cz);
-                if (p == MovementContext.UNBUILT) return found;
-                fd = ctx.descriptorOf(cx, y, cz, p);
-            }
+            // The column's node-level cell decides landing-vs-gap-vs-blocked — read its slot once.
+            int p = ctx.packedAt(cx, y, cz);
+            if (p == MovementContext.UNBUILT) return found; // unknown column — don't jump into/over it
+            long fd = ctx.descriptorOf(cx, y, cz, p);
 
             if (ctx.standable(fd)) {
                 // A standable node-level cell normally ENDS the direction (never overfly a ledge, v1) — it
@@ -553,7 +530,7 @@ public final class Parkour implements Movement {
                 //
                 // ISSUE-3 jump-over trigger: an obstacle worth flying OVER (rather than dead-ending the scan)
                 // is treated as an OVERFLYABLE gap column so a landing BEYOND it is found — magma/campfire
-                // jumped clean, snow's +1 rising landing reached, a soul-sand/honey drag avoided. Three terms:
+                // jumped clean, snow's +1 rising landing reached. Two terms:
                 //   • DAMAGING (caps-gated) — a hazard floor (magma, campfire).
                 //   • topY < 12 — a SUNK block that TRAPS the walker: max ascend is JUMP_RISE = 20/16 = 1.25,
                 //     so stepping onto a cell whose top is T/16 drops you to T/16 and climbing out onto a +1
@@ -561,21 +538,20 @@ public final class Parkour implements Movement {
                 //     topY ≥ 12 is always escapable by a plain Ascend (no jump-over owed — and this EXCLUDES
                 //     farmland / dirt-path (15) and soul sand's own height (14), avoiding discarded
                 //     candidates); topY < 12 (snow layer 2, low slab) traps → trigger.
-                //   • isSlow(fd) — a slow FLOOR (soul sand / honey, vanilla getSpeedFactor 0.4 → SURFACE_SLOW)
-                //     is worth jumping OVER to dodge the walk-speed multiplier; honey is a full block (topY 16)
-                //     so ONLY this term catches it. A* still decides via cost, so it is never unnecessary.
-                // A plain full non-damaging non-slow block (topY 16) triggers NOTHING → the scan still
-                // terminates, byte-identical to v1 for ordinary terrain. The walk-ONTO-this-cell candidate
-                // below is still emitted (now priced with the landing floor's own hazard via floorHazardCost),
-                // so A* gets BOTH the walk and the jump and picks the cheaper.
-                // INVARIANT this scan relies on (verified 1.21.11 Blocks.java): honey is the ONLY vanilla
-                // block with jumpFactor<1, and it ALSO has speedFactor 0.4, so `isSlow` already catches every
-                // vanilla jump-reducer — no separate `|| jumpReducing` term is needed to overfly (rather than
-                // launch weakly from) one. A MODDED jump-reducer that is NOT slow would slip through; add the
-                // term only if that ever matters. (Follower Fix 3 handles the takeoff-timing side of this.)
+                // A SLOW floor is DELIBERATELY NOT overflown (owner decision): flying OVER a slow block (honey /
+                // soul sand) is a scope reduction removed here — the honey wall-slide (HoneyBlock.doSlideMovement)
+                // steals ~88% of horizontal momentum on a fast descent beside honey and drops the bot into the
+                // void, and special-casing it is exactly the bandaid class the model avoids. A slow block in the
+                // gap-line is now a non-overflyable obstacle: the scan terminates on it (soul sand/honey is
+                // full-block-standable so it dead-ends the direction here), so A* re-routes to jump FROM the slow
+                // block instead (Traverse onto it, then a reduced-envelope Parkour off it) or refuses. A crossing
+                // move (WalkOff) covers the honey case separately.
+                // A plain full non-damaging block (topY 16) — including a slow floor now — triggers NOTHING → the
+                // scan terminates, byte-identical to v1 for ordinary terrain. The walk-ONTO-this-cell candidate
+                // below is still emitted (priced with the landing floor's own hazard via floorHazardCost), so A*
+                // gets the walk (and, for a slow block, the jump-FROM-it) and picks the cheaper.
                 boolean trigger = (NavBlock.isDamaging(fd) && ctx.caps().takesDamage())
-                        || NavBlock.topY(fd) < 12
-                        || ctx.isSlow(fd);
+                        || NavBlock.topY(fd) < 12;
                 // Overfly ONLY when the obstacle's body above is clear enough to fly through — the flat and
                 // g==0 sub-cases. A raised ledge (y+1 a standable floor) or otherwise blocked body cannot be
                 // overflown (you climb it or stop), so it keeps the v1 terminate even when triggering.
@@ -1079,5 +1055,12 @@ public final class Parkour implements Movement {
                 .done(b -> b.grounded()
                         && b.footX() == tx && b.footY() == ty + 1 && b.footZ() == tz);
         return plan;
+    }
+
+    /** A jump is an irreversible airborne commitment — its landing cell being the goal must not preempt the
+     *  jump mid-arc (the ice-STOP undershoot). See {@link Movement#commitsAcrossArrival()}. */
+    @Override
+    public boolean commitsAcrossArrival() {
+        return true;
     }
 }

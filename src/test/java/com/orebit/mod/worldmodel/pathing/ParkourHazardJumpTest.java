@@ -31,11 +31,13 @@ import net.minecraft.world.level.chunk.Strategy;
  * Headless proof of the ISSUE-3 <b>jump-over-a-standable-obstacle</b> parkour rule and its landing
  * floor-hazard pricing. Before the fix the aligned parkour scan ENDED a direction at the first
  * {@code standable} node-level cell, so a standable obstacle (magma / campfire / snow layer / slab /
- * soul sand / honey) was never treated as a jump-over gap column — the bot walked onto the hazard (magma,
- * damage) or dead-ended entirely (snow into a +1 ledge). The fix arms a jump-over TRIGGER at the standable
- * branch — {@code damaging (caps-gated) || topY < 12 || isSlow} — so a triggering obstacle is overflown to
- * a landing BEYOND it while the walk-onto candidate still stands, and A* picks the cheaper. A plain full
- * non-damaging non-slow block (topY 16) triggers nothing and stays byte-identical (the walker steps/walks).
+ * snow layer) was never treated as a jump-over gap column — the bot walked onto the hazard (magma, damage)
+ * or dead-ended entirely (snow into a +1 ledge). The fix arms a jump-over TRIGGER at the standable branch —
+ * {@code damaging (caps-gated) || topY < 12} — so a triggering obstacle is overflown to a landing BEYOND it
+ * while the walk-onto candidate still stands, and A* picks the cheaper. A plain full non-damaging block
+ * (topY 16) triggers nothing and stays byte-identical (the walker steps/walks). NOTE (owner 2026-07-14): a
+ * SLOW floor (soul sand / honey) is DELIBERATELY no longer overflown — the {@code || isSlow} term was
+ * removed (the honey wall-slide void-fall); a walkable slow span is walked across, not jumped.
  *
  * <p>Scene convention (shared with {@link com.orebit.mod.worldmodel.pathing HazardJumpDiagnosisTest} /
  * {@code ParkourOverFluidTest}): a sealed stone section with a 1-wide corridor at {@code z=8}, floor at
@@ -103,29 +105,31 @@ class ParkourHazardJumpTest {
         assertFalse(visitsFloor(plan, 3, 0, 8), "the plan must NOT stand on the campfire cell (3,0,8)");
     }
 
-    // ---- (4) slow FLOOR gaps — worth jumping over the walk-speed multiplier ---------------------------
+    // ---- (4) slow FLOOR spans — NO LONGER jumped (owner 2026-07-14: slow-flyover removed) --------------
+    // The jump-over trigger's `|| isSlow` term was removed: a slow block in the gap-line is a NON-overflyable
+    // obstacle now, so a WALKABLE slow floor is simply walked across (eating the drag), never jumped over.
 
     @Test
-    void soulSandGap_parkoursOverTheSlowFloor() {
-        // Two soul-sand cells in the gap floor (3,0)+(4,0); landing (5,0); a walk drags across both at the
-        // 0.4 speed factor (≈2.5× per step), clearly dearer than one g=2 jump over them.
+    void soulSandGap_walkedAcrossNotJumped() {
+        // Two soul-sand cells in the gap floor (3,0)+(4,0); landing (5,0). The scan no longer overflies the
+        // slow floor, and soul sand is walkable, so the ONLY route is a plain walk across both cells.
         BlockPathPlan plan = search(twoCellGap(soulSand(), soulSand()), 2, 0, 8, 5, 0, 8);
 
-        assertNotNull(plan, "a route to the goal must exist");
-        assertTrue(contains(plan, MovementRegistry.PARKOUR),
-                "the slow soul-sand span should be JUMPED (isSlow trigger) — the drag exceeds the jump");
+        assertNotNull(plan, "a route to the goal must exist (walk across the slow floor)");
+        assertFalse(contains(plan, MovementRegistry.PARKOUR),
+                "a slow soul-sand span is NO LONGER jumped over (isSlow trigger removed) — the bot Traverses");
         assertReaches(plan, 5, 0, 8);
     }
 
     @Test
-    void honeyGap_parkoursOverTheSlowFloor() {
-        // Honey is a FULL block (topY 16) — only the isSlow term catches it (getSpeedFactor 0.4). VERIFIED
-        // in NavBlock: honey classifies SURFACE_SLOW, so ctx.isSlow(fd) fires and the jump-over is offered.
+    void honeyGap_walkedAcrossNotJumped() {
+        // Honey is a FULL block (topY 16) and slow; with the isSlow trigger gone it is not overflown. Walking
+        // onto/across honey is fine (only the JUMP is suppressed), so the bot walks the span to the goal.
         BlockPathPlan plan = search(twoCellGap(honey(), honey()), 2, 0, 8, 5, 0, 8);
 
-        assertNotNull(plan, "a route to the goal must exist");
-        assertTrue(contains(plan, MovementRegistry.PARKOUR),
-                "the slow honey span should be JUMPED (isSlow trigger) — the drag exceeds the jump");
+        assertNotNull(plan, "a route to the goal must exist (walk across the honey)");
+        assertFalse(contains(plan, MovementRegistry.PARKOUR),
+                "a slow honey span is NO LONGER jumped over (isSlow trigger removed) — the bot Traverses");
         assertReaches(plan, 5, 0, 8);
     }
 
