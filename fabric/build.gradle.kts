@@ -125,7 +125,7 @@ loom {
             configName = "Orebit Parkour ($minecraft)"
             runDir = "../../../run/parkour"
             vmArg("-Dorebit.parkour=true")
-            for (key in listOf("debug")) {
+            for (key in listOf("debug", "owneronly")) {
                 val v = project.findProperty("orebit.parkour.$key")
                 if (v != null) vmArg("-Dorebit.parkour.$key=$v")
             }

@@ -16,6 +16,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.movements.StartSprintSwim;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Surface;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Swim;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.WalkOff;
 
 /**
  * The set of {@link Movement} strategies the block A* expands each node with (MOVEMENT-DESIGN.md §7).
@@ -41,6 +42,7 @@ public final class MovementRegistry {
     public static final Movement CLIMB = new Climb();
     public static final Movement PARKOUR = new Parkour();
     public static final Movement DIAGONAL_PARKOUR = new DiagonalParkour();
+    public static final Movement WALK_OFF = new WalkOff();
 
     /**
      * Tier 1 (ground + water): walk + step-assist, diagonal walk, jump-up-1, step-down-1, safe drop, the
@@ -51,7 +53,9 @@ public final class MovementRegistry {
      * Every move self-gates: the ground moves on {@code MODE_STANDING}, the sprint-swim + surface on
      * {@code MODE_PRONE}, Pillar/MineDown on place/break caps, the swim moves on the presence of water, the
      * climb on a climbable feet/neighbour cell — so a walk-only bot on dry land still gets only the plain
-     * ground moves and never changes pose.
+     * ground moves and never changes pose. WalkOff (a no-jump gap-1/descend-1 crossing) is appended last;
+     * it self-gates on a jump-REFUSED start cell (honey / cobweb-body / low ceiling), so where a jump is
+     * legal Parkour owns the destination and WalkOff stays silent — the honey crosser without a hijack.
      *
      * <p><b>Order matters on cost ties only</b>: relaxation rejects non-strict improvements, so the
      * earlier-listed movement wins an equal-g destination. New movements are appended at the END so the
@@ -61,5 +65,5 @@ public final class MovementRegistry {
      */
     public static final List<Movement> TIER1 =
             List.of(TRAVERSE, DIAGONAL, ASCEND, DESCEND, FALL, PILLAR, MINE_DOWN, SWIM, SPRINT_SWIM,
-                    START_SPRINT_SWIM, SURFACE, CLIMB, PARKOUR, DIAGONAL_PARKOUR);
+                    START_SPRINT_SWIM, SURFACE, CLIMB, PARKOUR, DIAGONAL_PARKOUR, WALK_OFF);
 }
