@@ -88,4 +88,24 @@ public interface Movement {
     default MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
         return null;
     }
+
+    /**
+     * Whether this move is an IRREVERSIBLE cross-arrival commitment — once begun (runup / takeoff / step-off) it
+     * must run to its landing before the bot may declare "arrived" and drop all inputs. A jump ({@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour Parkour} / {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour DiagonalParkour}) and the no-jump
+     * {@link com.orebit.mod.pathfinding.blockpathfinder.movements.WalkOff WalkOff} crossing are committed: the
+     * bot leaves the ground and cannot stop mid-arc, so a goal whose landing cell is within the arrival radius
+     * must NOT preempt the move (the ice-STOP parkour undershoot; the WalkOff close-goal step-off).
+     *
+     * <p>Default {@code false} — an ordinary grounded, reversible move (Traverse / Diagonal / Ascend / Descend /
+     * Pillar / …) can be stopped at any cell, so arrival may fire the moment the bot is in range and grounded.
+     * The follower reads this in its arrival-preempt gate ({@code BotNavigator.midCommittedMove}); a move-agnostic
+     * property, so it replaces the old {@code instanceof Parkour || instanceof DiagonalParkour} test and adding a
+     * new committed move is one override on that move, never a follower edit. This is a move-NATURE flag (like the
+     * cost model or {@link #plan}), not per-tick state — evaluate it as a constant.
+     */
+    default boolean commitsAcrossArrival() {
+        return false;
+    }
 }

@@ -34,7 +34,8 @@ import net.minecraft.world.level.chunk.Strategy;
  * never offered — the bot pathed INTO the lava (common in the nether). The fix brings cardinal
  * {@code Parkour}'s two admissions to the diagonal: a non-standable gap cell is overflown when
  * {@code overJumpable} (fluids/short décor, not fences), and a standable obstacle worth flying over
- * ({@code damaging || topY < 12 || isSlow}) is treated as an overflyable column while its own body prism
+ * ({@code damaging || topY < 12}; owner 2026-07-14: the {@code || isSlow} term was REMOVED — a slow floor is
+ * no longer overflown, mirroring cardinal Parkour) is treated as an overflyable column while its own body prism
  * {@code y+1..y+3} — and every swept corner column's — is proven strictly {@code passable} by
  * {@code verifyArc}/{@code cornerColumnCost}, so a 2-tall hazard column still rejects the jump.
  *
@@ -101,34 +102,36 @@ class DiagonalHazardJumpTest {
         assertFalse(visitsFloor(plan, 6, 5, 6), "the plan must NOT stand on the magma centre (6,5,6)");
     }
 
-    // ---- (3) slow floors: a 2-gap of soul-sand / honey, jumped when the drag exceeds the jump ----------
+    // ---- (3) slow floors: a diagonal slow span is NO LONGER jumped (owner 2026-07-14: slow-flyover removed)
+    // The `|| isSlow` diagonal jump-over term was removed to mirror cardinal Parkour. A WALKABLE slow floor is
+    // Diagonal-WALKED across (eating the drag), never DiagonalParkoured over. (Walkable STONE corners here — a
+    // lava-corner scene would strand, since the slow span can no longer be flown over.)
 
     @Test
-    void soulSandSpan_diagonalParkoursOverTheSlowFloor() {
-        // Two soul-sand gap cells (6,6)+(7,7), landing (8,8); lava corners. Walking drags across both at the
-        // 0.4 speed factor (2.5× per diagonal step) — dearer than one g=2 diagonal jump over them.
+    void soulSandSpan_walkedNotDiagonalJumped() {
+        // Two soul-sand gap cells (6,6)+(7,7), landing (8,8); walkable stone corners. The slow floor is not
+        // overflown, so the bot Diagonal-walks the span to the goal — no DiagonalParkour.
         NavGridView grid = diagCourse(2, Blocks.SOUL_SAND.defaultBlockState(),
-                Blocks.LAVA.defaultBlockState(), null);
+                Blocks.STONE.defaultBlockState(), null);
         BlockPathPlan plan = search(grid, 5, 5, 5, 8, 5, 8);
 
-        assertNotNull(plan, "a route to the goal must exist");
-        assertTrue(contains(plan, MovementRegistry.DIAGONAL_PARKOUR),
-                "the slow soul-sand span should be JUMPED (isSlow trigger) — the drag exceeds the jump");
+        assertNotNull(plan, "a route to the goal must exist (walk the slow diagonal span)");
+        assertFalse(contains(plan, MovementRegistry.DIAGONAL_PARKOUR),
+                "a slow soul-sand span is NO LONGER diagonally jumped (isSlow trigger removed) — the bot walks");
         assertReaches(plan, 8, 6, 8);
-        assertFalse(visitsFloor(plan, 6, 5, 6) || visitsFloor(plan, 7, 5, 7),
-                "the plan must NOT walk the soul-sand gap cells");
     }
 
     @Test
-    void honeySpan_diagonalParkoursOverTheSlowFloor() {
-        // Honey is a FULL block (topY 16) — only the isSlow term catches it (getSpeedFactor 0.4).
+    void honeySpan_walkedNotDiagonalJumped() {
+        // Honey is a FULL block (topY 16) and slow; with the isSlow term gone it is not overflown. Walking
+        // across honey is fine (only the JUMP is suppressed), so the bot Diagonal-walks the span to the goal.
         NavGridView grid = diagCourse(2, Blocks.HONEY_BLOCK.defaultBlockState(),
-                Blocks.LAVA.defaultBlockState(), null);
+                Blocks.STONE.defaultBlockState(), null);
         BlockPathPlan plan = search(grid, 5, 5, 5, 8, 5, 8);
 
-        assertNotNull(plan, "a route to the goal must exist");
-        assertTrue(contains(plan, MovementRegistry.DIAGONAL_PARKOUR),
-                "the slow honey span should be JUMPED (isSlow trigger) — the drag exceeds the jump");
+        assertNotNull(plan, "a route to the goal must exist (walk the honey diagonal span)");
+        assertFalse(contains(plan, MovementRegistry.DIAGONAL_PARKOUR),
+                "a slow honey span is NO LONGER diagonally jumped (isSlow trigger removed) — the bot walks");
         assertReaches(plan, 8, 6, 8);
     }
 

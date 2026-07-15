@@ -262,10 +262,10 @@ class SlowBlockCostTest {
     /**
      * A single-chunk flat world: the given floor block over all of y=0, a 2-tall walk gap (y=1..2), and a
      * solid CEILING at y=3. The ceiling denies parkour its takeoff head-clearance (floor y=0 needs y+3=3
-     * clear) — WITHOUT it, the ISSUE-3 slow-floor jump-over lets the bot parkour-hop OVER soul-sand cells to
-     * dodge the walk-speed multiplier (a cheaper route, legitimate and tested in ParkourHazardJumpTest),
-     * which would break this test's per-CELL macro-surcharge equality. Walking (and the flat cuboid collapse)
-     * only need the 2-tall gap, so the ceiling isolates the macro run under test.
+     * clear), isolating the macro run under test. (Historically it also suppressed the ISSUE-3 slow-floor
+     * jump-over — a parkour-hop OVER soul-sand cells to dodge the walk-speed multiplier — but that behavior
+     * was removed 2026-07-14, so the ceiling is now belt-and-suspenders for this per-CELL surcharge equality.)
+     * Walking (and the flat cuboid collapse) only need the 2-tall gap.
      */
     private static NavGridView flatFloorWorld(BlockState floorBlock) {
         BlockState air = Blocks.AIR.defaultBlockState();
