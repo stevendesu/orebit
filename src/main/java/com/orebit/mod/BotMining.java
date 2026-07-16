@@ -5,6 +5,7 @@ import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
 import com.orebit.mod.platform.BotInventory;
 import com.orebit.mod.platform.WorldEdits;
+import com.orebit.mod.worldmodel.resource.DropModel;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -45,6 +46,10 @@ public final class BotMining {
     private final BotInventory inv;
 
     private BlockPos requested;   // cell requested THIS tick (set by request(), consumed by tick())
+    // Tool condition requested for THIS tick's break (Phase 2). Mirrors `requested`'s consume-each-tick
+    // lifecycle: EITHER (the default) equips the fastest correct tool as before; a silk condition (from a
+    // gather with a drop goal) equips the goal tool so the fastest-tool re-select does NOT override it.
+    private DropModel.ToolCondition requestedCondition = DropModel.ToolCondition.EITHER;
     private BlockPos target;      // cell currently being mined across ticks (null = idle)
     private float progress;       // accumulated destroy progress in [0,1) toward breaking `target`
     private int lastStage = -1;   // last crack-overlay stage 0..9 pushed for `target` (-1 = none shown)
@@ -59,7 +64,18 @@ public final class BotMining {
      * only advances while the same cell keeps being requested, and aborts the tick nothing is.
      */
     public void request(BlockPos pos) {
+        request(pos, DropModel.ToolCondition.EITHER);
+    }
+
+    /**
+     * Ask to mine {@code pos} this tick with a specific drop-goal tool {@code condition} (Phase 2). A silk
+     * condition makes {@link #tick} equip the goal tool (silk / no-silk) instead of the fastest correct tool,
+     * so a {@code /bot gather stone} silk pickaxe isn't overridden by a faster plain one. The condition, like
+     * the requested cell, is consumed each tick (re-request every tick to keep the goal tool held).
+     */
+    public void request(BlockPos pos, DropModel.ToolCondition condition) {
         this.requested = pos;
+        this.requestedCondition = condition == null ? DropModel.ToolCondition.EITHER : condition;
     }
 
     /** Whether a break is currently in progress — for the follower to gate forward motion while digging. */
@@ -74,7 +90,9 @@ public final class BotMining {
      */
     public void tick(ServerLevel level) {
         BlockPos want = this.requested;
+        DropModel.ToolCondition cond = this.requestedCondition;
         this.requested = null; // consume; the mover must re-request next tick to keep digging
+        this.requestedCondition = DropModel.ToolCondition.EITHER;
 
         if (want == null) {                 // nothing requested → release (matches vanilla progress reset)
             stop(level);
@@ -101,9 +119,15 @@ public final class BotMining {
             return;
         }
 
-        // Equip the fastest hotbar tool FIRST so the destroy-progress read (and the visible held item) reflect
-        // it, then face + swing like a mining player.
-        inv.selectBestHotbarTool(state);
+        // Equip the tool FIRST so the destroy-progress read (and the visible held item) reflect it, then face +
+        // swing like a mining player. Default (EITHER) equips the fastest correct tool; a gather with a silk
+        // drop goal (Phase 2) requests a condition so the SILK/NO_SILK goal tool is equipped and the fastest-
+        // tool re-select can't override it (BotGatherer has already verified a qualifying tool exists).
+        if (cond == DropModel.ToolCondition.EITHER) {
+            inv.selectBestHotbarTool(state);
+        } else {
+            inv.equipForCondition(level, state, cond);
+        }
         lookAtCenter(target);
         bot.swing(InteractionHand.MAIN_HAND);
 
