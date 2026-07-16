@@ -22,9 +22,10 @@ import net.minecraft.commands.SharedSuggestionProvider;
  * {@link com.orebit.mod.AllyBotEntity#startGather}, which runs a hand-coded {@code GATHER}-mode state machine
  * reusing the reactive executors (query → {@code driveToward} → {@code BotMining}).
  *
- * <p>{@code <resource>} is a column name ({@link ResourceClasses#columnForName} — "diamond", "iron", "gold",
- * "andesite", …); an unknown name replies with a hint. Optional {@code [count]} (default 1) is the target
- * number of picked-up items (owner-ratified quota semantics — robust to fortune/variant drop counts).
+ * <p>{@code <resource>} is a locatable name ({@link ResourceClasses#resourceForName} — "diamond", "iron",
+ * "gold", "stone", "wood", "andesite", …); an unknown name replies with a hint. Optional {@code [count]}
+ * (default 1) is the target number of picked-up items (owner-ratified quota semantics — robust to
+ * fortune/variant drop counts).
  */
 public final class GatherCommand implements BotCommand {
 
@@ -32,10 +33,10 @@ public final class GatherCommand implements BotCommand {
     public void contribute(LiteralArgumentBuilder<CommandSourceStack> bot) {
         bot.then(Commands.literal("gather")
                 .then(Commands.argument("resource", StringArgumentType.word())
-                        // Tab-complete the valid column names (prefix-filtered) — the list was
+                        // Tab-complete the valid resource names (prefix-filtered) — the list was
                         // previously undiscoverable in-game (s52).
                         .suggests((ctx, b) -> SharedSuggestionProvider.suggest(
-                                ResourceClasses.columnNames(), b))
+                                ResourceClasses.locatableNames(), b))
                         .executes(ctx -> run(ctx, 1))
                         .then(Commands.argument("count", IntegerArgumentType.integer(1))
                                 .executes(ctx -> run(ctx, IntegerArgumentType.getInteger(ctx, "count"))))));
@@ -43,14 +44,14 @@ public final class GatherCommand implements BotCommand {
 
     private static int run(CommandContext<CommandSourceStack> ctx, int count) throws CommandSyntaxException {
         final String resource = StringArgumentType.getString(ctx, "resource");
-        final int column = ResourceClasses.columnForName(resource);
-        if (column < 0) {
+        final int resourceId = ResourceClasses.resourceForName(resource);
+        if (resourceId < 0) {
             CommandFeedback.send(ctx.getSource(),
                     "unknown resource '" + resource + "' (try: diamond, iron, gold, coal, andesite, diorite, ...)");
             return 0;
         }
         return OrebitCommands.act(ctx, (b, player, src) -> {
-            b.startGather(column, count);
+            b.startGather(resourceId, count);
             CommandFeedback.send(src, "gathering " + resource + " ×" + count + "…");
         });
     }

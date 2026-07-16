@@ -274,13 +274,13 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     }
 
     /** {@code /bot gather <resource> [count]}: switch to {@link Mode#GATHER} and start the
-     *  {@link BotGatherer} loop for indexed resource {@code column}, targeting {@code quota} picked-up items. */
-    public void startGather(int column, int quota) {
+     *  {@link BotGatherer} loop for locatable {@code resourceId}, targeting {@code quota} picked-up items. */
+    public void startGather(int resourceId, int quota) {
         this.mode = Mode.GATHER;
         this.comeTarget = null;
         navigator.clearPlan();
         portalFollower.resetPortalSeek();
-        gatherer.startGather(column, quota);
+        gatherer.startGather(resourceId, quota);
     }
 
     @Override
