@@ -32,8 +32,8 @@ import com.orebit.mod.platform.BlockLookup;
 public final class ResourceClasses {
     public static final int MAX_CLASS = 64;
 
-    /** The number of indexed pyramid columns (0..23). */
-    public static final int COLUMN_COUNT = 24;
+    /** The number of indexed pyramid columns (0..24). */
+    public static final int COLUMN_COUNT = 25;
 
     private static int nextIndex = 0;
     private static final Map<Block, Integer> BLOCK_TO_CLASS = new HashMap<>();
@@ -223,7 +223,7 @@ public final class ResourceClasses {
     public static final int USER_DEFINED_2  = 63;
 
     // ===================================================================================================
-    // Indexed-column layer: 24 of the 64 classes get a pyramid column (0..23); the rest map to -1.
+    // Indexed-column layer: 25 of the 64 classes get a pyramid column (0..24); the rest map to -1.
     // ===================================================================================================
     private static final int[] COLUMN_OF = new int[MAX_CLASS];
     private static final String[] COLUMN_NAME = new String[COLUMN_COUNT];
@@ -262,8 +262,16 @@ public final class ResourceClasses {
         // Gatherables (columns 23..). The LOG class was registered from day one but never column-bound,
         // which made `/bot gather wood` impossible (scan + pyramid tally are both column-keyed, s52).
         // Every consumer sizes off COLUMN_COUNT and the pyramid is in-memory (rebuilt per chunk load),
-        // so growing the column set needs no data migration.
+        // so growing the column set needs no data migration (the res.bin codec skips out-of-range column
+        // ids by design, so an older shard just lacks the newer column until it rebuilds from live).
         bindColumn(23, LOG,               "wood");
+        // STONE (owner-directed): `/bot gather stone` for early-game crafting materials (mine stone ->
+        // cobblestone drops for a furnace, etc.). Binding a column is the "treat it like wood" path —
+        // it makes stone tab-completable + live-scannable, at the cost of ALSO entering the pyramid.
+        // Stone saturates the compass (it's everywhere) and its ubiquity flips the NavGrid-build resource
+        // tally gate to almost-always-on underground; gather never NEEDS the compass for stone (the live
+        // scan always finds it adjacent), so decoupling "gatherable" from "persisted" is a later cleanup.
+        bindColumn(24, STONE,             "stone");
     }
 
     private ResourceClasses() {}

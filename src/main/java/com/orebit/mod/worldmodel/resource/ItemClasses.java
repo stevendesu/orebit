@@ -92,6 +92,11 @@ public final class ItemClasses {
                 "stripped_acacia_log", "stripped_dark_oak_log", "stripped_mangrove_log",
                 "stripped_cherry_log", "stripped_pale_oak_log", "stripped_crimson_stem",
                 "stripped_warped_stem");
+        // Stone (the owner-directed gather column): mining stone drops COBBLESTONE, so the carried "stone"
+        // family is cobblestone plus the stone block item itself (silk-touch / crafted). Reclassifying
+        // cobblestone as a tracked resource means it now sweeps under `/bot drop resources`/`stone` and is
+        // no longer `trash` — consistent with stone being a resource you deliberately gather.
+        bind("stone", "stone", "cobblestone");
     }
 
     /** Map every {@code path} to the {@link ResourceClasses} column named {@code columnName}. */
