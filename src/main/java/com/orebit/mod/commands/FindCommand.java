@@ -8,6 +8,7 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 
+import com.orebit.mod.AllyBotEntity;
 import com.orebit.mod.platform.CommandFeedback;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.resource.ResourceClasses;
@@ -28,10 +29,13 @@ import net.minecraft.server.level.ServerLevel;
  * the bot to them. Mirrors {@link ProbeCommand} in spirit: a strategy-pattern {@link BotCommand} that reads
  * the world model and prints, never touching a hot path.
  *
- * <p>{@code <resource>} is a column name ({@link ResourceClasses#columnForName} — "diamond", "iron", "gold",
- * "andesite", …); an unknown name replies with a hint. Optional {@code [minCount]} (default 1) is the
- * per-region quantity threshold. Reports the top 5 hits nearest-first, each as
- * {@code <resource> x~<approxCount> at <cx> <cy> <cz> (<dist>m)}, or "no &lt;resource&gt; found nearby".
+ * <p>{@code <resource>} is a locatable name ({@link ResourceClasses#resourceForName} — "diamond", "iron",
+ * "gold", "stone", "wood", "andesite", …); an unknown name replies with a hint. Optional {@code [minCount]}
+ * (default 1) is the per-region quantity threshold. A PERSISTED resource ({@link
+ * ResourceClasses#columnForResource} {@code >= 0}) reports the top 5 pyramid hits nearest-first, each as
+ * {@code <resource> x~<approxCount> at <cx> <cy> <cz> (<dist>m)}, or "no &lt;resource&gt; found nearby". A
+ * locatable-only resource (stone/wood — no pyramid slot) instead does a bounded LOCAL live-scan of the loaded
+ * chunks around the bot and reports the nearest hit (or "none loaded nearby").
  */
 public final class FindCommand implements BotCommand {
 
@@ -42,9 +46,9 @@ public final class FindCommand implements BotCommand {
     public void contribute(LiteralArgumentBuilder<CommandSourceStack> bot) {
         bot.then(Commands.literal("find")
                 .then(Commands.argument("resource", StringArgumentType.word())
-                        // Tab-complete the valid column names, same provider as /bot gather (s52).
+                        // Tab-complete the valid resource names, same provider as /bot gather (s52).
                         .suggests((ctx, b) -> SharedSuggestionProvider.suggest(
-                                ResourceClasses.columnNames(), b))
+                                ResourceClasses.locatableNames(), b))
                         .executes(ctx -> run(ctx, 1))
                         .then(Commands.argument("minCount", IntegerArgumentType.integer(1))
                                 .executes(ctx -> run(ctx, IntegerArgumentType.getInteger(ctx, "minCount"))))));
@@ -53,11 +57,15 @@ public final class FindCommand implements BotCommand {
     private static int run(CommandContext<CommandSourceStack> ctx, int minCount) throws CommandSyntaxException {
         final CommandSourceStack source = ctx.getSource();
         final String resource = StringArgumentType.getString(ctx, "resource");
-        final int column = ResourceClasses.columnForName(resource);
-        if (column < 0) {
+        final int resourceId = ResourceClasses.resourceForName(resource);
+        if (resourceId < 0) {
             CommandFeedback.send(source,
                     "unknown resource '" + resource + "' (try: diamond, iron, gold, coal, andesite, diorite, ...)");
             return 0;
+        }
+        final int column = ResourceClasses.columnForResource(resourceId);
+        if (column < 0) { // locatable-only (stone/wood): no pyramid compass → bounded local live-scan
+            return OrebitCommands.act(ctx, (b, player, src) -> localFind(b, resource, resourceId, src));
         }
         return OrebitCommands.act(ctx, (b, player, src) -> {
             final ServerLevel level = (ServerLevel) Worlds.of(b);
@@ -79,9 +87,31 @@ public final class FindCommand implements BotCommand {
                 final long dist = Math.round(Math.sqrt(dx * dx + dy * dy + dz * dz));
                 CommandFeedback.send(src, "  " + resource + " x~" + h.approxCount()
                         + " in region @ " + c.getX() + " " + c.getY() + " " + c.getZ()
-                        + " (" + dist + "m)" + liveScan(level, h, column, anchor));
+                        + " (" + dist + "m)" + liveScan(level, h, resourceId, anchor));
             }
         });
+    }
+
+    /**
+     * The non-persisted (locatable-only) branch: a bounded LOCAL live-scan of the loaded chunks around the bot
+     * for {@code resourceId} ({@link ResourceScan#nearestLoadedCell}), reporting the nearest actual block. These
+     * resources (stone/wood) have no pyramid compass, so there is no distant heading — only what is loaded now.
+     */
+    private static void localFind(AllyBotEntity b, String resource, int resourceId, CommandSourceStack src) {
+        final ServerLevel level = (ServerLevel) Worlds.of(b);
+        final BlockPos anchor = b.blockPosition();
+        final BlockPos nearest = ResourceScan.nearestLoadedCell(level, anchor, resourceId);
+        if (nearest == null) {
+            CommandFeedback.send(src, "no " + resource + " loaded nearby (it isn't tracked on the compass — "
+                    + "I can only see loaded chunks around me).");
+            return;
+        }
+        final long dx = nearest.getX() - anchor.getX();
+        final long dy = nearest.getY() - anchor.getY();
+        final long dz = nearest.getZ() - anchor.getZ();
+        final long dist = Math.round(Math.sqrt(dx * dx + dy * dy + dz * dz));
+        CommandFeedback.send(src, "nearest " + resource + " (live scan) at "
+                + nearest.getX() + " " + nearest.getY() + " " + nearest.getZ() + " (" + dist + "m).");
     }
 
     /**
@@ -93,8 +123,8 @@ public final class FindCommand implements BotCommand {
      * bug worth instrumenting the write path for). A region no longer resident can't be verified (its chunk
      * unloaded since the tally was written); {@code exactCells} returns {@code null} there and we say so.
      */
-    private static String liveScan(ServerLevel level, ResourceQuery.ResourceHit h, int column, BlockPos anchor) {
-        final List<BlockPos> cells = ResourceScan.exactCells(level, h.rx(), h.ry(), h.rz(), column);
+    private static String liveScan(ServerLevel level, ResourceQuery.ResourceHit h, int resourceId, BlockPos anchor) {
+        final List<BlockPos> cells = ResourceScan.exactCells(level, h.rx(), h.ry(), h.rz(), resourceId);
         if (cells == null) return "  [region not loaded — can't verify exact cells]";
         if (cells.isEmpty()) return "  [LIVE: 0 exact in the 16³ region — stale tally or a bug, NOT a real vein]";
         BlockPos nearest = null;

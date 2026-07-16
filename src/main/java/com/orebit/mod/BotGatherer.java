@@ -45,7 +45,7 @@ final class BotGatherer {
      *  {@code /bot gather} target cell — otherwise it paths closer first (see {@link #gatherMine}). */
     private static final double MINE_REACH = 4.5;
 
-    private int gatherColumn = -1;            // indexed resource column being gathered (-1 = not gathering)
+    private int gatherResourceId = -1;        // locatable resource being gathered (-1 = not gathering)
     private int gatherQuota;                  // target count of PICKED-UP items (owner-ratified, §10)
     private int gathered;                     // items accrued so far (counted on standing-mine ticks)
     private GatherPhase gatherPhase;          // current phase (null = inactive)
@@ -120,14 +120,15 @@ final class BotGatherer {
 
     /**
      * {@code /bot gather <resource> [count]} entry point (the gather half — mode switch/plan reset live on
-     * {@link AllyBotEntity#startGather}). Begin the loop for indexed resource {@code column}, targeting
+     * {@link AllyBotEntity#startGather}). Begin the loop for locatable {@code resourceId}, targeting
      * {@code quota} PICKED-UP items (§10). Anchors the RETURN target at the bot's current cell and enters
      * {@link GatherPhase#SCAN} — the primary ore source is a LIVE nearest-first scan of the loaded sections
      * around the bot (the resource pyramid is coarse + load-populated + can mis-bucket, so it's used only as
-     * the COMPASS heading when nothing is loaded nearby).
+     * the COMPASS heading when nothing is loaded nearby — and only for a PERSISTED resource; a locatable-only
+     * resource like stone/wood has no pyramid slot, so its COMPASS gracefully reports "nothing nearby").
      */
-    void startGather(int column, int quota) {
-        this.gatherColumn = column;
+    void startGather(int resourceId, int quota) {
+        this.gatherResourceId = resourceId;
         this.gatherQuota = Math.max(1, quota);
         this.gathered = 0;
         this.gatherStartPos = bot.blockPosition().immutable();
@@ -178,8 +179,13 @@ final class BotGatherer {
             enterMine();
             return;
         }
-        if (scanCursor >= SCAN_OFFSETS.length) { // nothing loaded nearby → ask the pyramid where to head
-            beginCompass(level);
+        if (scanCursor >= SCAN_OFFSETS.length) { // nothing loaded nearby
+            if (ResourceClasses.columnForResource(gatherResourceId) >= 0) {
+                beginCompass(level); // persisted → ask the pyramid where to head
+            } else { // locatable-only (stone/wood): no pyramid compass — stop gracefully
+                bot.chat("I don't see any " + ResourceClasses.nameOfResource(gatherResourceId) + " nearby.");
+                bot.setMode(AllyBotEntity.Mode.STAY);
+            }
         }
     }
 
@@ -206,7 +212,7 @@ final class BotGatherer {
             final int ry = bsy + o[1];
             if (ry < 0) continue; // below the world column
             final List<BlockPos> cells =
-                    ResourceScan.exactCells(level, bcx + o[0], ry, bcz + o[2], gatherColumn);
+                    ResourceScan.exactCells(level, bcx + o[0], ry, bcz + o[2], gatherResourceId);
             if (cells == null || cells.isEmpty()) continue;
             for (BlockPos cell : cells) {
                 if (!unreachableCells.contains(cell.asLong())) scanFound.add(cell);
@@ -291,7 +297,7 @@ final class BotGatherer {
                 // anything — a bare-hand break silently yields nothing, so the quota can never advance
                 // (the mined-forever-got-nothing failure). Refuse honestly instead of grinding.
                 if (!new BotInventory(bot).hasCorrectTool(level.getBlockState(cell))) {
-                    bot.chat("I can't harvest " + ResourceClasses.nameOfColumn(gatherColumn)
+                    bot.chat("I can't harvest " + ResourceClasses.nameOfResource(gatherResourceId)
                             + " without the right tool.");
                     bot.setMode(AllyBotEntity.Mode.STAY);
                     return;
@@ -482,7 +488,7 @@ final class BotGatherer {
         bot.navigator().clearPlan();
         if (gathered >= gatherQuota) {
             gatherPhase = GatherPhase.RETURN;
-            bot.chat("got " + gathered + " " + ResourceClasses.nameOfColumn(gatherColumn) + " — heading back.");
+            bot.chat("got " + gathered + " " + ResourceClasses.nameOfResource(gatherResourceId) + " — heading back.");
             return;
         }
         enterMine();
@@ -501,7 +507,8 @@ final class BotGatherer {
      */
     private void beginCompass(ServerLevel level) {
         List<ResourceQuery.ResourceHit> hits =
-                ResourceQuery.find(level, gatherColumn, bot.blockPosition(), 1, 8);
+                ResourceQuery.find(level, ResourceClasses.columnForResource(gatherResourceId),
+                        bot.blockPosition(), 1, 8);
         for (ResourceQuery.ResourceHit h : hits) {
             final long key = regionKey(h.rx(), h.ry(), h.rz());
             if (gatherBlacklist.contains(key)) continue;
@@ -513,7 +520,7 @@ final class BotGatherer {
             gatherPhase = GatherPhase.COMPASS;
             return;
         }
-        bot.chat("I don't see any " + ResourceClasses.nameOfColumn(gatherColumn) + " nearby.");
+        bot.chat("I don't see any " + ResourceClasses.nameOfResource(gatherResourceId) + " nearby.");
         bot.setMode(AllyBotEntity.Mode.STAY);
     }
 
@@ -547,10 +554,10 @@ final class BotGatherer {
         BlockPos s = gatherStartPos;
         boolean arrived = bot.navigator().driveToward(s.getX() + 0.5, s.getY(), s.getZ() + 0.5, s.below());
         if (arrived) {
-            bot.chat("back with " + gathered + " " + ResourceClasses.nameOfColumn(gatherColumn) + ".");
+            bot.chat("back with " + gathered + " " + ResourceClasses.nameOfResource(gatherResourceId) + ".");
             bot.setMode(AllyBotEntity.Mode.STAY);
         } else if (bot.navigator().navGaveUp()) {
-            bot.chat("I got " + gathered + " " + ResourceClasses.nameOfColumn(gatherColumn)
+            bot.chat("I got " + gathered + " " + ResourceClasses.nameOfResource(gatherResourceId)
                     + " but can't find my way back.");
             bot.setMode(AllyBotEntity.Mode.STAY);
         }

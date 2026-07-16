@@ -34,14 +34,21 @@ public final class ResourceScan {
 
     private ResourceScan() {}
 
+    // Local live-scan volume around an anchor (in sections), shared by {@link #nearestLoadedCell}: horizontal
+    // ± chunks, plus a downward-biased vertical band (ore sits below). Cold — the /bot find non-persisted
+    // fallback (a one-shot diagnostic), never a hot path.
+    private static final int SCAN_RADIUS_CHUNKS = 3;
+    private static final int SCAN_DOWN_SECTIONS = 6;
+    private static final int SCAN_UP_SECTIONS = 2;
+
     /**
      * Scan the level-0 region {@code (rx,ry,rz)}'s LIVE 16³ blocks for every cell whose block maps to the
-     * indexed resource {@code column} ({@link ResourceClasses#columnForBlock}). Returns {@code null} if the
+     * locatable {@code resourceId} ({@link ResourceClasses#resourceForBlock}). Returns {@code null} if the
      * region's chunk isn't {@link NavStore}-resident (see the class javadoc), otherwise the matching cells in
      * scan order (possibly empty). Cold — called at most once per gather PATH tick / per find hit, never on a
      * hot path.
      */
-    public static List<BlockPos> exactCells(ServerLevel level, int rx, int ry, int rz, int column) {
+    public static List<BlockPos> exactCells(ServerLevel level, int rx, int ry, int rz, int resourceId) {
         if (NavStore.get(level, NavStore.key(rx, rz)) == null) return null; // region chunk not resident
         final List<BlockPos> found = new ArrayList<>();
         final int ox = rx << 4, oz = rz << 4;
@@ -51,12 +58,45 @@ public final class ResourceScan {
             for (int dy = 0; dy < 16; dy++) {
                 for (int dz = 0; dz < 16; dz++) {
                     m.set(ox + dx, oy + dy, oz + dz);
-                    if (ResourceClasses.columnForBlock(level.getBlockState(m).getBlock()) == column) {
+                    if (ResourceClasses.resourceForBlock(level.getBlockState(m).getBlock()) == resourceId) {
                         found.add(m.immutable());
                     }
                 }
             }
         }
         return found;
+    }
+
+    /**
+     * A bounded LOCAL live-scan for a NON-persisted (locatable-only) resource — the {@code /bot find} fallback
+     * for resources that have no pyramid compass ({@link ResourceClasses#columnForResource} {@code < 0}, e.g.
+     * stone/wood). Sweeps the loaded sections in a small volume around {@code anchor} via {@link #exactCells}
+     * and returns the single matching cell nearest to {@code anchor}, or {@code null} if none is loaded nearby.
+     * Cold — a one-shot command diagnostic (not throttled; the gatherer keeps its own multi-tick scan).
+     */
+    public static BlockPos nearestLoadedCell(ServerLevel level, BlockPos anchor, int resourceId) {
+        final int bcx = anchor.getX() >> 4;
+        final int bcz = anchor.getZ() >> 4;
+        final int bsy = (anchor.getY() - RegionGrid.of(level).minY()) >> 4;
+        BlockPos best = null;
+        long bestD = Long.MAX_VALUE;
+        for (int dcx = -SCAN_RADIUS_CHUNKS; dcx <= SCAN_RADIUS_CHUNKS; dcx++) {
+            for (int dcz = -SCAN_RADIUS_CHUNKS; dcz <= SCAN_RADIUS_CHUNKS; dcz++) {
+                for (int dsy = -SCAN_DOWN_SECTIONS; dsy <= SCAN_UP_SECTIONS; dsy++) {
+                    final int ry = bsy + dsy;
+                    if (ry < 0) continue; // below the world column
+                    final List<BlockPos> cells = exactCells(level, bcx + dcx, ry, bcz + dcz, resourceId);
+                    if (cells == null) continue; // section not resident
+                    for (BlockPos c : cells) {
+                        final long ddx = c.getX() - anchor.getX();
+                        final long ddy = c.getY() - anchor.getY();
+                        final long ddz = c.getZ() - anchor.getZ();
+                        final long d = ddx * ddx + ddy * ddy + ddz * ddz;
+                        if (d < bestD) { bestD = d; best = c; }
+                    }
+                }
+            }
+        }
+        return best;
     }
 }

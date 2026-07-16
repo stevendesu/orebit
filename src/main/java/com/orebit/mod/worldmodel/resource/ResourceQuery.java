@@ -74,7 +74,7 @@ public final class ResourceQuery {
      * to the headless core {@link #find(ResourcePyramid, int, int, int, int, int, int, int)}.
      *
      * @param column an indexed resource column (0..{@link ResourceClasses#COLUMN_COUNT}-1), e.g. from
-     *               {@link ResourceClasses#columnForName}
+     *               {@link ResourceClasses#columnForResource}
      * @return up to {@code maxResults} hits, nearest-first; empty if none known/loaded near the anchor
      */
     public static List<ResourceHit> find(ServerLevel level, int column, BlockPos anchor,

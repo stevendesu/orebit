@@ -31,8 +31,8 @@ import net.minecraft.world.item.ItemStack;
  *   <li>{@code tools} — pickaxes/axes/shovels/hoes/swords, shears, bow, ...;</li>
  *   <li>{@code trash} — everything that is NOT a resource, tool, or armor piece (junk blocks, drops the
  *       bot doesn't need) — the inventory cleaner;</li>
- *   <li>a {@link ResourceClasses} column name ({@code iron}, {@code diamond}, {@code gold}, {@code wood},
- *       ...) — just that resource.</li>
+ *   <li>a {@link ResourceClasses} resource name ({@code iron}, {@code diamond}, {@code gold}, {@code wood},
+ *       {@code stone}, ...) — just that resource.</li>
  * </ul>
  * Armor is deliberately kept (it is neither dropped by {@code trash} nor a keyword yet) until the combat
  * arc gives the bot a reason to manage it.
@@ -44,12 +44,12 @@ public final class DropCommand implements BotCommand {
     private static final String TOOLS = "tools";
     private static final String TRASH = "trash";
 
-    /** Tab-completion source: the category keywords followed by every resource column name. */
+    /** Tab-completion source: the category keywords followed by every resource name. */
     private static final List<String> SUGGESTIONS = buildSuggestions();
 
     private static List<String> buildSuggestions() {
         List<String> s = new ArrayList<>(List.of(ALL, RESOURCES, TOOLS, TRASH));
-        s.addAll(ResourceClasses.columnNames());
+        s.addAll(ResourceClasses.locatableNames());
         return List.copyOf(s);
     }
 
@@ -81,13 +81,13 @@ public final class DropCommand implements BotCommand {
     private static Predicate<ItemStack> filterFor(String what) {
         switch (what) {
             case ALL:       return s -> true;
-            case RESOURCES: return s -> ItemClasses.resourceColumn(s.getItem()) >= 0;
+            case RESOURCES: return s -> ItemClasses.resourceId(s.getItem()) >= 0;
             case TOOLS:     return s -> ItemClasses.isTool(s.getItem());
             case TRASH:     return s -> ItemClasses.isTrash(s.getItem());
             default:
-                int column = ResourceClasses.columnForName(what);
-                if (column < 0) return null;
-                return s -> ItemClasses.resourceColumn(s.getItem()) == column;
+                int resourceId = ResourceClasses.resourceForName(what);
+                if (resourceId < 0) return null;
+                return s -> ItemClasses.resourceId(s.getItem()) == resourceId;
         }
     }
 }
