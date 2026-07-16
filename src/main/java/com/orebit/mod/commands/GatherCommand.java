@@ -7,7 +7,7 @@ import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 
 import com.orebit.mod.platform.CommandFeedback;
-import com.orebit.mod.worldmodel.resource.ResourceClasses;
+import com.orebit.mod.worldmodel.resource.DropModel;
 
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -36,7 +36,7 @@ public final class GatherCommand implements BotCommand {
                         // Tab-complete the valid resource names (prefix-filtered) — the list was
                         // previously undiscoverable in-game (s52).
                         .suggests((ctx, b) -> SharedSuggestionProvider.suggest(
-                                ResourceClasses.locatableNames(), b))
+                                DropModel.outputNames(), b))
                         .executes(ctx -> run(ctx, 1))
                         .then(Commands.argument("count", IntegerArgumentType.integer(1))
                                 .executes(ctx -> run(ctx, IntegerArgumentType.getInteger(ctx, "count"))))));
@@ -44,15 +44,15 @@ public final class GatherCommand implements BotCommand {
 
     private static int run(CommandContext<CommandSourceStack> ctx, int count) throws CommandSyntaxException {
         final String resource = StringArgumentType.getString(ctx, "resource");
-        final int resourceId = ResourceClasses.resourceForName(resource);
-        if (resourceId < 0) {
+        final DropModel.Output output = DropModel.resolve(resource);
+        if (output == null) {
             CommandFeedback.send(ctx.getSource(),
-                    "unknown resource '" + resource + "' (try: diamond, iron, gold, coal, andesite, diorite, ...)");
+                    "unknown output '" + resource + "' (try: cobblestone, stone, iron, diamond, coal, andesite, wood, ...)");
             return 0;
         }
         return OrebitCommands.act(ctx, (b, player, src) -> {
-            b.startGather(resourceId, count);
-            CommandFeedback.send(src, "gathering " + resource + " ×" + count + "…");
+            b.startGather(output, count);
+            CommandFeedback.send(src, "gathering " + output.name() + " ×" + count + "…");
         });
     }
 }
