@@ -108,7 +108,7 @@ import net.minecraft.world.level.chunk.Strategy;
 public class PathfinderBenchmark {
 
     @Param({"TOWER", "OPEN", "UPOVER_OPEN", "UPOVER_WALL", "SHORT", "MULTI", "FLOOD", "CLIFFS",
-            "BRIDGE", "SPIRAL", "SETUP", "SETUP_MACRO"})
+            "BRIDGE", "SPIRAL", "SETUP", "SETUP_MACRO", "SWIMPOOL", "SWIM1X1"})
     private String scenario;
 
     private NavGridView grid;
@@ -252,6 +252,39 @@ public class PathfinderBenchmark {
                 corridor = SPIRAL_CORRIDOR;
                 caps = PLACE_ONLY_CAPS;
                 spiralSanityDryRun();
+                break;
+            case "SWIMPOOL":
+                // The AQUATIC-BRANCHING guard (owner-requested swim benchmark): a large fully-submerged
+                // pool — stone floor at y=0, a 6-deep water slab (y 1..6), air above — spanning chunks
+                // -4..4. Start and goal are both submerged (feet+head water ⇒ start mode PRONE), offset
+                // DIAGONALLY (dx=dz=32, dy=0), so the search is pure prone sprint-swim across open water
+                // with NO edits and NO corridor (swim carries no place/break, macros need a cuboidBound).
+                // The diagonal goal is the point: with only the 6 cardinal/vertical swim moves (HEAD)
+                // the search must staircase; with the added diagonal swim (the current stack's 26-dir
+                // registry) it can cut the diagonal — so the SAME fixture measures the pass-2 aquatic
+                // branching cost of the extra swim candidates. DEFAULT caps (move-only): water blocks
+                // walking (passable rejects fluids) so swim is forced, and no break/place means the
+                // headless "free break" gotcha can't restructure the pool.
+                grid = buildPoolWorld();
+                start = SWIMPOOL_START;
+                goal = SWIMPOOL_GOAL;
+                corridor = null;
+                caps = BotCaps.DEFAULT;
+                swimSanityDryRun();
+                break;
+            case "SWIM1X1":
+                // The PRONE-GAP-THREADING guard: the same submerged pool, but a solid stone wall
+                // (local x plane, world x=24, y 1..6, all z) splits it in two with a SINGLE 1x1 water
+                // opening at the bot's feet level (world (24,4,8)) — the classic "1×1 hole in a wall
+                // threaded prone" case (SprintSwim needs only water at the destination FEET; the head may
+                // be solid). Straight goal across (z=8) so the route must find and thread the hole. Tests
+                // the swim family's constrained-corridor behaviour in both the 6-dir and 26-dir registries.
+                grid = buildPoolWallWorld();
+                start = SWIMPOOL_START;
+                goal = SWIM1X1_GOAL;
+                corridor = null;
+                caps = BotCaps.DEFAULT;
+                swimSanityDryRun();
                 break;
             default:
                 throw new IllegalArgumentException("unknown scenario: " + scenario);
@@ -882,6 +915,151 @@ public class PathfinderBenchmark {
         if (places > 6) {
             throw new IllegalStateException("SPIRAL plan placed " + places
                     + " blocks — it is building, not climbing; no longer the constrained-cuboids guard");
+        }
+    }
+
+    // --- SWIM geometry: both swim scenarios share a 6-deep water slab (world y 1..6) over a stone floor
+    //     at y=0, air above. The bot starts submerged at (8,3,8) — floor cell (8,3,8) is water, feet
+    //     (8,4,8) and head (8,5,8) are water, so the start-mode geometry (feet+head water) derives
+    //     MODE_PRONE and the search runs prone sprint-swim from the first pop. SWIMPOOL's goal is offset
+    //     diagonally (dx=dz=32) to force the diagonal-vs-staircase split; SWIM1X1's goal is straight
+    //     across so the route must thread the single wall opening.
+    static final BlockPos SWIMPOOL_START = new BlockPos(8, 3, 8);
+    static final BlockPos SWIMPOOL_GOAL = new BlockPos(40, 3, 40);
+    static final BlockPos SWIM1X1_GOAL = new BlockPos(40, 3, 8);
+    /** Top world-Y of the water slab (inclusive); water fills y 1..SWIM_WATER_TOP, air above. */
+    static final int SWIM_WATER_TOP = 6;
+    /** SWIM1X1 wall plane (world x) and the world coords of the single 1x1 feet-level opening. */
+    static final int SWIM_WALL_X = 24, SWIM_HOLE_Y = 4, SWIM_HOLE_Z = 8;
+
+    /**
+     * The SWIMPOOL fixture: stone floor at world y=0, a full-water slab from y=1 to {@link #SWIM_WATER_TOP},
+     * air above, spanning chunks (-4..4) so both the diagonal swim and the (unused) vertical bob stay inside
+     * built terrain. Every chunk shares one classified column (the world is uniform), exactly like
+     * {@link #buildFlatWorld}: one ground+water section, shared air sections above.
+     */
+    static NavGridView buildPoolWorld() {
+        return new NavGridView(0, buildPoolChunks(-999, false)); // wallLocalX < 0 ⇒ no wall
+    }
+
+    /**
+     * The SWIM1X1 fixture: the SWIMPOOL slab plus a one-block-thick stone WALL on the world plane
+     * {@code x=}{@link #SWIM_WALL_X} rising through the whole water column (y 1..{@link #SWIM_WATER_TOP}),
+     * spanning every Z — with a SINGLE 1x1 water opening punched at the bot's feet level
+     * ({@code (24,4,8)}). The wall lives only in chunk {@code cx=1} (world x 16..31; local x 8); the chunk
+     * row holding z=8 ({@code cz=0}) gets the opening, every other {@code cx=1} row is a solid wall.
+     */
+    static NavGridView buildPoolWallWorld() {
+        // Shared plain-pool column for every chunk the wall doesn't touch.
+        ConcurrentHashMap<Long, NavSection[]> chunks = buildPoolChunks(-999, false);
+
+        int wallChunkX = SWIM_WALL_X >> 4;    // chunk 1
+        int wallXLocal = SWIM_WALL_X & 15;    // local x 8
+        int holeChunkZ = SWIM_HOLE_Z >> 4;    // chunk 0
+        for (int cz = -4; cz <= 4; cz++) {
+            boolean withHole = (cz == holeChunkZ);
+            // Rebuild the whole cx=1 chunk column with the wall (and, for cz=0, the hole) baked in.
+            NavSection[] wallColumn = buildPoolColumn(wallXLocal, withHole);
+            chunks.put(NavStore.key(wallChunkX, cz), wallColumn);
+        }
+        return new NavGridView(0, chunks); // minY=0, synthetic (no live level)
+    }
+
+    /**
+     * Builds the raw chunk map for a uniform water pool. When {@code wallLocalX >= 0}, EVERY chunk also
+     * carries a stone wall at that local-x through the water column — but the swim fixtures instead call
+     * {@link #buildPoolColumn} per-chunk so the wall lands only in the wall chunk, so this is invoked with
+     * {@code wallLocalX < 0} (no wall) for the shared plain columns. {@code withHole} is ignored here.
+     */
+    static ConcurrentHashMap<Long, NavSection[]> buildPoolChunks(int wallLocalX, boolean withHole) {
+        NavSection[] column = buildPoolColumn(wallLocalX, withHole);
+        ConcurrentHashMap<Long, NavSection[]> chunks = new ConcurrentHashMap<>();
+        for (int cx = -4; cx <= 4; cx++) {
+            for (int cz = -4; cz <= 4; cz++) {
+                chunks.put(NavStore.key(cx, cz), column);
+            }
+        }
+        return chunks;
+    }
+
+    /**
+     * One classified nav column (y 0..63) for the pool: stone floor at local y=0, water at local
+     * y 1..{@link #SWIM_WATER_TOP}, air above. When {@code wallLocalX >= 0}, that local-x column is filled
+     * with stone through the water band (the wall); when {@code withHole} the wall cell at
+     * ({@code wallLocalX}, {@link #SWIM_HOLE_Y}, {@link #SWIM_HOLE_Z}) is left as water — the 1x1 opening.
+     * Each call returns fresh {@link NavSection}s (columns with different content must NOT share instances,
+     * or the depth-nibble sweep corrupts).
+     */
+    static NavSection[] buildPoolColumn(int wallLocalX, boolean withHole) {
+        BlockState air = Blocks.AIR.defaultBlockState();
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        BlockState water = Blocks.WATER.defaultBlockState();
+
+        // Section 0 (world y 0..15): stone floor + water band (+ optional wall/hole).
+        PalettedContainer<BlockState> s0 = new PalettedContainer<>(
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                s0.set(x, 0, z, stone);                          // floor
+                for (int y = 1; y <= SWIM_WATER_TOP; y++) {
+                    s0.set(x, y, z, water);                      // water slab
+                }
+            }
+        }
+        if (wallLocalX >= 0) {
+            for (int z = 0; z < 16; z++) {
+                for (int y = 1; y <= SWIM_WATER_TOP; y++) {
+                    s0.set(wallLocalX, y, z, stone);             // solid wall through the water
+                }
+            }
+            if (withHole) {
+                // Punch the single feet-level opening back to water (local z of the world hole z).
+                s0.set(wallLocalX, SWIM_HOLE_Y, SWIM_HOLE_Z & 15, water);
+            }
+        }
+        NavSection sec0 = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(s0, false, sec0.getTraversalGrid());
+
+        // Sections 1..3: all air (the water tops out at y=6, well inside section 0).
+        PalettedContainer<BlockState> airStates = new PalettedContainer<>(
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
+        NavSection airMid = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(airStates, true, airMid.getTraversalGrid());
+        NavSection airTop = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(airStates, true, airTop.getTraversalGrid());
+
+        NavSection[] column = { sec0, airMid, airMid, airTop }; // y 0..63
+        NavSectionBuilder.computeDepth(column);
+        return column;
+    }
+
+    /**
+     * Setup-time (NOT measured) shape check for the swim scenarios: the search must FIND (not partial),
+     * the start must actually be PRONE (submerged), and the route must be made of swim moves (no walking —
+     * water blocks the ground moves, so any non-swim step means the fixture drifted). Prints the expansion
+     * count + a per-movement-class tally so the run log records the 6-dir-vs-26-dir shape (the tally uses
+     * getSimpleName strings, never an instanceof, so the harness compiles on HEAD where the diagonal swim
+     * class is absent).
+     */
+    private void swimSanityDryRun() {
+        var plan = BlockPathfinder.findPath(grid, start, goal, caps, corridor);
+        int expansions = BlockPathfinder.lastExpansions();
+        java.util.TreeMap<String, Integer> byMove = new java.util.TreeMap<>();
+        if (plan != null) {
+            for (int i = 0; i < plan.size(); i++) {
+                String m = plan.movement(i).getClass().getSimpleName();
+                byMove.merge(m, 1, Integer::sum);
+            }
+        }
+        System.out.println("[PathfinderBenchmark] " + scenario + " sanity: found=" + (plan != null)
+                + " partial=" + BlockPathfinder.lastWasPartial()
+                + " expansions=" + expansions
+                + " planSize=" + (plan == null ? -1 : plan.size()) + " moves=" + byMove);
+        if (plan == null) {
+            throw new IllegalStateException(scenario + " did not find a path — fixture broken");
+        }
+        if (BlockPathfinder.lastWasPartial()) {
+            throw new IllegalStateException(scenario + " returned a PARTIAL — swim route not realizable");
         }
     }
 

@@ -86,7 +86,9 @@ public final class ConfigValidator {
                 intClamped(props, ConfigKeys.PATHING_MAX_THREADS, d.maxThreads(), 1, 64),
                 intClamped(props, ConfigKeys.PATHING_ASYNC_SEARCH_BUDGET_MS, d.asyncSearchBudgetMs(), 1, 10_000),
                 // hpa: 0 disables the periodic flush; upper rail is a sanity cap (~9.5 days) against a typo.
-                intClamped(props, ConfigKeys.HPA_PERSIST_INTERVAL_TICKS, d.persistIntervalTicks(), 0, 16_000_000));
+                intClamped(props, ConfigKeys.HPA_PERSIST_INTERVAL_TICKS, d.persistIntervalTicks(), 0, 16_000_000),
+                // doors
+                bool(props, ConfigKeys.DOORS_TOGGLE, d.doorToggle()));
     }
 
     // ---- per-type parse + clamp (each warns through the sink and never throws) ----------------------

@@ -186,4 +186,16 @@ public final class ConfigKeys {
      * runs). Default {@code 6000} (≈ 5 minutes at 20 t/s), matching vanilla autosave feel.
      */
     public static final String HPA_PERSIST_INTERVAL_TICKS = "hpa.persistIntervalTicks";
+
+    // ---- doors: how the bot deals with doors in its path --------------------------------------------
+    /**
+     * {@code boolean} — the bot may OPEN/CLOSE hand-toggleable doors (wood/copper) by right-clicking, preferring
+     * that over smashing them or routing around. Rides into {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.BotCaps#mayToggleDoors}. <b>Default {@code true}</b> (DOORS P3):
+     * the follower now operates doors for real — it opens a closed door before crossing and closes it again on a
+     * hallway-corner exit — so the feature is complete and on by default, like the other movements. Set it
+     * {@code false} as a kill-switch to fall back to P1 behaviour (an already-open door is walked through, a
+     * closed door is mined). Iron doors are never hand-toggleable regardless of this flag.
+     */
+    public static final String DOORS_TOGGLE = "doors.toggle";
 }

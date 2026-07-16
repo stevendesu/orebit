@@ -100,6 +100,15 @@ public final class Traverse implements Movement {
         final int startTopY = ctx.standable(startDesc) ? ctx.topYOf(startDesc) : 16; // == floorSurface
         final boolean startStair = ctx.isStair(startDesc); // a stair start's surface is DIRECTIONAL per move
         for (int[] d : CARDINALS) {
+            // §2b door EXIT: when the bot STANDS in an intact door (open OR closed) whose swung panel blocks THIS
+            // travel edge, a plain walk can't leave that way. The shared exitDoorDecision (also used by Ascend /
+            // Descend) is EXIT_CLEAR off any door (the common case), EXIT_BLOCKED for an iron / flag-off door
+            // (skip the direction, P1), or EXIT_TOGGLE for a hand-toggleable feet door (P2): fold a door SET to
+            // the opposite state onto each variant below to free the exit — state-agnostic, so it re-opens a door
+            // that entry already toggled shut.
+            int exitDoor = ctx.exitDoorDecision(x, y, z, d[0], d[1]);
+            if (exitDoor == MovementContext.EXIT_BLOCKED) continue;
+            boolean exitDoorToggle = exitDoor == MovementContext.EXIT_TOGGLE;
             int nx = x + d[0];
             int nz = z + d[1];
             // The START surface toward THIS neighbour: directional for a stair takeoff (high 16/16 on the
@@ -134,7 +143,11 @@ public final class Traverse implements Movement {
                 // travels X or Z; derive its axis from the cardinal's (dx,dz) step.
                 int travelAxis = d[0] != 0 ? Axes.AXIS_X : Axes.AXIS_Z;
                 NavGridCuboidsView cuboids = ctx.cuboids();
-                if (BlockPathfinder.MACRO_MOVES && cuboids != null && travelAxis == ctx.macroAxis()) {
+                // Skip the macro collapse when we owe an exit-door toggle: the macro's internal edit-set can't
+                // carry the source door's SET_CLOSED, so force the micro emit (which folds it) — a conservative,
+                // rare case (only when leaving a doorway through its swung-panel edge).
+                if (BlockPathfinder.MACRO_MOVES && cuboids != null && travelAxis == ctx.macroAxis()
+                        && !exitDoorToggle) {
                     if (emitMacro(ctx, out, cuboids, x, y, z, nx, nz, d, pd, flags)) {
                         continue; // already have footing here; don't also step-assist/bridge this column
                     }
@@ -144,7 +157,8 @@ public final class Traverse implements Movement {
                     // hazard/slow surcharge for the destination body (zero-read when the flag bits are
                     // clear; the edit-folding form breaks through a bush/web where that's cheaper).
                     EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
-                    ctx.requireBodyClear(e, nx, y, nz, flags);
+                    if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z);
+                    ctx.requireBodyClearToward(e, nx, y, nz, flags, d[0], d[1]);
                     if (e.valid()) {
                         out.accept(nx, y, nz,
                                 cost(ctx, pd) + ctx.bodyTransitCost(e, flags, nx, y, nz) + e.extraCost(), e);
@@ -167,7 +181,8 @@ public final class Traverse implements Movement {
                                 <= MovementContext.STEP_ASSIST_MAX_RISE) {
                     int flags = MovementContext.flagsOf(pu);
                     EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
-                    ctx.requireBodyClear(e, nx, uy, nz, flags);
+                    if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z);
+                    ctx.requireBodyClearToward(e, nx, uy, nz, flags, d[0], d[1]);
                     if (e.valid()) {
                         out.accept(nx, uy, nz,
                                 cost(ctx, pud) + ctx.bodyTransitCost(e, flags, nx, uy, nz) + e.extraCost(), e);
@@ -187,8 +202,9 @@ public final class Traverse implements Movement {
                     && MovementContext.rise(0, 16, sTop) <= MovementContext.STEP_ASSIST_MAX_RISE) {
                 int flags = MovementContext.flagsOf(p);
                 EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+                if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z);
                 e.requireFloor(nx, y, nz);
-                ctx.requireBodyClear(e, nx, y, nz, flags);
+                ctx.requireBodyClearToward(e, nx, y, nz, flags, d[0], d[1]);
                 if (e.valid()) {
                     out.accept(nx, y, nz,
                             cost(ctx, pd) + ctx.bodyTransitCost(e, flags, nx, y, nz) + e.extraCost(), e);
@@ -213,6 +229,9 @@ public final class Traverse implements Movement {
         // A cardinal flat walk travels along X or Z. Derive (axis, sign) from the (dx,dz) step.
         int axis = d[0] != 0 ? Axes.AXIS_X : Axes.AXIS_Z;
         int sign = d[0] != 0 ? d[0] : d[1];
+        // The door ENTRY edge is uniform along the run (each cell entered from the previous, same direction) —
+        // so an already-open door in a collapsed run's body is crossed free rather than mined (§2a, P1).
+        int entryEdge = MovementContext.ordinalOf(-Axes.stepX(axis, sign), -Axes.stepZ(axis, sign));
 
         // The maximal uniform box containing the FIRST destination cell (nx,y,nz), resolved over committed
         // navtypes with the search's speculative PathEdits applied. cuboidScratch() is a per-context reusable
@@ -263,8 +282,8 @@ public final class Traverse implements Movement {
             // cell that crept into the run), then the two body cells above it. Same vocabulary as the micro
             // move's requireBodyClear, but read per cell so each step's headroom is verified.
             e.requireFloor(cx, y, cz);
-            e.requireAir(cx, y + 1, cz);
-            e.requireAir(cx, y + 2, cz);
+            e.requireAirToward(cx, y + 1, cz, entryEdge);
+            e.requireAirToward(cx, y + 2, cz, entryEdge);
             if (!e.valid()) {
                 // Conservative clamp: the first failing step ends the run; everything up to it stayed valid.
                 // We must drop the partial edits this step folded before it failed, so re-fold steps 1..k-1
@@ -296,8 +315,8 @@ public final class Traverse implements Movement {
                 int cx = x + Axes.stepX(axis, sign) * k;
                 int cz = z + Axes.stepZ(axis, sign) * k;
                 e.requireFloor(cx, y, cz);
-                e.requireAir(cx, y + 1, cz);
-                e.requireAir(cx, y + 2, cz);
+                e.requireAirToward(cx, y + 1, cz, entryEdge);
+                e.requireAirToward(cx, y + 2, cz, entryEdge);
                 transit += ctx.bodyTransitCost(e, k == 1 ? startFlags : ctx.flagsAt(cx, y, cz), cx, y, cz);
             }
         }

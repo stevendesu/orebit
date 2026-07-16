@@ -35,6 +35,19 @@ public final class PathEdits {
     public static final int PLACED = 1;
     /** The path breaks the block here — reads as air. */
     public static final int BROKEN = 2;
+    /**
+     * The path OPENS a (hand-toggleable) door here (DOORS P2) — an <b>absolute-SET</b> edit: unlike {@link
+     * #PLACED}/{@link #BROKEN} (which resolve to a constant geometry — cobblestone / air), a door-set resolves
+     * to THAT door's own facing/hinge forced into the target OPEN state ({@link MovementContext#descriptorAt}
+     * reads the grid door and applies {@link com.orebit.mod.worldmodel.navblock.NavBlock#withDoorOpen}). Folds
+     * through the same latest-wins machinery ({@link #markIfAbsent}) with no parity/XOR: a {@code SET_OPEN} then
+     * {@code SET_CLOSED} on one cell (the hallway-corner double-toggle) resolves — walking node→start,
+     * first-seen-wins — to the edit CLOSEST to the node, exactly like a place-then-break.
+     */
+    public static final int SET_OPEN = 3;
+    /** The path CLOSES a (hand-toggleable) door here (DOORS P2) — the absolute-SET counterpart of {@link
+     *  #SET_OPEN}; resolves the door forced into the target CLOSED state. */
+    public static final int SET_CLOSED = 4;
 
     // Open-addressing long→kind table (linear probing, power-of-two capacity). The kind itself is the
     // occupancy marker: a slot is empty iff its value is NONE (0), which PLACED/BROKEN never are — so no
@@ -106,6 +119,8 @@ public final class PathEdits {
         if (se == null) return;
         for (int i = 0, n = se.placeCount(); i < n; i++) markIfAbsent(se.placeAt(i), (byte) PLACED);
         for (int i = 0, n = se.breakCount(); i < n; i++) markIfAbsent(se.breakAt(i), (byte) BROKEN);
+        for (int i = 0, n = se.doorSetCount(); i < n; i++)
+            markIfAbsent(se.doorSetAt(i), (byte) (se.doorSetOpenAt(i) ? SET_OPEN : SET_CLOSED));
     }
 
     /**
@@ -119,6 +134,8 @@ public final class PathEdits {
         if (s == null) return;
         for (int i = 0, n = s.placeCount(); i < n; i++) markIfAbsent(s.placeAt(i), (byte) PLACED);
         for (int i = 0, n = s.breakCount(); i < n; i++) markIfAbsent(s.breakAt(i), (byte) BROKEN);
+        for (int i = 0, n = s.doorSetCount(); i < n; i++)
+            markIfAbsent(s.doorSetAt(i), (byte) (s.doorSetOpenAt(i) ? SET_OPEN : SET_CLOSED));
     }
 
     /**

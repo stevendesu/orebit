@@ -54,8 +54,12 @@ public class SteerControlTest {
         @Override public boolean solidAt(int x, int y, int z) { return false; }
         @Override public boolean airAt(int x, int y, int z) { return true; }
         @Override public boolean swimHazardAt(int x, int y, int z) { return false; }
+        @Override public boolean bubbleUpAt(int x, int y, int z) { return false; }
         @Override public void mine(int x, int y, int z) { }
         @Override public void place(int x, int y, int z) { }
+        // Door reconcile seam (DOORS P3) — stubbed: no door in the pure-geometry SteerControl tests.
+        @Override public void setDoorOpen(int x, int y, int z, boolean open) { }
+        @Override public boolean doorOpenAt(int x, int y, int z) { return false; }
         // Parkour-servo seams (Phase 1-3) — stubbed: ordinary stone friction, no takeoff hazard.
         @Override public double slipperinessAt(int x, int y, int z) { return 0.6; }
         @Override public boolean gapFloorHazardAt(int x, int y, int z) { return false; }

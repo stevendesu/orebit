@@ -252,6 +252,20 @@ public final class NavGridView {
         return section == null ? null : section.getTraversalGrid().depthRaw();
     }
 
+    /**
+     * The per-pop exit-door prefilter: {@code true} iff cell {@code (x,y,z)}'s section is BUILT and provably
+     * holds no door ({@link NavSection#anyDoor} false) — the caller may then skip the always-on
+     * exit-through-own-door feet-descriptor read and treat the node as door-free (the overwhelmingly common
+     * case). Returns {@code false} for an unbuilt section too, so the caller falls back to the exact full read
+     * there (an out-of-built feet cell reads live/AIR — never wrongly skipped). Resolution goes through the
+     * same per-search chunk cache as every other read, so this is a cached section resolve plus a bit test;
+     * when it returns false the caller's own {@link #descriptorAt} re-resolves the same (now-cached) section.
+     */
+    public boolean sectionHasNoDoor(int x, int y, int z) {
+        NavSection section = sectionAt(x, y, z);
+        return section != null && !section.anyDoor();
+    }
+
     /** The {@link NavSection} covering world cell {@code (x,y,z)}, or {@code null} if it isn't built. */
     private NavSection sectionAt(int x, int y, int z) {
         int sectionIndex = (y - minY) >> 4;

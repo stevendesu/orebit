@@ -871,7 +871,23 @@ final class BotNavigator {
                     : floorOf(path.waypoint(waypointIndex - 1));
             MovePlan mp = movement.plan(fromFloor.getX(), fromFloor.getY(), fromFloor.getZ(),
                     toFloor.getX(), toFloor.getY(), toFloor.getZ());
-            if (mp != null) phaseRunner.begin(mp); else phaseRunner.clear();
+            if (mp != null) {
+                // DOORS P3: fold this step's door-set (SET_OPEN entering / SET_CLOSED on the exit double-toggle)
+                // into the plan as Need.OPEN reqs. A movement's cell-geometry plan(...) can't derive a door-open
+                // from floor coords alone, but the search already folded it onto the step's StepEdits — inject it
+                // here so the PhaseRunner opens/closes the door (and never mines it) as a converted move. Almost
+                // always empty; the loop is a no-op on the common step.
+                StepEdits se = path.edits(waypointIndex);
+                if (se != null) {
+                    for (int i = 0; i < se.doorSetCount(); i++) {
+                        long c = se.doorSetAt(i);
+                        mp.requireDoor(BlockPos.getX(c), BlockPos.getY(c), BlockPos.getZ(c), se.doorSetOpenAt(i));
+                    }
+                }
+                phaseRunner.begin(mp);
+            } else {
+                phaseRunner.clear();
+            }
             lastPhaseDone = false;
             lastRegressions = 0;
             lastPlanMove = movement.getClass().getSimpleName();
@@ -1046,6 +1062,19 @@ final class BotNavigator {
                 WorldEdits.placeBlock(level, p, block.defaultBlockState());
             } else {
                 WorldEdits.placeBlock(level, p, bot.placeBlock()); // conjured, infinite supply
+            }
+        }
+        // Door-set (DOORS P3): open/close each folded (hand-toggleable) door — the "right-click" edit in place of
+        // smashing it. Re-validated on the LIVE door via doorOpenAt (NOT solidAt — an open door keeps a thin
+        // collision box), so an already-correct door is left alone (no redundant swing/sound). This path is for an
+        // UNCONVERTED (legacy steer) move that folds a door-set; today only Traverse folds one and it is converted
+        // (its door-set rides the PhaseRunner Need.OPEN path), so this loop is a defensive backstop for parity.
+        for (int i = 0; i < edits.doorSetCount(); i++) {
+            long c = edits.doorSetAt(i);
+            int dx = BlockPos.getX(c), dy = BlockPos.getY(c), dz = BlockPos.getZ(c);
+            boolean open = edits.doorSetOpenAt(i);
+            if (bot.doorOpenAt(dx, dy, dz) != open) {
+                WorldEdits.setDoorOpen(level, new BlockPos(dx, dy, dz), bot, open);
             }
         }
     }
