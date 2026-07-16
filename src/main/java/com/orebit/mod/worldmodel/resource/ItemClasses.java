@@ -11,15 +11,15 @@ import net.minecraft.world.item.Item;
 
 /**
  * The item-side companion to {@link ResourceClasses}: classifies a carried {@link Item} into the taxonomy
- * the {@code /bot drop} command sorts by — a <b>resource</b> (and which {@link ResourceClasses} column it
+ * the {@code /bot drop} command sorts by — a <b>resource</b> (and which {@link ResourceClasses} locatable it
  * belongs to), a <b>tool</b>/weapon, <b>armor</b>, or otherwise <b>trash</b>.
  *
  * <h2>Why a separate item map (not just {@link ResourceClasses})</h2>
- * {@link ResourceClasses} maps <i>blocks</i> to resource columns — but the bot's inventory holds <i>items</i>,
+ * {@link ResourceClasses} maps <i>blocks</i> to resource locatables — but the bot's inventory holds <i>items</i>,
  * and mining a block drops a DIFFERENT item than the block (iron ore → {@code raw_iron}, not the ore block).
- * So the resource↔item relationship needs its own table. It reuses {@link ResourceClasses}'s column names /
- * indices, so {@code /bot drop iron} and {@code /bot gather iron} name the same "iron" and the drop command's
- * tab-completion is just {@link ResourceClasses#columnNames()} plus the category keywords.
+ * So the resource↔item relationship needs its own table. It reuses {@link ResourceClasses}'s locatable names /
+ * ids, so {@code /bot drop iron} and {@code /bot gather iron} name the same "iron" and the drop command's
+ * tab-completion is just {@link ResourceClasses#locatableNames()} plus the category keywords.
  *
  * <h2>Version-agnostic by construction</h2>
  * Classification keys on the item's registry-id string ({@link ItemLookup#idOf} — the one thin overlay seam),
@@ -37,8 +37,8 @@ public final class ItemClasses {
 
     private ItemClasses() {}
 
-    /** Bare item path (namespace stripped) → the {@link ResourceClasses} column it drops toward. */
-    private static final Map<String, Integer> PATH_TO_COLUMN = new HashMap<>();
+    /** Bare item path (namespace stripped) → the {@link ResourceClasses} locatable id it drops toward. */
+    private static final Map<String, Integer> PATH_TO_RESOURCE = new HashMap<>();
 
     /** Id suffixes that mark a tool or weapon (any material, incl. modded). */
     private static final String[] TOOL_SUFFIXES = { "_pickaxe", "_axe", "_shovel", "_hoe", "_sword" };
@@ -99,11 +99,11 @@ public final class ItemClasses {
         bind("stone", "stone", "cobblestone");
     }
 
-    /** Map every {@code path} to the {@link ResourceClasses} column named {@code columnName}. */
-    private static void bind(String columnName, String... paths) {
-        int column = ResourceClasses.columnForName(columnName);
-        if (column < 0) return; // column name not bound in ResourceClasses — skip (keeps the two in sync)
-        for (String path : paths) PATH_TO_COLUMN.put(path, column);
+    /** Map every {@code path} to the {@link ResourceClasses} locatable named {@code resourceName}. */
+    private static void bind(String resourceName, String... paths) {
+        int resourceId = ResourceClasses.resourceForName(resourceName);
+        if (resourceId < 0) return; // name not registered in ResourceClasses — skip (keeps the two in sync)
+        for (String path : paths) PATH_TO_RESOURCE.put(path, resourceId);
     }
 
     /** The bare path (namespace stripped) of {@code item}: {@code "minecraft:iron_ingot"} → {@code "iron_ingot"}. */
@@ -113,9 +113,9 @@ public final class ItemClasses {
         return colon < 0 ? id : id.substring(colon + 1);
     }
 
-    /** The {@link ResourceClasses} column {@code item} drops toward, or {@code -1} if it isn't a tracked resource. */
-    public static int resourceColumn(Item item) {
-        return PATH_TO_COLUMN.getOrDefault(path(item), -1);
+    /** The {@link ResourceClasses} locatable id {@code item} drops toward, or {@code -1} if it isn't a tracked resource. */
+    public static int resourceId(Item item) {
+        return PATH_TO_RESOURCE.getOrDefault(path(item), -1);
     }
 
     /** Whether {@code item} is a tool or weapon (pickaxe/axe/shovel/hoe/sword, shears, bow, ...). */
@@ -136,7 +136,7 @@ public final class ItemClasses {
 
     /** Whether {@code item} is "trash": not a tracked resource, not a tool, not armor — the /bot drop trash set. */
     public static boolean isTrash(Item item) {
-        return resourceColumn(item) < 0 && !isTool(item) && !isArmor(item);
+        return resourceId(item) < 0 && !isTool(item) && !isArmor(item);
     }
 
     /** Lower-cased trim of a user token — the {@code /bot drop} argument normaliser. */
