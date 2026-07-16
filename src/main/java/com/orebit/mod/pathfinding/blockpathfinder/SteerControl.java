@@ -847,6 +847,69 @@ public final class SteerControl {
         return s;
     }
 
+    /** The vanilla ground-jump initial vertical velocity ({@code vy₀ = 0.42}) — the impulse the takeoff phase's
+     *  {@link BotSteering#setJumping} produces, used by {@link #parkourLaunchShort} to predict the arc a jump we
+     *  are ABOUT to fire would fly (the bot is still grounded at {@code vy ≈ −0.078} when we ask). */
+    static final double PARKOUR_JUMP_VY = 0.42;
+
+    /**
+     * The parkour RUNUP <b>velocity-alignment</b> drive — the launch-axis pre-jump servo that replaces the
+     * open-loop {@link #steerTowards} in a {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour} runup. A diagonal jump launches a
+     * ballistic arc, and the arc is only a clean 45° (the geometry the envelope + airborne servo assume) if the
+     * bot's horizontal VELOCITY is on the jump axis at take-off. A cardinal (+X) run onto a diagonal (NE) takeoff
+     * cell arrives with velocity that is 45° OFF the jump line — a large component PERPENDICULAR to the axis — so
+     * an open-loop "face the pursuit point + full forward" launches a skewed arc that clips the near face of the
+     * landing and drops into the gap. This closes the loop on the bot's momentum exactly like {@link #groundServo}
+     * /{@link #swimServo}: the desired velocity is {@code (ux,uz)·}{@link #SERVO_GROUND_CRUISE} — pure along-axis,
+     * ZERO cross-axis — so the velocity error {@code desired − current} points to BOTH advance along the axis AND
+     * cancel (reverse-thrust) any perpendicular component. Facing that error and holding forward bleeds the
+     * cross-axis velocity to ~0 while the bot approaches the takeoff edge, so by the time the jump fires the launch
+     * is on-axis ({@code vx≈vz} for a 45° diagonal). No velocity is ever written — input only (look + forward),
+     * the Baritone model. The cruise ceiling is unreachable (an over-terminal target, the {@code groundServo}
+     * precedent), so on a safe straight the forward key saturates and this drives the runup exactly as hard as the
+     * open-loop walk — it only ever STEERS the momentum onto the axis, never slows a bot already on it.
+     */
+    public static void parkourRunupAlign(BotSteering b, double ux, double uz) {
+        double dvx = ux * SERVO_GROUND_CRUISE;               // desired velocity: pure along-axis, zero cross-axis
+        double dvz = uz * SERVO_GROUND_CRUISE;
+        double errx = dvx - b.velX();                        // error → advance along-axis AND null the cross-axis
+        double errz = dvz - b.velZ();
+        double emag = Math.sqrt(errx * errx + errz * errz);
+        if (emag < SERVO_DEADBAND) {
+            b.faceHorizontally(ux, uz);                      // on-axis at speed: hold heading, coast
+            b.setForward(0.0f);
+        } else {
+            b.faceHorizontally(errx, errz);                  // face the error: forward thrust or cross-axis bleed
+            b.setForward((float) Math.min(1.0, SERVO_GAIN * emag));
+        }
+    }
+
+    /**
+     * The take-off <b>launch-momentum sufficiency</b> test (called on the grounded jump tick by {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour}): does a NON-sprint jump fired from
+     * the bot's CURRENT along-axis momentum reach the landing cell, or will it drop short into the gap? Reuses the
+     * ballistic {@link #predictAlongTouchdown} predictor — from the current along-axis position/velocity, with the
+     * jump impulse {@link #PARKOUR_JUMP_VY} we are about to apply and the airborne servo's own forward-accel
+     * policy ({@code dir=+1}, walk accel — the best a non-sprint arc achieves) — and compares the predicted
+     * along-axis touchdown against the landing cell's NEAR edge ({@code C − 0.5 + }{@link #PARKOUR_CELL_MARGIN},
+     * the same half-width floor the airborne servo never predicts below). Short ⇒ the caller injects a sprint for
+     * the take-off (the extra jump-boost + accel the arc needs); this is the ONLY momentum lever left once the
+     * launch is on-axis, since a slow (e.g. soul-sand) takeoff floor throttles the run-up speed to a plateau that
+     * a plain jump can't fling across the gap. General — no floor/coordinate special-casing; it simply asks the
+     * physics "does this launch reach?". The airborne servo brakes any resulting overshoot (it aims the landing
+     * cell centre and reverse-thrusts), so injecting when NOT strictly needed is self-correcting, never a fall.
+     */
+    public static boolean parkourLaunchShort(BotSteering b, double ux, double uz, int tx, int ty, int tz) {
+        double s = b.x() * ux + b.z() * uz;                  // current along-axis position
+        double v = b.velX() * ux + b.velZ() * uz;            // current along-axis velocity (the run-up plateau)
+        double landY = ty + 1.0;                             // FLAT diagonal: feet return to the takeoff level
+        double pred = predictAlongTouchdown(s, v, b.y(), PARKOUR_JUMP_VY, landY, +1, PARKOUR_A_WALK);
+        double c = (tx + 0.5) * ux + (tz + 0.5) * uz;        // landing centre, along-axis
+        double nearEdge = c - 0.5 + PARKOUR_CELL_MARGIN;      // the near-edge floor a safe touchdown must clear
+        return pred < nearEdge;
+    }
+
     /** The current segment's horizontal travel frame into scratch {@code F}; false if degenerate (a dive/rise). */
     private static boolean travelFrame(SteerView p) {
         double cdx = p.tx() - p.sx(), cdz = p.tz() - p.sz();
