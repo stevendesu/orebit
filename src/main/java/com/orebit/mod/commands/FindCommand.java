@@ -11,6 +11,7 @@ import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.orebit.mod.AllyBotEntity;
 import com.orebit.mod.platform.CommandFeedback;
 import com.orebit.mod.platform.Worlds;
+import com.orebit.mod.worldmodel.resource.DropModel;
 import com.orebit.mod.worldmodel.resource.ResourceClasses;
 import com.orebit.mod.worldmodel.resource.ResourceQuery;
 import com.orebit.mod.worldmodel.resource.ResourceScan;
@@ -48,7 +49,7 @@ public final class FindCommand implements BotCommand {
                 .then(Commands.argument("resource", StringArgumentType.word())
                         // Tab-complete the valid resource names, same provider as /bot gather (s52).
                         .suggests((ctx, b) -> SharedSuggestionProvider.suggest(
-                                ResourceClasses.locatableNames(), b))
+                                DropModel.outputNames(), b))
                         .executes(ctx -> run(ctx, 1))
                         .then(Commands.argument("minCount", IntegerArgumentType.integer(1))
                                 .executes(ctx -> run(ctx, IntegerArgumentType.getInteger(ctx, "minCount"))))));
@@ -56,13 +57,16 @@ public final class FindCommand implements BotCommand {
 
     private static int run(CommandContext<CommandSourceStack> ctx, int minCount) throws CommandSyntaxException {
         final CommandSourceStack source = ctx.getSource();
-        final String resource = StringArgumentType.getString(ctx, "resource");
-        final int resourceId = ResourceClasses.resourceForName(resource);
-        if (resourceId < 0) {
+        final String typed = StringArgumentType.getString(ctx, "resource");
+        final DropModel.Output output = DropModel.resolve(typed);
+        if (output == null) {
             CommandFeedback.send(source,
-                    "unknown resource '" + resource + "' (try: diamond, iron, gold, coal, andesite, diorite, ...)");
+                    "unknown output '" + typed + "' (try: cobblestone, stone, iron, diamond, coal, andesite, wood, ...)");
             return 0;
         }
+        // Find locates the SOURCE block X (where to go), so resolve Y → its source resource (Phase 2).
+        final String resource = output.name();
+        final int resourceId = output.sourceResourceId();
         final int column = ResourceClasses.columnForResource(resourceId);
         if (column < 0) { // locatable-only (stone/wood): no pyramid compass → bounded local live-scan
             return OrebitCommands.act(ctx, (b, player, src) -> localFind(b, resource, resourceId, src));

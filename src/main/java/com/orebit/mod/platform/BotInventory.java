@@ -4,7 +4,9 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
+import com.orebit.mod.worldmodel.resource.DropModel;
 
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.player.Inventory;
@@ -191,6 +193,92 @@ public final class BotInventory {
         ItemStack tool = inv.getItem(bestSlot);
         bot.setItemInHand(InteractionHand.MAIN_HAND, tool); // hold the faster tool
         inv.setItem(bestSlot, held);                        // and leave what we held in the tool's old slot
+    }
+
+    // ---- Drop-goal-aware (silk) tool selection (Phase 2) -------------------------------------------
+
+    /**
+     * Whether the bot carries a tool that is BOTH correct-for-drops on {@code state} AND enchanted with Silk
+     * Touch — the "can I silk-harvest this?" predicate the drop model uses to decide whether a SILK_REQUIRED
+     * output (e.g. {@code /bot gather stone}) is achievable. Scans every slot; the silk check rides the {@link
+     * ToolEnchants} overlay seam (data-driven enchantments drifted at 1.21). Cold (command/mining cadence).
+     */
+    public boolean hasSilkTouchToolFor(ServerLevel level, BlockState state) {
+        for (int i = 0, n = inv.getContainerSize(); i < n; i++) {
+            ItemStack s = inv.getItem(i);
+            if (!s.isEmpty() && s.isCorrectToolForDrops(state) && ToolEnchants.hasSilkTouch(level, s)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Equip (into the main hand) a hotbar tool that produces the drop the {@code condition} demands on {@code
+     * state}, returning whether the bot CAN produce it. This is the Phase-2 drop-goal-aware equip — it may pick
+     * a SLOWER tool than {@link #selectBestHotbarTool} would (a silk pickaxe over a faster no-silk one, or vice
+     * versa) because the DROP, not the speed, is the goal:
+     * <ul>
+     *   <li>{@link DropModel.ToolCondition#EITHER} — today's behavior: equip the fastest hotbar tool and
+     *       succeed iff the bot has a correct tool at all ({@link #hasCorrectTool}).</li>
+     *   <li>{@link DropModel.ToolCondition#SILK_REQUIRED} — equip the fastest hotbar tool that is correct AND
+     *       carries Silk Touch; fail (return {@code false}, no change) if none qualifies (bare hands never have
+     *       silk).</li>
+     *   <li>{@link DropModel.ToolCondition#NO_SILK} — equip the fastest hotbar tool that is correct AND lacks
+     *       Silk Touch. If none qualifies but the block is hand-harvestable (no correct tool required), a bare
+     *       (non-silk) hand suffices — the held item is kept if it lacks silk, else a silk tool is stashed to an
+     *       empty hotbar slot to bare the hand; only if a silk tool can't be stashed does it fail.</li>
+     * </ul>
+     * Only the HOTBAR (slots 0..8, the holdable ones) is considered, mirroring {@link #selectBestHotbarTool};
+     * the currently-held item counts too. Uses only the version-stable {@code isCorrectToolForDrops}/{@code
+     * getDestroySpeed}/{@code setItemInHand} verbs plus the {@link ToolEnchants} silk seam. Cold — one bot,
+     * mining cadence, never the A* hot path.
+     */
+    public boolean equipForCondition(ServerLevel level, BlockState state, DropModel.ToolCondition condition) {
+        if (condition == null || condition == DropModel.ToolCondition.EITHER) {
+            selectBestHotbarTool(state);
+            return hasCorrectTool(state);
+        }
+        final boolean wantSilk = (condition == DropModel.ToolCondition.SILK_REQUIRED);
+
+        // Find the fastest QUALIFYING hotbar tool (correct + silk-matches). Held is the incumbent to beat.
+        final ItemStack held = bot.getMainHandItem();
+        final boolean heldQualifies = qualifiesForCondition(level, held, state, wantSilk);
+        float bestSpeed = heldQualifies ? held.getDestroySpeed(state) : -1.0f;
+        int bestSlot = -1;
+        for (int i = 0; i <= 8; i++) {
+            ItemStack s = inv.getItem(i);
+            if (!qualifiesForCondition(level, s, state, wantSilk)) continue;
+            float sp = s.getDestroySpeed(state);
+            if (sp > bestSpeed) { bestSpeed = sp; bestSlot = i; }
+        }
+        if (bestSlot >= 0) { // a strictly-better qualifying hotbar tool exists → swap it into hand
+            ItemStack tool = inv.getItem(bestSlot);
+            bot.setItemInHand(InteractionHand.MAIN_HAND, tool);
+            inv.setItem(bestSlot, held);
+            return true;
+        }
+        if (heldQualifies) return true; // already holding a qualifying tool, nothing faster
+
+        // No qualifying tool. For NO_SILK on a hand-harvestable block, a bare non-silk hand works — ensure the
+        // hand isn't silk-enchanted (which would silk-touch the wrong drop): keep a non-silk/empty hand, else
+        // stash the silk tool into an empty hotbar slot to bare the hand.
+        if (!wantSilk && !state.requiresCorrectToolForDrops()) {
+            if (held.isEmpty() || !ToolEnchants.hasSilkTouch(level, held)) return true;
+            for (int i = 0; i <= 8; i++) {
+                if (inv.getItem(i).isEmpty()) {
+                    inv.setItem(i, held);
+                    bot.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Whether {@code s} is correct-for-drops on {@code state} and its Silk-Touch presence matches {@code
+     *  wantSilk} — the per-slot qualifier {@link #equipForCondition} ranks by speed. */
+    private boolean qualifiesForCondition(ServerLevel level, ItemStack s, BlockState state, boolean wantSilk) {
+        if (s.isEmpty() || !s.isCorrectToolForDrops(state)) return false;
+        return ToolEnchants.hasSilkTouch(level, s) == wantSilk;
     }
 
     // ---- Per-pathfind feasibility snapshot (the cheap Baritone-style cap) --------------------------

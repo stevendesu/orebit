@@ -273,14 +273,15 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.debugMineTarget = pos.immutable();
     }
 
-    /** {@code /bot gather <resource> [count]}: switch to {@link Mode#GATHER} and start the
-     *  {@link BotGatherer} loop for locatable {@code resourceId}, targeting {@code quota} picked-up items. */
-    public void startGather(int resourceId, int quota) {
+    /** {@code /bot gather <output> [count]}: switch to {@link Mode#GATHER} and start the {@link BotGatherer}
+     *  loop for the resolved drop {@code output} (Phase 2 — its source resource is scanned/mined with the
+     *  silk-aware goal tool), targeting {@code quota} picked-up items of the output Y. */
+    public void startGather(com.orebit.mod.worldmodel.resource.DropModel.Output output, int quota) {
         this.mode = Mode.GATHER;
         this.comeTarget = null;
         navigator.clearPlan();
         portalFollower.resetPortalSeek();
-        gatherer.startGather(resourceId, quota);
+        gatherer.startGather(output, quota);
     }
 
     @Override

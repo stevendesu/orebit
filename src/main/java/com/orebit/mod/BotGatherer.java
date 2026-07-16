@@ -13,9 +13,11 @@ import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.platform.BlockShapes;
 import com.orebit.mod.platform.BotInventory;
 import com.orebit.mod.platform.EntityState;
+import com.orebit.mod.platform.ItemLookup;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
+import com.orebit.mod.worldmodel.resource.DropModel;
 import com.orebit.mod.worldmodel.resource.ResourceClasses;
 import com.orebit.mod.worldmodel.resource.ResourceQuery;
 import com.orebit.mod.worldmodel.resource.ResourceScan;
@@ -45,7 +47,10 @@ final class BotGatherer {
      *  {@code /bot gather} target cell — otherwise it paths closer first (see {@link #gatherMine}). */
     private static final double MINE_REACH = 4.5;
 
-    private int gatherResourceId = -1;        // locatable resource being gathered (-1 = not gathering)
+    private int gatherResourceId = -1;        // SOURCE locatable resource being scanned/mined (-1 = not gathering)
+    private String gatherOutputName;          // friendly OUTPUT name (chat label) — e.g. "cobblestone" (Phase 2)
+    private DropModel.ToolCondition gatherToolCondition = DropModel.ToolCondition.EITHER; // silk goal (Phase 2)
+    private DropModel.Output gatherOutput;    // the resolved output (its counts() gates COLLECT accrual)
     private int gatherQuota;                  // target count of PICKED-UP items (owner-ratified, §10)
     private int gathered;                     // items accrued so far (counted on standing-mine ticks)
     private GatherPhase gatherPhase;          // current phase (null = inactive)
@@ -127,8 +132,11 @@ final class BotGatherer {
      * the COMPASS heading when nothing is loaded nearby — and only for a PERSISTED resource; a locatable-only
      * resource like stone/wood has no pyramid slot, so its COMPASS gracefully reports "nothing nearby").
      */
-    void startGather(int resourceId, int quota) {
-        this.gatherResourceId = resourceId;
+    void startGather(DropModel.Output output, int quota) {
+        this.gatherOutput = output;
+        this.gatherResourceId = output.sourceResourceId();
+        this.gatherOutputName = output.name();
+        this.gatherToolCondition = output.condition();
         this.gatherQuota = Math.max(1, quota);
         this.gathered = 0;
         this.gatherStartPos = bot.blockPosition().immutable();
@@ -183,7 +191,7 @@ final class BotGatherer {
             if (ResourceClasses.columnForResource(gatherResourceId) >= 0) {
                 beginCompass(level); // persisted → ask the pyramid where to head
             } else { // locatable-only (stone/wood): no pyramid compass — stop gracefully
-                bot.chat("I don't see any " + ResourceClasses.nameOfResource(gatherResourceId) + " nearby.");
+                bot.chat("I don't see any " + gatherOutputName + " nearby.");
                 bot.setMode(AllyBotEntity.Mode.STAY);
             }
         }
@@ -293,16 +301,20 @@ final class BotGatherer {
             // re-selection — the ordering that made COLLECT reachable at all. s52.)
             final BlockPos occluder = firstOcclusion(level, cell);
             if (occluder == null) {
-                // Correct-tool gate: iron & friends require a stone+ pickaxe for the block to DROP
-                // anything — a bare-hand break silently yields nothing, so the quota can never advance
-                // (the mined-forever-got-nothing failure). Refuse honestly instead of grinding.
-                if (!new BotInventory(bot).hasCorrectTool(level.getBlockState(cell))) {
-                    bot.chat("I can't harvest " + ResourceClasses.nameOfResource(gatherResourceId)
-                            + " without the right tool.");
+                // Drop-goal-aware tool gate (Phase 2): equip a tool that both is correct-for-drops AND
+                // satisfies the requested output's silk condition. This subsumes the old correct-tool gate
+                // (iron & friends need a stone+ pickaxe or the break drops nothing) AND enforces the drop goal
+                // (gather stone needs SILK; gather cobblestone needs a NON-silk pickaxe). If no tool qualifies
+                // → refuse honestly with a condition-specific message rather than deliver the wrong item.
+                final BlockState cellState = level.getBlockState(cell);
+                if (!new BotInventory(bot).equipForCondition(level, cellState, gatherToolCondition)) {
+                    bot.chat(toolRefusalMessage());
                     bot.setMode(AllyBotEntity.Mode.STAY);
                     return;
                 }
-                bot.mining().request(cell); // clear line → BotMining faces + times the break + drops
+                // Request WITH the condition so BotMining equips the goal tool (its per-tick fastest-tool
+                // re-select would otherwise override the silk pick with a faster plain one).
+                bot.mining().request(cell, gatherToolCondition);
             } else {
                 // Dig the eye→ore ray open, first blocking block per tick — each break strictly shortens the
                 // occlusion, so this terminates with a clear line and falls into the branch above.
@@ -408,8 +420,10 @@ final class BotGatherer {
     /**
      * Enter COLLECT: the target block just broke. Find its ACTUAL {@link ItemEntity} with one scan around
      * the mined cell (drops spawn with a random offset/velocity and then fall/roll — the cell coordinate
-     * alone chases a hole, not an item). No drop found = nothing ever dropped (someone else took it, or a
-     * drop-less break slipped past the tool gate) → skip COLLECT entirely, no accrual.
+     * alone chases a hole, not an item). Only a drop whose item id COUNTS toward the requested output Y is
+     * chased (Phase 2: {@code gather cobblestone} counts cobblestone, not the odd coal the vein also held) —
+     * so incidental non-Y drops are left uncounted (the bot still auto-picks them up walking over them). No
+     * matching drop = the tool produced the wrong item or someone took it → skip COLLECT, no accrual.
      */
     private void beginCollect(BlockPos cell) {
         collectCell = cell;
@@ -420,10 +434,11 @@ final class BotGatherer {
         final ServerLevel level = (ServerLevel) Worlds.of(bot);
         for (ItemEntity e : level.getEntitiesOfClass(ItemEntity.class,
                 new AABB(cell).inflate(2.0), ItemEntity::isAlive)) {
+            if (!countsAsOutput(e)) continue; // only the requested output Y is chased + counted
             final double d = e.distanceToSqr(cell.getX() + 0.5, cell.getY() + 0.5, cell.getZ() + 0.5);
             if (d < bestD) { bestD = d; nearest = e; }
         }
-        if (nearest == null) { // no drop exists — nothing to chase, nothing to count
+        if (nearest == null) { // no matching drop exists — nothing to chase, nothing to count
             finishCollect();
             return;
         }
@@ -488,7 +503,7 @@ final class BotGatherer {
         bot.navigator().clearPlan();
         if (gathered >= gatherQuota) {
             gatherPhase = GatherPhase.RETURN;
-            bot.chat("got " + gathered + " " + ResourceClasses.nameOfResource(gatherResourceId) + " — heading back.");
+            bot.chat("got " + gathered + " " + gatherOutputName + " — heading back.");
             return;
         }
         enterMine();
@@ -520,7 +535,7 @@ final class BotGatherer {
             gatherPhase = GatherPhase.COMPASS;
             return;
         }
-        bot.chat("I don't see any " + ResourceClasses.nameOfResource(gatherResourceId) + " nearby.");
+        bot.chat("I don't see any " + gatherOutputName + " nearby.");
         bot.setMode(AllyBotEntity.Mode.STAY);
     }
 
@@ -554,13 +569,34 @@ final class BotGatherer {
         BlockPos s = gatherStartPos;
         boolean arrived = bot.navigator().driveToward(s.getX() + 0.5, s.getY(), s.getZ() + 0.5, s.below());
         if (arrived) {
-            bot.chat("back with " + gathered + " " + ResourceClasses.nameOfResource(gatherResourceId) + ".");
+            bot.chat("back with " + gathered + " " + gatherOutputName + ".");
             bot.setMode(AllyBotEntity.Mode.STAY);
         } else if (bot.navigator().navGaveUp()) {
-            bot.chat("I got " + gathered + " " + ResourceClasses.nameOfResource(gatherResourceId)
+            bot.chat("I got " + gathered + " " + gatherOutputName
                     + " but can't find my way back.");
             bot.setMode(AllyBotEntity.Mode.STAY);
         }
+    }
+
+    /** Whether {@code e}'s dropped stack is an item the requested output Y counts toward its quota (Phase 2 —
+     *  {@code gather stone} counts the stone item, {@code gather cobblestone} counts cobblestone). Defensive
+     *  fallback (no output resolved) counts anything, matching the pre-Phase-2 nearest-of-any behavior. */
+    private boolean countsAsOutput(ItemEntity e) {
+        if (gatherOutput == null) return true;
+        return gatherOutput.counts(ItemLookup.idOf(e.getItem().getItem()));
+    }
+
+    /** The condition-specific refusal for the MINE tool gate: the bot has no tool that can produce the
+     *  requested output Y (Phase 2 — consistent with the existing correct-tool refusal). */
+    private String toolRefusalMessage() {
+        return switch (gatherToolCondition) {
+            case SILK_REQUIRED ->
+                "I need a Silk Touch pickaxe to gather " + gatherOutputName + ".";
+            case NO_SILK ->
+                "I can't make " + gatherOutputName + " with only a Silk Touch pickaxe (I need a plain pickaxe).";
+            case EITHER ->
+                "I can't harvest " + gatherOutputName + " without the right tool.";
+        };
     }
 
     /** True when {@code cell}'s centre is within a player's mining reach ({@link #MINE_REACH}) of the bot's eyes. */
