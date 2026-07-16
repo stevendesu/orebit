@@ -41,6 +41,12 @@ public final class Descend implements Movement {
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
         if (ctx.mode() != MovementContext.MODE_STANDING) return; // a ground step-down — only while upright
         for (int[] d : CARDINALS) {
+            // §2b door EXIT (shared with Traverse / Ascend): if the bot STANDS in an intact door whose panel
+            // blocks THIS horizontal travel edge, a step-down can't leave that way either. EXIT_CLEAR off any
+            // door; EXIT_BLOCKED (iron / flag-off) skips the direction; EXIT_TOGGLE folds a door SET (below).
+            int exitDoor = ctx.exitDoorDecision(x, y, z, d[0], d[1]);
+            if (exitDoor == MovementContext.EXIT_BLOCKED) continue;
+            boolean exitDoorToggle = exitDoor == MovementContext.EXIT_TOGGLE;
             int nx = x + d[0];
             int nz = z + d[1];
             int dy = y - 1; // destination floor one below
@@ -53,15 +59,24 @@ public final class Descend implements Movement {
             boolean dstStandable = ctx.standable(dstDesc);
             int flags = MovementContext.flagsOf(packed);
             EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+            // §2b: fold the exit-door toggle onto this arm when leaving through a blocked (toggleable) feet door.
+            if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z);
             // Footing: step onto the block below, or BUILD A STEP DOWN — place a throwaway floor one down
             // against the wall and descend onto it (if the bot may place and the spot is placeable).
             if (!dstStandable) e.requireFloor(nx, dy, nz);
             // The step-off transit (nx, y..y+2, nz) is the dest floor's body column; clear it through the
-            // dest's JUMP-level HEADROOM, else read/break the three cells under the RISKY_EDIT gate.
+            // dest's JUMP-level HEADROOM, else read/break the three cells under the RISKY_EDIT gate. A door in
+            // the dest column is a LOWERED doorway (a door standing on the step the bot drops onto): it occupies
+            // the two body cells directly above the dest floor — (nx,y,nz) lower + (nx,y+1,nz) upper — which are
+            // cleared DOOR-AWARE (walked past free / opened rather than mined, as Traverse handles a flat one).
+            // The step-off head cell (nx,y+2,nz) sits ABOVE any such doorway (a door never reaches it), so it
+            // stays a plain requireAir. A door reads non-passable (SHAPE_OTHER), so HEADROOM never proves clear
+            // through one — this cold path always runs when a door is present; a door-free descend is unchanged.
             if (!ctx.headroomProves(flags, dy, MovementContext.HEADROOM_JUMP)) {
-                e.requireAir(nx, y + 2, nz); // head clearance stepping off
-                e.requireAir(nx, y + 1, nz); // transit feet / new head
-                e.requireAir(nx, y, nz);     // new feet
+                int entryEdge = MovementContext.ordinalOf(-d[0], -d[1]); // edge of the dest column the step enters
+                e.requireAir(nx, y + 2, nz);                  // head clearance stepping off (above any doorway)
+                e.requireAirToward(nx, y + 1, nz, entryEdge); // transit feet / new head — dest door upper half
+                e.requireAirToward(nx, y, nz, entryEdge);     // new feet — dest door lower half
             }
             if (e.valid()) {
                 // Slow-FLOOR surcharge on the landing (same rule as Traverse/Diagonal; a PLACED step-down

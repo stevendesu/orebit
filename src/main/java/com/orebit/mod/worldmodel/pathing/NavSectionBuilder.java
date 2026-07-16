@@ -224,6 +224,7 @@ public final class NavSectionBuilder {
                                            TraversalGrid grid, IntConsumer portalCells, int[] resourceTallyOut) {
         if (onlyAir) {
             fillRows(grid, NavBlock.AIR & 0xFFFF, 0, 0, NavSection.SIZE - 1);
+            grid.setAnyDoor(false); // all-air section holds no door (self-contained, independent of reset())
             return true;
         }
 
@@ -240,17 +241,20 @@ public final class NavSectionBuilder {
         int[] slotToColumn = resourceTallyOut != null ? new int[palette.length] : null;
         boolean anyPortal = false;
         boolean anyResource = false;
+        boolean anyDoor = false;
         for (int s = 0; s < palette.length; s++) {
             short navtype = NavBlock.navtypeFor(palette[s]);
             slotToNavtype[s] = navtype & 0xFFFF;
             slotToDesc[s] = NavBlock.descriptor(navtype);
             anyPortal |= NavBlock.isNetherPortal(slotToDesc[s]); // nether-only gate (index feed); one bit-test per entry
+            anyDoor |= NavBlock.isDoor(slotToDesc[s]);           // per-pop exit-door gate feed; one bit-test per entry
             if (slotToColumn != null) {
                 int col = ResourceClasses.columnForBlock(palette[s].getBlock());
                 slotToColumn[s] = col;
                 anyResource |= (col >= 0);                 // one compare per palette entry, like anyPortal
             }
         }
+        grid.setAnyDoor(anyDoor); // section-level door prefilter for the per-pop exit-door gate
 
         // Portal collection: gated on the palette actually containing one (portals are vanishingly rare),
         // so the per-cell pass never taxes the normal classify path.
@@ -497,6 +501,9 @@ public final class NavSectionBuilder {
         // BOTH scratch rebuilds — this section's, and the below section's, which reads this grid as ITS
         // overscan — see the new block.
         grid.set(lx, ly, lz, newNavtype & 0xFFFF, grid.flags(lx, ly, lz));
+        // Raise the section's door prefilter if a door was placed (SET-only: a removed door leaves it stale-
+        // true, which merely falls back to the exact full exit-door read — never a wrong skip).
+        if (NavBlock.isDoor(NavBlock.descriptor(newNavtype))) grid.setAnyDoor(true);
 
         fillScratch(desc, grid, above == null ? null : above.getTraversalGrid());
 
@@ -612,6 +619,7 @@ public final class NavSectionBuilder {
                     continue;
                 }
                 grid.set(lx, ly, lz, nav, grid.flags(lx, ly, lz));
+                if (NavBlock.isDoor(NavBlock.descriptor((short) nav))) grid.setAnyDoor(true); // door prefilter (SET-only)
                 patchFloorGap(grid, aboveGrid, lx, ly, lz);
                 patchRunUp(grid, aboveGrid, belowGrid, lx, ly, lz);
                 changed++;

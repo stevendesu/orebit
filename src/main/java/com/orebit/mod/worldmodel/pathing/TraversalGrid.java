@@ -57,9 +57,32 @@ public class TraversalGrid {
     private final short[] data = new short[BLOCK_COUNT];
     private final byte[] depth = new byte[BLOCK_COUNT];
 
+    /**
+     * Section-level prefilter: {@code true} iff at least one cell in this section classifies as a
+     * {@link com.orebit.mod.worldmodel.navblock.NavBlock#isDoor door}. Set once at classify time (the
+     * {@code anyPortal}-style palette gate in {@link NavSectionBuilder#classifyNavtypes}) and monotonically
+     * raised by a runtime door {@code patchCell}. Read per-pop by the pathfinder to skip the always-on
+     * exit-through-own-door feet-descriptor read in the overwhelmingly common door-free section (see
+     * {@code MovementContext.setCurrentDoorEdge}). SET-only across patches: a section that loses its last
+     * door stays {@code true} until rebuilt, which merely falls back to the exact (unchanged) full read —
+     * never a wrong skip. Cleared on {@link #reset} (pooled reuse never carries a prior section's doors).
+     */
+    private boolean anyDoor;
+
     public void reset() {
         Arrays.fill(data, (short) 0); // navtype AIR (0) + no flags; always overwritten on build
         Arrays.fill(depth, DEPTH_UNKNOWN_BYTE); // no depth claims until a column build/patch writes them
+        anyDoor = false; // pooled reuse: never carry a prior section's door prefilter
+    }
+
+    /** Whether any cell in this section is a door — the per-pop exit-door gate's prefilter (see field doc). */
+    public boolean anyDoor() {
+        return anyDoor;
+    }
+
+    /** Set the section-level door prefilter (classify sets the exact value; a door patch raises it to true). */
+    public void setAnyDoor(boolean value) {
+        this.anyDoor = value;
     }
 
     /** The fine {@code NavBlock} navtype index at this cell (low 10 bits) — a single mask, no shift. */

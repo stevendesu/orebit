@@ -11,10 +11,13 @@ public final class EditFixtures {
 
     private EditFixtures() {}
 
+    private static final long[] NO_CELLS = new long[0];
+    private static final boolean[] NO_FLAGS = new boolean[0];
+
     /** A {@link PathEdits} holding exactly the given PLACED cells (packed {@code BlockPos.asLong}). */
     public static PathEdits withPlaced(long... placedCells) {
         StepEdits se = new StepEdits();
-        se.load(new long[0], 0, placedCells, placedCells.length);
+        se.load(NO_CELLS, 0, placedCells, placedCells.length, NO_CELLS, NO_FLAGS, 0);
         PathEdits edits = new PathEdits();
         edits.add(se);
         return edits;
@@ -23,9 +26,19 @@ public final class EditFixtures {
     /** A {@link PathEdits} holding exactly the given BROKEN cells (packed {@code BlockPos.asLong}). */
     public static PathEdits withBroken(long... brokenCells) {
         StepEdits se = new StepEdits();
-        se.load(brokenCells, brokenCells.length, new long[0], 0);
+        se.load(brokenCells, brokenCells.length, NO_CELLS, 0, NO_CELLS, NO_FLAGS, 0);
         PathEdits edits = new PathEdits();
         edits.add(se);
         return edits;
+    }
+
+    /** A single-edge {@link StepEdits} that OPENS ({@code open=true}) or CLOSES the door at each given cell
+     *  (DOORS P2). Uses the same package-private {@code load} seam a real edge uses. */
+    public static StepEdits doorSetStep(boolean open, long... doorCells) {
+        StepEdits se = new StepEdits();
+        boolean[] opens = new boolean[doorCells.length];
+        java.util.Arrays.fill(opens, open);
+        se.load(NO_CELLS, 0, NO_CELLS, 0, doorCells, opens, doorCells.length);
+        return se;
     }
 }

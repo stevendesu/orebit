@@ -76,7 +76,9 @@ public record Config(
         int maxThreads,
         int asyncSearchBudgetMs,
         // ---- hpa (persisted region tier) ----
-        int persistIntervalTicks) {
+        int persistIntervalTicks,
+        // ---- doors ----
+        boolean doorToggle) {
 
     /**
      * The all-defaults configuration — reproduces TODAY's hardcoded follower behaviour exactly (break +
@@ -96,7 +98,9 @@ public record Config(
                               * 2 planner threads; 250 ms/async-search budget. Sync (async=false) keeps the
                               * node cap = pathing.syncSearchBudgetNodes (DEFAULT_MAX_NODES). */
                              true, 2, 250,
-            /* hpa        */ 6000);
+            /* hpa        */ 6000,
+            /* doors      */ true); // doors.toggle ON — the P3 executor operates doors (open before crossing,
+                                     // close on the exit double-toggle); the flag stays a config kill-switch.
 
     /**
      * The capability gate the block-tier A* reads, derived from the placement / mining / pathing knobs
@@ -121,7 +125,8 @@ public record Config(
                 /* maxBreakHardness */ maxHardness,
                 /* allowUnbreakable */ allowUnbreakable,
                 /* maxNodes         */ maxNodes,
-                /* greedyWeight     */ greedyWeight);
+                /* greedyWeight     */ greedyWeight,
+                /* mayToggleDoors   */ doorToggle);
     }
 
     /**

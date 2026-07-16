@@ -38,11 +38,22 @@ public final class MovePlan {
         /** The cell must be clear — the runner mines it (timed, real tool) while it is solid. */
         AIR,
         /** The cell must be solid footing — the runner places a block there while it is missing. */
-        FOOTING
+        FOOTING,
+        /**
+         * The (hand-toggleable) door at the cell must reach a target OPEN state (DOORS P3) — the runner
+         * {@link BotSteering#setDoorOpen}s it (instant, place-like) while the live door
+         * ({@link BotSteering#doorOpenAt}, <b>not</b> {@code solidAt} — an open door still has collision) does
+         * not read that state. The target ({@code open}) rides on the {@link Req}. Carried at plan level (not
+         * inside a phase) because a door-open is a precondition of the WHOLE crossing, established before any
+         * phase drives — see {@link #requireDoor} and {@link PhaseRunner}.
+         */
+        OPEN
     }
 
     private final List<Phase> phases = new ArrayList<>(4);
     private Predicate<BotSteering> resetWhen = b -> false;
+    /** Plan-level door {@link Need#OPEN} reqs (DOORS P3); almost always empty (a door crossing is rare). */
+    private final List<Req> doorReqs = new ArrayList<>(0);
 
     /** Append a phase; returns it for fluent configuration ({@code .need(...).drive(...).advanceWhen(...)}). */
     public Phase phase(String name) {
@@ -61,10 +72,35 @@ public final class MovePlan {
         return this;
     }
 
+    /**
+     * Require the door at cell {@code (x,y,z)} reach {@code open} before the crossing drives (DOORS P3) — a
+     * plan-level {@link Need#OPEN}. Injected by {@link com.orebit.mod.BotNavigator} from the step's folded
+     * door-set ({@link StepEdits}) after the movement builds its geometry plan, since a door-open is a
+     * live-world fact a movement's cell-geometry {@code plan(...)} cannot derive on its own. The runner opens
+     * all door reqs (via {@link BotSteering#setDoorOpen}) as a pre-pass each tick and re-validates them with
+     * {@link BotSteering#doorOpenAt}; a cell governed by a door req is never mined by a {@link Need#AIR} on the
+     * same cell ({@link #isDoorCell}). Returns {@code this} for fluent use.
+     */
+    public MovePlan requireDoor(int x, int y, int z, boolean open) {
+        doorReqs.add(new Req(Need.OPEN, x, y, z, open));
+        return this;
+    }
+
     // ---- consumed by PhaseRunner ---------------------------------------------------------------------
     int size() { return phases.size(); }
     Phase phaseAt(int i) { return phases.get(i); }
     boolean regressed(BotSteering bot) { return resetWhen.test(bot); }
+    List<Req> doorReqs() { return doorReqs; }
+
+    /** Whether cell {@code (x,y,z)} is governed by a door {@link Need#OPEN} (so a {@code Need.AIR} must NOT mine
+     *  it — the door is opened/closed by hand, never smashed). Linear over the tiny door list (usually empty). */
+    boolean isDoorCell(int x, int y, int z) {
+        for (int i = 0; i < doorReqs.size(); i++) {
+            Req r = doorReqs.get(i);
+            if (r.x == x && r.y == y && r.z == z) return true;
+        }
+        return false;
+    }
 
     /**
      * One step of a {@link MovePlan}: the geometry it must establish first, how to drive the bot's inputs once
@@ -113,10 +149,15 @@ public final class MovePlan {
         boolean isDone(BotSteering bot) { return done.test(bot); }
     }
 
-    /** One geometry requirement: a {@link Need} at a world cell. */
+    /** One geometry requirement: a {@link Need} at a world cell. {@code open} is the target door state, used
+     *  only by {@link Need#OPEN} (true for AIR/FOOTING, where it is inert). */
     static final class Req {
         final Need kind;
         final int x, y, z;
-        Req(Need kind, int x, int y, int z) { this.kind = kind; this.x = x; this.y = y; this.z = z; }
+        final boolean open;
+        Req(Need kind, int x, int y, int z) { this(kind, x, y, z, true); }
+        Req(Need kind, int x, int y, int z, boolean open) {
+            this.kind = kind; this.x = x; this.y = y; this.z = z; this.open = open;
+        }
     }
 }
