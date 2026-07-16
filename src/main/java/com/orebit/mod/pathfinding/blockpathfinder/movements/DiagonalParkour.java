@@ -368,13 +368,25 @@ public final class DiagonalParkour implements Movement {
         final double hazardRaw = Parkour.HAZARD_TAKEOFF_LOOKAHEAD * 1.41421356;
         final boolean sprint = Math.abs(tx - fx) - 1 >= 2; // diagonal: |Δx| == |Δz| == g+1
         final boolean[] airborneOnce = new boolean[1];
+        // Take-off SPRINT INJECTION (decided once, on the grounded jump tick): a gap-1 diagonal defaults to no
+        // sprint, but a slow (soul-sand) takeoff floor throttles the run-up to a plateau whose plain jump drops
+        // SHORT into the gap. The takeoff drive asks the ballistic predictor whether the on-axis launch reaches
+        // the landing near-edge; if not it injects a sprint for the launch (its jump-boost + accel is the only
+        // remaining momentum lever). The airborne servo brakes any overshoot, so the injection is self-correcting.
+        // [0] = the persisted decision (held across takeoff/airborne/land so the arc predictor uses the right
+        // accel); [1] = the once-guard so the grounded predict runs a single time per attempt.
+        final boolean[] sprintInject = new boolean[2];
         MovePlan plan = new MovePlan();
         plan.resetWhen(b -> airborneOnce[0] && b.grounded()
                 && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
         plan.phase("runup")
                 .drive((b, v) -> {
                     airborneOnce[0] = false; // re-attempt begins → disarm until the next arc is live
-                    SteerControl.steerTowards(b, v);
+                    sprintInject[1] = false; // re-attempt begins → allow the launch predict to run again
+                    // Velocity-alignment servo: bleed any cross-axis (off-jump-line) momentum so the launch is a
+                    // clean 45° arc (the +X-runup skew that clipped the landing near-face). Along-axis progress
+                    // still saturates forward, so the takeoff trigger fires on schedule.
+                    SteerControl.parkourRunupAlign(b, uxn, uzn);
                     b.setSprinting(sprint);
                 })
                 // Fix 3: hazardous diagonal gap-floor → predictive early takeoff (raw √2 units), else the
@@ -390,8 +402,14 @@ public final class DiagonalParkour implements Movement {
                 });
         plan.phase("takeoff")
                 .drive((b, v) -> {
-                    SteerControl.steerTowards(b, v);
-                    b.setSprinting(sprint);
+                    // First grounded takeoff tick: decide the sprint injection from the (now on-axis) launch
+                    // momentum — does a plain jump reach the landing, or drop short into the gap?
+                    if (b.grounded() && !sprintInject[1]) {
+                        sprintInject[1] = true;
+                        sprintInject[0] = !sprint && SteerControl.parkourLaunchShort(b, uxn, uzn, tx, ty, tz);
+                    }
+                    SteerControl.parkourRunupAlign(b, uxn, uzn);
+                    b.setSprinting(sprint || sprintInject[0]);
                     b.setJumping(true);
                 })
                 .advanceWhen(b -> !b.grounded());
@@ -399,15 +417,16 @@ public final class DiagonalParkour implements Movement {
                 .drive((b, v) -> {
                     airborneOnce[0] = true; // arc is live → a grounded return to the start cell is a balk
                     // FLAT diagonal: the predictive landing servo (replaces open-loop full-forward) — air-brake
-                    // an overshoot, accelerate a shortfall, never brake short into the gap. Sprint held.
-                    SteerControl.parkourAirborne(b, v, uxn, uzn, tx, ty, tz, sprint);
+                    // an overshoot, accelerate a shortfall, never brake short into the gap. Sprint held (incl. an
+                    // injected takeoff sprint, so the predictor's accel matches the arc).
+                    SteerControl.parkourAirborne(b, v, uxn, uzn, tx, ty, tz, sprint || sprintInject[0]);
                 })
                 .advanceWhen(b -> b.grounded()); // hold the arc inputs until touchdown
         plan.phase("land")
                 // Keep braking to the desired point via the same predictive servo until grounded on the target
                 // cell (once grounded the predictor returns the live along-position → a reverse-brake toward the
                 // cell centre, the ice-slide arrest).
-                .drive((b, v) -> SteerControl.parkourAirborne(b, v, uxn, uzn, tx, ty, tz, sprint))
+                .drive((b, v) -> SteerControl.parkourAirborne(b, v, uxn, uzn, tx, ty, tz, sprint || sprintInject[0]))
                 .done(b -> b.grounded()
                         && b.footX() == tx && b.footY() == ty + 1 && b.footZ() == tz);
         return plan;
