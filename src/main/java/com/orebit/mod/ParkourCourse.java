@@ -137,6 +137,8 @@ public final class ParkourCourse {
         final String name;
         boolean slabRunway;
         boolean soulRunway;             // soul-sand takeoff+runway (slow floor — tighter envelope row)
+        boolean soulTakeoff;            // STONE runway but the takeoff cell ONLY is soul sand (issue-1 repro:
+                                        //   +X momentum builds on stone, only the launch block is slow)
         boolean stairRun;               // a staircase-traversal trial (custom build + pass/fail), not a jump
         int stairSteps;                 // number of stair blocks in the run
         BlockState gapFloor;            // magma/honey placed in the FIRST gap cell (null = normal void gap)
@@ -270,6 +272,12 @@ public final class ParkourCourse {
             // regression gate (NeoForge 1.21.11, 100% consistent void-fall) so a run is ~1 min instead of ~15.
             if (System.getProperty("orebit.parkour.owneronly") != null) {
                 ownerRepro();
+                return;
+            }
+            // Fast-iteration gate: -Dorebit.parkour.souldiag builds ONLY the issue-1 soul-sand-takeoff repro
+            // (stone +X runway, soul-sand takeoff cell, gap-1 NE diagonal jump over a void) so a run is ~1 min.
+            if (System.getProperty("orebit.parkour.souldiag") != null) {
+                soulDiag("souldiag");
                 return;
             }
             // Cardinal head-on (approach == jump == +X). name, jump(dx,dy,dz), template.
@@ -549,6 +557,49 @@ public final class ParkourCourse {
             Trial t = new Trial(name, a, rdx, rdz, jdx, jdy, jdz, Template.REACH, false, b[0], b[1]);
             t.soulRunway = true;
             trials.add(t);
+        }
+
+        /** ISSUE-1 repro: a STONE +X runway (momentum builds on stone) ending at a SINGLE soul-sand TAKEOFF cell,
+         *  then a gap-1 NE diagonal jump (jump vector (2,0,2)) onto a stone REACH landing, with the diagonal gap
+         *  cell left VOID (a miss falls → {@code fell} FAIL). WALKIN only — the +X runup IS the condition. The
+         *  bot must redirect its +X momentum into an NE launch off the slow soul takeoff; the suspicion is it
+         *  walks off the +X edge of the soul into the void instead of launching NE. The {@code soulTakeoff} flag
+         *  keeps the runway stone and lays soul on the takeoff cell only, and suppresses the 3-wide runway (so
+         *  there is no stone side-cell to corner-cut the diagonal from — the jump MUST come off the soul cell).
+         *
+         *  <p>Template OFFSET (not REACH) lays a 1-WIDE landing strip at (landX,landZ) running +X, so the ONLY
+         *  reachable landing is the intended gap-1 diagonal off the soul cell (14,8)->(16,10). A 3-wide REACH
+         *  platform instead let the planner corner-cut a gap-2 diagonal FROM the stone runway cell (13,8) onto
+         *  the platform's far corner (16,11), sidestepping the soul takeoff entirely (observed: it PASSED). */
+        void soulDiag(String name) {
+            int[] b = nextBase();
+            Trial t = new Trial(name + ".walkin", Approach.WALKIN, 1, 0, 2, 0, 2, Template.OFFSET, false, b[0], b[1]);
+            t.soulTakeoff = true;
+            trials.add(t);
+            // STANDSTILL twin (owner's "Setup A"): IDENTICAL jump/landing geometry (gap-1 NE diagonal jump
+            // (2,0,2) off the soul-sand takeoff cell onto the 1-wide OFFSET landing strip over a void, same goal),
+            // but Approach.REST spawns the bot ON the soul takeoff cell AT REST (setDeltaMovement ZERO, zero
+            // horizontal momentum) — no +X runup. The soulTakeoff flag still lays soul on the takeoff cell only.
+            // This isolates THE question: is the diagonal-off-soul jump makeable from a standstill (→ walkin's
+            // failure is driver-side runup-momentum) or does it miss too (→ physically unmakeable off a slow
+            // block = a pathing problem)? A miss falls into the void (fell → FAIL), a make reaches the goal (PASS).
+            int[] b2 = nextBase();
+            Trial s = new Trial(name + ".standstill", Approach.REST, 1, 0, 2, 0, 2, Template.OFFSET, false, b2[0], b2[1]);
+            s.soulTakeoff = true;
+            trials.add(s);
+            // HAZARD FLYOVER twin: a gap-1 NE diagonal (2,0,2), +X runup, 1-wide OFFSET landing over a void, with
+            // MAGMA laid in the DIAGONAL gap cell (gapFloorX,gapFloorZ) the arc flies over — the diagonal-parkour
+            // counterpart of the cardinal magma-overhang. A 1-wide STONE runway/takeoff (NOT soulTakeoff — soul's
+            // 0.875 collision top sits BELOW the magma's full 1.0 top, so a soul takeoff would rest the bot's 0.6
+            // hitbox corner UP on the taller magma and clip it for reasons unrelated to the driver; a stone takeoff
+            // is the fair flyover test, same height as the magma). This confirms the runup fix (velocity alignment
+            // + Fix-3 early takeoff) keeps the bot's grounded center off the magma and clears it mid-arc.
+            // assertNoDamage → any HP lost is a FAIL (minHP must stay 20); a make reaches the goal.
+            int[] b3 = nextBase();
+            Trial m = new Trial(name + ".magma", Approach.WALKIN, 1, 0, 2, 0, 2, Template.OFFSET, false, b3[0], b3[1]);
+            m.gapFloor = MAGMA;
+            m.assertNoDamage = true;
+            trials.add(m);
         }
 
         /** Ascending staircase climbing +X: {@code steps} stairs, each +1 up/+1 over, under a tight 2-block
@@ -871,12 +922,13 @@ public final class ParkourCourse {
                 }
                 if (wasGrounded && !onGround) {
                     takeoffSpeed = spd;
-                    trace.write(String.format(Locale.ROOT, "  TAKEOFF spd=%.4f at x=%.3f z=%.3f (proj=%.3f)\n",
-                            spd, x, z, tr.proj(x, z)));
+                    trace.write(String.format(Locale.ROOT,
+                            "  TAKEOFF spd=%.4f at x=%.3f z=%.3f (proj=%.3f) vx=%.4f vz=%.4f\n",
+                            spd, x, z, tr.proj(x, z), v.x, v.z));
                 }
                 trace.write(String.format(Locale.ROOT,
-                        "T %-16s %3d  %.3f %.3f %.3f | %.4f %.4f | %d | %s\n",
-                        tr.name, attemptTicks, x, bot.getY(), z, spd, v.y, onGround ? 1 : 0, move));
+                        "T %-16s %3d  %.3f %.3f %.3f | %.4f %.4f | vx=%.4f vz=%.4f | %d | %s\n",
+                        tr.name, attemptTicks, x, bot.getY(), z, spd, v.y, v.x, v.z, onGround ? 1 : 0, move));
             } catch (IOException ignored) { }
             wasGrounded = onGround;
             prevX = x;
@@ -922,6 +974,9 @@ public final class ParkourCourse {
                 int cz = tr.baseZ + k * tr.rdz;
                 if (tr.slabRunway) placeState(cx, Y0, cz, SLAB);
                 else if (tr.soulRunway) placeState(cx, Y0, cz, SOUL);
+                // soulTakeoff: 1-wide STONE runway with soul sand ONLY on the last (takeoff) cell. Placed BEFORE
+                // the wideRunway branch so no stone side-cell exists to corner-cut the diagonal from.
+                else if (tr.soulTakeoff) placeState(cx, Y0, cz, k == RUN - 1 ? SOUL : FLOOR);
                 else if (tr.wideRunway) placeWide(cx, Y0, cz, tr.rdx, tr.rdz);
                 else place(cx, Y0, cz);
             }
