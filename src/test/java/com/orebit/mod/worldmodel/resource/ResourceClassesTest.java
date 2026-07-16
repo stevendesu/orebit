@@ -36,8 +36,13 @@ public class ResourceClassesTest {
         assertEquals(diamondCol, ResourceClasses.columnForBlock(block("deepslate_diamond_ore")),
                 "deepslate_diamond_ore must share diamond_ore's column");
 
+        // s(gather): STONE is column-bound now (24, "stone") — /bot gather stone is an owner-directed
+        // feature (mine stone -> cobblestone for early crafting). Only minecraft:stone maps in; deepslate
+        // stays registry-only (you can't craft with cobbled deepslate the way stone recipes expect).
+        int stoneCol = ResourceClasses.columnForBlock(block("stone"));
+        assertTrue(stoneCol >= 0, "stone must be indexed (the stone column)");
+        assertEquals(stoneCol, ResourceClasses.columnForName("stone"), "columnForName(stone) matches block");
         // Non-indexed / non-tracked map to -1.
-        assertEquals(-1, ResourceClasses.columnForBlock(block("stone")), "stone -> -1 (registry-only)");
         assertEquals(-1, ResourceClasses.columnForBlock(block("deepslate")), "deepslate block -> -1 (saturates)");
         // s52: LOG is column-bound now (23, "wood") — /bot gather wood is an owner-directed feature.
         int woodCol = ResourceClasses.columnForBlock(block("oak_log"));
@@ -58,7 +63,7 @@ public class ResourceClassesTest {
         assertEquals(ironCol, ResourceClasses.columnForName("iron"), "columnForName(iron) matches block");
 
         // Column count and full name round-trip over every column.
-        assertEquals(24, ResourceClasses.columnCount(), "24 indexed columns (s52: +wood at 23)");
+        assertEquals(25, ResourceClasses.columnCount(), "25 indexed columns (s52: +wood at 23; +stone at 24)");
         for (int c = 0; c < ResourceClasses.columnCount(); c++) {
             String name = ResourceClasses.nameOfColumn(c);
             assertNotNull(name, "column " + c + " must have a name");
@@ -73,7 +78,8 @@ public class ResourceClassesTest {
         Bootstrap.bootStrap();
 
         // Non-indexed blocks keep a stable class id (>= 0) even with column -1.
-        assertTrue(ResourceClasses.classIdForBlock(block("stone")) >= 0, "stone has a class id");
+        assertEquals(-1, ResourceClasses.columnForBlock(block("gravel")), "gravel is registry-only (column -1)");
+        assertTrue(ResourceClasses.classIdForBlock(block("gravel")) >= 0, "gravel has a class id");
         assertTrue(ResourceClasses.classIdForBlock(block("deepslate")) >= 0, "deepslate has a class id");
         assertTrue(ResourceClasses.classIdForBlock(block("oak_log")) >= 0, "oak_log has a class id");
         // An untracked block resolves to -1.
