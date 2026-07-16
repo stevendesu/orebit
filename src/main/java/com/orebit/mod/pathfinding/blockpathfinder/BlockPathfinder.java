@@ -838,6 +838,7 @@ public final class BlockPathfinder {
             int curMode = nodes.mode[current];
             relaxer.currentMode = curMode; // default dest mode for ordinary (mode-preserving) accepts
             ctx.setMode(curMode);          // surfaced to each movement's candidates() for mode-gating
+            ctx.setCurrentDoorEdge(cx, cy, cz); // §2b: refuse a Traverse exit through an intact open door's blocked side
             List<Movement> tier1 = MovementRegistry.TIER1;
             for (int mi = 0, mn = tier1.size(); mi < mn; mi++) {
                 relaxer.move = mi;
@@ -1438,6 +1439,7 @@ public final class BlockPathfinder {
 
     /** Empty buffer for an edit-set with no breaks/places on one of its axes. */
     private static final long[] NO_CELLS = new long[0];
+    private static final boolean[] NO_FLAGS = new boolean[0];
 
     /**
      * Slice one expanded waypoint's edit-set out of a macro edge's folded {@link StepEdits}, by position: the
@@ -1470,9 +1472,25 @@ public final class BlockPathfinder {
                 bk[bn++] = pos;
             }
         }
-        if (pn == 0 && bn == 0) return null;
+        // Door-sets at this step's body cells (DOORS P2): a macro flat run clamps at a non-uniform door, so a
+        // door-set inside a folded macro edge is rare, but slice it by position for completeness — the step
+        // landing here owns the toggle of the door in its own body space.
+        long[] dr = null;
+        boolean[] drOpen = null;
+        int dn = 0;
+        for (int i = 0, c = all.doorSetCount(); i < c; i++) {
+            long pos = all.doorSetAt(i);
+            if (pos == body1 || pos == body2) {
+                if (dr == null) { dr = new long[c]; drOpen = new boolean[c]; }
+                dr[dn] = pos;
+                drOpen[dn] = all.doorSetOpenAt(i);
+                dn++;
+            }
+        }
+        if (pn == 0 && bn == 0 && dn == 0) return null;
         StepEdits s = new StepEdits();
-        s.load(bk == null ? NO_CELLS : bk, bn, pl == null ? NO_CELLS : pl, pn);
+        s.load(bk == null ? NO_CELLS : bk, bn, pl == null ? NO_CELLS : pl, pn,
+               dr == null ? NO_CELLS : dr, drOpen == null ? NO_FLAGS : drOpen, dn);
         return s;
     }
 }

@@ -53,7 +53,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  * gate). Entering water from land is {@link Swim}'s job; diving from the surface is the down-case here (a
  * surface node's feet — the top water cell — satisfy the gate). A pure land node generates nothing.
  */
-public final class SprintSwim implements Movement {
+public class SprintSwim implements Movement {
 
     /**
      * Sprint-swim cost per block, in <b>ticks</b>: {@code 20 / 5.612 ≈ 3.56} (20 ticks/s ÷ the wiki's

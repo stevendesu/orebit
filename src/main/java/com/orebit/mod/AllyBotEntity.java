@@ -37,7 +37,10 @@ import net.minecraft.world.level.Level;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.BubbleColumnBlock;
+import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.phys.Vec3;
 
 /**
@@ -778,6 +781,18 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         return level.getFluidState(scratchPos).is(FluidTags.LAVA);   // damaging fluid
     }
 
+    /** Live UP bubble-column probe (see {@link BotSteering#bubbleUpAt}) — a {@code BUBBLE_COLUMN} whose
+     *  {@code DRAG_DOWN} is false (soul-sand column, pushes up). The RideBubbleColumn follower's ENTER/RIDE
+     *  state gate. {@code BubbleColumnBlock.DRAG_DOWN} is range-stable 1.17+, direct call (no platform seam),
+     *  matching the {@code BUBBLE_COLUMN} references in {@link #swimHazardAt}. */
+    @Override
+    public boolean bubbleUpAt(int x, int y, int z) {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        scratchPos.set(x, y, z);
+        BlockState s = level.getBlockState(scratchPos);
+        return s.is(Blocks.BUBBLE_COLUMN) && !s.getValue(BubbleColumnBlock.DRAG_DOWN);
+    }
+
     /**
      * Live landing-surface friction (see {@link BotSteering#slipperinessAt}) — the vanilla per-block
      * slipperiness the parkour airborne servo reads to shape its air-brake. PORTABILITY: {@code
@@ -872,6 +887,27 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             WorldEdits.placeBlock(level, p, placeBlock()); // conjured, infinite supply
         }
         this.swing(InteractionHand.MAIN_HAND);
+    }
+
+    /** Open/close the door at {@code (x,y,z)} server-side (DOORS P3) — the "right-click the door" reconcile
+     *  action, routed to {@link WorldEdits#setDoorOpen} (authoritative, both-halves sync, iron/non-door no-op).
+     *  Cosmetically faces the door (like {@link #place} looks at its footing) but never swings — operating a
+     *  door is not a hand attack. */
+    @Override
+    public void setDoorOpen(int x, int y, int z, boolean open) {
+        lookAtCell(x, y, z); // cosmetic — face the door we operate; no swing
+        WorldEdits.setDoorOpen((ServerLevel) Worlds.of(this), new BlockPos(x, y, z), this, open);
+    }
+
+    /** Live OPEN-property readback for the door at {@code (x,y,z)} (see {@link BotSteering#doorOpenAt}) — reads
+     *  {@code DoorBlock.OPEN}, NOT collision ({@link #solidAt}), because an open door still has a thin collision
+     *  box; {@code false} for a non-door cell. The door executor's gate + verify-readback. */
+    @Override
+    public boolean doorOpenAt(int x, int y, int z) {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        scratchPos.set(x, y, z);
+        BlockState s = level.getBlockState(scratchPos);
+        return s.getBlock() instanceof DoorBlock && s.getValue(BlockStateProperties.OPEN);
     }
 
     // ---- Survival gating (the bot runs the full vanilla player tick via doTick — see tick()) ----------

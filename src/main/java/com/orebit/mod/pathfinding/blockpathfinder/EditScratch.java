@@ -29,6 +29,11 @@ public final class EditScratch {
     private int breakCount;
     private long[] places = new long[3];
     private int placeCount;
+    // Door OPEN/CLOSE sets (DOORS P2) — a crossing folds a SET on each of a door's two body cells; almost
+    // always empty. The parallel {@code doorOpens} says whether each target state is OPEN (true) or CLOSED.
+    private long[] doors = new long[2];
+    private boolean[] doorOpens = new boolean[2];
+    private int doorCount;
     private float extraCost;
     private boolean valid;
     private boolean allowEdits;
@@ -52,6 +57,7 @@ public final class EditScratch {
     public EditScratch reset(boolean allowEdits) {
         breakCount = 0;
         placeCount = 0;
+        doorCount = 0;
         extraCost = 0f;
         valid = true;
         this.allowEdits = allowEdits;
@@ -67,6 +73,33 @@ public final class EditScratch {
         if (!valid) return;
         long d = ctx.descriptorAt(x, y, z); // one read; reused by passable/breakable/breakCost below
         if (ctx.passable(d)) return;
+        foldBreakOrFail(x, y, z, d);
+    }
+
+    /**
+     * {@link #requireAir} made DOOR-AWARE for a horizontal crossing (P1): a blocked body cell that is an
+     * ALREADY-OPEN door not blocking {@code entryEdge} (the cardinal ordinal of the edge the move crosses to
+     * enter this column) is passed FREE — no break, no cost — instead of mined. Every other cell behaves exactly
+     * as {@link #requireAir} (the door test is one predictable, almost-always-false {@link
+     * MovementContext#doorEntryClear} branch inserted between the passable check and the break fold). Used only by
+     * {@link MovementContext#requireBodyClearToward}.
+     */
+    public void requireAirToward(int x, int y, int z, int entryEdge) {
+        if (!valid) return;
+        long d = ctx.descriptorAt(x, y, z);
+        if (ctx.passable(d)) return;
+        if (ctx.doorEntryClear(d, entryEdge)) return; // already-open door, not blocking our entry → free passage
+        // P2: a hand-toggleable door blocking our entry edge — fold a cheap OPEN/CLOSE SET (prefer over smashing)
+        // when doors.toggle is on. Toggling always moves the blocked panel to the perpendicular edge, so the
+        // OTHER state frees this entry edge (see MovementContext.doorSetClears). Iron / non-toggleable doors and
+        // the flag-off case fall through to the P1 break fold unchanged.
+        if (ctx.doorSetClears(d, entryEdge)) { setDoor(x, y, z, ctx.doorToggledOpen(d)); return; }
+        foldBreakOrFail(x, y, z, d);
+    }
+
+    /** Shared tail of {@link #requireAir}/{@link #requireAirToward}: fold a break of a breakable blocked cell
+     *  (adding its mining cost) when edits are allowed, else invalidate the move. */
+    private void foldBreakOrFail(int x, int y, int z, long d) {
         if (allowEdits && ctx.breakable(d)) {
             breaks = push(breaks, breakCount, x, y, z);
             breakCount++;
@@ -137,6 +170,39 @@ public final class EditScratch {
     }
 
     /**
+     * Fold an OPEN/CLOSE of the (hand-toggleable) door at cell {@code (x,y,z)} to {@code targetOpen} (DOORS P2)
+     * — the "right-click the door" alternative to smashing it (or to skipping the direction). The caller has
+     * already proven, via {@link MovementContext#doorSetClears}, that the door is toggleable, that {@code
+     * doors.toggle} is on, and that reaching {@code targetOpen} clears the crossing edge.
+     *
+     * <p><b>One interaction, one cost — even though a door is two body cells.</b> A crossing folds a SET on
+     * BOTH the door's cells (feet + head) so every downstream {@code descriptorAt} of the door reads the same
+     * state; but the toggle is a single right-click, so the {@link MovementContext#DOOR_TOGGLE_COST} is charged
+     * only for the FIRST cell of a door — the second (vertically adjacent, same target) is recognised as the
+     * other half and folded free. Re-folding the exact same cell is a no-op. This keeps the g-cost honest (one
+     * toggle ≈ 6 ticks ≪ breaking both halves) without needing to know which half is the lower one.
+     */
+    void setDoor(int x, int y, int z, boolean targetOpen) {
+        long cell = BlockPos.asLong(x, y, z);
+        boolean sameDoor = false;
+        for (int i = 0; i < doorCount; i++) {
+            if (doors[i] == cell) return; // already folded this exact cell
+        }
+        long below = BlockPos.asLong(x, y - 1, z), above = BlockPos.asLong(x, y + 1, z);
+        for (int i = 0; i < doorCount; i++) {
+            if ((doors[i] == below || doors[i] == above) && doorOpens[i] == targetOpen) { sameDoor = true; break; }
+        }
+        if (doorCount == doors.length) {
+            doors = Arrays.copyOf(doors, doors.length * 2);
+            doorOpens = Arrays.copyOf(doorOpens, doorOpens.length * 2);
+        }
+        doors[doorCount] = cell;
+        doorOpens[doorCount] = targetOpen;
+        doorCount++;
+        if (!sameDoor) extraCost += MovementContext.DOOR_TOGGLE_COST; // one right-click per door, not per half
+    }
+
+    /**
      * Fold a <b>break-through</b> of a PASSABLE hazard/through-slow body cell (berry bush, cobweb, fire —
      * cells {@link #requireAir} leaves alone because nothing blocks) at a caller-computed cost — the
      * "punch the bush and walk through" option. The caller ({@link MovementContext#bodyTransitCost(EditScratch,
@@ -170,9 +236,9 @@ public final class EditScratch {
         return extraCost;
     }
 
-    /** Whether any break or place was folded — lets a caller test for edits without {@link #snapshot()}. */
+    /** Whether any break, place, or door-set was folded — lets a caller test for edits without {@link #snapshot()}. */
     public boolean hasEdits() {
-        return breakCount != 0 || placeCount != 0;
+        return breakCount != 0 || placeCount != 0 || doorCount != 0;
     }
 
     /**
@@ -183,7 +249,7 @@ public final class EditScratch {
      * {@link #hasEdits()} (the search gates on it; an empty set should stay a plain {@code null} edge).
      */
     void copyInto(StepEdits e) {
-        e.load(breaks, breakCount, places, placeCount);
+        e.load(breaks, breakCount, places, placeCount, doors, doorOpens, doorCount);
     }
 
     private static long[] push(long[] buf, int count, int x, int y, int z) {

@@ -75,6 +75,13 @@ public final class Ascend implements Movement {
         final boolean startStair = ctx.isStair(startDesc);
 
         for (int[] d : CARDINALS) {
+            // §2b door EXIT (shared with Traverse / Descend): if the bot STANDS in an intact door whose panel
+            // blocks THIS horizontal travel edge, an Ascend can't climb out that way either. EXIT_CLEAR off any
+            // door (common case); EXIT_BLOCKED (iron / flag-off) skips the direction; EXIT_TOGGLE folds a door SET
+            // (below) to free the exit. The crossing edge is the same feet cell a flat walk leaves through.
+            int exitDoor = ctx.exitDoorDecision(x, y, z, d[0], d[1]);
+            if (exitDoor == MovementContext.EXIT_BLOCKED) continue;
+            boolean exitDoorToggle = exitDoor == MovementContext.EXIT_TOGGLE;
             int nx = x + d[0];
             int nz = z + d[1];
             // START surface toward this neighbour (directional on a stair). A PLACED step is a full cube, so
@@ -107,15 +114,20 @@ public final class Ascend implements Movement {
 
             int dstFlags = MovementContext.flagsOf(dstPacked);
             EditScratch e = ctx.edits().reset(!(srcRisky || MovementContext.risksEdit(dstFlags)));
+            // §2b: fold the exit-door toggle onto this arm when leaving through a blocked (toggleable) feet door.
+            if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z);
             // Footing: stand on the block that's there, or BUILD A STEP UP. If the footing one-up-and-over
             // has no face of its own (open air / a ledge), a support block is placed beneath it against the
             // floor the bot stands on, then the footing on top — the two-block staircase step. requireFootingOn
             // folds 0, 1 or 2 places; invalid if the bot can't place or the spot is RISKY_EDIT.
             if (!dstStandable) e.requireFootingOn(nx, uy, nz, nx, y, nz);
             // The takeoff head-clearance (source y+3) and the landing body (feet+head) must be clear; cells
-            // the HEADROOM bit can't prove are read and — when allowed — folded into a break-set (dig up).
+            // the HEADROOM bit can't prove are read and — when allowed — folded into a break-set (dig up). The
+            // landing body is cleared DOOR-AWARE: a RAISED doorway (a door standing on the step the bot climbs
+            // onto) is walked past free / opened rather than mined, exactly as Traverse handles a flat one. The
+            // entry edge is derived from the horizontal component (dx,dz), the SAME feet-door direction as a walk.
             if (!srcClear) e.requireAir(x, y + 3, z);
-            ctx.requireBodyClear(e, nx, uy, nz, dstFlags);
+            ctx.requireBodyClearToward(e, nx, uy, nz, dstFlags, d[0], d[1]);
             if (e.valid()) {
                 // Slow-FLOOR surcharge on the landing (soul sand / honey — same rule as Traverse/Diagonal;
                 // a floor this move PLACES reads as the conjured full cube, never slow) plus the

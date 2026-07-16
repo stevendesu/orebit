@@ -97,13 +97,32 @@ public final class PhaseRunner {
 
         MovePlan.Phase phase = plan.phaseAt(cursor);
 
-        // Establish this phase's geometry FIRST. Mining is timed and one-cell-at-a-time, so the first unmet AIR
-        // need claims the tick and we hold; placements are instant, so all missing footings resolve now. While
-        // anything is unmet, hold on the target column instead of driving the phase (stop and fix the geometry).
         boolean holding = false;
         holdNeed = null;
+
+        // Doors FIRST (DOORS P3), before any body-cell geometry — a door-open is a precondition of the whole
+        // crossing, so it is opened BEFORE the bot drives through (and the exit double-toggle CLOSEs before the
+        // exit segment drives). setDoorOpen is instant (a direct server set), so all door reqs resolve this tick;
+        // we re-validate against the LIVE door via doorOpenAt — NOT solidAt, because an open door keeps a thin
+        // collision box (solidAt would stay true and never clear the hold). Self-healing like FOOTING: re-issued
+        // each tick until the door reads the target state. Almost always empty (a door crossing is rare).
+        for (MovePlan.Req d : plan.doorReqs()) {
+            if (bot.doorOpenAt(d.x, d.y, d.z) != d.open) {
+                bot.setDoorOpen(d.x, d.y, d.z, d.open);
+                if (holdNeed == null) { holdNeed = MovePlan.Need.OPEN; holdX = d.x; holdY = d.y; holdZ = d.z; }
+                holding = true; // re-validate next tick (the toggle is instant)
+            }
+        }
+
+        // Establish this phase's geometry. Mining is timed and one-cell-at-a-time, so the first unmet AIR
+        // need claims the tick and we hold; placements are instant, so all missing footings resolve now. While
+        // anything is unmet, hold on the target column instead of driving the phase (stop and fix the geometry).
         for (MovePlan.Req r : phase.needs()) {
             if (r.kind == MovePlan.Need.AIR) {
+                // A door cell is governed by a Need.OPEN (opened by hand above) — NEVER mine it, even though an
+                // open door reads solidAt (its thin collision). Without this a Need.AIR on the door body cell
+                // would smash the door the crossing just opened.
+                if (plan.isDoorCell(r.x, r.y, r.z)) continue;
                 if (bot.solidAt(r.x, r.y, r.z)) {
                     bot.mine(r.x, r.y, r.z);
                     if (holdNeed == null) { holdNeed = r.kind; holdX = r.x; holdY = r.y; holdZ = r.z; }

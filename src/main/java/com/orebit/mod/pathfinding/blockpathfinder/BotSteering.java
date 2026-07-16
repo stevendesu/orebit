@@ -120,6 +120,25 @@ public interface BotSteering {
     void place(int x, int y, int z);
 
     /**
+     * OPEN ({@code open == true}) or CLOSE the hand-toggleable door at cell {@code (x,y,z)} server-side — the
+     * "right-click the door" action a {@code Need.OPEN} establishes (DOORS P3), routed to {@link
+     * com.orebit.mod.platform.WorldEdits#setDoorOpen}. Authoritative and instant (a direct vanilla {@code
+     * setOpen}, not a simulated click), like {@link #place}; iron / non-door cells are no-ops (see WorldEdits).
+     * The entity layer may cosmetically face the door but never swings. Reactive: the runner re-issues it while
+     * the live door does not yet read the target state.
+     */
+    void setDoorOpen(int x, int y, int z, boolean open);
+
+    /**
+     * Whether the door at cell {@code (x,y,z)} is currently OPEN (its live {@code DoorBlock.OPEN} property) —
+     * the door executor's gate and verify-readback (DOORS P3). It reads the OPEN <b>block-state property</b>,
+     * NOT {@link #solidAt}: an open door keeps a thin (~3px) collision box, so {@code solidAt} stays TRUE even
+     * when open — testing solidness would make a {@code Need.OPEN} wrongly MINE the door. Non-door cells read
+     * {@code false}. Reads the live level, so it reflects the bot's own just-issued {@link #setDoorOpen}.
+     */
+    boolean doorOpenAt(int x, int y, int z);
+
+    /**
      * Whether cell {@code (x,y,z)} is a swim <b>overshoot hazard</b> — a cell the follower must not let its
      * momentum carry the prone bot into while cornering: a <b>bubble column</b> (whose vertical drag breaches
      * a prone swimmer out of the water and ejects it) or <b>lava</b>/damaging fluid. Reads the LIVE level (the
@@ -129,6 +148,19 @@ public interface BotSteering {
      * crawl) or harmless (take the corner at full speed).
      */
     boolean swimHazardAt(int x, int y, int z);
+
+    /**
+     * Whether the block at {@code (x,y,z)} is an <b>UP bubble column</b> (a {@code BUBBLE_COLUMN} with
+     * {@code DRAG_DOWN=false} — a soul-sand column whose conveyor pushes an entity upward). The
+     * {@link com.orebit.mod.pathfinding.blockpathfinder.movements.RideBubbleColumn} follower uses it as a
+     * pure STATE probe (no timers): the ENTER phase scans the bot's feet-level cardinal neighbours for the
+     * up-column to swim into, and the RIDE phase tests the bot's own feet cell to know it is still being
+     * carried (leaving the column — {@code false} at the feet — ends the ride). Reads the LIVE level (a cold,
+     * tick-rate follower read, the {@link #swimHazardAt}/{@link #slipperinessAt} pattern; distinct from that
+     * hazard probe, which fires for DOWN columns and lava too). DOWN (magma) columns read {@code false} — the
+     * ride is UP-only.
+     */
+    boolean bubbleUpAt(int x, int y, int z);
 
     /**
      * The vanilla surface FRICTION (slipperiness) of the block at {@code (x,y,z)} — {@code 0.6} for ordinary

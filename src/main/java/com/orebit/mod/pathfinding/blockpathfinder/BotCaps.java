@@ -97,7 +97,31 @@ public record BotCaps(
          * optimal paths (fine for a follow-bot) for far fewer expanded nodes. Was {@code
          * BlockPathfinder.H_WEIGHT} (2.0).
          */
-        float greedyWeight) {
+        float greedyWeight,
+        /**
+         * May OPEN/CLOSE hand-toggleable doors (wood/copper) by right-clicking, instead of smashing or routing
+         * around them ({@code doors.toggle}). The P3 executor operates doors for real (open before crossing,
+         * close on the exit double-toggle), so the live config default ({@link
+         * com.orebit.mod.config.Config#DEFAULT}) is now {@code true}. With this off the planner is byte-identical
+         * to P1 (an already-open door is passable, a closed door is mined); with it on, {@link
+         * MovementContext#doorSetClears}/{@code canToggleExitDoor} fold a cheap {@code SET_OPEN}/{@code
+         * SET_CLOSED} the search prefers over a break. Iron doors are never hand-toggleable regardless (they lack
+         * {@link com.orebit.mod.worldmodel.navblock.NavBlock#doorToggleable}). NOTE: the back-compat constructor
+         * below still defaults this OFF for legacy {@code new BotCaps(...)} call sites (presets/benchmarks/tests).
+         */
+        boolean mayToggleDoors) {
+
+    /**
+     * Back-compat constructor — the pre-DOORS-P2 component list, with {@code mayToggleDoors} defaulted OFF. Keeps
+     * the many existing {@code new BotCaps(...)} call sites (presets, benchmarks, tests) compiling unchanged; the
+     * live config path ({@link com.orebit.mod.config.Config#toBotCaps}) uses the full canonical constructor.
+     */
+    public BotCaps(int jumpHeight, int safeFallDistance, int maxFallDistance, boolean takesDamage,
+                   float costPerHitpoint, boolean canBreak, boolean canPlace, int maxBreakHardness,
+                   boolean allowUnbreakable, int maxNodes, float greedyWeight) {
+        this(jumpHeight, safeFallDistance, maxFallDistance, takesDamage, costPerHitpoint, canBreak, canPlace,
+             maxBreakHardness, allowUnbreakable, maxNodes, greedyWeight, false);
+    }
 
     /** Quantized-hardness sentinel for "unbreakable / mine anything" — the historical insta-mine cap. */
     public static final int UNBREAKABLE = 255;

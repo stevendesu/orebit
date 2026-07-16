@@ -12,6 +12,7 @@ import com.orebit.mod.platform.Replaceable;
 import net.minecraft.core.Direction;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.block.BaseEntityBlock;
+import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.BubbleColumnBlock;
@@ -24,6 +25,7 @@ import net.minecraft.world.level.block.StairBlock;
 import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.DoorHingeSide;
 import net.minecraft.world.level.block.state.properties.Half;
 import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.material.FluidState;
@@ -63,16 +65,21 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *   bits  width field
  *   0–4     5   topY        collision top surface, round(maxY*16), clamped 0..31
  *   5–7     3   shape       ShapeClass ordinal (EMPTY..OTHER) — see {@link #SHAPE_FULL} etc.
- *   8–9     2   stairFacing {@link StairBlock} horizontal FACING (0=N 1=E 2=S 3=W); 0 for non-stairs. On a
- *                           BOTTOM stair the HIGH 16/16 half is on the FACING side, the LOW 8/16 front
- *                           opposite (empirically verified, StairVoxelProbe), so a walk-up reads as a +0.5
- *                           step-assist rather than a +1.0 jump — the movement layers directional-surface resolver.
- *   10      1   stairHalf   {@link StairBlock} HALF (0=bottom 1=top); 0 for non-stairs. A TOP stair's top
- *                           surface is flat 16/16 everywhere, so it needs no directional handling.
+ *   8–9     2   horizFacing SHARED horizontal FACING (0=N 1=E 2=S 3=W); 0 for cells with no facing. Populated for
+ *                           BOTH {@link StairBlock} states (via {@link #stairFacing}) AND {@link DoorBlock} states
+ *                           (via {@link #doorFacing}) — a cell is a stair XOR a door (disambiguated by
+ *                           {@link #isStair} / {@link #isDoor}), so the field is reused. On a BOTTOM stair the HIGH
+ *                           16/16 half is on the FACING side, the LOW 8/16 front opposite (empirically verified,
+ *                           StairVoxelProbe), so a walk-up reads as a +0.5 step-assist rather than a +1.0 jump.
+ *   10      1   stairHalf   {@link StairBlock} HALF (0=bottom 1=top); 0 for non-stairs (incl. doors — a door does
+ *                           NOT set this bit). A TOP stair's top surface is flat 16/16 everywhere, so it needs no
+ *                           directional handling.
  *   11      1   portal      ANY teleport portal — LOW bit of a 2-bit field (mirrors {@code fluid}: low = is-portal,
  *                           high = is-nether). Base identity field, NOT derived. The walker routes AROUND any set cell.
  *   12      1   netherPortal HIGH bit of the portal field: 00 none / 01 end (end_portal + end_gateway) / 11 nether / 10 unused.
- *   13      1   (free)      remainder of the reclaimed sturdy-faces mask — unread by pathfinding
+ *   13      1   doorHinge   {@link DoorBlock} DOOR_HINGE (1 = RIGHT, 0 = LEFT); 0 for non-doors. Colocated with
+ *                           the geometry cluster; consumed only by {@link #doorBlockedEdge} to pick the OPEN door's
+ *                           perpendicular blocked edge. (Formerly the remainder of the reclaimed sturdy-faces mask.)
  *   14–15   2   openable    0 none / 1 door / 2 trapdoor / 3 fence-gate
  *   16–17   2   fluid       00 none / 01 water / 11 lava (low bit = is-fluid, high = is-lava; water incl. waterlogged)
  *   18–19   2   surface     0 none / 1 slow / 2 slippery
@@ -89,8 +96,10 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           0 none / 1 light (sweet berry bush, powder snow ~0.75×) / 2 heavy (cobweb ~0.05×).
  *                           Distinct from the {@code surface} slow field (bits 18–19), which prices standing
  *                           ON a slow floor (soul sand / honey); this prices moving THROUGH a slowing cell.
- *   43      1   (free)      formerly the nether-portal bit — the portal field moved down to bits 11–12 (widened
- *                           to a 2-bit any-portal / is-nether field so the walker can route around ALL portals).
+ *   43      1   doorOpen    {@link DoorBlock} OPEN (1 = open, 0 = closed); 0 for non-doors. Colocated with the
+ *                           movement-impact cluster; consumed by {@link #doorBlockedEdge} (open ⇒ perpendicular
+ *                           edge, closed ⇒ opposite edge). (Formerly the nether-portal bit — the portal field moved
+ *                           down to bits 11–12, widened to a 2-bit any-portal / is-nether field.)
  *   44      1   protected   owner-protected block ({@code mining.protectedBlocks}) — the bot must NEVER
  *                           break it. A base identity field applied AFTER static-init by {@link
  *                           #applyProtected} (the list needs the loaded config + bound datapack tags), so
@@ -112,6 +121,24 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           as swimmable — but the column's vertical push overrides swim depth control, so
  *                           {@link #isSwimmableWater} now EXCLUDES bubbles (impassable → routed around). The
  *                           direction is reserved for a future RideBubbleColumn move (ride the push up/down).
+ *   48–49   2   fallSoftness the LANDING block's fall-damage class — how much fall damage it absorbs when a
+ *                           bot lands on / falls into it: 00 full (×1.0, ordinary ground) / 01 half (×0.5,
+ *                           beds) / 10 fifth (×0.2, hay bale / honey block) / 11 zero (×0.0, slime, water,
+ *                           powder snow, sweet berry bush, cobweb, bubble column). Classified by a curated
+ *                           block-identity/instanceof map (no single vanilla getter exists — the multiplier is
+ *                           applied inside per-block {@code fallOn} overrides / fall-distance resets) and
+ *                           rounded UP conservatively toward MORE damage. The {@code Fall} movement multiplies
+ *                           its excess-fall damage budget + cost by {1.0,0.5,0.2,0.0} (00 = unchanged; 11 =
+ *                           uncapped). A base identity field (like {@code portal}/{@code bubble}), one
+ *                           mask-and-shift on the hot path.
+ *   50      1   doorToggleable a door the bot can OPEN/CLOSE BY HAND (wood + copper) vs a redstone-only iron
+ *                           door (DOORS P2). Set for every {@link DoorBlock} except {@link Blocks#IRON_DOOR}
+ *                           (the {@code Blocks.*} idiom of the door/portal/bubble reads — range-stable, no
+ *                           platform seam; copper doors, added in 1.21, are non-iron and hand-openable, so the
+ *                           test needs no version gate — pre-1.21 the non-iron door set is simply the wood
+ *                           species). Meaningful only when {@link #isDoor}. Consumed by the planner's
+ *                           prefer-open-over-smash SET fold (an iron door has no SET option → break/route as
+ *                           in P1). Bits 51–63 remain wholly unused.
  * </pre>
  */
 public final class NavBlock {
@@ -162,6 +189,17 @@ public final class NavBlock {
     /** Downward bubble column (magma floor, {@code DRAG_DOWN=true}) — drags entities down. */
     public static final int BUBBLE_DOWN = 2;
 
+    // ---- Fall-softness class (2 bits, 48–49): the LANDING block's fall-damage multiplier -------
+    /** Full fall damage (multiplier 1.0) — ordinary ground (stone, dirt, …). */
+    public static final int FALLSOFT_NONE  = 0;
+    /** Half fall damage (multiplier 0.5) — beds. */
+    public static final int FALLSOFT_HALF  = 1;
+    /** One-fifth fall damage (multiplier 0.2) — hay bale, honey block. */
+    public static final int FALLSOFT_FIFTH = 2;
+    /** Zero fall damage (multiplier 0.0) — slime; and the fall-distance-reset media (water, powder snow,
+     *  sweet berry bush, cobweb, bubble column). */
+    public static final int FALLSOFT_ZERO  = 3;
+
     // ---- Bit field shifts/masks --------------------------------------------------------------
     // Bits 8–10 hold the stair facing (2) + half (1), populated ONLY for StairBlock states (0 elsewhere, so
     // only stairs split navtypes); bits 11–12 hold the 2-bit portal field (any-portal / is-nether, see below);
@@ -169,8 +207,14 @@ public final class NavBlock {
     // block-fingerprints doc). Bit 43 is now also free (the portal marker moved down from it into 11–12).
     private static final int TOP_Y_SHIFT = 0,  TOP_Y_MASK = 0x1F;
     private static final int SHAPE_SHIFT = 5,  SHAPE_MASK = 0x07;
-    private static final int STAIR_FACING_SHIFT = 8, STAIR_FACING_MASK = 0x03; // 0=N 1=E 2=S 3=W (stairs only)
+    private static final int STAIR_FACING_SHIFT = 8, STAIR_FACING_MASK = 0x03; // 0=N 1=E 2=S 3=W (stairs AND doors)
     private static final long STAIR_HALF_BIT = 1L << 10;                       // 0=bottom 1=top (stairs only)
+    // Doors reuse the bits-8–9 facing field (a cell is stair XOR door). Hinge (bit 13) + open (bit 43) complete
+    // the directional-solidity encoding; the blocked edge is DERIVED at query time (see #doorBlockedEdge), never
+    // precomputed. DOOR_FACING_SHIFT/_MASK alias the stair facing field deliberately (same 2-bit HORIZONTAL_FACING).
+    private static final int DOOR_FACING_SHIFT = STAIR_FACING_SHIFT, DOOR_FACING_MASK = STAIR_FACING_MASK;
+    private static final long DOOR_HINGE_BIT = 1L << 13; // 1 = RIGHT hinge, 0 = LEFT (doors only)
+    private static final long DOOR_OPEN_BIT  = 1L << 43; // 1 = open, 0 = closed (doors only)
     private static final int OPEN_SHIFT  = 14, OPEN_MASK  = 0x03;
     private static final int FLUID_SHIFT = 16, FLUID_MASK = 0x03;
     private static final int SURF_SHIFT  = 18, SURF_MASK  = 0x03;
@@ -192,6 +236,8 @@ public final class NavBlock {
     private static final long PROTECTED_BIT = 1L << 44;               // owner-protected: never break (base field)
     private static final long REDUCED_JUMP_BIT = 1L << 45;            // reduced-jump floor: honey (base field)
     private static final int BUBBLE_SHIFT = 46, BUBBLE_MASK = 0x03;   // bubble column + drag dir (base field)
+    private static final int FALLSOFT_SHIFT = 48, FALLSOFT_MASK = 0x03; // landing fall-damage class (base field)
+    private static final long DOOR_TOGGLEABLE_BIT = 1L << 50;           // hand-openable door (wood/copper), not iron
 
     // ---- Precomputed predicate bits (37+) ----------------------------------------------------
     // Each is a PURE function of the fields above, so it adds ZERO navtypes (a function of existing bits
@@ -356,13 +402,33 @@ public final class NavBlock {
         // direct Blocks.* / NETHER_PORTAL references above). DRAG_DOWN=false → up (soul sand), true → down (magma).
         if (block == Blocks.BUBBLE_COLUMN)
             d |= (long) (state.getValue(BubbleColumnBlock.DRAG_DOWN) ? BUBBLE_DOWN : BUBBLE_UP) << BUBBLE_SHIFT;
+        // Fall-softness (bits 48–49): the block's fall-damage class, for a bot LANDING on / falling into it.
+        d |= (long) (fallSoftness(block) & FALLSOFT_MASK) << FALLSOFT_SHIFT;
         // Stair facing/half — the directional standing-surface facts (bits 8–10), populated ONLY for stairs so
         // only stair states split navtypes. A north/east/south/west stair now dedups per FACING (as the old
         // per-Block sturdy-faces mask did), but bounded: stairs conflate across material, so this adds at most
         // 4 facings × 2 halves × the distinct base stair descriptors (a few dozen navtypes, well within cap).
         if (block instanceof StairBlock) {
-            d |= (long) stairFacingOrdinal(state) << STAIR_FACING_SHIFT;
+            d |= (long) horizontalFacingOrdinal(state) << STAIR_FACING_SHIFT;
             if (state.getValue(BlockStateProperties.HALF) == Half.TOP) d |= STAIR_HALF_BIT;
+        }
+        // Door directional solidity (P0): pack HORIZONTAL_FACING into the SHARED facing field (bits 8–9), the
+        // hinge into bit 13, and open/closed into bit 43 — for ALL doors incl. iron (an open iron door is still a
+        // passable doorway). The TOGGLEABLE bit (50, P2) additionally marks a HAND-openable door (wood/copper) so
+        // the planner may prefer opening it over smashing it; iron doors lack it and fall through to break/route.
+        // The blocked edge is DERIVED at query time (#doorBlockedEdge), not stored. HORIZONTAL_FACING / OPEN /
+        // DOOR_HINGE are range-stable 1.17.1→26.x (same discipline as the stair/bubble reads above), so no platform
+        // seam. A door is SHAPE_OTHER (not a stair), so these bits never collide with a stair's reads of the same
+        // field — the isStair / isDoor gate disambiguates. Both door halves share FACING/OPEN/HINGE, so they dedup.
+        if (block instanceof DoorBlock) {
+            d |= (long) horizontalFacingOrdinal(state) << DOOR_FACING_SHIFT;
+            if (state.getValue(BlockStateProperties.DOOR_HINGE) == DoorHingeSide.RIGHT) d |= DOOR_HINGE_BIT;
+            if (state.getValue(BlockStateProperties.OPEN)) d |= DOOR_OPEN_BIT;
+            // Hand-openable iff NOT an iron door. The Blocks.IRON_DOOR identity check mirrors the Blocks.*
+            // idiom used for portals/bubble columns above (range-stable, no BlockSetType.canOpenByHand seam).
+            // Copper doors (≥1.21) are non-iron + hand-openable, so this needs no explicit version gate: on
+            // versions without copper the non-iron door set is exactly the wood species.
+            if (block != Blocks.IRON_DOOR) d |= DOOR_TOGGLEABLE_BIT;
         }
         return withDerived(d);
     }
@@ -477,11 +543,12 @@ public final class NavBlock {
     }
 
     /**
-     * The 2-bit stair-facing ordinal (0=N 1=E 2=S 3=W) from a stair state's {@link
-     * BlockStateProperties#HORIZONTAL_FACING} — the FACING side is where a BOTTOM stair's HIGH 16/16 half
-     * sits (StairVoxelProbe). Every {@link StairBlock} carries HORIZONTAL_FACING on every supported version.
+     * The 2-bit horizontal-facing ordinal (0=N 1=E 2=S 3=W) from a state's {@link
+     * BlockStateProperties#HORIZONTAL_FACING} — shared by stairs (the FACING side is where a BOTTOM stair's HIGH
+     * 16/16 half sits, StairVoxelProbe) and doors (the facing that {@link #doorBlockedEdge} rotates from). Every
+     * {@link StairBlock} and {@link DoorBlock} carries HORIZONTAL_FACING on every supported version.
      */
-    private static int stairFacingOrdinal(BlockState state) {
+    private static int horizontalFacingOrdinal(BlockState state) {
         switch (state.getValue(BlockStateProperties.HORIZONTAL_FACING)) {
             case EAST:  return 1;
             case SOUTH: return 2;
@@ -501,6 +568,47 @@ public final class NavBlock {
         if (block == Blocks.COBWEB) return TRANSIT_HEAVY;
         if (block == Blocks.SWEET_BERRY_BUSH || block == Blocks.POWDER_SNOW) return TRANSIT_LIGHT;
         return TRANSIT_NONE;
+    }
+
+    /**
+     * The LANDING FALL-SOFTNESS class (the {@code fallSoftness} field, bits 48–49) — how much fall damage
+     * the block absorbs when a bot lands ON (or falls INTO) it, encoded as one of four classes rounded UP
+     * conservatively (toward MORE damage) from the block's true vanilla fall-damage multiplier:
+     * <ul>
+     *   <li>{@link #FALLSOFT_ZERO} (×0.0) — slime block ({@code SlimeBlock.fallOn} cancels ALL fall damage
+     *       when not sneaking; the bot never sneaks), and the fall-distance-RESET media: water (any depth),
+     *       bubble columns, powder snow, sweet berry bush, cobweb (each resets the entity's fall distance so
+     *       the landing deals nothing);</li>
+     *   <li>{@link #FALLSOFT_FIFTH} (×0.2) — hay bale + honey block ({@code fallOn} scales damage to 0.2);</li>
+     *   <li>{@link #FALLSOFT_HALF} (×0.5) — beds ({@code BedBlock.fallOn} scales damage to 0.5);</li>
+     *   <li>{@link #FALLSOFT_NONE} (×1.0) — every other block (full fall damage).</li>
+     * </ul>
+     * There is no single vanilla getter for the multiplier (it lives inside per-block {@code fallOn}
+     * overrides / fall-distance resets), so this is a CURATED block-identity/instanceof map — the same
+     * pattern as {@code openable} (DoorBlock/TrapDoorBlock/FenceGateBlock) and the {@code bubble}
+     * (Blocks.BUBBLE_COLUMN) classification. Every block referenced is range-stable 1.17.1→26.x, so no
+     * platform adapter is needed (matching the direct {@code Blocks.*} / {@code instanceof} references
+     * throughout this method).
+     *
+     * <p><b>V1 landing scope:</b> {@code Fall} only lands on a {@link #isStandable standable} cell, so only
+     * the STANDABLE soft-landers (slime / hay / honey / bed) affect pathing today; the fall-distance-reset
+     * media (water / powder snow / berry / cobweb / bubble column) are classified here for correctness and
+     * future use but are not yet landing targets (a Fall→swim landing predicate is deferred to v1.1).
+     */
+    private static int fallSoftness(Block block) {
+        if (block == Blocks.SLIME_BLOCK
+                || block == Blocks.WATER || block == Blocks.BUBBLE_COLUMN
+                || block == Blocks.POWDER_SNOW
+                || block == Blocks.SWEET_BERRY_BUSH || block == Blocks.COBWEB) {
+            return FALLSOFT_ZERO;
+        }
+        if (block == Blocks.HAY_BLOCK || block == Blocks.HONEY_BLOCK) {
+            return FALLSOFT_FIFTH;
+        }
+        if (block instanceof BedBlock) {
+            return FALLSOFT_HALF;
+        }
+        return FALLSOFT_NONE;
     }
 
     private static boolean isDamaging(Block block) {
@@ -624,6 +732,48 @@ public final class NavBlock {
     public static int stairHalf(long d)    { return (d & STAIR_HALF_BIT) != 0 ? 1 : 0; }
     /** Openable kind: 0 none, 1 door, 2 trapdoor, 3 fence-gate. */
     public static int openable(long d)     { return (int) (d >>> OPEN_SHIFT) & OPEN_MASK; }
+
+    // ---- Door directional solidity (P0) — meaningful only when isDoor(d) ----------------------
+    /** Whether this cell is a {@link DoorBlock} (any material incl. iron) — the gate on the door queries below. */
+    public static boolean isDoor(long d)   { return openable(d) == OPEN_DOOR; }
+    /** A door's HORIZONTAL_FACING ordinal (0=N 1=E 2=S 3=W); reads the shared facing field (bits 8–9). 0 for
+     *  non-doors — always gate on {@link #isDoor} first (a stair uses the same bits via {@link #stairFacing}). */
+    public static int doorFacing(long d)   { return (int) (d >>> DOOR_FACING_SHIFT) & DOOR_FACING_MASK; }
+    /** A door's DOOR_HINGE side: {@code true} = RIGHT, {@code false} = LEFT (bit 13). 0 for non-doors. */
+    public static boolean doorHinge(long d){ return (d & DOOR_HINGE_BIT) != 0; }
+    /** Whether a door is OPEN ({@code true}) or CLOSED ({@code false}) (bit 43). 0 for non-doors. */
+    public static boolean doorOpen(long d) { return (d & DOOR_OPEN_BIT) != 0; }
+    /**
+     * The single cardinal edge (0=N 1=E 2=S 3=W) a door BLOCKS in its current state — DERIVED, never stored, so
+     * both states cost 2 bits (facing) + 2 bits (hinge/open) rather than a 5-bit precomputed pair (owner-final
+     * bit plan). A CLOSED door blocks the edge OPPOSITE its facing ({@code (facing+2)&3}); an OPEN door swings to
+     * block a PERPENDICULAR edge chosen by hinge ({@code RIGHT → (facing+1)&3}, {@code LEFT → (facing+3)&3}).
+     * Ground truth (owner-verified table, asserted in DoorClassificationTest): CLOSED N→S S→N E→W W→E; OPEN
+     * facing N L→W R→E, S L→E R→W, E L→N R→S, W L→S R→N. Undefined for non-doors — gate on {@link #isDoor}.
+     */
+    public static int doorBlockedEdge(long d) {
+        int facing = doorFacing(d);
+        if (doorOpen(d)) return doorHinge(d) ? (facing + 1) & 3 : (facing + 3) & 3;
+        return (facing + 2) & 3;
+    }
+    /**
+     * Whether a door can be opened/closed BY HAND (wood + copper), vs a redstone-only iron door (bit 50, DOORS
+     * P2). {@code false} for non-doors — gate on {@link #isDoor} first. The planner offers a cheap OPEN/CLOSE
+     * SET edit only for toggleable doors; an iron door has no SET option and falls through to break/route.
+     */
+    public static boolean doorToggleable(long d) { return (d & DOOR_TOGGLEABLE_BIT) != 0; }
+    /**
+     * The same door descriptor forced into the {@code open} state — sets/clears the OPEN bit (43), leaving
+     * facing/hinge/toggleable and every derived predicate bit untouched (none depends on OPEN: a door is
+     * {@code SHAPE_OTHER}/non-passable open or closed). So {@code withDoorOpen(closedDesc, true)} is bit-identical
+     * to the same door's real OPEN navtype descriptor, and {@link #doorBlockedEdge} of the result is the target
+     * state's blocked edge. This is how {@code MovementContext.descriptorAt} resolves a planned {@code SET_OPEN}/
+     * {@code SET_CLOSED} door edit against THAT door's own facing/hinge (unlike a PLACED cell, which resolves to a
+     * universal cobblestone constant). Undefined for non-doors — the caller applies it only to door cells.
+     */
+    public static long withDoorOpen(long d, boolean open) {
+        return open ? (d | DOOR_OPEN_BIT) : (d & ~DOOR_OPEN_BIT);
+    }
     /** Fluid: 0 none, 1 water (incl. waterlogged), 3 lava (low bit = is-fluid, high bit = is-lava). */
     public static int fluid(long d)        { return (int) (d >>> FLUID_SHIFT) & FLUID_MASK; }
     /** Any fluid present (water or lava) — the low fluid bit. */
@@ -700,6 +850,12 @@ public final class NavBlock {
     /** Whether this cell is a bubble column ({@link #bubbleDir} != 0) — impassable-to-swim (routed around);
      *  direction reserved for a future RideBubbleColumn move. */
     public static boolean isBubble(long d) { return bubbleDir(d) != 0; }
+    /**
+     * The LANDING fall-softness class ({@link #FALLSOFT_NONE}/{@link #FALLSOFT_HALF}/{@link #FALLSOFT_FIFTH}/
+     * {@link #FALLSOFT_ZERO}) — the block's fall-damage class the {@code Fall} movement multiplies its
+     * excess-fall damage BUDGET (survivable depth) and COST by (×1.0 / ×0.5 / ×0.2 / ×0.0). One
+     * mask-and-shift on the already-loaded descriptor long. See {@link #fallSoftness(Block)} for the map. */
+    public static int fallSoftness(long d) { return (int) (d >>> FALLSOFT_SHIFT) & FALLSOFT_MASK; }
     /**
      * Derived: water is present in this cell right now — a water source/flow <b>or</b> a <b>waterlogged
      * solid</b> (a waterlogged fence/stair has a water fluid state). This is the "would water flow if I edit

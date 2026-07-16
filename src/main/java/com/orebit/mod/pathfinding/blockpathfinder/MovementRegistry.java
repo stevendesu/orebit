@@ -7,10 +7,12 @@ import com.orebit.mod.pathfinding.blockpathfinder.movements.Climb;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Descend;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Diagonal;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalSprintSwim;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Fall;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.MineDown;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Pillar;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.RideBubbleColumn;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.SprintSwim;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.StartSprintSwim;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Surface;
@@ -43,6 +45,8 @@ public final class MovementRegistry {
     public static final Movement PARKOUR = new Parkour();
     public static final Movement DIAGONAL_PARKOUR = new DiagonalParkour();
     public static final Movement WALK_OFF = new WalkOff();
+    public static final Movement DIAGONAL_SPRINT_SWIM = new DiagonalSprintSwim();
+    public static final Movement RIDE_BUBBLE_COLUMN = new RideBubbleColumn();
 
     /**
      * Tier 1 (ground + water): walk + step-assist, diagonal walk, jump-up-1, step-down-1, safe drop, the
@@ -65,5 +69,6 @@ public final class MovementRegistry {
      */
     public static final List<Movement> TIER1 =
             List.of(TRAVERSE, DIAGONAL, ASCEND, DESCEND, FALL, PILLAR, MINE_DOWN, SWIM, SPRINT_SWIM,
-                    START_SPRINT_SWIM, SURFACE, CLIMB, PARKOUR, DIAGONAL_PARKOUR, WALK_OFF);
+                    START_SPRINT_SWIM, SURFACE, CLIMB, PARKOUR, DIAGONAL_PARKOUR, WALK_OFF,
+                    DIAGONAL_SPRINT_SWIM, RIDE_BUBBLE_COLUMN);
 }

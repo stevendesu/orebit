@@ -278,6 +278,14 @@ public final class ConfigLoader {
             line(w, "# server stop regardless of this. 0 disables the periodic flush (stop flush still runs).");
             line(w, "# Default 6000 (~5 minutes at 20 ticks/second).");
             kv(w, ConfigKeys.HPA_PERSIST_INTERVAL_TICKS, d.persistIntervalTicks());
+            line(w, "");
+
+            line(w, "# --- doors: how the bot deals with doors in its path ---");
+            line(w, "# Bot may OPEN/CLOSE hand-toggleable doors (wood/copper) instead of smashing or routing around");
+            line(w, "# them. Default false: a planned door-open is only followable once the bot can operate doors (a");
+            line(w, "# later feature), so for now an already-open door is walked through and a closed door is mined.");
+            line(w, "# Iron doors are never hand-toggleable regardless of this.");
+            kv(w, ConfigKeys.DOORS_TOGGLE, d.doorToggle());
         } catch (IOException e) {
             OrebitCommon.LOGGER.warn("[Orebit] could not write default config {} — using defaults in memory",
                     file, e);

@@ -31,16 +31,22 @@ import java.util.Arrays;
 public final class EditSnapshot {
 
     /** The no-edits baseline — seeding with this is exactly a non-seeded search (lazy-splice mode). */
-    public static final EditSnapshot EMPTY = new EditSnapshot(new long[0], new long[0]);
+    public static final EditSnapshot EMPTY = new EditSnapshot(new long[0], new long[0], new long[0], new boolean[0]);
 
     /** Cells the earlier plan breaks (packed {@code BlockPos.asLong}) — the seeded search reads air. */
     private final long[] breaks;
     /** Cells the earlier plan places — the seeded search reads solid footing. */
     private final long[] places;
+    /** Cells whose (hand-toggleable) door the earlier plan opens/closes (DOORS P2) — the seeded search reads
+     *  the door forced into that target state ({@code doorOpens} parallel: true = OPEN, false = CLOSED). */
+    private final long[] doors;
+    private final boolean[] doorOpens;
 
-    private EditSnapshot(long[] breaks, long[] places) {
+    private EditSnapshot(long[] breaks, long[] places, long[] doors, boolean[] doorOpens) {
         this.breaks = breaks;
         this.places = places;
+        this.doors = doors;
+        this.doorOpens = doorOpens;
     }
 
     /**
@@ -61,27 +67,40 @@ public final class EditSnapshot {
         int brkN = 0;
         long[] plc = new long[8];
         int plcN = 0;
+        long[] dr = new long[4];
+        boolean[] drOpen = new boolean[4];
+        int drN = 0;
 
         for (int i = plan.size() - 1; i >= first; i--) {          // last-to-first = latest-wins
             StepEdits se = plan.edits(i);
             if (se == null) continue;
             for (int j = 0, n = se.placeCount(); j < n; j++) {    // places before breaks, as PathEdits.add
                 long cell = se.placeAt(j);
-                if (!contains(brk, brkN, cell) && !contains(plc, plcN, cell)) {
+                if (!contains(brk, brkN, cell) && !contains(plc, plcN, cell) && !contains(dr, drN, cell)) {
                     if (plcN == plc.length) plc = Arrays.copyOf(plc, plcN << 1);
                     plc[plcN++] = cell;
                 }
             }
             for (int j = 0, n = se.breakCount(); j < n; j++) {
                 long cell = se.breakAt(j);
-                if (!contains(brk, brkN, cell) && !contains(plc, plcN, cell)) {
+                if (!contains(brk, brkN, cell) && !contains(plc, plcN, cell) && !contains(dr, drN, cell)) {
                     if (brkN == brk.length) brk = Arrays.copyOf(brk, brkN << 1);
                     brk[brkN++] = cell;
                 }
             }
+            for (int j = 0, n = se.doorSetCount(); j < n; j++) { // door-sets last, same latest-wins dedup
+                long cell = se.doorSetAt(j);
+                if (!contains(brk, brkN, cell) && !contains(plc, plcN, cell) && !contains(dr, drN, cell)) {
+                    if (drN == dr.length) { dr = Arrays.copyOf(dr, drN << 1); drOpen = Arrays.copyOf(drOpen, drN << 1); }
+                    dr[drN] = cell;
+                    drOpen[drN] = se.doorSetOpenAt(j);
+                    drN++;
+                }
+            }
         }
-        if (brkN == 0 && plcN == 0) return EMPTY;
-        return new EditSnapshot(Arrays.copyOf(brk, brkN), Arrays.copyOf(plc, plcN));
+        if (brkN == 0 && plcN == 0 && drN == 0) return EMPTY;
+        return new EditSnapshot(Arrays.copyOf(brk, brkN), Arrays.copyOf(plc, plcN),
+                                Arrays.copyOf(dr, drN), Arrays.copyOf(drOpen, drN));
     }
 
     private static boolean contains(long[] a, int n, long v) {
@@ -93,7 +112,7 @@ public final class EditSnapshot {
 
     /** True when the snapshot carries no edits (== {@link #EMPTY} semantics). */
     public boolean isEmpty() {
-        return breaks.length == 0 && places.length == 0;
+        return breaks.length == 0 && places.length == 0 && doors.length == 0;
     }
 
     /** Number of cells the baseline breaks. */
@@ -114,5 +133,20 @@ public final class EditSnapshot {
     /** The {@code i}-th placed cell, packed {@code BlockPos.asLong}. */
     public long placeAt(int i) {
         return places[i];
+    }
+
+    /** Number of door-set cells in the baseline (DOORS P2). */
+    public int doorSetCount() {
+        return doors.length;
+    }
+
+    /** The {@code i}-th door-set cell, packed {@code BlockPos.asLong}. */
+    public long doorSetAt(int i) {
+        return doors[i];
+    }
+
+    /** Whether the {@code i}-th door-set targets the OPEN ({@code true}) or CLOSED ({@code false}) state. */
+    public boolean doorSetOpenAt(int i) {
+        return doorOpens[i];
     }
 }
