@@ -11,11 +11,15 @@ import java.util.UUID;
 import com.mojang.authlib.GameProfile;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.platform.ConfigDir;
+import com.orebit.mod.platform.ItemLookup;
 import com.orebit.mod.platform.PlatformEvents;
+import com.orebit.mod.platform.ToolEnchants;
+import com.orebit.mod.worldmodel.resource.DropModel;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 
@@ -28,6 +32,16 @@ import net.minecraft.world.item.Items;
  * (known worldgen seed, capability config) is supplied by the run dir the orchestration script prepares
  * ({@code server.properties} pins the seed; {@code config/orebit.properties} the caps); this class adds NO
  * behavior of its own to the bot.
+ *
+ * <p><b>GATHER mode</b> ({@code -Dorebit.autotest.gather=<resource>}): instead of the goto, pre-equip a tool
+ * ({@code -Dorebit.autotest.tool}, default {@code diamond_pickaxe}; {@code -Dorebit.autotest.silk} adds Silk
+ * Touch) into the bot's real inventory and drive {@code /bot gather <resource> [count]} through the same
+ * internal API the command calls ({@link AllyBotEntity#startGather}). The poll ({@code gatherTick}) reads the
+ * bot's own signals — the read-only {@link AllyBotEntity#gatherPhaseName}/{@link AllyBotEntity#gatheredCount}
+ * observation seams and the terminal STAY flip — and writes a granular result (phase reached / collected /
+ * quota / returned / trajectory / outcome PASS·FAIL·TIMEOUT) so the four known gather failure modes
+ * (collected-but-not-returned, never-collected/wander, unreachable, timeout) are distinguishable. PASS =
+ * collected≥quota AND the bot returned to its start cell within budget.
  *
  * <p><b>Inert in production.</b> {@link #register} returns immediately unless the system property is set,
  * so shipping this class in the jar costs a single property read at init. It is version-portable common
@@ -86,11 +100,25 @@ public final class HeadlessAutotest {
                 // Inside a trial chamber ~240 blocks off (owner-confirmed in the master world).
                 cell("orebit.autotest.goal", "201,-28,90"),
                 Integer.getInteger("orebit.autotest.budgetTicks", 24_000),
-                Integer.getInteger("orebit.autotest.startDelayTicks", 0));
+                Integer.getInteger("orebit.autotest.startDelayTicks", 0),
+                // GATHER mode (-Dorebit.autotest.gather=<resource>): drive /bot gather instead of /bot goto.
+                // Null (unset) = the historical goto scenario above, byte-for-byte unchanged. When set, the
+                // goal cell is ignored; the bot gathers <resource> ×count, pre-equipped with <tool> (+silk),
+                // and must return to its start cell (PASS = collected>=quota AND returned within budget).
+                System.getProperty("orebit.autotest.gather"),
+                Integer.getInteger("orebit.autotest.count", 1),
+                System.getProperty("orebit.autotest.tool", "diamond_pickaxe"),
+                Boolean.getBoolean("orebit.autotest.silk"));
         events.onServerStarted(scenario::start);
         events.onWorldTickEnd(scenario::tick);
-        OrebitCommon.LOGGER.info("[Orebit/autotest] armed: start={} goal={} budget={}t",
-                compact(scenario.start), compact(scenario.goal), scenario.budgetTicks);
+        if (scenario.gatherResource != null) {
+            OrebitCommon.LOGGER.info("[Orebit/autotest] armed GATHER: resource={} count={} tool={}{} start={} budget={}t",
+                    scenario.gatherResource, scenario.gatherQuota, scenario.toolId,
+                    scenario.silk ? "+silk" : "", compact(scenario.start), scenario.budgetTicks);
+        } else {
+            OrebitCommon.LOGGER.info("[Orebit/autotest] armed GOTO: start={} goal={} budget={}t",
+                    compact(scenario.start), compact(scenario.goal), scenario.budgetTicks);
+        }
     }
 
     /** Parse {@code "x,y,z"} from a system property (default {@code def}). Fail fast on garbage — a typo'd
@@ -122,6 +150,22 @@ public final class HeadlessAutotest {
         final int startDelayTicks;
         boolean goalIssued;
 
+        // ---- GATHER mode (null gatherResource = GOTO mode; see class javadoc) ----
+        /** Resource name for {@code /bot gather} (e.g. "cobblestone", "stone", "iron"); null = GOTO mode. */
+        final String gatherResource;
+        /** Target picked-up count (quota) for the gather run. */
+        final int gatherQuota;
+        /** Item id of the tool to pre-equip before gathering (e.g. "diamond_pickaxe"). */
+        final String toolId;
+        /** Whether to add Silk Touch to the pre-equipped tool (needed for {@code gather stone}). */
+        final boolean silk;
+        /** True once gathering is under way. */
+        boolean gatherIssued;
+        /** Last non-terminal gather phase observed (for the TIMEOUT/FAIL result). */
+        String lastGatherPhase = "IDLE";
+        /** Max distance the bot ever reached from its gather-start cell (exposes a wander). */
+        double maxDistFromStart;
+
         MinecraftServer server;
         FakePlayerEntity owner;   // synthetic, never world-placed (see class javadoc)
         AllyBotEntity bot;
@@ -133,11 +177,16 @@ public final class HeadlessAutotest {
         BufferedWriter traceOut;  // the CURRENT per-search file (BlockPathfinder.TRACE_OUT aliases it)
         int traceSearches;
 
-        Scenario(BlockPos start, BlockPos goal, int budgetTicks, int startDelayTicks) {
+        Scenario(BlockPos start, BlockPos goal, int budgetTicks, int startDelayTicks,
+                 String gatherResource, int gatherQuota, String toolId, boolean silk) {
             this.start = start;
             this.goal = goal;
             this.budgetTicks = budgetTicks;
             this.startDelayTicks = startDelayTicks;
+            this.gatherResource = gatherResource;
+            this.gatherQuota = Math.max(1, gatherQuota);
+            this.toolId = toolId;
+            this.silk = silk;
         }
 
         /**
@@ -195,7 +244,37 @@ public final class HeadlessAutotest {
                 // which raises the region-tier mine-through cost of a ground descent (repro of the owner's
                 // bare-handed pillar-to-the-sky: the empty-air highway out-prices a dig-down descent).
                 bot.getInventory().clearContent();
-                if (!Boolean.getBoolean("orebit.autotest.barehanded")) {
+                final boolean barehanded = Boolean.getBoolean("orebit.autotest.barehanded");
+
+                // ---- GATHER mode (-Dorebit.autotest.gather=<resource>): drive /bot gather ----
+                // Pre-equip the correct/silk tool into the bot's REAL ServerPlayer inventory BEFORE the
+                // command, so the gather machine's drop-goal tool gate (BotGatherer.equipForCondition) does
+                // not refuse for lack of a qualifying pickaxe. Then hand off to the exact internal API the
+                // /bot gather command calls (AllyBotEntity.startGather) — no goto, no rtrace (those are
+                // GOTO-only). The gather poll (gatherTick) takes over from here.
+                if (gatherResource != null) {
+                    DropModel.Output output = DropModel.resolve(gatherResource);
+                    if (output == null) {
+                        finishGather("FAIL", "unknown gather resource '" + gatherResource + "'", "FAIL");
+                        return;
+                    }
+                    if (!barehanded) {
+                        ItemStack tool = new ItemStack(toolItem(toolId));
+                        if (silk) {
+                            ToolEnchants.applySilkTouch(level, tool);
+                        }
+                        bot.getInventory().setItem(0, tool);
+                    }
+                    bot.startGather(output, gatherQuota);
+                    gatherIssued = true;
+                    OrebitCommon.LOGGER.info("[Orebit/autotest] bot spawned at {} gathering {} x{} (tool={}{})",
+                            compact(bot.blockPosition()), output.name(), gatherQuota,
+                            barehanded ? "none" : toolId, silk ? "+silk" : "");
+                    return;
+                }
+
+                // ---- GOTO mode (unchanged): one stone pickaxe by default ----
+                if (!barehanded) {
                     bot.getInventory().setItem(0, new ItemStack(Items.STONE_PICKAXE));
                 }
                 // Region-cascade trace seam (-Dorebit.autotest.rtrace=true): run the FULL-cascade rtrace toward
@@ -292,6 +371,12 @@ public final class HeadlessAutotest {
             }
             ticks++;
 
+            // GATHER mode has its own poll (find→mine→return); GOTO's arrival/give-up poll is below.
+            if (gatherResource != null) {
+                gatherTick(level);
+                return;
+            }
+
             if (!bot.isAlive()) {
                 finish("FAIL", "bot died");
                 return;
@@ -377,17 +462,9 @@ public final class HeadlessAutotest {
             }
         }
 
-        /** Write the result file (run dir, same anchor as the config seam), log the verdict, halt. */
+        /** Write the GOTO result file (run dir, same anchor as the config seam), log the verdict, halt. */
         void finish(String result, String reason) {
             done = true;
-            if (tracing) {
-                BlockPathfinder.TRACE = false;
-                BlockPathfinder.TRACE_SEARCH_START = null;
-                BlockPathfinder.TRACE_OUT = null;
-                closeTrace();
-                OrebitCommon.LOGGER.info("[Orebit/autotest] wrote {} A* trace file(s) (orebit-autotest-trace-*.txt)",
-                        traceSearches);
-            }
             Path file = ConfigDir.serverDir(server).resolve(RESULT_FILE);
             try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
                 kv(w, "result", result);
@@ -417,6 +494,133 @@ public final class HeadlessAutotest {
                 }
             } catch (IOException e) {
                 OrebitCommon.LOGGER.error("[Orebit/autotest] could not write {}", file, e);
+            }
+            endRun(result, reason);
+        }
+
+        /**
+         * GATHER-mode poll (find→mine→return). Reads only the bot's own signals — liveness, {@link
+         * AllyBotEntity#gatherPhaseName} / {@link AllyBotEntity#gatheredCount} (read-only observation seams),
+         * mode flip to STAY (the machine's terminal signal), and position — plus the harness budget. The
+         * granular result distinguishes the four known gather failures (collected-but-not-returned;
+         * never-collected/wander; unreachable; timeout) via {@code collected}/{@code returned}/{@code
+         * distanceFromStart}/{@code phaseReached}.
+         */
+        void gatherTick(ServerLevel level) {
+            if (!bot.isAlive()) {
+                finishGather("FAIL", "bot died", "FAIL");
+                return;
+            }
+            final double dStart = dist3(start, bot.getX(), bot.getY(), bot.getZ());
+            if (dStart > maxDistFromStart) {
+                maxDistFromStart = dStart;
+            }
+            final String phase = bot.gatherPhaseName();
+            if (!"IDLE".equals(phase)) {
+                lastGatherPhase = phase;
+            }
+            final int collected = bot.gatheredCount();
+
+            // The gather machine ends by flipping to STAY (RETURN arrived, RETURN unreachable, nothing found,
+            // or a tool refusal). Diagnose which of the four failure modes (or PASS) it is.
+            if (bot.mode() == AllyBotEntity.Mode.STAY) {
+                final boolean quotaMet = collected >= gatherQuota;
+                final boolean returned = dStart <= RETURN_TOL;
+                if (quotaMet && returned) {
+                    finishGather("PASS", "gathered " + collected + "/" + gatherQuota + " and returned", "PASS");
+                } else if (quotaMet) {
+                    finishGather("FAIL", "collected " + collected + "/" + gatherQuota
+                            + " but did not return (dist=" + fmt(dStart) + ")", "FAIL");
+                } else if (collected == 0) {
+                    finishGather("FAIL", "never collected any " + gatherResource
+                            + " (ended in phase " + lastGatherPhase + ", maxDist=" + fmt(maxDistFromStart) + ")", "FAIL");
+                } else {
+                    finishGather("FAIL", "collected only " + collected + "/" + gatherQuota
+                            + " (ended in phase " + lastGatherPhase + ")", "FAIL");
+                }
+                return;
+            }
+            if (ticks >= budgetTicks) {
+                finishGather("FAIL", "tick budget exhausted (phase " + lastGatherPhase
+                        + ", collected " + collected + "/" + gatherQuota + ", maxDist=" + fmt(maxDistFromStart) + ")",
+                        "TIMEOUT");
+                return;
+            }
+            if (ticks % PROGRESS_LOG_TICKS == 0) {
+                OrebitCommon.LOGGER.info(
+                        "[Orebit/autotest] t={} pos={} phase={} collected={}/{} distFromStart={} maxDist={}",
+                        ticks, compact(bot.blockPosition()), phase, collected, gatherQuota,
+                        fmt(dStart), fmt(maxDistFromStart));
+            }
+        }
+
+        /** Write the GATHER result file (granular: phase / collected / quota / returned / trajectory), halt. */
+        void finishGather(String result, String reason, String outcome) {
+            done = true;
+            Path file = ConfigDir.serverDir(server).resolve(RESULT_FILE);
+            try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
+                kv(w, "result", result);       // PASS/FAIL — the orchestrator's exit-code contract
+                kv(w, "outcome", outcome);     // PASS/FAIL/TIMEOUT — granular
+                kv(w, "reason", reason);
+                kv(w, "mode", "gather");
+                kv(w, "resource", gatherResource);
+                kv(w, "quota", gatherQuota);
+                kv(w, "ticks", ticks);
+                kv(w, "ticksUsed", ticks);
+                kv(w, "budgetTicks", budgetTicks);
+                kv(w, "start", start.getX() + "," + start.getY() + "," + start.getZ());
+                if (bot != null) {
+                    final double dStart = dist3(start, bot.getX(), bot.getY(), bot.getZ());
+                    final int collected = bot.gatheredCount();
+                    kv(w, "phaseReached", "PASS".equals(result) ? "DONE" : lastGatherPhase);
+                    kv(w, "collected", collected);
+                    kv(w, "inventoryCount", countInInventory());
+                    kv(w, "returned", dStart <= RETURN_TOL);
+                    kv(w, "finalX", fmt(bot.getX()));
+                    kv(w, "finalY", fmt(bot.getY()));
+                    kv(w, "finalZ", fmt(bot.getZ()));
+                    kv(w, "distanceFromStart", fmt(dStart));
+                    kv(w, "maxDistFromStart", fmt(maxDistFromStart));
+                    kv(w, "mode_bot", bot.mode());
+                    kv(w, "navGaveUp", bot.navigator().navGaveUp());
+                    kv(w, "alive", bot.isAlive());
+                }
+            } catch (IOException e) {
+                OrebitCommon.LOGGER.error("[Orebit/autotest] could not write {}", file, e);
+            }
+            endRun(result, reason);
+        }
+
+        /**
+         * Count items already IN the bot's real inventory that the requested output would count toward its
+         * quota (a physical cross-check of {@link AllyBotEntity#gatheredCount}, which is the machine's
+         * accrual). Version-portable: the {@code getContainerSize()/getItem()} container verbs + the {@link
+         * ItemLookup#idOf} id seam + {@link DropModel.Output#counts}.
+         */
+        int countInInventory() {
+            if (bot == null || gatherResource == null) return 0;
+            DropModel.Output output = DropModel.resolve(gatherResource);
+            if (output == null) return 0;
+            var inv = bot.getInventory();
+            int total = 0;
+            for (int i = 0, n = inv.getContainerSize(); i < n; i++) {
+                ItemStack s = inv.getItem(i);
+                if (!s.isEmpty() && output.counts(ItemLookup.idOf(s.getItem()))) {
+                    total += s.getCount();
+                }
+            }
+            return total;
+        }
+
+        /** Shared teardown: close any A* trace, log the verdict, and halt+exit (see the long note below). */
+        void endRun(String result, String reason) {
+            if (tracing) {
+                BlockPathfinder.TRACE = false;
+                BlockPathfinder.TRACE_SEARCH_START = null;
+                BlockPathfinder.TRACE_OUT = null;
+                closeTrace();
+                OrebitCommon.LOGGER.info("[Orebit/autotest] wrote {} A* trace file(s) (orebit-autotest-trace-*.txt)",
+                        traceSearches);
             }
             OrebitCommon.LOGGER.info("[Orebit/autotest] {} ({}) after {} ticks — halting server",
                     result, reason, ticks);
@@ -449,5 +653,42 @@ public final class HeadlessAutotest {
         private static String fmt(double v) {
             return String.format(Locale.ROOT, "%.2f", v);
         }
+
+        /** 3-D distance from block cell {@code p}'s centre to the point {@code (x,y,z)}. */
+        private static double dist3(BlockPos p, double x, double y, double z) {
+            double dx = p.getX() + 0.5 - x, dy = p.getY() - y, dz = p.getZ() + 0.5 - z;
+            return Math.sqrt(dx * dx + dy * dy + dz * dz);
+        }
+
+        /**
+         * Map a tool id to a range-stable {@link Items} constant (this class is common source compiled across
+         * the whole 1.17→26.x range, so it must NOT reach into a version-fragile registry lookup by
+         * {@code ResourceLocation}). Covers the pickaxe tiers plus the common wood tools; an unknown id logs a
+         * warning and falls back to the diamond pickaxe so a typo never silently disarms the bot.
+         */
+        private static Item toolItem(String id) {
+            String key = id == null ? "" : id.toLowerCase(Locale.ROOT).replaceFirst("^minecraft:", "");
+            return switch (key) {
+                case "wooden_pickaxe", "wood_pickaxe" -> Items.WOODEN_PICKAXE;
+                case "stone_pickaxe" -> Items.STONE_PICKAXE;
+                case "iron_pickaxe" -> Items.IRON_PICKAXE;
+                case "golden_pickaxe", "gold_pickaxe" -> Items.GOLDEN_PICKAXE;
+                case "diamond_pickaxe" -> Items.DIAMOND_PICKAXE;
+                case "netherite_pickaxe" -> Items.NETHERITE_PICKAXE;
+                case "iron_axe" -> Items.IRON_AXE;
+                case "diamond_axe" -> Items.DIAMOND_AXE;
+                case "netherite_axe" -> Items.NETHERITE_AXE;
+                case "iron_shovel" -> Items.IRON_SHOVEL;
+                case "diamond_shovel" -> Items.DIAMOND_SHOVEL;
+                case "shears" -> Items.SHEARS;
+                default -> {
+                    OrebitCommon.LOGGER.warn("[Orebit/autotest] unknown -Tool '{}' — defaulting to diamond_pickaxe", id);
+                    yield Items.DIAMOND_PICKAXE;
+                }
+            };
+        }
+
+        /** Return tolerance (blocks) — the bot is "back" when within this of its gather-start cell. */
+        private static final double RETURN_TOL = 2.5;
     }
 }

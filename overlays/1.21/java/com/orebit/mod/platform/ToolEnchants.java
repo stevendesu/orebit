@@ -30,9 +30,20 @@ public final class ToolEnchants {
     /** Whether {@code stack} is enchanted with Silk Touch (level &gt; 0). Resolves the {@code Silk Touch}
      *  {@link Holder} from {@code level}'s registry access (data-driven enchantments, 1.21+). */
     public static boolean hasSilkTouch(ServerLevel level, ItemStack stack) {
-        Holder<Enchantment> silk = level.registryAccess()
+        return EnchantmentHelper.getItemEnchantmentLevel(silkHolder(level), stack) > 0;
+    }
+
+    /** Apply Silk Touch level 1 to {@code stack} (test/harness support — the headless gather autotest
+     *  pre-equips a silk pickaxe for {@code gather stone}). 1.21+: resolve the {@code Silk Touch}
+     *  {@link Holder} from the level's registry access and use the component-era {@code
+     *  ItemStack.enchant(Holder, int)} form. */
+    public static void applySilkTouch(ServerLevel level, ItemStack stack) {
+        stack.enchant(silkHolder(level), 1);
+    }
+
+    private static Holder<Enchantment> silkHolder(ServerLevel level) {
+        return level.registryAccess()
                 .lookup(Registries.ENCHANTMENT).orElseThrow()
                 .getOrThrow(Enchantments.SILK_TOUCH);
-        return EnchantmentHelper.getItemEnchantmentLevel(silk, stack) > 0;
     }
 }

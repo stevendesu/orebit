@@ -40,4 +40,12 @@ public final class ToolEnchants {
     public static boolean hasSilkTouch(ServerLevel level, ItemStack stack) {
         return EnchantmentHelper.getItemEnchantmentLevel(Enchantments.SILK_TOUCH, stack) > 0;
     }
+
+    /** Apply Silk Touch level 1 to {@code stack} (test/harness support — the headless gather autotest
+     *  pre-equips a silk pickaxe for {@code gather stone}). Baseline: {@code ItemStack.enchant(Enchantment,
+     *  int)} with the static enchantment constant. {@code level} is unused here (kept for the stable
+     *  signature — the 1.21+ flavor resolves the enchantment holder from it). */
+    public static void applySilkTouch(ServerLevel level, ItemStack stack) {
+        stack.enchant(Enchantments.SILK_TOUCH, 1);
+    }
 }

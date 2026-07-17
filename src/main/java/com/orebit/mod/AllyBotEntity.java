@@ -195,6 +195,25 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         return navigator;
     }
 
+    // ---- Read-only gather observation (HeadlessAutotest only; NO logic change) ------------------
+    // Delegate to the gatherer's read-only seams so the headless gather autotest can report the phase
+    // reached and the accrued count without reaching into private component state.
+
+    /** Current {@link BotGatherer} phase name for the harness ({@code "IDLE"} when not gathering). */
+    String gatherPhaseName() {
+        return gatherer.phaseName();
+    }
+
+    /** Items accrued toward the current gather quota (the picked-up count). */
+    int gatheredCount() {
+        return gatherer.gatheredCount();
+    }
+
+    /** Where the active {@code /bot gather} run was issued — its RETURN target (null before a run). */
+    net.minecraft.core.BlockPos gatherStartPos() {
+        return gatherer.gatherStartPos();
+    }
+
     public void lookAtPlayer(Player player) {
         double dx = player.getX() - this.getX();
         double dy = (player.getEyeY()) - this.getEyeY();

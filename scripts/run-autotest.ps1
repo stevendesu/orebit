@@ -37,6 +37,22 @@ param(
     # bare-handed pillar cascade (L1 flood level-tagged 'E <seq> L1'). Needs a master with the persisted HPA.
     [switch]$Rtrace,
     [string]$GroundDrive = "",   # "" = build-default; "servo" | "legacy" forces drive()'s land branch (Stage-2 A/B)
+    # -Gather <resource>: GATHER mode. Drive /bot gather <resource> [count] instead of /bot goto — the bot
+    # find→mine→returns for the named resource (tab-complete list: cobblestone, stone, iron, diamond, coal,
+    # andesite, wood, ...). When set, -Goal is IGNORED; the bot must return to its -Start cell to PASS.
+    # The result file gains the granular gather schema (phaseReached / collected / quota / returned /
+    # finalX/Y/Z / distanceFromStart / maxDistFromStart / outcome[PASS/FAIL/TIMEOUT]).
+    [string]$Gather = "",
+    # -Count <n>: gather quota (target number of PICKED-UP items). Default 1.
+    [int]$Count = 1,
+    # -Tool <item_id>: the tool pre-equipped into the bot's real inventory BEFORE the gather command, so the
+    # drop-goal tool gate doesn't refuse for lack of a correct pickaxe. Default diamond_pickaxe. Range-stable
+    # ids: {wooden,stone,iron,golden,diamond,netherite}_pickaxe, {iron,diamond,netherite}_axe,
+    # {iron,diamond}_shovel, shears. Ignored under -Barehanded (which pre-equips nothing).
+    [string]$Tool = "diamond_pickaxe",
+    # -Silk: add Silk Touch to the pre-equipped tool. Required for `gather stone` (SILK_REQUIRED); harmless
+    # for NO_SILK resources like cobblestone (which then refuse — use a plain -Tool, no -Silk, for those).
+    [switch]$Silk,
     # -MasterWorld <path>: FROZEN-WORLD mode. Instead of seed-regenerating the world each run (which is
     # non-deterministic for VEGETATION -- trees generate in parallel-chunk-gen order; proven by the
     # startprobe: same seed -> 3 distinct tree layouts in 5 runs), copy a pristine, pre-generated master
@@ -96,6 +112,10 @@ if ($Trace)           { $gradleArgs += "-Porebit.autotest.trace=true" }
 if ($ProbeOnly)       { $gradleArgs += "-Porebit.autotest.probeOnly=true" }
 if ($Barehanded)      { $gradleArgs += "-Porebit.autotest.barehanded=true" }
 if ($Rtrace)          { $gradleArgs += "-Porebit.autotest.rtrace=true" }
+if ($Gather -ne "")   { $gradleArgs += "-Porebit.autotest.gather=$Gather" }
+if ($Count -gt 1)     { $gradleArgs += "-Porebit.autotest.count=$Count" }
+if ($Tool -ne "")     { $gradleArgs += "-Porebit.autotest.tool=$Tool" }
+if ($Silk)            { $gradleArgs += "-Porebit.autotest.silk=true" }
 if ($GroundDrive -ne "") { $gradleArgs += "-Porebit.ground.drive=$GroundDrive" }
 
 # gradlew.bat resolves the PROJECT from the current working directory, not from its own location --
