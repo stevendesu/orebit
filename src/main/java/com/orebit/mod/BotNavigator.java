@@ -782,9 +782,65 @@ final class BotNavigator {
         }
         lastRepairedBlockedGen = gen;
         bot.chat("[bot] path blocked — invalidating a region crossing and rerouting.");
-        if (!pathPlan.repairBlocked()) {
+        // The hop + window target must be sampled BEFORE repairBlocked(), which re-derives the skeleton and
+        // resets the window — afterwards the crossing being blamed is already gone.
+        final String hop = describeBlockedHop();
+        final BlockPos wt = pathPlan.currentWindowTarget();
+        final boolean repaired = pathPlan.repairBlocked();
+        logRepair(gen, hop, wt, repaired);
+        if (!repaired) {
             giveUp();
         }
+    }
+
+    /**
+     * Server-log twin of the region-crossing invalidation chat line. The chat message alone is INVISIBLE to a
+     * headless run: {@link AllyBotEntity#chat} routes to the owner's {@code CommandFeedback}, so with a
+     * synthetic never-placed owner (the autotest harness) the event leaves NO trace in the log, and a
+     * {@code grep} for it wrongly reads as "the bot never invalidated". This makes the event observable
+     * regardless of client/chat, in the {@code [Orebit]} logger idiom (cf. {@code window-swap} / {@code
+     * START-DEAD}).
+     *
+     * <p>Logs the repair's ACTUAL outcome, which the chat line (emitted before the attempt) cannot: {@code
+     * REROUTED} = a crossing really was blacklisted and a new skeleton derived; {@code GAVE-UP} = there was
+     * no onward hop to blame, or every level's blacklist is exhausted — the bot is about to {@link #giveUp}
+     * and NOTHING was invalidated. A {@code ->?} to-hop marks the former case (the bot sits on the last
+     * skeleton step), which is why the two must not be conflated when reading a run.
+     *
+     * <p>Deliberately UNGATED (like START-DEAD): it is rare and meaningful, not per-tick noise — {@link
+     * #repairStep} fires exactly ONE repair per BLOCKED search result ({@link PathPlan#blockedGeneration}),
+     * so the line is bounded by the number of distinct blocked results. Never throws onto the tick.
+     */
+    private void logRepair(int gen, String hop, BlockPos windowTarget, boolean repaired) {
+        try {
+            OrebitCommon.LOGGER.info(
+                    "[Orebit] region-crossing BLOCKED (gen={}) -> {} bot={} hop={} windowTarget={} "
+                            + "reason=block tier cannot realize this crossing for these caps",
+                    gen, repaired ? "REROUTED (crossing blacklisted)" : "GAVE-UP (no hop to blame / exhausted)",
+                    AllyBotEntity.compact(bot.blockPosition()), hop,
+                    windowTarget == null ? "?" : AllyBotEntity.compact(windowTarget));
+        } catch (Throwable ignored) {
+            // diagnostics must never crash the tick
+        }
+    }
+
+    /** The skeleton hop {@link PathPlan#repairBlocked} is about to blame, as {@code S<i>(rx,ry,rz)->S<i+1>(…)}
+     *  — mirroring {@link PathPlan#blockedHop}'s {@code windowStart -> windowStart+1}. A {@code ?} to-step
+     *  means no onward hop exists (the give-up branch). Never throws. */
+    private String describeBlockedHop() {
+        try {
+            final int from = pathPlan.windowStartIndex();
+            final RegionPathPlan sk = pathPlan.skeletonPlan();
+            return describeStep(sk, from) + "->" + describeStep(sk, from + 1);
+        } catch (Throwable ignored) {
+            return "?";
+        }
+    }
+
+    /** {@code S<step>(rx,ry,rz)} for a skeleton step, or {@code "?"} when out of range (cf. logWindowSwap). */
+    private static String describeStep(RegionPathPlan sk, int step) {
+        if (sk == null || step < 0 || step >= sk.size()) return "?";
+        return "S" + step + "(" + sk.rx(step) + "," + sk.ry(step) + "," + sk.rz(step) + ")";
     }
 
     /**
