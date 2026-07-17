@@ -17,6 +17,7 @@ import com.orebit.mod.platform.ItemLookup;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
+import com.orebit.mod.worldmodel.pathing.NavStore;
 import com.orebit.mod.worldmodel.resource.DropModel;
 import com.orebit.mod.worldmodel.resource.ResourceClasses;
 import com.orebit.mod.worldmodel.resource.ResourceQuery;
@@ -57,6 +58,7 @@ final class BotGatherer {
     private BlockPos gatherStartPos;          // where /bot gather was issued — the fixed RETURN target (§10)
     private int gatherLastInvTotal;           // inventory item total at the last standing-mine tick (Δ = drops)
     private int scanCursor;                   // index into SCAN_OFFSETS for the throttled nearest-first scan
+    private int scanWaitTicks;                 // consecutive ticks held waiting for the SCAN volume to nav-build (STEP 2)
     private int scanAnchorX, scanAnchorY, scanAnchorZ; // bot cell the current scan sweep is centred on
     private BlockPos compassTarget;           // centre of the pyramid-hinted region walked toward (COMPASS)
     private long compassKey;                  // that region's blacklist key
@@ -164,6 +166,7 @@ final class BotGatherer {
         this.mineQueue.clear();
         this.gatherBlacklist.clear();
         this.unreachableCells.clear();
+        this.scanWaitTicks = 0;
         bot.navigator().clearNavGaveUp();
         beginScanSweep();
         this.gatherPhase = GatherPhase.SCAN;
@@ -180,6 +183,19 @@ final class BotGatherer {
             case COMPASS -> gatherCompass(level);
             case RETURN -> gatherReturn(level);
         }
+    }
+
+    /**
+     * Whether the local SCAN volume around the bot is nav-built (STEP 2 readiness gate). Reuses the shared
+     * {@code navReadyRadiusChunks} ring residency test — that radius (default 4) covers the gather SCAN
+     * volume ({@link #SCAN_RADIUS_CHUNKS} = 3), so committing a target only once this holds means the SCAN
+     * sees all nearby veins (not just the bot's own already-built chunk) and selectMineTarget's route-cost
+     * A* runs over built terrain.
+     */
+    private boolean navVolumeReady(ServerLevel level) {
+        final int radius = ConfigLoader.config().navReadyRadiusChunks();
+        final BlockPos p = bot.blockPosition();
+        return NavStore.ringBuilt(level, p.getX() >> 4, p.getZ() >> 4, radius);
     }
 
     /** Re-anchor a fresh nearest-first live scan on the bot's current cell. */
@@ -201,6 +217,26 @@ final class BotGatherer {
     private void gatherScan(ServerLevel level) {
         bot.setForward(0.0f); // stand still while scanning
         bot.lookAtPlayer(bot.owner());
+        // NAVGRID READINESS GATE (STEP 2, gather side): the SCAN residency-gates each section on NavStore
+        // (ResourceScan.exactCells returns null for a non-resident chunk), so at cold start — when only the
+        // bot's own chunk has built — it sees just that one chunk and commits a truncated-world target (the
+        // Y=80 canopy log while the low reachable logs' chunks are still building). And selectMineTarget's
+        // route-cost A* would run over the same unbuilt (AIR-reading) grid. So don't sweep/commit until the
+        // whole local volume is nav-built: the readiness ring (radius navReadyRadiusChunks) covers the SCAN
+        // volume (radius SCAN_RADIUS_CHUNKS=3). State-based (polls real residency); the counter is a give-up
+        // backstop only. Mid-gather re-scans re-anchor on terrain the bot already walked, so this only bites
+        // at the initial cold-start scan.
+        if (!navVolumeReady(level)) {
+            if (scanWaitTicks++ == 0) {
+                bot.chat("[bot] waiting for the terrain to load…");
+            }
+            if (scanWaitTicks > ConfigLoader.config().navReadyTimeoutTicks()) {
+                bot.chat("I can't get terrain data to gather here.");
+                bot.setMode(AllyBotEntity.Mode.STAY);
+            }
+            return;
+        }
+        scanWaitTicks = 0;
         if (advanceScan(level)) {
             gatherLastInvTotal = new BotInventory(bot).totalItemCount();
             bot.navigator().clearPlan();

@@ -67,6 +67,33 @@ public final class NavStore {
         if (m != null) NavReclaim.retire(m.remove(chunkKey));
     }
 
+    /**
+     * Whether chunk {@code (chunkX, chunkZ)}'s nav data is currently BUILT/resident in {@code level} — a
+     * chunk is stored here on nav-build and dropped on unload, so a non-null entry means "loaded AND
+     * nav-built". The readiness signal the bot-side gate polls: the planner reads unbuilt cells as AIR (the
+     * background {@link NavGridView} has no live fallback), so planning before the vicinity is built picks a
+     * truncated-world target — the gate holds until this returns {@code true} across the readiness ring.
+     */
+    public static boolean isBuilt(ServerLevel level, int chunkX, int chunkZ) {
+        return get(level, key(chunkX, chunkZ)) != null;
+    }
+
+    /**
+     * Whether EVERY chunk in the {@code (2*radiusChunks+1)²} ring centred on {@code (chunkX, chunkZ)} is
+     * nav-built (see {@link #isBuilt}). The vicinity-readiness test the drive gate + gather SCAN gate + the
+     * headless harness all share, so "the bot's surrounding NavGrid is built" is decided in one place. Cold —
+     * called at most once per bot per tick while it waits to plan (a few ticks at cold start), never on a hot
+     * path; a {@code radiusChunks} of 0 tests only the centre chunk.
+     */
+    public static boolean ringBuilt(ServerLevel level, int chunkX, int chunkZ, int radiusChunks) {
+        for (int dx = -radiusChunks; dx <= radiusChunks; dx++) {
+            for (int dz = -radiusChunks; dz <= radiusChunks; dz++) {
+                if (get(level, key(chunkX + dx, chunkZ + dz)) == null) return false;
+            }
+        }
+        return true;
+    }
+
     /** Number of chunks currently stored for a level (diagnostics). */
     public static int size(ServerLevel level) {
         ConcurrentHashMap<Long, NavSection[]> m = BY_LEVEL.get(level);
