@@ -170,6 +170,21 @@ public final class HeadlessAutotest {
         /** Max distance the bot ever reached from its gather-start cell (exposes a wander). */
         double maxDistFromStart;
 
+        // ---- TRACE mode (-Dorebit.autotest.traceGoal=x,y,z): mirror /bot trace, headlessly ----
+        /**
+         * The {@code goalFloor} cell for a one-shot {@link AllyBotEntity#traceTo} — the EXACT entry point
+         * {@code /bot trace} (TraceCommand) calls, so the dump is comparable byte-for-byte with a live
+         * {@code /bot trace}. Null = not a trace run. NOTE the convention: {@code TraceCommand} passes
+         * {@code player.blockPosition().below()}, i.e. the block the caller STANDS ON — so this property is
+         * the FLOOR cell, not the owner's feet cell (mirroring the {@code rtrace} seam's {@code goal.below()}).
+         * Distinct from {@code -Dorebit.autotest.trace}, which rolls a file per search of a full goto run.
+         */
+        final BlockPos traceGoal = System.getProperty("orebit.autotest.traceGoal") == null
+                ? null
+                : cell("orebit.autotest.traceGoal", "0,0,0");
+        /** True once the one-shot trace has been issued (it is terminal — the run halts right after). */
+        boolean traceIssued;
+
         MinecraftServer server;
         FakePlayerEntity owner;   // synthetic, never world-placed (see class javadoc)
         AllyBotEntity bot;
@@ -376,6 +391,36 @@ public final class HeadlessAutotest {
                 return;
             }
             ticks++;
+
+            // TRACE mode (-Dorebit.autotest.traceGoal): one-shot mirror of /bot trace. Deferred to the poll on
+            // the SAME readiness gate the goto/gather use — a trace fired at SERVER_STARTED would search an
+            // UNBUILT nav grid (optimistic-AIR reads) and could never match a live /bot trace, which is always
+            // issued in warm, resident terrain. Terminal: dump, then halt (no goto, no gather).
+            if (traceGoal != null) {
+                if (traceIssued) {
+                    return;
+                }
+                if (ticks < startDelayTicks) {
+                    return;
+                }
+                if (!navReadyAround(level, start)) {
+                    if (ticks >= budgetTicks) {
+                        finish("FAIL", "nav grid never built around start (waited " + ticks + "t)");
+                    } else if (ticks % PROGRESS_LOG_TICKS == 0) {
+                        OrebitCommon.LOGGER.info("[Orebit/autotest] t={} waiting for nav readiness around start {}",
+                                ticks, compact(start));
+                    }
+                    return;
+                }
+                traceIssued = true;
+                // The exact internal call TraceCommand makes (goalFloor = the cell the caller stands on).
+                String msg = bot.traceTo(traceGoal);
+                OrebitCommon.LOGGER.info("[Orebit/autotest] /bot trace mirror at tick {} (startDelay {}t + nav ready)"
+                        + " startFloor={} goalFloor={}: {}", ticks, startDelayTicks,
+                        compact(bot.blockPosition().below()), compact(traceGoal), msg);
+                finish("TRACE", "block A* trace only (no goto): " + msg);
+                return;
+            }
 
             // GATHER mode has its own poll (find→mine→return); GOTO's arrival/give-up poll is below.
             if (gatherResource != null) {

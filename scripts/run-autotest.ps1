@@ -36,6 +36,13 @@ param(
     # run/autotest/orebit-region-trace.txt, then halt. No goto. Combine with -Barehanded to capture the
     # bare-handed pillar cascade (L1 flood level-tagged 'E <seq> L1'). Needs a master with the persisted HPA.
     [switch]$Rtrace,
+    # -TraceGoal <x,y,z>: TRACE mode. Headless mirror of the in-game `/bot trace` — spawn the bot at -Start,
+    # wait for the same nav-readiness gate the goto uses, then call the exact entry point TraceCommand calls
+    # (AllyBotEntity.traceTo) and halt. No goto. The dump lands in run/autotest/orebit-trace.txt (+ the
+    # region-heuristic A/B twin orebit-trace-region.txt), directly diffable against a live /bot trace and
+    # analyzable with internal_docs/trace_analysis.py. IMPORTANT: like /bot trace's goalFloor, this is the
+    # cell the caller STANDS ON (the owner's feet cell minus one Y), not the feet cell. -Goal is IGNORED.
+    [string]$TraceGoal = "",
     [string]$GroundDrive = "",   # "" = build-default; "servo" | "legacy" forces drive()'s land branch (Stage-2 A/B)
     # -Gather <resource>: GATHER mode. Drive /bot gather <resource> [count] instead of /bot goto — the bot
     # find→mine→returns for the named resource (tab-complete list: cobblestone, stone, iron, diamond, coal,
@@ -112,6 +119,7 @@ if ($Trace)           { $gradleArgs += "-Porebit.autotest.trace=true" }
 if ($ProbeOnly)       { $gradleArgs += "-Porebit.autotest.probeOnly=true" }
 if ($Barehanded)      { $gradleArgs += "-Porebit.autotest.barehanded=true" }
 if ($Rtrace)          { $gradleArgs += "-Porebit.autotest.rtrace=true" }
+if ($TraceGoal -ne "") { $gradleArgs += "-Porebit.autotest.traceGoal=$TraceGoal" }
 if ($Gather -ne "")   { $gradleArgs += "-Porebit.autotest.gather=$Gather" }
 if ($Count -gt 1)     { $gradleArgs += "-Porebit.autotest.count=$Count" }
 if ($Tool -ne "")     { $gradleArgs += "-Porebit.autotest.tool=$Tool" }
