@@ -1499,8 +1499,15 @@ public final class RegionPathfinder {
      *   <li><b>WATER</b> → symmetric swim ({@link LeafCostComputer#WATER_TRANSIT_TICKS}).</li>
      *   <li><b>collapsed MIXED</b> → passability-weighted mass: {@code airWalk·passFrac + solidMine·(1−passFrac)}.</li>
      * </ul>
-     * A {@code null}/unbuilt (unloaded) record is <b>FREE</b> — perfectly optimistic, distinct from a genuine
-     * built {@link RegionFragments#KIND_AIR KIND_AIR} region (which keeps the directional pillar/fall chute).
+     * A {@code null}/unbuilt (unloaded) record is <b>NOT free</b> (it once was — the "teleporter through the
+     * unknown" that defeated the cap-safe area bound and drove the pillar-to-ceiling flood; see the method body
+     * and {@code FINDINGS-region-pillar-flood.md} §2). It is priced <b>directionally off admissible worldgen
+     * priors</b> — up is dear (pillar/mine: no player staircases exist in ungenerated terrain), down is cheap
+     * (fall), lateral is a walk — and, under {@link #UNBUILT_Y_BANDED} (the default), additionally Y-banded on
+     * sea level 63. Still admissibly optimistic (a natural hill/cave might make it cheaper) but no longer a free
+     * teleporter; chunks load on approach and a replan corrects to real terrain (§6 online optimism). Distinct
+     * from a genuine built {@link RegionFragments#KIND_AIR KIND_AIR} region (which keeps the directional
+     * pillar/fall chute).
      */
     private static float uniformTransitCost(int level, RegionFragments rfM, int f, boolean canPlace, int safeFall,
                                             RegionMineModel mine, float pillarField, boolean reverse,
