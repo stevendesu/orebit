@@ -26,6 +26,7 @@ import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
+import com.orebit.mod.worldmodel.pathing.NavStore;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Block;
@@ -183,6 +184,14 @@ final class BotNavigator {
     /** Set once the region tier can find NO route avoiding the blacklist — the bot holds + tells the owner. */
     private boolean navGaveUp;
 
+    // ---- NavGrid readiness gate (STEP 2): never plan over an unbuilt vicinity ------------------------
+    /** Consecutive ticks the bot has HELD this drive waiting for its {@code navReadyRadiusChunks} ring to
+     *  build. State-based: reset to 0 the instant readiness is met (so it only counts CONSECUTIVE unready
+     *  ticks); the timeout below is a give-up backstop, not the trigger (no-arbitrary-timers-compliant). */
+    private int navReadyWaitTicks;
+    /** Dedup for the one-per-episode "waiting for terrain" chat (reset when readiness is met / the plan clears). */
+    private boolean navReadyWaitAnnounced;
+
     /** Reused mutable cursor for the phase-hold occupant read (no per-check allocation). */
     private final BlockPos.MutableBlockPos scratchPos = new BlockPos.MutableBlockPos();
 
@@ -249,6 +258,8 @@ final class BotNavigator {
         this.activePlanStep = -1;
         this.phaseRunner.clear();
         this.exactGoalEscalated = false; // a cleared goal releases the exact-tolerance ratchet
+        this.navReadyWaitTicks = 0;      // a fresh goal starts a fresh readiness episode
+        this.navReadyWaitAnnounced = false;
     }
 
     /** Re-anchor after a COMPLETED dimension change: the active plan, its settled/start anchors, and any
@@ -405,6 +416,18 @@ final class BotNavigator {
         // in place — escalating up its level stack in repairStep — without discarding the whole nested plan. A
         // full rebuild fires only on no-plan or a new goal region.
         if (pathPlan == null || newRegionGoal) {
+            // NAVGRID READINESS GATE (STEP 2): the block/region tiers read an UNBUILT nav cell as AIR (the
+            // background NavGridView has no live-getBlockState fallback), so planning before the bot's
+            // surrounding grid has built picks a truncated-world target (the cold-start canopy bug). NavGrids
+            // build async over a few ticks after chunks load, so before the FIRST plan / a new-region replan,
+            // require the navReadyRadiusChunks ring resident. Not ready → HOLD this tick (don't plan), the same
+            // held state a planless drive already uses; after navReadyTimeoutTicks consecutive unready ticks,
+            // give up cleanly. State-based (polls real NavStore residency); the counter is a backstop only.
+            if (!navVicinityReady()) {
+                return holdForNavReady();
+            }
+            navReadyWaitTicks = 0;
+            navReadyWaitAnnounced = false;
             if (newRegionGoal) {
                 // New destination region → the learned dead-ends no longer apply; start the repair fresh.
                 navGaveUp = false;
@@ -810,6 +833,44 @@ final class BotNavigator {
     private void giveUp() {
         navGaveUp = true;
         bot.chat("I can't find a way to reach you.");
+    }
+
+    /**
+     * Whether the bot's surrounding NavGrid is built out to the configured readiness radius — the
+     * state-based signal the readiness gate polls (STEP 2). A {@code navReadyRadiusChunks} of 0 tests only
+     * the bot's own chunk; the ring must cover a full block-tier window so a plan never extends into unbuilt
+     * (AIR-reading) chunks. Cold — one ring residency scan per held tick, never on a hot path.
+     */
+    private boolean navVicinityReady() {
+        final ServerLevel level = (ServerLevel) Worlds.of(bot);
+        final int radius = ConfigLoader.config().navReadyRadiusChunks();
+        final BlockPos p = bot.blockPosition();
+        return NavStore.ringBuilt(level, p.getX() >> 4, p.getZ() >> 4, radius);
+    }
+
+    /**
+     * HOLD this tick because the bot's vicinity NavGrid isn't built yet (STEP 2): drop movement inputs (the
+     * same held state a planless drive uses), count the consecutive unready tick, and — only after
+     * {@code navReadyTimeoutTicks} of them — give up cleanly so a genuinely un-loadable area fails instead of
+     * hanging. Returns {@code false} (not arrived), matching {@link #driveToward}'s hold contract.
+     */
+    private boolean holdForNavReady() {
+        driveState = "WAIT";
+        bot.setForward(0.0f);
+        bot.lookAtPlayer(bot.owner());
+        navReadyWaitTicks++;
+        if (!navReadyWaitAnnounced) {
+            navReadyWaitAnnounced = true;
+            bot.chat("[bot] waiting for the terrain to load…");
+        }
+        if (navReadyWaitTicks > ConfigLoader.config().navReadyTimeoutTicks() && !navGaveUp) {
+            navGaveUp = true;
+            bot.chat("I can't get terrain data to path there.");
+        }
+        if (Debug.VERBOSE) {
+            driveStateLog("WAIT (nav grid unbuilt: " + navReadyWaitTicks + "t)");
+        }
+        return false;
     }
 
     /**
