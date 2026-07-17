@@ -14,6 +14,8 @@ import com.orebit.mod.platform.ConfigDir;
 import com.orebit.mod.platform.ItemLookup;
 import com.orebit.mod.platform.PlatformEvents;
 import com.orebit.mod.platform.ToolEnchants;
+import com.orebit.mod.config.ConfigLoader;
+import com.orebit.mod.worldmodel.pathing.NavStore;
 import com.orebit.mod.worldmodel.resource.DropModel;
 
 import net.minecraft.core.BlockPos;
@@ -161,6 +163,8 @@ public final class HeadlessAutotest {
         final boolean silk;
         /** True once gathering is under way. */
         boolean gatherIssued;
+        /** The resolved gather output, prepared at spawn but issued only once the vicinity is nav-built (STEP 4). */
+        DropModel.Output pendingOutput;
         /** Last non-terminal gather phase observed (for the TIMEOUT/FAIL result). */
         String lastGatherPhase = "IDLE";
         /** Max distance the bot ever reached from its gather-start cell (exposes a wander). */
@@ -265,11 +269,18 @@ public final class HeadlessAutotest {
                         }
                         bot.getInventory().setItem(0, tool);
                     }
-                    bot.startGather(output, gatherQuota);
-                    gatherIssued = true;
-                    OrebitCommon.LOGGER.info("[Orebit/autotest] bot spawned at {} gathering {} x{} (tool={}{})",
+                    // Prepare, but DON'T issue yet (STEP 4): hold the bot until its vicinity has nav-built (and
+                    // any -StartDelay elapsed), then issue /bot gather from the poll — deterministic regardless
+                    // of machine speed, matching warm play (a player issues gather standing in loaded terrain,
+                    // not into a still-building world). Issuing at tick 1 on an unbuilt grid is exactly the
+                    // cold-start truncated-scan the readiness gate exists to prevent. STAY meanwhile so the bot
+                    // doesn't FOLLOW-drive during the wait. gatherTick() does the deferred issue.
+                    pendingOutput = output;
+                    bot.setMode(AllyBotEntity.Mode.STAY);
+                    OrebitCommon.LOGGER.info("[Orebit/autotest] bot spawned at {}; gather {} x{} (tool={}{}) "
+                                    + "pending (startDelay {}t + nav readiness)",
                             compact(bot.blockPosition()), output.name(), gatherQuota,
-                            barehanded ? "none" : toolId, silk ? "+silk" : "");
+                            barehanded ? "none" : toolId, silk ? "+silk" : "", startDelayTicks);
                     return;
                 }
 
@@ -287,17 +298,12 @@ public final class HeadlessAutotest {
                     finish("RTRACE", "region cascade trace only (no goto)");
                     return;
                 }
-                // The same internal call /bot goto makes (GotoCommand -> comeTo): COME once, then STAY. Deferred
-                // by startDelayTicks so the nav grid can build first (else the tick-1 plan floods on unbuilt nav).
-                if (startDelayTicks <= 0) {
-                    bot.comeTo(goal);
-                    goalIssued = true;
-                    OrebitCommon.LOGGER.info("[Orebit/autotest] bot spawned at {} heading to {}",
-                            compact(bot.blockPosition()), compact(goal));
-                } else {
-                    OrebitCommon.LOGGER.info("[Orebit/autotest] bot spawned at {}; deferring goto {} by {}t (nav settle)",
-                            compact(bot.blockPosition()), compact(goal), startDelayTicks);
-                }
+                // The same internal call /bot goto makes (GotoCommand -> comeTo): COME once, then STAY. Always
+                // issued from the poll (tick()), once startDelayTicks have elapsed AND the nav grid around the
+                // start cell has built (STEP 4 residency wait) — deterministic regardless of machine speed, and
+                // it never fires the tick-1 plan on an unbuilt (AIR-reading) grid.
+                OrebitCommon.LOGGER.info("[Orebit/autotest] bot spawned at {}; goto {} pending (startDelay {}t + nav readiness)",
+                        compact(bot.blockPosition()), compact(goal), startDelayTicks);
             } catch (Throwable t) {
                 OrebitCommon.LOGGER.error("[Orebit/autotest] scenario setup threw", t);
                 finish("FAIL", "setup threw " + t.getClass().getSimpleName() + " (see log)");
@@ -382,16 +388,25 @@ public final class HeadlessAutotest {
                 return;
             }
 
-            // Deferred goto (startDelayTicks): sit at spawn until the nav grid around the bot has built, THEN
-            // issue the goal — so the traced searches run on real terrain, isolating a heuristic pathology from
+            // Deferred goto: sit at spawn until -StartDelay has elapsed AND the nav grid around the start cell
+            // has built (STEP 4), THEN issue the goal — so the plan/traced searches run on real terrain, never
             // the tick-1 unbuilt-nav flood. Skip the arrival poll entirely until the goal exists.
             if (!goalIssued) {
                 if (ticks < startDelayTicks) {
                     return;
                 }
+                if (!navReadyAround(level, start)) {
+                    if (ticks >= budgetTicks) {
+                        finish("FAIL", "nav grid never built around start (waited " + ticks + "t)");
+                    } else if (ticks % PROGRESS_LOG_TICKS == 0) {
+                        OrebitCommon.LOGGER.info("[Orebit/autotest] t={} waiting for nav readiness around start {}",
+                                ticks, compact(start));
+                    }
+                    return;
+                }
                 bot.comeTo(goal);
                 goalIssued = true;
-                OrebitCommon.LOGGER.info("[Orebit/autotest] goal issued at tick {} (after {}t settle) heading to {}",
+                OrebitCommon.LOGGER.info("[Orebit/autotest] goal issued at tick {} (startDelay {}t + nav ready) heading to {}",
                         ticks, startDelayTicks, compact(goal));
                 return;
             }
@@ -509,6 +524,30 @@ public final class HeadlessAutotest {
         void gatherTick(ServerLevel level) {
             if (!bot.isAlive()) {
                 finishGather("FAIL", "bot died", "FAIL");
+                return;
+            }
+            // Deferred gather issue (STEP 4): honor -StartDelay (previously a NO-OP in gather mode — only goto
+            // read startDelayTicks) AND wait for the nav grid around the start cell to build before issuing, so
+            // the SCAN commits over real terrain instead of the bot's lone already-built chunk (the cold-start
+            // Y=80 canopy target). Deterministic regardless of machine speed. Runs BEFORE the terminal-STAY
+            // check below (the bot sits in STAY while it waits, which must not be read as "finished").
+            if (!gatherIssued) {
+                if (ticks < startDelayTicks) {
+                    return;
+                }
+                if (!navReadyAround(level, start)) {
+                    if (ticks >= budgetTicks) {
+                        finishGather("FAIL", "nav grid never built around start (waited " + ticks + "t)", "TIMEOUT");
+                    } else if (ticks % PROGRESS_LOG_TICKS == 0) {
+                        OrebitCommon.LOGGER.info("[Orebit/autotest] t={} waiting for nav readiness around start {}",
+                                ticks, compact(start));
+                    }
+                    return;
+                }
+                bot.startGather(pendingOutput, gatherQuota);
+                gatherIssued = true;
+                OrebitCommon.LOGGER.info("[Orebit/autotest] gather issued at tick {} (startDelay {}t + nav ready): {} x{}",
+                        ticks, startDelayTicks, pendingOutput.name(), gatherQuota);
                 return;
             }
             final double dStart = dist3(start, bot.getX(), bot.getY(), bot.getZ());
@@ -686,6 +725,17 @@ public final class HeadlessAutotest {
                     yield Items.DIAMOND_PICKAXE;
                 }
             };
+        }
+
+        /**
+         * Whether the NavGrid ring around {@code cell} (radius {@code pathing.navReadyRadiusChunks}) has fully
+         * built (STEP 4) — the same residency signal the bot's own readiness gate polls, so the harness issues
+         * its command exactly when a warm player standing in loaded terrain could. Cold — one ring scan per
+         * waiting tick.
+         */
+        boolean navReadyAround(ServerLevel level, BlockPos cell) {
+            final int radius = ConfigLoader.config().navReadyRadiusChunks();
+            return NavStore.ringBuilt(level, cell.getX() >> 4, cell.getZ() >> 4, radius);
         }
 
         /** Return tolerance (blocks) — the bot is "back" when within this of its gather-start cell. */
