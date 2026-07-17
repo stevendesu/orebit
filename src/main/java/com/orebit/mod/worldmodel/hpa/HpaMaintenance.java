@@ -1,8 +1,8 @@
 package com.orebit.mod.worldmodel.hpa;
 
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.platform.BlockChangeEvents;
@@ -62,11 +62,23 @@ import net.minecraft.world.level.block.state.BlockState;
  *
  * <h2>Thread safety (HPA-IMPLEMENTATION.md §12, §14)</h2>
  * {@code setBlockState} can run off the main tick thread during worldgen, so {@link #onBlockChanged} may be
- * invoked concurrently. The per-level dirty sets are {@link ConcurrentHashMap#newKeySet() concurrent sets}
- * and the level→set map is a {@link ConcurrentHashMap}, so marking a leaf dirty is lock-free and
- * thread-safe. The recompute side ({@link #flush}) runs on the tick thread (as {@link LeafCostComputer}
+ * invoked concurrently. The per-level dirty sets are {@link ConcurrentSkipListSet}s (concurrent, deduping,
+ * <b>sorted</b>) and the level→set map is a {@link ConcurrentHashMap}, so marking a leaf dirty is lock-free
+ * and thread-safe. The recompute side ({@link #flush}) runs on the tick thread (as {@link LeafCostComputer}
  * requires — it drives the single-threaded block tier and a non-thread-safe section pool); the concurrent
- * set lets producers (worldgen threads) keep enqueuing while the tick thread drains. The marking path is
+ * set lets producers (worldgen threads) keep enqueuing while the tick thread drains.
+ *
+ * <p><b>Deterministic drain (why sorted, not a plain concurrent hash-keyset).</b> {@link #flush} drains at
+ * most {@link #MAX_LEAVES_PER_TICK} leaves per tick; over a large, still-settling backlog the SUBSET drained
+ * by any given tick — and hence the region cost pyramid the region-A* skeleton reads — depended on the
+ * hash-keyset's <i>iteration order</i>, which is not stable across JVM runs (leaves are enqueued in async
+ * worldgen order, which itself varies). Two identical-seed runs could therefore have merged different leaf
+ * subsets at the search tick → different skeleton → behavioral fork (proven: a165be0, 341-leaf symmetric
+ * difference at tick 3657). The {@link ConcurrentSkipListSet} drains via {@link ConcurrentSkipListSet#pollFirst()
+ * pollFirst()} in ascending packed-key order, so the drain SEQUENCE is a deterministic function of the set's
+ * <i>contents</i>, independent of enqueue order. The packed leaf key ({@link RegionAddress#packLevelKey}) is a
+ * non-negative {@code long} (22b rx | 22b rz | 6b ry), so natural {@code Long} ordering is a total, stable
+ * order over all leaves. The marking path is
  * COLD (one boxed {@code Long} per block change, never a per-block hot loop), matching the project's
  * existing {@code ConcurrentHashMap}-based pipeline idiom ({@code NavStore}, {@code ChunkNavLoader}); the
  * <i>hot</i> region/block searches allocate nothing (HPA-IMPLEMENTATION.md §14) and live elsewhere.
@@ -90,9 +102,11 @@ public final class HpaMaintenance {
      * Per-dimension dirty-leaf sets. Key = {@link RegionAddress#packLevelKey} of the changed level-0 leaf
      * ({@code rx, ry, rz}); the set dedups multiple changes in the same leaf within a debounce window. The
      * outer map and each inner set are concurrent so off-thread worldgen changes can mark leaves while the
-     * tick thread drains. Created on first dirty mark for a level.
+     * tick thread drains. Created on first dirty mark for a level. The inner set is a
+     * {@link ConcurrentSkipListSet} rather than a hash keyset so {@link #flush} drains in a stable, sorted,
+     * insertion-order-independent sequence (see the "Deterministic drain" note above).
      */
-    private static final Map<ServerLevel, Set<Long>> DIRTY = new ConcurrentHashMap<>();
+    private static final Map<ServerLevel, ConcurrentSkipListSet<Long>> DIRTY = new ConcurrentHashMap<>();
 
     // ---------------------------------------------------------------------------------------------------
     // Registration
@@ -241,8 +255,8 @@ public final class HpaMaintenance {
     }
 
     /** The dimension's dirty set, created on first touch. */
-    private static Set<Long> dirtyFor(ServerLevel level) {
-        return DIRTY.computeIfAbsent(level, l -> ConcurrentHashMap.newKeySet());
+    private static ConcurrentSkipListSet<Long> dirtyFor(ServerLevel level) {
+        return DIRTY.computeIfAbsent(level, l -> new ConcurrentSkipListSet<>());
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -264,7 +278,7 @@ public final class HpaMaintenance {
      * @param level the dimension to flush
      */
     public static void flush(ServerLevel level) {
-        final Set<Long> dirty = DIRTY.get(level);
+        final ConcurrentSkipListSet<Long> dirty = DIRTY.get(level);
         if (dirty == null || dirty.isEmpty()) return;
 
         final RegionGrid grid = RegionGrid.peek(level);
@@ -276,10 +290,12 @@ public final class HpaMaintenance {
         final CostPyramid pyramid = grid.pyramid();
 
         int processed = 0;
-        final java.util.Iterator<Long> it = dirty.iterator();
-        while (processed < MAX_LEAVES_PER_TICK && it.hasNext()) {
-            final long key = it.next();
-            it.remove(); // claim this leaf (set is concurrent — a re-mark after this re-enqueues it)
+        // pollFirst() atomically claims the least-keyed dirty leaf (set is concurrent — a re-mark after this
+        // re-enqueues it). Ascending packed-key order makes the drain SEQUENCE a deterministic function of the
+        // set's contents, independent of enqueue/iteration order (see the "Deterministic drain" class note).
+        Long boxed;
+        while (processed < MAX_LEAVES_PER_TICK && (boxed = dirty.pollFirst()) != null) {
+            final long key = boxed;
 
             final int rx = RegionAddress.unpackRX(key);
             final int ry = RegionAddress.unpackRY(key);
