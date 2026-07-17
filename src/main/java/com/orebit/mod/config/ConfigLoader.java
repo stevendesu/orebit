@@ -270,6 +270,19 @@ public final class ConfigLoader {
             line(w, "# best partial path; the bot moves that way and replans. Bigger = escapes bigger dead-ends,");
             line(w, "# longer worst-case plan latency (the tick itself is never stalled -- these run off-thread).");
             kv(w, ConfigKeys.PATHING_ASYNC_SEARCH_BUDGET_MS, d.asyncSearchBudgetMs());
+            line(w, "# Chunks of NavGrid built per level per server tick (>= 1). NavGrids build over a few ticks");
+            line(w, "# after chunks load; raise this on a strong/multi-core machine so the bot's surrounding nav");
+            line(w, "# data is ready sooner (shorter readiness wait below), lower it on a constrained host.");
+            kv(w, ConfigKeys.PATHING_CHUNK_BUILDS_PER_TICK, d.chunkBuildsPerTick());
+            line(w, "# Radius (in chunks) of the ring around the bot that must be nav-built before it plans a");
+            line(w, "# path (N => a (2N+1)^2 chunk ring). The bot HOLDS until this is built, so it never plans");
+            line(w, "# over unbuilt terrain (which the planner reads as air -> a truncated-world target). Default");
+            line(w, "# 4 covers the block-tier sliding window + a 1-chunk margin. 0 disables the gate.");
+            kv(w, ConfigKeys.PATHING_NAV_READY_RADIUS_CHUNKS, d.navReadyRadiusChunks());
+            line(w, "# How many ticks to wait for that ring to build before giving up (>= 1). A give-up backstop");
+            line(w, "# only -- the gate polls real nav residency and proceeds the instant the ring is built, so on");
+            line(w, "# a healthy server the wait is 1-2 ticks and this never fires. Default 150 (~7.5s).");
+            kv(w, ConfigKeys.PATHING_NAV_READY_TIMEOUT_TICKS, d.navReadyTimeoutTicks());
             line(w, "");
 
             line(w, "# --- hpa: the persisted region tier (survives a server restart) ---");

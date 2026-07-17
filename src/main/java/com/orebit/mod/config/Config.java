@@ -75,6 +75,9 @@ public record Config(
         boolean asyncPathing,
         int maxThreads,
         int asyncSearchBudgetMs,
+        int chunkBuildsPerTick,
+        int navReadyRadiusChunks,
+        int navReadyTimeoutTicks,
         // ---- hpa (persisted region tier) ----
         int persistIntervalTicks,
         // ---- doors ----
@@ -98,6 +101,11 @@ public record Config(
                               * 2 planner threads; 250 ms/async-search budget. Sync (async=false) keeps the
                               * node cap = pathing.syncSearchBudgetNodes (DEFAULT_MAX_NODES). */
                              true, 2, 250,
+                             /* chunkBuildsPerTick 8 (the old hardcoded ChunkNavLoader cap); navReadyRadiusChunks
+                              * 4 = the block-tier 4-region window + 1 chunk margin (also ⊇ the gather SCAN
+                              * volume); navReadyTimeoutTicks 150 = ~7.5s give-up backstop for the state-based
+                              * readiness gate. */
+                             8, 4, 150,
             /* hpa        */ 6000,
             /* doors      */ true); // doors.toggle ON — the P3 executor operates doors (open before crossing,
                                      // close on the exit double-toggle); the flag stays a config kill-switch.

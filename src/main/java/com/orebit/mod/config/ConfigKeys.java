@@ -177,6 +177,36 @@ public final class ConfigKeys {
      */
     public static final String PATHING_ASYNC_SEARCH_BUDGET_MS = "pathing.asyncSearchBudgetMs";
 
+    /**
+     * {@code int >= 1} — chunks of NavGrid built per level per server tick (drained at tick-end from the
+     * chunk-load queue). Replaces the old hardcoded per-tick build cap. A teleport / world-open can queue
+     * hundreds of chunks at once; this bounds how fast they fill in so the build cost stays off the frame
+     * budget. Raise it on a strong / multi-core machine to make the bot's surrounding nav data ready in fewer
+     * ticks (shrinking the readiness wait below); lower it on a constrained host. Default {@code 8}.
+     */
+    public static final String PATHING_CHUNK_BUILDS_PER_TICK = "pathing.chunkBuildsPerTick";
+    /**
+     * {@code int >= 0} — the radius (in chunks) of the ring around the bot whose NavGrid must be built before
+     * the bot plans a path. {@code N} ⇒ a {@code (2N+1)²} chunk ring must all be nav-built. NavGrids build
+     * asynchronously over a few ticks after chunks load, and the planner reads an unbuilt cell as AIR, so
+     * planning too early picks a truncated-world target (the cold-start canopy bug). The bot HOLDS (does not
+     * plan) until this ring is built. Default {@code 4}: the block-tier sliding window spans
+     * {@link com.orebit.mod.pathfinding.PathPlan#WINDOW} (=4) level-0 regions — each a 16-block chunk — so the
+     * far window target sits up to 3 chunks ahead; 4 covers that full window plus a 1-chunk margin (and also
+     * covers the gather SCAN volume, radius 3). {@code 0} disables the gate (plan immediately, old behaviour).
+     */
+    public static final String PATHING_NAV_READY_RADIUS_CHUNKS = "pathing.navReadyRadiusChunks";
+    /**
+     * {@code int >= 1} — how many consecutive ticks the bot waits for its {@link #PATHING_NAV_READY_RADIUS_CHUNKS
+     * readiness ring} to build before giving up and telling the owner it can't get terrain data. A give-up
+     * BACKSTOP only: the gate itself is state-based (it polls real {@link
+     * com.orebit.mod.worldmodel.pathing.NavStore} residency and proceeds the instant the ring is built), so on a
+     * healthy server the wait is 1-2 ticks and this timeout never fires. It exists so a genuinely un-loadable
+     * area (world border, permanently missing chunk) fails cleanly instead of hanging. Default {@code 150}
+     * (~7.5 s at 20 t/s).
+     */
+    public static final String PATHING_NAV_READY_TIMEOUT_TICKS = "pathing.navReadyTimeoutTicks";
+
     // ---- hpa: the persisted region tier (routing fragments + resource tallies) ----------------------
     /**
      * {@code int} — how often (in server ticks) the background crash-insurance flush re-writes each dimension's

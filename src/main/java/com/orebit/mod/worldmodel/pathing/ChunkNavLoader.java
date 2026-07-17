@@ -1,13 +1,18 @@
 package com.orebit.mod.worldmodel.pathing;
 
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
+import com.orebit.mod.AllyBotEntity;
+import com.orebit.mod.BotManager;
 import com.orebit.mod.OrebitCommon;
+import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.platform.ChunkCoords;
 import com.orebit.mod.platform.PlatformEvents;
+import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.HpaMaintenance;
 
 import net.minecraft.server.level.ServerLevel;
@@ -26,21 +31,31 @@ import net.minecraft.world.level.chunk.ChunkAccess;
  * global queue drained against whichever level happened to tick, mixing dimensions.
  *
  * <p><b>Per-tick budget:</b> a teleport can load hundreds of chunks at once; draining them all in
- * one tick would spike. We build at most {@link #MAX_BUILDS_PER_TICK} per level per tick and leave
- * the rest queued — the bot's nav data fills in over a few ticks rather than stalling the server.
+ * one tick would spike. We build at most {@code pathing.chunkBuildsPerTick} (default 8) per level per
+ * tick and leave the rest queued — the bot's nav data fills in over a few ticks rather than stalling
+ * the server.
+ *
+ * <p><b>Bot-vicinity priority:</b> when a level holds one or more bots, the per-tick budget is spent on
+ * the pending chunks NEAREST a bot first (a cheap bounded selection over the pending set), so a bot's
+ * surrounding NavGrid — the ring its readiness gate waits on ({@code pathing.navReadyRadiusChunks}) —
+ * fills in within a tick or two instead of behind an arbitrary FIFO backlog. With no bots in the level
+ * the drain is plain FIFO (the historical behaviour).
  */
 public final class ChunkNavLoader {
 
     private ChunkNavLoader() {}
-
-    /** Cap on chunk builds per level per tick, to keep nav recompute off the frame budget. */
-    private static final int MAX_BUILDS_PER_TICK = 8;
 
     private static final Map<ServerLevel, Queue<Long>> pending = new ConcurrentHashMap<>();
 
     // Diagnostics until a consumer exists: confirm the pipeline is alive without log spam.
     private static int totalBuilt = 0;
     private static int nextLogAt = 1;
+
+    // Tick-thread-confined scratch for the vicinity-priority drain (onWorldTickEnd runs on the server
+    // thread; levels tick sequentially, so a single reused buffer per call is race-free). Avoids
+    // per-tick allocation on the (cold, only-when-pending) drain path.
+    private static final ArrayList<Long> DRAIN_SCRATCH = new ArrayList<>();
+    private static final ArrayList<AllyBotEntity> BOT_SCRATCH = new ArrayList<>();
 
     // Chunk-key packing lives on NavStore now (the owner of the key space), so the consumer
     // (NavGridView) reads entries back with the exact same packing this loader writes them with.
@@ -52,28 +67,28 @@ public final class ChunkNavLoader {
 
         events.onWorldTickEnd(level -> {
             Queue<Long> queue = pending.get(level);
-            if (queue == null) return;
-            int built = 0;
-            Long k;
-            while (built < MAX_BUILDS_PER_TICK && (k = queue.poll()) != null) {
-                ChunkAccess chunk = level.getChunk(NavStore.keyX(k), NavStore.keyZ(k));
-                // Nether-portal discovery rides the build: the classifier collects portal cells (palette-
-                // gated — free for the no-portal chunk) and the chunk's index entry is replaced wholesale
-                // beside its nav sections, so a rebuild is idempotent and a portal-less rebuild self-cleans.
-                NetherPortalIndex.CellBuffer portals = new NetherPortalIndex.CellBuffer();
-                NavStore.put(level, k, ChunkNavBuilder.buildAllSections(level, chunk, portals));
-                // Newly BUILT nav data is as plan-relevant as an edit: advance the edit epoch so the
-                // follower's terrain-recheck debounce re-searches over the fresh area (without this a
-                // bot whose first search ran before its chunks built waited on an unrelated block change
-                // — the s52b cold-open false START-DEAD). One bump per chunk build, cold.
-                NavGridUpdater.bumpEpoch(level);
-                NetherPortalIndex.record(level, k, portals.toArray());
-                // Eager HPA* region build (HPA-IMPLEMENTATION.md §12): build the region leaves as the chunk's
-                // nav data is built, so the cost pyramid accumulates explored terrain (and survives chunk
-                // unload in RAM — the travel-then-path fix). Bounded by this loader's per-tick chunk budget.
-                HpaMaintenance.onChunkNavBuilt(level, NavStore.keyX(k), NavStore.keyZ(k));
-                built++;
+            if (queue == null || queue.isEmpty()) return;
+            final int budget = ConfigLoader.config().chunkBuildsPerTick();
+
+            // Gather the bots resident in THIS level (usually one). With none, keep the cheap FIFO poll —
+            // no drain, no selection (the historical path). With bots present, spend the budget on the
+            // pending chunks nearest a bot first so their readiness ring builds within a tick or two.
+            BOT_SCRATCH.clear();
+            for (AllyBotEntity bot : BotManager.bots()) {
+                if (bot != null && bot.isAlive() && Worlds.of(bot) == level) BOT_SCRATCH.add(bot);
             }
+
+            int built = 0;
+            if (BOT_SCRATCH.isEmpty()) {
+                Long k;
+                while (built < budget && (k = queue.poll()) != null) {
+                    buildChunk(level, k);
+                    built++;
+                }
+            } else {
+                built = drainNearestBots(level, queue, budget);
+            }
+
             if (built > 0) {
                 totalBuilt += built;
                 if (totalBuilt >= nextLogAt) {
@@ -90,5 +105,91 @@ public final class ChunkNavLoader {
             NavGridUpdater.bumpEpoch(level); // dropped nav data changes the grid the same as building it
             NetherPortalIndex.remove(level, key); // the portal index lives exactly as long as the nav data
         });
+    }
+
+    /**
+     * Build ONE queued chunk's nav data + all its riders (portal index, edit-epoch bump, HPA leaf) — the
+     * per-chunk work factored out of the tick drain so the FIFO and the vicinity-priority paths run it
+     * identically. Server-tick thread only.
+     */
+    private static void buildChunk(ServerLevel level, long k) {
+        ChunkAccess chunk = level.getChunk(NavStore.keyX(k), NavStore.keyZ(k));
+        // Nether-portal discovery rides the build: the classifier collects portal cells (palette-
+        // gated — free for the no-portal chunk) and the chunk's index entry is replaced wholesale
+        // beside its nav sections, so a rebuild is idempotent and a portal-less rebuild self-cleans.
+        NetherPortalIndex.CellBuffer portals = new NetherPortalIndex.CellBuffer();
+        NavStore.put(level, k, ChunkNavBuilder.buildAllSections(level, chunk, portals));
+        // Newly BUILT nav data is as plan-relevant as an edit: advance the edit epoch so the
+        // follower's terrain-recheck debounce re-searches over the fresh area (without this a
+        // bot whose first search ran before its chunks built waited on an unrelated block change
+        // — the s52b cold-open false START-DEAD). One bump per chunk build, cold.
+        NavGridUpdater.bumpEpoch(level);
+        NetherPortalIndex.record(level, k, portals.toArray());
+        // Eager HPA* region build (HPA-IMPLEMENTATION.md §12): build the region leaves as the chunk's
+        // nav data is built, so the cost pyramid accumulates explored terrain (and survives chunk
+        // unload in RAM — the travel-then-path fix). Bounded by this loader's per-tick chunk budget.
+        HpaMaintenance.onChunkNavBuilt(level, NavStore.keyX(k), NavStore.keyZ(k));
+    }
+
+    /**
+     * Bot-vicinity-priority drain (STEP 3): with at least one bot in {@code level}, spend the {@code budget}
+     * on the pending chunks NEAREST any bot first. Drains the whole queue into {@link #DRAIN_SCRATCH},
+     * builds the {@code budget} nearest (by squared chunk distance to the closest bot), and re-queues the
+     * rest. Cheap (no full sort): the {@code budget} nearest are found by {@code budget} bounded linear
+     * passes — {@code budget} is small (≈8), so this is O(pending × budget). Cold — only runs on a tick with
+     * pending chunks AND a bot present. Returns the number built. Preserves every per-chunk side effect via
+     * {@link #buildChunk} (incl. the epoch bump the cold-open re-search relies on).
+     */
+    private static int drainNearestBots(ServerLevel level, Queue<Long> queue, int budget) {
+        DRAIN_SCRATCH.clear();
+        for (Long k = queue.poll(); k != null; k = queue.poll()) DRAIN_SCRATCH.add(k);
+        final int n = DRAIN_SCRATCH.size();
+        if (n == 0) return 0;
+
+        // Fast path: no selection needed (everything fits in this tick's budget). Build in FIFO order.
+        if (n <= budget) {
+            for (int i = 0; i < n; i++) buildChunk(level, DRAIN_SCRATCH.get(i));
+            DRAIN_SCRATCH.clear();
+            return n;
+        }
+
+        // Bounded selection: pick the `budget` chunks with the smallest distance-to-nearest-bot, building
+        // each as it is selected and marking it consumed (null) so the next pass skips it. Then re-queue the
+        // survivors. `budget` passes over `n` entries — no allocation, no full sort.
+        int built = 0;
+        for (int slot = 0; slot < budget; slot++) {
+            int bestIdx = -1;
+            long bestD = Long.MAX_VALUE;
+            for (int i = 0; i < n; i++) {
+                final Long k = DRAIN_SCRATCH.get(i);
+                if (k == null) continue;
+                final long d = nearestBotChunkDistSq(NavStore.keyX(k), NavStore.keyZ(k));
+                if (d < bestD) { bestD = d; bestIdx = i; }
+            }
+            if (bestIdx < 0) break;
+            buildChunk(level, DRAIN_SCRATCH.get(bestIdx));
+            DRAIN_SCRATCH.set(bestIdx, null);
+            built++;
+        }
+        for (int i = 0; i < n; i++) {
+            final Long k = DRAIN_SCRATCH.get(i);
+            if (k != null) queue.add(k); // survivors go back for a later tick (re-prioritised as the bot moves)
+        }
+        DRAIN_SCRATCH.clear();
+        return built;
+    }
+
+    /** Squared chunk-space distance from chunk {@code (cx,cz)} to the NEAREST bot in {@link #BOT_SCRATCH}
+     *  (already filtered to the current level). {@link #BOT_SCRATCH} is non-empty when this is called. */
+    private static long nearestBotChunkDistSq(int cx, int cz) {
+        long best = Long.MAX_VALUE;
+        for (int i = 0, m = BOT_SCRATCH.size(); i < m; i++) {
+            final AllyBotEntity bot = BOT_SCRATCH.get(i);
+            final long dx = cx - (bot.blockPosition().getX() >> 4);
+            final long dz = cz - (bot.blockPosition().getZ() >> 4);
+            final long d = dx * dx + dz * dz;
+            if (d < best) best = d;
+        }
+        return best;
     }
 }

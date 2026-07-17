@@ -235,6 +235,16 @@ public class BotManager {
         return botsByOwner.get(player.getUUID());
     }
 
+    /**
+     * A live view of every spawned bot (keyed by owner) — the enumeration the nav-build pipeline uses to
+     * prioritise chunks near a bot ({@code ChunkNavLoader} builds nearest-a-bot first, so a just-spawned /
+     * teleported bot's readiness wait is 1-2 ticks). Server-thread confined like the rest of this manager;
+     * callers must not mutate it. Single-bot-per-owner today, multi-bot ready.
+     */
+    public static java.util.Collection<AllyBotEntity> bots() {
+        return botsByOwner.values();
+    }
+
     public static void removeBotFor(ServerPlayer player) {
         AllyBotEntity bot = botsByOwner.remove(player.getUUID());
         if (bot != null) {
