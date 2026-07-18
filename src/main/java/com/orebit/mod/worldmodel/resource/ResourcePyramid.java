@@ -3,6 +3,7 @@ package com.orebit.mod.worldmodel.resource;
 import java.util.Arrays;
 
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
+import com.orebit.mod.worldmodel.hpa.RegionShardResidency;
 
 /**
  * The per-dimension SoA resource-tally store — a <b>parallel</b> layer to
@@ -191,7 +192,26 @@ public final class ResourcePyramid {
     /** Lazily-allocated per-level tables, index = level (0..{@link RegionAddress#MAX_LEVEL}). */
     private final Level[] levels = new Level[RegionAddress.MAX_LEVEL + 1];
 
+    /**
+     * The dimension's shard-residency index (Stage-2 clobber-guard) — {@code null} until the startup-flip
+     * increment associates one. When non-null, {@link ResourceMerger#mergeUpTallies}'s per-parent recompute
+     * consults it to DEFER rather than overwrite a persisted-but-not-yet-resident coarse tally (see
+     * {@link RegionShardResidency}). {@code null} by default ⇒ the guard never fires ⇒ byte-identical to the
+     * eager-load-all roll-up.
+     */
+    private RegionShardResidency residency;
+
     public ResourcePyramid() {}
+
+    /** The dimension's shard-residency index, or {@code null} if none is associated (Stage-2 clobber-guard). */
+    public RegionShardResidency residency() {
+        return residency;
+    }
+
+    /** Associate this pyramid with its dimension's shard-residency index (Stage-2 clobber-guard). */
+    public void setResidency(RegionShardResidency residency) {
+        this.residency = residency;
+    }
 
     /** The level table, allocating it on first touch. {@code level} must be {@code 0..MAX_LEVEL}. */
     private Level level(int level) {
@@ -233,6 +253,21 @@ public final class ResourcePyramid {
     /** Mark an interned row built / not-built. */
     public void setBuilt(int level, int row, boolean value) {
         levels[level].built[row] = value;
+    }
+
+    /**
+     * <b>Stage-2 cold-shard eviction</b> (increment 4): mark row {@code (level, row)} unbuilt and zero its column
+     * vector — the resource-tier RAM drop the evictor ({@code RegionEvictor}) applies to a shard's level-0..5 rows
+     * alongside the cost drop. The row stays <b>interned</b> (the open-addressed map is never compacted). Zeroing
+     * the vector keeps the additive identity honest: the roll-up ({@link ResourceMerger#recomputeParent}) reads a
+     * child's stored vector directly, so an evicted row must contribute nothing even in the (guard-deferred) window
+     * before a reload — and the guard defers on it anyway once its shard is persisted-non-resident. A later reload
+     * re-fills this row byte-identically (built=false ⇒ the decoder does not treat it as live-wins). Tick-thread.
+     */
+    public void dropRow(int level, int row) {
+        final Level l = levels[level];
+        l.built[row] = false;
+        Arrays.fill(l.cols, row * COLUMNS, row * COLUMNS + COLUMNS, (byte) 0);
     }
 
     // ---------------------------------------------------------------------------------------------------

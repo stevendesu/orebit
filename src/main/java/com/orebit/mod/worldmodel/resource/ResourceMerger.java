@@ -3,6 +3,7 @@ package com.orebit.mod.worldmodel.resource;
 import java.util.Arrays;
 
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
+import com.orebit.mod.worldmodel.hpa.RegionShardResidency;
 
 /**
  * Roll-up driver for the {@link ResourcePyramid} — the resource-tally analog of
@@ -54,8 +55,19 @@ public final class ResourceMerger {
      * {@link com.orebit.mod.worldmodel.hpa.PyramidMerger#mergeUpFragments}.
      */
     public static void mergeUpTallies(ResourcePyramid p, int level0Rx, int level0Ry, int level0Rz) {
-        int childLevel = 0;
-        int crx = level0Rx, cry = level0Ry, crz = level0Rz;
+        mergeUpFrom(p, 0, level0Rx, level0Ry, level0Rz);
+    }
+
+    /**
+     * Generalized upward walk: recompute every ancestor of the row {@code (childLevel, crx, cry, crz)} as the
+     * per-column log₂-sum of its children, ascending to {@link ResourcePyramid#RESOURCE_TOP_LEVEL}, stopping the
+     * moment a parent's vector is unchanged (damping). {@link #mergeUpTallies} is the {@code childLevel == 0} case;
+     * the reconciler (DESIGN-worldmodel-persistence.md §2b) calls it with {@code childLevel == }
+     * {@link RegionAddress#SHARD_LEVEL} to propagate a reconciled shard-top tally up to the true-global top.
+     * Recomputes only PARENTS ({@code childLevel+1} and up); the row itself is assumed current (a real leaf/merge
+     * or a {@link #reconcileNode} the caller already ran).
+     */
+    public static void mergeUpFrom(ResourcePyramid p, int childLevel, int crx, int cry, int crz) {
         // Roll up to RESOURCE_TOP_LEVEL (true-global) — higher than the region A*'s MAX_COARSE_LEVEL so the
         // compass can surface resources seen anywhere; damping keeps the extra levels cheap (§5; RegionAddress).
         while (childLevel < ResourcePyramid.RESOURCE_TOP_LEVEL) {
@@ -75,6 +87,20 @@ public final class ResourceMerger {
     }
 
     /**
+     * Recompute the single tally row {@code (level, rx, ry, rz)} in place as the per-column log₂-sum of its
+     * children — the per-cell reconcile primitive (DESIGN-worldmodel-persistence.md §2b). Interns the row if
+     * needed; because the sum reads children through {@code rowIfPresent} it now folds in any freshly-interned
+     * persisted children, so a straddle coarse tally becomes correct-full. Runs through the guarded
+     * {@link #recomputeParent}, so it composes with the Stage-2 clobber-guard: a child still in a non-resident
+     * OTHER shard DEFERS the recompute (the stored tally is kept and re-marked reconcile-pending) rather than
+     * being summed down toward a partial child set.
+     */
+    public static void reconcileNode(ResourcePyramid p, int level, int rx, int ry, int rz) {
+        final int row = p.rowFor(level, rx, ry, rz);
+        recomputeParent(p, level, row, rx, ry, rz);
+    }
+
+    /**
      * Recompute the interned parent row {@code (parentLevel, parentRow)} (region coords {@code prx,pry,prz}) as
      * the per-column log₂-sum of its children, writing it only if it differs from the stored vector. Returns
      * whether the parent's vector changed (drives the walk's early-out).
@@ -83,6 +109,39 @@ public final class ResourceMerger {
                                            int prx, int pry, int prz) {
         final int childLevel = parentLevel - 1;
         final int children = RegionAddress.childCount(parentLevel);
+
+        // Stage-2 clobber-guard (DESIGN-worldmodel-persistence.md — bounded region RAM): the resource-tier analog
+        // of PyramidMerger's guard. If ANY absent child ({@code rowIfPresent < 0}) belongs to a
+        // persisted-on-disk-but-not-resident shard, this child set is only partially loaded, so summing it would
+        // ZERO-OUT the correct, fully-explored persisted coarse tally. DEFER: return false (no change) WITHOUT
+        // reading or writing the parent row — the stored (persisted) vector is kept — and record the node
+        // reconcile-pending. Returning false makes mergeUpTallies' unchanged early-out stop the upward walk for
+        // this chain this pass, exactly as an unchanged recompute would (never clobbers, never a torn state).
+        //   Byte-identical no-op: residency() is null until the startup-flip increment wires it, and empty under
+        // eager-load-all, so isPersistedNonResident is always false and this block is skipped.
+        //   Increment 4 (cold-shard eviction): the deferral key is "absent OR interned-but-UNBUILT" so an EVICTED
+        // child — a row {@link ResourcePyramid#dropRow} zeroed + marked !built but left interned — defers exactly
+        // like a never-loaded one when its shard is persisted-non-resident, keeping the resident coarse tally intact
+        // instead of summing it down toward the partial (evicted-to-zero) child set. Byte-identical under
+        // eager-load-all (isPersistedNonResident always false) and for a genuinely-empty resident leaf.
+        final RegionShardResidency residency = p.residency();
+        if (residency != null) {
+            for (int i = 0; i < children; i++) {
+                final int crx = RegionAddress.childRX(prx, i);
+                final int crz = RegionAddress.childRZ(prz, i);
+                final int cry = RegionAddress.childRY(pry, i, parentLevel);
+                final int childRow = p.rowIfPresent(childLevel, crx, cry, crz);
+                if (childRow >= 0 && p.isBuilt(childLevel, childRow)) continue; // real, resident+built child
+                final int csx = RegionAddress.shardOf(crx, childLevel);
+                final int csz = RegionAddress.shardOf(crz, childLevel);
+                if (residency.isPersistedNonResident(csx, csz)) {
+                    // Request the missing shard be paged in (Stage-2 atomic lazy-load), then keep the persisted tally.
+                    residency.enqueueLoad(csx, csz);
+                    residency.markReconcilePending(parentLevel, prx, pry, prz);
+                    return false; // DEFER — keep the stored (persisted) tally; stop the walk this pass
+                }
+            }
+        }
 
         final byte[] acc = ACC.get();
         final byte[] child = CHILD.get();

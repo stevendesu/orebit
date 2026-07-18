@@ -99,8 +99,14 @@ public final class ConfigValidator {
                 intClamped(props, ConfigKeys.PATHING_NAV_READY_RADIUS_CHUNKS, d.navReadyRadiusChunks(), 0, 64),
                 intClamped(props, ConfigKeys.PATHING_NAV_READY_TIMEOUT_TICKS, d.navReadyTimeoutTicks(), 1, 72_000),
                 floatClamped(props, ConfigKeys.PATHING_HPA_FLUSH_BUDGET_MS, d.hpaFlushBudgetMs(), 0.1f, 1000.0f),
+                // regionShardLoadBudgetMs > 0, ceilinged at 1000 ms (same rail as the other per-tick drain budgets).
+                floatClamped(props, ConfigKeys.PATHING_REGION_SHARD_LOAD_BUDGET_MS, d.regionShardLoadBudgetMs(), 0.1f, 1000.0f),
                 // hpa: 0 disables the periodic flush; upper rail is a sanity cap (~9.5 days) against a typo.
                 intClamped(props, ConfigKeys.HPA_PERSIST_INTERVAL_TICKS, d.persistIntervalTicks(), 0, 16_000_000),
+                bool(props, ConfigKeys.HPA_LAZY_LOAD, d.lazyLoad()),
+                // residentLeafCap >= 0 (0 = unbounded / eviction off); no meaningful upper rail (a large cap just
+                // never binds), so Integer.MAX_VALUE.
+                intClamped(props, ConfigKeys.HPA_RESIDENT_LEAF_CAP, d.residentLeafCap(), 0, Integer.MAX_VALUE),
                 // doors
                 bool(props, ConfigKeys.DOORS_TOGGLE, d.doorToggle()));
     }

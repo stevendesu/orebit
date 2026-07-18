@@ -101,6 +101,17 @@ public final class RegionGrid {
      * teardown is needed). Not yet written by chunk-load — that is phase 4.
      */
     private final ResourcePyramid resourcePyramid;
+    /**
+     * The dimension's shard-residency index (Stage-2 bounded region RAM). Created with the grid and installed on
+     * BOTH pyramids so the clobber-guard ({@link PyramidMerger#combineFragments} /
+     * {@link com.orebit.mod.worldmodel.resource.ResourceMerger#recomputeParent}) and the on-demand shard loader
+     * ({@code RegionShardLoader}) share one view of "which shards are on disk vs. paged in". Under eager-load-all
+     * ({@code hpa.lazyLoad=false}) its persisted-shard index stays EMPTY — {@code isPersistedNonResident} is
+     * always false, the guard never fires, no load is ever enqueued — so the region tier is byte-identical to
+     * before this increment. It only comes alive when {@code RegionPersistence.loadCoarseOnly} populates the
+     * index from a startup directory listing.
+     */
+    private final RegionShardResidency residency;
     /** Dimension floor, resolved once through the {@link LevelBounds} seam (overworld −64). */
     private final int minY;
 
@@ -109,6 +120,9 @@ public final class RegionGrid {
         this.sections = null;
         this.pyramid = new CostPyramid();
         this.resourcePyramid = new ResourcePyramid();
+        this.residency = new RegionShardResidency();
+        this.pyramid.setResidency(residency);
+        this.resourcePyramid.setResidency(residency);
         this.minY = LevelBounds.minY(level);
     }
 
@@ -145,6 +159,9 @@ public final class RegionGrid {
         this.sections = sections;
         this.pyramid = new CostPyramid();
         this.resourcePyramid = new ResourcePyramid();
+        this.residency = new RegionShardResidency();
+        this.pyramid.setResidency(residency);
+        this.resourcePyramid.setResidency(residency);
         this.minY = minY;
     }
 
@@ -160,6 +177,15 @@ public final class RegionGrid {
      */
     public ResourcePyramid resourcePyramid() {
         return resourcePyramid;
+    }
+
+    /**
+     * The dimension's shard-residency index (Stage-2 bounded region RAM) — the discriminator the clobber-guard
+     * consults and the queue {@code RegionShardLoader} drains. Never {@code null} (created with the grid); its
+     * persisted-shard index is empty unless {@code RegionPersistence.loadCoarseOnly} populated it.
+     */
+    public RegionShardResidency residency() {
+        return residency;
     }
 
     /** The dimension floor (vertical origin for region {@code ry}; overworld −64). */
@@ -195,6 +221,16 @@ public final class RegionGrid {
         if (row != -1 && pyramid.isBuilt(0, row)) {
             return; // already computed
         }
+        // Stage-2 atomic lazy-load: a planner touch of an unbuilt leaf whose SHARD is persisted-on-disk-but-not-
+        // resident means "on disk, not yet paged in" — request the load (the RegionShardLoader drain pages it in
+        // next tick) and return the §6 optimistic default for THIS tick. NO disk I/O in the accessor. Under
+        // eager-load-all the persisted-shard index is empty ⇒ isPersistedNonResident is false ⇒ this is a no-op
+        // (a genuinely-unexplored leaf never enqueues). The shard of a level-0 leaf is shardOf(rx|rz, 0) = coord>>5.
+        final int sx = RegionAddress.shardOf(rx, 0);
+        final int sz = RegionAddress.shardOf(rz, 0);
+        if (residency.isPersistedNonResident(sx, sz)) {
+            residency.enqueueLoad(sx, sz);
+        }
         rebuildLeaf(rx, ry, rz);
     }
 
@@ -225,6 +261,10 @@ public final class RegionGrid {
         RegionFragments rf = pyramid.ensureFragments(0, r);
         FragmentLeafComputer.computeLeaf(column[ry], rf);
         pyramid.setBuilt(0, r, true);
+        // Stage-2 cold-shard eviction (increment 4): a leaf we actually (re)built is recent activity in its shard —
+        // bump the shard's LRU recency stamp so the evictor treats it as more-recently-used than idle shards. Cold
+        // (once per real leaf build, not per search node — a built leaf short-circuits in ensureLeaf), thread-safe.
+        residency.touchShard(RegionAddress.shardOf(rx, 0), RegionAddress.shardOf(rz, 0));
     }
 
     /**

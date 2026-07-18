@@ -10,7 +10,9 @@ import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
 import com.orebit.mod.platform.PlatformEvents;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.HpaMaintenance;
+import com.orebit.mod.worldmodel.persistence.RegionEvictor;
 import com.orebit.mod.worldmodel.persistence.RegionPersistence;
+import com.orebit.mod.worldmodel.persistence.RegionShardLoader;
 import com.orebit.mod.worldmodel.pathing.ChunkNavLoader;
 import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
 import com.orebit.mod.worldmodel.pathing.NavReclaim;
@@ -80,7 +82,18 @@ public final class OrebitCommon {
         // AFTER ConfigLoader::load (loadAll itself needs no config, but the periodic flush below reads
         // hpa.persistIntervalTicks). SERVER_STARTED runs on the tick thread before any player joins, so the
         // interning + coarse-level replay race nothing. Missing/corrupt files rebuild from the live world.
-        events.onServerStarted(RegionPersistence::loadAll);
+        //   hpa.lazyLoad (Stage-2 bounded region RAM) switches the startup load path: TRUE = coarse-only startup
+        // (loadCoarseOnly loads only the per-dimension coarse levels + indexes the shard files, and
+        // RegionShardLoader pages shards in on demand — bounds RAM); FALSE (the shipped default until the whole
+        // stage is in-game-verified) = the eager loadAll above. loadCoarseOnly needs the config, so this stays
+        // registered after ConfigLoader::load.
+        events.onServerStarted(server -> {
+            if (ConfigLoader.config().lazyLoad()) {
+                RegionPersistence.loadCoarseOnly(server);
+            } else {
+                RegionPersistence.loadAll(server);
+            }
+        });
 
         // The authoritative flush: on a graceful stop, after the tick loop halts (no concurrent writer), write
         // every explored dimension's region tier. This is the PRIMARY persistence trigger for the auto-stop /
@@ -100,6 +113,21 @@ public final class OrebitCommon {
         // ALL loaders/eras here (unlike onServerStopping), so even an impl that leaves onServerStopping on the
         // default no-op still persists recent state. Cheap when clean (one counter bump + a dirty-set test).
         events.onWorldTickEnd(RegionPersistence::tick);
+
+        // Stage-2 on-demand region-shard lazy-load drain (DESIGN-worldmodel-persistence.md — bounded region RAM):
+        // once per level-tick, page in any shards the clobber-guard / RegionGrid.ensureLeaf requested, atomically
+        // and under the pathing.regionShardLoadBudgetMs budget. Registered unconditionally: under eager-load-all
+        // (hpa.lazyLoad=false) the residency's persisted-shard index is empty, so nothing is ever requested and
+        // this is a cheap per-tick queue-empty test. Sits beside RegionPersistence::tick / HpaMaintenance::flush.
+        events.onWorldTickEnd(RegionShardLoader::drain);
+
+        // Stage-2 cold-shard EVICTION (DESIGN-worldmodel-persistence.md — bounded region RAM, increment 4): once per
+        // level-tick, if resident built L0 cost leaves exceed hpa.residentLeafCap, page the coldest FULLY-UNLOADED
+        // shards back to disk (LRU, flush-if-dirty first, keep the coarse tier resident) until back under cap. This
+        // is the half that actually BOUNDS live region RAM; the RegionShardLoader drain above pages evicted shards
+        // back in on demand. Registered unconditionally: with hpa.residentLeafCap=0 (the default) it is a no-op
+        // (eviction off). Sits beside RegionPersistence::tick / RegionShardLoader::drain.
+        events.onWorldTickEnd(RegionEvictor::sweep);
 
         // NavSection retirement drain (DESIGN-background-pathfinding.md §4.1): once per level-tick, advance
         // the reclamation epoch and return retired sections to the pool once no in-flight background search
