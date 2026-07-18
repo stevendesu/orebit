@@ -102,8 +102,19 @@ public final class PyramidMerger {
      * above to change. O(levels) per leaf change (HPA-FRAGMENTS.md §6.5).
      */
     public static void mergeUpFragments(CostPyramid p, int level0Rx, int level0Ry, int level0Rz) {
-        int childLevel = 0;
-        int crx = level0Rx, cry = level0Ry, crz = level0Rz;
+        mergeUpFrom(p, 0, level0Rx, level0Ry, level0Rz);
+    }
+
+    /**
+     * Generalized upward walk: recompute every ancestor of the node {@code (childLevel, crx, cry, crz)} from its
+     * children via {@link #combineFragments}, ascending to {@link RegionAddress#MAX_COARSE_LEVEL}, stopping the
+     * moment a parent's recompute leaves its output unchanged (the §6.5 damping). {@link #mergeUpFragments} is the
+     * {@code childLevel == 0} case (a leaf changed); the reconciler (DESIGN-worldmodel-persistence.md §2b) calls it
+     * with {@code childLevel == }{@link RegionAddress#SHARD_LEVEL} to propagate a reconciled shard-top cell above
+     * the shard. Recomputes only PARENTS ({@code childLevel+1} and up); the node itself is assumed current (a real
+     * leaf, or a {@link #reconcileNode} the caller already ran).
+     */
+    public static void mergeUpFrom(CostPyramid p, int childLevel, int crx, int cry, int crz) {
         // Roll up only to MAX_COARSE_LEVEL — no world-root node (HPA-FRAGMENTS.md §S5; RegionAddress).
         while (childLevel < RegionAddress.MAX_COARSE_LEVEL) {
             int parentLevel = childLevel + 1;
@@ -124,6 +135,20 @@ public final class PyramidMerger {
             crx = prx; cry = pry; crz = prz;
             childLevel = parentLevel;
         }
+    }
+
+    /**
+     * Recompute the single node {@code (level, rx, ry, rz)} in place from its children via
+     * {@link #combineFragments} — the per-cell reconcile primitive (DESIGN-worldmodel-persistence.md §2b). Interns
+     * the row if needed, then recombines it; because the combine reads children through {@code rowIfPresent} it
+     * now UNIONs the live children with any freshly-interned persisted children, so a straddle coarse cell becomes
+     * correct-full. Runs through the guarded {@link #combineFragments}, so it composes with the Stage-2
+     * clobber-guard: if a child still lives in a non-resident OTHER shard the recompute is DEFERRED (the cell is
+     * left intact and re-marked reconcile-pending) rather than clobbered.
+     */
+    public static void reconcileNode(CostPyramid p, int level, int rx, int ry, int rz) {
+        final int row = p.rowFor(level, rx, ry, rz);
+        combineFragments(p, level, row, rx, ry, rz);
     }
 
     /** Built-state + content signature of a node (a distinct sentinel for unbuilt/absent), for the merge damping. */
@@ -181,6 +206,49 @@ public final class PyramidMerger {
     public static void combineFragments(CostPyramid p, int parentLevel, int parentRow, int prx, int pry, int prz) {
         final int childLevel = parentLevel - 1;
         final int children = RegionAddress.childCount(parentLevel);
+
+        // Stage-2 clobber-guard (DESIGN-worldmodel-persistence.md — bounded region RAM): if ANY absent child
+        // ({@code rowIfPresent < 0}) belongs to a shard that is persisted-on-disk-but-not-resident, this child set
+        // is only PARTIALLY loaded, so an optimistic rollup here would OVERWRITE the correct, fully-explored
+        // persisted coarse value with a partial one. DEFER instead: return before touching the parent's fragments
+        // or built flag (leaving the persisted-loaded / prior value intact) and record the node reconcile-pending
+        // for a later increment to re-merge once the missing shards page in. An interned-but-unbuilt child
+        // (rowIfPresent >= 0) is resident-but-empty and keeps today's optimistic treatment — the guard keys ONLY on
+        // genuinely-absent (uninterned) children, exactly as the merge's absent-child branch does.
+        //   Byte-identical no-op invariant: residency() is null until the startup-flip increment wires it, and even
+        // when set it is empty under eager-load-all, so isPersistedNonResident is always false and this whole block
+        // is skipped — the item-gathering / union-find / footprint code below is unchanged. When it DOES defer, the
+        // early return leaves built + fragments untouched, and mergeUpFragments' unchanged-signature early-out then
+        // stops the upward walk for this chain this pass (the parent didn't change), which never clobbers and never
+        // leaves a torn state.
+        //   Increment 4 (cold-shard eviction) broadens the deferral key from "absent (uninterned)" to "absent OR
+        // interned-but-UNBUILT" so an EVICTED child — a row {@link CostPyramid#dropRow} nulled + marked !built but
+        // left interned (the map is never compacted) — is treated exactly like a never-loaded one: the guard defers
+        // on it when its shard is persisted-non-resident, so a live re-merge of a coarse ancestor over an evicted
+        // shard keeps the resident coarse value intact (and enqueues the reload) instead of clobbering it with a
+        // partial rollup. A present-AND-built child is the only "real, resident" case and is skipped. This stays
+        // byte-identical under eager-load-all (residency empty ⇒ isPersistedNonResident always false) and for a
+        // genuinely-empty RESIDENT leaf (interned-unbuilt, shard resident ⇒ not persisted-non-resident ⇒ not
+        // deferred, then the combine below treats it optimistically exactly as before).
+        final RegionShardResidency residency = p.residency();
+        if (residency != null) {
+            for (int i = 0; i < children; i++) {
+                final int crx = RegionAddress.childRX(prx, i);
+                final int crz = RegionAddress.childRZ(prz, i);
+                final int cry = RegionAddress.childRY(pry, i, parentLevel);
+                final int childRow = p.rowIfPresent(childLevel, crx, cry, crz);
+                if (childRow >= 0 && p.isBuilt(childLevel, childRow)) continue; // real, resident+built child
+                final int csx = RegionAddress.shardOf(crx, childLevel);
+                final int csz = RegionAddress.shardOf(crz, childLevel);
+                if (residency.isPersistedNonResident(csx, csz)) {
+                    // Request the missing shard be paged in (Stage-2 atomic lazy-load) so the deferred cell is
+                    // actually reconciled once it lands, then keep the persisted value for this pass.
+                    residency.enqueueLoad(csx, csz);
+                    residency.markReconcilePending(parentLevel, prx, pry, prz);
+                    return; // DEFER — keep the existing (persisted) parent value; do not recompute this pass
+                }
+            }
+        }
 
         final int[] itemSlot = ITEM_SLOT.get();
         final int[] itemMask = ITEM_MASK.get();

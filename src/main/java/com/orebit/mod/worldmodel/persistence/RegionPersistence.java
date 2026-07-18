@@ -21,6 +21,7 @@ import com.orebit.mod.platform.DimensionId;
 import com.orebit.mod.worldmodel.hpa.CostPyramid;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
+import com.orebit.mod.worldmodel.hpa.RegionShardResidency;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
 import net.minecraft.server.MinecraftServer;
@@ -137,6 +138,70 @@ public final class RegionPersistence {
             RegionGrid grid = RegionGrid.of(level);
             for (Path f : costFiles) loadCostFile(grid, f);
             for (Path f : resFiles) loadResourceFile(grid, f);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Load (COARSE-ONLY, at SERVER_STARTED, Stage-2 lazy) — decode only the coarse levels + index the shards
+    // ---------------------------------------------------------------------------------------------------
+
+    /**
+     * The Stage-2 bounded-region-RAM startup (DESIGN-worldmodel-persistence.md — the coarse-only-startup +
+     * on-demand lazy-load increment): for every dimension, decode ONLY the two per-dimension coarse files
+     * ({@code hpa.coarse.bin} cost L6, {@code res.coarse.bin} resource L6–21) directly into their levels, and
+     * build the {@link RegionShardResidency} <b>persisted-shard index</b> from a directory LISTING of the shard
+     * files ({@code hpa.<X>.<Z>.bin}/{@code res.<X>.<Z>.bin}) — parsing {@code (X,Z)} out of the FILENAMES, never
+     * reading a shard body. The shards themselves stay on disk and are paged in on demand by {@code RegionShardLoader}
+     * as the planner touches their leaves; {@code residentShards} starts empty. This is the {@code hpa.lazyLoad=true}
+     * alternative to {@link #loadAll}: RAM is bounded to the coarse tier + the shards actually visited, and the
+     * clobber-guard (armed by the now-populated index) keeps the first live leaf builds from clobbering the
+     * persisted coarse values until their shards land. Runs on the tick thread before any player joins.
+     */
+    public static void loadCoarseOnly(MinecraftServer server) {
+        for (ServerLevel level : server.getAllLevels()) {
+            Path dir = dimDir(server, level);
+            if (!Files.isDirectory(dir)) continue;
+
+            // Persisted-shard index: FILENAMES only (no bodies read) across both cost + resource shard files.
+            Set<Long> shardKeys = new HashSet<>();
+            collectShardKeys(dir, COST_GLOB, shardKeys);
+            collectShardKeys(dir, RESOURCE_GLOB, shardKeys);
+
+            Path costCoarse = dir.resolve(COST_COARSE_FILE);
+            Path resCoarse = dir.resolve(RESOURCE_COARSE_FILE);
+            boolean anyCoarse = Files.isRegularFile(costCoarse) || Files.isRegularFile(resCoarse);
+            if (shardKeys.isEmpty() && !anyCoarse) continue; // nothing persisted for this dimension
+
+            RegionGrid grid = RegionGrid.of(level);
+            if (Files.isRegularFile(costCoarse)) loadCostFile(grid, costCoarse);
+            if (Files.isRegularFile(resCoarse)) loadResourceFile(grid, resCoarse);
+            grid.residency().setPersistedIndex(shardKeys); // residentShards stays empty — nothing paged in yet
+        }
+    }
+
+    /** Add the {@link #shardKey} of every {@code <prefix>.<X>.<Z>.bin} file matching {@code glob} in {@code dir}
+     *  to {@code out} (the coarse file's {@code <prefix>.coarse.bin} name yields no key and is skipped). */
+    private static void collectShardKeys(Path dir, String glob, Set<Long> out) {
+        for (Path f : listMatching(dir, glob)) {
+            Long k = shardKeyFromFilename(f.getFileName().toString());
+            if (k != null) out.add(k);
+        }
+    }
+
+    /**
+     * Parse a shard filename ({@code hpa.<X>.<Z>.bin} / {@code res.<X>.<Z>.bin}) into its {@link #shardKey}, or
+     * {@code null} for the {@code <prefix>.coarse.bin} coarse file or any name that is not a well-formed shard.
+     * Handles negative coords ({@code hpa.-1.2.bin}). Package-visible for headless testing (pure string parse).
+     */
+    static Long shardKeyFromFilename(String name) {
+        if (!name.endsWith(".bin")) return null;
+        String stem = name.substring(0, name.length() - ".bin".length()); // "hpa.<X>.<Z>" or "hpa.coarse"
+        String[] parts = stem.split("\\.");
+        if (parts.length != 3) return null; // "<prefix>.coarse" is 2 parts → skipped; a shard is 3
+        try {
+            return shardKey(Integer.parseInt(parts[1]), Integer.parseInt(parts[2]));
+        } catch (NumberFormatException e) {
+            return null; // not a numeric shard name
         }
     }
 
@@ -376,6 +441,28 @@ public final class RegionPersistence {
         flushDimension(server, level, grid, onlyShards, coarseDirty);
     }
 
+    /**
+     * Whether the level-5 shard {@code shardKey} has unflushed changes in {@code level} — the evictor's
+     * flush-if-dirty gate ({@code RegionEvictor}), so an evicted shard's on-disk copy is current before its RAM is
+     * freed. Cheap (a set lookup), tick-thread.
+     */
+    public static boolean isShardDirty(ServerLevel level, long shardKey) {
+        Set<Long> s = DIRTY_SHARDS.get(level);
+        return s != null && s.contains(shardKey);
+    }
+
+    /**
+     * Flush ONE shard's cost + resource leaf files (levels 0..5) to disk and clear its dirty mark — the evictor's
+     * flush-before-evict (increment 4). No coarse write: eviction keeps the coarse levels resident + unchanged, so
+     * the on-disk coarse files stay current from the last full/periodic flush. Cold, tick-thread; never throws
+     * (each file write is an independent atomic replace via {@link #writeAtomic}).
+     */
+    public static void flushShard(MinecraftServer server, ServerLevel level, RegionGrid grid, int sx, int sz) {
+        flushDimension(server, level, grid, Collections.singleton(shardKey(sx, sz)), false);
+        Set<Long> s = DIRTY_SHARDS.get(level);
+        if (s != null) s.remove(shardKey(sx, sz));
+    }
+
     /** Drop all dirty/tick bookkeeping (server stop). */
     public static void clear() {
         DIRTY_SHARDS.clear();
@@ -403,8 +490,9 @@ public final class RegionPersistence {
     // Paths
     // ---------------------------------------------------------------------------------------------------
 
-    /** {@code <world>/orebit/<sanitized-dim>} for a level. {@code LevelResource.ROOT} is stable 1.17→26.x. */
-    private static Path dimDir(MinecraftServer server, ServerLevel level) {
+    /** {@code <world>/orebit/<sanitized-dim>} for a level. {@code LevelResource.ROOT} is stable 1.17→26.x.
+     *  Package-visible so {@code RegionShardLoader} resolves the same per-dimension directory for its lazy loads. */
+    static Path dimDir(MinecraftServer server, ServerLevel level) {
         return server.getWorldPath(LevelResource.ROOT)
                 .resolve(ROOT_DIR)
                 .resolve(sanitize(dimensionId(level)));
