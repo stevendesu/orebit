@@ -105,6 +105,7 @@ class RideBubbleColumnFollowerTest {
         @Override public void setForward(float zza) { }
         @Override public void setSprinting(boolean s) { }
         @Override public void setJumping(boolean j) { }
+        @Override public void setSneak(boolean s) { }
         @Override public void sinkInWater() { }
         @Override public boolean solidAt(int x, int y, int z) { return false; }
         @Override public boolean airAt(int x, int y, int z) { return true; }

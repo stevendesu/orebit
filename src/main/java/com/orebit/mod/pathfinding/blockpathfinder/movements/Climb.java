@@ -77,10 +77,38 @@ public final class Climb implements Movement {
     public static final float CLIMB_DOWN_COST = 20f / 3.0f;
 
     /**
-     * Ticks for the grab (entry) step — one sideways walk step into the climb column, priced exactly as
-     * the flat walk it physically is ({@link Traverse#FLAT_COST}).
+     * The vanilla crouch (sneak) horizontal movement-input factor: a sneaking player moves at ~0.3× walk
+     * speed (walk 4.317 m/s → sneak ~1.295 m/s). This is the input the bot must hold to translate ALONG a
+     * climbable without changing height — {@code Player.isSuppressingSlidingDownLadder()} (==
+     * {@code isShiftKeyDown()}) zeroes the {@code −0.15}/t climbable fall in
+     * {@code LivingEntity.handleOnClimbable}, so a sneaking bot holds its height on a vine/ladder while it
+     * eases sideways (verified against 1.21.11 vanilla; both conjuncts — {@code motion.y < 0} and
+     * {@code this instanceof Player} — hold for the ServerPlayer-subclass bot).
+     *
+     * <p><b>Single source of truth</b> for the sneak factor: this constant prices {@link #GRAB_LATERAL_COST}
+     * (the PLAN cost) AND is read by the follower ({@link com.orebit.mod.AllyBotEntity}) to scale the bot's
+     * horizontal movement input while sneaking — the client-only slowdown vanilla's {@code LocalPlayer.aiStep}
+     * applies, which the headless bot otherwise skips. With it applied, the executed lateral speed (~0.065 b/t,
+     * below the ±0.15 climbable clamp) genuinely matches the ~15.44 t/block plan cost instead of coasting at
+     * the clamp.
      */
-    public static final float GRAB_COST = Traverse.FLAT_COST;
+    public static final float SNEAK_SPEED_FACTOR = 0.3f;
+
+    /**
+     * Ticks per block for a LATERAL grab/cling step (Δy == 0) — a genuine must-cling sideways move on a
+     * climbable: entering a {@link com.orebit.mod.worldmodel.navblock.NavBlock#SHAPE_OTHER SHAPE_OTHER}
+     * ladder / scaffolding WALL, or clinging to a vine hanging over air. Physically derived:
+     * {@code FLAT_COST / SNEAK_SPEED_FACTOR = 4.633 / 0.3 ≈ 15.44}. To translate laterally along a climbable
+     * WITHOUT ratcheting up (holding jump climbs at {@code +0.2}/t) or sliding down (the {@code −0.15}/t
+     * fall clamp), the bot must SNEAK, which caps its horizontal input at ~0.3× walk (~1.295 m/s =
+     * 0.065 b/t). Vanilla also clamps on-climbable horizontal motion to ±0.15 b/t, but the sneak speed
+     * (0.065) is well UNDER that clamp, so sneak — not the clamp — governs the traversal time. This is far
+     * dearer than a flat walk ({@link Traverse#FLAT_COST} 4.633), so A* only clings when there is genuinely
+     * no walkable footing; the guard in {@link #candidates} additionally refuses the cling outright whenever
+     * a plain Traverse/Descend route through the (passable) climbable already reaches standable ground.
+     * (Vertical grabs — climb up/down — keep their own {@link #CLIMB_UP_COST}/{@link #CLIMB_DOWN_COST}.)
+     */
+    public static final float GRAB_LATERAL_COST = Traverse.FLAT_COST / SNEAK_SPEED_FACTOR;
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
@@ -131,29 +159,65 @@ public final class Climb implements Movement {
             int nx = x + d[0];
             int nz = z + d[1];
             int pn = ctx.packedAt(nx, y + 1, nz);
-            if (pn == MovementContext.UNBUILT
-                    || !ctx.isClimbable(ctx.descriptorOf(nx, y + 1, nz, pn))) {
-                continue;
-            }
+            if (pn == MovementContext.UNBUILT) continue;
+            long feetD = ctx.descriptorOf(nx, y + 1, nz, pn);
+            if (!ctx.isClimbable(feetD)) continue;
             int ph = ctx.packedAt(nx, y + 2, nz);
             if (ph == MovementContext.UNBUILT
                     || !ctx.passableOrClimbable(ctx.descriptorOf(nx, y + 2, nz, ph))) {
                 continue;
             }
-            out.accept(nx, y, nz, GRAB_COST);
+
+            // Standability guard — the fix for the "cling to a vine that hangs over walkable ground" flood.
+            // A PASSABLE climbable (a vine — empty shape) is NOT a wall: a plain Traverse/Descend already
+            // steps onto the standable floor beneath it, its body passing THROUGH the passable vine, so a
+            // lateral cling here is REDUNDANT (and, held at the wrong Δy, ratchets the bot up the vine). Emit
+            // the grab ONLY for a genuine must-cling: either the feet climbable is a SHAPE_OTHER wall
+            // (ladder / scaffolding — NOT passable, so no walk enters it), or the vine has NO standable
+            // footing at the destination floor (nx,y,nz) NOR one below it (nx,y-1,nz) — a true mid-air cling.
+            // Both levels are checked because the walk alternative lands the bot either AT the node floor (a
+            // grass cell with the vine in the body) or ONE below via Descend (grass under a full vine column).
+            if (ctx.passable(feetD)) {
+                int pf0 = ctx.packedAt(nx, y, nz);
+                boolean floorStandable = pf0 != MovementContext.UNBUILT
+                        && ctx.standable(ctx.descriptorOf(nx, y, nz, pf0));
+                int pfb = ctx.packedAt(nx, y - 1, nz);
+                boolean belowStandable = pfb != MovementContext.UNBUILT
+                        && ctx.standable(ctx.descriptorOf(nx, y - 1, nz, pfb));
+                if (floorStandable || belowStandable) continue; // walkable — Traverse/Descend own it
+            }
+
+            out.accept(nx, y, nz, GRAB_LATERAL_COST);
         }
     }
 
     /**
-     * Hold the column and let the vanilla climbable physics do the vertical work: re-centre on the target
-     * column (a climb segment is vertical/degenerate — this faces the column and eases forward to ~0 once
-     * centred, which also keeps the bot pressed onto the surface), and hold jump only when the waypoint is
-     * above the feet (vanilla climbs at {@code +0.2}/t while jumping on a climbable). Going down needs no
-     * input — {@code onClimbable} clamps the descent to {@code −0.15}/t and gravity does the rest.
+     * Hold the column and let the vanilla climbable physics do the vertical work, keyed on the MOVE's
+     * intended Δy — {@code path.ty() - path.sy()}, the planned dest-floor minus source-floor — NOT the bot's
+     * current (possibly sagging) height. Keying on {@code b.y()} was the vine-flood bug: on a non-solid vine
+     * "floor" the bot sags below the feet-target {@code ty}, so {@code ty > b.y()} held jump on a LATERAL
+     * move and ratcheted the bot UP the vine ({@code +0.2}/t) instead of easing across it. The three cases:
+     * <ul>
+     *   <li><b>Δy &gt; 0 (climb up)</b> — hold jump: vanilla climbs at {@code +0.2}/t while jumping on a
+     *       climbable.</li>
+     *   <li><b>Δy == 0 (lateral grab/cling)</b> — hold SNEAK: {@code isSuppressingSlidingDownLadder()} zeroes
+     *       the {@code −0.15}/t slide so the bot holds its height, and re-centre eases it sideways along the
+     *       surface. No jump (jumping would climb).</li>
+     *   <li><b>Δy &lt; 0 (climb down)</b> — no input: {@code onClimbable} clamps the descent to {@code −0.15}/t
+     *       and gravity does the rest (a held sneak here would stop the intended descent).</li>
+     * </ul>
+     * Re-centre first (a climb/cling segment is near-degenerate — face the column, ease forward to ~0 once
+     * centred, keeping the bot pressed onto the surface).
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
         SteerControl.recenterOnTarget(b, path);
-        if (path.ty() > b.y() + 0.1) b.setJumping(true);
+        double ddy = path.ty() - path.sy(); // the MOVE's planned Δy (feet targets), not the sagging pose
+        if (ddy > 0.1) {
+            b.setJumping(true);  // climb up
+        } else if (ddy >= -0.1) {
+            b.setSneak(true);    // lateral: hold height (suppress the ladder/vine slide) and ease across
+        }
+        // else (climb down): no jump, no sneak — vanilla slow-fall carries the descent
     }
 }

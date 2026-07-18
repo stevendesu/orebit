@@ -87,6 +87,16 @@ public interface BotSteering {
     void setJumping(boolean jumping);
 
     /**
+     * Hold/release the sneak (crouch) input — vanilla {@code Entity.setShiftKeyDown}. On a climbable this is
+     * the height-hold input: {@code Player.isSuppressingSlidingDownLadder()} (== {@code isShiftKeyDown()})
+     * zeroes the {@code −0.15}/t slide in {@code LivingEntity.handleOnClimbable}, so a sneaking bot holds its
+     * position on a vine/ladder while it eases sideways ({@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Climb}'s lateral grab). Reset to {@code false}
+     * each tick by the follower, like {@link #setJumping}/{@link #setSprinting}, so a move must re-assert it.
+     */
+    void setSneak(boolean sneaking);
+
+    /**
      * Sink in water — the descend half of the water vertical control, the effect of <b>holding shift</b>.
      * Vanilla applies the rise half ({@code jumpInLiquid}, {@code +0.04}) from the shared {@code LivingEntity}
      * tick (so {@link #setJumping} works), but the sink half ({@code LocalPlayer.goDownInWater}, {@code -0.04})

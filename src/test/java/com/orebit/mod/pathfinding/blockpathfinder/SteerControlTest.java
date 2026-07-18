@@ -25,7 +25,7 @@ public class SteerControlTest {
         // recorded outputs
         float forward = Float.NaN;
         double faceDx, faceDz;
-        boolean sprinting, jumping, sank;
+        boolean sprinting, jumping, sank, sneaking;
 
         FakeBot(double x, double y, double z) { this.x = x; this.y = y; this.z = z; }
 
@@ -49,6 +49,7 @@ public class SteerControlTest {
         @Override public void setForward(float zza) { forward = zza; }
         @Override public void setSprinting(boolean s) { sprinting = s; }
         @Override public void setJumping(boolean j) { jumping = j; }
+        @Override public void setSneak(boolean s) { sneaking = s; }
         @Override public void sinkInWater() { sank = true; }
         // Reconcile seam — unused by the pure-geometry SteerControl tests, stubbed to satisfy the interface.
         @Override public boolean solidAt(int x, int y, int z) { return false; }
