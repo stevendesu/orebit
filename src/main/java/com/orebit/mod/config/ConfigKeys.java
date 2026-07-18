@@ -212,6 +212,17 @@ public final class ConfigKeys {
      */
     public static final String PATHING_HPA_FLUSH_BUDGET_MS = "pathing.hpaFlushBudgetMs";
     /**
+     * {@code float > 0} — the per-level per-tick wall-clock budget (milliseconds) for the Stage-2 <b>region-shard
+     * lazy-load</b> drain ({@code RegionShardLoader}), the region-persistence analog of
+     * {@link #PATHING_CHUNK_BUILD_BUDGET_MS}. When {@link com.orebit.mod.config.ConfigKeys#HPA_LAZY_LOAD hpa.lazyLoad}
+     * is on, a coarse-only startup pages shard leaves in on demand; each whole-shard load is atomic (measured
+     * ~11–34 ms, tick-safe now that the on-disk format is un-gzipped) and this budget bounds how many shards a
+     * single tick pages in, with a hardcoded ≥1-per-tick count backstop so progress is always guaranteed. Elapsed
+     * is checked after each shard (worst-case overshoot one shard). Clamped to {@code (0, 1000]} ms. Default
+     * {@code 2.0}. Ignored under eager-load-all (no shards are ever requested).
+     */
+    public static final String PATHING_REGION_SHARD_LOAD_BUDGET_MS = "pathing.regionShardLoadBudgetMs";
+    /**
      * {@code int >= 0} — the radius (in chunks) of the ring around the bot whose NavGrid must be built before
      * the bot plans a path. {@code N} ⇒ a {@code (2N+1)²} chunk ring must all be nav-built. NavGrids build
      * asynchronously over a few ticks after chunks load, and the planner reads an unbuilt cell as AIR, so
@@ -242,6 +253,29 @@ public final class ConfigKeys {
      * runs). Default {@code 6000} (≈ 5 minutes at 20 t/s), matching vanilla autosave feel.
      */
     public static final String HPA_PERSIST_INTERVAL_TICKS = "hpa.persistIntervalTicks";
+    /**
+     * {@code boolean} — page the persisted region tier in <b>lazily</b> (Stage-2 bounded region RAM): load ONLY
+     * the per-dimension coarse levels at server start ({@code RegionPersistence.loadCoarseOnly}) and stream each
+     * per-shard leaf file in on demand as the planner touches it (the atomic {@code RegionShardLoader}), instead
+     * of eager-loading every shard up front ({@code loadAll}). Bounds RAM to the coarse tier + the shards actually
+     * visited. <b>Default {@code false}</b> for now — eager-load-all stays the shipped behaviour until the whole
+     * bounded-RAM stage is in-game-verified; flip to {@code true} to opt into lazy loading. Requires a server
+     * restart to change (it governs the startup load path).
+     */
+    public static final String HPA_LAZY_LOAD = "hpa.lazyLoad";
+    /**
+     * {@code int >= 0} — the Stage-2 <b>bounded region RAM</b> target: the maximum number of resident BUILT
+     * level-0 cost leaves (the dominant region-tier RAM cost, ~1.6–5.8 KB each) the cold-shard evictor
+     * ({@code RegionEvictor}) keeps paged in. <b>Default {@code 0} = UNBOUNDED / eviction OFF</b> — the evictor is
+     * a no-op, so bounded RAM stays opt-in until the whole stage is in-game-verified. A positive value bounds RAM:
+     * when the resident built-leaf count exceeds it, the evictor pages the coldest shards whose backing chunk
+     * columns are <b>all currently unloaded</b> (LRU by last-touch, flushing any dirty shard first) back to disk —
+     * keeping the coarse (level-6) tier resident — and the clobber-guard + {@code RegionShardLoader} page them back
+     * in on demand when the planner next touches them (byte-identical round-trip). Pairs naturally with
+     * {@link #HPA_LAZY_LOAD} (eviction converts an eager-loaded shard into a persisted-non-resident one either way).
+     * Read once per eviction sweep off {@code onWorldTickEnd}, never on the search hot path.
+     */
+    public static final String HPA_RESIDENT_LEAF_CAP = "hpa.residentLeafCap";
 
     // ---- doors: how the bot deals with doors in its path --------------------------------------------
     /**

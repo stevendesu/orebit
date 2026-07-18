@@ -294,6 +294,10 @@ public final class ConfigLoader {
             line(w, "# drains the (small) dirty set fully; a bulk edit amortizes over a few ticks. Elapsed is");
             line(w, "# checked after each leaf. Bounded by a hardcoded leaf-count backstop. Clamped to (0, 1000] ms.");
             kv(w, ConfigKeys.PATHING_HPA_FLUSH_BUDGET_MS, d.hpaFlushBudgetMs());
+            line(w, "# Per-tick wall-clock budget (ms, > 0) for the Stage-2 region-shard lazy-load drain (only used");
+            line(w, "# when hpa.lazyLoad=true). Each whole-shard load is atomic (~11-34ms); this bounds how many");
+            line(w, "# shards a tick pages in, with a >=1-per-tick backstop. Clamped to (0, 1000] ms. Default 2.0.");
+            kv(w, ConfigKeys.PATHING_REGION_SHARD_LOAD_BUDGET_MS, d.regionShardLoadBudgetMs());
             line(w, "");
 
             line(w, "# --- hpa: the persisted region tier (survives a server restart) ---");
@@ -302,6 +306,15 @@ public final class ConfigLoader {
             line(w, "# server stop regardless of this. 0 disables the periodic flush (stop flush still runs).");
             line(w, "# Default 6000 (~5 minutes at 20 ticks/second).");
             kv(w, ConfigKeys.HPA_PERSIST_INTERVAL_TICKS, d.persistIntervalTicks());
+            line(w, "# Page the persisted region tier in LAZILY: load only the coarse levels at start and stream");
+            line(w, "# per-shard leaf files in on demand (bounds RAM), instead of eager-loading every shard up front.");
+            line(w, "# Default false (eager). Requires a server restart to change.");
+            kv(w, ConfigKeys.HPA_LAZY_LOAD, d.lazyLoad());
+            line(w, "# Bounded region RAM: max resident BUILT level-0 cost leaves (~1.6-5.8 KB each) to keep paged in");
+            line(w, "# (>= 0). 0 (default) = UNBOUNDED / eviction OFF. A positive value pages the coldest shards whose");
+            line(w, "# chunks are all currently unloaded back to disk (keeping the coarse tier resident); they reload");
+            line(w, "# on demand when the planner next touches them. Opt-in until in-game-verified.");
+            kv(w, ConfigKeys.HPA_RESIDENT_LEAF_CAP, d.residentLeafCap());
             line(w, "");
 
             line(w, "# --- doors: how the bot deals with doors in its path ---");

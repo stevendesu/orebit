@@ -169,7 +169,26 @@ public final class CostPyramid {
     /** Lazily-allocated per-level tables, index = level (0..{@link RegionAddress#MAX_LEVEL}). */
     private final Level[] levels = new Level[RegionAddress.MAX_LEVEL + 1];
 
+    /**
+     * The dimension's shard-residency index (Stage-2 clobber-guard) — {@code null} until the startup-flip
+     * increment associates one. When non-null, {@link PyramidMerger#combineFragments} consults it to DEFER a
+     * coarse recompute rather than overwrite a persisted-but-not-yet-resident coarse value (see
+     * {@link RegionShardResidency}). {@code null} by default ⇒ the guard never fires ⇒ byte-identical to the
+     * eager-load-all merge.
+     */
+    private RegionShardResidency residency;
+
     public CostPyramid() {}
+
+    /** The dimension's shard-residency index, or {@code null} if none is associated (Stage-2 clobber-guard). */
+    public RegionShardResidency residency() {
+        return residency;
+    }
+
+    /** Associate this pyramid with its dimension's shard-residency index (Stage-2 clobber-guard). */
+    public void setResidency(RegionShardResidency residency) {
+        this.residency = residency;
+    }
 
     /** The level table, allocating it on first touch. {@code level} must be {@code 0..MAX_LEVEL}. */
     private Level level(int level) {
@@ -216,6 +235,24 @@ public final class CostPyramid {
     /** Mark an interned row built / not-built (set by {@link LeafCostComputer} / {@link PyramidMerger}). */
     public void setBuilt(int level, int row, boolean value) {
         levels[level].built[row] = value;
+    }
+
+    /**
+     * <b>Stage-2 cold-shard eviction</b> (increment 4): free row {@code (level, row)}'s {@link RegionFragments}
+     * record (the dominant per-leaf RAM) and mark it unbuilt — the RAM drop the evictor ({@code RegionEvictor})
+     * applies to a shard's level-0..5 rows. The row stays <b>interned</b> (open-addressed maps are never compacted —
+     * a concurrent planner-thread search would read a moved row), so a coarse ancestor's merge sees it as an
+     * <b>evicted (built=false)</b> child — the {@link PyramidMerger#combineFragments clobber-guard} then DEFERS on
+     * it when its shard is persisted-non-resident, rather than clobbering the coarse value, and a later reload
+     * re-fills this very row byte-identically (its built flag is false ⇒ the decoder does not treat it as
+     * live-wins). Concurrency-safe: nulling {@code frags[row]} + clearing {@code built[row]} only degrades a
+     * concurrent read to the §6 optimistic default (the same state an unbuilt node always presents), never a torn
+     * or moved row. Runs on the tick thread (the evictor's sweep).
+     */
+    public void dropRow(int level, int row) {
+        final Level l = levels[level];
+        l.frags[row] = null;
+        l.built[row] = false;
     }
 
     // ---------------------------------------------------------------------------------------------------

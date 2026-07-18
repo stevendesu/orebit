@@ -80,8 +80,11 @@ public record Config(
         int navReadyRadiusChunks,
         int navReadyTimeoutTicks,
         float hpaFlushBudgetMs,
+        float regionShardLoadBudgetMs,
         // ---- hpa (persisted region tier) ----
         int persistIntervalTicks,
+        boolean lazyLoad,
+        int residentLeafCap,
         // ---- doors ----
         boolean doorToggle) {
 
@@ -114,7 +117,20 @@ public record Config(
                               * dirty-leaf drain (leaf rebuild ~0.15-1.8 ms, so 1 ms usually drains the small
                               * dirty set fully) — HpaMaintenance keeps its own count backstop. */
                              64, 2.0f, 4, 150, 1.0f,
+                             /* regionShardLoadBudgetMs 2.0 = the per-tick wall-clock budget on the Stage-2
+                              * lazy-shard-load drain (mirrors chunkBuildBudgetMs); only bites when hpa.lazyLoad
+                              * is on, else no shard is ever requested. */
+                             2.0f,
             /* hpa        */ 6000,
+                             /* lazyLoad false = eager-load-all stays the shipped default until the bounded-RAM
+                              * stage is in-game-verified; the loadCoarseOnly + RegionShardLoader path is fully
+                              * built + tested behind this flag and flips on later. */
+                             false,
+                             /* residentLeafCap 0 = UNBOUNDED / eviction OFF — the Stage-2 cold-shard evictor
+                              * (RegionEvictor) stays inert until an owner opts in with a positive target max
+                              * resident built L0 cost-leaf count, so bounded region RAM is opt-in + in-game
+                              * verifiable. */
+                             0,
             /* doors      */ true); // doors.toggle ON — the P3 executor operates doors (open before crossing,
                                      // close on the exit double-toggle); the flag stays a config kill-switch.
 
@@ -217,6 +233,14 @@ public record Config(
     // run JIT-cold (~16 ms). warmup=false is the off-switch; warmupBudgetMs is the hard wall-clock cap on
     // the pass (default 1500). Boot-only — read once in OrebitCommon's onServerStarted hook, never per
     // search or per tick.
+
+    // {@link #residentLeafCap} (hpa group, auto-generated accessor) is the Stage-2 bounded-region-RAM
+    // target: the maximum number of resident BUILT level-0 cost leaves (the dominant region-tier RAM, ~1.6-5.8
+    // KB each) the cold-shard evictor (RegionEvictor) keeps paged in. 0 (default) = UNBOUNDED / eviction OFF —
+    // the evictor is a no-op, so bounded RAM stays opt-in until in-game-verified. A positive value bounds RAM:
+    // once resident leaves exceed it, the evictor pages the coldest FULLY-UNLOADED shards back to disk (keeping
+    // the coarse tier resident), and the clobber-guard + RegionShardLoader page them back in on demand. Read
+    // once per eviction sweep (onWorldTickEnd), never on the search hot path.
 
     // {@link #placeBaseCost} (placement group, auto-generated accessor) is the flat per-placement base cost
     // (ticks) — a behavioral "reluctance to place" penalty, NOT a physical place time (see {@link

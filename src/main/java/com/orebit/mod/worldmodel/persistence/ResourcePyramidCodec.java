@@ -5,10 +5,9 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.zip.GZIPInputStream;
-import java.util.zip.GZIPOutputStream;
 
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
+import com.orebit.mod.worldmodel.hpa.StraddleSet;
 import com.orebit.mod.worldmodel.resource.ResourceClasses;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
@@ -34,9 +33,9 @@ import com.orebit.mod.worldmodel.resource.ResourcePyramid;
  * <h2>File format (both shard and coarse — a stack of per-level sections)</h2>
  * <pre>
  *   magic (int)                    \
- *   version (short)                 |  header — UNCOMPRESSED. OBRS = shard (L0-5), OBRC = coarse (L6-21).
+ *   version (short)                 |  header. OBRS = shard (L0-5), OBRC = coarse (L6-21).
  *   columnCount (byte)             /   the COLUMN_COUNT this was written with (forward-compat validation)
- *   --- gzip(body) ---
+ *   --- body (uncompressed) ---
  *   levelCount (byte)                 number of level sections that follow (only non-empty levels are written)
  *   per level section:
  *     level (byte)
@@ -68,8 +67,8 @@ public final class ResourcePyramidCodec {
     static final int MAGIC_SHARD = ('O' << 24) | ('B' << 16) | ('R' << 8) | 'S';
     /** Coarse-file magic — ASCII "OBRC" (Orebit Resource Coarse, levels 6..21). */
     static final int MAGIC_COARSE = ('O' << 24) | ('B' << 16) | ('R' << 8) | 'C';
-    /** Schema version; bump on any incompatible layout change. */
-    static final short VERSION = 1;
+    /** Schema version; bump on any incompatible layout change. v2 dropped gzip. */
+    static final short VERSION = 2;
 
     /** Indexed column count (24) — a compile-time constant, so this reference stays MC-free. */
     private static final int COLUMNS = ResourceClasses.COLUMN_COUNT;
@@ -86,7 +85,7 @@ public final class ResourcePyramidCodec {
     // ---------------------------------------------------------------------------------------------------
 
     /**
-     * Write shard {@code (shardX, shardZ)}'s resource levels 0..5 to {@code rawOut} (header raw, body gzip'd),
+     * Write shard {@code (shardX, shardZ)}'s resource levels 0..5 to {@code rawOut} (header + body uncompressed),
      * each row as its non-zero {@code (col, log2val)} pairs. Only built rows whose level-relative shard equals
      * {@code (shardX, shardZ)} are written. The stream is left open for the caller to close.
      */
@@ -104,14 +103,10 @@ public final class ResourcePyramidCodec {
 
     private static void encode(ResourcePyramid p, int magic, int loLevel, int hiLevel,
                                boolean shardScoped, int shardX, int shardZ, OutputStream rawOut) throws IOException {
-        DataOutputStream header = new DataOutputStream(rawOut);
-        header.writeInt(magic);
-        header.writeShort(VERSION);
-        header.writeByte(COLUMNS);
-        header.flush();
-
-        GZIPOutputStream gz = new GZIPOutputStream(rawOut);
-        DataOutputStream out = new DataOutputStream(gz);
+        DataOutputStream out = new DataOutputStream(rawOut);
+        out.writeInt(magic);
+        out.writeShort(VERSION);
+        out.writeByte(COLUMNS);
 
         int levelCount = 0;
         for (int level = loLevel; level <= hiLevel; level++) {
@@ -146,7 +141,6 @@ public final class ResourcePyramidCodec {
             }
         }
         out.flush();
-        gz.finish();
     }
 
     /** Whether row {@code r} at {@code level} is a persistable built row matching the (optional) shard scope. */
@@ -178,10 +172,21 @@ public final class ResourcePyramidCodec {
      * coarse magic. Throws {@link IOException} on a bad header / truncation.
      */
     public static void decode(InputStream rawIn, ResourcePyramid dest) throws IOException {
-        DataInputStream header = new DataInputStream(rawIn);
-        int magic = header.readInt();
-        int version = header.readUnsignedShort();
-        header.readUnsignedByte(); // stored columnCount — read for stream alignment (per-pair col is self-guarding)
+        decode(rawIn, dest, null);
+    }
+
+    /**
+     * As {@link #decode(InputStream, ResourcePyramid)}, additionally reporting the <b>straddle set</b> (Stage-2
+     * §2b reconciliation): a <i>coarse</i> tally row (level {@code >= 1}) SKIPPED by live-world-wins is recorded
+     * into {@code straddle} (when non-null) so a later {@code RegionReconciler} can re-sum it now that this shard's
+     * persisted child tallies are interned. Level-0 skips are NOT recorded. Passing {@code null} is exactly the
+     * base decode — the collector is a pure observation, interning is unchanged.
+     */
+    public static void decode(InputStream rawIn, ResourcePyramid dest, StraddleSet straddle) throws IOException {
+        DataInputStream in = new DataInputStream(rawIn);
+        int magic = in.readInt();
+        int version = in.readUnsignedShort();
+        in.readUnsignedByte(); // stored columnCount — read for stream alignment (per-pair col is self-guarding)
         if (magic != MAGIC_SHARD && magic != MAGIC_COARSE) {
             throw new IOException("bad resource-pyramid magic 0x" + Integer.toHexString(magic));
         }
@@ -189,7 +194,6 @@ public final class ResourcePyramidCodec {
             throw new IOException("unsupported resource-pyramid version " + version + " (expected " + VERSION + ")");
         }
 
-        DataInputStream in = new DataInputStream(new GZIPInputStream(rawIn));
         int levelCount = in.readUnsignedByte();
         for (int ls = 0; ls < levelCount; ls++) {
             int level = in.readUnsignedByte();
@@ -203,6 +207,8 @@ public final class ResourcePyramidCodec {
 
                 int existing = dest.rowIfPresent(level, rx, ry, rz);
                 boolean skip = existing != -1 && dest.isBuilt(level, existing); // live world wins (§6)
+                // A skipped COARSE tally is a straddle to reconcile (§2b); leaf skips need none (no children).
+                if (skip && straddle != null && level >= 1) straddle.add(level, rx, ry, rz);
                 int row = skip ? -1 : dest.rowFor(level, rx, ry, rz);
 
                 for (int j = 0; j < nz; j++) {

@@ -6,14 +6,18 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.zip.GZIPInputStream;
-import java.util.zip.GZIPOutputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import com.orebit.mod.worldmodel.hpa.CostCodec;
 import com.orebit.mod.worldmodel.hpa.CostPyramid;
 import com.orebit.mod.worldmodel.hpa.PyramidMerger;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.RegionFragments;
+import com.orebit.mod.worldmodel.hpa.StraddleSet;
 
 /**
  * On-disk (de)serializer for a dimension's {@link CostPyramid} fragment records — the cost half of the
@@ -35,21 +39,29 @@ import com.orebit.mod.worldmodel.hpa.RegionFragments;
  * its level and marks it built, with <b>no {@code mergeUp} replay</b>. A round-trip is lossless — persisted
  * coarse == recomputed coarse (proven by {@code RegionPersistenceRoundTripTest}).
  *
- * <h2>File format (both shard and coarse — a stack of per-level sections)</h2>
+ * <h2>File format (both shard and coarse — a stack of per-level COLUMN-RUN sections, v3)</h2>
  * <pre>
- *   magic (int)                    \  header — UNCOMPRESSED so a reader validates before inflating
+ *   magic (int)                    \  header
  *   version (short)                /   OBHS = shard (L0-5), OBHC = coarse (L6); both distinct from the old OBHP blob
- *   --- gzip(body) ---
+ *   --- body (uncompressed) ---
  *   levelCount (byte)                 number of level sections that follow (only non-empty levels are written)
  *   per level section:
  *     level (byte)                    the pyramid level these rows live at
- *     rowCount (int)                  built rows at this level in this file
- *     per row:
- *       rx (int) ry (byte) rz (int)   region coords at this level (ry is 0..31 from the dimension floor)
- *       recordLen (unsigned short)    bytes of the packed CostCodec bitstream that follow
- *       record (recordLen bytes)      CostCodec.packRegion(rf) output
+ *     columnCount (int)               distinct (rx,rz) columns with built rows at this level in this file
+ *     per column:
+ *       rx (int) rz (int)             the column's region coords at this level
+ *       runCount (unsigned short)     ry-runs in this column
+ *       per run:
+ *         ryStart (byte)              first ry of the run (0..31 from the dimension floor)
+ *         ryLen (byte)                consecutive ry rows in the run (all share the byte-identical record below)
+ *         recordLen (unsigned short)  bytes of the packed CostCodec bitstream that follow
+ *         record (recordLen bytes)    CostCodec.packRegion(rf) output, shared by every ry in the run
  *   [shard files only] invalCount (int) = 0   reserved Stage-3 INVALIDATION section (empty stub)
  * </pre>
+ * A run collapses rows that are BOTH consecutive in {@code ry} AND carry a byte-identical record — this is where
+ * the redundant per-row coordinate headers (same rx/rz per column, sequential ry) are eliminated. On decode each
+ * run is EXPANDED back to its individual {@code (rx, ry, rz, record)} rows and interned exactly as the flat format
+ * did, so the round-trip is byte-identical at the row/record level (only the wire framing changed vs v2).
  * The reserved invalidation section is a forward-compatibility placeholder for Stage 3: it is the LAST thing in
  * a shard body, written as {@code int 0}, and {@link #decode} reads the count but ignores any entries — so a
  * future non-empty section's trailing bytes are simply not consumed and never break this reader.
@@ -66,8 +78,9 @@ import com.orebit.mod.worldmodel.hpa.RegionFragments;
  * it. {@link #decode} additionally honours "live world wins" — it never overwrites a row already
  * {@link CostPyramid#isBuilt built} this session.
  *
- * <p>Pure Java (streams + gzip + the MC-free {@link CostCodec}); no Minecraft API, so it is unit-testable with
- * no server. Cold path (server start/stop/periodic flush), so normal allocation is fine here.
+ * <p>Pure Java (plain streams + the MC-free {@link CostCodec}); no Minecraft API, so it is unit-testable with
+ * no server. Cold path (server start/stop/periodic flush), so normal allocation is fine here. The body is written
+ * UNCOMPRESSED — gzip inflate dominated shard-load cost (measured 62–71%) for only a ~2–3× on-disk saving.
  */
 public final class CostPyramidCodec {
 
@@ -77,8 +90,13 @@ public final class CostPyramidCodec {
     static final int MAGIC_SHARD = ('O' << 24) | ('B' << 16) | ('H' << 8) | 'S';
     /** Coarse-file magic — ASCII "OBHC" (Orebit HPA Coarse, cost level 6). */
     static final int MAGIC_COARSE = ('O' << 24) | ('B' << 16) | ('H' << 8) | 'C';
-    /** Schema version; bump on any incompatible layout change (old files then read as absent). */
-    static final short VERSION = 1;
+    /**
+     * Schema version; bump on any incompatible layout change (old files then read as absent). v2 dropped gzip;
+     * v3 replaced the flat per-row body with a COLUMN-RUN body (rows grouped by {@code (rx,rz)} column, consecutive
+     * byte-identical records at consecutive {@code ry} collapsed into runs) — recovers ~97% of gzip's on-disk
+     * saving (~2× vs the flat raw body) at raw decode speed, by killing the repeated per-row coordinate headers.
+     */
+    static final short VERSION = 3;
 
     /** Lowest / highest cost level carried by a per-region shard file. */
     static final int SHARD_LO_LEVEL = 0;
@@ -89,7 +107,7 @@ public final class CostPyramidCodec {
     // ---------------------------------------------------------------------------------------------------
 
     /**
-     * Write shard {@code (shardX, shardZ)}'s cost levels 0..5 to {@code rawOut} (header raw, body gzip'd), plus
+     * Write shard {@code (shardX, shardZ)}'s cost levels 0..5 to {@code rawOut} (header + body uncompressed), plus
      * the empty reserved invalidation section. Only built rows whose level-relative shard equals
      * {@code (shardX, shardZ)} are written; interned-but-unbuilt rows and rows with no fragment record are
      * skipped. The stream is left open for the caller to close.
@@ -110,38 +128,57 @@ public final class CostPyramidCodec {
     private static void encode(CostPyramid p, int magic, int loLevel, int hiLevel,
                                boolean shardScoped, int shardX, int shardZ, boolean reserveInval,
                                OutputStream rawOut) throws IOException {
-        DataOutputStream header = new DataOutputStream(rawOut);
-        header.writeInt(magic);
-        header.writeShort(VERSION);
-        header.flush();
+        DataOutputStream out = new DataOutputStream(rawOut);
+        out.writeInt(magic);
+        out.writeShort(VERSION);
 
-        GZIPOutputStream gz = new GZIPOutputStream(rawOut);
-        DataOutputStream out = new DataOutputStream(gz);
-
+        // Build the column groupings for every level first (cold path — normal allocation is fine), so we can
+        // write the exact non-empty levelCount and stream each level's columns/runs without a second scan.
+        int nLevels = hiLevel - loLevel + 1;
+        @SuppressWarnings("unchecked")
+        List<Column>[] byLevel = new List[nLevels];
         int levelCount = 0;
         for (int level = loLevel; level <= hiLevel; level++) {
-            if (countRows(p, level, shardScoped, shardX, shardZ) > 0) levelCount++;
+            List<Column> cols = collectColumns(p, level, shardScoped, shardX, shardZ);
+            byLevel[level - loLevel] = cols;
+            if (!cols.isEmpty()) levelCount++;
         }
         out.writeByte(levelCount);
 
         for (int level = loLevel; level <= hiLevel; level++) {
-            int n = countRows(p, level, shardScoped, shardX, shardZ);
-            if (n == 0) continue;
+            List<Column> cols = byLevel[level - loLevel];
+            if (cols.isEmpty()) continue;
             out.writeByte(level);
-            out.writeInt(n);
-            int rows = p.rowCount(level);
-            for (int r = 0; r < rows; r++) {
-                if (!matches(p, level, r, shardScoped, shardX, shardZ)) continue;
-                RegionFragments rf = p.fragmentRecord(level, r);
-                int bits = CostCodec.regionBitLength(rf);
-                int nbytes = (bits + 7) >> 3;
-                byte[] buf = new byte[nbytes];
-                CostCodec.packRegion(rf, buf, 0);
-                out.writeInt(p.rowRX(level, r));
-                out.writeByte(p.rowRY(level, r));
-                out.writeInt(p.rowRZ(level, r));
-                out.writeShort(nbytes);
-                out.write(buf);
+            out.writeInt(cols.size());
+            for (Column c : cols) {
+                c.sortByRy();
+                out.writeInt(c.rx);
+                out.writeInt(c.rz);
+
+                // Split the ry-sorted column into runs: consecutive ry AND byte-identical record collapse.
+                int size = c.size();
+                List<Integer> runFirst = new ArrayList<>();
+                int i = 0;
+                while (i < size) {
+                    int j = i + 1;
+                    while (j < size
+                            && c.ryAt(j) == c.ryAt(j - 1) + 1
+                            && Arrays.equals(c.recAt(j), c.recAt(i))) {
+                        j++;
+                    }
+                    runFirst.add(i);
+                    i = j;
+                }
+                out.writeShort(runFirst.size());
+                for (int f = 0; f < runFirst.size(); f++) {
+                    int s = runFirst.get(f);
+                    int e = (f + 1 < runFirst.size()) ? runFirst.get(f + 1) : size;
+                    byte[] rec = c.recAt(s);
+                    out.writeByte(c.ryAt(s));   // ryStart
+                    out.writeByte(e - s);       // ryLen (column ry-range is 0..31, so a run fits a byte)
+                    out.writeShort(rec.length); // recordLen
+                    out.write(rec);
+                }
             }
         }
 
@@ -149,7 +186,6 @@ public final class CostPyramidCodec {
         if (reserveInval) out.writeInt(0);
 
         out.flush();
-        gz.finish();
     }
 
     /** Whether row {@code r} at {@code level} is a persistable built row matching the (optional) shard scope. */
@@ -160,13 +196,75 @@ public final class CostPyramidCodec {
                 && RegionAddress.shardOf(p.rowRZ(level, r), level) == shardZ;
     }
 
-    private static int countRows(CostPyramid p, int level, boolean shardScoped, int shardX, int shardZ) {
+    /**
+     * Group every persistable built row at {@code level} (matching the optional shard scope) into {@link Column}s
+     * keyed by {@code (rx,rz)}, packing each row's {@link CostCodec} record eagerly. Column order is arbitrary
+     * (decode expands + interns regardless of order); within a column rows are ry-sorted at write time.
+     */
+    private static List<Column> collectColumns(CostPyramid p, int level,
+                                               boolean shardScoped, int shardX, int shardZ) {
+        Map<Long, Column> byColumn = new HashMap<>();
         int rows = p.rowCount(level);
-        int n = 0;
         for (int r = 0; r < rows; r++) {
-            if (matches(p, level, r, shardScoped, shardX, shardZ)) n++;
+            if (!matches(p, level, r, shardScoped, shardX, shardZ)) continue;
+            int rx = p.rowRX(level, r);
+            int ry = p.rowRY(level, r);
+            int rz = p.rowRZ(level, r);
+            RegionFragments rf = p.fragmentRecord(level, r);
+            int bits = CostCodec.regionBitLength(rf);
+            int nbytes = (bits + 7) >> 3;
+            byte[] buf = new byte[nbytes];
+            CostCodec.packRegion(rf, buf, 0);
+
+            long key = (((long) rx) << 32) ^ (rz & 0xffffffffL);
+            Column col = byColumn.get(key);
+            if (col == null) {
+                col = new Column(rx, rz);
+                byColumn.put(key, col);
+            }
+            col.add(ry, buf);
         }
-        return n;
+        return new ArrayList<>(byColumn.values());
+    }
+
+    /** One {@code (rx,rz)} column's built rows: parallel {@code ry} + packed-record arrays, ry-sortable. */
+    private static final class Column {
+        final int rx, rz;
+        private int[] rys = new int[8];
+        private byte[][] recs = new byte[8][];
+        private int size = 0;
+
+        Column(int rx, int rz) { this.rx = rx; this.rz = rz; }
+
+        void add(int ry, byte[] rec) {
+            if (size == rys.length) {
+                rys = Arrays.copyOf(rys, size << 1);
+                recs = Arrays.copyOf(recs, size << 1);
+            }
+            rys[size] = ry;
+            recs[size] = rec;
+            size++;
+        }
+
+        int size() { return size; }
+        int ryAt(int i) { return rys[i]; }
+        byte[] recAt(int i) { return recs[i]; }
+
+        /** Insertion sort by ry (columns are tiny — ry range 0..31). Keeps ry + rec arrays in lockstep. */
+        void sortByRy() {
+            for (int i = 1; i < size; i++) {
+                int ry = rys[i];
+                byte[] rec = recs[i];
+                int j = i - 1;
+                while (j >= 0 && rys[j] > ry) {
+                    rys[j + 1] = rys[j];
+                    recs[j + 1] = recs[j];
+                    j--;
+                }
+                rys[j + 1] = ry;
+                recs[j + 1] = rec;
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -182,9 +280,22 @@ public final class CostPyramidCodec {
      * caller treats the file as absent).
      */
     public static void decode(InputStream rawIn, CostPyramid dest) throws IOException {
-        DataInputStream header = new DataInputStream(rawIn);
-        int magic = header.readInt();
-        int version = header.readUnsignedShort();
+        decode(rawIn, dest, null);
+    }
+
+    /**
+     * As {@link #decode(InputStream, CostPyramid)}, additionally reporting the <b>straddle set</b> (Stage-2
+     * §2b reconciliation): whenever a <i>coarse</i> row (level {@code >= 1}) is SKIPPED by the live-world-wins
+     * rule, its cell is recorded into {@code straddle} (when non-null) so a later {@code RegionReconciler} pass can
+     * re-derive it now that this shard's persisted children are interned beside the live-partial coarse value.
+     * Level-0 skips are NOT recorded (a live leaf always wins and has no children to reconcile). Passing
+     * {@code null} is exactly the base {@link #decode(InputStream, CostPyramid)} — byte-for-byte the same interning
+     * behaviour, the collector is a pure observation.
+     */
+    public static void decode(InputStream rawIn, CostPyramid dest, StraddleSet straddle) throws IOException {
+        DataInputStream in = new DataInputStream(rawIn);
+        int magic = in.readInt();
+        int version = in.readUnsignedShort();
         if (magic != MAGIC_SHARD && magic != MAGIC_COARSE) {
             throw new IOException("bad cost-pyramid magic 0x" + Integer.toHexString(magic));
         }
@@ -192,29 +303,43 @@ public final class CostPyramidCodec {
             throw new IOException("unsupported cost-pyramid version " + version + " (expected " + VERSION + ")");
         }
 
-        DataInputStream in = new DataInputStream(new GZIPInputStream(rawIn));
         int levelCount = in.readUnsignedByte();
         for (int ls = 0; ls < levelCount; ls++) {
             int level = in.readUnsignedByte();
-            int count = in.readInt();
-            if (count < 0) throw new IOException("negative cost row count " + count);
+            int columnCount = in.readInt();
+            if (columnCount < 0) throw new IOException("negative cost column count " + columnCount);
             // gridSize per level: 16 at the leaf, 4 at the coarse levels (NOT the flat LEAF_SIZE the old codec used).
             final int gridSize = PyramidMerger.coarseG(level);
-            for (int i = 0; i < count; i++) {
+            for (int cc = 0; cc < columnCount; cc++) {
                 int rx = in.readInt();
-                int ry = in.readUnsignedByte();
                 int rz = in.readInt();
-                int nbytes = in.readUnsignedShort();
-                byte[] buf = new byte[nbytes];
-                in.readFully(buf);
+                int runCount = in.readUnsignedShort();
+                for (int ru = 0; ru < runCount; ru++) {
+                    int ryStart = in.readUnsignedByte();
+                    int ryLen = in.readUnsignedByte();
+                    int nbytes = in.readUnsignedShort();
+                    byte[] buf = new byte[nbytes];
+                    in.readFully(buf);
 
-                int existing = dest.rowIfPresent(level, rx, ry, rz);
-                if (existing != -1 && dest.isBuilt(level, existing)) continue; // live world wins (§6)
+                    // Expand the run back to individual rows and intern each exactly as the flat format did.
+                    for (int k = 0; k < ryLen; k++) {
+                        int ry = ryStart + k;
 
-                int row = dest.rowFor(level, rx, ry, rz);
-                RegionFragments out = dest.ensureFragments(level, row);
-                CostCodec.unpackRegion(buf, 0, gridSize, out);
-                dest.setBuilt(level, row, true);
+                        int existing = dest.rowIfPresent(level, rx, ry, rz);
+                        if (existing != -1 && dest.isBuilt(level, existing)) {
+                            // Live world wins (§6). A skipped COARSE row is a straddle to reconcile (§2b): its
+                            // live-partial value stays, but this shard's persisted children are now interned beside
+                            // it. Leaf skips need no reconcile (no children), so only record level >= 1.
+                            if (straddle != null && level >= 1) straddle.add(level, rx, ry, rz);
+                            continue;
+                        }
+
+                        int row = dest.rowFor(level, rx, ry, rz);
+                        RegionFragments out = dest.ensureFragments(level, row);
+                        CostCodec.unpackRegion(buf, 0, gridSize, out);
+                        dest.setBuilt(level, row, true);
+                    }
+                }
             }
         }
 
