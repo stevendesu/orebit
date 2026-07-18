@@ -9,6 +9,17 @@
 #   3. asserts on run/autotest/orebit-autotest-result.properties.
 # Exit codes: 0 = PASS, 1 = FAIL (result file says so), 2 = no result file (crash / hook never armed).
 #
+# Determinism convention (scripts/autotest/orebit.properties): reproducibility depends on pinning the
+# non-deterministic scheduling knobs. Two pins live in that template:
+#   - pathing.async=false            -> synchronous search (async replan TIMING made the route nondeterministic).
+#   - HIGH drain budgets + fixed count -> the NavGrid chunk-build drain and the HPA* dirty-leaf flush are
+#     wall-clock TIME-budgeted in production (pathing.chunkBuildBudgetMs / pathing.hpaFlushBudgetMs, def
+#     2.0 / 1.0 ms), so the per-tick drain COUNT varies with machine timing. The template pins both budgets
+#     to 100 ms (never bind) with pathing.chunkBuildsPerTick=8 (and the hardcoded MAX_LEAVES_PER_TICK=64),
+#     so the FIXED COUNT backstops govern -> identical per-tick drain counts across same-seed runs. Production
+#     uses the low ms budgets for adaptive scheduling; the autotest trades that for reproducibility. If a
+#     future session sees run-to-run repro drift, confirm these pins survived any config-template edit.
+#
 # Requires JAVA_HOME -> JDK 21 (the 1.21.11 node; mc-1.21 era rule: >=1.20.5 -> 21).
 # Windows PowerShell 5.1 compatible (no &&, no ternary).
 
