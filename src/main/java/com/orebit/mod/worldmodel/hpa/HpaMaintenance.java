@@ -1,15 +1,20 @@
 package com.orebit.mod.worldmodel.hpa;
 
+import java.util.Arrays;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 
 import com.orebit.mod.OrebitCommon;
+import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.platform.BlockChangeEvents;
 import com.orebit.mod.platform.LevelBounds;
 import com.orebit.mod.worldmodel.pathing.NavSection;
+import com.orebit.mod.worldmodel.pathing.NavSectionBuilder;
 import com.orebit.mod.worldmodel.pathing.NavStore;
 import com.orebit.mod.worldmodel.persistence.RegionPersistence;
+import com.orebit.mod.worldmodel.resource.Log2Codec;
+import com.orebit.mod.worldmodel.resource.ResourceClasses;
 import com.orebit.mod.worldmodel.resource.ResourceMerger;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
@@ -17,6 +22,8 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.ChunkAccess;
+import net.minecraft.world.level.chunk.LevelChunkSection;
 
 /**
  * Incremental maintenance of the HPA* cost pyramid — keeps the region tier live as the world changes
@@ -40,8 +47,9 @@ import net.minecraft.world.level.block.state.BlockState;
  * changes in one leaf collapse to one entry. The actual recompute happens in {@link #flush}, called once
  * per level per tick from the existing {@code onWorldTickEnd} cadence (the same cadence
  * {@link com.orebit.mod.worldmodel.pathing.ChunkNavLoader ChunkNavLoader} drains its build queue on), and is
- * itself budgeted to at most {@link #MAX_LEAVES_PER_TICK} leaves so a world-wide edit amortizes over a few
- * ticks rather than stalling one.
+ * itself budgeted by a per-tick wall-clock time budget ({@code pathing.hpaFlushBudgetMs}) with a
+ * {@link #MAX_LEAVES_PER_TICK} count backstop, so a world-wide edit amortizes over a few ticks rather than
+ * stalling one.
  *
  * <h2>Flow</h2>
  * <ol>
@@ -92,11 +100,16 @@ public final class HpaMaintenance {
     private HpaMaintenance() {}
 
     /**
-     * Cap on dirty-leaf recomputes per level per tick, to keep the (heavier) leaf re-pathfind off the frame
-     * budget — mirrors {@link com.orebit.mod.worldmodel.pathing.ChunkNavLoader}'s {@code MAX_BUILDS_PER_TICK}.
-     * A world-wide edit fills in over a few ticks rather than stalling one.
+     * COUNT BACKSTOP on dirty-leaf recomputes per level per tick — <b>no longer the primary gate</b> (that is
+     * the wall-clock {@code pathing.hpaFlushBudgetMs} time budget {@link #flush} spends, mirroring
+     * {@link com.orebit.mod.worldmodel.pathing.ChunkNavLoader}'s move to a time budget + count backstop). This
+     * ceiling just keeps a burst of cheap leaves from draining unbounded within the time budget; the time
+     * budget is what stops a run of expensive leaves. A world-wide edit fills in over a few ticks rather than
+     * stalling one. Raised from 8 to 64 with the time-budget change (it is now a safety cap, not a per-tick
+     * target — a leaf rebuild is ~0.15–1.8 ms, so the 1 ms default budget usually drains the small dirty set
+     * fully well under this cap).
      */
-    private static final int MAX_LEAVES_PER_TICK = 8;
+    private static final int MAX_LEAVES_PER_TICK = 64;
 
     /**
      * Per-dimension dirty-leaf sets. Key = {@link RegionAddress#packLevelKey} of the changed level-0 leaf
@@ -107,6 +120,23 @@ public final class HpaMaintenance {
      * insertion-order-independent sequence (see the "Deterministic drain" note above).
      */
     private static final Map<ServerLevel, ConcurrentSkipListSet<Long>> DIRTY = new ConcurrentHashMap<>();
+
+    /**
+     * Per-dimension dirty <b>resource</b>-leaf sets — the SEPARATE queue for the resource-pyramid re-tally
+     * (find-mine-resources design §8.5). A leaf lands here only when {@link #onBlockChanged} sees a change that
+     * adds or removes an INDEXED resource block (the {@link ResourceClasses#columnForBlock} gate), so a common
+     * block change (dirt/stone/air — column −1) never enters this queue and pays no sweep. Same concurrent,
+     * deduping, {@link ConcurrentSkipListSet sorted} structure as {@link #DIRTY} (deterministic ascending drain),
+     * drained by {@link #flush} under the <b>same</b> per-tick wall-clock budget as the cost drain.
+     */
+    private static final Map<ServerLevel, ConcurrentSkipListSet<Long>> RESOURCE_DIRTY = new ConcurrentHashMap<>();
+
+    /** Reusable per-thread raw-count + log₂-encoded scratch for the resource re-tally (tick thread; sized to the
+     *  column count). Mirrors the {@code ResourceMerger} thread-local scratch idiom — no per-re-tally allocation. */
+    private static final ThreadLocal<int[]> RETALLY_RAW =
+            ThreadLocal.withInitial(() -> new int[ResourceClasses.COLUMN_COUNT]);
+    private static final ThreadLocal<byte[]> RETALLY_ENC =
+            ThreadLocal.withInitial(() -> new byte[ResourceClasses.COLUMN_COUNT]);
 
     // ---------------------------------------------------------------------------------------------------
     // Registration
@@ -167,21 +197,26 @@ public final class HpaMaintenance {
         for (int ry = 0; ry < column.length; ry++) {
             if (column[ry] == null) continue;
             buildLeafSafe(level, pyramid, chunkX, ry, chunkZ); // note the (rx, rz, ry) order inside
-            // Resource tally (sparse — only sections that actually held ≥1 indexed block have a tally; the
-            // pyramid interns no row for the null/empty common case). Same (rx=chunkX, ry=sectionIndex,
-            // rz=chunkZ) coord convention as the cost pyramid.
-            final byte[] tally = column[ry].resourceTally();
-            if (tally != null) writeResourceTallySafe(resources, chunkX, ry, chunkZ, tally);
+            // Resource tally (sparse — only sections that actually hold ≥1 indexed block get a non-null tally;
+            // the pyramid interns no row for the resource-free common case). Same (rx=chunkX, ry=sectionIndex,
+            // rz=chunkZ) coord convention as the cost pyramid. A NULL tally on rebuild means the section dropped
+            // to no indexed resource — if a row was previously written for it (e.g. a since-mined-out vein), it
+            // must be CLEARED, not skipped (design §8.5 zero-row fix); writeResourceTallySafe handles both.
+            writeResourceTallySafe(resources, chunkX, ry, chunkZ, column[ry].resourceTally());
         }
     }
 
     /**
      * Write a section's level-0 resource tally into the {@link ResourcePyramid} and roll it up, <b>never
-     * throwing</b> onto the tick thread (mirrors {@link #buildLeafSafe}). Only called for a non-null tally,
-     * so no row is ever interned for a resource-free section (the sparsity contract, design §3/§5).
+     * throwing</b> onto the tick thread (mirrors {@link #buildLeafSafe}). A <b>non-null</b> {@code tally} is the
+     * log₂-encoded ({@link Log2Codec}) column vector for a resource-bearing section; a <b>null</b> {@code tally}
+     * means the (re)built section holds no indexed resource, so a row previously written for it must be CLEARED
+     * (the design §8.5 zero-row fix) — otherwise a since-mined-out vein would keep reporting on the compass. A
+     * resource-free section that never had a row stays uninterned (the sparsity contract, design §3/§5).
      */
     private static void writeResourceTallySafe(ResourcePyramid resources, int rx, int ry, int rz, byte[] tally) {
         try {
+            if (tally == null) { clearResourceRow(resources, rx, ry, rz); return; }
             int row = resources.rowFor(0, rx, ry, rz);
             resources.setRow(0, row, tally);
             resources.setBuilt(0, row, true);
@@ -190,13 +225,89 @@ public final class HpaMaintenance {
             long n = ++resourceFailures;
             if (n == 1 || n % 256 == 0) {
                 OrebitCommon.LOGGER.error("[Orebit] resource tally write failed at region ({},{},{}) [{} total] — "
-                        + "row skipped (drill-down under-reports there until next build)", rx, ry, rz, n, t);
+                        + "row skipped (drill-down mis-reports there until next build)", rx, ry, rz, n, t);
             }
         }
     }
 
     /** Count of resource-tally-write failures swallowed by {@link #writeResourceTallySafe} (log throttle). */
     private static volatile long resourceFailures = 0;
+
+    /**
+     * Apply a <b>raw</b> per-column re-tally ({@link ResourceClasses#COLUMN_COUNT} counts) to the level-0
+     * resource row {@code (rx,ry,rz)} and roll it up, <b>clearing</b> the row when the section now holds no
+     * indexed resource. The re-tally driver for a block change (find-mine-resources design §8.5): the log₂
+     * histogram store cannot subtract one block from a bucket (a bucket is a range), so a resource-relevant
+     * change re-counts the whole section ({@link NavSectionBuilder#tallyResources}) and this re-encodes +
+     * writes the row. All-zero counts ⇒ {@link #clearResourceRow} (a since-mined-out section drops its row and
+     * its roll-up); a section that never had a row stays uninterned. Package-visible so the §8.5 zero-row
+     * behaviour is directly unit-testable (MC-free). Returns whether a row was written or cleared.
+     */
+    static boolean applyResourceRetally(ResourcePyramid resources, int rx, int ry, int rz, int[] rawCounts) {
+        final int cols = ResourceClasses.COLUMN_COUNT;
+        boolean anyNonzero = false;
+        for (int c = 0; c < cols; c++) if (rawCounts[c] != 0) { anyNonzero = true; break; }
+        if (!anyNonzero) return clearResourceRow(resources, rx, ry, rz);
+
+        final byte[] enc = RETALLY_ENC.get();
+        for (int c = 0; c < cols; c++) enc[c] = Log2Codec.encode(rawCounts[c]);
+        int row = resources.rowFor(0, rx, ry, rz);
+        resources.setRow(0, row, enc);
+        resources.setBuilt(0, row, true);
+        ResourceMerger.mergeUpTallies(resources, rx, ry, rz);
+        return true;
+    }
+
+    /**
+     * Zero a previously-populated level-0 resource row and roll the drop up (the §8.5 clear path). No-op — and
+     * <b>no interning</b> — when the row was never present (sparsity: an always-empty section earns no row). The
+     * existing sparse write path could never clear a row (a null/all-zero tally was simply skipped), which is
+     * exactly why a mined-out vein kept reporting; this is the missing inverse. Package-visible for the test.
+     * Returns whether a row was cleared.
+     */
+    static boolean clearResourceRow(ResourcePyramid resources, int rx, int ry, int rz) {
+        final int existing = resources.rowIfPresent(0, rx, ry, rz);
+        if (existing < 0) return false; // never had a row ⇒ nothing to clear
+        final byte[] zero = RETALLY_ENC.get();
+        Arrays.fill(zero, 0, ResourceClasses.COLUMN_COUNT, (byte) 0);
+        resources.setRow(0, existing, zero);
+        resources.setBuilt(0, existing, false); // now an interned-but-empty placeholder
+        ResourceMerger.mergeUpTallies(resources, rx, ry, rz);
+        return true;
+    }
+
+    /**
+     * Re-tally ONE dirty resource leaf from live geometry + write/clear its pyramid row, <b>never throwing</b>
+     * onto the tick thread (mirrors {@link #writeResourceTallySafe}). Skips a leaf whose chunk is not
+     * {@link NavStore}-resident (it re-tallies from scratch on its next chunk (re)build — mirrors
+     * {@code ResourceScan.exactCells}' residency gate). Runs the resource-only section sweep
+     * ({@link NavSectionBuilder#tallyResources} — a small fraction of a full classify) then applies it via
+     * {@link #applyResourceRetally} (which clears the row for a since-emptied section).
+     */
+    private static void retallyResourceLeafSafe(ServerLevel level, ResourcePyramid resources, int rx, int ry, int rz) {
+        try {
+            if (NavStore.get(level, NavStore.key(rx, rz)) == null) return; // not nav-resident → skip
+            final int[] raw = RETALLY_RAW.get();
+            NavSectionBuilder.tallyResources(sectionAt(level, rx, ry, rz), raw);
+            applyResourceRetally(resources, rx, ry, rz, raw);
+        } catch (Throwable t) {
+            long n = ++resourceFailures;
+            if (n == 1 || n % 256 == 0) {
+                OrebitCommon.LOGGER.error("[Orebit] resource re-tally failed at region ({},{},{}) [{} total] — "
+                        + "row left stale (drill-down mis-reports there until next chunk rebuild)", rx, ry, rz, n, t);
+            }
+        }
+    }
+
+    /** The live {@link LevelChunkSection} at region {@code (rx,ry,rz)} (rx/rz = chunk coords, ry = section index
+     *  from the floor), or {@code null} if that section index is out of the column. Only called for a
+     *  nav-resident chunk (gated in {@link #retallyResourceLeafSafe}), so {@code getChunk} returns the loaded
+     *  chunk without generating — the same accessor {@code ChunkNavLoader} uses on the tick thread. */
+    private static LevelChunkSection sectionAt(ServerLevel level, int rx, int ry, int rz) {
+        final ChunkAccess chunk = level.getChunk(rx, rz);
+        final LevelChunkSection[] sections = chunk.getSections();
+        return (ry >= 0 && ry < sections.length) ? sections[ry] : null;
+    }
 
     /**
      * Recompute one leaf's faces + re-merge its ancestors, <b>never throwing</b> onto the caller (the server
@@ -234,10 +345,6 @@ public final class HpaMaintenance {
         if (!(level instanceof ServerLevel server)) return; // server authority only (mirror NavGridUpdater)
         if (oldState == newState) return;                    // interned states: reference-equal == no change
 
-        // TODO(milestone-1): resource pyramid is load-populated only; block-change re-tally deferred
-        //   (see DESIGN-find-mine-resources.md §8.5). This hook keeps only the COST pyramid live; the
-        //   gather loop tolerates mid-session drift via its on-arrival local section scan.
-
         // No pyramid for this dimension yet → nothing to keep live; it builds fresh on first plan. We must
         // NOT call RegionGrid.of() here (that would create a pyramid for a dimension nobody has planned in,
         // off the worldgen thread). Probe the cache without creating.
@@ -251,12 +358,27 @@ public final class HpaMaintenance {
         final int rx = pos.getX() >> 4;
         final int rz = pos.getZ() >> 4;
 
-        dirtyFor(server).add(RegionAddress.packLevelKey(rx, sectionIndex, rz));
+        final long leafKey = RegionAddress.packLevelKey(rx, sectionIndex, rz);
+        dirtyFor(server).add(leafKey);
+
+        // Resource re-tally gate (find-mine-resources design §8.5). The resource tally only changes when the
+        // block change ADDS or REMOVES an indexed resource block; columnForBlock is O(1) (a HashMap lookup) and
+        // dirt/stone/air all map to column −1, so the overwhelming majority of block changes skip the resource
+        // work entirely (the cost dirtying above is unaffected). A resource-relevant change marks the SEPARATE
+        // resource-dirty set, drained (row re-tallied / cleared) by flush under the shared per-tick budget.
+        final int oldCol = ResourceClasses.columnForBlock(oldState.getBlock());
+        final int newCol = ResourceClasses.columnForBlock(newState.getBlock());
+        if (oldCol >= 0 || newCol >= 0) resourceDirtyFor(server).add(leafKey);
     }
 
-    /** The dimension's dirty set, created on first touch. */
+    /** The dimension's cost-leaf dirty set, created on first touch. */
     private static ConcurrentSkipListSet<Long> dirtyFor(ServerLevel level) {
         return DIRTY.computeIfAbsent(level, l -> new ConcurrentSkipListSet<>());
+    }
+
+    /** The dimension's resource-leaf dirty set, created on first touch. */
+    private static ConcurrentSkipListSet<Long> resourceDirtyFor(ServerLevel level) {
+        return RESOURCE_DIRTY.computeIfAbsent(level, l -> new ConcurrentSkipListSet<>());
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -264,8 +386,9 @@ public final class HpaMaintenance {
     // ---------------------------------------------------------------------------------------------------
 
     /**
-     * Drain up to {@link #MAX_LEAVES_PER_TICK} dirty leaves for {@code level}, re-flooding each leaf's fragment
-     * record ({@link FragmentLeafComputer#computeLeaf}) and re-merging its ancestors
+     * Drain dirty leaves for {@code level} until the per-tick {@code pathing.hpaFlushBudgetMs} wall-clock
+     * budget is spent (or the {@link #MAX_LEAVES_PER_TICK} count backstop is hit), re-flooding each leaf's
+     * fragment record ({@link FragmentLeafComputer#computeLeaf}) and re-merging its ancestors
      * ({@link PyramidMerger#mergeUpFragments}). Call once per level per tick from the existing
      * {@code onWorldTickEnd} cadence (wired in {@link com.orebit.mod.OrebitCommon#init}, alongside
      * {@code ChunkNavLoader}'s drain). No-op if nothing is dirty in this dimension. Runs on the tick thread; the
@@ -279,48 +402,86 @@ public final class HpaMaintenance {
      */
     public static void flush(ServerLevel level) {
         final ConcurrentSkipListSet<Long> dirty = DIRTY.get(level);
-        if (dirty == null || dirty.isEmpty()) return;
+        final ConcurrentSkipListSet<Long> resDirty = RESOURCE_DIRTY.get(level);
+        final boolean haveCost = dirty != null && !dirty.isEmpty();
+        final boolean haveRes = resDirty != null && !resDirty.isEmpty();
+        if (!haveCost && !haveRes) return;
 
         final RegionGrid grid = RegionGrid.peek(level);
         if (grid == null) {
-            // The dimension's grid was dropped (level unload) — discard its dirty backlog.
-            dirty.clear();
+            // The dimension's grid was dropped (level unload) — discard both dirty backlogs.
+            if (dirty != null) dirty.clear();
+            if (resDirty != null) resDirty.clear();
             return;
         }
         final CostPyramid pyramid = grid.pyramid();
+
+        // Time-budgeted drain: recompute leaves until the per-tick wall-clock budget is spent, capped by the
+        // MAX_LEAVES_PER_TICK count backstop. Elapsed is checked before each leaf (so worst-case overshoot is
+        // one leaf). Mirrors ChunkNavLoader's time budget + count backstop — a leaf rebuild is ~0.15–1.8 ms so
+        // the 1 ms default usually drains the (small) dirty set fully, while a bulk edit amortizes over ticks.
+        // The resource re-tally drain below SHARES this one budget (cost leaves first), so the two together can
+        // never exceed the per-tick budget (plus at most one in-flight unit of overshoot each).
+        final long budgetNanos = (long) (ConfigLoader.config().hpaFlushBudgetMs() * 1_000_000.0);
+        final long start = System.nanoTime();
 
         int processed = 0;
         // pollFirst() atomically claims the least-keyed dirty leaf (set is concurrent — a re-mark after this
         // re-enqueues it). Ascending packed-key order makes the drain SEQUENCE a deterministic function of the
         // set's contents, independent of enqueue/iteration order (see the "Deterministic drain" class note).
-        Long boxed;
-        while (processed < MAX_LEAVES_PER_TICK && (boxed = dirty.pollFirst()) != null) {
-            final long key = boxed;
+        if (haveCost) {
+            Long boxed;
+            while (processed < MAX_LEAVES_PER_TICK && System.nanoTime() - start < budgetNanos
+                    && (boxed = dirty.pollFirst()) != null) {
+                final long key = boxed;
 
-            final int rx = RegionAddress.unpackRX(key);
-            final int ry = RegionAddress.unpackRY(key);
-            final int rz = RegionAddress.unpackRZ(key);
+                final int rx = RegionAddress.unpackRX(key);
+                final int ry = RegionAddress.unpackRY(key);
+                final int rz = RegionAddress.unpackRZ(key);
 
-            // Recompute the leaf's six faces + re-merge ancestors (crash-safe). If its chunk/section
-            // unloaded since the mark, computeLeaf no-ops (leaves the node unbuilt) — the planner then reads
-            // the §6 default.
-            buildLeafSafe(level, pyramid, rx, ry, rz);
+                // Recompute the leaf's six faces + re-merge ancestors (crash-safe). If its chunk/section
+                // unloaded since the mark, computeLeaf no-ops (leaves the node unbuilt) — the planner then reads
+                // the §6 default.
+                buildLeafSafe(level, pyramid, rx, ry, rz);
 
-            processed++;
+                processed++;
+            }
         }
-        // Block-change-driven leaf recomputes also dirty the dimension for persistence (§5.2).
-        if (processed > 0) RegionPersistence.markDirty(level);
+
+        // Resource re-tally drain (find-mine-resources design §8.5) — same deterministic ascending drain, same
+        // count backstop, and the SAME shared wall-clock budget as the cost drain above (whatever time it left).
+        // A resource re-tally is far cheaper than a cost-leaf rebuild (a resource-only section sweep, no
+        // mini-pathfind), and resource-relevant changes are rare, so this set is usually tiny and drains fully.
+        int resProcessed = 0;
+        if (haveRes) {
+            final ResourcePyramid resources = grid.resourcePyramid();
+            Long boxed;
+            while (resProcessed < MAX_LEAVES_PER_TICK && System.nanoTime() - start < budgetNanos
+                    && (boxed = resDirty.pollFirst()) != null) {
+                final long key = boxed;
+                retallyResourceLeafSafe(level, resources,
+                        RegionAddress.unpackRX(key), RegionAddress.unpackRY(key), RegionAddress.unpackRZ(key));
+                resProcessed++;
+            }
+        }
+
+        // Block-change-driven leaf recomputes / re-tallies also dirty the dimension for persistence (§5.2).
+        if (processed > 0 || resProcessed > 0) RegionPersistence.markDirty(level);
     }
 
     /**
-     * Drop a dimension's dirty backlog (on level unload — call alongside {@link RegionGrid#drop}). Idempotent.
+     * Drop a dimension's dirty backlogs (cost + resource) on level unload — call alongside
+     * {@link RegionGrid#drop}. Idempotent.
      */
     public static void drop(ServerLevel level) {
         DIRTY.remove(level);
+        RESOURCE_DIRTY.remove(level);
     }
 
-    /** Drop every dimension's dirty backlog (on server stop — call alongside {@link RegionGrid#clear}). */
+    /** Drop every dimension's dirty backlogs (cost + resource) on server stop — call alongside
+     *  {@link RegionGrid#clear}. */
     public static void clear() {
         DIRTY.clear();
+        RESOURCE_DIRTY.clear();
     }
 }

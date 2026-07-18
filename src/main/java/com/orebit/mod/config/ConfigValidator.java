@@ -24,6 +24,9 @@ import net.minecraft.world.level.block.Block;
  *       weighted-octile search) → clamp up, defaulting a non-number;</li>
  *   <li>{@code pathing.costPerHitpoint} must be {@code >= 0} (0 = damage priced at nothing) → clamp up,
  *       defaulting a non-number;</li>
+ *   <li>{@code pathing.chunkBuildBudgetMs} / {@code pathing.hpaFlushBudgetMs} must be a positive float,
+ *       ceilinged at 1000 ms → clamp to {@code [0.1, 1000.0]}, defaulting a non-number (the ceiling is
+ *       generous so the autotest can pin a high, never-binding budget — see the {@code validate} note);</li>
  *   <li>{@code mining.maxHardness} must be {@code 0..255} (the quantized-hardness range) → clamp;</li>
  *   <li>{@code mining.ticksToMineFlat} must be {@code >= 0} → clamp;</li>
  *   <li>{@code placement.conjuredBlock} must resolve to a real {@link Block} on the running version (via
@@ -85,11 +88,17 @@ public final class ConfigValidator {
                 // start (the host's core count isn't known here), and a >10s search budget is a config typo.
                 intClamped(props, ConfigKeys.PATHING_MAX_THREADS, d.maxThreads(), 1, 64),
                 intClamped(props, ConfigKeys.PATHING_ASYNC_SEARCH_BUDGET_MS, d.asyncSearchBudgetMs(), 1, 10_000),
-                // chunkBuildsPerTick >= 1 (0 would stall the nav pipeline); navReadyRadiusChunks >= 0 (0
-                // disables the gate); navReadyTimeoutTicks >= 1. Upper rails are sanity caps against a typo.
+                // chunkBuildsPerTick >= 1 (the COUNT BACKSTOP; 0 would stall the nav pipeline);
+                // chunkBuildBudgetMs / hpaFlushBudgetMs are the PRIMARY per-tick drain gates, in (0, 1000] ms.
+                // The ceiling is generous (1 s) rather than half-a-tick because the autotest deliberately pins
+                // a HIGH budget (100 ms) so it never binds and the deterministic COUNT backstop governs — a
+                // >1 s per-tick drain budget is the real typo. navReadyRadiusChunks >= 0 (0 disables the gate);
+                // navReadyTimeoutTicks >= 1. Upper rails are sanity caps against a typo.
                 intClamped(props, ConfigKeys.PATHING_CHUNK_BUILDS_PER_TICK, d.chunkBuildsPerTick(), 1, 4_096),
+                floatClamped(props, ConfigKeys.PATHING_CHUNK_BUILD_BUDGET_MS, d.chunkBuildBudgetMs(), 0.1f, 1000.0f),
                 intClamped(props, ConfigKeys.PATHING_NAV_READY_RADIUS_CHUNKS, d.navReadyRadiusChunks(), 0, 64),
                 intClamped(props, ConfigKeys.PATHING_NAV_READY_TIMEOUT_TICKS, d.navReadyTimeoutTicks(), 1, 72_000),
+                floatClamped(props, ConfigKeys.PATHING_HPA_FLUSH_BUDGET_MS, d.hpaFlushBudgetMs(), 0.1f, 1000.0f),
                 // hpa: 0 disables the periodic flush; upper rail is a sanity cap (~9.5 days) against a typo.
                 intClamped(props, ConfigKeys.HPA_PERSIST_INTERVAL_TICKS, d.persistIntervalTicks(), 0, 16_000_000),
                 // doors
@@ -153,6 +162,27 @@ public final class ConfigValidator {
             return def;
         }
         if (v < 0.0f) { warn.accept(key + "=" + v + " below minimum 0.0 — clamped"); return 0.0f; }
+        return v;
+    }
+
+    /**
+     * Like {@link #weightNonNeg} but clamps to a closed {@code [min, max]} float range, for the strictly
+     * positive, ceilinged wall-clock budget knobs ({@code pathing.chunkBuildBudgetMs},
+     * {@code pathing.hpaFlushBudgetMs}). A {@code min > 0} realises the "must be positive" rule (a 0 / negative
+     * / non-number value warns and clamps up), and {@code max} is a sanity ceiling against a typo.
+     */
+    private float floatClamped(Properties props, String key, float def, float min, float max) {
+        String raw = props.getProperty(key);
+        if (raw == null) return def;
+        float v;
+        try {
+            v = Float.parseFloat(raw.trim());
+        } catch (NumberFormatException e) {
+            warn.accept(key + "='" + raw.trim() + "' is not a number — using default " + def);
+            return def;
+        }
+        if (v < min) { warn.accept(key + "=" + v + " below minimum " + min + " — clamped"); return min; }
+        if (v > max) { warn.accept(key + "=" + v + " above maximum " + max + " — clamped"); return max; }
         return v;
     }
 

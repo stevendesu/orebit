@@ -270,10 +270,16 @@ public final class ConfigLoader {
             line(w, "# best partial path; the bot moves that way and replans. Bigger = escapes bigger dead-ends,");
             line(w, "# longer worst-case plan latency (the tick itself is never stalled -- these run off-thread).");
             kv(w, ConfigKeys.PATHING_ASYNC_SEARCH_BUDGET_MS, d.asyncSearchBudgetMs());
-            line(w, "# Chunks of NavGrid built per level per server tick (>= 1). NavGrids build over a few ticks");
-            line(w, "# after chunks load; raise this on a strong/multi-core machine so the bot's surrounding nav");
-            line(w, "# data is ready sooner (shorter readiness wait below), lower it on a constrained host.");
+            line(w, "# Per-tick COUNT BACKSTOP on NavGrid chunk builds per level (>= 1). No longer the primary");
+            line(w, "# gate -- the wall-clock budget below is. This ceiling just keeps a burst of cheap all-air");
+            line(w, "# columns from draining unbounded within the time budget. Raise on a strong/multi-core host");
+            line(w, "# to let more cheap columns build per tick; default 64 is a backstop, not a per-tick target.");
             kv(w, ConfigKeys.PATHING_CHUNK_BUILDS_PER_TICK, d.chunkBuildsPerTick());
+            line(w, "# PRIMARY per-tick wall-clock budget (ms, > 0) for draining the NavGrid chunk-build queue.");
+            line(w, "# Per-column cost swings ~15x with terrain (surface ~1ms, cave ~5ms), which a fixed count");
+            line(w, "# can't adapt to; a time budget drains as many columns as safely fit. Elapsed is checked");
+            line(w, "# after each column (worst-case overshoot one column). Clamped to (0, 1000] ms. Default 2.0.");
+            kv(w, ConfigKeys.PATHING_CHUNK_BUILD_BUDGET_MS, d.chunkBuildBudgetMs());
             line(w, "# Radius (in chunks) of the ring around the bot that must be nav-built before it plans a");
             line(w, "# path (N => a (2N+1)^2 chunk ring). The bot HOLDS until this is built, so it never plans");
             line(w, "# over unbuilt terrain (which the planner reads as air -> a truncated-world target). Default");
@@ -283,6 +289,11 @@ public final class ConfigLoader {
             line(w, "# only -- the gate polls real nav residency and proceeds the instant the ring is built, so on");
             line(w, "# a healthy server the wait is 1-2 ticks and this never fires. Default 150 (~7.5s).");
             kv(w, ConfigKeys.PATHING_NAV_READY_TIMEOUT_TICKS, d.navReadyTimeoutTicks());
+            line(w, "# Per-tick wall-clock budget (ms, > 0) for the HPA* region-tier dirty-leaf flush -- the");
+            line(w, "# region-tier analog of chunkBuildBudgetMs. A leaf rebuild is ~0.15-1.8ms, so 1.0 usually");
+            line(w, "# drains the (small) dirty set fully; a bulk edit amortizes over a few ticks. Elapsed is");
+            line(w, "# checked after each leaf. Bounded by a hardcoded leaf-count backstop. Clamped to (0, 1000] ms.");
+            kv(w, ConfigKeys.PATHING_HPA_FLUSH_BUDGET_MS, d.hpaFlushBudgetMs());
             line(w, "");
 
             line(w, "# --- hpa: the persisted region tier (survives a server restart) ---");

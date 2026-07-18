@@ -178,13 +178,39 @@ public final class ConfigKeys {
     public static final String PATHING_ASYNC_SEARCH_BUDGET_MS = "pathing.asyncSearchBudgetMs";
 
     /**
-     * {@code int >= 1} — chunks of NavGrid built per level per server tick (drained at tick-end from the
-     * chunk-load queue). Replaces the old hardcoded per-tick build cap. A teleport / world-open can queue
-     * hundreds of chunks at once; this bounds how fast they fill in so the build cost stays off the frame
-     * budget. Raise it on a strong / multi-core machine to make the bot's surrounding nav data ready in fewer
-     * ticks (shrinking the readiness wait below); lower it on a constrained host. Default {@code 8}.
+     * {@code int >= 1} — per-level per-tick <b>COUNT BACKSTOP</b> on NavGrid chunk builds (drained at
+     * tick-end from the chunk-load queue). <b>No longer the primary gate</b> — that is now the wall-clock
+     * {@link #PATHING_CHUNK_BUILD_BUDGET_MS}. This is the safety ceiling that keeps a burst of cheap all-air
+     * columns from draining unbounded and spiking other tick work even inside the time budget; the time
+     * budget is what actually stops a run of expensive (cave) columns. A teleport / world-open can queue
+     * hundreds of chunks at once; the two together bound how fast they fill in so the build cost stays off
+     * the frame budget. Raise it on a strong / multi-core machine to let more cheap columns build per tick;
+     * lower it on a constrained host. Default {@code 64} (a backstop value, not a per-tick target).
      */
     public static final String PATHING_CHUNK_BUILDS_PER_TICK = "pathing.chunkBuildsPerTick";
+    /**
+     * {@code float > 0} — the <b>primary</b> per-level per-tick wall-clock budget (milliseconds) for
+     * draining the NavGrid chunk-build queue. Elapsed time is checked after each column, so the worst-case
+     * overshoot is one column. Per-column build cost swings ~15× with terrain (a surface column ~1 ms, a
+     * cave column ~5 ms — {@code ChunkBuildBenchmark}), which a fixed COUNT can't adapt to (8 cave columns =
+     * ~41 ms of a 50 ms tick); a wall-clock budget drains as many columns as safely fit. Bounded above by
+     * the {@link #PATHING_CHUNK_BUILDS_PER_TICK} count backstop. Clamped to {@code (0, 1000]} ms — the ceiling
+     * is generous (1 s) so a determinism-pinned harness (the headless autotest) can set a HIGH budget that
+     * never binds, letting the deterministic count backstop govern instead; a &gt; 1 s per-tick drain budget is
+     * the real typo. Default {@code 2.0}.
+     */
+    public static final String PATHING_CHUNK_BUILD_BUDGET_MS = "pathing.chunkBuildBudgetMs";
+    /**
+     * {@code float > 0} — the per-level per-tick wall-clock budget (milliseconds) for the HPA* dirty-leaf
+     * flush ({@link com.orebit.mod.worldmodel.hpa.HpaMaintenance#flush}), the region-tier analog of
+     * {@link #PATHING_CHUNK_BUILD_BUDGET_MS}. Elapsed time is checked after each leaf (worst-case overshoot
+     * one leaf). A leaf rebuild is cheap-ish (~0.15–1.8 ms), so at the default {@code 1.0} ms this usually
+     * drains the (typically small) dirty set fully; a bulk edit amortizes over a few ticks instead of
+     * stalling one. Bounded above by a hardcoded leaf-count backstop
+     * ({@code HpaMaintenance.MAX_LEAVES_PER_TICK}). Clamped to {@code (0, 1000]} ms (generous ceiling — the
+     * autotest pins a high, never-binding budget for determinism). Default {@code 1.0}.
+     */
+    public static final String PATHING_HPA_FLUSH_BUDGET_MS = "pathing.hpaFlushBudgetMs";
     /**
      * {@code int >= 0} — the radius (in chunks) of the ring around the bot whose NavGrid must be built before
      * the bot plans a path. {@code N} ⇒ a {@code (2N+1)²} chunk ring must all be nav-built. NavGrids build

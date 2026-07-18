@@ -517,6 +517,10 @@ public final class RegionPathfinder {
                                                       boolean canBreak, boolean canPlace, int safeFall,
                                                       RegionEdgeBlacklist blacklist, RegionMineModel mine,
                                                       DigSeedSet digSeeds, RegionTube tube) {
+        // Bracket the whole search so ensureLeaf/rebuildLeaf/startFragmentByFlood box each chunk key at most once
+        // per search instead of once per edge-relaxation (RegionGrid per-search column cache).
+        final long colTok = grid.beginColumnCache();
+        try {
         final Nodes nodes = SEARCH.get();
         nodes.reset();
         LAST_WAS_FLOOD.get()[0] = false; // §3a: cleared here; set only if the cap-safe flood guard trips below
@@ -616,6 +620,9 @@ public final class RegionPathfinder {
             return null;
         }
         return reconstructFragments(nodes, startRow, reachedRow, minY, level, reachedGoalRegion);
+        } finally {
+            grid.endColumnCache(colTok);
+        }
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -785,6 +792,10 @@ public final class RegionPathfinder {
     public static RegionCostField costToGoalField(RegionGrid grid, int minY, BlockPos goalFloor, BlockPos startFloor,
                                                   boolean canBreak, boolean canPlace, int safeFall,
                                                   RegionMineModel mine, RegionPlaceModel place, RegionBox bound) {
+        // Bracket the whole field build so ensureLeaf/rebuildLeaf/startFragmentByFlood box each chunk key at most
+        // once per build instead of once per edge-relaxation (RegionGrid per-search column cache).
+        final long colTok = grid.beginColumnCache();
+        try {
         // Capability-aware pillar cost for the field's upward-climb term (place-side sibling of the mine model);
         // replaces the hardcoded PILLAR_PER_BLOCK_FIELD stand-in. Only the reverse (field) edges read it.
         final float pillarField = place.pillarPerBlock();
@@ -901,6 +912,9 @@ public final class RegionPathfinder {
         stats[0] = settles;
         stats[1] = earlyExit ? 1 : 0;
         return field;
+        } finally {
+            grid.endColumnCache(colTok);
+        }
     }
 
     /** Diagnostics for the last {@link #costToGoalField} build on this thread: [0] = settles, [1] = early exit. */
