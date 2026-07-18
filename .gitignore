@@ -53,3 +53,10 @@ logs/
 
 # Autotest master world — backed up on the autotest-world orphan branch, never in code history
 scripts/autotest-world-master/
+# Cliff invalid-region-crossing repro master world (#5) — untracked like the autotest master above;
+# rebuildable via scripts/repro-cliff/ (gen_fills.py + rcon.py); owner decides whether it lands on the
+# autotest-world orphan branch.
+scripts/autotest-cliff/world-master/
+# Lateral-climb repro master world — untracked like the cliff master above; rebuildable via
+# scripts/repro-climb/ (gen_fills.py + rcon.py); owner decides whether it lands on the orphan branch.
+scripts/autotest-climb/world-master/
