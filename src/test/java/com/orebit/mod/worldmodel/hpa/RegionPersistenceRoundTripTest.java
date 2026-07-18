@@ -1,5 +1,6 @@
 package com.orebit.mod.worldmodel.hpa;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -7,30 +8,40 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.HashSet;
+import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
 import com.orebit.mod.worldmodel.persistence.CostPyramidCodec;
 import com.orebit.mod.worldmodel.persistence.ResourcePyramidCodec;
 import com.orebit.mod.worldmodel.resource.ResourceClasses;
+import com.orebit.mod.worldmodel.resource.ResourceMerger;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
 /**
- * Headless round-trip tests for the world-model persistence file codecs
+ * Headless round-trip tests for the <b>Stage-1 sharded</b> world-model persistence codecs
  * ({@link CostPyramidCodec} / {@link ResourcePyramidCodec}, DESIGN-worldmodel-persistence.md §7). These need
- * <b>no Minecraft server</b>: a pyramid is hand-built, encoded to a byte[], decoded into a fresh pyramid, and
- * every level-0 row's fragments/columns must survive the trip. The per-record fragment bitstream itself is
- * already covered by {@code CostCodecTest}; this exercises the FILE wrapper — the header, multi-row framing,
- * gzip body, coord round-trip, live-world-wins guard, and resource sparsity.
+ * <b>no Minecraft server</b>: a pyramid is hand-built, the real {@code mergeUp} drivers populate its coarse
+ * levels, it is FLUSHED via the new per-shard writer + per-dimension coarse writer, RELOADED via the new
+ * reader <b>with no {@code mergeUp} replay</b>, and every row at every level must survive byte-identically —
+ * which proves (a) the shard split/reassembly is lossless and (b) persisted-coarse == recomputed-coarse (the
+ * whole point of persisting the coarse levels directly).
  *
  * <p>Lives in the {@code hpa} package to reach {@link RegionFragments}'s package-private setters + the
  * {@link FragmentBuilder} (as {@code CostCodecTest} does) when seeding cost leaves; the {@link ResourcePyramid}
- * uses its public API.
+ * uses its public API. The per-record fragment bitstream itself is already covered by {@code CostCodecTest};
+ * this exercises the FILE wrapper — the multi-shard/per-level framing, the coarse files, the gzip body, coord
+ * round-trip, the live-world-wins guard, resource sparsity, and the reserved invalidation section.
  */
 public class RegionPersistenceRoundTripTest {
 
     private static final int G = 16;
     private static final int CELLS = G * G * G;
+
+    /** Cost pyramid rolls up to level 6; resource to level 21. */
+    private static final int COST_TOP = RegionAddress.MAX_COARSE_LEVEL;               // 6
+    private static final int RES_TOP = ResourcePyramid.RESOURCE_TOP_LEVEL;            // 21
 
     private static int idx(int x, int y, int z) {
         return (y << 8) | (z << 4) | x;
@@ -74,137 +85,246 @@ public class RegionPersistenceRoundTripTest {
         p.setBuilt(0, row, true);
     }
 
-    private static void assertSchemaEqual(RegionFragments a, RegionFragments b) {
-        assertEquals(a.kind(), b.kind(), "kind");
-        assertEquals(a.avgSolidHardness(), b.avgSolidHardness(), "avgSolidHardness");
-        assertEquals(a.fragmentCount(), b.fragmentCount(), "fragmentCount");
-        if (a.kind() == RegionFragments.KIND_MIXED) {
-            assertEquals(a.passFrac(), b.passFrac(), "passFrac");
-            for (int f = 0; f < a.fragmentCount(); f++) {
-                assertEquals(a.faceMask(f), b.faceMask(f), "faceMask[" + f + "]");
-                for (int face = 0; face < 6; face++) {
-                    assertEquals(a.footprint(f, face), b.footprint(f, face),
-                            "footprint[" + f + "][" + face + "]");
-                }
-            }
-        }
+    // ---- shard-aware flush/reload of a whole pyramid (mirrors RegionPersistence.flushDimension) --------
+
+    /** L5 shard key packing, identical to {@code RegionPersistence.shardKey}. */
+    private static long shardKey(int sx, int sz) {
+        return ((long) sx << 32) | (sz & 0xFFFFFFFFL);
     }
 
-    private static CostPyramid roundTripCost(CostPyramid src) throws IOException {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        CostPyramidCodec.encode(src, bos);
+    /** Shards holding a built cost row across levels 0..5. */
+    private static Set<Long> costShards(CostPyramid p) {
+        Set<Long> shards = new HashSet<>();
+        for (int level = 0; level <= RegionAddress.SHARD_LEVEL; level++) {
+            int rows = p.rowCount(level);
+            for (int r = 0; r < rows; r++) {
+                if (!p.isBuilt(level, r) || p.fragmentRecord(level, r) == null) continue;
+                shards.add(shardKey(RegionAddress.shardOf(p.rowRX(level, r), level),
+                                    RegionAddress.shardOf(p.rowRZ(level, r), level)));
+            }
+        }
+        return shards;
+    }
+
+    private static Set<Long> resourceShards(ResourcePyramid p) {
+        Set<Long> shards = new HashSet<>();
+        for (int level = 0; level <= RegionAddress.SHARD_LEVEL; level++) {
+            int rows = p.rowCount(level);
+            for (int r = 0; r < rows; r++) {
+                if (!p.isBuilt(level, r)) continue;
+                shards.add(shardKey(RegionAddress.shardOf(p.rowRX(level, r), level),
+                                    RegionAddress.shardOf(p.rowRZ(level, r), level)));
+            }
+        }
+        return shards;
+    }
+
+    /** Flush {@code src} to per-shard + coarse byte blobs and reload them (no mergeUp) into a fresh pyramid. */
+    private static CostPyramid flushReloadCost(CostPyramid src) throws IOException {
         CostPyramid back = new CostPyramid();
-        CostPyramidCodec.decode(new ByteArrayInputStream(bos.toByteArray()), back);
+        for (long key : costShards(src)) {
+            int sx = (int) (key >> 32), sz = (int) key;
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            CostPyramidCodec.encodeShard(src, sx, sz, bos);
+            CostPyramidCodec.decode(new ByteArrayInputStream(bos.toByteArray()), back);
+        }
+        ByteArrayOutputStream coarse = new ByteArrayOutputStream();
+        CostPyramidCodec.encodeCoarse(src, coarse);
+        CostPyramidCodec.decode(new ByteArrayInputStream(coarse.toByteArray()), back);
         return back;
     }
 
-    // ===================================================================================================
-    // Cost pyramid: several level-0 leaves of every kind survive the file round-trip.
-    // ===================================================================================================
-    @Test
-    void costPyramid_levelZeroLeaves_roundTrip() throws IOException {
-        CostPyramid src = new CostPyramid();
-        // A mix of coords (incl. negatives) so the int rx/rz + byte ry framing is exercised.
-        seedUniform(src, 0, 0, 0, RegionFragments.KIND_SOLID, 6);
-        seedUniform(src, -3, 5, 7, RegionFragments.KIND_AIR, 0);
-        seedUniform(src, 1000000, 31, -2000000, RegionFragments.KIND_WATER, 0);
-        seedMixed(src, 4, 2, -9, new int[] { 4, 12 });   // two disjoint corridors → 2 fragments
-        seedMixed(src, -1, 0, 1, new int[] { 8 });       // one corridor → 1 fragment
-        // An interned-but-unbuilt row must NOT be persisted.
-        src.rowFor(0, 50, 0, 50);
-
-        CostPyramid back = roundTripCost(src);
-
-        int[][] coords = { {0, 0, 0}, {-3, 5, 7}, {1000000, 31, -2000000}, {4, 2, -9}, {-1, 0, 1} };
-        for (int[] c : coords) {
-            int rowSrc = src.rowIfPresent(0, c[0], c[1], c[2]);
-            int rowBack = back.rowIfPresent(0, c[0], c[1], c[2]);
-            assertTrue(rowBack != -1, "leaf (" + c[0] + "," + c[1] + "," + c[2] + ") must survive");
-            assertTrue(back.isBuilt(0, rowBack), "reloaded leaf must be built");
-            assertSchemaEqual(src.fragmentRecord(0, rowSrc), back.fragmentRecord(0, rowBack));
+    private static ResourcePyramid flushReloadResource(ResourcePyramid src) throws IOException {
+        ResourcePyramid back = new ResourcePyramid();
+        for (long key : resourceShards(src)) {
+            int sx = (int) (key >> 32), sz = (int) key;
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            ResourcePyramidCodec.encodeShard(src, sx, sz, bos);
+            ResourcePyramidCodec.decode(new ByteArrayInputStream(bos.toByteArray()), back);
         }
-        assertEquals(-1, back.rowIfPresent(0, 50, 0, 50), "an unbuilt leaf is not persisted");
+        ByteArrayOutputStream coarse = new ByteArrayOutputStream();
+        ResourcePyramidCodec.encodeCoarse(src, coarse);
+        ResourcePyramidCodec.decode(new ByteArrayInputStream(coarse.toByteArray()), back);
+        return back;
+    }
+
+    // ---- structural equality -------------------------------------------------------------------------
+
+    private static byte[] packRow(CostPyramid p, int level, int row) {
+        RegionFragments rf = p.fragmentRecord(level, row);
+        int nbytes = (CostCodec.regionBitLength(rf) + 7) >> 3;
+        byte[] buf = new byte[nbytes];
+        CostCodec.packRegion(rf, buf, 0);
+        return buf;
+    }
+
+    private static int builtCostRows(CostPyramid p, int level) {
+        int n = 0, rows = p.rowCount(level);
+        for (int r = 0; r < rows; r++) {
+            if (p.isBuilt(level, r) && p.fragmentRecord(level, r) != null) n++;
+        }
+        return n;
+    }
+
+    private static void assertCostIdentical(CostPyramid src, CostPyramid back, int maxLevel) {
+        for (int level = 0; level <= maxLevel; level++) {
+            int rows = src.rowCount(level);
+            for (int r = 0; r < rows; r++) {
+                if (!src.isBuilt(level, r) || src.fragmentRecord(level, r) == null) continue;
+                int rx = src.rowRX(level, r), ry = src.rowRY(level, r), rz = src.rowRZ(level, r);
+                int br = back.rowIfPresent(level, rx, ry, rz);
+                assertTrue(br != -1, "cost L" + level + " (" + rx + "," + ry + "," + rz + ") must reload");
+                assertTrue(back.isBuilt(level, br), "reloaded cost L" + level + " row must be built");
+                assertArrayEquals(packRow(src, level, r), packRow(back, level, br),
+                        "cost L" + level + " (" + rx + "," + ry + "," + rz + ") record bytes");
+            }
+            assertEquals(builtCostRows(src, level), builtCostRows(back, level),
+                    "cost L" + level + " built-row count");
+        }
+    }
+
+    private static int builtResourceRows(ResourcePyramid p, int level) {
+        int n = 0, rows = p.rowCount(level);
+        for (int r = 0; r < rows; r++) {
+            if (p.isBuilt(level, r)) n++;
+        }
+        return n;
+    }
+
+    private static void assertResourceIdentical(ResourcePyramid src, ResourcePyramid back, int maxLevel) {
+        int cols = ResourceClasses.COLUMN_COUNT;
+        for (int level = 0; level <= maxLevel; level++) {
+            int rows = src.rowCount(level);
+            for (int r = 0; r < rows; r++) {
+                if (!src.isBuilt(level, r)) continue;
+                int rx = src.rowRX(level, r), ry = src.rowRY(level, r), rz = src.rowRZ(level, r);
+                int br = back.rowIfPresent(level, rx, ry, rz);
+                assertTrue(br != -1, "res L" + level + " (" + rx + "," + ry + "," + rz + ") must reload");
+                assertTrue(back.isBuilt(level, br), "reloaded res L" + level + " row must be built");
+                for (int c = 0; c < cols; c++) {
+                    assertEquals(src.getLog2(level, r, c), back.getLog2(level, br, c),
+                            "res L" + level + " (" + rx + "," + ry + "," + rz + ") col " + c);
+                }
+            }
+            assertEquals(builtResourceRows(src, level), builtResourceRows(back, level),
+                    "res L" + level + " built-row count");
+        }
     }
 
     // ===================================================================================================
-    // Live world wins (§6): decode must NOT clobber a leaf already built this session.
+    // The headline test: multi-shard, multi-section leaves + real mergeUp coarse → flush → reload → identical.
     // ===================================================================================================
     @Test
-    void costPyramid_decodeDoesNotClobberLiveLeaf() throws IOException {
+    void shardedRoundTrip_persistedCoarseEqualsRecomputedCoarse() throws IOException {
+        CostPyramid cp = new CostPyramid();
+        ResourcePyramid rp = new ResourcePyramid();
+
+        // Leaves spanning THREE L5 shards (chunkX>>5): shard 0 (chunkX 2,5), shard 1 (chunkX 40,45),
+        // shard -1 (chunkX -5) — and multiple vertical sections (ry 0, 3, 5, 31).
+        seedUniform(cp, 2, 0, 3, RegionFragments.KIND_SOLID, 6);
+        seedUniform(cp, 2, 31, 3, RegionFragments.KIND_AIR, 0);
+        seedMixed(cp, 5, 3, 7, new int[] { 4, 12 });                       // 2 fragments
+        seedUniform(cp, 40, 0, 3, RegionFragments.KIND_WATER, 0);          // shard 1
+        seedMixed(cp, 45, 5, 7, new int[] { 8 });                          // shard 1, 1 fragment
+        seedUniform(cp, -5, 2, 3, RegionFragments.KIND_SOLID, 8);          // shard -1
+
+        // Resource tallies at a subset of the same sections, across the same shards.
+        seedResource(rp, 2, 0, 3, new int[][] { {1, 5}, {7, 2} });
+        seedResource(rp, 5, 3, 7, new int[][] { {0, 3} });
+        seedResource(rp, 40, 0, 3, new int[][] { {ResourceClasses.COLUMN_COUNT - 1, 9} });
+        seedResource(rp, -5, 2, 3, new int[][] { {2, 1}, {11, 4} });
+
+        // Sanity: the seed really does span multiple shards (so sharding is exercised, not a degenerate 1 shard).
+        assertTrue(costShards(cp).size() >= 3, "test must span >=3 cost shards");
+        assertTrue(resourceShards(rp).size() >= 3, "test must span >=3 resource shards");
+
+        // Populate the coarse levels with the REAL merge drivers (production incremental path), then snapshot by
+        // flush→reload. mergeUp per built leaf: cost → level 6, resource → level 21.
+        for (int r = 0; r < cp.rowCount(0); r++) {
+            if (cp.isBuilt(0, r)) {
+                PyramidMerger.mergeUpFragments(cp, cp.rowRX(0, r), cp.rowRY(0, r), cp.rowRZ(0, r));
+            }
+        }
+        for (int r = 0; r < rp.rowCount(0); r++) {
+            if (rp.isBuilt(0, r)) {
+                ResourceMerger.mergeUpTallies(rp, rp.rowRX(0, r), rp.rowRY(0, r), rp.rowRZ(0, r));
+            }
+        }
+
+        // The coarse files must actually carry rows (else the "persist coarse directly" claim is untested).
+        assertTrue(cp.rowCount(COST_TOP) > 0, "cost must have level-6 rows after mergeUp");
+        assertTrue(rp.rowCount(RES_TOP) > 0, "resource must have top-level rows after mergeUp");
+
+        // FLUSH via the sharded writer, RELOAD via the sharded reader (direct — no mergeUp on `back`).
+        CostPyramid costBack = flushReloadCost(cp);
+        ResourcePyramid resBack = flushReloadResource(rp);
+
+        // The reloaded pyramids must be structurally identical to the pre-flush ones at EVERY level, incl. the
+        // coarse levels that were loaded directly (never re-merged) — proving persisted-coarse == recomputed.
+        assertCostIdentical(cp, costBack, COST_TOP);
+        assertResourceIdentical(rp, resBack, RES_TOP);
+    }
+
+    private static void seedResource(ResourcePyramid p, int rx, int ry, int rz, int[][] colVals) {
+        int row = p.rowFor(0, rx, ry, rz);
+        for (int[] cv : colVals) {
+            p.setLog2(0, row, cv[0], (byte) cv[1]);
+        }
+        p.setBuilt(0, row, true);
+    }
+
+    // ===================================================================================================
+    // Live world wins (§6): decode must NOT clobber a row already built this session (cost + resource).
+    // ===================================================================================================
+    @Test
+    void decodeDoesNotClobberLiveRows() throws IOException {
         CostPyramid src = new CostPyramid();
         seedUniform(src, 2, 3, 4, RegionFragments.KIND_SOLID, 6);
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        CostPyramidCodec.encode(src, bos);
+        CostPyramidCodec.encodeShard(src, RegionAddress.shardOf(2, 0), RegionAddress.shardOf(4, 0), bos);
 
-        // A fresh session where the same leaf is already live as AIR — the live value must survive the decode.
         CostPyramid live = new CostPyramid();
-        seedUniform(live, 2, 3, 4, RegionFragments.KIND_AIR, 0);
+        seedUniform(live, 2, 3, 4, RegionFragments.KIND_AIR, 0); // a different, live value
         CostPyramidCodec.decode(new ByteArrayInputStream(bos.toByteArray()), live);
+        assertEquals(RegionFragments.KIND_AIR, live.fragmentRecord(0, live.rowIfPresent(0, 2, 3, 4)).kind(),
+                "live-built cost leaf must win over the persisted one");
 
-        int row = live.rowIfPresent(0, 2, 3, 4);
-        assertEquals(RegionFragments.KIND_AIR, live.fragmentRecord(0, row).kind(),
-                "live-built leaf must win over the persisted one");
+        ResourcePyramid rsrc = new ResourcePyramid();
+        int rr = rsrc.rowFor(0, 5, 5, 5);
+        rsrc.setLog2(0, rr, 3, (byte) 8);
+        rsrc.setBuilt(0, rr, true);
+        ByteArrayOutputStream rbos = new ByteArrayOutputStream();
+        ResourcePyramidCodec.encodeShard(rsrc, RegionAddress.shardOf(5, 0), RegionAddress.shardOf(5, 0), rbos);
+
+        ResourcePyramid rlive = new ResourcePyramid();
+        int lr = rlive.rowFor(0, 5, 5, 5);
+        rlive.setLog2(0, lr, 3, (byte) 1);
+        rlive.setBuilt(0, lr, true);
+        ResourcePyramidCodec.decode(new ByteArrayInputStream(rbos.toByteArray()), rlive);
+        assertEquals((byte) 1, rlive.getLog2(0, rlive.rowIfPresent(0, 5, 5, 5), 3),
+                "live-built resource tally must win over the persisted one");
     }
 
     // ===================================================================================================
-    // Resource pyramid: sparse level-0 tallies survive the file round-trip.
+    // An interned-but-unbuilt row is never persisted; an all-zero built resource row still round-trips.
     // ===================================================================================================
     @Test
-    void resourcePyramid_levelZeroTallies_roundTrip() throws IOException {
-        ResourcePyramid src = new ResourcePyramid();
-        int cols = ResourceClasses.COLUMN_COUNT;
+    void unbuiltRowsNotPersisted_zeroBuiltResourceRoundTrips() throws IOException {
+        CostPyramid cp = new CostPyramid();
+        seedUniform(cp, 3, 0, 3, RegionFragments.KIND_SOLID, 6);
+        cp.rowFor(0, 3, 1, 3); // interned but never built — must NOT persist
+        CostPyramid cb = flushReloadCost(cp);
+        assertEquals(-1, cb.rowIfPresent(0, 3, 1, 3), "an unbuilt cost leaf is not persisted");
+        assertTrue(cb.rowIfPresent(0, 3, 0, 3) != -1, "a built cost leaf is persisted");
 
-        // Row A: a couple of non-zero columns (a typical ore-bearing section).
-        int a = src.rowFor(0, 7, 1, -3);
-        src.setLog2(0, a, 1, (byte) 5);
-        src.setLog2(0, a, 7, (byte) 2);
-        src.setBuilt(0, a, true);
-        // Row B: a single non-zero column near the end of the range.
-        int b = src.rowFor(0, -100, 30, 200);
-        src.setLog2(0, b, cols - 1, (byte) 9);
-        src.setBuilt(0, b, true);
-        // Row C: all-zero but built (a built-empty tally still round-trips).
-        int c = src.rowFor(0, 0, 0, 0);
-        src.setBuilt(0, c, true);
-        // An interned-but-unbuilt row must NOT be persisted.
-        src.rowFor(0, 9, 9, 9);
-
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        ResourcePyramidCodec.encode(src, bos);
-        ResourcePyramid back = new ResourcePyramid();
-        ResourcePyramidCodec.decode(new ByteArrayInputStream(bos.toByteArray()), back);
-
-        int[][] coords = { {7, 1, -3}, {-100, 30, 200}, {0, 0, 0} };
-        for (int[] cc : coords) {
-            int rowSrc = src.rowIfPresent(0, cc[0], cc[1], cc[2]);
-            int rowBack = back.rowIfPresent(0, cc[0], cc[1], cc[2]);
-            assertTrue(rowBack != -1, "tally (" + cc[0] + "," + cc[1] + "," + cc[2] + ") must survive");
-            assertTrue(back.isBuilt(0, rowBack), "reloaded tally must be built");
-            for (int col = 0; col < cols; col++) {
-                assertEquals(src.getLog2(0, rowSrc, col), back.getLog2(0, rowBack, col),
-                        "column " + col + " of tally " + cc[0] + "," + cc[1] + "," + cc[2]);
-            }
-        }
-        assertEquals(-1, back.rowIfPresent(0, 9, 9, 9), "an unbuilt tally is not persisted");
-    }
-
-    @Test
-    void resourcePyramid_decodeDoesNotClobberLiveTally() throws IOException {
-        ResourcePyramid src = new ResourcePyramid();
-        int r = src.rowFor(0, 5, 5, 5);
-        src.setLog2(0, r, 3, (byte) 8);
-        src.setBuilt(0, r, true);
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        ResourcePyramidCodec.encode(src, bos);
-
-        ResourcePyramid live = new ResourcePyramid();
-        int lr = live.rowFor(0, 5, 5, 5);
-        live.setLog2(0, lr, 3, (byte) 1); // a different, live value
-        live.setBuilt(0, lr, true);
-        ResourcePyramidCodec.decode(new ByteArrayInputStream(bos.toByteArray()), live);
-
-        assertEquals((byte) 1, live.getLog2(0, live.rowIfPresent(0, 5, 5, 5), 3),
-                "live-built tally must win over the persisted one");
+        ResourcePyramid rp = new ResourcePyramid();
+        int z = rp.rowFor(0, 3, 0, 3); // all-zero but BUILT — must round-trip
+        rp.setBuilt(0, z, true);
+        rp.rowFor(0, 3, 1, 3);          // interned but unbuilt — must NOT persist
+        ResourcePyramid rb = flushReloadResource(rp);
+        assertTrue(rb.rowIfPresent(0, 3, 0, 3) != -1 && rb.isBuilt(0, rb.rowIfPresent(0, 3, 0, 3)),
+                "a built all-zero resource tally round-trips");
+        assertEquals(-1, rb.rowIfPresent(0, 3, 1, 3), "an unbuilt resource tally is not persisted");
     }
 
     // ===================================================================================================

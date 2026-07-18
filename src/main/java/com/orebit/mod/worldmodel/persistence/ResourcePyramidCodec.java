@@ -8,37 +8,47 @@ import java.io.OutputStream;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
+import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.resource.ResourceClasses;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
 /**
- * On-disk (de)serializer for a dimension's {@link ResourcePyramid} <b>level-0 tallies</b> — the resource half
- * of the world-model persistence arc (DESIGN-worldmodel-persistence.md §2, §7). One file per dimension
- * ({@code <world>/orebit/<dim>/res.bin}), the compass counterpart to {@link CostPyramidCodec}'s {@code hpa.bin}:
- * it lets {@code /bot report} surface resources the bot saw in now-unloaded terrain after a restart.
+ * On-disk (de)serializer for a dimension's {@link ResourcePyramid} tally rows — the resource half of the
+ * world-model persistence arc (DESIGN-worldmodel-persistence.md §2, §7). The compass counterpart to
+ * {@link CostPyramidCodec}, and, like it, <b>Stage-1 sharded</b>:
+ * <ul>
+ *   <li>{@code res.<X>.<Z>.bin} — resource levels <b>0..5</b> for the shard {@code (X = chunkX>>5, Z = chunkZ>>5)}
+ *       (one level-5 region, 32×32 chunks). Written by {@link #encodeShard}.</li>
+ *   <li>{@code res.coarse.bin} — resource levels <b>6..{@link ResourcePyramid#RESOURCE_TOP_LEVEL 21}</b>,
+ *       per-dimension (the true-global tier {@code /bot find}/{@code /bot report} read). Written by
+ *       {@link #encodeCoarse}.</li>
+ * </ul>
+ * The coarse levels are persisted directly so reload is a pure decode with <b>no {@code mergeUp} replay</b>
+ * (the point of Stage 1 — see {@link CostPyramidCodec}).
  *
- * <h2>What is persisted</h2>
- * Only level-0 tally rows; the coarse roll-up is replayed on load via
- * {@link com.orebit.mod.worldmodel.resource.ResourceMerger#mergeUpTallies}. A row is a
- * {@link ResourceClasses#COLUMN_COUNT}-wide {@code byte[]} of log₂ counts, but it is <b>sparse</b> — a section
- * gets a tally only when it holds ≥1 indexed block, and most of its 24 columns are 0 — so each row is written as
+ * <h2>What a row holds</h2>
+ * A row is a {@link ResourceClasses#COLUMN_COUNT}-wide {@code byte[]} of log₂ counts, but it is <b>sparse</b> — a
+ * region gets a tally only where it holds ≥1 indexed block, and most columns are 0 — so each row is written as
  * {@code (col, log2val)} pairs over the non-zero columns only.
  *
- * <h2>File format</h2>
+ * <h2>File format (both shard and coarse — a stack of per-level sections)</h2>
  * <pre>
- *   magic (int, "OBRP")            \
- *   version (short)                 |  header — UNCOMPRESSED
+ *   magic (int)                    \
+ *   version (short)                 |  header — UNCOMPRESSED. OBRS = shard (L0-5), OBRC = coarse (L6-21).
  *   columnCount (byte)             /   the COLUMN_COUNT this was written with (forward-compat validation)
  *   --- gzip(body) ---
- *   rowCount (int)
- *   per row:
- *     rx (int) ry (byte) rz (int)
- *     nNonZero (byte)               number of non-zero columns that follow
- *     nNonZero * ( col (byte), log2val (byte) )
+ *   levelCount (byte)                 number of level sections that follow (only non-empty levels are written)
+ *   per level section:
+ *     level (byte)
+ *     rowCount (int)
+ *     per row:
+ *       rx (int) ry (byte) rz (int)
+ *       nNonZero (byte)             number of non-zero columns that follow
+ *       nNonZero * ( col (byte), log2val (byte) )
  * </pre>
- * The stored {@code columnCount} lets a decoder validate/zero-extend: {@link ResourceClasses} freezes column
- * ids by design, so a pair whose {@code col} is outside the running build's column range (a newer file on an
- * older build) is skipped rather than mis-applied.
+ * The stored {@code columnCount} lets a decoder validate/zero-extend: {@link ResourceClasses} freezes column ids
+ * by design, so a pair whose {@code col} is outside the running build's column range (a newer file on an older
+ * build) is skipped rather than mis-applied.
  *
  * <h2>Cache semantics</h2>
  * Same as {@link CostPyramidCodec}: bad magic / version → {@link IOException} → treated as absent by
@@ -54,21 +64,48 @@ public final class ResourcePyramidCodec {
 
     private ResourcePyramidCodec() {}
 
-    /** File magic — ASCII "OBRP" (Orebit Resource Pyramid). */
-    static final int MAGIC = ('O' << 24) | ('B' << 16) | ('R' << 8) | 'P';
+    /** Shard-file magic — ASCII "OBRS" (Orebit Resource Shard, levels 0..5). */
+    static final int MAGIC_SHARD = ('O' << 24) | ('B' << 16) | ('R' << 8) | 'S';
+    /** Coarse-file magic — ASCII "OBRC" (Orebit Resource Coarse, levels 6..21). */
+    static final int MAGIC_COARSE = ('O' << 24) | ('B' << 16) | ('R' << 8) | 'C';
     /** Schema version; bump on any incompatible layout change. */
     static final short VERSION = 1;
 
     /** Indexed column count (24) — a compile-time constant, so this reference stays MC-free. */
     private static final int COLUMNS = ResourceClasses.COLUMN_COUNT;
 
+    /** Lowest / highest resource level carried by a per-region shard file. */
+    static final int SHARD_LO_LEVEL = 0;
+    static final int SHARD_HI_LEVEL = RegionAddress.SHARD_LEVEL; // 5
+    /** Lowest / highest resource level carried by the per-dimension coarse file. */
+    static final int COARSE_LO_LEVEL = RegionAddress.MAX_COARSE_LEVEL;          // 6
+    static final int COARSE_HI_LEVEL = ResourcePyramid.RESOURCE_TOP_LEVEL;      // 21
+
+    // ---------------------------------------------------------------------------------------------------
+    // Encode
+    // ---------------------------------------------------------------------------------------------------
+
     /**
-     * Write every <b>built</b> level-0 tally row of {@code p} to {@code rawOut} (header raw, body gzip'd), each
-     * as its non-zero {@code (col, log2val)} pairs. The stream is left open for the caller to close.
+     * Write shard {@code (shardX, shardZ)}'s resource levels 0..5 to {@code rawOut} (header raw, body gzip'd),
+     * each row as its non-zero {@code (col, log2val)} pairs. Only built rows whose level-relative shard equals
+     * {@code (shardX, shardZ)} are written. The stream is left open for the caller to close.
      */
-    public static void encode(ResourcePyramid p, OutputStream rawOut) throws IOException {
+    public static void encodeShard(ResourcePyramid p, int shardX, int shardZ, OutputStream rawOut) throws IOException {
+        encode(p, MAGIC_SHARD, SHARD_LO_LEVEL, SHARD_HI_LEVEL, true, shardX, shardZ, rawOut);
+    }
+
+    /**
+     * Write the per-dimension coarse resource file — levels 6..21, all built rows (no shard scoping). The stream
+     * is left open for the caller to close.
+     */
+    public static void encodeCoarse(ResourcePyramid p, OutputStream rawOut) throws IOException {
+        encode(p, MAGIC_COARSE, COARSE_LO_LEVEL, COARSE_HI_LEVEL, false, 0, 0, rawOut);
+    }
+
+    private static void encode(ResourcePyramid p, int magic, int loLevel, int hiLevel,
+                               boolean shardScoped, int shardX, int shardZ, OutputStream rawOut) throws IOException {
         DataOutputStream header = new DataOutputStream(rawOut);
-        header.writeInt(MAGIC);
+        header.writeInt(magic);
         header.writeShort(VERSION);
         header.writeByte(COLUMNS);
         header.flush();
@@ -76,29 +113,35 @@ public final class ResourcePyramidCodec {
         GZIPOutputStream gz = new GZIPOutputStream(rawOut);
         DataOutputStream out = new DataOutputStream(gz);
 
-        final int rows = p.rowCount(0);
-        int persist = 0;
-        for (int r = 0; r < rows; r++) {
-            if (p.isBuilt(0, r)) persist++;
+        int levelCount = 0;
+        for (int level = loLevel; level <= hiLevel; level++) {
+            if (countRows(p, level, shardScoped, shardX, shardZ) > 0) levelCount++;
         }
-        out.writeInt(persist);
+        out.writeByte(levelCount);
 
         final byte[] vec = new byte[COLUMNS];
-        for (int r = 0; r < rows; r++) {
-            if (!p.isBuilt(0, r)) continue;
-            p.readRow(0, r, vec);
-            int nz = 0;
-            for (int c = 0; c < COLUMNS; c++) {
-                if (vec[c] != 0) nz++;
-            }
-            out.writeInt(p.rowRX(0, r));
-            out.writeByte(p.rowRY(0, r));
-            out.writeInt(p.rowRZ(0, r));
-            out.writeByte(nz);
-            for (int c = 0; c < COLUMNS; c++) {
-                if (vec[c] != 0) {
-                    out.writeByte(c);
-                    out.writeByte(vec[c]);
+        for (int level = loLevel; level <= hiLevel; level++) {
+            int n = countRows(p, level, shardScoped, shardX, shardZ);
+            if (n == 0) continue;
+            out.writeByte(level);
+            out.writeInt(n);
+            int rows = p.rowCount(level);
+            for (int r = 0; r < rows; r++) {
+                if (!matches(p, level, r, shardScoped, shardX, shardZ)) continue;
+                p.readRow(level, r, vec);
+                int nz = 0;
+                for (int c = 0; c < COLUMNS; c++) {
+                    if (vec[c] != 0) nz++;
+                }
+                out.writeInt(p.rowRX(level, r));
+                out.writeByte(p.rowRY(level, r));
+                out.writeInt(p.rowRZ(level, r));
+                out.writeByte(nz);
+                for (int c = 0; c < COLUMNS; c++) {
+                    if (vec[c] != 0) {
+                        out.writeByte(c);
+                        out.writeByte(vec[c]);
+                    }
                 }
             }
         }
@@ -106,19 +149,40 @@ public final class ResourcePyramidCodec {
         gz.finish();
     }
 
+    /** Whether row {@code r} at {@code level} is a persistable built row matching the (optional) shard scope. */
+    private static boolean matches(ResourcePyramid p, int level, int r, boolean shardScoped, int shardX, int shardZ) {
+        if (!p.isBuilt(level, r)) return false;
+        if (!shardScoped) return true;
+        return RegionAddress.shardOf(p.rowRX(level, r), level) == shardX
+                && RegionAddress.shardOf(p.rowRZ(level, r), level) == shardZ;
+    }
+
+    private static int countRows(ResourcePyramid p, int level, boolean shardScoped, int shardX, int shardZ) {
+        int rows = p.rowCount(level);
+        int n = 0;
+        for (int r = 0; r < rows; r++) {
+            if (matches(p, level, r, shardScoped, shardX, shardZ)) n++;
+        }
+        return n;
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Decode
+    // ---------------------------------------------------------------------------------------------------
+
     /**
-     * Read tally rows written by {@link #encode} from {@code rawIn} into {@code dest}, interning each level-0 row
-     * and marking it built. Coarse levels are NOT rolled up here — {@link RegionPersistence} replays
-     * {@code mergeUpTallies} after decode. Honours "live world wins" (a tally already built this session is left
-     * untouched) and forward-compat (a column id ≥ the running build's {@link #COLUMNS} is skipped). Throws
-     * {@link IOException} on a bad header / truncation.
+     * Read tally rows written by {@link #encodeShard} / {@link #encodeCoarse} from {@code rawIn} into
+     * {@code dest}, interning each row DIRECTLY at its stored level and marking it built — <b>no {@code mergeUp}
+     * replay</b>. Honours "live world wins" (a tally already built this session is left untouched) and
+     * forward-compat (a column id ≥ the running build's {@link #COLUMNS} is skipped). Accepts either the shard or
+     * coarse magic. Throws {@link IOException} on a bad header / truncation.
      */
     public static void decode(InputStream rawIn, ResourcePyramid dest) throws IOException {
         DataInputStream header = new DataInputStream(rawIn);
         int magic = header.readInt();
         int version = header.readUnsignedShort();
         header.readUnsignedByte(); // stored columnCount — read for stream alignment (per-pair col is self-guarding)
-        if (magic != MAGIC) {
+        if (magic != MAGIC_SHARD && magic != MAGIC_COARSE) {
             throw new IOException("bad resource-pyramid magic 0x" + Integer.toHexString(magic));
         }
         if (version != VERSION) {
@@ -126,27 +190,30 @@ public final class ResourcePyramidCodec {
         }
 
         DataInputStream in = new DataInputStream(new GZIPInputStream(rawIn));
-        int count = in.readInt();
-        if (count < 0) throw new IOException("negative resource row count " + count);
+        int levelCount = in.readUnsignedByte();
+        for (int ls = 0; ls < levelCount; ls++) {
+            int level = in.readUnsignedByte();
+            int count = in.readInt();
+            if (count < 0) throw new IOException("negative resource row count " + count);
+            for (int i = 0; i < count; i++) {
+                int rx = in.readInt();
+                int ry = in.readUnsignedByte();
+                int rz = in.readInt();
+                int nz = in.readUnsignedByte();
 
-        for (int i = 0; i < count; i++) {
-            int rx = in.readInt();
-            int ry = in.readUnsignedByte();
-            int rz = in.readInt();
-            int nz = in.readUnsignedByte();
+                int existing = dest.rowIfPresent(level, rx, ry, rz);
+                boolean skip = existing != -1 && dest.isBuilt(level, existing); // live world wins (§6)
+                int row = skip ? -1 : dest.rowFor(level, rx, ry, rz);
 
-            int existing = dest.rowIfPresent(0, rx, ry, rz);
-            boolean skip = existing != -1 && dest.isBuilt(0, existing); // live world wins (§6)
-            int row = skip ? -1 : dest.rowFor(0, rx, ry, rz);
-
-            for (int j = 0; j < nz; j++) {
-                int col = in.readUnsignedByte();
-                byte val = in.readByte();
-                if (!skip && col < COLUMNS) {
-                    dest.setLog2(0, row, col, val);
+                for (int j = 0; j < nz; j++) {
+                    int col = in.readUnsignedByte();
+                    byte val = in.readByte();
+                    if (!skip && col < COLUMNS) {
+                        dest.setLog2(level, row, col, val);
+                    }
                 }
+                if (!skip) dest.setBuilt(level, row, true);
             }
-            if (!skip) dest.setBuilt(0, row, true);
         }
     }
 }

@@ -191,9 +191,10 @@ public final class HpaMaintenance {
         final RegionGrid grid = RegionGrid.of(level);
         final CostPyramid pyramid = grid.pyramid();
         final ResourcePyramid resources = grid.resourcePyramid();
-        // A chunk's leaves (re)built ⇒ this dimension has unflushed region-tier changes. Mark it for the next
-        // periodic/stop persistence flush (DESIGN-worldmodel-persistence.md §5.2). Cold: once per chunk build.
-        RegionPersistence.markDirty(level);
+        // A chunk's leaves (re)built ⇒ this dimension's SHARD (containing chunkX/chunkZ) has unflushed region-tier
+        // changes. Mark it for the next periodic/stop persistence flush (DESIGN-worldmodel-persistence.md §5.2).
+        // Cold: once per chunk build.
+        RegionPersistence.markDirty(level, chunkX, chunkZ);
         for (int ry = 0; ry < column.length; ry++) {
             if (column[ry] == null) continue;
             buildLeafSafe(level, pyramid, chunkX, ry, chunkZ); // note the (rx, rz, ry) order inside
@@ -443,6 +444,8 @@ public final class HpaMaintenance {
                 // unloaded since the mark, computeLeaf no-ops (leaves the node unbuilt) — the planner then reads
                 // the §6 default.
                 buildLeafSafe(level, pyramid, rx, ry, rz);
+                // This leaf (rx,rz = chunk coords) + its coarse ancestors changed ⇒ mark its shard dirty (§5.2).
+                RegionPersistence.markDirty(level, rx, rz);
 
                 processed++;
             }
@@ -459,14 +462,13 @@ public final class HpaMaintenance {
             while (resProcessed < MAX_LEAVES_PER_TICK && System.nanoTime() - start < budgetNanos
                     && (boxed = resDirty.pollFirst()) != null) {
                 final long key = boxed;
-                retallyResourceLeafSafe(level, resources,
-                        RegionAddress.unpackRX(key), RegionAddress.unpackRY(key), RegionAddress.unpackRZ(key));
+                final int rxR = RegionAddress.unpackRX(key), rzR = RegionAddress.unpackRZ(key);
+                retallyResourceLeafSafe(level, resources, rxR, RegionAddress.unpackRY(key), rzR);
+                // The re-tallied leaf's shard + coarse tallies changed ⇒ mark its shard dirty (§5.2).
+                RegionPersistence.markDirty(level, rxR, rzR);
                 resProcessed++;
             }
         }
-
-        // Block-change-driven leaf recomputes / re-tallies also dirty the dimension for persistence (§5.2).
-        if (processed > 0 || resProcessed > 0) RegionPersistence.markDirty(level);
     }
 
     /**
