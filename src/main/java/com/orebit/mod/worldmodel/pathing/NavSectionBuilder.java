@@ -285,6 +285,50 @@ public final class NavSectionBuilder {
     }
 
     /**
+     * <b>Resource-only re-tally of a live section</b> — the incremental block-change path
+     * ({@code HpaMaintenance} resource re-tally; find-mine-resources design §8.5). Reproduces <b>exactly</b>
+     * the resource-tally subset of {@link #classifyNavtypes} (the same {@link SectionPalette#read}, the same
+     * {@link ResourceClasses#columnForBlock} palette gate, and the same gated 4096-cell increment pass), but
+     * builds <b>no</b> navtype grid, flags, or depth nibbles — so it costs a small fraction of a full classify.
+     * Writes raw per-column counts into {@code out} (length {@link ResourceClasses#COLUMN_COUNT}, caller-owned;
+     * this method zeroes it first). A {@code null} / all-air section leaves {@code out} all-zero. The caller
+     * log₂-encodes ({@link Log2Codec}) and writes/clears the pyramid row (an all-zero result CLEARS a row a
+     * fully-mined section previously populated).
+     */
+    public static void tallyResources(LevelChunkSection section, int[] out) {
+        if (section == null) { tallyResources((PalettedContainer<BlockState>) null, true, out); return; }
+        tallyResources(section.getStates(), Sections.hasOnlyAir(section), out);
+    }
+
+    /**
+     * Headless form of {@link #tallyResources(LevelChunkSection, int[])} over a bare state container
+     * ({@code states} is not touched when {@code onlyAir}, so it may be null then) — the unit-testable core,
+     * mirroring the headless {@link #classifyNavtypes(PalettedContainer, boolean, TraversalGrid, IntConsumer, int[])}
+     * overload. The palette-map + gated per-cell increment are line-for-line the tally block of that method, so
+     * the two never drift.
+     */
+    public static void tallyResources(PalettedContainer<BlockState> states, boolean onlyAir, int[] out) {
+        Arrays.fill(out, 0, ResourceClasses.COLUMN_COUNT, 0);
+        if (onlyAir) return;
+
+        final int[] slotScratch = SLOT_SCRATCH.get();
+        BlockState[] palette = SectionPalette.read(states, slotScratch);
+        int[] slotToColumn = new int[palette.length];
+        boolean anyResource = false;
+        for (int s = 0; s < palette.length; s++) {
+            int col = ResourceClasses.columnForBlock(palette[s].getBlock());
+            slotToColumn[s] = col;
+            anyResource |= (col >= 0);                 // one compare per palette entry, like anyPortal
+        }
+        if (!anyResource) return;                      // resource-free section ⇒ out stays all-zero
+
+        for (int i = 0; i < 4096; i++) {
+            int c = slotToColumn[slotScratch[i]];
+            if (c >= 0) out[c]++;
+        }
+    }
+
+    /**
      * <b>Pass 2 of the column build</b> — compute every cell's neighbour-property flags from the resident
      * navtypes, with the section ABOVE's cells as vertical overscan ({@code above} nullable: world-top,
      * unbuilt, or uniform-air above all mean "air above", which is exact for the first two and lets the
