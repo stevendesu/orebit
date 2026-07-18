@@ -84,6 +84,23 @@ start. Out-of-range or unparseable individual values are clamped/defaulted with 
 | `pathing.async` | boolean | `true` | Run window searches on the **background planner pool** instead of the server tick thread (s44; `internal_docs/DESIGN-background-pathfinding.md`). The tick thread submits a `SearchRequest` and adopts the result at the **same settled boundary** plans already swap at, so searches stop costing tick time (measured complex-path tick ~8-16 ms sync → ~3 ms async); plans arrive 1-3 ticks after they're requested (the bot keeps walking its current plan meanwhile). `false` = today's synchronous behaviour, **byte-identical** to pre-s44. **Requires a server restart to change** (the pool is built once at init; `/bot config reload` won't rebuild it). NOT read into `BotCaps` — consumed by `PathPlan`/`PlanExecutor`. | `pathing.async=false` |
 | `pathing.maxThreads` | int `>= 1` | `2` | Background planner **pool size** when `async=true`. Clamped to a `[1, 64]` sanity rail at parse, then **re-clamped to `[1, cores − 2]` at pool start** (the host core count isn't known at validate time). Bots share the pool; raise it on a multi-tenant server (many bots) to cut search tail latency, lower it to `1` on a constrained host — like view-distance, it trades bot responsiveness against server CPU headroom. **Requires a server restart to change.** | `pathing.maxThreads=4` |
 | `pathing.asyncSearchBudgetMs` | int `>= 1` | `250` | Wall-clock budget (ms) per background search when `async=true` — the **time-based cap that replaces `pathing.syncSearchBudgetNodes`** as the effective search limit (checked every 256 pops; `pathing.syncSearchBudgetNodes` degrades to `TIME_MODE_NODE_BACKSTOP` ≈ 262k, a memory-only backstop). A search that exhausts the budget returns its best partial path — the bot walks it and replans, converging on far goals (an in-game 13.6k-node search FOUND past the old 10k node cap). Bigger budgets escape bigger dead-ends at the cost of longer worst-case plan latency (the tick is never stalled either way). Sync mode (`async=false`) ignores this — the node cap rules. | `pathing.asyncSearchBudgetMs=300` |
+| `pathing.chunkBuildBudgetMs` | float `(0, 1000]` | `2.0` | **Primary** per-level per-tick wall-clock budget (ms) for draining the NavGrid chunk-build queue (`ChunkNavLoader`, at `onWorldTickEnd`). Elapsed is checked **after each column**, so worst-case overshoot is one column (both drain paths — FIFO and bot-vicinity-nearest). Per-column build cost swings ~15× with terrain (surface ~1 ms, cave ~5 ms — `ChunkBuildBenchmark`), which the old fixed COUNT couldn't adapt to (8 cave columns = ~41 ms of a 50 ms tick); a time budget drains as many columns as safely fit. Bounded above by the `pathing.chunkBuildsPerTick` count backstop. The ceiling is a generous 1 s (not half-a-tick) so the **headless autotest can pin a high budget that never binds** — see the determinism note below. Not read into `BotCaps`. | `pathing.chunkBuildBudgetMs=4.0` |
+| `pathing.chunkBuildsPerTick` | int `>= 1` | `64` | **COUNT BACKSTOP** on NavGrid chunk builds per level per tick — **no longer the primary gate** (that is `pathing.chunkBuildBudgetMs`). Keeps a burst of cheap all-air columns from draining unbounded inside the time budget. Default `64` is a safety ceiling, not a per-tick target (was `8` when it was the primary count gate). Not read into `BotCaps`. | `pathing.chunkBuildsPerTick=128` |
+| `pathing.hpaFlushBudgetMs` | float `(0, 1000]` | `1.0` | Per-level per-tick wall-clock budget (ms) for the HPA\* region-tier **dirty-leaf flush** (`HpaMaintenance.flush`, at `onWorldTickEnd`) — the region-tier analog of `pathing.chunkBuildBudgetMs`. Elapsed checked after each leaf. A leaf rebuild is ~0.15–1.8 ms, so `1.0` usually drains the (typically small) dirty set fully; a bulk edit (TNT / fill) amortizes over a few ticks. Bounded above by the hardcoded `HpaMaintenance.MAX_LEAVES_PER_TICK` count backstop (`64`). Not read into `BotCaps`. | `pathing.hpaFlushBudgetMs=2.0` |
+
+> **Determinism convention — the headless autotest pins HIGH budgets (`internal_docs`-durable, do not lose this):**
+> The time-budget drains (`ChunkNavLoader`, `HpaMaintenance.flush`) are wall-clock-scheduled, so the *number*
+> of columns/leaves drained per tick varies run-to-run with machine timing. That is fine — even good — in
+> production (adaptive scheduling), but it would make the headless autotest (`scripts/run-autotest.ps1`) a
+> non-reproducible regression oracle: a different per-tick drain count can shift when nav/region data becomes
+> available and thus which skeleton a mid-run search reads. So the autotest's config template
+> (`scripts/autotest/orebit.properties`) pins **`pathing.chunkBuildBudgetMs = 100`** and
+> **`pathing.hpaFlushBudgetMs = 100`** (high — never bind) with **`pathing.chunkBuildsPerTick = 8`** (and the
+> hardcoded `MAX_LEAVES_PER_TICK = 64` for the flush). With the ms budgets never binding, the **fixed count
+> backstops govern**, so per-tick drain counts are identical across same-seed runs. Production uses the low
+> defaults (`2.0` / `1.0`) for adaptive scheduling; the autotest trades that for reproducibility. This is the
+> same class of determinism pin as the template's existing `pathing.async=false`. (The generous 1 s clamp
+> ceiling on the two ms keys exists precisely so `100` is a legal, un-clamped value.)
 
 ### `hpa.*` — the persisted region tier
 
@@ -150,6 +167,9 @@ fix, and never failing the load:
 - `pathing.maxThreads` clamped to `1..64` (a sanity rail — the real `[1, cores − 2]` clamp happens at pool
   start, where the host core count is known).
 - `pathing.asyncSearchBudgetMs` clamped to `1..10000` (a >10 s per-search budget is treated as a config typo).
+- `pathing.chunkBuildBudgetMs` / `pathing.hpaFlushBudgetMs` clamped to `0.1..1000.0` (positive float; the `floatClamped`
+  helper). The generous 1 s ceiling admits the autotest's high, never-binding determinism pin (`100`).
+- `pathing.chunkBuildsPerTick` clamped to `1..4096` (the count backstop; `0` would stall the nav pipeline).
 - `pathing.async` is a boolean (defaults to `Config.DEFAULT` on anything that isn't exactly `true`/`false`).
 - `mining.maxHardness` clamped to `0..255`.
 - `mining.ticksToMineFlat` clamped to `>= 0`.

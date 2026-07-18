@@ -76,8 +76,10 @@ public record Config(
         int maxThreads,
         int asyncSearchBudgetMs,
         int chunkBuildsPerTick,
+        float chunkBuildBudgetMs,
         int navReadyRadiusChunks,
         int navReadyTimeoutTicks,
+        float hpaFlushBudgetMs,
         // ---- hpa (persisted region tier) ----
         int persistIntervalTicks,
         // ---- doors ----
@@ -101,11 +103,17 @@ public record Config(
                               * 2 planner threads; 250 ms/async-search budget. Sync (async=false) keeps the
                               * node cap = pathing.syncSearchBudgetNodes (DEFAULT_MAX_NODES). */
                              true, 2, 250,
-                             /* chunkBuildsPerTick 8 (the old hardcoded ChunkNavLoader cap); navReadyRadiusChunks
+                             /* chunkBuildsPerTick 64 = the per-tick COUNT BACKSTOP (no longer the primary gate:
+                              * the time budget below is — so cheap all-air columns can't drain unbounded while
+                              * cave columns still stop on time); chunkBuildBudgetMs 2.0 = the primary per-tick
+                              * wall-clock drain budget (a cave column measured ~5 ms, surface ~1 ms, so a fixed
+                              * count couldn't adapt — 8 cave columns = 41 ms of a 50 ms tick); navReadyRadiusChunks
                               * 4 = the block-tier 4-region window + 1 chunk margin (also ⊇ the gather SCAN
                               * volume); navReadyTimeoutTicks 150 = ~7.5s give-up backstop for the state-based
-                              * readiness gate. */
-                             8, 4, 150,
+                              * readiness gate; hpaFlushBudgetMs 1.0 = the per-tick wall-clock budget on the
+                              * dirty-leaf drain (leaf rebuild ~0.15-1.8 ms, so 1 ms usually drains the small
+                              * dirty set fully) — HpaMaintenance keeps its own count backstop. */
+                             64, 2.0f, 4, 150, 1.0f,
             /* hpa        */ 6000,
             /* doors      */ true); // doors.toggle ON — the P3 executor operates doors (open before crossing,
                                      // close on the exit double-toggle); the flag stays a config kill-switch.

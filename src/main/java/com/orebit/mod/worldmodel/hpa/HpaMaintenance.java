@@ -5,6 +5,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 
 import com.orebit.mod.OrebitCommon;
+import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.platform.BlockChangeEvents;
 import com.orebit.mod.platform.LevelBounds;
 import com.orebit.mod.worldmodel.pathing.NavSection;
@@ -40,8 +41,9 @@ import net.minecraft.world.level.block.state.BlockState;
  * changes in one leaf collapse to one entry. The actual recompute happens in {@link #flush}, called once
  * per level per tick from the existing {@code onWorldTickEnd} cadence (the same cadence
  * {@link com.orebit.mod.worldmodel.pathing.ChunkNavLoader ChunkNavLoader} drains its build queue on), and is
- * itself budgeted to at most {@link #MAX_LEAVES_PER_TICK} leaves so a world-wide edit amortizes over a few
- * ticks rather than stalling one.
+ * itself budgeted by a per-tick wall-clock time budget ({@code pathing.hpaFlushBudgetMs}) with a
+ * {@link #MAX_LEAVES_PER_TICK} count backstop, so a world-wide edit amortizes over a few ticks rather than
+ * stalling one.
  *
  * <h2>Flow</h2>
  * <ol>
@@ -92,11 +94,16 @@ public final class HpaMaintenance {
     private HpaMaintenance() {}
 
     /**
-     * Cap on dirty-leaf recomputes per level per tick, to keep the (heavier) leaf re-pathfind off the frame
-     * budget — mirrors {@link com.orebit.mod.worldmodel.pathing.ChunkNavLoader}'s {@code MAX_BUILDS_PER_TICK}.
-     * A world-wide edit fills in over a few ticks rather than stalling one.
+     * COUNT BACKSTOP on dirty-leaf recomputes per level per tick — <b>no longer the primary gate</b> (that is
+     * the wall-clock {@code pathing.hpaFlushBudgetMs} time budget {@link #flush} spends, mirroring
+     * {@link com.orebit.mod.worldmodel.pathing.ChunkNavLoader}'s move to a time budget + count backstop). This
+     * ceiling just keeps a burst of cheap leaves from draining unbounded within the time budget; the time
+     * budget is what stops a run of expensive leaves. A world-wide edit fills in over a few ticks rather than
+     * stalling one. Raised from 8 to 64 with the time-budget change (it is now a safety cap, not a per-tick
+     * target — a leaf rebuild is ~0.15–1.8 ms, so the 1 ms default budget usually drains the small dirty set
+     * fully well under this cap).
      */
-    private static final int MAX_LEAVES_PER_TICK = 8;
+    private static final int MAX_LEAVES_PER_TICK = 64;
 
     /**
      * Per-dimension dirty-leaf sets. Key = {@link RegionAddress#packLevelKey} of the changed level-0 leaf
@@ -264,8 +271,9 @@ public final class HpaMaintenance {
     // ---------------------------------------------------------------------------------------------------
 
     /**
-     * Drain up to {@link #MAX_LEAVES_PER_TICK} dirty leaves for {@code level}, re-flooding each leaf's fragment
-     * record ({@link FragmentLeafComputer#computeLeaf}) and re-merging its ancestors
+     * Drain dirty leaves for {@code level} until the per-tick {@code pathing.hpaFlushBudgetMs} wall-clock
+     * budget is spent (or the {@link #MAX_LEAVES_PER_TICK} count backstop is hit), re-flooding each leaf's
+     * fragment record ({@link FragmentLeafComputer#computeLeaf}) and re-merging its ancestors
      * ({@link PyramidMerger#mergeUpFragments}). Call once per level per tick from the existing
      * {@code onWorldTickEnd} cadence (wired in {@link com.orebit.mod.OrebitCommon#init}, alongside
      * {@code ChunkNavLoader}'s drain). No-op if nothing is dirty in this dimension. Runs on the tick thread; the
@@ -289,12 +297,20 @@ public final class HpaMaintenance {
         }
         final CostPyramid pyramid = grid.pyramid();
 
+        // Time-budgeted drain: recompute leaves until the per-tick wall-clock budget is spent, capped by the
+        // MAX_LEAVES_PER_TICK count backstop. Elapsed is checked before each leaf (so worst-case overshoot is
+        // one leaf). Mirrors ChunkNavLoader's time budget + count backstop — a leaf rebuild is ~0.15–1.8 ms so
+        // the 1 ms default usually drains the (small) dirty set fully, while a bulk edit amortizes over ticks.
+        final long budgetNanos = (long) (ConfigLoader.config().hpaFlushBudgetMs() * 1_000_000.0);
+        final long start = System.nanoTime();
+
         int processed = 0;
         // pollFirst() atomically claims the least-keyed dirty leaf (set is concurrent — a re-mark after this
         // re-enqueues it). Ascending packed-key order makes the drain SEQUENCE a deterministic function of the
         // set's contents, independent of enqueue/iteration order (see the "Deterministic drain" class note).
         Long boxed;
-        while (processed < MAX_LEAVES_PER_TICK && (boxed = dirty.pollFirst()) != null) {
+        while (processed < MAX_LEAVES_PER_TICK && System.nanoTime() - start < budgetNanos
+                && (boxed = dirty.pollFirst()) != null) {
             final long key = boxed;
 
             final int rx = RegionAddress.unpackRX(key);

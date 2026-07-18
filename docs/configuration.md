@@ -102,6 +102,9 @@ pathing.warmupBudgetMs        = 1500
 pathing.async                 = true
 pathing.maxThreads            = 2
 pathing.asyncSearchBudgetMs   = 250
+pathing.chunkBuildBudgetMs    = 2.0
+pathing.chunkBuildsPerTick    = 64
+pathing.hpaFlushBudgetMs      = 1.0
 ```
 
 | Key | Default | What it does |
@@ -114,6 +117,9 @@ pathing.asyncSearchBudgetMs   = 250
 | `pathing.async` | `true` | Compute paths on background threads instead of the server tick thread. Searches stop costing tick time entirely; a plan arrives a tick or two after it's requested, and the bot keeps walking its current plan meanwhile (it also pre-computes the next stretch before finishing the current one, so long walks don't pause at plan boundaries). Set `false` for the synchronous behaviour: searches run on the tick thread under the node cap above. Requires a server restart to change. |
 | `pathing.maxThreads` | `2` | How many background planner threads to run when `pathing.async` is on (clamped to your core count minus two). All bots share the pool — raise it on a server with many bots to keep their plans snappy, lower it to `1` on a constrained host. Trades bot responsiveness against server CPU headroom, like view-distance. Requires a restart to change. |
 | `pathing.asyncSearchBudgetMs` | `250` | The wall-clock budget, in milliseconds, for one background path search — with `pathing.async` on, *time* replaces the node cap as the effective search limit (the node cap remains as a memory backstop). A search that runs out of budget returns its best partial path; the bot moves that way and replans, converging on far goals. Bigger budgets escape bigger dead-ends at the cost of slower worst-case planning — the server tick is never stalled either way. |
+| `pathing.chunkBuildBudgetMs` | `2.0` | How many milliseconds each server tick the bot spends building the terrain-scan data (the "nav grid") for freshly loaded chunks. A single chunk column costs anywhere from ~1 ms (open surface) to ~5 ms (deep caves), so a fixed *count* per tick couldn't adapt — this time budget builds as many columns as safely fit and leaves the rest for the next tick. After a teleport or a fresh world-open (which can load hundreds of chunks at once) the bot's surroundings fill in over a few ticks instead of spiking the frame. Raise it on a strong machine for faster fill-in; lower it on a constrained host. |
+| `pathing.chunkBuildsPerTick` | `64` | A safety cap on how many chunk columns can build in a single tick, on top of the time budget above — it stops a burst of very cheap (all-air) columns from running away even inside the budget. This is a backstop, not the main limit; leave it unless a strong machine is spending too many columns per tick. |
+| `pathing.hpaFlushBudgetMs` | `1.0` | How many milliseconds each tick the bot spends refreshing its long-range routing map after the world changes (blocks mined, built, exploded). Usually a fraction of this is enough to catch up fully; a big edit (TNT, a fill command) is absorbed over a few ticks instead of one. The map-building analog of `pathing.chunkBuildBudgetMs`. |
 
 ### World memory — surviving a restart
 

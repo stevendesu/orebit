@@ -9,6 +9,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import com.orebit.mod.AllyBotEntity;
 import com.orebit.mod.BotManager;
 import com.orebit.mod.OrebitCommon;
+import com.orebit.mod.config.Config;
 import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.platform.ChunkCoords;
 import com.orebit.mod.platform.PlatformEvents;
@@ -31,9 +32,12 @@ import net.minecraft.world.level.chunk.ChunkAccess;
  * global queue drained against whichever level happened to tick, mixing dimensions.
  *
  * <p><b>Per-tick budget:</b> a teleport can load hundreds of chunks at once; draining them all in
- * one tick would spike. We build at most {@code pathing.chunkBuildsPerTick} (default 8) per level per
- * tick and leave the rest queued — the bot's nav data fills in over a few ticks rather than stalling
- * the server.
+ * one tick would spike. We drain columns until a per-tick wall-clock budget ({@code pathing.chunkBuildBudgetMs},
+ * default 2 ms) is spent — checking elapsed after each column, so the worst-case overshoot is one column —
+ * bounded above by a max-count backstop ({@code pathing.chunkBuildsPerTick}, default 64) that keeps a burst of
+ * cheap all-air columns from draining unbounded. The rest stay queued and fill in over a few ticks. A fixed
+ * COUNT couldn't adapt: per-column build cost swings ~15× with terrain (surface ~1 ms, cave ~5 ms), so 8 cave
+ * columns already cost ~41 ms of a 50 ms tick; a time budget drains as many columns as safely fit each tick.
  *
  * <p><b>Bot-vicinity priority:</b> when a level holds one or more bots, the per-tick budget is spent on
  * the pending chunks NEAREST a bot first (a cheap bounded selection over the pending set), so a bot's
@@ -68,7 +72,15 @@ public final class ChunkNavLoader {
         events.onWorldTickEnd(level -> {
             Queue<Long> queue = pending.get(level);
             if (queue == null || queue.isEmpty()) return;
-            final int budget = ConfigLoader.config().chunkBuildsPerTick();
+            // Time-budgeted drain: build columns until the per-tick wall-clock budget is spent, with a max
+            // COUNT backstop so a burst of cheap all-air columns can't drain unbounded. Per-column build cost
+            // swings ~15× with terrain (surface ~1 ms, cave ~5 ms — ChunkBuildBenchmark), so a fixed count
+            // can't adapt; the ms budget drains as many columns as safely fit. Elapsed is checked AFTER each
+            // column (both drain paths), so the worst-case overshoot is one column.
+            final Config cfg = ConfigLoader.config();
+            final long budgetNanos = (long) (cfg.chunkBuildBudgetMs() * 1_000_000.0);
+            final int maxCount = cfg.chunkBuildsPerTick();
+            final long start = System.nanoTime();
 
             // Gather the bots resident in THIS level (usually one). With none, keep the cheap FIFO poll —
             // no drain, no selection (the historical path). With bots present, spend the budget on the
@@ -81,12 +93,13 @@ public final class ChunkNavLoader {
             int built = 0;
             if (BOT_SCRATCH.isEmpty()) {
                 Long k;
-                while (built < budget && (k = queue.poll()) != null) {
+                while (built < maxCount && System.nanoTime() - start < budgetNanos
+                        && (k = queue.poll()) != null) {
                     buildChunk(level, k);
                     built++;
                 }
             } else {
-                built = drainNearestBots(level, queue, budget);
+                built = drainNearestBots(level, queue, maxCount, start, budgetNanos);
             }
 
             if (built > 0) {
@@ -132,32 +145,39 @@ public final class ChunkNavLoader {
     }
 
     /**
-     * Bot-vicinity-priority drain (STEP 3): with at least one bot in {@code level}, spend the {@code budget}
-     * on the pending chunks NEAREST any bot first. Drains the whole queue into {@link #DRAIN_SCRATCH},
-     * builds the {@code budget} nearest (by squared chunk distance to the closest bot), and re-queues the
-     * rest. Cheap (no full sort): the {@code budget} nearest are found by {@code budget} bounded linear
-     * passes — {@code budget} is small (≈8), so this is O(pending × budget). Cold — only runs on a tick with
-     * pending chunks AND a bot present. Returns the number built. Preserves every per-chunk side effect via
-     * {@link #buildChunk} (incl. the epoch bump the cold-open re-search relies on).
+     * Bot-vicinity-priority drain (STEP 3): with at least one bot in {@code level}, spend the per-tick time
+     * budget on the pending chunks NEAREST any bot first, capped by the {@code maxCount} backstop. Drains the
+     * whole queue into {@link #DRAIN_SCRATCH}, builds the nearest (by squared chunk distance to the closest
+     * bot) until either {@code System.nanoTime() - start >= budgetNanos} or {@code maxCount} columns are
+     * built, and re-queues the rest. Cheap (no full sort): each nearest is found by a bounded linear pass —
+     * at most {@code maxCount} passes over {@code n} entries. Cold — only runs on a tick with pending chunks
+     * AND a bot present. Elapsed is checked at the top of each build (before selecting/building that column),
+     * so worst-case overshoot is one column. Returns the number built. Preserves every per-chunk side effect
+     * via {@link #buildChunk} (incl. the epoch bump the cold-open re-search relies on).
      */
-    private static int drainNearestBots(ServerLevel level, Queue<Long> queue, int budget) {
+    private static int drainNearestBots(ServerLevel level, Queue<Long> queue, int maxCount, long start,
+            long budgetNanos) {
         DRAIN_SCRATCH.clear();
         for (Long k = queue.poll(); k != null; k = queue.poll()) DRAIN_SCRATCH.add(k);
         final int n = DRAIN_SCRATCH.size();
         if (n == 0) return 0;
 
-        // Fast path: no selection needed (everything fits in this tick's budget). Build in FIFO order.
-        if (n <= budget) {
-            for (int i = 0; i < n; i++) buildChunk(level, DRAIN_SCRATCH.get(i));
+        // Fast path: everything fits the COUNT backstop → build in FIFO order, still honoring the time budget
+        // (re-queue whatever the budget runs out on). Elapsed checked before each column.
+        if (n <= maxCount) {
+            int i = 0;
+            for (; i < n && System.nanoTime() - start < budgetNanos; i++) buildChunk(level, DRAIN_SCRATCH.get(i));
+            final int built = i;
+            for (; i < n; i++) queue.add(DRAIN_SCRATCH.get(i)); // survivors go back for a later tick
             DRAIN_SCRATCH.clear();
-            return n;
+            return built;
         }
 
-        // Bounded selection: pick the `budget` chunks with the smallest distance-to-nearest-bot, building
-        // each as it is selected and marking it consumed (null) so the next pass skips it. Then re-queue the
-        // survivors. `budget` passes over `n` entries — no allocation, no full sort.
+        // Bounded selection: pick the nearest chunk each pass, building it and marking it consumed (null) so
+        // the next pass skips it, until the time budget or the `maxCount` backstop stops us. Then re-queue the
+        // survivors. At most `maxCount` passes over `n` entries — no allocation, no full sort.
         int built = 0;
-        for (int slot = 0; slot < budget; slot++) {
+        for (int slot = 0; slot < maxCount && System.nanoTime() - start < budgetNanos; slot++) {
             int bestIdx = -1;
             long bestD = Long.MAX_VALUE;
             for (int i = 0; i < n; i++) {
