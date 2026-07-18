@@ -22,6 +22,7 @@ import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.Replaceable;
 import com.orebit.mod.platform.WorldEdits;
 import com.orebit.mod.platform.Worlds;
+import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
@@ -195,8 +196,115 @@ final class BotNavigator {
     /** Reused mutable cursor for the phase-hold occupant read (no per-check allocation). */
     private final BlockPos.MutableBlockPos scratchPos = new BlockPos.MutableBlockPos();
 
+    // ---- per-journey search-health telemetry (pure observation — NAVSTATS) ---------------------------
+    /** The live journey's accumulator (reset at each journey start). A journey runs from a goal being set
+     *  until it is reached / abandoned / changed (a new goal region). Threaded into each {@link PathPlan} so
+     *  every windowed block search + region flood is aggregated; NOTHING here alters a search/plan decision. */
+    private final NavJourneyStats journeyStats = new NavJourneyStats();
+    /** A snapshot of the last COMPLETED journey (for {@code /bot stats}'s "last completed" section). */
+    private final NavJourneyStats lastJourneyStats = new NavJourneyStats();
+    private boolean journeyActive;
+    /** The level-0 region key of the current journey's goal — a change is a new journey. */
+    private long journeyGoalKey;
+    /** Bot horizontal position last tick, for the per-tick distance accumulation ({@code havePos} gates the
+     *  first tick, which has no previous sample). */
+    private double journeyLastX, journeyLastZ;
+    private boolean journeyHavePos;
+    /** Last-seen region-blacklist size, to delta-accumulate {@code crossingsInvalidated} across plan rebuilds. */
+    private int prevBlacklistCount;
+
     BotNavigator(AllyBotEntity bot) {
         this.bot = bot;
+    }
+
+    /** The live journey's telemetry (the autotest reads its aggregates; also the {@code /bot stats} "current"). */
+    NavJourneyStats journeyStats() {
+        return journeyStats;
+    }
+
+    /** The last completed journey's telemetry snapshot (empty if none completed yet). */
+    NavJourneyStats lastJourneyStats() {
+        return lastJourneyStats;
+    }
+
+    /** Readable {@code /bot stats} lines: the current journey, plus the last completed one if it has data. */
+    java.util.List<String> statsReport() {
+        java.util.List<String> out = new java.util.ArrayList<>(journeyStats.table(
+                journeyActive ? "current" : "current (idle)"));
+        if (lastJourneyStats.searchCount() > 0 || lastJourneyStats.distanceTraveled() > 1.0) {
+            out.add("");
+            out.addAll(lastJourneyStats.table("last completed"));
+        }
+        return out;
+    }
+
+    /**
+     * Per-tick NAVSTATS bookkeeping (called at the top of {@link #driveToward} — pure observation). Detects
+     * a new journey (goal region changed / no active journey) and resets the accumulator, then accumulates
+     * this tick's horizontal travel, observes the bot's region for the boundary-recross signal, and
+     * delta-accumulates newly-blacklisted crossings. Never affects control flow.
+     */
+    private void navStatsTick(BlockPos goalFloor) {
+        final long goalKey = regionKey(goalFloor);
+        if (!journeyActive || goalKey != journeyGoalKey) {
+            if (journeyActive) finalizeJourney("superseded"); // the previous goal was replaced mid-flight
+            startJourney(goalFloor, goalKey);
+        }
+        // Abandonment observed here too (covers holdForNavReady's direct navGaveUp set, not just giveUp()).
+        if (navGaveUp && journeyActive) {
+            finalizeJourney("abandoned");
+            return;
+        }
+        final double x = bot.getX(), z = bot.getZ();
+        if (journeyHavePos) {
+            final double ddx = x - journeyLastX, ddz = z - journeyLastZ;
+            journeyStats.addDistance(Math.sqrt(ddx * ddx + ddz * ddz));
+        }
+        journeyLastX = x;
+        journeyLastZ = z;
+        journeyHavePos = true;
+        journeyStats.observeRegion(regionKey(floorOf(bot.blockPosition())));
+        final int cur = pathPlan != null ? pathPlan.blacklistedCrossings() : 0;
+        if (cur >= prevBlacklistCount) journeyStats.addCrossingsInvalidated(cur - prevBlacklistCount);
+        prevBlacklistCount = cur; // a plan rebuild drops cur → rebase (no spurious subtract)
+    }
+
+    private void startJourney(BlockPos goalFloor, long goalKey) {
+        final BlockPos here = floorOf(bot.blockPosition());
+        final double dx = goalFloor.getX() - here.getX();
+        final double dz = goalFloor.getZ() - here.getZ();
+        journeyStats.reset(Math.sqrt(dx * dx + dz * dz));
+        journeyActive = true;
+        journeyGoalKey = goalKey;
+        journeyHavePos = false;
+        prevBlacklistCount = pathPlan != null ? pathPlan.blacklistedCrossings() : 0;
+    }
+
+    /** End the current journey: record the outcome, log one greppable line (if it did real work), snapshot
+     *  it as "last completed", and go idle. Idempotent (a no-op once inactive). */
+    private void finalizeJourney(String outcome) {
+        if (!journeyActive) return;
+        journeyActive = false;
+        journeyStats.setOutcome(outcome);
+        if (journeyStats.hasActivity()) {
+            OrebitCommon.LOGGER.info(journeyStats.logLine());
+            journeyStats.copyInto(lastJourneyStats);
+        }
+    }
+
+    /** Abandonment hook shared by {@link #giveUp} and the nav-readiness timeout — finalizes the journey. */
+    private void abandonJourney() {
+        finalizeJourney("abandoned");
+    }
+
+    /** The level-0 region key of a world cell (the level the skeleton commits over — the boundary-recross
+     *  granularity). Packed rx(24)|rz(24)|ry(16); masks make it an identity key, not a reversible address. */
+    private long regionKey(BlockPos p) {
+        final int minY = RegionGrid.of((ServerLevel) Worlds.of(bot)).minY();
+        final long rx = RegionAddress.regionX(p.getX(), 0) & 0xFFFFFFL;
+        final long rz = RegionAddress.regionZ(p.getZ(), 0) & 0xFFFFFFL;
+        final long ry = RegionAddress.regionY(p.getY(), 0, minY) & 0xFFFFL;
+        return (rx << 40) | (rz << 16) | ry;
     }
 
     // ---- the surface the entity + sibling components drive ------------------------------------------
@@ -347,6 +455,8 @@ final class BotNavigator {
      */
     boolean driveToward(double tx, double ty, double tz, BlockPos goalFloor,
                         double arriveDist, double arriveY, int goalTolXZ, int goalTolY) {
+        navStatsTick(goalFloor); // NAVSTATS: journey bookkeeping (pure observation, no control-flow effect)
+
         double dx = tx - bot.getX();
         double dy = ty - bot.getY();
         double dz = tz - bot.getZ();
@@ -372,6 +482,7 @@ final class BotNavigator {
         boolean withinRange = distXZ <= arriveDist && Math.abs(dy) <= arriveY;
         if (withinRange && (bot.grounded() || bot.isInWater()) && !onDamagingFloor() && !midCommittedMove()) {
             driveState = "COMPLETE";
+            finalizeJourney("reached"); // NAVSTATS: the continuous arrival test is the definition of done
             bot.setForward(0.0f);
             clearPlan(); // also resets the exact-goal escalation — this goal is DONE
             bot.lookAtPlayer(bot.owner());
@@ -667,6 +778,7 @@ final class BotNavigator {
         // in it must NOT crash the server tick — degrade to "no plan" (which falls back to the visible
         // straight-line steer below), log once, and keep the game playable. Remove the guard once the region
         // tier is hardened.
+        journeyStats.onReplan(); // NAVSTATS: a full skeleton (PathPlan) rebuild — includes the initial build
         try {
             if (pathPlan != null) pathPlan.cancelPending(); // the old plan's in-flight search is superseded
             // Async pathing (pathing.async): hand the plan the planner pool so its window searches run off
@@ -676,7 +788,7 @@ final class BotNavigator {
             PlanExecutor executor = ConfigLoader.config().asyncPathing() ? PlanExecutor.instance() : null;
             this.pathPlan = new PathPlan(level, RegionGrid.of(level), startFloor, goalFloor, bot.caps(),
                     bot.inventoryFeasibility(), bot.currentStartMode(), null, executor,
-                    goalTolXZ, goalTolY);
+                    goalTolXZ, goalTolY, journeyStats); // last arg: NAVSTATS telemetry sink (pure observation)
             this.path = pathPlan.currentBlockPlan();
         } catch (Throwable t) {
             if (!loggedPlanError) {
@@ -786,6 +898,7 @@ final class BotNavigator {
         // resets the window — afterwards the crossing being blamed is already gone.
         final String hop = describeBlockedHop();
         final BlockPos wt = pathPlan.currentWindowTarget();
+        journeyStats.onRepair(); // NAVSTATS: a region-tier online repair attempt
         final boolean repaired = pathPlan.repairBlocked();
         logRepair(gen, hop, wt, repaired);
         if (!repaired) {
@@ -888,6 +1001,7 @@ final class BotNavigator {
 
     private void giveUp() {
         navGaveUp = true;
+        abandonJourney(); // NAVSTATS: the region tier exhausted its options — journey abandoned
         bot.chat("I can't find a way to reach you.");
     }
 
@@ -921,6 +1035,7 @@ final class BotNavigator {
         }
         if (navReadyWaitTicks > ConfigLoader.config().navReadyTimeoutTicks() && !navGaveUp) {
             navGaveUp = true;
+            abandonJourney(); // NAVSTATS: terrain never loaded — journey abandoned
             bot.chat("I can't get terrain data to path there.");
         }
         if (Debug.VERBOSE) {

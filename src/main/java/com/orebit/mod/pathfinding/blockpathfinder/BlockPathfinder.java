@@ -72,6 +72,18 @@ public final class BlockPathfinder {
      */
     private static final ThreadLocal<boolean[]> LAST_PARTIAL_TL = ThreadLocal.withInitial(() -> new boolean[1]);
 
+    /**
+     * Whether this thread's most-recently-finished {@link #findPath} was bound by its <b>node/time cap</b>
+     * (the {@code budgetHit} flag: the node ceiling {@code maxNodes}, or in TIME mode the wall clock) rather
+     * than exhausting the open set or reaching the goal — same per-thread seam as {@link #lastExpansions()},
+     * a pure telemetry read for the search-health accumulator ({@code NavJourneyStats}). This is a superset
+     * of {@link #lastWasPartial()}: a cap hit yields a PARTIAL when it also made real progress, but a cap hit
+     * with no committable progress returns {@code null} (FAIL-budget) — still a cap hit, NOT a partial. Read
+     * via {@link #lastWasBudgetHit()}. Set once per search (with {@link #lastExpansions()}), so it also
+     * resets each search (a FOUND/exhausted result clears it).
+     */
+    private static final ThreadLocal<boolean[]> LAST_BUDGET_HIT_TL = ThreadLocal.withInitial(() -> new boolean[1]);
+
     /** Node count of this thread's most-recently-finished {@link #findPath}. */
     public static int lastExpansions() {
         return LAST_EXPANSIONS_TL.get()[0];
@@ -80,6 +92,12 @@ public final class BlockPathfinder {
     /** Whether this thread's most-recently-finished {@link #findPath} returned a best-effort PARTIAL. */
     public static boolean lastWasPartial() {
         return LAST_PARTIAL_TL.get()[0];
+    }
+
+    /** Whether this thread's most-recently-finished {@link #findPath} was bound by its node/time cap
+     *  ({@code budgetHit}) — the flood/cap-exhaustion telemetry seam. See {@link #LAST_BUDGET_HIT_TL}. */
+    public static boolean lastWasBudgetHit() {
+        return LAST_BUDGET_HIT_TL.get()[0];
     }
 
     /**
@@ -93,6 +111,7 @@ public final class BlockPathfinder {
         EDIT_POOL.get();
         LAST_EXPANSIONS_TL.get();
         LAST_PARTIAL_TL.get();
+        LAST_BUDGET_HIT_TL.get();
     }
 
     /**
@@ -689,6 +708,7 @@ public final class BlockPathfinder {
         final long t0 = System.nanoTime();
         LAST_EXPANSIONS_TL.get()[0] = 0; // reset the instrumentation seam (covers the early no-start-ground return)
         LAST_PARTIAL_TL.get()[0] = false;
+        LAST_BUDGET_HIT_TL.get()[0] = false;
         final int sx = startFloor.getX(), sy = startFloor.getY(), sz = startFloor.getZ();
         final int gx = goalFloor.getX(), gy = goalFloor.getY(), gz = goalFloor.getZ();
 
@@ -855,6 +875,7 @@ public final class BlockPathfinder {
         }
 
         LAST_EXPANSIONS_TL.get()[0] = expansions; // instrumentation seam — the just-finished search's node count
+        LAST_BUDGET_HIT_TL.get()[0] = budgetHit;  // telemetry: was the search bound by its node/time cap
 
         if (reachedRow == -1) {
             if (Debug.ENABLED) explainFailure(ctx, sx, sy, sz, gx, gy, gz, expansions, budgetHit, bestX, bestY, bestZ, confineBound);

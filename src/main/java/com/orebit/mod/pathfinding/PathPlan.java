@@ -1,6 +1,7 @@
 package com.orebit.mod.pathfinding;
 
 import com.orebit.mod.Debug;
+import com.orebit.mod.NavJourneyStats;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.async.PlanExecutor;
@@ -189,6 +190,14 @@ public final class PathPlan {
      */
     private final PlanExecutor executor;
     /**
+     * Per-journey search-health accumulator (pure observation) the live driver attaches, or {@code null}
+     * for every headless / test caller. {@link #resultStatus} feeds it every completed block search
+     * (expansions / partial / cap-hit) and the ctor + cascade feed it region-tier flood trips; nothing here
+     * ever changes a search / plan / repair decision. Set in the ctor BEFORE the first {@link #replanBlock},
+     * so the ctor's own first search is counted.
+     */
+    private final NavJourneyStats stats;
+    /**
      * The async search mailbox — the in-flight/parked/pre-plan-attempt state and its transitions
      * ({@link AsyncWindowSearch}). Always constructed (empty in sync mode, so {@link #cancelPending} is
      * always safe); its state is only ever touched when {@link #executor} is non-null. The adopt/status
@@ -364,6 +373,22 @@ public final class PathPlan {
     public PathPlan(ServerLevel level, RegionGrid regionGrid, BlockPos startFloor, BlockPos goalFloor,
                     BotCaps caps, MovementContext.InventoryView inventory, int startMode,
                     EditSnapshot baseline, PlanExecutor executor, int goalTolXZ, int goalTolY) {
+        this(level, regionGrid, startFloor, goalFloor, caps, inventory, startMode, baseline, executor,
+                goalTolXZ, goalTolY, null);
+    }
+
+    /**
+     * As above, additionally attaching a per-journey search-health accumulator {@code stats}
+     * ({@link NavJourneyStats}) — a pure-observation sink the live {@link com.orebit.mod.BotNavigator driver}
+     * passes so EVERY windowed block search (the ctor's first one included) and every region-tier flood is
+     * aggregated for {@code /bot stats} + the journey-end log line. {@code null} = every headless / test
+     * caller (no telemetry, byte-identical behaviour).
+     */
+    public PathPlan(ServerLevel level, RegionGrid regionGrid, BlockPos startFloor, BlockPos goalFloor,
+                    BotCaps caps, MovementContext.InventoryView inventory, int startMode,
+                    EditSnapshot baseline, PlanExecutor executor, int goalTolXZ, int goalTolY,
+                    NavJourneyStats stats) {
+        this.stats = stats;
         this.goalTolXZ = goalTolXZ;
         this.goalTolY = goalTolY;
         this.baseline = baseline;
@@ -406,6 +431,10 @@ public final class PathPlan {
         this.skeleton = hier.l0Skeleton();
         this.windowStart = 0;
         this.committedIndex = 0;
+        // Telemetry: the initial region plan tripped the cap-safe flood guard (a region-tier area problem,
+        // not a proven dead-end). Read the per-thread flag the build's last region search set — pure
+        // observation (RegionPathfinder.lastWasFlood is set on this same tick thread by the build above).
+        if (stats != null && RegionPathfinder.lastWasFlood()) stats.onRegionFlood();
 
         if (skeleton == null || skeleton.isEmpty()) {
             // No coarse route at all (no built ground at the start region). Leave the block plan null and the
@@ -596,6 +625,8 @@ public final class PathPlan {
         if (!hier.onBotMoved(botFloor, botOnBlockPlan(botFloor))) {
             return false; // still within every level's window — slide the block window over the unchanged L0
         }
+        // Telemetry: a re-derivation ran (L0 changed) — count a flood if its region search tripped the guard.
+        if (stats != null && RegionPathfinder.lastWasFlood()) stats.onRegionFlood();
         this.skeleton = hier.l0Skeleton();
         if (skeleton == null || skeleton.isEmpty()) {
             this.blockPlan = null;
@@ -783,7 +814,8 @@ public final class PathPlan {
         this.blockPlan = BlockPathfinder.findPath(grid, botFloor, target, caps, null, cuboidCap, inventory,
                 startMode, baseline, 0L, regionFieldFor(target), tolXZFor(target), tolYFor(target));
         this.lastPlanPartial = blockPlan != null && BlockPathfinder.lastWasPartial();
-        this.status = resultStatus(blockPlan, BlockPathfinder.lastExpansions());
+        this.status = resultStatus(blockPlan, BlockPathfinder.lastExpansions(),
+                BlockPathfinder.lastWasPartial(), BlockPathfinder.lastWasBudgetHit());
         if (Debug.ENABLED && blockPlan != null) {
             logBlockPlan();
         }
@@ -804,7 +836,10 @@ public final class PathPlan {
      *       instead (dig out, {@code BotNavigator.selfRescue}).</li>
      * </ul>
      */
-    private PathStatus resultStatus(BlockPathPlan plan, int expansions) {
+    private PathStatus resultStatus(BlockPathPlan plan, int expansions, boolean partial, boolean budgetHit) {
+        // Telemetry (pure observation — the single choke every installed result passes through): record the
+        // search's node count, whether it was a best-effort PARTIAL, and whether its node/time cap bound it.
+        if (stats != null) stats.onBlockSearch(expansions, partial, budgetHit);
         if (plan != null) {
             startDead = false;
             return PathStatus.RUNNING;
@@ -823,6 +858,13 @@ public final class PathPlan {
      */
     public int blockedGeneration() {
         return blockedGeneration;
+    }
+
+    /** Total region→region crossings the cascade has blacklisted (summed across its per-level blacklists) —
+     *  a monotone-within-this-plan telemetry read; the driver deltas it into the journey's
+     *  {@code crossingsInvalidated} (a plan rebuild resets it to 0, which the delta handles). */
+    public int blacklistedCrossings() {
+        return hier != null ? hier.totalBlacklisted() : 0;
     }
 
     /** Whether the last BLOCKED came from a START-DEAD search (≤1 expansion — see {@link #resultStatus}).
@@ -887,7 +929,8 @@ public final class PathPlan {
             case RESULT:
                 this.blockPlan = async.resultPlan();
                 this.lastPlanPartial = blockPlan != null && async.resultPartial();
-                this.status = resultStatus(blockPlan, async.resultExpansions());
+                this.status = resultStatus(blockPlan, async.resultExpansions(),
+                        async.resultPartial(), async.resultBudgetHit());
                 if (Debug.ENABLED && blockPlan != null) logBlockPlan();
                 break;
             default: // NONE — nothing finished / pre-plan parked or dropped internally
@@ -898,7 +941,8 @@ public final class PathPlan {
         if (async.pollParked(actualFloor, windowTargetPos, startMode)) {
             this.blockPlan = async.resultPlan();
             this.lastPlanPartial = async.resultPartial();
-            this.status = resultStatus(blockPlan, async.resultExpansions()); // parked plans are never null
+            this.status = resultStatus(blockPlan, async.resultExpansions(),
+                    async.resultPartial(), async.resultBudgetHit()); // parked plans are never null
             if (Debug.ENABLED) logBlockPlan();
         }
     }
@@ -1000,7 +1044,11 @@ public final class PathPlan {
         if (!blockedHop(repairHopScratch)) {
             return false;
         }
-        if (!hier.onBlocked(repairHopScratch[0], repairHopScratch[1], botFloor)) {
+        final boolean rerouted = hier.onBlocked(repairHopScratch[0], repairHopScratch[1], botFloor);
+        // Telemetry: the escalation re-planned regions — count a flood if its last region search tripped the
+        // guard (pure observation; onBlocked ran on this tick thread, so its lastWasFlood is current).
+        if (stats != null && RegionPathfinder.lastWasFlood()) stats.onRegionFlood();
+        if (!rerouted) {
             this.skeleton = null;
             this.blockPlan = null;
             this.status = PathStatus.FAILED;

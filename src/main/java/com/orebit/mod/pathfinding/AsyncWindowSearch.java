@@ -65,6 +65,7 @@ final class AsyncWindowSearch {
     private BlockPathPlan resultPlan;
     private boolean resultPartial;
     private int resultExpansions;
+    private boolean resultBudgetHit;
 
     private final PlanExecutor executor;
 
@@ -137,6 +138,7 @@ final class AsyncWindowSearch {
         resultPlan = done.plan();
         resultPartial = done.wasPartial();
         resultExpansions = done.expansions();
+        resultBudgetHit = done.wasBudgetHit();
         return Drain.RESULT;
     }
 
@@ -160,6 +162,7 @@ final class AsyncWindowSearch {
         resultPlan = parkedPlan;
         resultPartial = parkedPartial;
         resultExpansions = Integer.MAX_VALUE; // a parked plan is never null — expansions are irrelevant
+        resultBudgetHit = false; // a parked (adopted precompute) plan is a real path, not a cap-bound result
         parkedPlan = null;
         return true;
     }
@@ -179,6 +182,12 @@ final class AsyncWindowSearch {
      *  repair-blacklist a skeleton hop (s52b). */
     int resultExpansions() {
         return resultExpansions;
+    }
+
+    /** Whether the last drained/adopted result was bound by its node/time cap ({@code budgetHit}) — telemetry
+     *  paired with {@link #resultPlan()}. */
+    boolean resultBudgetHit() {
+        return resultBudgetHit;
     }
 
     /** Whether an unfinished search toward {@code target} is already in flight (skip-resubmit guard). */

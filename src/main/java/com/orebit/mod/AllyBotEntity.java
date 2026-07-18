@@ -195,6 +195,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         return navigator;
     }
 
+    /** Readable per-journey search-health telemetry lines for {@code /bot stats} (current + last-completed
+     *  journey). Pure observation — see {@link NavJourneyStats}. */
+    public java.util.List<String> navStatsReport() {
+        return navigator.statsReport();
+    }
+
     // ---- Read-only gather observation (HeadlessAutotest only; NO logic change) ------------------
     // Delegate to the gatherer's read-only seams so the headless gather autotest can report the phase
     // reached and the accrued count without reaching into private component state.
