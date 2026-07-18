@@ -216,8 +216,8 @@ public final class RegionGrid {
         }
         // Only build if the chunk's nav data is resident and this vertical section exists; otherwise leave the
         // node unbuilt (fragment reads fall back to the §6 default).
-        NavSection[] column = columnAt(rx, rz);
-        if (column == null || ry < 0 || ry >= column.length || column[ry] == null) {
+        NavSection[] column = columnCached(rx, rz);
+        if (column == COL_MISSING || ry < 0 || ry >= column.length || column[ry] == null) {
             return;
         }
         // Flood-fill the section's connectivity into the row's RegionFragments record (HPA-FRAGMENTS.md §3, §5).
@@ -267,8 +267,8 @@ public final class RegionGrid {
         if (level == null && sections == null) {
             return -1;
         }
-        NavSection[] column = columnAt(rx, rz);
-        if (column == null || ry < 0 || ry >= column.length || column[ry] == null) {
+        NavSection[] column = columnCached(rx, rz);
+        if (column == COL_MISSING || ry < 0 || ry >= column.length || column[ry] == null) {
             return -1;
         }
         // Section-local coords: origin is (rx<<4, minY + ry<<4, rz<<4); lx/lz wrap to the low nibble, ly measured
@@ -556,6 +556,122 @@ public final class RegionGrid {
             return -1;
         }
         return column[ry].getNavtype(wx & 15, (wy - minY) & 15, wz & 15);
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Per-search column cache (leaf-build / start-flood read path) — the Long-boxing fix.
+    //
+    // The region cost-to-goal Dijkstra field build ({@link RegionPathfinder#costToGoalField}) and the forward
+    // region A* ({@code planLevelFragments}) call {@link #ensureLeaf} per node per edge-relaxation. For a BUILT
+    // leaf {@code ensureLeaf} short-circuits on the {@link CostPyramid} built flag (an open-addressed long->row
+    // map — no boxing). For an UNRESIDENT/unbuilt leaf it falls into {@link #rebuildLeaf}, which resolves the
+    // chunk column through {@link #columnAt} — a boxed {@code ConcurrentHashMap} lookup ({@code NavStore.get}
+    // autoboxes the {@code long} chunk key) — and, on a miss, returns WITHOUT marking the leaf built. So every
+    // later touch of that same unresident leaf re-enters {@code rebuildLeaf} and re-boxes another {@code Long}:
+    // the flood's frontier re-probes the same handful of edge-of-loaded-terrain columns thousands of times (the
+    // JFR-measured ~90% of whole-search allocation). This is the region-tier analog of the boxing
+    // {@link com.orebit.mod.worldmodel.pathing.NavGridView} already kills for the block tier with its per-search
+    // open-addressed chunk cache ({@code lookupChunk}/{@code chunkSlot}); the {@link DigScratch} {@code colFor}
+    // cache already does the same for {@link #goalDigSeeds}' BFS — but the ensureLeaf/rebuildLeaf/
+    // startFragmentByFlood path bypassed BOTH.
+    //
+    // Fix: an epoch-stamped ThreadLocal open-addressed {@code long}->{@link NavSection}[] cache (the
+    // {@code lookupChunk} idiom) that {@code rebuildLeaf} + {@link #startFragmentByFlood} resolve columns through
+    // instead of {@code columnAt}, memoizing the unresident/{@link #COL_MISSING} verdict — so the boxed
+    // {@code columnAt} runs at most ONCE per distinct chunk per search instead of once per edge-touch. Byte-
+    // identical: within a search {@link #columnCached} returns the same column object (or {@code COL_MISSING} for
+    // a missing chunk, treated exactly as {@code columnAt}'s {@code null} was), so the §6 optimistic-AIR default
+    // for an unbuilt node is unchanged; only the lookup is memoized. It mirrors {@code NavGridView}'s per-search
+    // snapshot contract (a chunk resolved once for the search's duration).
+    //
+    // Scoping (CRITICAL for correctness): the cache is consulted ONLY between {@link #beginColumnCache} and
+    // {@link #endColumnCache} — the epoch is nonzero only then. The pathfinder brackets each field build / region
+    // A* with it. {@link HpaMaintenance#flush} ALSO calls {@code rebuildLeaf} on the tick thread to recompute a
+    // leaf whose block changed; that path runs UNARMED (epoch 0) so it always reads live {@link NavStore} data and
+    // never a stale cached column. {@code endColumnCache} RESTORES the prior epoch (0 at the outermost level), so a
+    // post-search same-thread maintenance rebuild is unarmed again. Epoch stamping (vs. array clearing) makes reset
+    // O(1) and makes every prior-search / non-search slot read as empty ({@code slotEpoch != cur}), so no clear is
+    // needed and the path stays allocation-free past warm-up.
+    // ---------------------------------------------------------------------------------------------------
+
+    /** Slots in the per-search leaf-build column cache — sized well above the distinct-chunk count of a bounded
+     *  field build / cap-safe region A* (a few hundred columns worst case); saturation degrades to a direct
+     *  lookup (never a hang), exactly like {@code NavGridView.lookupChunk}. */
+    private static final int LEAF_COL_CAP = 1024;
+    private static final int LEAF_COL_MASK = LEAF_COL_CAP - 1;
+
+    /** Per-thread epoch-stamped open-addressed {@code long}->{@link NavSection}[] column cache. */
+    private static final class ColCache {
+        final long[] keys = new long[LEAF_COL_CAP];
+        final NavSection[][] vals = new NavSection[LEAF_COL_CAP][]; // COL_MISSING = negative cache; never null when written
+        final long[] slotEpoch = new long[LEAF_COL_CAP];            // 0 = never written; else the search epoch that wrote it
+        long cur;   // current search epoch (0 = UNARMED: not inside a bracketed search)
+        long seq;   // monotonic epoch issuer (a unique nonzero value per beginColumnCache)
+    }
+
+    private static final ThreadLocal<ColCache> LEAF_COLS = ThreadLocal.withInitial(ColCache::new);
+
+    /**
+     * Arm the per-search column cache for the calling thread and return the token to pass to
+     * {@link #endColumnCache} (the prior epoch, so brackets nest safely). The region cost-field build and region
+     * A* wrap their body in {@code long t = grid.beginColumnCache(); try { … } finally { grid.endColumnCache(t); }}
+     * so the storm of {@link #rebuildLeaf}/{@link #startFragmentByFlood} column reads boxes each chunk key at most
+     * once per search instead of once per edge-touch. Outside a bracket the cache is UNARMED and reads go straight
+     * to live {@link NavStore} (so {@link HpaMaintenance}'s rebuilds never see a stale column).
+     */
+    public long beginColumnCache() {
+        ColCache c = LEAF_COLS.get();
+        long prev = c.cur;
+        c.cur = ++c.seq;          // unique nonzero epoch; prior-search slots (older epoch) now read as empty
+        return prev;
+    }
+
+    /** Disarm / restore the column cache to the epoch captured by the matching {@link #beginColumnCache}. */
+    public void endColumnCache(long token) {
+        LEAF_COLS.get().cur = token;
+    }
+
+    /** Murmur3 64-bit finalizer -> leaf-column-cache slot (the {@code NavGridView.chunkSlot} idiom). */
+    private static int leafColSlot(long k) {
+        k ^= k >>> 33;
+        k *= 0xff51afd7ed558ccdL;
+        k ^= k >>> 33;
+        k *= 0xc4ceb9fe1a85ec53L;
+        k ^= k >>> 33;
+        return (int) k & LEAF_COL_MASK;
+    }
+
+    /**
+     * Resolve chunk {@code (rx,rz)}'s section column through the per-search cache when armed, else a direct
+     * {@link #columnAt}. Returns {@link #COL_MISSING} (never {@code null}) when the backing store has no column —
+     * the caller treats it exactly as {@code columnAt}'s {@code null}. When armed, boxes the {@code long} key at
+     * most once per distinct chunk per search (the epoch-stamped open-addressed slot); a saturated cache degrades
+     * to a direct lookup.
+     */
+    private NavSection[] columnCached(int rx, int rz) {
+        final ColCache c = LEAF_COLS.get();
+        final long e = c.cur;
+        if (e == 0) { // UNARMED (maintenance / non-search reader) — always live, never cached
+            NavSection[] col = columnAt(rx, rz);
+            return col == null ? COL_MISSING : col;
+        }
+        final long key = NavStore.key(rx, rz);
+        int slot = leafColSlot(key);
+        for (int probes = 0; probes < LEAF_COL_CAP; probes++) {
+            if (c.slotEpoch[slot] != e) { // empty-or-stale slot (open-addressing chain end) — box once, then cache
+                NavSection[] col = columnAt(rx, rz);
+                c.keys[slot] = key;
+                c.vals[slot] = col == null ? COL_MISSING : col;
+                c.slotEpoch[slot] = e;
+                return c.vals[slot];
+            }
+            if (c.keys[slot] == key) {
+                return c.vals[slot];
+            }
+            slot = (slot + 1) & LEAF_COL_MASK;
+        }
+        NavSection[] col = columnAt(rx, rz); // cache saturated — degrade to a direct lookup
+        return col == null ? COL_MISSING : col;
     }
 
     /**
