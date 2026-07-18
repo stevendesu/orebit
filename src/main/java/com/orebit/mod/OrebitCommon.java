@@ -88,6 +88,13 @@ public final class OrebitCommon {
         // no-op) still get crash-insurance from the periodic flush below.
         events.onServerStopping(RegionPersistence::flushAll);
 
+        // Drop the persistence bookkeeping AFTER the authoritative flush above (callbacks fire in registration
+        // order). This releases the ServerLevel map keys the dirty/tick maps hold, so on an integrated-server
+        // world reload in the same JVM (exit-to-menu then load another world) the old levels can be GC'd —
+        // matching the RegionGrid.clear/HpaMaintenance.clear server-stop teardown idiom. flushAll already
+        // removes each level from DIRTY_SHARDS/COARSE_DIRTY but leaves TICKS_SINCE_FLUSH; clear() drops all three.
+        events.onServerStopping(server -> RegionPersistence.clear());
+
         // Budgeted periodic flush (crash insurance): once per level-tick advance a per-dimension counter and,
         // every hpa.persistIntervalTicks, re-write only dimensions marked dirty since the last flush. Wired for
         // ALL loaders/eras here (unlike onServerStopping), so even an impl that leaves onServerStopping on the

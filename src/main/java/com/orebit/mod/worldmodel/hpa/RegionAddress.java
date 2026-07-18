@@ -50,6 +50,26 @@ public final class RegionAddress {
     public static final int MAX_LEVEL = 22;
 
     /**
+     * The level whose cell is one persistence SHARD (a Minecraft-{@code .mca}-style per-region file — Stage-1
+     * region persistence). A shard is one level-5 region: {@code sideOf(5) == 512} blocks == 32×32 chunks. Cost
+     * levels 0..5 and resource levels 0..5 are bucketed into per-shard files; higher levels go to the
+     * per-dimension coarse files. Equals {@link #OCTREE_TOP} (5) by construction — the level at which a cell
+     * first spans the full padded vertical slab.
+     */
+    public static final int SHARD_LEVEL = OCTREE_TOP; // 5
+
+    /**
+     * The shard (level-5 region) coordinate that contains a level-{@code level} region coordinate, for
+     * {@code 0 <= level <= }{@link #SHARD_LEVEL}. A level-{@code L} cell is {@code 1<<(SHARD_LEVEL-L)} of them per
+     * shard on an axis, so the containing shard coordinate is {@code regionCoord >> (SHARD_LEVEL - level)}. At
+     * level 0 this is {@code chunkCoord >> 5}; at {@link #SHARD_LEVEL} the region IS the shard (identity). Used by
+     * the persistence codecs to bucket a level's rows into per-shard files.
+     */
+    public static int shardOf(int regionCoord, int level) {
+        return regionCoord >> (SHARD_LEVEL - level);
+    }
+
+    /**
      * Highest level the <b>fragment pyramid</b> is rolled up to / the region A* will plan at (HPA-FRAGMENTS.md
      * §S5). There is deliberately <b>no single world-root node</b>: once a level's cap-safe search reaches any
      * practical goal, higher levels are dead weight (storage + merge work) — a level-{@value} quadtree cell is
