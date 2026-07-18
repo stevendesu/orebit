@@ -14,6 +14,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.Climb;
 import com.orebit.mod.config.Config;
 import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.platform.BotInventory;
@@ -325,6 +326,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                                   // an idle/holding bot in water should hold, not auto-rise (was isInWater?1:0)
         this.setJumping(false);   // discrete land jumps use jumpFromGround(); swim following re-enables this
         this.setSprinting(false); // ditto — buoyancy + sprint-swim are refined per-step in steerAlongPath
+        this.setShiftKeyDown(false); // sneak is re-asserted per-step by a move that needs it (Climb lateral hold)
         this.steeredThisTick = false;       // reset the swim-pose diagnostic snapshot for this tick
 
         // Stage-1 mining test hook: while a /bot mine target is set, request it each tick until it's gone, then
@@ -368,6 +370,17 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                             owner.blockPosition().below());
                 }
             }
+        }
+
+        // Vanilla client-side sneak slowdown (LocalPlayer.aiStep scales a crouching player's movement inputs to
+        // ~0.3×). The headless bot never runs that client tick, so a bot holding sneak would otherwise move at
+        // FULL walk speed — a hack. Apply the same scaling here, ONLY while shiftKeyDown, so a sneaking bot
+        // (today: Climb's lateral hold) genuinely moves at ~30% walk speed: its on-climbable lateral velocity
+        // becomes ~0.065 b/t (below the ±0.15 clamp, so this scaling — not the clamp — governs), matching
+        // Climb.GRAB_LATERAL_COST's ~15.44 t/block derivation. Non-sneaking movement is untouched.
+        if (this.isShiftKeyDown()) {
+            this.xxa *= Climb.SNEAK_SPEED_FACTOR;
+            this.zza *= Climb.SNEAK_SPEED_FACTOR;
         }
 
         super.tick(); // ServerPlayer housekeeping (i-frames, containers, advancements, attributes, …)
@@ -754,6 +767,11 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     }
 
     @Override public void setForward(float zza) { this.zza = zza; }
+
+    /** Sneak input for the {@link BotSteering} seam: vanilla {@code Entity.setShiftKeyDown}. Held true on a
+     *  climbable, {@code isSuppressingSlidingDownLadder()} zeroes the {@code −0.15}/t slide so the bot holds
+     *  its height (Climb's lateral grab). Reset false at the top of each tick alongside jump/sprint. */
+    @Override public void setSneak(boolean sneaking) { this.setShiftKeyDown(sneaking); }
 
     // setSprinting(boolean) is satisfied by the inherited public LivingEntity method.
     /** Widen the inherited protected {@code setJumping} to public so it satisfies the {@link BotSteering} seam.
