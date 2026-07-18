@@ -551,6 +551,7 @@ public final class HeadlessAutotest {
                     kv(w, "alive", bot.isAlive());
                     kv(w, "waypoint", bot.navigator().waypointIndex());
                     kv(w, "pathSize", bot.navigator().pathSize());
+                    writeNavStats(w, bot.navigator().journeyStats()); // NAVSTATS search-health aggregates
                 }
             } catch (IOException e) {
                 OrebitCommon.LOGGER.error("[Orebit/autotest] could not write {}", file, e);
@@ -668,11 +669,35 @@ public final class HeadlessAutotest {
                     kv(w, "mode_bot", bot.mode());
                     kv(w, "navGaveUp", bot.navigator().navGaveUp());
                     kv(w, "alive", bot.isAlive());
+                    writeNavStats(w, bot.navigator().journeyStats()); // NAVSTATS search-health aggregates
                 }
             } catch (IOException e) {
                 OrebitCommon.LOGGER.error("[Orebit/autotest] could not write {}", file, e);
             }
             endRun(result, reason);
+        }
+
+        /**
+         * Write the per-journey NAVSTATS search-health aggregates as {@code navstat_*} result keys — the
+         * search-health oracle: floods, boundary thrash, and roundabout routes are visible independent of the
+         * PASS/FAIL verdict. Reads the live journey accumulator (which retains the last journey's totals until
+         * a new goal is set; the run halts before that), so it captures the run's actual search behaviour.
+         */
+        private static void writeNavStats(BufferedWriter w, NavJourneyStats s) throws IOException {
+            kv(w, "navstat_outcome", s.outcome());
+            kv(w, "navstat_searches", s.searchCount());
+            kv(w, "navstat_expansionsTotal", s.totalExpansions());
+            kv(w, "navstat_expansionsMax", s.maxExpansions());
+            kv(w, "navstat_partial", s.partialCount());
+            kv(w, "navstat_capHit", s.capHitCount());
+            kv(w, "navstat_flood", s.floodCount());
+            kv(w, "navstat_replans", s.replanCount());
+            kv(w, "navstat_repairs", s.repairCount());
+            kv(w, "navstat_crossingsInvalidated", s.crossingsInvalidated());
+            kv(w, "navstat_boundaryRecrossings", s.boundaryRecrossings());
+            kv(w, "navstat_distanceTraveled", fmt(s.distanceTraveled()));
+            kv(w, "navstat_straightLineDistance", fmt(s.straightLineDistance()));
+            kv(w, "navstat_routeEfficiency", fmt(s.routeEfficiency()));
         }
 
         /**
