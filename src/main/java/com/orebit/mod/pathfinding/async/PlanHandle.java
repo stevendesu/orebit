@@ -23,6 +23,7 @@ public final class PlanHandle {
     private volatile boolean done;
     private BlockPathPlan plan;      // plain fields: published by the volatile done write below
     private boolean partial;
+    private boolean budgetHit;
     private boolean rejected;
     private int expansions;
 
@@ -51,6 +52,12 @@ public final class PlanHandle {
         return expansions;
     }
 
+    /** Whether the search was bound by its node/time cap ({@code budgetHit}) — telemetry, read after
+     *  {@link #isDone}. See {@code BlockPathfinder.lastWasBudgetHit()}. */
+    public boolean wasBudgetHit() {
+        return budgetHit;
+    }
+
     /**
      * Whether this handle completed WITHOUT running the search — an executor failure (queue full,
      * worker threw), NOT a search that proved no path exists. The two must stay distinguishable
@@ -63,10 +70,11 @@ public final class PlanHandle {
     }
 
     /** Worker: publish the result. The volatile {@code done} write must stay LAST. */
-    void complete(BlockPathPlan plan, boolean partial, int expansions) {
+    void complete(BlockPathPlan plan, boolean partial, int expansions, boolean budgetHit) {
         this.plan = plan;
         this.partial = partial;
         this.expansions = expansions;
+        this.budgetHit = budgetHit;
         this.done = true;
     }
 

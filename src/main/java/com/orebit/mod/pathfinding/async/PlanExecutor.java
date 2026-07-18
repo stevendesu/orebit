@@ -209,7 +209,7 @@ public final class PlanExecutor {
                         req.baseline(), req.budgetNanos(), req.field(),
                         req.goalTolXZ(), req.goalTolY());
                 job.handle.complete(plan, plan != null && BlockPathfinder.lastWasPartial(),
-                        BlockPathfinder.lastExpansions());
+                        BlockPathfinder.lastExpansions(), BlockPathfinder.lastWasBudgetHit());
             } catch (Throwable t) {
                 job.handle.completeRejected(); // retried at the next boundary; never blacklists a hop
                 if (shouldLogFailure()) {

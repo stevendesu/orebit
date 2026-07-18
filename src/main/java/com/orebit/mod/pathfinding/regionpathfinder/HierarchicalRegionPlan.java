@@ -118,6 +118,14 @@ public final class HierarchicalRegionPlan {
         return failed;
     }
 
+    /** Total blacklisted crossings across all levels — a search-health telemetry read ({@code /bot stats}'s
+     *  {@code crossingsInvalidated}); grows as {@link #repairBlocked} blacklists dead hops. Pure observation. */
+    public int totalBlacklisted() {
+        int n = 0;
+        for (RegionEdgeBlacklist b : blacklists) n += b.size();
+        return n;
+    }
+
     /** The coarsest level the stack currently spans (collapses toward 0 as the bot nears the goal). */
     public int topLevel() {
         return topLevel;
