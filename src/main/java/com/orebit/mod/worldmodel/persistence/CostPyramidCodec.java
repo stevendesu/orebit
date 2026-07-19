@@ -240,7 +240,41 @@ public final class CostPyramidCodec {
     }
 
     /**
-     * Write ONE shard's cost levels 0..5 from a {@link #bucketShards} bucket — byte-identical to
+     * Gather ONE shard's cost levels 0..5 into a {@link ShardColumns} via the pyramid's incremental per-shard row
+     * index ({@link CostPyramid#shardRowCount}/{@link CostPyramid#shardRowAt}), <b>without scanning the dimension</b>
+     * — the periodic-flush replacement for {@link #bucketShards} (which buckets EVERY shard in one {@code O(rows)}
+     * dimension pass, re-run each draining tick). Returns {@code null} when the shard holds no persistable (built +
+     * fragment-record) row (mirroring {@code RegionPersistence.enumerateCostShards}: such a shard writes no file).
+     *
+     * <p><b>Byte-identical to {@link #encodeShard}{@code (p, sx, sz, out)} for the same shard.</b> The index lists a
+     * shard's rows in ascending intern order per level, which is exactly the order {@link #collectColumns} /
+     * {@link #bucketShards} encounter that shard's rows in a full scan; the same rows are fed in the same order into
+     * the same {@link ShardColumns} column grouping, and the write-time built-filter here matches theirs — so the
+     * emitted bytes match. Cold path — normal allocation is fine.
+     */
+    public static ShardColumns bucketShard(CostPyramid p, long shardKey) {
+        ShardColumns bucket = null;
+        for (int level = SHARD_LO_LEVEL; level <= SHARD_HI_LEVEL; level++) {
+            final int n = p.shardRowCount(shardKey, level);
+            for (int i = 0; i < n; i++) {
+                final int r = p.shardRowAt(shardKey, level, i);
+                if (!p.isBuilt(level, r) || p.fragmentRecord(level, r) == null) continue;
+                final int rx = p.rowRX(level, r);
+                final int ry = p.rowRY(level, r);
+                final int rz = p.rowRZ(level, r);
+                final RegionFragments rf = p.fragmentRecord(level, r);
+                final int nbytes = (CostCodec.regionBitLength(rf) + 7) >> 3;
+                final byte[] buf = new byte[nbytes];
+                CostCodec.packRegion(rf, buf, 0);
+                if (bucket == null) bucket = new ShardColumns();
+                bucket.add(level - SHARD_LO_LEVEL, rx, rz, ry, buf);
+            }
+        }
+        return bucket;
+    }
+
+    /**
+     * Write ONE shard's cost levels 0..5 from a {@link #bucketShards}/{@link #bucketShard} bucket — byte-identical to
      * {@link #encodeShard} for the same shard. The stream is left open for the caller to close.
      */
     public static void encodeShardBucket(ShardColumns bucket, OutputStream rawOut) throws IOException {
