@@ -304,8 +304,15 @@ public final class ConfigLoader {
             line(w, "# How often (in server ticks) to re-write each dimension's persisted routing/resource data");
             line(w, "# as CRASH INSURANCE, and only when it changed. The authoritative flush happens on a graceful");
             line(w, "# server stop regardless of this. 0 disables the periodic flush (stop flush still runs).");
-            line(w, "# Default 6000 (~5 minutes at 20 ticks/second).");
+            line(w, "# Default 6000 (~5 minutes at 20 ticks/second). The pass it triggers is spread across ticks");
+            line(w, "# under hpa.persistFlushBudgetMs below (no longer one big write).");
             kv(w, ConfigKeys.HPA_PERSIST_INTERVAL_TICKS, d.persistIntervalTicks());
+            line(w, "# Per-tick wall-clock budget (ms, > 0) for that periodic flush drain -- the persistence analog");
+            line(w, "# of pathing.hpaFlushBudgetMs. When the interval fires, dirty shards are written under this");
+            line(w, "# budget and the pass RESUMES on later ticks until the backlog drains (coarse files last),");
+            line(w, "# turning the old one-tick flush spike into a steady trickle. >=1 shard/tick backstop. Clamped");
+            line(w, "# to (0, 1000] ms. Default 2.0.");
+            kv(w, ConfigKeys.HPA_PERSIST_FLUSH_BUDGET_MS, d.persistFlushBudgetMs());
             line(w, "# Page the persisted region tier in LAZILY: load only the coarse levels at start and stream");
             line(w, "# per-shard leaf files in on demand (bounds RAM), instead of eager-loading every shard up front.");
             line(w, "# Default false (eager). Requires a server restart to change.");

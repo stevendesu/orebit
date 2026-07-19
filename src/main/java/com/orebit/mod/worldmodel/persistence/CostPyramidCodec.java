@@ -8,6 +8,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -128,19 +129,33 @@ public final class CostPyramidCodec {
     private static void encode(CostPyramid p, int magic, int loLevel, int hiLevel,
                                boolean shardScoped, int shardX, int shardZ, boolean reserveInval,
                                OutputStream rawOut) throws IOException {
-        DataOutputStream out = new DataOutputStream(rawOut);
-        out.writeInt(magic);
-        out.writeShort(VERSION);
-
-        // Build the column groupings for every level first (cold path — normal allocation is fine), so we can
-        // write the exact non-empty levelCount and stream each level's columns/runs without a second scan.
+        // Build the column groupings for every level first (cold path — normal allocation is fine), then hand
+        // them to the shared serializer. Factored out of the write loop so the scan-once-bucket path
+        // ({@link #encodeShardBucket}) emits BYTE-IDENTICAL bytes: it feeds the same List<Column>[] shape into
+        // the same {@link #writeEncoded}.
         int nLevels = hiLevel - loLevel + 1;
         @SuppressWarnings("unchecked")
         List<Column>[] byLevel = new List[nLevels];
-        int levelCount = 0;
         for (int level = loLevel; level <= hiLevel; level++) {
-            List<Column> cols = collectColumns(p, level, shardScoped, shardX, shardZ);
-            byLevel[level - loLevel] = cols;
+            byLevel[level - loLevel] = collectColumns(p, level, shardScoped, shardX, shardZ);
+        }
+        writeEncoded(new DataOutputStream(rawOut), magic, loLevel, hiLevel, byLevel, reserveInval);
+    }
+
+    /**
+     * The single header + column-run serializer, shared by {@link #encode} (which gathers each level's columns
+     * per shard via {@link #collectColumns}) and {@link #encodeShardBucket} (which gathers them for every shard
+     * in ONE dimension pass). {@code byLevel} is indexed by {@code level - loLevel}; only non-empty levels are
+     * written. Identical column lists in ⇒ identical bytes out, which is what makes the scan-once-bucket flush
+     * byte-for-byte the same on disk as the per-shard {@link #encodeShard}.
+     */
+    private static void writeEncoded(DataOutputStream out, int magic, int loLevel, int hiLevel,
+                                     List<Column>[] byLevel, boolean reserveInval) throws IOException {
+        out.writeInt(magic);
+        out.writeShort(VERSION);
+
+        int levelCount = 0;
+        for (List<Column> cols : byLevel) {
             if (!cols.isEmpty()) levelCount++;
         }
         out.writeByte(levelCount);
@@ -186,6 +201,88 @@ public final class CostPyramidCodec {
         if (reserveInval) out.writeInt(0);
 
         out.flush();
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Scan-once bucket — group every shard's rows in ONE dimension pass (kills the periodic flush's O(N*M))
+    // ---------------------------------------------------------------------------------------------------
+
+    /**
+     * Bucket EVERY persistable built cost row (levels 0..5) by its level-5 shard key in ONE pass over the
+     * dimension, instead of re-scanning the whole dimension once per shard (the old {@link #encodeShard} path
+     * runs {@link #collectColumns} per level PER shard ⇒ O(dirtyShards × rows)). The periodic flush calls this
+     * once per draining tick and writes each dirty shard from its bucket via {@link #encodeShardBucket} — the
+     * emitted bytes are byte-identical to {@link #encodeShard} for the same shard (same {@link Column} grouping,
+     * same insertion→iteration order, so the same column-run framing). The map key is the packed L5 shard key,
+     * IDENTICAL to {@code RegionPersistence.shardKey(shardX, shardZ)}; only shards with ≥1 persistable row appear
+     * (mirroring {@code RegionPersistence.enumerateCostShards}). Cold path — normal allocation is fine.
+     */
+    public static Map<Long, ShardColumns> bucketShards(CostPyramid p) {
+        Map<Long, ShardColumns> shards = new HashMap<>();
+        for (int level = SHARD_LO_LEVEL; level <= SHARD_HI_LEVEL; level++) {
+            int rows = p.rowCount(level);
+            for (int r = 0; r < rows; r++) {
+                if (!p.isBuilt(level, r) || p.fragmentRecord(level, r) == null) continue;
+                int rx = p.rowRX(level, r);
+                int ry = p.rowRY(level, r);
+                int rz = p.rowRZ(level, r);
+                RegionFragments rf = p.fragmentRecord(level, r);
+                int nbytes = (CostCodec.regionBitLength(rf) + 7) >> 3;
+                byte[] buf = new byte[nbytes];
+                CostCodec.packRegion(rf, buf, 0);
+
+                long key = shardKeyOf(rx, rz, level);
+                shards.computeIfAbsent(key, k -> new ShardColumns())
+                      .add(level - SHARD_LO_LEVEL, rx, rz, ry, buf);
+            }
+        }
+        return shards;
+    }
+
+    /**
+     * Write ONE shard's cost levels 0..5 from a {@link #bucketShards} bucket — byte-identical to
+     * {@link #encodeShard} for the same shard. The stream is left open for the caller to close.
+     */
+    public static void encodeShardBucket(ShardColumns bucket, OutputStream rawOut) throws IOException {
+        writeEncoded(new DataOutputStream(rawOut), MAGIC_SHARD, SHARD_LO_LEVEL, SHARD_HI_LEVEL,
+                bucket.toLists(), true);
+    }
+
+    /** Packed L5 shard key of a row at {@code level} — MUST match {@code RegionPersistence.shardKey}. */
+    private static long shardKeyOf(int rx, int rz, int level) {
+        long sx = RegionAddress.shardOf(rx, level);
+        long sz = RegionAddress.shardOf(rz, level);
+        return (sx << 32) | (sz & 0xFFFFFFFFL);
+    }
+
+    /**
+     * One shard's per-level {@link Column} groupings — gathered by {@link #bucketShards}, consumed by
+     * {@link #encodeShardBucket}. Opaque handle. Rows are added in row-scan order, so each per-level column map
+     * ends up in the SAME insertion→iteration order {@link #collectColumns} produces for that shard, and the
+     * encoded bytes therefore match the per-shard {@link #encodeShard} exactly.
+     */
+    public static final class ShardColumns {
+        @SuppressWarnings("unchecked")
+        private final Map<Long, Column>[] byLevel = new Map[SHARD_HI_LEVEL - SHARD_LO_LEVEL + 1];
+
+        void add(int relLevel, int rx, int rz, int ry, byte[] rec) {
+            Map<Long, Column> m = byLevel[relLevel];
+            if (m == null) { m = new HashMap<>(); byLevel[relLevel] = m; }
+            long colKey = (((long) rx) << 32) ^ (rz & 0xffffffffL); // matches collectColumns' column key
+            Column col = m.get(colKey);
+            if (col == null) { col = new Column(rx, rz); m.put(colKey, col); }
+            col.add(ry, rec);
+        }
+
+        @SuppressWarnings("unchecked")
+        List<Column>[] toLists() {
+            List<Column>[] out = new List[byLevel.length];
+            for (int i = 0; i < byLevel.length; i++) {
+                out[i] = (byLevel[i] == null) ? Collections.<Column>emptyList()
+                                              : new ArrayList<>(byLevel[i].values());
+            }
+            return out;
+        }
     }
 
     /** Whether row {@code r} at {@code level} is a persistable built row matching the (optional) shard scope. */

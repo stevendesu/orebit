@@ -103,6 +103,8 @@ public final class ConfigValidator {
                 floatClamped(props, ConfigKeys.PATHING_REGION_SHARD_LOAD_BUDGET_MS, d.regionShardLoadBudgetMs(), 0.1f, 1000.0f),
                 // hpa: 0 disables the periodic flush; upper rail is a sanity cap (~9.5 days) against a typo.
                 intClamped(props, ConfigKeys.HPA_PERSIST_INTERVAL_TICKS, d.persistIntervalTicks(), 0, 16_000_000),
+                // persistFlushBudgetMs > 0, ceilinged at 1000 ms (same rail as the other per-tick drain budgets).
+                floatClamped(props, ConfigKeys.HPA_PERSIST_FLUSH_BUDGET_MS, d.persistFlushBudgetMs(), 0.1f, 1000.0f),
                 bool(props, ConfigKeys.HPA_LAZY_LOAD, d.lazyLoad()),
                 // residentLeafCap >= 0 (0 = unbounded / eviction off); no meaningful upper rail (a large cap just
                 // never binds), so Integer.MAX_VALUE.
