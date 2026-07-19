@@ -182,4 +182,64 @@ public record BotCaps(
     public static final BotCaps BREAK_PLACE = new BotCaps(
             1, DEFAULT_SAFE_FALL, DEFAULT_MAX_FALL, true, DEFAULT_COST_PER_HITPOINT, true, true,
             UNBREAKABLE, false, DEFAULT_MAX_NODES, DEFAULT_GREEDY_WEIGHT);
+
+    // ---- realizability signature (#5 RegionCrossingMemory caps-dominance tag) --------------------------
+    //
+    // Packs the caps axes that determine whether a region crossing is PHYSICALLY REALIZABLE into one long, so
+    // a persisted invalidation can be tagged with the caps that failed it and a later bot can decide by
+    // DOMINANCE whether that failure binds it. Deliberately EXCLUDES the search knobs (maxNodes/greedyWeight)
+    // and the cost knob (costPerHitpoint — a damage-priced-but-passable hop is still realizable; the
+    // realizability boundary is takesDamage + the fall window, not the price). Each field occupies a disjoint
+    // bit range, encoded so a LARGER field value == MORE capable: takesDamage is stored INVERTED as an
+    // "invuln" bit (an immune bot is strictly more capable across hazards), and maxBreakHardness is zeroed
+    // when !canBreak so a can't-break bot's stale hardness can't fake extra capability. ~43 bits, one long.
+    private static final int  SIG_INVULN         = 4;                              // bit 4 (= !takesDamage)
+    private static final long SIG_BOOL_MASK      = 0b11111L;                       // bits 0..4 (the 5 bools)
+    private static final int  SIG_MBH_SHIFT      = 5;                              // bits 5..12  (8 bits 0..255)
+    private static final long SIG_MBH_MASK       = 0xFFL   << SIG_MBH_SHIFT;
+    private static final int  SIG_JUMP_SHIFT     = 13;                             // bits 13..16 (4 bits)
+    private static final long SIG_JUMP_MASK      = 0xFL    << SIG_JUMP_SHIFT;
+    private static final int  SIG_SAFEFALL_SHIFT = 17;                             // bits 17..29 (13 bits)
+    private static final long SIG_SAFEFALL_MASK  = 0x1FFFL << SIG_SAFEFALL_SHIFT;
+    private static final int  SIG_MAXFALL_SHIFT  = 30;                             // bits 30..42 (13 bits)
+    private static final long SIG_MAXFALL_MASK   = 0x1FFFL << SIG_MAXFALL_SHIFT;
+
+    /**
+     * Pack the realizability-relevant caps into one long — the caps-dominance tag a {@code RegionCrossingMemory}
+     * (#5) stores with each remembered dead crossing. See the field-layout note above.
+     */
+    public long realizabilitySig() {
+        long s = 0L;
+        if (canBreak)         s |= 1L << 0;
+        if (canPlace)         s |= 1L << 1;
+        if (allowUnbreakable) s |= 1L << 2;
+        if (mayToggleDoors)   s |= 1L << 3;
+        if (!takesDamage)     s |= 1L << SIG_INVULN;
+        s |= (canBreak ? clampField(maxBreakHardness, 0xFF) : 0L) << SIG_MBH_SHIFT;
+        s |= clampField(jumpHeight, 0xF)        << SIG_JUMP_SHIFT;
+        s |= clampField(safeFallDistance, 0x1FFF) << SIG_SAFEFALL_SHIFT;
+        s |= clampField(maxFallDistance, 0x1FFF)  << SIG_MAXFALL_SHIFT;
+        return s;
+    }
+
+    private static long clampField(int v, int max) {
+        return v < 0 ? 0L : Math.min(v, max);
+    }
+
+    /**
+     * Whether caps signature {@code a} is at least as capable as {@code b} on EVERY realizability axis (a
+     * DOMINATES b). An invalidation recorded by caps R binds a later bot with caps C iff {@code
+     * sigDominates(R, C)} — R was no less capable, so if R couldn't realize the crossing, C can't either.
+     * Equal caps dominate each other (an invalidation binds an identical bot); a strictly stronger bot is NOT
+     * dominated and rightly ignores the weaker bot's negative. Cheap: disjoint-field bit compares, cold path.
+     */
+    public static boolean sigDominates(long a, long b) {
+        // every capability bool set in b must also be set in a (else b has a capability a lacks → a ⊉ b)
+        if ((b & SIG_BOOL_MASK & ~a) != 0L) return false;
+        // each numeric field lives in a disjoint bit range → a masked compare orders that field alone
+        return (a & SIG_MBH_MASK)      >= (b & SIG_MBH_MASK)
+            && (a & SIG_JUMP_MASK)     >= (b & SIG_JUMP_MASK)
+            && (a & SIG_SAFEFALL_MASK) >= (b & SIG_SAFEFALL_MASK)
+            && (a & SIG_MAXFALL_MASK)  >= (b & SIG_MAXFALL_MASK);
+    }
 }

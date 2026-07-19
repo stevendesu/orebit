@@ -112,6 +112,14 @@ public final class RegionGrid {
      * index from a startup directory listing.
      */
     private final RegionShardResidency residency;
+    /**
+     * The dimension's long-lived memory of forbidden region→region crossings (#5 invalidation memory). Created
+     * with the grid; survives every navigation's {@code HierarchicalRegionPlan} boundary so a fresh plan can be
+     * SEEDED with the dead crossings already proven, instead of re-discovering them from scratch on each new
+     * goal. Never {@code null}. In-memory only for now (disk persistence into the reserved shard invalidation
+     * section is a later increment).
+     */
+    private final RegionCrossingMemory crossingMemory;
     /** Dimension floor, resolved once through the {@link LevelBounds} seam (overworld −64). */
     private final int minY;
 
@@ -123,6 +131,7 @@ public final class RegionGrid {
         this.residency = new RegionShardResidency();
         this.pyramid.setResidency(residency);
         this.resourcePyramid.setResidency(residency);
+        this.crossingMemory = new RegionCrossingMemory();
         this.minY = LevelBounds.minY(level);
     }
 
@@ -162,6 +171,7 @@ public final class RegionGrid {
         this.residency = new RegionShardResidency();
         this.pyramid.setResidency(residency);
         this.resourcePyramid.setResidency(residency);
+        this.crossingMemory = new RegionCrossingMemory();
         this.minY = minY;
     }
 
@@ -186,6 +196,15 @@ public final class RegionGrid {
      */
     public RegionShardResidency residency() {
         return residency;
+    }
+
+    /**
+     * The dimension's long-lived region-crossing invalidation memory (#5). A {@code HierarchicalRegionPlan}
+     * seeds its per-level blacklists from this at build time and records newly-proven dead crossings back into
+     * it, so learned dead-ends persist across the plan boundary (new goal / tolerance change).
+     */
+    public RegionCrossingMemory crossingMemory() {
+        return crossingMemory;
     }
 
     /** The dimension floor (vertical origin for region {@code ry}; overworld −64). */
