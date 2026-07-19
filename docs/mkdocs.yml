@@ -15,6 +15,7 @@ nav:
   - Gathering: gathering.md
   - Commands: commands.md
   - Configuration: configuration.md
+  - Saved Data: persistence.md
   - Optimizations:
       - Optimizations/index.md
       - Reading Blocks: Optimizations/01_block_reading.md
@@ -29,6 +30,8 @@ nav:
       - Off the Tick Thread: Optimizations/10_background_pathfinding.md
       - Teaching the Block Search the Map: Optimizations/11_region_heuristic.md
       - Paying for the Map: Optimizations/12_field_build.md
+      - Persisting the Map: Optimizations/13_persisting_the_map.md
+      - Catching the Spike: Optimizations/14_catching_the_spike.md
 theme:
   name: material
   icon:

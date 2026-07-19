@@ -36,16 +36,16 @@ back so you can confirm they loaded.) The defaults are chosen so that, out of th
 freshly configured bot behaves exactly as it does with no config at all — change only what
 you want to change.
 
-A few keys are exceptions. `pathing.async` and `pathing.maxThreads` (the background-planner
-switch and its thread-pool size) only take effect on a server restart. And
-`mining.protectedBlocks` is half-and-half: the reload makes the bot *refuse* to break
+A few keys are exceptions. `pathing.async`, `pathing.maxThreads` (the background-planner
+switch and its thread-pool size) and `hpa.lazyLoad` (the paged world-memory startup) only
+take effect on a server restart. And `mining.protectedBlocks` is half-and-half: the reload makes the bot *refuse* to break
 newly-protected blocks immediately, but the planner keeps routing from cached block data
 until a restart (or until the affected chunks naturally rebuild) — see the key's entry
 below.
 
 ## Options
 
-The file is grouped into four sections. Every value below is the default.
+The file is grouped into sections by what they control. Every value below is the default.
 
 ### Placement — can the bot build?
 
@@ -105,6 +105,9 @@ pathing.asyncSearchBudgetMs   = 250
 pathing.chunkBuildBudgetMs    = 2.0
 pathing.chunkBuildsPerTick    = 64
 pathing.hpaFlushBudgetMs      = 1.0
+pathing.regionShardLoadBudgetMs = 2.0
+pathing.navReadyRadiusChunks  = 4
+pathing.navReadyTimeoutTicks  = 150
 ```
 
 | Key | Default | What it does |
@@ -120,21 +123,32 @@ pathing.hpaFlushBudgetMs      = 1.0
 | `pathing.chunkBuildBudgetMs` | `2.0` | How many milliseconds each server tick the bot spends building the terrain-scan data (the "nav grid") for freshly loaded chunks. A single chunk column costs anywhere from ~1 ms (open surface) to ~5 ms (deep caves), so a fixed *count* per tick couldn't adapt — this time budget builds as many columns as safely fit and leaves the rest for the next tick. After a teleport or a fresh world-open (which can load hundreds of chunks at once) the bot's surroundings fill in over a few ticks instead of spiking the frame. Raise it on a strong machine for faster fill-in; lower it on a constrained host. |
 | `pathing.chunkBuildsPerTick` | `64` | A safety cap on how many chunk columns can build in a single tick, on top of the time budget above — it stops a burst of very cheap (all-air) columns from running away even inside the budget. This is a backstop, not the main limit; leave it unless a strong machine is spending too many columns per tick. |
 | `pathing.hpaFlushBudgetMs` | `1.0` | How many milliseconds each tick the bot spends refreshing its long-range routing map after the world changes (blocks mined, built, exploded). Usually a fraction of this is enough to catch up fully; a big edit (TNT, a fill command) is absorbed over a few ticks instead of one. The map-building analog of `pathing.chunkBuildBudgetMs`. |
+| `pathing.regionShardLoadBudgetMs` | `2.0` | How many milliseconds each tick the bot spends paging its saved long-range map back in from disk, when `hpa.lazyLoad` is on. As the bot heads toward a distant region it explored in an earlier session, that region's map is streamed off disk a shard at a time; this budget bounds how many shards load per tick (always at least one, so it never stalls) so a fresh approach fills in smoothly instead of hitching. Ignored when `hpa.lazyLoad` is off (the whole map is already in memory). |
+| `pathing.navReadyRadiusChunks` | `4` | How large an area around the bot (in chunks) must have its terrain scan finished before the bot will plan a path. Nav data builds over a few ticks after chunks load, and the planner treats not-yet-scanned ground as empty air — so planning too early can aim the bot at a hole that isn't really there. The bot waits until a `(2×4+1)²` = 9×9-chunk ring is scanned, which briefly shows as "waiting for terrain" right after joining or teleporting. `0` disables the wait (plan immediately). |
+| `pathing.navReadyTimeoutTicks` | `150` | A give-up backstop for that wait: if the readiness ring still isn't built after this many ticks, the bot stops waiting and tells you it can't get terrain data, instead of hanging forever on a genuinely un-loadable spot (the world border, a permanently missing chunk). On a healthy server the ring builds in a tick or two and this never fires. `150` ≈ 7.5 seconds. |
 
 ### World memory — surviving a restart
 
 The bot remembers the coarse shape of terrain it has explored (for long-range routing) and where it saw
 resources (for `/bot report`). That memory is saved into the world folder so it survives a server restart —
 important for a server that stops when idle and restarts often. It's saved automatically on a clean shutdown;
-the one knob below only controls a background safety-save in between.
+the knobs below control the background safety-save in between and, optionally, how much of that memory is
+kept in RAM at once. The saved files and everything a server admin can safely do with them are covered on the
+[Saved Data](persistence.md) page.
 
 ```properties
 hpa.persistIntervalTicks = 6000
+hpa.persistFlushBudgetMs = 2.0
+hpa.lazyLoad             = false
+hpa.residentLeafCap      = 0
 ```
 
 | Key | Default | What it does |
 | --- | --- | --- |
 | `hpa.persistIntervalTicks` | `6000` | How often (in server ticks, 20 = 1 second) to re-save that memory in the background as crash insurance, and only for worlds that changed since the last save. The real save happens on a clean server stop no matter what this is set to — this is just a safety net for a hard crash. `6000` ≈ 5 minutes. Set `0` to turn the periodic safety-save off (the shutdown save still runs). The data lives in `<world>/orebit/<dimension>/` and is treated as a cache — if a file is ever corrupted it's simply ignored and rebuilt as you explore. |
+| `hpa.persistFlushBudgetMs` | `2.0` | How many milliseconds each tick that background safety-save is allowed to spend writing. When the interval above fires on a world that's been heavily explored, there can be a lot of changed data to write; rather than write it all in one tick (which caused a brief ~2-second server stall), the save trickles out under this budget across as many ticks as it takes. It's crash insurance, so spreading it out is safe — the clean-shutdown save is always complete. Leave it unless you want the periodic save to finish faster (raise) or stay even quieter (lower). |
+| `hpa.lazyLoad` | `false` | Where the saved world-memory lives at runtime. `false` (default) loads all of it into RAM at server start — simple, and fine for most worlds. `true` loads only the top-level summary at start and streams each region's detail back off disk as the bot approaches it (see `pathing.regionShardLoadBudgetMs`), which keeps memory bounded on a world with a huge explored area — pair it with `hpa.residentLeafCap` to actually cap RAM. **Requires a server restart to change.** This mode is newer and off by default while it proves out; turn it on if bot world-memory RAM is a concern on a long-lived world. |
+| `hpa.residentLeafCap` | `0` | The RAM cap for lazy-loaded world memory, as a maximum number of detailed region tiles kept in memory at once. `0` (default) means unbounded — nothing is ever evicted. A positive value tells the bot to page the coldest regions (those whose chunks are all currently unloaded) back to disk once the resident count exceeds the cap, reloading them on demand if the bot returns. The top-level summary always stays resident, so long-range planning still works over evicted regions. Only has an effect when `hpa.lazyLoad` is on. |
 
 ### Survival — is the bot mortal?
 
@@ -152,6 +166,16 @@ player simulation, so when these are on, the mechanics are the real ones — not
 | `survival.takesDamage` | `false` | If `true`, the bot takes damage like a player — lava, fire, falls, cactus, mobs. This also changes how it *plans*: a mortal bot pays a steep path cost to walk through fire or a berry bush and treats big drops as expensive, so it routes around hazards an invulnerable bot would stroll through. How steep is one knob: `pathing.costPerHitpoint` (see Pathfinding above). `false` = invulnerable (hazards still cost it time, never health). |
 | `survival.hunger` | `false` | If `true`, the bot's food bar drains from activity like a player's. If `false`, it never gets hungry (and can always sprint). Note the bot doesn't yet feed itself — a hungry bot is your problem to keep fed. |
 | `survival.needsBreath` | `false` | If `true`, the bot's air depletes underwater and it can drown. If `false`, it can swim submerged indefinitely. |
+
+### Doors — how the bot handles doors
+
+```properties
+doors.toggle = true
+```
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `doors.toggle` | `true` | Whether the bot may open and close hand-operable doors (wooden, copper) by right-clicking them, rather than smashing through or routing around — it opens a closed door before crossing and closes it again behind itself on a hallway corner. Set `false` as a kill-switch: an already-open door is walked through, a closed one is mined. Iron doors are never hand-operable regardless of this setting (they need redstone). |
 
 ## Example configurations
 
