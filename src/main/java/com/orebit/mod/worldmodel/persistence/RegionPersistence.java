@@ -10,11 +10,13 @@ import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.orebit.mod.Debug;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.platform.DimensionId;
@@ -365,7 +367,7 @@ public final class RegionPersistence {
      * is live) never leaves a half-written {@code .bin} — the previous good file survives. Falls back to a plain
      * replace when the filesystem refuses an atomic move. Never throws onto the tick thread.
      */
-    private static void writeAtomic(Path file, StreamWriter writer) {
+    private static boolean writeAtomic(Path file, StreamWriter writer) {
         Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
         try {
             try (OutputStream out = Files.newOutputStream(tmp)) {
@@ -376,6 +378,7 @@ public final class RegionPersistence {
             } catch (IOException atomicUnsupported) {
                 Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
             }
+            return true;
         } catch (Throwable t) {
             onFlushFailure(file, t);
             try {
@@ -383,6 +386,7 @@ public final class RegionPersistence {
             } catch (IOException ignored) {
                 // best effort — a stray .tmp is harmless (overwritten next flush)
             }
+            return false;
         }
     }
 
@@ -412,33 +416,164 @@ public final class RegionPersistence {
     }
 
     /**
-     * The periodic-flush driver, wired off {@code onWorldTickEnd}. Every {@code hpa.persistIntervalTicks} ticks
-     * for a level, if any shard was marked dirty (or the coarse levels changed) since the last flush, write those
-     * shards + coarse files and clear the marks. A non-positive interval disables the periodic flush (the stop
-     * flush still runs). Runs on the tick thread.
+     * The periodic-flush driver, wired off {@code onWorldTickEnd} — <b>interval-triggered, then a budgeted
+     * resuming drain</b>. Every {@code hpa.persistIntervalTicks} ticks for a level the flush pass BEGINS; from
+     * then on each tick writes as many dirty shards as fit the per-tick {@code hpa.persistFlushBudgetMs}
+     * wall-clock budget (with a ≥1-shard-per-tick backstop), the pass RESUMING on subsequent ticks until the
+     * dirty backlog + coarse files fully drain — at which point the interval counter resets and we wait a full
+     * interval again. This turns the old one-tick flush spike (a whole dimension's dirty shards + both coarse
+     * files written at once — measured ~1.9 s in-game) into a steady trickle. A non-positive interval disables
+     * the periodic flush (the {@code SERVER_STOPPING} flush still runs). Runs on the tick thread.
+     *
+     * <p><b>Cadence choice:</b> interval-triggered-then-drain (not a fully-continuous every-tick drain) —
+     * because each draining tick re-buckets the whole dimension ({@code O(rows)}); triggering only every
+     * interval keeps that scan out of the common tick, while the budget keeps the triggered pass off the frame.
      */
     public static void tick(ServerLevel level) {
         int interval = ConfigLoader.config().persistIntervalTicks();
         if (interval <= 0) return;
         int t = TICKS_SINCE_FLUSH.merge(level, 1, Integer::sum);
-        if (t < interval) return;
-        TICKS_SINCE_FLUSH.put(level, 0);
+        if (t < interval) return; // not time yet — keep accumulating dirty marks
 
-        // Resolve the flush targets BEFORE claiming (removing) the dirty marks: if there is nothing to flush to
-        // (no live grid, or no server), an early return here must NOT consume the marks — otherwise unflushed
-        // changes would be silently dropped without ever hitting disk. The SERVER_STOPPING flush is the net.
+        // At/past the interval: we're in (or entering) a flush pass. Spend this tick's flush budget on the
+        // dirty backlog. The counter stays >= interval (keeps incrementing) until the pass fully drains, at
+        // which point we reset it to 0 and wait a whole interval before the next pass.
         RegionGrid grid = RegionGrid.peek(level);
-        if (grid == null) return;
+        if (grid == null) {
+            // Nothing to flush in this dimension (never planned/explored, or dropped on unload). Reset so the
+            // counter doesn't sit pinned at the interval spamming this early-out each tick.
+            TICKS_SINCE_FLUSH.put(level, 0);
+            return;
+        }
         MinecraftServer server = level.getServer();
-        if (server == null) return;
+        if (server == null) return; // transient — retry next tick WITHOUT resetting (marks stay, nothing lost)
 
-        Set<Long> dirty = DIRTY_SHARDS.remove(level);        // claim this interval's dirty shards
-        boolean coarseDirty = COARSE_DIRTY.remove(level);
+        long budgetNanos = (long) (ConfigLoader.config().persistFlushBudgetMs() * 1_000_000.0);
+        boolean complete = drainDimension(server, level, grid, budgetNanos);
+        if (complete) TICKS_SINCE_FLUSH.put(level, 0); // pass done → wait a full interval again
+        // else: leave the counter >= interval so the drain resumes next tick.
+    }
+
+    /**
+     * Write one draining tick's slice of {@code level}'s dirty region tier under a per-tick wall-clock budget,
+     * returning whether the backlog (dirty shards + coarse) is now fully drained. Mirrors the budgeted-drain
+     * idiom of {@link com.orebit.mod.worldmodel.pathing.ChunkNavLoader} / {@code HpaMaintenance.flush}:
+     * <ul>
+     *   <li><b>Scan-once bucket</b> — ONE pass over the dimension's L0–5 rows (cost + resource) buckets every
+     *       shard's rows ({@link CostPyramidCodec#bucketShards}/{@link ResourcePyramidCodec#bucketShards}),
+     *       replacing the old scan-per-dirty-shard encode ({@code O(dirtyShards × rows)}) with {@code O(rows)}
+     *       per draining tick. Re-bucketed each tick (the pyramid mutates between ticks); the per-shard encoded
+     *       bytes are byte-identical to {@code encodeShard}.</li>
+     *   <li><b>Clear-after-write</b> — a shard's dirty mark is removed from the LIVE {@link #DIRTY_SHARDS} set
+     *       ONLY after its file(s) are successfully written, so a budget-deferred or failed shard stays marked
+     *       and is retried next tick (never silently dropped). {@link #COARSE_DIRTY} likewise clears only once
+     *       both coarse files are written.</li>
+     *   <li><b>Budget + backstop</b> — elapsed is checked after each shard; a ≥1-shard-per-tick backstop
+     *       guarantees progress even if a single shard exceeds the budget.</li>
+     *   <li><b>Coarse LAST</b> — the two per-dimension coarse files are written after the shards, and deferred
+     *       to a later tick if the budget is already spent (unless nothing else was written this tick — the
+     *       same ≥1 progress backstop).</li>
+     * </ul>
+     * Runs on the tick thread; {@link #markDirty} is also tick-thread, so the live dirty set isn't mutated
+     * concurrently during the drain.
+     */
+    private static boolean drainDimension(MinecraftServer server, ServerLevel level, RegionGrid grid,
+                                          long budgetNanos) {
+        Set<Long> dirty = DIRTY_SHARDS.get(level);
         boolean haveShards = dirty != null && !dirty.isEmpty();
-        if (!haveShards && !coarseDirty) return;             // nothing changed since the last flush
+        boolean coarseDirty = COARSE_DIRTY.contains(level);
+        if (!haveShards && !coarseDirty) return true; // nothing to flush → this pass is done
 
-        Set<Long> onlyShards = (dirty == null) ? Collections.emptySet() : dirty;
-        flushDimension(server, level, grid, onlyShards, coarseDirty);
+        Path dir = dimDir(server, level);
+        try {
+            Files.createDirectories(dir);
+        } catch (IOException e) {
+            onFlushFailure(dir, e);
+            return false; // couldn't even make the dir — retry next tick (marks untouched)
+        }
+
+        final long start = System.nanoTime();
+        final CostPyramid cp = grid.pyramid();
+        final ResourcePyramid rp = grid.resourcePyramid();
+
+        int wrote = 0;
+        long shardEncNanos = 0L;
+
+        if (haveShards) {
+            // Scan-once bucket the WHOLE dimension (cost + resource) — O(rows), once per draining tick — instead
+            // of a full-dimension scan per dirty shard (the old O(dirtyShards × rows) encode). Not cached across
+            // ticks (the pyramid mutates between ticks): re-bucket from current state each draining tick.
+            final Map<Long, CostPyramidCodec.ShardColumns> costBuckets = CostPyramidCodec.bucketShards(cp);
+            final Map<Long, ResourcePyramidCodec.ShardRows> resBuckets = ResourcePyramidCodec.bucketShards(rp);
+
+            // Drain from the LIVE dirty set, removing each shard only AFTER its file(s) are written
+            // (clear-after-write). Same thread as markDirty (tick thread) → no concurrent modification. The ≥1
+            // backstop (wrote >= 1 before the budget check) guarantees progress even if one shard is slow.
+            Iterator<Long> it = dirty.iterator();
+            while (it.hasNext()) {
+                if (wrote >= 1 && System.nanoTime() - start >= budgetNanos) break;
+                long key = it.next();
+                final int sx = shardX(key), sz = shardZ(key);
+                boolean ok = true;
+                final long encStart = System.nanoTime();
+                final CostPyramidCodec.ShardColumns cb = costBuckets.get(key);
+                if (cb != null) {
+                    ok &= writeAtomic(dir.resolve("hpa." + sx + "." + sz + ".bin"),
+                            out -> CostPyramidCodec.encodeShardBucket(cb, out));
+                }
+                final ResourcePyramidCodec.ShardRows rb = resBuckets.get(key);
+                if (rb != null) {
+                    ok &= writeAtomic(dir.resolve("res." + sx + "." + sz + ".bin"),
+                            out -> ResourcePyramidCodec.encodeShardBucket(rb, out));
+                }
+                shardEncNanos += System.nanoTime() - encStart;
+                if (ok) {
+                    it.remove(); // clear the mark ONLY on success (a failure leaves it set → retried next tick)
+                    wrote++;
+                }
+            }
+        }
+
+        // Coarse LAST, under the budget: write the two per-dimension coarse files after the shards. If the budget
+        // is already spent AND we wrote shards this tick, defer coarse to a later tick; but if we wrote nothing
+        // else this tick, always attempt coarse (the ≥1 progress backstop, so the pass can't stall on coarse).
+        // Clear COARSE_DIRTY only once both files are actually written.
+        long coarseNanos = 0L;
+        boolean coarseWritten = false;
+        if (coarseDirty && (wrote == 0 || System.nanoTime() - start < budgetNanos)) {
+            final long cStart = System.nanoTime();
+            boolean ok = true;
+            if (hasBuiltCostLevel(cp, RegionAddress.MAX_COARSE_LEVEL)) {
+                ok &= writeAtomic(dir.resolve(COST_COARSE_FILE), out -> CostPyramidCodec.encodeCoarse(cp, out));
+            }
+            if (hasBuiltResourceCoarse(rp)) {
+                ok &= writeAtomic(dir.resolve(RESOURCE_COARSE_FILE), out -> ResourcePyramidCodec.encodeCoarse(rp, out));
+            }
+            coarseNanos = System.nanoTime() - cStart;
+            if (ok) {
+                COARSE_DIRTY.remove(level);
+                coarseWritten = true;
+            }
+        }
+
+        final long elapsedNanos = System.nanoTime() - start;
+        final Set<Long> after = DIRTY_SHARDS.get(level);
+        final int remaining = (after == null) ? 0 : after.size();
+
+        // Per-flush breakdown (for the coarse-cadence decision — see the shard-encode vs coarse split). Gated on
+        // Debug.VERBOSE and a >~5 ms pass so it only fires on a pass that actually did meaningful work.
+        if (Debug.VERBOSE && (wrote > 0 || coarseWritten) && elapsedNanos > 5_000_000L) {
+            OrebitCommon.LOGGER.info(
+                    "[Orebit][PERSIST] wrote {} shards in {}ms (shardEnc={}ms coarse={}ms) {} dirty remaining",
+                    wrote, ms(elapsedNanos), ms(shardEncNanos), ms(coarseNanos), remaining);
+        }
+
+        return remaining == 0 && !COARSE_DIRTY.contains(level);
+    }
+
+    /** Format a nanosecond duration as milliseconds with one decimal, for the breakdown log. */
+    private static String ms(long nanos) {
+        return String.format("%.1f", nanos / 1_000_000.0);
     }
 
     /**

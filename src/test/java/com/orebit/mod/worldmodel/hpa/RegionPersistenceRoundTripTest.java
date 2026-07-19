@@ -9,6 +9,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 
 import org.junit.jupiter.api.Test;
@@ -271,6 +272,66 @@ public class RegionPersistenceRoundTripTest {
             p.setLog2(0, row, cv[0], (byte) cv[1]);
         }
         p.setBuilt(0, row, true);
+    }
+
+    // ===================================================================================================
+    // Scan-once bucket byte-identity: the periodic flush's O(dirtyShards*rows) -> O(rows) rewrite changes only
+    // HOW rows are gathered — encodeShardBucket MUST emit byte-for-byte the same shard file as encodeShard.
+    // ===================================================================================================
+    @Test
+    void scanOnceBucket_isByteIdenticalToPerShardEncode() throws IOException {
+        CostPyramid cp = new CostPyramid();
+        ResourcePyramid rp = new ResourcePyramid();
+
+        // Multi-shard, multi-section, multi-fragment — and three consecutive-ry SOLID leaves in one column so the
+        // bucket path exercises the ry column-run collapse, plus mergeUp so levels 1..5 carry rows too.
+        seedUniform(cp, 2, 0, 3, RegionFragments.KIND_SOLID, 6);
+        seedUniform(cp, 2, 1, 3, RegionFragments.KIND_SOLID, 6);
+        seedUniform(cp, 2, 2, 3, RegionFragments.KIND_SOLID, 6);
+        seedUniform(cp, 2, 31, 3, RegionFragments.KIND_AIR, 0);
+        seedMixed(cp, 5, 3, 7, new int[] { 4, 12 });
+        seedUniform(cp, 40, 0, 3, RegionFragments.KIND_WATER, 0);
+        seedMixed(cp, 45, 5, 7, new int[] { 8 });
+        seedUniform(cp, -5, 2, 3, RegionFragments.KIND_SOLID, 8);
+
+        seedResource(rp, 2, 0, 3, new int[][] { {1, 5}, {7, 2} });
+        seedResource(rp, 2, 1, 3, new int[][] { {1, 5}, {7, 2} });
+        seedResource(rp, 5, 3, 7, new int[][] { {0, 3} });
+        seedResource(rp, 40, 0, 3, new int[][] { {ResourceClasses.COLUMN_COUNT - 1, 9} });
+        seedResource(rp, -5, 2, 3, new int[][] { {2, 1}, {11, 4} });
+
+        for (int r = 0; r < cp.rowCount(0); r++) {
+            if (cp.isBuilt(0, r)) PyramidMerger.mergeUpFragments(cp, cp.rowRX(0, r), cp.rowRY(0, r), cp.rowRZ(0, r));
+        }
+        for (int r = 0; r < rp.rowCount(0); r++) {
+            if (rp.isBuilt(0, r)) ResourceMerger.mergeUpTallies(rp, rp.rowRX(0, r), rp.rowRY(0, r), rp.rowRZ(0, r));
+        }
+
+        // Cost: the bucket's shard set must match enumerate, and each shard's bucket bytes == encodeShard bytes.
+        Map<Long, CostPyramidCodec.ShardColumns> costBuckets = CostPyramidCodec.bucketShards(cp);
+        assertEquals(costShards(cp), costBuckets.keySet(), "cost bucket shard set must match the enumerate");
+        for (long key : costShards(cp)) {
+            int sx = (int) (key >> 32), sz = (int) key;
+            ByteArrayOutputStream perShard = new ByteArrayOutputStream();
+            CostPyramidCodec.encodeShard(cp, sx, sz, perShard);
+            ByteArrayOutputStream bucket = new ByteArrayOutputStream();
+            CostPyramidCodec.encodeShardBucket(costBuckets.get(key), bucket);
+            assertArrayEquals(perShard.toByteArray(), bucket.toByteArray(),
+                    "cost shard (" + sx + "," + sz + ") bucket bytes must equal encodeShard bytes");
+        }
+
+        // Resource: same byte-identity per shard.
+        Map<Long, ResourcePyramidCodec.ShardRows> resBuckets = ResourcePyramidCodec.bucketShards(rp);
+        assertEquals(resourceShards(rp), resBuckets.keySet(), "resource bucket shard set must match the enumerate");
+        for (long key : resourceShards(rp)) {
+            int sx = (int) (key >> 32), sz = (int) key;
+            ByteArrayOutputStream perShard = new ByteArrayOutputStream();
+            ResourcePyramidCodec.encodeShard(rp, sx, sz, perShard);
+            ByteArrayOutputStream bucket = new ByteArrayOutputStream();
+            ResourcePyramidCodec.encodeShardBucket(resBuckets.get(key), bucket);
+            assertArrayEquals(perShard.toByteArray(), bucket.toByteArray(),
+                    "resource shard (" + sx + "," + sz + ") bucket bytes must equal encodeShard bytes");
+        }
     }
 
     // ===================================================================================================

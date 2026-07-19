@@ -250,9 +250,26 @@ public final class ConfigKeys {
      * persisted HPA region tier ({@code <world>/orebit/<dim>/hpa.bin} + {@code res.bin}), and only when that
      * dimension changed since its last flush. This is a SAFETY NET only: the authoritative flush happens on a
      * graceful server stop regardless. {@code 0} (or negative) disables the periodic flush (stop flush still
-     * runs). Default {@code 6000} (≈ 5 minutes at 20 t/s), matching vanilla autosave feel.
+     * runs). Default {@code 6000} (≈ 5 minutes at 20 t/s), matching vanilla autosave feel. The pass this
+     * interval TRIGGERS is itself spread across ticks under {@link #HPA_PERSIST_FLUSH_BUDGET_MS} (it no longer
+     * writes every dirty shard in one tick — it drains a budgeted slice each tick until the backlog clears).
      */
     public static final String HPA_PERSIST_INTERVAL_TICKS = "hpa.persistIntervalTicks";
+    /**
+     * {@code float > 0} — the per-level per-tick wall-clock budget (milliseconds) for the periodic
+     * crash-insurance flush drain ({@link com.orebit.mod.worldmodel.persistence.RegionPersistence#tick}), the
+     * persistence analog of {@link #PATHING_HPA_FLUSH_BUDGET_MS}. When the {@link #HPA_PERSIST_INTERVAL_TICKS}
+     * interval fires, the dimension's dirty shards are written under this budget and the pass RESUMES on
+     * subsequent ticks until the backlog drains (interval-triggered, then a budgeted resuming drain) — turning
+     * the old one-tick flush spike (a whole dimension's dirty shards + both coarse files written at once,
+     * measured ~1.9 s) into a steady trickle. Elapsed is checked after each shard (worst-case overshoot one
+     * shard), with a hardcoded ≥1-shard-per-tick backstop so progress is guaranteed even if a single shard
+     * exceeds the budget; the two coarse files are written LAST (deferred to a later tick if the budget is spent).
+     * Atomicity is not required (each shard file is an independent atomic replace, and the {@code SERVER_STOPPING}
+     * flush is authoritative), so spreading the writes across ticks is safe. Clamped to {@code (0, 1000]} ms.
+     * Default {@code 2.0}.
+     */
+    public static final String HPA_PERSIST_FLUSH_BUDGET_MS = "hpa.persistFlushBudgetMs";
     /**
      * {@code boolean} — page the persisted region tier in <b>lazily</b> (Stage-2 bounded region RAM): load ONLY
      * the per-dimension coarse levels at server start ({@code RegionPersistence.loadCoarseOnly}) and stream each
