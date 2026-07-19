@@ -307,7 +307,9 @@ public class RegionPersistenceRoundTripTest {
             if (rp.isBuilt(0, r)) ResourceMerger.mergeUpTallies(rp, rp.rowRX(0, r), rp.rowRY(0, r), rp.rowRZ(0, r));
         }
 
-        // Cost: the bucket's shard set must match enumerate, and each shard's bucket bytes == encodeShard bytes.
+        // Cost: the bucket's shard set must match enumerate, and each shard's bucket bytes == encodeShard bytes —
+        // for BOTH the whole-dimension bucketShards (the interim oracle) AND the index-driven per-shard bucketShard
+        // (the live periodic-flush path). Both must be byte-for-byte the scanning encodeShard.
         Map<Long, CostPyramidCodec.ShardColumns> costBuckets = CostPyramidCodec.bucketShards(cp);
         assertEquals(costShards(cp), costBuckets.keySet(), "cost bucket shard set must match the enumerate");
         for (long key : costShards(cp)) {
@@ -317,10 +319,15 @@ public class RegionPersistenceRoundTripTest {
             ByteArrayOutputStream bucket = new ByteArrayOutputStream();
             CostPyramidCodec.encodeShardBucket(costBuckets.get(key), bucket);
             assertArrayEquals(perShard.toByteArray(), bucket.toByteArray(),
-                    "cost shard (" + sx + "," + sz + ") bucket bytes must equal encodeShard bytes");
+                    "cost shard (" + sx + "," + sz + ") bucketShards bytes must equal encodeShard bytes");
+            // Index-driven gather (drainDimension's actual path) — same bytes.
+            ByteArrayOutputStream idx = new ByteArrayOutputStream();
+            CostPyramidCodec.encodeShardBucket(CostPyramidCodec.bucketShard(cp, key), idx);
+            assertArrayEquals(perShard.toByteArray(), idx.toByteArray(),
+                    "cost shard (" + sx + "," + sz + ") index bucketShard bytes must equal encodeShard bytes");
         }
 
-        // Resource: same byte-identity per shard.
+        // Resource: same byte-identity per shard, for both the whole-dim bucketShards and the index bucketShard.
         Map<Long, ResourcePyramidCodec.ShardRows> resBuckets = ResourcePyramidCodec.bucketShards(rp);
         assertEquals(resourceShards(rp), resBuckets.keySet(), "resource bucket shard set must match the enumerate");
         for (long key : resourceShards(rp)) {
@@ -330,7 +337,12 @@ public class RegionPersistenceRoundTripTest {
             ByteArrayOutputStream bucket = new ByteArrayOutputStream();
             ResourcePyramidCodec.encodeShardBucket(resBuckets.get(key), bucket);
             assertArrayEquals(perShard.toByteArray(), bucket.toByteArray(),
-                    "resource shard (" + sx + "," + sz + ") bucket bytes must equal encodeShard bytes");
+                    "resource shard (" + sx + "," + sz + ") bucketShards bytes must equal encodeShard bytes");
+            // Index-driven gather (drainDimension's actual path) — same bytes.
+            ByteArrayOutputStream idx = new ByteArrayOutputStream();
+            ResourcePyramidCodec.encodeShardBucket(ResourcePyramidCodec.bucketShard(rp, key), idx);
+            assertArrayEquals(perShard.toByteArray(), idx.toByteArray(),
+                    "resource shard (" + sx + "," + sz + ") index bucketShard bytes must equal encodeShard bytes");
         }
     }
 

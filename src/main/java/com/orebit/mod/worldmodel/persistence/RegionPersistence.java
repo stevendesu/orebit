@@ -1,5 +1,6 @@
 package com.orebit.mod.worldmodel.persistence;
 
+import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -370,7 +371,12 @@ public final class RegionPersistence {
     private static boolean writeAtomic(Path file, StreamWriter writer) {
         Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
         try {
-            try (OutputStream out = Files.newOutputStream(tmp)) {
+            // Buffer the raw channel: the codecs wrap this stream in a DataOutputStream and emit tens of thousands
+            // of tiny (1–2 byte) writes per shard, each of which is a syscall against an unbuffered channel
+            // (measured ~340 ms/shard on Windows). A 64 KB BufferedOutputStream folds them into a handful of block
+            // writes (~10–30 ms/shard). Byte-identical on disk. The try-with-resources flushes + closes the buffer
+            // (down to the file) BEFORE the Files.move below.
+            try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(tmp), 1 << 16)) {
                 writer.write(out);
             }
             try {
@@ -425,9 +431,9 @@ public final class RegionPersistence {
      * files written at once — measured ~1.9 s in-game) into a steady trickle. A non-positive interval disables
      * the periodic flush (the {@code SERVER_STOPPING} flush still runs). Runs on the tick thread.
      *
-     * <p><b>Cadence choice:</b> interval-triggered-then-drain (not a fully-continuous every-tick drain) —
-     * because each draining tick re-buckets the whole dimension ({@code O(rows)}); triggering only every
-     * interval keeps that scan out of the common tick, while the budget keeps the triggered pass off the frame.
+     * <p><b>Cadence choice:</b> interval-triggered-then-drain (not a fully-continuous every-tick drain) — each
+     * draining tick writes real shard files (buffered I/O, but still disk work), so triggering only every interval
+     * keeps that off the common tick, while the per-tick budget keeps the triggered pass off the frame.
      */
     public static void tick(ServerLevel level) {
         int interval = ConfigLoader.config().persistIntervalTicks();
@@ -459,11 +465,13 @@ public final class RegionPersistence {
      * returning whether the backlog (dirty shards + coarse) is now fully drained. Mirrors the budgeted-drain
      * idiom of {@link com.orebit.mod.worldmodel.pathing.ChunkNavLoader} / {@code HpaMaintenance.flush}:
      * <ul>
-     *   <li><b>Scan-once bucket</b> — ONE pass over the dimension's L0–5 rows (cost + resource) buckets every
-     *       shard's rows ({@link CostPyramidCodec#bucketShards}/{@link ResourcePyramidCodec#bucketShards}),
-     *       replacing the old scan-per-dirty-shard encode ({@code O(dirtyShards × rows)}) with {@code O(rows)}
-     *       per draining tick. Re-bucketed each tick (the pyramid mutates between ticks); the per-shard encoded
-     *       bytes are byte-identical to {@code encodeShard}.</li>
+     *   <li><b>Indexed per-shard gather</b> — each dirty shard's rows are gathered via each pyramid's incremental
+     *       shard-row index ({@link CostPyramidCodec#bucketShard}/{@link ResourcePyramidCodec#bucketShard}), so a
+     *       shard write is {@code O(the shard's own rows)}. This replaces both the original scan-per-dirty-shard
+     *       encode ({@code O(dirtyShards × rows)}) AND the interim scan-once bucket ({@code bucketShards}, which
+     *       re-packed EVERY L0–5 row of the dimension once per draining tick). The gathered bytes are
+     *       byte-identical to {@code encodeShard} (the index lists a shard's rows in the same order a full scan
+     *       would encounter them).</li>
      *   <li><b>Clear-after-write</b> — a shard's dirty mark is removed from the LIVE {@link #DIRTY_SHARDS} set
      *       ONLY after its file(s) are successfully written, so a budget-deferred or failed shard stays marked
      *       and is retried next tick (never silently dropped). {@link #COARSE_DIRTY} likewise clears only once
@@ -500,15 +508,15 @@ public final class RegionPersistence {
         long shardEncNanos = 0L;
 
         if (haveShards) {
-            // Scan-once bucket the WHOLE dimension (cost + resource) — O(rows), once per draining tick — instead
-            // of a full-dimension scan per dirty shard (the old O(dirtyShards × rows) encode). Not cached across
-            // ticks (the pyramid mutates between ticks): re-bucket from current state each draining tick.
-            final Map<Long, CostPyramidCodec.ShardColumns> costBuckets = CostPyramidCodec.bucketShards(cp);
-            final Map<Long, ResourcePyramidCodec.ShardRows> resBuckets = ResourcePyramidCodec.bucketShards(rp);
-
             // Drain from the LIVE dirty set, removing each shard only AFTER its file(s) are written
             // (clear-after-write). Same thread as markDirty (tick thread) → no concurrent modification. The ≥1
             // backstop (wrote >= 1 before the budget check) guarantees progress even if one shard is slow.
+            //
+            // Per-shard gather via each pyramid's incremental shard-row index ({@code bucketShard}) — O(the shard's
+            // own rows), NO whole-dimension scan. This replaces the old scan-once bucket ({@code bucketShards}), which
+            // re-packed EVERY level-0..5 row of the dimension once per draining tick (O(rows)/tick regardless of dirty
+            // count). {@code bucketShard} feeds the shard's rows in ascending intern order (== the scan order), so
+            // {@code encodeShardBucket} still emits byte-identical shard files (guarded by the round-trip test).
             Iterator<Long> it = dirty.iterator();
             while (it.hasNext()) {
                 if (wrote >= 1 && System.nanoTime() - start >= budgetNanos) break;
@@ -516,12 +524,12 @@ public final class RegionPersistence {
                 final int sx = shardX(key), sz = shardZ(key);
                 boolean ok = true;
                 final long encStart = System.nanoTime();
-                final CostPyramidCodec.ShardColumns cb = costBuckets.get(key);
+                final CostPyramidCodec.ShardColumns cb = CostPyramidCodec.bucketShard(cp, key);
                 if (cb != null) {
                     ok &= writeAtomic(dir.resolve("hpa." + sx + "." + sz + ".bin"),
                             out -> CostPyramidCodec.encodeShardBucket(cb, out));
                 }
-                final ResourcePyramidCodec.ShardRows rb = resBuckets.get(key);
+                final ResourcePyramidCodec.ShardRows rb = ResourcePyramidCodec.bucketShard(rp, key);
                 if (rb != null) {
                     ok &= writeAtomic(dir.resolve("res." + sx + "." + sz + ".bin"),
                             out -> ResourcePyramidCodec.encodeShardBucket(rb, out));

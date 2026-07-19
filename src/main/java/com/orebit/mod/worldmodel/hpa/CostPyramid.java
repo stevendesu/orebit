@@ -178,6 +178,13 @@ public final class CostPyramid {
      */
     private RegionShardResidency residency;
 
+    /**
+     * Additive per-L5-shard row index (levels 0..{@link RegionAddress#SHARD_LEVEL}), maintained in {@link #rowFor}
+     * at row creation so the periodic persistence flush gathers one shard's rows without scanning the dimension
+     * ({@link com.orebit.mod.worldmodel.persistence.CostPyramidCodec#bucketShard}). Tick-thread only (interning is).
+     */
+    private final ShardRowIndex shardIndex = new ShardRowIndex();
+
     public CostPyramid() {}
 
     /** The dimension's shard-residency index, or {@code null} if none is associated (Stage-2 clobber-guard). */
@@ -210,7 +217,32 @@ public final class CostPyramid {
      * first use of that level.
      */
     public int rowFor(int level, int rx, int ry, int rz) {
-        return level(level).intern(RegionAddress.packLevelKey(rx, ry, rz), rx, ry, rz);
+        final Level l = level(level);
+        final int before = l.count; // a NEW row's index == the level's old count (rows are append-only)
+        final int row = l.intern(RegionAddress.packLevelKey(rx, ry, rz), rx, ry, rz);
+        if (row == before && level <= RegionAddress.SHARD_LEVEL) {
+            // Newly created shard-level row → index it under its L5 shard (matches CostPyramidCodec.shardKeyOf /
+            // RegionPersistence.shardKey). Additive: an existing row (row < before) is never re-added.
+            final long shardKey = ((long) RegionAddress.shardOf(rx, level) << 32)
+                    | (RegionAddress.shardOf(rz, level) & 0xFFFFFFFFL);
+            shardIndex.add(shardKey, level, row);
+        }
+        return row;
+    }
+
+    /**
+     * Number of shard-indexed cost rows for L5 shard {@code shardKey} at shard-level {@code sl}
+     * (0..{@link RegionAddress#SHARD_LEVEL}) — the persistence flush's per-shard gather seam
+     * ({@link com.orebit.mod.worldmodel.persistence.CostPyramidCodec#bucketShard}). Includes interned-but-unbuilt /
+     * evicted rows (the caller applies the built-filter), so the gather is O(the shard's own rows), no dim scan.
+     */
+    public int shardRowCount(long shardKey, int sl) {
+        return shardIndex.rowCount(shardKey, sl);
+    }
+
+    /** The {@code i}-th shard-indexed cost row (ascending intern order) for {@code shardKey} at shard-level {@code sl}. */
+    public int shardRowAt(long shardKey, int sl, int i) {
+        return shardIndex.rowAt(shardKey, sl, i);
     }
 
     /**
