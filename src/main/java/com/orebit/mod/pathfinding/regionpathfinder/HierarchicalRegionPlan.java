@@ -2,6 +2,7 @@ package com.orebit.mod.pathfinding.regionpathfinder;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
+import com.orebit.mod.worldmodel.hpa.RegionCrossingMemory;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
 
 import net.minecraft.core.BlockPos;
@@ -59,6 +60,14 @@ public final class HierarchicalRegionPlan {
     private final BotCaps caps;
     /** The bot's tool-aware region dig-cost model (PERF-DESIGN region §5), built once from its inventory. */
     private final RegionMineModel mine;
+    /**
+     * The dimension's long-lived crossing-invalidation memory (#5). This plan SEEDS its blacklists from it at
+     * construction (so dead crossings proven under an earlier goal survive the plan boundary) and RECORDS every
+     * newly-proven dead crossing back into it. Shared per-dimension via {@link RegionGrid#crossingMemory()}.
+     */
+    private final RegionCrossingMemory crossingMemory;
+    /** This bot's realizability signature — the caps-dominance tag stored with each crossing it invalidates. */
+    private final long capsSig;
 
     // ---- the stack (indices 0..topLevel valid) -------------------------------------------------------
     private final LevelPlan[] levels = new LevelPlan[RegionAddress.MAX_COARSE_LEVEL + 1];
@@ -74,9 +83,25 @@ public final class HierarchicalRegionPlan {
         this.goal = goal;
         this.caps = caps;
         this.mine = mine;
+        this.crossingMemory = grid.crossingMemory();
+        this.capsSig = caps.realizabilitySig();
         for (int i = 0; i < levels.length; i++) {
             levels[i] = new LevelPlan();
             blacklists[i] = new RegionEdgeBlacklist();
+        }
+        // #5: seed this navigation's per-level blacklists from the dimension's long-lived crossing memory, so
+        // dead crossings proven under an earlier goal are avoided from the FIRST skeleton instead of being
+        // re-discovered from scratch. Only crossings whose FAILING caps dominate this bot's caps bind it
+        // (a stronger bot ignores a weaker bot's negative); for the common single-bot case the caps are
+        // identical, so every remembered crossing applies. Empty memory (fresh dimension / tests / benchmarks)
+        // seeds nothing → byte-identical to before this increment.
+        for (int L = 0; L < blacklists.length; L++) {
+            final int n = crossingMemory.count(L);
+            for (int i = 0; i < n; i++) {
+                if (BotCaps.sigDominates(crossingMemory.sigAt(L, i), capsSig)) {
+                    blacklists[L].add(crossingMemory.fromAt(L, i), crossingMemory.toAt(L, i));
+                }
+            }
         }
     }
 
@@ -244,6 +269,7 @@ public final class HierarchicalRegionPlan {
             return false;
         }
         blacklists[0].add(l0FromKey, l0ToKey);
+        crossingMemory.record(0, l0FromKey, l0ToKey, capsSig);
         if (rederiveSuffix(0, botFloor)) {
             return true;
         }
@@ -346,9 +372,10 @@ public final class HierarchicalRegionPlan {
         if (to >= sk.size()) {
             return; // no onward hop at this level to blame
         }
-        blacklists[level].add(
-                RegionPathfinder.fragmentNodeKey(sk.rx(from), sk.ry(from), sk.rz(from), sk.fragmentId(from)),
-                RegionPathfinder.fragmentNodeKey(sk.rx(to), sk.ry(to), sk.rz(to), sk.fragmentId(to)));
+        final long fromKey = RegionPathfinder.fragmentNodeKey(sk.rx(from), sk.ry(from), sk.rz(from), sk.fragmentId(from));
+        final long toKey = RegionPathfinder.fragmentNodeKey(sk.rx(to), sk.ry(to), sk.rz(to), sk.fragmentId(to));
+        blacklists[level].add(fromKey, toKey);
+        crossingMemory.record(level, fromKey, toKey, capsSig);
     }
 
     /**
