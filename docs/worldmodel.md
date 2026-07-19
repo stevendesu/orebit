@@ -123,8 +123,10 @@ Two more pieces round out the layer:
   classify pass that builds the nav grid — so it costs no extra world scan.
 
 The fine nav grid costs no disk at all (recomputed). The coarse layer **persists**:
-each dimension's cost and resource pyramids are written to `<world>/orebit/<dim>/` as
-compact gzip blobs (within a **~6–8% per dimension** budget of save-file size),
-eager-loaded at server start and flushed on stop, so a restart doesn't have to
-re-explore. The files are treated as a cache — if one is missing or corrupt, the layer
-simply rebuilds from the live world.
+each dimension's cost and resource pyramids are written to `<world>/orebit/<dim>/`, split
+into per-region shard files (one per 32×32-chunk area, the same footprint as a vanilla
+`.mca` region) plus a small per-dimension summary, so a restart doesn't have to re-explore
+and the bot still knows the lay of distant land it visited sessions ago. The files are a
+rebuildable cache — safe to delete, and if one is missing or corrupt the layer just rebuilds
+it from the live world. Full detail — what's written where, and what an admin can safely do
+with it — is on the [Saved Data](persistence.md) page.

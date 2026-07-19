@@ -38,3 +38,10 @@ They read best in order — each chapter builds on the ones before it:
 12. [Paying for the Map](12_field_build.md) — the bill for that heuristic: the profiler
     finds 90% of a full search in the map build, a question answered once per region
     instead of once per cell, and a flood that learns to stop when it knows the way.
+13. [Persisting the Map](13_persisting_the_map.md) — saving the coarse map to disk so a
+    restart doesn't re-explore: sharding it like Minecraft's own region files, and four
+    measured format decisions (store the roll-up, don't pool, drop the gzip, hand-encode
+    the repetition) — one of which the benchmark killed.
+14. [Catching the Spike](14_catching_the_spike.md) — a 2-second freeze that moved every
+    run, a GC theory that was wrong, and the small whole-tick telemetry that named the real
+    culprit in one line — then the budget that tamed it.
