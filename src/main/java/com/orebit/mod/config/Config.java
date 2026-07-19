@@ -83,6 +83,7 @@ public record Config(
         float regionShardLoadBudgetMs,
         // ---- hpa (persisted region tier) ----
         int persistIntervalTicks,
+        float persistFlushBudgetMs,
         boolean lazyLoad,
         int residentLeafCap,
         // ---- doors ----
@@ -122,6 +123,11 @@ public record Config(
                               * is on, else no shard is ever requested. */
                              2.0f,
             /* hpa        */ 6000,
+                             /* persistFlushBudgetMs 2.0 = the per-tick wall-clock budget on the periodic
+                              * crash-insurance flush drain: the interval TRIGGERS the pass, then it drains dirty
+                              * shards a budgeted slice per tick (resuming across ticks, coarse files last) instead
+                              * of writing everything in one tick — the fix for the ~1.9 s periodic flush spike. */
+                             2.0f,
                              /* lazyLoad false = eager-load-all stays the shipped default until the bounded-RAM
                               * stage is in-game-verified; the loadCoarseOnly + RegionShardLoader path is fully
                               * built + tested behind this flag and flips on later. */
@@ -241,6 +247,13 @@ public record Config(
     // once resident leaves exceed it, the evictor pages the coldest FULLY-UNLOADED shards back to disk (keeping
     // the coarse tier resident), and the clobber-guard + RegionShardLoader page them back in on demand. Read
     // once per eviction sweep (onWorldTickEnd), never on the search hot path.
+
+    // {@link #persistFlushBudgetMs} (hpa group, auto-generated accessor) is the per-tick wall-clock budget (ms)
+    // for the periodic crash-insurance flush drain (RegionPersistence.tick). The persistIntervalTicks interval
+    // TRIGGERS a flush; this budget then bounds how much of the dirty-shard backlog is written each tick, the
+    // pass resuming across ticks until it clears (coarse files last, deferred if the budget is spent). Turns the
+    // old one-tick flush spike into a steady trickle. Read once per draining tick (cold), never on any hot path.
+    // Default 2.0 (mirrors pathing.hpaFlushBudgetMs's per-tick drain philosophy).
 
     // {@link #placeBaseCost} (placement group, auto-generated accessor) is the flat per-placement base cost
     // (ticks) — a behavioral "reluctance to place" penalty, NOT a physical place time (see {@link

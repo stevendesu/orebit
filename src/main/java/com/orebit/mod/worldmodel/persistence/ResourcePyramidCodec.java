@@ -5,6 +5,12 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.StraddleSet;
@@ -103,44 +109,145 @@ public final class ResourcePyramidCodec {
 
     private static void encode(ResourcePyramid p, int magic, int loLevel, int hiLevel,
                                boolean shardScoped, int shardX, int shardZ, OutputStream rawOut) throws IOException {
-        DataOutputStream out = new DataOutputStream(rawOut);
+        // Gather each level's matching rows first (cold path — normal allocation is fine), then hand them to the
+        // shared serializer. Factored out of the write loop so the scan-once-bucket path ({@link #encodeShardBucket})
+        // emits BYTE-IDENTICAL bytes: it feeds the same List<Row>[] shape into the same {@link #writeEncoded}.
+        int nLevels = hiLevel - loLevel + 1;
+        @SuppressWarnings("unchecked")
+        List<Row>[] byLevel = new List[nLevels];
+        final byte[] vec = new byte[COLUMNS];
+        for (int level = loLevel; level <= hiLevel; level++) {
+            List<Row> list = new ArrayList<>();
+            int rows = p.rowCount(level);
+            for (int r = 0; r < rows; r++) {
+                if (!matches(p, level, r, shardScoped, shardX, shardZ)) continue;
+                p.readRow(level, r, vec);
+                list.add(new Row(p.rowRX(level, r), p.rowRY(level, r), p.rowRZ(level, r), Arrays.copyOf(vec, COLUMNS)));
+            }
+            byLevel[level - loLevel] = list;
+        }
+        writeEncoded(new DataOutputStream(rawOut), magic, loLevel, byLevel);
+    }
+
+    /**
+     * The single header + per-level-rows serializer, shared by {@link #encode} (which gathers each level's
+     * matching rows per shard) and {@link #encodeShardBucket} (which gathers them for every shard in ONE
+     * dimension pass). {@code byLevel} is indexed by {@code level - loLevel}; only non-empty levels are written.
+     * Identical row lists in ⇒ identical bytes out — what makes the scan-once-bucket flush byte-for-byte the
+     * same on disk as the per-shard {@link #encodeShard}.
+     */
+    private static void writeEncoded(DataOutputStream out, int magic, int loLevel, List<Row>[] byLevel) throws IOException {
         out.writeInt(magic);
         out.writeShort(VERSION);
         out.writeByte(COLUMNS);
 
         int levelCount = 0;
-        for (int level = loLevel; level <= hiLevel; level++) {
-            if (countRows(p, level, shardScoped, shardX, shardZ) > 0) levelCount++;
+        for (List<Row> l : byLevel) {
+            if (!l.isEmpty()) levelCount++;
         }
         out.writeByte(levelCount);
 
-        final byte[] vec = new byte[COLUMNS];
-        for (int level = loLevel; level <= hiLevel; level++) {
-            int n = countRows(p, level, shardScoped, shardX, shardZ);
-            if (n == 0) continue;
-            out.writeByte(level);
-            out.writeInt(n);
-            int rows = p.rowCount(level);
-            for (int r = 0; r < rows; r++) {
-                if (!matches(p, level, r, shardScoped, shardX, shardZ)) continue;
-                p.readRow(level, r, vec);
+        for (int i = 0; i < byLevel.length; i++) {
+            List<Row> list = byLevel[i];
+            if (list.isEmpty()) continue;
+            out.writeByte(loLevel + i);
+            out.writeInt(list.size());
+            for (Row row : list) {
                 int nz = 0;
                 for (int c = 0; c < COLUMNS; c++) {
-                    if (vec[c] != 0) nz++;
+                    if (row.vec[c] != 0) nz++;
                 }
-                out.writeInt(p.rowRX(level, r));
-                out.writeByte(p.rowRY(level, r));
-                out.writeInt(p.rowRZ(level, r));
+                out.writeInt(row.rx);
+                out.writeByte(row.ry);
+                out.writeInt(row.rz);
                 out.writeByte(nz);
                 for (int c = 0; c < COLUMNS; c++) {
-                    if (vec[c] != 0) {
+                    if (row.vec[c] != 0) {
                         out.writeByte(c);
-                        out.writeByte(vec[c]);
+                        out.writeByte(row.vec[c]);
                     }
                 }
             }
         }
         out.flush();
+    }
+
+    /** One persistable resource row: its region coords + a snapshot of its {@link #COLUMNS}-wide log₂ vector. */
+    private static final class Row {
+        final int rx, ry, rz;
+        final byte[] vec;
+        Row(int rx, int ry, int rz, byte[] vec) { this.rx = rx; this.ry = ry; this.rz = rz; this.vec = vec; }
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Scan-once bucket — group every shard's rows in ONE dimension pass (kills the periodic flush's O(N*M))
+    // ---------------------------------------------------------------------------------------------------
+
+    /**
+     * Bucket EVERY persistable built resource row (levels 0..5) by its level-5 shard key in ONE pass over the
+     * dimension, instead of re-scanning the whole dimension once per shard (the old {@link #encodeShard} path).
+     * The periodic flush calls this once per draining tick and writes each dirty shard from its bucket via
+     * {@link #encodeShardBucket} — byte-identical to {@link #encodeShard} for the same shard (rows in the same
+     * row-scan order). The map key is the packed L5 shard key, IDENTICAL to
+     * {@code RegionPersistence.shardKey(shardX, shardZ)}; only shards with ≥1 built row appear. Cold path.
+     */
+    public static Map<Long, ShardRows> bucketShards(ResourcePyramid p) {
+        Map<Long, ShardRows> shards = new HashMap<>();
+        final byte[] vec = new byte[COLUMNS];
+        for (int level = SHARD_LO_LEVEL; level <= SHARD_HI_LEVEL; level++) {
+            int rows = p.rowCount(level);
+            for (int r = 0; r < rows; r++) {
+                if (!p.isBuilt(level, r)) continue;
+                int rx = p.rowRX(level, r);
+                int ry = p.rowRY(level, r);
+                int rz = p.rowRZ(level, r);
+                p.readRow(level, r, vec);
+                long key = shardKeyOf(rx, rz, level);
+                shards.computeIfAbsent(key, k -> new ShardRows())
+                      .add(level - SHARD_LO_LEVEL, new Row(rx, ry, rz, Arrays.copyOf(vec, COLUMNS)));
+            }
+        }
+        return shards;
+    }
+
+    /**
+     * Write ONE shard's resource levels 0..5 from a {@link #bucketShards} bucket — byte-identical to
+     * {@link #encodeShard} for the same shard. The stream is left open for the caller to close.
+     */
+    public static void encodeShardBucket(ShardRows bucket, OutputStream rawOut) throws IOException {
+        writeEncoded(new DataOutputStream(rawOut), MAGIC_SHARD, SHARD_LO_LEVEL, bucket.toLists());
+    }
+
+    /** Packed L5 shard key of a row at {@code level} — MUST match {@code RegionPersistence.shardKey}. */
+    private static long shardKeyOf(int rx, int rz, int level) {
+        long sx = RegionAddress.shardOf(rx, level);
+        long sz = RegionAddress.shardOf(rz, level);
+        return (sx << 32) | (sz & 0xFFFFFFFFL);
+    }
+
+    /**
+     * One shard's per-level rows — gathered by {@link #bucketShards}, consumed by {@link #encodeShardBucket}.
+     * Opaque handle. Rows are appended in row-scan order (the same order {@link #encode} writes them), so the
+     * encoded bytes match the per-shard {@link #encodeShard} exactly.
+     */
+    public static final class ShardRows {
+        @SuppressWarnings("unchecked")
+        private final List<Row>[] byLevel = new List[SHARD_HI_LEVEL - SHARD_LO_LEVEL + 1];
+
+        void add(int relLevel, Row row) {
+            List<Row> l = byLevel[relLevel];
+            if (l == null) { l = new ArrayList<>(); byLevel[relLevel] = l; }
+            l.add(row);
+        }
+
+        @SuppressWarnings("unchecked")
+        List<Row>[] toLists() {
+            List<Row>[] out = new List[byLevel.length];
+            for (int i = 0; i < byLevel.length; i++) {
+                out[i] = (byLevel[i] == null) ? Collections.<Row>emptyList() : byLevel[i];
+            }
+            return out;
+        }
     }
 
     /** Whether row {@code r} at {@code level} is a persistable built row matching the (optional) shard scope. */
@@ -149,15 +256,6 @@ public final class ResourcePyramidCodec {
         if (!shardScoped) return true;
         return RegionAddress.shardOf(p.rowRX(level, r), level) == shardX
                 && RegionAddress.shardOf(p.rowRZ(level, r), level) == shardZ;
-    }
-
-    private static int countRows(ResourcePyramid p, int level, boolean shardScoped, int shardX, int shardZ) {
-        int rows = p.rowCount(level);
-        int n = 0;
-        for (int r = 0; r < rows; r++) {
-            if (matches(p, level, r, shardScoped, shardX, shardZ)) n++;
-        }
-        return n;
     }
 
     // ---------------------------------------------------------------------------------------------------
