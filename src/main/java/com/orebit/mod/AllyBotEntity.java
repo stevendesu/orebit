@@ -368,6 +368,11 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             }
         }
 
+        // SLOWTICK: roll the per-server-tick boundary at the EARLIEST instrumented entry (the bot's entity tick
+        // runs before this level's onWorldTickEnd), then time the whole nav dispatch as the botTick phase. This
+        // is the sync replan/search + steer; diagnosis only, no behaviour change.
+        SlowTickMonitor.beginTick(level.getServer());
+        final long botTickStart = System.nanoTime();
         switch (mode) {
             case STAY -> holdPosition();
             case GATHER -> gatherer.gatherLoopTick();
@@ -390,6 +395,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                 }
             }
         }
+        SlowTickMonitor.botTick(botTickStart);
 
         // Vanilla client-side sneak slowdown (LocalPlayer.aiStep scales a crouching player's movement inputs to
         // ~0.3×). The headless bot never runs that client tick, so a bot holding sneak would otherwise move at

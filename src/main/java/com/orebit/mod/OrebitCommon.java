@@ -108,18 +108,27 @@ public final class OrebitCommon {
         // removes each level from DIRTY_SHARDS/COARSE_DIRTY but leaves TICKS_SINCE_FLUSH; clear() drops all three.
         events.onServerStopping(server -> RegionPersistence.clear());
 
+        // SLOWTICK telemetry heartbeat (SlowTickMonitor) — a DIAGNOSIS instrument, no behaviour change. Registered
+        // FIRST among the onWorldTickEnd hooks (loader seams fire them in registration order) so it rolls the
+        // per-server-tick boundary — emitting the just-closed tick's attribution line + resetting the phase
+        // accumulators — BEFORE any phase hook below accumulates into the new tick. Runs unconditionally every
+        // level every tick so an idle tick still advances the boundary (else empty ticks collapse into one false
+        // "slow" tick). Multi-dimension double-counting is avoided by keying on the server tick number: the
+        // 2nd/3rd dimension's tick-end this server tick shares the number and never re-rolls.
+        events.onWorldTickEnd(SlowTickMonitor::onLevelTickEnd);
+
         // Budgeted periodic flush (crash insurance): once per level-tick advance a per-dimension counter and,
         // every hpa.persistIntervalTicks, re-write only dimensions marked dirty since the last flush. Wired for
         // ALL loaders/eras here (unlike onServerStopping), so even an impl that leaves onServerStopping on the
         // default no-op still persists recent state. Cheap when clean (one counter bump + a dirty-set test).
-        events.onWorldTickEnd(RegionPersistence::tick);
+        events.onWorldTickEnd(level -> { final long t = System.nanoTime(); RegionPersistence.tick(level); SlowTickMonitor.persist(t); });
 
         // Stage-2 on-demand region-shard lazy-load drain (DESIGN-worldmodel-persistence.md — bounded region RAM):
         // once per level-tick, page in any shards the clobber-guard / RegionGrid.ensureLeaf requested, atomically
         // and under the pathing.regionShardLoadBudgetMs budget. Registered unconditionally: under eager-load-all
         // (hpa.lazyLoad=false) the residency's persisted-shard index is empty, so nothing is ever requested and
         // this is a cheap per-tick queue-empty test. Sits beside RegionPersistence::tick / HpaMaintenance::flush.
-        events.onWorldTickEnd(RegionShardLoader::drain);
+        events.onWorldTickEnd(level -> { final long t = System.nanoTime(); RegionShardLoader.drain(level); SlowTickMonitor.shardLoad(t); });
 
         // Stage-2 cold-shard EVICTION (DESIGN-worldmodel-persistence.md — bounded region RAM, increment 4): once per
         // level-tick, if resident built L0 cost leaves exceed hpa.residentLeafCap, page the coldest FULLY-UNLOADED
@@ -127,7 +136,7 @@ public final class OrebitCommon {
         // is the half that actually BOUNDS live region RAM; the RegionShardLoader drain above pages evicted shards
         // back in on demand. Registered unconditionally: with hpa.residentLeafCap=0 (the default) it is a no-op
         // (eviction off). Sits beside RegionPersistence::tick / RegionShardLoader::drain.
-        events.onWorldTickEnd(RegionEvictor::sweep);
+        events.onWorldTickEnd(level -> { final long t = System.nanoTime(); RegionEvictor.sweep(level); SlowTickMonitor.evict(t); });
 
         // NavSection retirement drain (DESIGN-background-pathfinding.md §4.1): once per level-tick, advance
         // the reclamation epoch and return retired sections to the pool once no in-flight background search
@@ -173,7 +182,8 @@ public final class OrebitCommon {
         // dirty leaves' faces and re-merge their ancestors, once per level per tick. A separate listener
         // (not folded into ChunkNavLoader's tick hook) keeps the region tier's wiring self-contained and
         // ChunkNavLoader untouched. No-op when nothing is dirty / no pyramid exists for the dimension.
-        events.onWorldTickEnd(HpaMaintenance::flush);
+        // (SLOWTICK: timed as the hpaFlush phase.)
+        events.onWorldTickEnd(level -> { final long t = System.nanoTime(); HpaMaintenance.flush(level); SlowTickMonitor.hpaFlush(t); });
 
         // Deterministic /bot come|stay|follow|here command surface (no LLM). The common command tree
         // builds on vanilla Brigadier; the loader seam only translates WHEN registration fires.
