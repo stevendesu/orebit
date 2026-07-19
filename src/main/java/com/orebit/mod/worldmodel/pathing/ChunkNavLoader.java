@@ -131,6 +131,8 @@ public final class ChunkNavLoader {
         // gated — free for the no-portal chunk) and the chunk's index entry is replaced wholesale
         // beside its nav sections, so a rebuild is idempotent and a portal-less rebuild self-cleans.
         NetherPortalIndex.CellBuffer portals = new NetherPortalIndex.CellBuffer();
+        // SLOWTICK navBuild phase: the NavGrid section build + its portal/epoch riders (diagnosis only).
+        final long navStart = System.nanoTime();
         NavStore.put(level, k, ChunkNavBuilder.buildAllSections(level, chunk, portals));
         // Newly BUILT nav data is as plan-relevant as an edit: advance the edit epoch so the
         // follower's terrain-recheck debounce re-searches over the fresh area (without this a
@@ -138,10 +140,14 @@ public final class ChunkNavLoader {
         // — the s52b cold-open false START-DEAD). One bump per chunk build, cold.
         NavGridUpdater.bumpEpoch(level);
         NetherPortalIndex.record(level, k, portals.toArray());
+        com.orebit.mod.SlowTickMonitor.navBuild(navStart);
         // Eager HPA* region build (HPA-IMPLEMENTATION.md §12): build the region leaves as the chunk's
         // nav data is built, so the cost pyramid accumulates explored terrain (and survives chunk
         // unload in RAM — the travel-then-path fix). Bounded by this loader's per-tick chunk budget.
+        // SLOWTICK mergeUp phase: the region-fragment leaf build + roll-up (diagnosis only).
+        final long mergeStart = System.nanoTime();
         HpaMaintenance.onChunkNavBuilt(level, NavStore.keyX(k), NavStore.keyZ(k));
+        com.orebit.mod.SlowTickMonitor.mergeUp(mergeStart);
     }
 
     /**
