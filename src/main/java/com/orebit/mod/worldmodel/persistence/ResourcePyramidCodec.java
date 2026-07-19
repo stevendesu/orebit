@@ -211,8 +211,38 @@ public final class ResourcePyramidCodec {
     }
 
     /**
-     * Write ONE shard's resource levels 0..5 from a {@link #bucketShards} bucket — byte-identical to
-     * {@link #encodeShard} for the same shard. The stream is left open for the caller to close.
+     * Gather ONE shard's resource levels 0..5 into a {@link ShardRows} via the pyramid's incremental per-shard row
+     * index ({@link ResourcePyramid#shardRowCount}/{@link ResourcePyramid#shardRowAt}), <b>without scanning the
+     * dimension</b> — the periodic-flush replacement for {@link #bucketShards}. Returns {@code null} when the shard
+     * holds no built row (mirroring {@code RegionPersistence.enumerateResourceShards}: such a shard writes no file).
+     *
+     * <p><b>Byte-identical to {@link #encodeShard}{@code (p, sx, sz, out)} for the same shard.</b> The index lists a
+     * shard's rows in ascending intern order per level — exactly the row-scan order {@link #encode}/{@link #bucketShards}
+     * use — and the built-filter here matches theirs, so the same rows are appended in the same order into the same
+     * per-level lists and the emitted bytes match. Cold path.
+     */
+    public static ShardRows bucketShard(ResourcePyramid p, long shardKey) {
+        ShardRows bucket = null;
+        final byte[] vec = new byte[COLUMNS];
+        for (int level = SHARD_LO_LEVEL; level <= SHARD_HI_LEVEL; level++) {
+            final int n = p.shardRowCount(shardKey, level);
+            for (int i = 0; i < n; i++) {
+                final int r = p.shardRowAt(shardKey, level, i);
+                if (!p.isBuilt(level, r)) continue;
+                final int rx = p.rowRX(level, r);
+                final int ry = p.rowRY(level, r);
+                final int rz = p.rowRZ(level, r);
+                p.readRow(level, r, vec);
+                if (bucket == null) bucket = new ShardRows();
+                bucket.add(level - SHARD_LO_LEVEL, new Row(rx, ry, rz, Arrays.copyOf(vec, COLUMNS)));
+            }
+        }
+        return bucket;
+    }
+
+    /**
+     * Write ONE shard's resource levels 0..5 from a {@link #bucketShards}/{@link #bucketShard} bucket — byte-identical
+     * to {@link #encodeShard} for the same shard. The stream is left open for the caller to close.
      */
     public static void encodeShardBucket(ShardRows bucket, OutputStream rawOut) throws IOException {
         writeEncoded(new DataOutputStream(rawOut), MAGIC_SHARD, SHARD_LO_LEVEL, bucket.toLists());
