@@ -592,8 +592,15 @@ public final class PathPlan {
                     && skeleton.rx(curRegion) == skeleton.rx(committedIndex)
                     && skeleton.ry(curRegion) == skeleton.ry(committedIndex)
                     && skeleton.rz(curRegion) == skeleton.rz(committedIndex);
-            if (sameRegionDig || committed(curRegion)) {
+            if ((sameRegionDig || committed(curRegion)) && !lastPlanPartial) {
                 // A real forward step: the path no longer revisits any region in [committedIndex, curRegion).
+                // FOLLOW-TO-TERMINUS (#5 partial-invalidation): gated on !lastPlanPartial. While the current
+                // window plan is a best-effort PARTIAL (it did NOT reach its target), do not slide/re-search
+                // mid-partial — let the bot follow the partial all the way to its terminus and re-evaluate
+                // there (via the consumption refresh). Sliding here re-searches from an intermediate cell each
+                // boundary crossing, which produces the oscillation that stops the bot ever settling at the
+                // terminal dead-end where the region crossing would be blamed. A COMPLETE window plan still
+                // commits and slides exactly as before.
                 committedIndex = curRegion;
                 windowStart = curRegion;
                 replanBlock();
