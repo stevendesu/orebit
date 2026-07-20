@@ -906,16 +906,27 @@ public final class BlockPathfinder {
                     if (rh < bestH) { bestH = rh; bestRow = r; seeded = true; }
                 }
             }
+            // #5 partial-invalidation: judge the terminus's PROGRESS by unweighted 3D-octile GEOMETRIC distance
+            // to the window target, NOT the search heuristic relaxer.h. relaxer.h is contaminated by the region
+            // cost field (which assumes the very skeleton this partial may be about to invalidate) and by the
+            // forced-cost / tie-break shaping, so a swim-flood that reduces relaxer.h WITHOUT getting
+            // geometrically closer reads as "progress" and returns a partial forever, never blaming the dead
+            // crossing. Octile (hWeight=1) is a pure geometric metric in the SAME tick units as
+            // PARTIAL_MIN_PROGRESS, so a terminus that is not geometrically closer to the target now suppresses
+            // the partial → null → BLOCKED → the region-crossing invalidation fires. bestRow stays the search's
+            // own closest-approach node; only the progress JUDGMENT changes.
+            final float startGeo = octile(sx, sy, sz, gx, gy, gz, 1.0f);
             if (PARTIAL_PATH && budgetHit && bestRow != startRow
-                    && (relaxer.h(sx, sy, sz) - bestH) > PARTIAL_MIN_PROGRESS) {
+                    && (startGeo - octile(nodes.x[bestRow], nodes.y[bestRow], nodes.z[bestRow], gx, gy, gz, 1.0f))
+                            > PARTIAL_MIN_PROGRESS) {
                 // Irreversibility guard: don't commit a partial past a move the bot can't undo (§IRREVERSIBLE_GUARD).
                 // Truncate to the last cell before the first unclimbable drop, then re-check that the (shorter)
-                // commit still makes real progress — if not, suppress the partial entirely (the bot stays put).
+                // commit still makes real geometric progress — if not, suppress the partial entirely (bot stays put).
                 int commitRow = IRREVERSIBLE_GUARD
                         ? lastReversibleRow(ctx, nodes, startRow, bestRow, caps) : bestRow;
                 if (commitRow != startRow) {
-                    float commitH = relaxer.h(nodes.x[commitRow], nodes.y[commitRow], nodes.z[commitRow]);
-                    if ((relaxer.h(sx, sy, sz) - commitH) > PARTIAL_MIN_PROGRESS) {
+                    float commitGeo = octile(nodes.x[commitRow], nodes.y[commitRow], nodes.z[commitRow], gx, gy, gz, 1.0f);
+                    if ((startGeo - commitGeo) > PARTIAL_MIN_PROGRESS) {
                         BlockPathPlan partial = reconstruct(grid, nodes, startRow, commitRow);
                         LAST_PARTIAL_TL.get()[0] = true;
                         // Tag: "-seed" = the commit point is a seeded never-popped start child; "-irrev" = the
