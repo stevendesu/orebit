@@ -18,10 +18,11 @@ public class SteerControlTest {
 
     private static final double EPS = 1.0e-6;
 
-    /** Minimal {@link BotSteering} double: settable pose/medium, records what the controller wrote. */
+    /** Minimal {@link BotSteering} double: settable pose/medium/velocity, records what the controller wrote. */
     private static final class FakeBot implements BotSteering {
         double x, y, z;
-        boolean grounded, inWater;
+        double velX, velZ;
+        boolean grounded, inWater, prone;
         // recorded outputs
         float forward = Float.NaN;
         double faceDx, faceDz;
@@ -32,9 +33,9 @@ public class SteerControlTest {
         @Override public double x() { return x; }
         @Override public double y() { return y; }
         @Override public double z() { return z; }
-        @Override public double velX() { return 0; }
+        @Override public double velX() { return velX; }
         @Override public double velY() { return 0; }
-        @Override public double velZ() { return 0; }
+        @Override public double velZ() { return velZ; }
         @Override public int footX() { return (int) Math.floor(x); }
         @Override public int footY() { return (int) Math.floor(y); }
         @Override public int footZ() { return (int) Math.floor(z); }
@@ -42,7 +43,7 @@ public class SteerControlTest {
         @Override public boolean inWater() { return inWater; }
         @Override public boolean inLava() { return false; }
         @Override public void faceHorizontally(double dx, double dz) { faceDx = dx; faceDz = dz; }
-        @Override public boolean prone() { return false; }
+        @Override public boolean prone() { return prone; }
         // Records the horizontal aim like faceHorizontally (pitch ignored) so the pure-geometry assertions on
         // faceDx/faceDz hold whether SteerControl aims via faceHorizontally or the 3-D faceTowards.
         @Override public void faceTowards(double dx, double dy, double dz) { faceDx = dx; faceDz = dz; }
@@ -152,13 +153,101 @@ public class SteerControlTest {
     }
 
     @Test
-    void swimTowards_pureVerticalSegment_stopsPushing() {
-        // A degenerate (vertical) segment has no horizontal target, so swimTowards stops pushing forward and
-        // lets the follower's water rule drive straight up/down the column.
+    void swimTowards_pureVerticalSegment_stopsPushingWhenCentred() {
+        // A degenerate (vertical) segment re-centres on the column; a bot already ON the column gets no
+        // forward shove, and holdDepth alone drives the climb/dive.
         View column = new View(3, 56, 3, 3, 60, 3);
         FakeBot b = new FakeBot(3, 56, 3);
         SteerControl.swimTowards(b, column);
-        assertEquals(0.0f, b.forward, 1e-6f, "no forward on a pure vertical — the water rule handles the climb/dive");
+        assertEquals(0.0f, b.forward, 1e-6f, "no forward on a centred pure vertical — holdDepth handles the climb/dive");
+    }
+
+    @Test
+    void swimTowards_pureVerticalSegment_offColumn_recentersOnTheColumn() {
+        // Off-column on a vertical segment: carried momentum has drifted the bot off the swim column, where
+        // the exact-cell reach (footX/footZ match) can never fire — the drive must pull it back, exactly as
+        // steerTowards' degenerate branch does.
+        View column = new View(3, 56, 3, 3, 60, 3);
+        FakeBot b = new FakeBot(3.7, 57, 3);
+        SteerControl.swimTowards(b, column);
+        assertTrue(b.faceDx < 0, "faces back toward the column (−x)");
+        assertEquals(0.7f, b.forward, 1e-6f, "forward ≈ horizontal offset (recenterOnTarget's proportional pull)");
+    }
+
+    @Test
+    void swimPitched_pureVerticalSegment_offColumn_recentersWhileKeepingTheDepthPitch() {
+        // The prone drive's degenerate branch station-keeps over the column (swimPitchedCentered's law):
+        // yaw toward the column centre, forward proportional to the offset. Centred behaviour (pure depth
+        // pitch, no push) is unchanged.
+        View column = new View(3.5, 56, 3.5, 3.5, 60, 3.5);
+        FakeBot drifted = new FakeBot(4.6, 57, 3.5);
+        SteerControl.swimPitched(drifted, column, SteerControl.SUBMERGE_BIAS);
+        assertTrue(drifted.faceDx < 0, "faces back toward the column (−x)");
+        assertEquals(1.0f, drifted.forward, 1e-6f, "full proportional pull while a whole block off");
+
+        FakeBot centred = new FakeBot(3.5, 57, 3.5);
+        SteerControl.swimPitched(centred, column, SteerControl.SUBMERGE_BIAS);
+        assertEquals(0.0f, centred.forward, 1e-6f, "centred: pure depth pitch, no horizontal push");
+    }
+
+    @Test
+    void swimServo_pureVerticalSegment_offColumn_stationKeepsOverTheColumn() {
+        View column = new View(3.5, 56, 3.5, 3.5, 60, 3.5);
+        FakeBot b = new FakeBot(4.1, 57, 3.5);
+        b.inWater = true;
+        SteerControl.swimServo(b, column, SteerControl.SUBMERGE_BIAS);
+        assertTrue(b.faceDx < 0, "faces back toward the column (−x)");
+        assertEquals(0.6f, b.forward, 1e-6f, "forward ≈ horizontal offset (recenterOnTarget's proportional pull)");
+    }
+
+    @Test
+    void swimServo_pureVerticalSegment_centred_reducesToDepthPitch_withTheProneForwardFloor() {
+        View column = new View(3.5, 56, 3.5, 3.5, 60, 3.5);
+        // Centred + upright: the old behaviour — pure depth pitch, forward released.
+        FakeBot upright = new FakeBot(3.5, 57, 3.5);
+        upright.inWater = true;
+        SteerControl.swimServo(upright, column, SteerControl.SUBMERGE_BIAS);
+        assertEquals(0.0f, upright.forward, 1e-6f, "centred upright: no horizontal push");
+
+        // Centred + prone + submerged + airborne: the cruise's client-legal floor applies — W is never fully
+        // released while prone (releasing it can drop the prone pose, and SprintSwim.reached requires prone()).
+        FakeBot prone = new FakeBot(3.5, 57, 3.5);
+        prone.inWater = true;
+        prone.prone = true;
+        SteerControl.swimServo(prone, column, SteerControl.SUBMERGE_BIAS);
+        assertEquals((float) SteerControl.SERVO_FORWARD_MIN, prone.forward, 1e-6f,
+                "centred prone: forward held at the client-legal floor, as on the cruise path");
+    }
+
+    @Test
+    void swimServo_verticalStack_carriedMomentumConvergesBackOntoTheColumn() {
+        // THE LIVELOCK CASE: a prone sprint-swimmer entering a pure-vertical waypoint stack with carried
+        // horizontal momentum. Pre-fix the degenerate branch applied ZERO horizontal control, so the sprint
+        // carry (~0.25 b/t → ~1 block of coast under water drag) stranded the bot one cell off-column — where
+        // the exact-cell swim reach (footX/footZ match) can never fire: a permanent silent livelock. Closed
+        // loop under a crude vanilla-water horizontal model (yaw-only moveRelative thrust, 0.8 drag; vertical
+        // is holdDepth's and not modelled): the bot must converge onto the column cell and hold it.
+        View column = new View(3.5, 56, 3.5, 3.5, 57, 3.5);
+        FakeBot b = new FakeBot(3.5, 56.5, 3.5);
+        b.inWater = true;
+        b.prone = true;
+        b.velX = 0.25;                                        // sprint-swim carry, ejecting off-column
+        for (int t = 0; t < 200; t++) {
+            SteerControl.swimServo(b, column, SteerControl.SUBMERGE_BIAS);
+            double h = Math.sqrt(b.faceDx * b.faceDx + b.faceDz * b.faceDz);
+            double ax = 0.0, az = 0.0;
+            if (h > 1e-9) {                                    // thrust along the yaw, scaled by the forward key
+                ax = b.faceDx / h * 0.02 * b.forward;
+                az = b.faceDz / h * 0.02 * b.forward;
+            }
+            b.velX = (b.velX + ax) * 0.8;                      // vanilla water tick: thrust, then drag
+            b.velZ = (b.velZ + az) * 0.8;
+            b.x += b.velX;
+            b.z += b.velZ;
+        }
+        assertEquals(3, b.footX(), "converged back onto the column cell (pre-fix: stranded at footX 4 forever)");
+        assertEquals(3, b.footZ(), "never left the column's z lane");
+        assertTrue(Math.abs(b.x - 3.5) < 0.3, "holds near the column centre (damped, not orbiting): off by " + Math.abs(b.x - 3.5));
     }
 
     @Test

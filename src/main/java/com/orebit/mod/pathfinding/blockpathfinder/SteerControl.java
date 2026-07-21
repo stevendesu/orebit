@@ -289,14 +289,15 @@ public final class SteerControl {
     /**
      * Swim along the planned line, HORIZONTALLY: face the look-ahead pursuit point and hold forward (the same
      * W-key + look a player uses). Vertical is the caller's {@link #holdDepth} (each swim move calls it with
-     * its own bias — the moves own their vertical control). A pure vertical (degenerate) segment has no
-     * horizontal target, so it just stops pushing and lets {@code holdDepth} drive the dive/climb straight
-     * down/up the column.
+     * its own bias — the moves own their vertical control). A pure vertical (degenerate) segment has no line
+     * to track, so it re-centres on the target column ({@link #recenterOnTarget}, as {@link #steerTowards}
+     * does) while {@code holdDepth} drives the dive/climb: carried momentum can drift the bot off the column,
+     * and the exact-cell swim reach ({@code Swim.reachedSwim}'s footX/footZ match) can never fire off-column.
      */
     public static void swimTowards(BotSteering b, SteerView p) {
         computeGeom(b, p, SWIM_CTE_GAIN);
         if (G.segLen < EPS) {
-            b.setForward(0.0f);
+            recenterOnTarget(b, p);
             return;
         }
         b.faceHorizontally(G.qx - b.x(), G.qz - b.z());
@@ -311,15 +312,18 @@ public final class SteerControl {
      * bobbing the bot ~bias/2 above the target — the sink/lipdown stall); pass {@code bias=0} for the brief
      * initiation move (StartSprintSwim), where aiming pitch at {@code p.ty()} keeps a surface crossing near the
      * top so it rises and crosses instead of digging into the floor. Pitch fixes the yaw-spin on steep/vertical
-     * segments that plain faceHorizontally suffers.
+     * segments that plain faceHorizontally suffers. A pure vertical (degenerate) segment has no line to pursue,
+     * so it station-keeps over the target column ({@link #swimPitchedCentered}'s proportional pull at the same
+     * bias): carried momentum can drift the bot off the column, and the exact-cell swim reach
+     * ({@code Swim.reachedSwim}'s footX/footZ match) can never fire off-column. Centred, that reduces to the
+     * pure depth pitch with no horizontal push.
      */
     public static void swimPitched(BotSteering b, SteerView p, double bias) {
         computeGeom(b, p, SWIM_CTE_GAIN);
-        double dy = (p.ty() - bias) - b.y();
         if (G.segLen < EPS) {
-            b.faceTowards(0.0, dy, 0.0);
-            b.setForward(0.0f);   // pure vertical: no horizontal push (moveRelative is yaw-only); pitch descends
+            swimPitchedCentered(b, p, bias);   // pure vertical: hold the column; pitch + holdDepth own the climb
         } else {
+            double dy = (p.ty() - bias) - b.y();
             b.faceTowards(G.qx - b.x(), dy, G.qz - b.z());
             b.setForward(1.0f);
         }
@@ -447,15 +451,28 @@ public final class SteerControl {
      *       {@code p.ty() - bias}, and the CALLER adds {@link #holdDepth} for the jump/sink. The servo owns only
      *       horizontal momentum.</li>
      * </ul>
-     * A degenerate (vertical) segment collapses to a pure depth pitch with no horizontal push, like
-     * {@link #swimPitched}.
+     * A degenerate (vertical) segment station-keeps over the target column ({@link #recenterOnTarget}'s
+     * proportional pull, pitched) with the same client-legal forward floor as the cruise: sprint momentum can
+     * drift the bot off the column, and the exact-cell swim reach ({@code Swim.reachedSwim}'s footX/footZ
+     * match) can never fire off-column. Centred, that reduces to a pure depth pitch.
      */
     public static void swimServo(BotSteering b, SteerView p, double bias) {
         computeGeom(b, p, SWIM_CTE_GAIN);
         double dy = (p.ty() - bias) - b.y();               // depth pitch target (same as swimPitched)
-        if (G.segLen < EPS) {                              // pure vertical: no horizontal servo, just dive/rise
-            b.faceTowards(0.0, dy, 0.0);
-            b.setForward(0.0f);
+        if (G.segLen < EPS) {                              // pure vertical: hold the column while diving/rising
+            double ox = p.tx() - b.x(), oz = p.tz() - b.z();
+            double od = Math.sqrt(ox * ox + oz * oz);
+            double vfwd;
+            if (od > EPS) {
+                b.faceTowards(ox, dy, oz);                 // yaw toward the column centre + depth pitch
+                vfwd = Math.min(1.0, od);                  // proportional: eases to 0 once centred (recenterOnTarget)
+            } else {
+                b.faceTowards(0.0, dy, 0.0);               // centred: pure depth pitch
+                vfwd = 0.0;
+            }
+            // Same client-legal floor as the cruise below: W never released while prone + in water + airborne.
+            if (b.prone() && b.inWater() && !b.grounded()) vfwd = Math.max(vfwd, SERVO_FORWARD_MIN);
+            b.setForward((float) vfwd);
             return;
         }
         // Desired travel DIRECTION: the pursuit vector (along-track + cross-track return toward the centerline).

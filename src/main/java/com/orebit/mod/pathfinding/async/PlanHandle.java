@@ -26,6 +26,7 @@ public final class PlanHandle {
     private boolean budgetHit;
     private boolean rejected;
     private int expansions;
+    private long[] realized;
 
     /** Tick thread: stop caring about this request (a newer one supersedes it, or the plan was cleared). */
     public void cancel() {
@@ -69,12 +70,20 @@ public final class PlanHandle {
         return rejected;
     }
 
+    /** The realized region-crossing pairs of a FAILED ({@code null}-plan) search — the Fix-A blame input
+     *  ({@code BlockPathfinder.lastRealizedCrossings()}); {@code null} for a found plan / rejected handle.
+     *  Read after {@link #isDone}. */
+    public long[] realizedCrossings() {
+        return realized;
+    }
+
     /** Worker: publish the result. The volatile {@code done} write must stay LAST. */
-    void complete(BlockPathPlan plan, boolean partial, int expansions, boolean budgetHit) {
+    void complete(BlockPathPlan plan, boolean partial, int expansions, boolean budgetHit, long[] realized) {
         this.plan = plan;
         this.partial = partial;
         this.expansions = expansions;
         this.budgetHit = budgetHit;
+        this.realized = realized;
         this.done = true;
     }
 
