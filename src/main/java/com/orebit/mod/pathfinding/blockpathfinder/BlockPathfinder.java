@@ -11,6 +11,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Axes;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.GoalForcedCost;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse;
+import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 
@@ -84,6 +85,42 @@ public final class BlockPathfinder {
      */
     private static final ThreadLocal<boolean[]> LAST_BUDGET_HIT_TL = ThreadLocal.withInitial(() -> new boolean[1]);
 
+    /**
+     * Directed region→region crossings the just-failed search REALIZED — i.e. a surviving cameFrom edge
+     * whose parent and child cells lie in different 16³ grid cells ({@code raw cell>>4} per axis; the y axis
+     * is NOT minY-rebased — the consumer converts). Stored as flat pairs {@code [from0,to0, from1,to1, ...]},
+     * each a {@link RegionAddress#packLevelKey} of the raw coords. Computed ONLY at null-return time (never
+     * per pop/relax); same per-thread seam as {@link #lastExpansions()}.
+     */
+    static final class RealizedCrossings {
+        long[] edges = new long[64];   // pairs; grows by doubling, hard-capped
+        int count;                     // longs used (2 per edge)
+        void reset() { count = 0; }
+        void add(long from, long to) {
+            for (int i = 0; i < count; i += 2) {           // dedup: the distinct-edge set is tiny
+                if (edges[i] == from && edges[i + 1] == to) return;
+            }
+            if (count >= 2 * MAX_REALIZED_EDGES) return;   // defensive cap
+            if (count == edges.length) edges = Arrays.copyOf(edges, count << 1);
+            edges[count++] = from;
+            edges[count++] = to;
+        }
+        long[] copy() { return Arrays.copyOf(edges, count); }
+    }
+
+    /** Hard cap on distinct realized crossings collected per failed search (a bounded search explores ~3–4
+     *  regions' worth of cells; 256 edges is far beyond any real window's crossing set). */
+    private static final int MAX_REALIZED_EDGES = 256;
+
+    private static final ThreadLocal<RealizedCrossings> LAST_REALIZED_TL =
+            ThreadLocal.withInitial(RealizedCrossings::new);
+
+    /** The realized region-crossing pairs of this thread's most-recently-finished FAILED {@link #findPath}
+     *  (empty array for FOUND/PARTIAL/start-dead results). Returns a copy (cold, once per result). */
+    public static long[] lastRealizedCrossings() {
+        return LAST_REALIZED_TL.get().copy();
+    }
+
     /** Node count of this thread's most-recently-finished {@link #findPath}. */
     public static int lastExpansions() {
         return LAST_EXPANSIONS_TL.get()[0];
@@ -112,6 +149,7 @@ public final class BlockPathfinder {
         LAST_EXPANSIONS_TL.get();
         LAST_PARTIAL_TL.get();
         LAST_BUDGET_HIT_TL.get();
+        LAST_REALIZED_TL.get();
     }
 
     /**
@@ -709,6 +747,7 @@ public final class BlockPathfinder {
         LAST_EXPANSIONS_TL.get()[0] = 0; // reset the instrumentation seam (covers the early no-start-ground return)
         LAST_PARTIAL_TL.get()[0] = false;
         LAST_BUDGET_HIT_TL.get()[0] = false;
+        LAST_REALIZED_TL.get().reset();
         final int sx = startFloor.getX(), sy = startFloor.getY(), sz = startFloor.getZ();
         final int gx = goalFloor.getX(), gy = goalFloor.getY(), gz = goalFloor.getZ();
 
@@ -801,10 +840,6 @@ public final class BlockPathfinder {
         int bestX = sx, bestY = sy, bestZ = sz;
         int bestRow = startRow;     // row of the closest-approach node — the partial-path target on budget exhaustion
         boolean budgetHit = false;
-        // End (exclusive) of the START's direct-successor row range, captured after the first expansion —
-        // the partial-commit seed set (see the budget-hit block below). -1 = never captured (budget blew
-        // before the start even expanded, or start==goal).
-        int childrenEnd = -1;
 
         while (nodes.heapSize > 0) {
             int current = nodes.pop();
@@ -864,14 +899,6 @@ public final class BlockPathfinder {
                 relaxer.move = mi;
                 tier1.get(mi).candidates(ctx, cx, cy, cz, relaxer);
             }
-
-            // Capture the START's direct-successor row range for the partial-commit seed (below). The first
-            // expansion is necessarily startRow (the heap held only it, and a sole entry can't be stale), and
-            // the node table is APPEND-ONLY (rows are never recycled/compacted), so every row appended by the
-            // expansion just above — (startRow, count) right now — is a direct start successor. Cost model:
-            // one register compare per pop, perfectly predicted after the first (same budget as the
-            // budgetNanos test above); the capture itself runs once.
-            if (expansions == 1) childrenEnd = nodes.count;
         }
 
         LAST_EXPANSIONS_TL.get()[0] = expansions; // instrumentation seam — the just-finished search's node count
@@ -884,38 +911,36 @@ public final class BlockPathfinder {
             // and replans from there — converging on a goal a single bounded search can't reach in one shot.
             // A search that EXHAUSTED the heap (walled in) returns null instead: the closest cell is all it can
             // reach, so moving there and replanning would just re-fail (and keeps the FAIL signal visible).
-            //
-            // Commit-point seeding from the start's direct successors (the 2026-07-06 buried-target incident):
-            // bestRow updates only at POP time, so a relaxed-but-never-popped start neighbour — e.g. the one
-            // expensive dig toward a buried window target, whose g (35–160 ticks of mining) keeps it behind
-            // thousands of cheap walk relaxations for the whole budget — can NEVER become the commit point,
-            // and the partial inches along whatever cheap flood the heuristic favoured instead of taking the
-            // one real block of progress. Evaluate h once per captured start child and adopt the overall min
-            // STRICTLY below the popped bestH (a tie keeps today's popped choice); the winner then flows
-            // through the SAME min-progress + irreversibility checks as a popped commit point — no forked
-            // logic. O(branching factor) work, once, only on the budget-hit path: the hot loop is untouched
-            // and FOUND results stay byte-identical. The parent==-1 skip is defensive (every first visit is
-            // relaxed, g starts +inf) — reconstruct() needs a parent chain, so never commit to a row without
-            // one. NOTE a seeded child's parent may since have been REWIRED to a cheaper deeper node; that
-            // chain is still valid (and cheaper), so reconstruct/lastReversibleRow handle it unchanged.
-            boolean seeded = false;
-            if (PARTIAL_PATH && budgetHit && childrenEnd > 0) {
-                for (int r = startRow + 1; r < childrenEnd; r++) {
-                    if (nodes.parent[r] == -1) continue;
-                    float rh = relaxer.h(nodes.x[r], nodes.y[r], nodes.z[r]);
-                    if (rh < bestH) { bestH = rh; bestRow = r; seeded = true; }
-                }
-            }
-            // #5 partial-invalidation: judge the terminus's PROGRESS by unweighted 3D-octile GEOMETRIC distance
-            // to the window target, NOT the search heuristic relaxer.h. relaxer.h is contaminated by the region
-            // cost field (which assumes the very skeleton this partial may be about to invalidate) and by the
-            // forced-cost / tie-break shaping, so a swim-flood that reduces relaxer.h WITHOUT getting
-            // geometrically closer reads as "progress" and returns a partial forever, never blaming the dead
-            // crossing. Octile (hWeight=1) is a pure geometric metric in the SAME tick units as
-            // PARTIAL_MIN_PROGRESS, so a terminus that is not geometrically closer to the target now suppresses
-            // the partial → null → BLOCKED → the region-crossing invalidation fires. bestRow stays the search's
-            // own closest-approach node; only the progress JUDGMENT changes.
             final float startGeo = octile(sx, sy, sz, gx, gy, gz, 1.0f);
+            // Geometric partial endpoint: on budget-hit the partial commits to the explored row geometrically
+            // CLOSEST to the target by the same unweighted 3D octile the progress gate below uses — NOT
+            // best-by-relaxer.h, which the region cost field / forced premium / tie-break contaminate (a
+            // swim-flood can reduce relaxer.h without getting geometrically closer, inching a partial along the
+            // wrong attractor forever). The scan covers ALL explored rows — popped AND relaxed-never-popped —
+            // which subsumes the old start-children seed (the 2026-07-06 buried-target incident): every row but
+            // startRow is a Movement-emitted occupiable destination with a valid parent chain, so committing to
+            // an arbitrary one introduces no new terminal-node class (reconstruct/lastReversibleRow walk any
+            // chain). Runs ONLY here (budget-hit null-return path), never per pop. Deterministic tie-break:
+            // strictly smaller octile wins; on an exact tie, smaller g; on a g tie, the lower row index (the
+            // ascending scan keeps the first). The parent<0 skip is defensive — reconstruct() needs a chain.
+            if (PARTIAL_PATH && budgetHit) {
+                int   geoRow = startRow;
+                float geoBest = startGeo;
+                float geoBestG = 0f;
+                final int n = nodes.count;
+                for (int r = 0; r < n; r++) {
+                    if (r == startRow || nodes.parent[r] < 0) continue;
+                    final float d = octile(nodes.x[r], nodes.y[r], nodes.z[r], gx, gy, gz, 1.0f);
+                    if (d < geoBest || (d == geoBest && geoRow != startRow && nodes.g[r] < geoBestG)) {
+                        geoBest = d; geoBestG = nodes.g[r]; geoRow = r;
+                    }
+                }
+                bestRow = geoRow;
+            }
+            // #5 partial-invalidation: judge the terminus's PROGRESS by the same unweighted 3D-octile GEOMETRIC
+            // distance, in the SAME tick units as PARTIAL_MIN_PROGRESS — a terminus that is not geometrically
+            // closer to the target suppresses the partial → null → BLOCKED → the region-crossing invalidation
+            // fires.
             if (PARTIAL_PATH && budgetHit && bestRow != startRow
                     && (startGeo - octile(nodes.x[bestRow], nodes.y[bestRow], nodes.z[bestRow], gx, gy, gz, 1.0f))
                             > PARTIAL_MIN_PROGRESS) {
@@ -929,16 +954,20 @@ public final class BlockPathfinder {
                     if ((startGeo - commitGeo) > PARTIAL_MIN_PROGRESS) {
                         BlockPathPlan partial = reconstruct(grid, nodes, startRow, commitRow);
                         LAST_PARTIAL_TL.get()[0] = true;
-                        // Tag: "-seed" = the commit point is a seeded never-popped start child; "-irrev" = the
-                        // guard truncated to an ancestor (ancestors were all popped, so the two are exclusive).
+                        // Tag: "-irrev" = the guard truncated the commit to an ancestor of the geometric endpoint.
                         if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
                                 "PARTIAL-" + partial.size() + "wp"
-                                        + (commitRow != bestRow ? "-irrev" : (seeded ? "-seed" : "")),
+                                        + (commitRow != bestRow ? "-irrev" : ""),
                                 sx, sy, sz, gx, gy, gz);
                         return partial;
                     }
                 }
             }
+            // Edge-realization blame (Fix A): every null return with real exploration becomes a BLOCKED result
+            // upstream, so collect the region crossings this search DID realize for the driver's blame walk
+            // (PathPlan.blameHop). Start-dead (≤1 expansion) proves nothing and skips the scan; a returned
+            // PARTIAL/FOUND never pays it.
+            if (expansions > 1) collectRealizedCrossings(nodes, LAST_REALIZED_TL.get());
             if (LOG_TIMING) logTiming(t0, expansions, relaxer.anyEdits,
                     budgetHit ? "FAIL-budget" : "FAIL-exhausted", sx, sy, sz, gx, gy, gz);
             return null;
@@ -1288,6 +1317,33 @@ public final class BlockPathfinder {
             if (riseBack > jumpRise) return p;  // stop just before the first drop the bot can't climb back
         }
         return bestRow; // whole partial is reversible
+    }
+
+    /**
+     * Cold: one pass over the explored SoA at null-return. Walks each surviving parent→child edge; an edge
+     * whose endpoints straddle region boundaries is staircase-decomposed one region step at a time (X, then
+     * Y, then Z) so a macro Pillar/MineDown/Traverse/Fall edge that collapsed several boundaries into one
+     * A* edge realizes EVERY intermediate crossing it physically traverses. The surviving cameFrom forest is
+     * a subset of all relaxations ever made, but any region the search reached retains a surviving path to
+     * it, so every crossing needed to explain reachability is present (rewired parents only drop redundant
+     * alternates). Diagonal edges crossing two boundaries at a corner get the same decomposition — slight
+     * over-marking only ever defers blame to a later genuinely-unrealized hop.
+     */
+    private static void collectRealizedCrossings(Nodes nodes, RealizedCrossings out) {
+        final int n = nodes.count;
+        for (int r = 0; r < n; r++) {
+            final int p = nodes.parent[r];
+            if (p < 0) continue;                                  // startRow
+            int fx = nodes.x[p] >> 4, fy = nodes.y[p] >> 4, fz = nodes.z[p] >> 4;
+            final int tx = nodes.x[r] >> 4, ty = nodes.y[r] >> 4, tz = nodes.z[r] >> 4;
+            if (fx == tx && fy == ty && fz == tz) continue;       // overwhelmingly common case
+            while (fx != tx) { final int s = fx + (tx > fx ? 1 : -1);
+                out.add(RegionAddress.packLevelKey(fx, fy, fz), RegionAddress.packLevelKey(s, fy, fz)); fx = s; }
+            while (fy != ty) { final int s = fy + (ty > fy ? 1 : -1);
+                out.add(RegionAddress.packLevelKey(fx, fy, fz), RegionAddress.packLevelKey(fx, s, fz)); fy = s; }
+            while (fz != tz) { final int s = fz + (tz > fz ? 1 : -1);
+                out.add(RegionAddress.packLevelKey(fx, fy, fz), RegionAddress.packLevelKey(fx, fy, s)); fz = s; }
+        }
     }
 
     /**

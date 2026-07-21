@@ -66,6 +66,7 @@ final class AsyncWindowSearch {
     private boolean resultPartial;
     private int resultExpansions;
     private boolean resultBudgetHit;
+    private long[] resultRealized;
 
     private final PlanExecutor executor;
 
@@ -139,6 +140,7 @@ final class AsyncWindowSearch {
         resultPartial = done.wasPartial();
         resultExpansions = done.expansions();
         resultBudgetHit = done.wasBudgetHit();
+        resultRealized = done.realizedCrossings();
         return Drain.RESULT;
     }
 
@@ -163,6 +165,7 @@ final class AsyncWindowSearch {
         resultPartial = parkedPartial;
         resultExpansions = Integer.MAX_VALUE; // a parked plan is never null — expansions are irrelevant
         resultBudgetHit = false; // a parked (adopted precompute) plan is a real path, not a cap-bound result
+        resultRealized = null;   // never null-plan ⇒ never BLOCKED ⇒ no blame input
         parkedPlan = null;
         return true;
     }
@@ -188,6 +191,12 @@ final class AsyncWindowSearch {
      *  paired with {@link #resultPlan()}. */
     boolean resultBudgetHit() {
         return resultBudgetHit;
+    }
+
+    /** The realized region-crossing pairs paired with a {@code null} {@link #resultPlan()} (the Fix-A blame
+     *  input, carried from the worker's failed search); {@code null} when the plan is non-null. */
+    long[] resultRealized() {
+        return resultRealized;
     }
 
     /** Whether an unfinished search toward {@code target} is already in flight (skip-resubmit guard). */
