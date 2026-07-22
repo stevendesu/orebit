@@ -895,12 +895,15 @@ final class BotNavigator {
         lastRepairedBlockedGen = gen;
         bot.chat("[bot] path blocked — invalidating a region crossing and rerouting.");
         // The hop + window target must be sampled BEFORE repairBlocked(), which re-derives the skeleton and
-        // resets the window — afterwards the crossing being blamed is already gone.
+        // resets the window — afterwards the crossing being blamed is already gone. Likewise the failing
+        // search's realized-set size + start region (blame-context enrichment).
         final String hop = describeBlockedHop();
         final BlockPos wt = pathPlan.currentWindowTarget();
+        final int realized = pathPlan.blockedRealizedCount();
+        final String searchStart = pathPlan.blockedStartRegionDesc();
         journeyStats.onRepair(); // NAVSTATS: a region-tier online repair attempt
         final boolean repaired = pathPlan.repairBlocked();
-        logRepair(gen, hop, wt, repaired);
+        logRepair(gen, hop, wt, repaired, realized, searchStart);
         if (!repaired) {
             giveUp();
         }
@@ -924,14 +927,17 @@ final class BotNavigator {
      * #repairStep} fires exactly ONE repair per BLOCKED search result ({@link PathPlan#blockedGeneration}),
      * so the line is bounded by the number of distinct blocked results. Never throws onto the tick.
      */
-    private void logRepair(int gen, String hop, BlockPos windowTarget, boolean repaired) {
+    private void logRepair(int gen, String hop, BlockPos windowTarget, boolean repaired,
+                           int realized, String searchStart) {
         try {
             OrebitCommon.LOGGER.info(
                     "[Orebit] region-crossing BLOCKED (gen={}) -> {} bot={} hop={} windowTarget={} "
+                            + "realized={} searchStart={} "
                             + "reason=block tier cannot realize this crossing for these caps",
                     gen, repaired ? "REROUTED (crossing blacklisted)" : "GAVE-UP (no hop to blame / exhausted)",
                     AllyBotEntity.compact(bot.blockPosition()), hop,
-                    windowTarget == null ? "?" : AllyBotEntity.compact(windowTarget));
+                    windowTarget == null ? "?" : AllyBotEntity.compact(windowTarget),
+                    realized < 0 ? "?" : Integer.toString(realized), searchStart);
         } catch (Throwable ignored) {
             // diagnostics must never crash the tick
         }
@@ -951,10 +957,13 @@ final class BotNavigator {
         }
     }
 
-    /** {@code S<step>(rx,ry,rz)} for a skeleton step, or {@code "?"} when out of range (cf. logWindowSwap). */
+    /** {@code S<step>(rx,ry,rz:f<frag>)} for a skeleton step, or {@code "?"} when out of range (cf.
+     *  logWindowSwap). The fragment id names WHICH pocket of the region the hop targets — a region-only
+     *  line hid which of two stacked fragments a blamed crossing entered. */
     private static String describeStep(RegionPathPlan sk, int step) {
         if (sk == null || step < 0 || step >= sk.size()) return "?";
-        return "S" + step + "(" + sk.rx(step) + "," + sk.ry(step) + "," + sk.rz(step) + ")";
+        return "S" + step + "(" + sk.rx(step) + "," + sk.ry(step) + "," + sk.rz(step)
+                + ":f" + sk.fragmentId(step) + ")";
     }
 
     /**

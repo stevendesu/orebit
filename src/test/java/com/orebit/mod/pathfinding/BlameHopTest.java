@@ -128,6 +128,92 @@ class BlameHopTest {
                 "a target behind the window start can blame nothing");
     }
 
+    // ------------------------------------------------------------------------------------------------
+    // Start-position blind spot (the treadmill fix): a search STARTING inside skeleton region S_k can
+    // never realize a hop ending at-or-before k (cameFrom edges grow outward from the start — a boundary
+    // edge INTO the start's own region never survives), so the walk begins at the LAST window index whose
+    // region is the search-start region. The 6-arg blameHop carries that start region as a raw cell>>4
+    // key; NO_START_REGION (the 5-arg form, all tests above) keeps the historical windowStart walk.
+    // ------------------------------------------------------------------------------------------------
+
+    @Test
+    void treadmillShape_startRegionSkipsTheJustWalkedHop() {
+        // The wall repro: [S0, S1, S2-up, S3], the failed search STARTED in S1's region, realized set
+        // empty. The old walk blamed S0->S1 — the lateral crossing the bot had just physically walked
+        // (a PROOF row against a valid crossing, every cycle: the treadmill). Hops ending at-or-before
+        // the start's own step are unrealizable-by-construction; the blame must land on S1->S2 (the
+        // ascent), never S0->S1.
+        RegionPathPlan plan = sk(0, new int[] {0, 4, 0, 0}, new int[] {1, 4, 0, 0},
+                new int[] {1, 5, 0, 0}, new int[] {2, 5, 0, 0});
+        assertEquals(1, PathPlan.blameHop(plan, 0, 3, edges(), 0, raw(1, 4, 0, 0)),
+                "the search started in S1's region — S0->S1 can never be realized by construction, so "
+                        + "the ascent hop S1->S2 takes the blame");
+    }
+
+    @Test
+    void startRegionMidWindow_earlierUnrealizedHopsBehindItAreSkipped() {
+        // Start region = S2's region; hops 0 and 1 are unrealized (empty set) but end at-or-before the
+        // start's step — behind the search, judged never-blamable. The walk begins at 2.
+        RegionPathPlan plan = sk(0, new int[] {0, 4, 0, 0}, new int[] {1, 4, 0, 0},
+                new int[] {2, 4, 0, 0}, new int[] {3, 4, 0, 0});
+        assertEquals(2, PathPlan.blameHop(plan, 0, 3, edges(), 0, raw(2, 4, 0, 0)),
+                "unrealized hops ending at-or-before the start's skeleton step are skipped");
+    }
+
+    @Test
+    void startRegionRepeatedOnSkeleton_lastOccurrenceAnchorsTheWalk() {
+        // A wiggle skeleton revisiting the start's region (A, B, A, C): the LAST index whose region is
+        // the start region anchors the walk (index 2), so hops 0 and 1 are both skipped.
+        RegionPathPlan plan = sk(0, new int[] {0, 4, 0, 0}, new int[] {1, 4, 0, 0},
+                new int[] {0, 4, 0, 0}, new int[] {0, 5, 0, 0});
+        assertEquals(2, PathPlan.blameHop(plan, 0, 3, edges(), 0, raw(0, 4, 0, 0)),
+                "the LAST window step sharing the start region anchors the walk");
+    }
+
+    @Test
+    void startRegionOffSkeleton_keepsTheWindowStartWalk() {
+        // An off-route start (its region is on no window step): the historical behaviour — walk from
+        // windowStart — is preserved, identical to the no-start-info 5-arg form.
+        RegionPathPlan plan = sk(0, new int[] {0, 4, 0, 0}, new int[] {1, 4, 0, 0},
+                new int[] {2, 4, 0, 0}, new int[] {3, 4, 0, 0});
+        assertEquals(0, PathPlan.blameHop(plan, 0, 3, edges(), 0, raw(9, 9, 9, 0)),
+                "a start region on no skeleton step keeps the historical windowStart walk");
+        assertEquals(PathPlan.blameHop(plan, 0, 3, edges(), 0),
+                PathPlan.blameHop(plan, 0, 3, edges(), 0, raw(9, 9, 9, 0)),
+                "off-skeleton start is byte-identical to the 5-arg (no start info) walk");
+    }
+
+    @Test
+    void startRegionIsTheTargetStep_noOnwardHopToBlame() {
+        // Start region == the window's LAST (target) step's region: every window hop ends at-or-before
+        // the start, so NO crossing is blamable — the failure is intra-region (the block tier could not
+        // reach the target cell from inside its own region). This must be -1 (give-up semantics), NOT
+        // the all-realized hop-into-target fallback: that fallback would blacklist a crossing the bot is
+        // effectively already past (behind or at the search start), poisoning a valid hop.
+        RegionPathPlan plan = sk(0, new int[] {0, 4, 0, 0}, new int[] {1, 4, 0, 0},
+                new int[] {2, 4, 0, 0});
+        assertEquals(-1, PathPlan.blameHop(plan, 0, 2, edges(), 0, raw(2, 4, 0, 0)),
+                "start region == target step region — no onward crossing exists to blame");
+        // The realized content is irrelevant here: even a fully-realized window yields -1.
+        long[] realized = edges(
+                raw(0, 4, 0, 0), raw(1, 4, 0, 0),
+                raw(1, 4, 0, 0), raw(2, 4, 0, 0));
+        assertEquals(-1, PathPlan.blameHop(plan, 0, 2, realized, 0, raw(2, 4, 0, 0)),
+                "the -1 is structural (every hop ends at-or-before the start), not realized-set-driven");
+    }
+
+    @Test
+    void startRegionRespectsRawKeyConversionAtNegativeMinY() {
+        // The start-region compare must happen in the SAME raw cell>>4 key space as the realized set:
+        // overworld minY=-64, skeleton ry 0 ⇒ raw ry -4. A start key built raw (as blamedHopIndex builds
+        // it from the floor cell: y>>4) must match the rebased skeleton step.
+        RegionPathPlan plan = sk(-64, new int[] {0, 0, 0, 0}, new int[] {1, 0, 0, 0},
+                new int[] {2, 0, 0, 0}, new int[] {3, 0, 0, 0});
+        assertEquals(1, PathPlan.blameHop(plan, 0, 3, edges(), -64,
+                        RegionAddress.packLevelKey(1, -4, 0)),
+                "a raw start key (floor>>4) must match the minY-rebased skeleton step it stands in");
+    }
+
     @Test
     void negativeMinYConvertsSkeletonRyToRawCellKeys() {
         // Overworld minY=-64: skeleton ry 0 spans world y -64..-49, whose raw cell>>4 is -4. A realized set
