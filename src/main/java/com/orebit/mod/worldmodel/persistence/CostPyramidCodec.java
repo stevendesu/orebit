@@ -17,6 +17,7 @@ import com.orebit.mod.worldmodel.hpa.CostCodec;
 import com.orebit.mod.worldmodel.hpa.CostPyramid;
 import com.orebit.mod.worldmodel.hpa.PyramidMerger;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
+import com.orebit.mod.worldmodel.hpa.RegionCrossingMemory;
 import com.orebit.mod.worldmodel.hpa.RegionFragments;
 import com.orebit.mod.worldmodel.hpa.StraddleSet;
 
@@ -57,15 +58,40 @@ import com.orebit.mod.worldmodel.hpa.StraddleSet;
  *         ryLen (byte)                consecutive ry rows in the run (all share the byte-identical record below)
  *         recordLen (unsigned short)  bytes of the packed CostCodec bitstream that follow
  *         record (recordLen bytes)    CostCodec.packRegion(rf) output, shared by every ry in the run
- *   [shard files only] invalCount (int) = 0   reserved Stage-3 INVALIDATION section (empty stub)
+ *   INVALIDATION section (v4, LAST, both shard and coarse files — Stage-3 #5 persisted invalidation memory):
+ *     sigSchemaVersion (byte)         = {@value #INVAL_SIG_SCHEMA_VERSION}; a mismatch skips ONLY this section
+ *     graphClassId (byte)             = {@value #INVAL_GRAPH_CLASS_ID} ("optimistic-v1"); mismatch = same skip
+ *     invalCount (int)                rows that follow
+ *     per row (24 B):
+ *       fromKey (long)                RegionPathfinder.fragmentNodeKey (56 bits) | LEVEL in the free bits 56..63
+ *       toKey (long)                  fragmentNodeKey (56 bits) | PROVENANCE (RegionCrossingMemory.PROV_*) in
+ *                                     the free bits 56..57
+ *       capsSig (long)                the failing BotCaps.realizabilitySig the crossing was proven dead under
  * </pre>
  * A run collapses rows that are BOTH consecutive in {@code ry} AND carry a byte-identical record — this is where
  * the redundant per-row coordinate headers (same rx/rz per column, sequential ry) are eliminated. On decode each
  * run is EXPANDED back to its individual {@code (rx, ry, rz, record)} rows and interned exactly as the flat format
  * did, so the round-trip is byte-identical at the row/record level (only the wire framing changed vs v2).
- * The reserved invalidation section is a forward-compatibility placeholder for Stage 3: it is the LAST thing in
- * a shard body, written as {@code int 0}, and {@link #decode} reads the count but ignores any entries — so a
- * future non-empty section's trailing bytes are simply not consumed and never break this reader.
+ *
+ * <h2>The invalidation section (v4 — DESIGN-persisted-invalidation-memory.md §4)</h2>
+ * v3 reserved the slot as a bare {@code int 0}; v4 defines it firmly and fills it from the dimension's
+ * {@link RegionCrossingMemory} at flush time. Sharding is <b>assign-to-FROM</b>: a level-0..5 row lands in the
+ * shard file containing its FROM region ({@link RegionAddress#shardOf} at the row's level); level-6
+ * ({@link RegionAddress#MAX_COARSE_LEVEL}) rows ride the per-dimension coarse file — exactly the cost-row
+ * precedent. The stored keys are the pure 56-bit {@code fragmentNodeKey}s; the row's LEVEL travels in the
+ * fromKey's free high byte and its provenance in two free toKey bits, so a row is self-describing and the
+ * section needs no per-level framing. On load the section's rows are merged into the per-dimension
+ * {@link RegionCrossingMemory} via {@code record} (whose antichain rule makes the merge idempotent and
+ * live-recorded-rows-compatible). A {@code sigSchemaVersion}/{@code graphClassId} mismatch drops the SECTION
+ * only (cache semantics — re-learn), never the cost rows above it; this is the entire migration story for new
+ * sig dimensions and capability-aware graphs. Provenance gates what is WRITTEN: {@code PROV_ESCALATION} rows
+ * (cascade-inferred realized-blame picks) are filtered out of every encode ({@link #persistableProv}) —
+ * session-memory only — while {@code PROV_PROOF} and {@code PROV_ROLLED_UP} rows persist; decode merges
+ * whatever a file carries (legacy escalation rows still load, they just stop being re-written) — EXCEPT
+ * virtual-goal rows (TO fragment == {@link RegionFragments#MAX_FRAGMENTS}, the search's
+ * {@code VIRTUAL_GOAL_FRAG} sentinel), which decode drops: journey-scoped by nature (no realized-evidence
+ * backing, and the key names only the goal REGION, not the goal cell), no longer recorded at the source,
+ * filtered here so legacy files self-clean on load.
  *
  * <h2>{@code gridSize} on decode (the per-level gotcha)</h2>
  * {@code gridSize} is not persisted (a build-time attribute). It is passed to {@link CostCodec#unpackRegion} per
@@ -96,8 +122,34 @@ public final class CostPyramidCodec {
      * v3 replaced the flat per-row body with a COLUMN-RUN body (rows grouped by {@code (rx,rz)} column, consecutive
      * byte-identical records at consecutive {@code ry} collapsed into runs) — recovers ~97% of gzip's on-disk
      * saving (~2× vs the flat raw body) at raw decode speed, by killing the repeated per-row coordinate headers.
+     * v4 turned the reserved trailing invalidation stub into the REAL #5 invalidation section (and added it to the
+     * coarse file, which previously ended at the cost body) — see the class-doc format table.
+     * v5 is a SEMANTIC bump, not a layout change: {@code FragmentBuilder} reclassified floorless leaves
+     * (any-water ⇒ {@code KIND_WATER}; {@code KIND_AIR} only when provably dry) — persisted records carry
+     * kinds, and stale caches holding majority-voted AIR labels would keep false-disconnecting no-place
+     * routes through swimmable cells, so they must read as absent and regenerate from live classify
+     * (cache semantics: bad/old ⇒ rebuilt, never trusted). Covers both shard and coarse files (they share
+     * this constant).
      */
-    static final short VERSION = 3;
+    static final short VERSION = 5;
+
+    /** Invalidation-section sig schema (the {@code BotCaps.realizabilitySig} bit layout generation). Bump when a
+     *  sig dimension is added/changed (breath, count buckets); old sections then read as absent (re-learn). */
+    static final int INVAL_SIG_SCHEMA_VERSION = 1;
+    /** Invalidation-section region-graph class — 0 = "optimistic-v1", today's single symmetric/optimistic
+     *  connectivity graph. A future capability-aware graph persists its own sections under a new id; rows never
+     *  transfer across graphs (fragment identities don't). */
+    static final int INVAL_GRAPH_CLASS_ID = 0;
+    /** Low 56 bits of a stored inval key = the pure {@code RegionPathfinder.fragmentNodeKey}. */
+    private static final long INVAL_KEY_MASK = (1L << 56) - 1;
+    /** The row's LEVEL rides the fromKey's free high byte (bits 56..63). */
+    private static final int INVAL_LEVEL_SHIFT = 56;
+    /** The row's provenance ({@code RegionCrossingMemory.PROV_*}) rides toKey bits 56..57. */
+    private static final int INVAL_PROV_SHIFT = 56;
+    private static final long INVAL_PROV_MASK = 0x3L;
+    /** A key's 6-bit fragment id sits at bits 50..55 (above {@code RegionAddress.packLevelKey}'s 0..49). */
+    private static final int INVAL_FRAG_SHIFT = 50;
+    private static final long INVAL_FRAG_MASK = 0x3F;
 
     /** Lowest / highest cost level carried by a per-region shard file. */
     static final int SHARD_LO_LEVEL = 0;
@@ -109,25 +161,48 @@ public final class CostPyramidCodec {
 
     /**
      * Write shard {@code (shardX, shardZ)}'s cost levels 0..5 to {@code rawOut} (header + body uncompressed), plus
-     * the empty reserved invalidation section. Only built rows whose level-relative shard equals
-     * {@code (shardX, shardZ)} are written; interned-but-unbuilt rows and rows with no fragment record are
-     * skipped. The stream is left open for the caller to close.
+     * an EMPTY invalidation section (no-memory legacy form — kept so tests and callers without a crossing memory
+     * stay source-compatible; production flushes go through the {@code mem}-carrying overload). Only built rows
+     * whose level-relative shard equals {@code (shardX, shardZ)} are written; interned-but-unbuilt rows and rows
+     * with no fragment record are skipped. The stream is left open for the caller to close.
      */
     public static void encodeShard(CostPyramid p, int shardX, int shardZ, OutputStream rawOut) throws IOException {
-        encode(p, MAGIC_SHARD, SHARD_LO_LEVEL, SHARD_HI_LEVEL, true, shardX, shardZ, true, rawOut);
+        encodeShard(p, shardX, shardZ, null, rawOut);
+    }
+
+    /**
+     * As {@link #encodeShard(CostPyramid, int, int, OutputStream)}, additionally filling the trailing
+     * invalidation section from {@code mem} (nullable = empty section): every remembered crossing at levels
+     * 0..{@link RegionAddress#SHARD_LEVEL} whose FROM region falls in this shard (assign-to-FROM, the cost-row
+     * bucketing precedent) is written as a 24-byte row — see the class-doc format table.
+     */
+    public static void encodeShard(CostPyramid p, int shardX, int shardZ, RegionCrossingMemory mem,
+                                   OutputStream rawOut) throws IOException {
+        encode(p, MAGIC_SHARD, SHARD_LO_LEVEL, SHARD_HI_LEVEL, true, shardX, shardZ, mem, rawOut);
     }
 
     /**
      * Write the per-dimension coarse cost file — level {@link RegionAddress#MAX_COARSE_LEVEL} only, all built
-     * rows (no shard scoping, no invalidation section). The stream is left open for the caller to close.
+     * rows (no shard scoping), plus an EMPTY invalidation section (no-memory legacy form). The stream is left
+     * open for the caller to close.
      */
     public static void encodeCoarse(CostPyramid p, OutputStream rawOut) throws IOException {
+        encodeCoarse(p, null, rawOut);
+    }
+
+    /**
+     * As {@link #encodeCoarse(CostPyramid, OutputStream)}, additionally filling the invalidation section with
+     * the level-{@link RegionAddress#MAX_COARSE_LEVEL} crossings from {@code mem} (nullable = empty section) —
+     * the L6 rows follow the cost precedent and live in the per-dimension coarse file, not a shard.
+     */
+    public static void encodeCoarse(CostPyramid p, RegionCrossingMemory mem, OutputStream rawOut)
+            throws IOException {
         encode(p, MAGIC_COARSE, RegionAddress.MAX_COARSE_LEVEL, RegionAddress.MAX_COARSE_LEVEL,
-                false, 0, 0, false, rawOut);
+                false, 0, 0, mem, rawOut);
     }
 
     private static void encode(CostPyramid p, int magic, int loLevel, int hiLevel,
-                               boolean shardScoped, int shardX, int shardZ, boolean reserveInval,
+                               boolean shardScoped, int shardX, int shardZ, RegionCrossingMemory mem,
                                OutputStream rawOut) throws IOException {
         // Build the column groupings for every level first (cold path — normal allocation is fine), then hand
         // them to the shared serializer. Factored out of the write loop so the scan-once-bucket path
@@ -139,7 +214,8 @@ public final class CostPyramidCodec {
         for (int level = loLevel; level <= hiLevel; level++) {
             byLevel[level - loLevel] = collectColumns(p, level, shardScoped, shardX, shardZ);
         }
-        writeEncoded(new DataOutputStream(rawOut), magic, loLevel, hiLevel, byLevel, reserveInval);
+        writeEncoded(new DataOutputStream(rawOut), magic, loLevel, hiLevel, byLevel,
+                collectInvalRows(mem, loLevel, hiLevel, shardScoped, shardX, shardZ));
     }
 
     /**
@@ -150,7 +226,7 @@ public final class CostPyramidCodec {
      * byte-for-byte the same on disk as the per-shard {@link #encodeShard}.
      */
     private static void writeEncoded(DataOutputStream out, int magic, int loLevel, int hiLevel,
-                                     List<Column>[] byLevel, boolean reserveInval) throws IOException {
+                                     List<Column>[] byLevel, long[] invalTriples) throws IOException {
         out.writeInt(magic);
         out.writeShort(VERSION);
 
@@ -197,10 +273,78 @@ public final class CostPyramidCodec {
             }
         }
 
-        // Reserved Stage-3 invalidation section (shard files only) — empty for now, forward-compatible.
-        if (reserveInval) out.writeInt(0);
+        // The v4 invalidation section — LAST in every file (shard AND coarse): schema header + the pre-gathered
+        // (fromKey|level, toKey|prov, capsSig) triples. See the class-doc format table.
+        out.writeByte(INVAL_SIG_SCHEMA_VERSION);
+        out.writeByte(INVAL_GRAPH_CLASS_ID);
+        final int invalCount = invalTriples.length / 3;
+        out.writeInt(invalCount);
+        for (int i = 0; i < invalTriples.length; i++) {
+            out.writeLong(invalTriples[i]);
+        }
 
         out.flush();
+    }
+
+    /** Empty triple array for the no-memory encode forms. */
+    private static final long[] NO_INVAL_ROWS = new long[0];
+
+    /**
+     * Gather the invalidation rows this file carries as flattened {@code (fromKey|level, toKey|prov, capsSig)}
+     * triples: every PERSISTABLE crossing of {@code mem} at levels {@code loLevel..hiLevel} whose FROM region
+     * falls in the shard scope (assign-to-FROM; the coarse file is unscoped). {@link #persistableProv} is the
+     * provenance gate — {@code PROV_ESCALATION} rows never reach disk. Deterministic order — level ascending,
+     * store index ascending — so the per-shard {@link #encodeShard} and the bucket path
+     * {@link #encodeShardBucket} emit byte-identical sections for the same memory. {@code null} mem ⇒ no rows.
+     * Cold path.
+     */
+    private static long[] collectInvalRows(RegionCrossingMemory mem, int loLevel, int hiLevel,
+                                           boolean shardScoped, int shardX, int shardZ) {
+        if (mem == null) return NO_INVAL_ROWS;
+        int count = 0;
+        for (int level = loLevel; level <= hiLevel; level++) {
+            for (int i = 0; i < mem.count(level); i++) {
+                if (invalRowInScope(mem.fromAt(level, i), level, shardScoped, shardX, shardZ)
+                        && persistableProv(mem.provAt(level, i))) count++;
+            }
+        }
+        if (count == 0) return NO_INVAL_ROWS;
+        long[] triples = new long[count * 3];
+        int w = 0;
+        for (int level = loLevel; level <= hiLevel; level++) {
+            for (int i = 0; i < mem.count(level); i++) {
+                long fromKey = mem.fromAt(level, i);
+                if (!invalRowInScope(fromKey, level, shardScoped, shardX, shardZ)
+                        || !persistableProv(mem.provAt(level, i))) continue;
+                triples[w++] = fromKey | ((long) level << INVAL_LEVEL_SHIFT);
+                triples[w++] = mem.toAt(level, i)
+                        | ((mem.provAt(level, i) & INVAL_PROV_MASK) << INVAL_PROV_SHIFT);
+                triples[w++] = mem.sigAt(level, i);
+            }
+        }
+        return triples;
+    }
+
+    /**
+     * Whether a crossing row's provenance may persist to disk. {@link RegionCrossingMemory#PROV_ESCALATION}
+     * rows are cascade-INFERRED (a realized-blame pick that only needs to CONVERGE within a session, not be
+     * individually correct) — session-memory only until region-tier blame is trustworthy as world knowledge: a
+     * wrong escalation row written to disk would be re-seeded into every future plan and could turn a corridor
+     * bottleneck into a permanent false no-route. {@link RegionCrossingMemory#PROV_PROOF} (block-tier proofs)
+     * and {@link RegionCrossingMemory#PROV_ROLLED_UP} (the Phase-2b fold over proofs) persist. Decode is
+     * deliberately untouched: a legacy file carrying escalation rows still loads — it just stops being
+     * re-written with them.
+     */
+    private static boolean persistableProv(int prov) {
+        return prov != RegionCrossingMemory.PROV_ESCALATION;
+    }
+
+    /** Whether a crossing whose FROM key is {@code fromKey} (at {@code level}) belongs to the given shard scope.
+     *  The fragment bits (50..55) sit above the packed rx/rz fields, so the unpack helpers read through them. */
+    private static boolean invalRowInScope(long fromKey, int level, boolean shardScoped, int shardX, int shardZ) {
+        if (!shardScoped) return true;
+        return RegionAddress.shardOf(RegionAddress.unpackRX(fromKey), level) == shardX
+                && RegionAddress.shardOf(RegionAddress.unpackRZ(fromKey), level) == shardZ;
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -275,11 +419,24 @@ public final class CostPyramidCodec {
 
     /**
      * Write ONE shard's cost levels 0..5 from a {@link #bucketShards}/{@link #bucketShard} bucket — byte-identical to
-     * {@link #encodeShard} for the same shard. The stream is left open for the caller to close.
+     * {@link #encodeShard} for the same shard (empty invalidation section — the no-memory legacy form). The stream
+     * is left open for the caller to close.
      */
     public static void encodeShardBucket(ShardColumns bucket, OutputStream rawOut) throws IOException {
+        encodeShardBucket(bucket, 0, 0, null, rawOut);
+    }
+
+    /**
+     * As {@link #encodeShardBucket(ShardColumns, OutputStream)}, additionally filling the invalidation section
+     * from {@code mem} for shard {@code (shardX, shardZ)} (the coords the bucket was gathered for — a
+     * {@link ShardColumns} does not carry them). Byte-identical to the {@code mem}-carrying
+     * {@link #encodeShard(CostPyramid, int, int, RegionCrossingMemory, OutputStream)} for the same shard and
+     * memory: both gather the same rows in the same level-ascending/store-index-ascending order.
+     */
+    public static void encodeShardBucket(ShardColumns bucket, int shardX, int shardZ, RegionCrossingMemory mem,
+                                         OutputStream rawOut) throws IOException {
         writeEncoded(new DataOutputStream(rawOut), MAGIC_SHARD, SHARD_LO_LEVEL, SHARD_HI_LEVEL,
-                bucket.toLists(), true);
+                bucket.toLists(), collectInvalRows(mem, SHARD_LO_LEVEL, SHARD_HI_LEVEL, true, shardX, shardZ));
     }
 
     /** Packed L5 shard key of a row at {@code level} — MUST match {@code RegionPersistence.shardKey}. */
@@ -411,7 +568,7 @@ public final class CostPyramidCodec {
      * caller treats the file as absent).
      */
     public static void decode(InputStream rawIn, CostPyramid dest) throws IOException {
-        decode(rawIn, dest, null);
+        decode(rawIn, dest, null, null, null);
     }
 
     /**
@@ -424,6 +581,22 @@ public final class CostPyramidCodec {
      * behaviour, the collector is a pure observation.
      */
     public static void decode(InputStream rawIn, CostPyramid dest, StraddleSet straddle) throws IOException {
+        decode(rawIn, dest, straddle, null, null);
+    }
+
+    /**
+     * As {@link #decode(InputStream, CostPyramid, StraddleSet)}, additionally merging the file's trailing
+     * invalidation section into {@code mem} (the per-dimension {@link RegionCrossingMemory}) via
+     * {@code record} under the caller-supplied {@code dominance} order (in practice {@code BotCaps::sigDominates}
+     * — supplied by the load site so this codec, like the store itself, never imports pathfinding). The antichain
+     * rule in {@code record} makes the merge idempotent and safe beside rows already recorded live this session.
+     * Section-level cache semantics: a {@code sigSchemaVersion}/{@code graphClassId} mismatch — or a
+     * {@code null} {@code mem} — skips the SECTION only; the cost rows above it load regardless. A truncated /
+     * pre-section EOF is tolerated (no section ⇒ nothing to merge).
+     */
+    public static void decode(InputStream rawIn, CostPyramid dest, StraddleSet straddle,
+                              RegionCrossingMemory mem, RegionCrossingMemory.Dominance dominance)
+            throws IOException {
         DataInputStream in = new DataInputStream(rawIn);
         int magic = in.readInt();
         int version = in.readUnsignedShort();
@@ -474,15 +647,42 @@ public final class CostPyramidCodec {
             }
         }
 
-        // Reserved Stage-3 invalidation section (shard files only, and always empty in Stage 1): read the entry
-        // count if present and ignore any entries. Read defensively — a coarse file has no such section, and a
-        // truncated/older shard simply has no trailing int; either way the cost rows above are already interned.
-        if (magic == MAGIC_SHARD) {
-            try {
-                in.readInt(); // invalCount — Stage-1 always 0; entries (none yet) intentionally not consumed
-            } catch (EOFException ignore) {
-                // no invalidation section present — fine, nothing more to read
+        // The v4 invalidation section (both shard and coarse files) — read defensively: the cost rows above are
+        // already interned, so any problem here degrades to "no section" (re-learn), never a failed file.
+        try {
+            int sigSchema = in.readUnsignedByte();
+            int graphClass = in.readUnsignedByte();
+            int invalCount = in.readInt();
+            if (sigSchema != INVAL_SIG_SCHEMA_VERSION || graphClass != INVAL_GRAPH_CLASS_ID) {
+                return; // an unknown sig layout / region-graph class — drop the SECTION only, re-learn (§4)
             }
+            if (mem == null || invalCount <= 0) {
+                return; // caller keeps no crossing memory (or nothing recorded) — section rows are ignored
+            }
+            for (int i = 0; i < invalCount; i++) {
+                long fromStored = in.readLong();
+                long toStored = in.readLong();
+                long capsSig = in.readLong();
+                int level = (int) (fromStored >>> INVAL_LEVEL_SHIFT) & 0xFF;
+                if (level > RegionAddress.MAX_COARSE_LEVEL) continue; // corrupt row — skip, keep reading
+                // Virtual-goal legacy filter: a row whose TO fragment is the search's virtual-goal sentinel
+                // ({@code RegionPathfinder.VIRTUAL_GOAL_FRAG} == {@link RegionFragments#MAX_FRAGMENTS} = 63,
+                // read from the key's fragment bits 50..55) is journey-scoped knowledge that should never have
+                // been durable: an (approach → V) blame carries no realized evidence, and the key encodes only
+                // the goal REGION, not the goal cell — so a persisted V-row from one goal poisons every later
+                // goal in that region. The record site (HierarchicalRegionPlan.onBlocked) no longer writes
+                // them, so this is purely a LEGACY cleanup, and decode is the single choke point: the row
+                // never enters the memory, so seeding never sees it and the shard's next dirty flush rewrites
+                // the section without it.
+                if ((int) ((toStored >>> INVAL_FRAG_SHIFT) & INVAL_FRAG_MASK) == RegionFragments.MAX_FRAGMENTS) {
+                    continue;
+                }
+                int provenance = (int) ((toStored >>> INVAL_PROV_SHIFT) & INVAL_PROV_MASK);
+                mem.record(level, fromStored & INVAL_KEY_MASK, toStored & INVAL_KEY_MASK, capsSig,
+                        provenance, dominance);
+            }
+        } catch (EOFException ignore) {
+            // no/truncated invalidation section — fine; the cost rows above are already interned
         }
     }
 }

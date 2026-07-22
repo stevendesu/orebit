@@ -132,6 +132,39 @@ public final class RegionPathfinder {
     }
 
     /**
+     * Per-thread flag, the {@link #LAST_WAS_FLOOD} sibling for TUBED searches: the last
+     * {@link #planLevelFragments} was confined to a {@link RegionTube} corridor (every sub-top cascade level
+     * is) and returned {@code null} — the corridor could not be refined at this level. That is evidence
+     * AGAINST the PARENT corridor, NOT proof the graph is disconnected: the §3a flood guard is DISABLED under
+     * a tube (the tube itself is the area bound), so a tubed heap-drain must never be mistaken for a genuine
+     * no-route. The {@link HierarchicalRegionPlan} cascade reads it via {@link #lastWasTubeConfined()} and
+     * ESCALATES — blaming a parent-window hop via {@link #lastTubeTouchedMask()} — instead of reporting
+     * route-impossible. A 1-element array so the reset/set are heap-free on the search thread.
+     */
+    private static final ThreadLocal<boolean[]> LAST_TUBE_CONFINED = ThreadLocal.withInitial(() -> new boolean[1]);
+
+    /**
+     * The parent-cell TOUCH mask of the last tube-confined failure on this thread: bit {@code i} is set iff
+     * that search explored ≥1 node whose parent-level cell is tube-skeleton cell {@code i} (skeleton indices
+     * ≥ 64 are unrepresented — blame probes only the window prefix, well inside 64). Valid only while
+     * {@link #lastWasTubeConfined()} is {@code true}; computed post-hoc on the tubed-failure path only
+     * (mirrors {@code BlockPathfinder.collectRealizedCrossings} — the hot relax loop gains nothing).
+     */
+    private static final ThreadLocal<long[]> LAST_TUBE_TOUCHED_MASK = ThreadLocal.withInitial(() -> new long[1]);
+
+    /** Whether the last {@link #planLevelFragments} on this thread was a tube-confined {@code null} — the
+     *  corridor was unrefinable at that level; escalate with blame, do NOT treat as disconnection. */
+    public static boolean lastWasTubeConfined() {
+        return LAST_TUBE_CONFINED.get()[0];
+    }
+
+    /** The tube-skeleton touch mask of the last tube-confined failure on this thread — read only while
+     *  {@link #lastWasTubeConfined()} is {@code true} (stale otherwise; it is not cleared at search start). */
+    static long lastTubeTouchedMask() {
+        return LAST_TUBE_TOUCHED_MASK.get()[0];
+    }
+
+    /**
      * §2 unbuilt-cost model selector. {@code true} = <b>Option B</b> (the default): the direction cost is
      * Y-<b>banded</b> on vanilla sea level 63 / terrain ceiling 128 — below 63, lateral is 2× (cave networks are
      * wiggly, so crossing unexplored underground is dear); in 63..128, up-2×/down-½×/lateral-1× (the surface band);
@@ -526,6 +559,9 @@ public final class RegionPathfinder {
         final Nodes nodes = SEARCH.get();
         nodes.reset();
         LAST_WAS_FLOOD.get()[0] = false; // §3a: cleared here; set only if the cap-safe flood guard trips below
+        // Tube-drain signal: cleared per search like the flood flag. The touch mask is NOT cleared — it is
+        // read only behind lastWasTubeConfined(), so a stale mask is unreachable.
+        LAST_TUBE_CONFINED.get()[0] = false;
 
         // Heuristic scale: SimpleRegionHeuristic is calibrated per LEVEL-0 region (COST_PER_REGION = one leaf
         // walk). At level L the derived edge costs scale with sideOf(L) = LEAF<<L, so scale h the same (×2^L)
@@ -637,6 +673,13 @@ public final class RegionPathfinder {
             // instead of giving up. A heap-drain (no budgetHit) is a genuine no-route for these caps → null.
             if (budgetHit && REGION_PARTIAL_ON_BUDGET && bestRow != startRow) {
                 return reconstructFragments(nodes, startRow, bestRow, minY, level, false);
+            }
+            if (tube != null) {
+                // Tube-confined failure (heap drain, or a budget hit with no partial, inside the corridor):
+                // the corridor cannot be refined at this level — evidence against the PARENT corridor, not a
+                // disconnection. Raise the escalation signal + the parent-cell touch mask for realized blame.
+                LAST_TUBE_CONFINED.get()[0] = true;
+                LAST_TUBE_TOUCHED_MASK.get()[0] = collectTubeTouchedMask(nodes, tube);
             }
             return null;
         }
@@ -1148,8 +1191,13 @@ public final class RegionPathfinder {
         }
     }
 
-    /** §3b tube envelope (A/B re-applied for cold benchmarking): corridor within a Chebyshev margin of a coarse
-     *  skeleton path, confining a finer forward search. {@link #contains} is the per-relax admission test. */
+    /** §3b tube envelope: the corridor within a Chebyshev margin of a coarse skeleton path, confining a finer
+     *  forward search — the PERMANENT corridor confinement of every sub-top cascade search
+     *  ({@code HierarchicalRegionPlan.rederiveSuffix} tubes every level below its top; NOT an A/B toggle).
+     *  The §3a flood guard is DISABLED under a tube (the tube itself is the area bound), so a tubed
+     *  {@code null} raises {@link #lastWasTubeConfined()} + {@link #lastTubeTouchedMask()} and the cascade
+     *  escalates with realized blame — it never reports route-impossible off a tubed drain.
+     *  {@link #contains} is the per-relax admission test. */
     static final class RegionTube {
         private final RegionPathPlan skeleton;
         private final int d;
@@ -1508,6 +1556,39 @@ public final class RegionPathfinder {
             if (n == startRow) break;
         }
         return new RegionPathPlan(rxs, rys, rzs, frags, px, py, pz, digs, len, minY, level, reachedGoalRegion);
+    }
+
+    /**
+     * The parent-cell TOUCH mask of a failed tube-confined search: bit {@code i} is set iff any explored node's
+     * parent-level cell is tube-skeleton cell {@code i} ({@code lim = min(skeleton.size(), 64)}; indices ≥ 64
+     * are unrepresented — blame probes only the window prefix). TOUCH-membership is the right realization
+     * signal INSIDE a tube: {@link #relaxFrag} rejects out-of-tube targets BEFORE interning, so every explored
+     * node's ancestry is corridor-internal — touching parent cell P certifies a realized corridor-internal
+     * route bot→P. (Unlike the block tier, where unconfined floods swim in from anywhere and EDGE realization
+     * is needed — {@code BlockPathfinder.collectRealizedCrossings}.) Residual imprecision — a lateral shortcut
+     * within the ±margin slack, or fragment-granular hops within one cell — can only DEFER blame: each blame
+     * adds a NEW parent edge, so the escalation converges regardless. Hence the rows this feeds are
+     * {@code PROV_ESCALATION}, never block-tier {@code PROV_PROOF}. The signed {@code >>} matches
+     * {@link RegionTube#contains}' own coordinate math (negative coords fold correctly); Y is skipped on
+     * Y-pinned parents ({@code !checkY} — {@code RegionAddress.regionY} pins ry to 0 at/above OCTREE_TOP, and
+     * {@code sk.ry(i) == 0} there). O(count × ≤64) on the tubed-failure path only — zero per-relax work.
+     */
+    private static long collectTubeTouchedMask(Nodes nodes, RegionTube tube) {
+        final RegionPathPlan sk = tube.skeleton;
+        final int lim = Math.min(sk.size(), 64);
+        final long full = (lim == 64) ? -1L : (1L << lim) - 1L;
+        long mask = 0L;
+        for (int r = 0; r < nodes.count && mask != full; r++) {
+            final int prx = nodes.x[r] >> tube.d;
+            final int prz = nodes.z[r] >> tube.d;
+            final int pry = tube.checkY ? (nodes.y[r] >> tube.d) : 0;
+            for (int i = 0; i < lim; i++) {
+                if (sk.rx(i) == prx && sk.rz(i) == prz && (!tube.checkY || sk.ry(i) == pry)) {
+                    mask |= 1L << i;
+                }
+            }
+        }
+        return mask;
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -1887,6 +1968,139 @@ public final class RegionPathfinder {
             if (d < bestD) { bestD = d; best = f; }
         }
         return best;
+    }
+
+    // ---------------------------------------------------------------------------------------------------
+    // Cold failure diagnostics (never on the search path) — the region FAIL post-mortem + key formatting
+    // ---------------------------------------------------------------------------------------------------
+
+    /**
+     * Human form of a {@link #fragmentNodeKey}: {@code (rx,ry,rz:<frag>)} — region coords via
+     * {@link RegionAddress#unpackRX}/{@code RY}/{@code RZ} (the fragment bits 50..55 sit outside every
+     * unpacked field, so the plain unpackers apply), fragment via the XOR-free high bits ({@code packLevelKey}
+     * uses only bits 0..49, so the XORed 6-bit fragment reads back directly). Cold (seed dump / blame lines).
+     */
+    static String describeFragKey(long key) {
+        return "(" + RegionAddress.unpackRX(key) + "," + RegionAddress.unpackRY(key) + ","
+                + RegionAddress.unpackRZ(key) + ":" + (int) ((key >>> 50) & 0x3F) + ")";
+    }
+
+    /**
+     * COLD failed-path post-mortem (diagnostic 3): re-derive the START node's candidate edges for the
+     * terminal drained search of a FAILED cascade — which fragment the start anchored to (the same
+     * {@link #startFragment} resolution the search used: level-0 flood, nearest-centroid fallback) and, per
+     * candidate edge, its disposition under the SAME predicates the relax loop applies
+     * ({@link RegionTube#contains} / {@link RegionEdgeBlacklist#contains} / the caps gates), so a heap-drain
+     * FAIL becomes attributable: every start edge was either capability-gated, tube-rejected, blacklisted,
+     * footprint-disjoint — or admissible ({@code OK-but-unexpanded}), meaning the drain happened deeper in.
+     * This is a RE-DERIVATION on the cold failure path only — the hot {@link #expandNode}/{@link #relaxFrag}
+     * loop is untouched; enumeration mirrors its edge cases verbatim (mine siblings, sealed-face dig-through,
+     * uniform transits, portal overlap, mine-fallback / mine-solid).
+     * Format (greppable): {@code start=(rx,ry,rz:f<id>) edges: (rx,ry,rz:f<id>)=<disposition> ...}.
+     */
+    static String describeStartEdges(int level, RegionGrid grid, int minY, BlockPos botFloor,
+                                     boolean canBreak, boolean canPlace,
+                                     RegionEdgeBlacklist blacklist, RegionTube tube) {
+        final int sx = RegionAddress.regionX(botFloor.getX(), level);
+        final int sy = RegionAddress.regionY(botFloor.getY(), level, minY);
+        final int sz = RegionAddress.regionZ(botFloor.getZ(), level);
+        ensureNode(grid, level, sx, sy, sz);
+        final int sFrag = startFragment(grid, level, sx, sy, sz, botFloor);
+        final long fromKey = fragmentKey(sx, sy, sz, sFrag);
+        final RegionFragments rfN = grid.fragmentRecord(level, sx, sy, sz);
+        final boolean uniformN = isUniformNode(rfN);
+        final int countN = uniformN ? 1 : rfN.fragmentCount();
+        final StringBuilder sb = new StringBuilder(192);
+        sb.append("start=(").append(sx).append(',').append(sy).append(',').append(sz)
+                .append(":f").append(sFrag).append(") edges:");
+        final int[] wa = new int[3], wb = new int[3]; // cold — fresh scratch is fine here
+        // (A) intra-region mine edges to sibling fragments (expandNode block A).
+        if (!uniformN && countN > 1) {
+            for (int fragC = 0; fragC < countN; fragC++) {
+                if (fragC == sFrag) continue;
+                appendEdge(sb, sx, sy, sz, fragC, !canBreak ? "caps-gated"
+                        : dispositionOf(fromKey, sx, sy, sz, fragC, blacklist, tube));
+            }
+        }
+        // (B) inter-region edges per face (expandNode block B).
+        for (int f = 0; f < 6; f++) {
+            if (level >= RegionAddress.OCTREE_TOP && (f == 2 || f == 3)) continue; // no ±Y neighbour (quadtree)
+            final int mrx = RegionAddress.neighborRX(sx, f);
+            final int mry = RegionAddress.neighborRY(sy, f);
+            final int mrz = RegionAddress.neighborRZ(sz, f);
+            if (!uniformN && !rfN.touchesFace(sFrag, f)) {
+                // Sealed face: only the break-capable dig-through (into the neighbour's fragment 0) exists.
+                appendEdge(sb, mrx, mry, mrz, 0, !canBreak ? "caps-gated"
+                        : dispositionOf(fromKey, mrx, mry, mrz, 0, blacklist, tube));
+                continue;
+            }
+            ensureNode(grid, level, mrx, mry, mrz);
+            final RegionFragments rfM = grid.fragmentRecord(level, mrx, mry, mrz);
+            final int oppF = RegionAddress.opposite(f);
+            final int packedA = uniformN ? RegionFragments.NO_FACE : rfN.footprint(sFrag, f);
+            footprintCenterWorld(level, minY, sx, sy, sz, f, packedA, wa);
+            if (isUniformNode(rfM)) {
+                final String disp;
+                if (!canBreak && rfM != null && rfM.kind() == RegionFragments.KIND_SOLID) {
+                    disp = "solid-neighbor"; // uniform rock a no-break bot cannot enter (the relax-loop gate)
+                } else if (!canPlace && rfM != null && rfM.kind() == RegionFragments.KIND_AIR && f != 2) {
+                    disp = "caps-gated";     // no-place bot cannot enter open air except by falling (−Y)
+                } else {
+                    disp = dispositionOf(fromKey, mrx, mry, mrz, 0, blacklist, tube);
+                }
+                appendEdge(sb, mrx, mry, mrz, 0, disp);
+                continue;
+            }
+            boolean emitted = false;
+            int bestFrag = -1;
+            long bestDist = Long.MAX_VALUE;
+            final int countM = rfM.fragmentCount();
+            for (int fb = 0; fb < countM; fb++) {
+                if (!rfM.touchesFace(fb, oppF)) continue;
+                final int packedB = rfM.footprint(fb, oppF);
+                footprintCenterWorld(level, minY, mrx, mry, mrz, oppF, packedB, wb);
+                if (footprintsOverlap(packedA, packedB)) {
+                    appendEdge(sb, mrx, mry, mrz, fb,
+                            dispositionOf(fromKey, mrx, mry, mrz, fb, blacklist, tube));
+                    emitted = true;
+                } else {
+                    appendEdge(sb, mrx, mry, mrz, fb, "no-footprint-overlap");
+                    final long d = Math.abs(wb[0] - wa[0]) + Math.abs(wb[1] - wa[1])
+                            + Math.abs(wb[2] - wa[2]);
+                    if (d < bestDist) { bestDist = d; bestFrag = fb; }
+                }
+            }
+            if (!emitted && canBreak) {
+                // The search would substitute a mine edge (nearest touching fragment, else fragment 0) —
+                // surface its disposition too, tagged so the row is distinguishable from a portal edge.
+                if (bestFrag != -1) {
+                    appendEdge(sb, mrx, mry, mrz, bestFrag, "mine-fallback:"
+                            + dispositionOf(fromKey, mrx, mry, mrz, bestFrag, blacklist, tube));
+                } else {
+                    appendEdge(sb, mrx, mry, mrz, 0, "mine-solid:"
+                            + dispositionOf(fromKey, mrx, mry, mrz, 0, blacklist, tube));
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    /** One post-mortem edge row: {@code  (rx,ry,rz:f<frag>)=<disposition>}. */
+    private static void appendEdge(StringBuilder sb, int rx, int ry, int rz, int frag, String disp) {
+        sb.append(" (").append(rx).append(',').append(ry).append(',').append(rz)
+                .append(":f").append(frag).append(")=").append(disp);
+    }
+
+    /** The relax loop's admission predicates, re-applied cold in {@link #relaxFrag}'s exact order:
+     *  tube rejection first, then the physical-key blacklist probe; an edge passing both was offered to the
+     *  failed search ({@code OK-but-unexpanded} — the drain happened beyond the start node). */
+    private static String dispositionOf(long fromKey, int mrx, int mry, int mrz, int mFrag,
+                                        RegionEdgeBlacklist blacklist, RegionTube tube) {
+        if (tube != null && !tube.contains(mrx, mry, mrz)) return "tube-rejected";
+        if (blacklist != null && blacklist.contains(fromKey, fragmentKey(mrx, mry, mrz, mFrag))) {
+            return "blacklisted";
+        }
+        return "OK-but-unexpanded";
     }
 
     // ---------------------------------------------------------------------------------------------------

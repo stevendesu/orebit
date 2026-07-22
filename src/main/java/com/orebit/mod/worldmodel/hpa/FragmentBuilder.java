@@ -24,8 +24,9 @@ import java.util.Arrays;
  * <h2>Algorithm (HPA-FRAGMENTS.md §3)</h2>
  * <ol>
  *   <li><b>Uniform fast-paths.</b> {@code passCount == 0} ⇒ {@link RegionFragments#KIND_SOLID};
- *       {@code standCount == 0} (no floor) ⇒ {@link RegionFragments#KIND_WATER} (mostly water) or
- *       {@link RegionFragments#KIND_AIR}. These fold in {@link LeafCostComputer}'s existing all-solid /
+ *       {@code standCount == 0} (no floor) ⇒ {@link RegionFragments#KIND_AIR} (provably dry:
+ *       {@code waterCount == 0}) or {@link RegionFragments#KIND_WATER} (ANY water present — see the body
+ *       comment: AIR is a capability gate's proof obligation). These fold in {@link LeafCostComputer}'s existing all-solid /
  *       all-air / all-water shortcuts and store no fragments.</li>
  *   <li><b>Flood fill</b> (BFS) the passable cells, 6-connected → raw components (beats union-find ~2.2× on
  *       the common large-component case — HPA-FRAGMENTS.md §4).</li>
@@ -101,8 +102,16 @@ public final class FragmentBuilder {
             return;
         }
         if (standCount == 0) {                        // no floor → floorless air or water column
-            boolean water = waterCount * 2 >= passCount;
-            out.setKind(water ? RegionFragments.KIND_WATER : RegionFragments.KIND_AIR);
+            // KIND_AIR is a capability gate's PROOF OBLIGATION — the region tier's no-place gate
+            // (RegionPathfinder's relax loop) drops lateral/upward entry into a uniform-AIR region on the
+            // claim "provably nothing swimmable here". With ANY water present that claim is false: the old
+            // majority vote labeled a surface leaf that is mostly air over a sliver of ocean KIND_AIR, and
+            // the gate then refused transit through genuinely swimmable cells — a coarse-graph FALSE
+            // DISCONNECTION, which never converges (the block tier can invalidate an optimistic edge online,
+            // but a pessimistically-missing edge is never rediscovered). So: AIR only when waterCount == 0;
+            // any water ⇒ KIND_WATER. Over-classifying toward WATER errs toward optimism — the system's
+            // safe direction — and the cost error is bounded (a mostly-air leaf gets swim-priced transit).
+            out.setKind(waterCount == 0 ? RegionFragments.KIND_AIR : RegionFragments.KIND_WATER);
             return;
         }
 

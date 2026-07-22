@@ -19,8 +19,10 @@ import java.util.Arrays;
  * A region with no occupiable fragment is one of three uniform kinds (no fragment records):
  * <ul>
  *   <li>{@link #KIND_SOLID} — mine straight through (cost from {@link #avgSolidHardness}).</li>
- *   <li>{@link #KIND_AIR} — floorless: a one-way down chute (fall in/out cheap, pillar up dear).</li>
- *   <li>{@link #KIND_WATER} — symmetric swim.</li>
+ *   <li>{@link #KIND_AIR} — floorless AND provably dry (zero water cells): a one-way down chute (fall
+ *       in/out cheap, pillar up dear). Capability gates may rely on "nothing swimmable here".</li>
+ *   <li>{@link #KIND_WATER} — floorless with ANY water: symmetric swim (over-classified toward WATER on a
+ *       mostly-air leaf — optimism is the safe direction; see {@link FragmentBuilder#build}).</li>
  * </ul>
  * {@link #KIND_MIXED} is the only kind that carries fragment records. A MIXED region with
  * {@link #fragmentCount()}{@code == 0} is a <b>collapsed / uniform-mass</b> region: either occupiability
@@ -57,9 +59,9 @@ public final class RegionFragments {
     public static final int KIND_MIXED = 0;
     /** Fully solid — mine straight through; no fragments. */
     public static final int KIND_SOLID = 1;
-    /** Floorless air column — one-way down chute; no fragments. */
+    /** Floorless, provably DRY air column — one-way down chute; no fragments. */
     public static final int KIND_AIR = 2;
-    /** Flooded — symmetric swim; no fragments. */
+    /** Floorless with ANY water — symmetric swim; no fragments. */
     public static final int KIND_WATER = 3;
 
     /** Hard cap on fragments per region — a 6-bit id (HPA-FRAGMENTS.md §3, §5). Over-cap ⇒ collapse. */

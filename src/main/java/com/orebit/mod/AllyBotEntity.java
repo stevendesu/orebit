@@ -202,6 +202,25 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         return navigator.statsReport();
     }
 
+    // ---- Read-only gather observation (HeadlessAutotest only; NO logic change) ------------------
+    // Delegate to the gatherer's read-only seams so the headless gather autotest can report the phase
+    // reached and the accrued count without reaching into private component state.
+
+    /** Current {@link BotGatherer} phase name for the harness ({@code "IDLE"} when not gathering). */
+    String gatherPhaseName() {
+        return gatherer.phaseName();
+    }
+
+    /** Items accrued toward the current gather quota (the picked-up count). */
+    int gatheredCount() {
+        return gatherer.gatheredCount();
+    }
+
+    /** Where the active {@code /bot gather} run was issued — its RETURN target (null before a run). */
+    net.minecraft.core.BlockPos gatherStartPos() {
+        return gatherer.gatherStartPos();
+    }
+
     public void lookAtPlayer(Player player) {
         double dx = player.getX() - this.getX();
         double dy = (player.getEyeY()) - this.getEyeY();
@@ -641,7 +660,10 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                 // what a real goto evaluates — NOT a single unbounded direct-L0 search (which was the old
                 // trace). Each level's per-node flood is captured, level-tagged in the 'E <seq> L<level>' lines,
                 // so the TOP level's flooding (e.g. L1 up-and-over) is greppable: grep '^E .* L1 '.
-                hier = HierarchicalRegionPlan.build(grid, minY, startFloor, goalFloor, caps, mine);
+                // traceInv rides along so the seed-time dominance sig matches the live plan's; a build never
+                // RECORDS into the crossing memory (only onBlocked/blacklistCurrentHop do, which a trace
+                // never drives), so the trace stays a pure diagnostic.
+                hier = HierarchicalRegionPlan.build(grid, minY, startFloor, goalFloor, caps, mine, traceInv);
             } finally {
                 RegionPathfinder.TRACE = false;
                 RegionPathfinder.TRACE_OUT = null;
