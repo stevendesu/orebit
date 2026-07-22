@@ -11,8 +11,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
+import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
+import com.orebit.mod.worldmodel.hpa.RegionCrossingMemory;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 import net.minecraft.core.BlockPos;
 
@@ -153,6 +157,9 @@ public class HierarchicalCascadeTest {
         boolean changed = h.onBotMoved(new BlockPos(8, 4, 8 + 16), false);
         assertTrue(changed, "an off-window step with no plan vouching for it must re-derive the L0 segment");
         assertNotSame(l0Before, h.l0Skeleton(), "the L0 skeleton is re-derived from the deviated cell");
+        // A genuine deviation whose replan SUCCEEDS blames nothing: the tube-escalation path engages only on a
+        // tube-confined failure, so a clean re-derive leaves the crossing memory untouched.
+        assertEquals(0, grid.crossingMemory().total(), "a successful deviation replan records no blame");
     }
 
     @Test
@@ -205,5 +212,123 @@ public class HierarchicalCascadeTest {
         boolean sameHop = after.rx(1) == l0.rx(1) && after.ry(1) == l0.ry(1) && after.rz(1) == l0.rz(1)
                 && after.fragmentId(1) == l0.fragmentId(1);
         assertTrue(!sameHop, "the repaired route avoids the blacklisted first hop");
+    }
+
+    // ===================================================================================================
+    // #5 crossing-memory record sites (DESIGN-persisted-invalidation-memory.md §3): the recorded sig is the
+    // EFFECTIVE sig of the searches the plan runs (its per-replan inventory snapshot), and a null-inventory
+    // plan (headless / trace / tests) never records at all.
+    // ===================================================================================================
+
+    /** The first L0 hop of the plan's skeleton, as the {@code (fromKey, toKey)} pair onBlocked takes. */
+    private static long[] firstHopKeys(HierarchicalRegionPlan h) {
+        return hopKeys(h, 0);
+    }
+
+    /** L0 hop {@code i → i+1} of the plan's skeleton, as the {@code (fromKey, toKey)} pair onBlocked takes. */
+    private static long[] hopKeys(HierarchicalRegionPlan h, int i) {
+        RegionPathPlan l0 = h.l0Skeleton();
+        assertTrue(l0.size() > i + 1);
+        return new long[] {
+                RegionPathfinder.fragmentNodeKey(l0.rx(i), l0.ry(i), l0.rz(i), l0.fragmentId(i)),
+                RegionPathfinder.fragmentNodeKey(l0.rx(i + 1), l0.ry(i + 1), l0.rz(i + 1), l0.fragmentId(i + 1)) };
+    }
+
+    /** The FIX-2 inventory: skews the effective sig vs the raw caps (consuming placement with zero carried
+     *  blocks clears the effective-place bit; an iron pickaxe sets the tier field), so recording is
+     *  observable AND {@code recordToMemory} is true. */
+    private static MovementContext.InventoryView sigSkewInventory() {
+        int[] tiers = new int[NavBlock.Tool.values().length];
+        tiers[NavBlock.Tool.PICKAXE.ordinal()] = MiningModel.Tier.IRON.ordinal();
+        return new MovementContext.InventoryView(
+                MiningModel.snapshot(tiers, 255, true), true, 0, 0f, 0f, 0f);
+    }
+
+    @Test
+    void onBlocked_recordsEffectiveSigOfSearchInventory_notCapsOnly() {
+        // The record-skew fix: the remembered sig must be what the plan's searches actually proved under,
+        // not the caps-only tag. Blame a DEEPER hop (1 → 2, FROM != the bot's start region) so the row is
+        // eligible for recording under the start-region journey scoping (a start-region blame is
+        // component-scoped and deliberately never recorded — see the dedicated test below).
+        MovementContext.InventoryView inv = sigSkewInventory();
+
+        BlockPos bot = new BlockPos(8, 4, 8);
+        HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, 0, bot, farGoalX(), CAPS,
+                RegionMineModel.DEFAULT, inv);
+        long[] hop = hopKeys(h, 1);
+        assertTrue(h.onBlocked(hop[0], hop[1], bot));
+
+        assertEquals(1, grid.crossingMemory().total(),
+                "one BLOCKED on a deeper hop (FROM != start region) = one remembered crossing, as before");
+        long recorded = grid.crossingMemory().sigAt(0, 0);
+        assertEquals(CAPS.realizabilitySig(inv), recorded, "the recorded sig is the failing search's effective sig");
+        assertTrue(recorded != CAPS.realizabilitySig(),
+                "this inventory must actually skew the sig, or the test proves nothing");
+    }
+
+    @Test
+    void onBlocked_startRegionHop_blacklistedButNotRecorded() {
+        // Start-region journey scoping: a blame whose FROM region is the failing search's OWN start region
+        // is proven only for the caps-connected component the bot stands in (the ravine problem — the
+        // optimistic fragment can span pockets the caps disconnect). It must still repair THIS plan
+        // (blacklists[0].add → the reroute avoids the hop) but must NOT become world knowledge (no
+        // crossingMemory.record, no roll-up fold, no cross-plan seeding). Uses a recording-capable plan
+        // (real InventoryView) so the skip is the scoping rule, not the null-inv §3.3 rule.
+        BlockPos bot = new BlockPos(8, 4, 8);
+        HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, 0, bot, farGoalX(), CAPS,
+                RegionMineModel.DEFAULT, sigSkewInventory());
+        RegionPathPlan l0 = h.l0Skeleton();
+        long[] hop = firstHopKeys(h); // hop 0 → 1: FROM is the bot's (= the sync search start's) region
+
+        assertTrue(h.onBlocked(hop[0], hop[1], bot), "the journey-scoped repair still reroutes");
+        RegionPathPlan after = h.l0Skeleton();
+        assertNotNull(after);
+        boolean sameHop = after.size() > 1 && after.rx(1) == l0.rx(1) && after.ry(1) == l0.ry(1)
+                && after.rz(1) == l0.rz(1) && after.fragmentId(1) == l0.fragmentId(1);
+        assertFalse(sameHop, "the per-plan blacklist still applies — the reroute avoids the blamed hop");
+        assertEquals(0, grid.crossingMemory().total(),
+                "a start-region blame is component-scoped — never recorded to the crossing memory");
+    }
+
+    @Test
+    void onBlocked_nullInventory_neverRecordsToMemory() {
+        // A caps-only plan (headless / trace / tests — no InventoryView): its placement/mining assumptions
+        // (infinite blocks + bare-hand pricing) are incoherent as a proof hypothesis, so its BLOCKEDs repair
+        // the plan's own blacklists but never become world knowledge.
+        BlockPos bot = new BlockPos(8, 4, 8);
+        HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, 0, bot, farGoalX(), CAPS);
+        long[] hop = firstHopKeys(h);
+        assertTrue(h.onBlocked(hop[0], hop[1], bot), "the repair itself still reroutes as before");
+        assertEquals(0, grid.crossingMemory().total(), "a null-inv plan must not record to the crossing memory");
+    }
+
+    @Test
+    void build_seedsFromMemoryByEffectiveSigDominance() {
+        // A crossing recorded under the caps-only sig (BARE tiers, raw place bit) binds a later plan whose
+        // effective sig carries MORE capability? No — dominance runs recorder ≥ me, so it binds only bots the
+        // recorder dominates: the bare-hand seed applies, the diamond-pick bot ignores it.
+        BlockPos bot = new BlockPos(8, 4, 8);
+        HierarchicalRegionPlan probe = HierarchicalRegionPlan.build(grid, 0, bot, farGoalX(), CAPS);
+        long[] hop = firstHopKeys(probe);
+        grid.crossingMemory().record(0, hop[0], hop[1], CAPS.realizabilitySig(), RegionCrossingMemory.PROV_PROOF, BotCaps::sigDominates);
+
+        // Same-sig bot (null inv → the identical caps-only sig): the seeded blacklist applies and the fresh
+        // plan's first hop differs from the remembered dead one.
+        HierarchicalRegionPlan seeded = HierarchicalRegionPlan.build(grid, 0, bot, farGoalX(), CAPS);
+        long[] seededHop = firstHopKeys(seeded);
+        assertTrue(seededHop[0] != hop[0] || seededHop[1] != hop[1],
+                "an equal-sig plan must be seeded away from the remembered dead crossing");
+
+        // A strictly more capable bot (diamond pick in an otherwise identical setup) is NOT dominated by the
+        // bare-hand recorder and rightly ignores the negative: its first hop is the direct one again.
+        int[] tiers = new int[NavBlock.Tool.values().length];
+        tiers[NavBlock.Tool.PICKAXE.ordinal()] = MiningModel.Tier.DIAMOND.ordinal();
+        MovementContext.InventoryView diamond = new MovementContext.InventoryView(
+                MiningModel.snapshot(tiers, 255, true), false, 0, 0f, 0f, 0f);
+        HierarchicalRegionPlan stronger = HierarchicalRegionPlan.build(grid, 0, bot, farGoalX(), CAPS,
+                RegionMineModel.DEFAULT, diamond);
+        long[] strongerHop = firstHopKeys(stronger);
+        assertEquals(hop[0], strongerHop[0]);
+        assertEquals(hop[1], strongerHop[1]);
     }
 }

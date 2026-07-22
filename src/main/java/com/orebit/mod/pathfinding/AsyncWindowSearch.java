@@ -67,6 +67,7 @@ final class AsyncWindowSearch {
     private int resultExpansions;
     private boolean resultBudgetHit;
     private long[] resultRealized;
+    private BlockPos resultStart;
 
     private final PlanExecutor executor;
 
@@ -141,6 +142,7 @@ final class AsyncWindowSearch {
         resultExpansions = done.expansions();
         resultBudgetHit = done.wasBudgetHit();
         resultRealized = done.realizedCrossings();
+        resultStart = from; // the floor the failed/successful search actually ran FROM (blame-walk input)
         return Drain.RESULT;
     }
 
@@ -166,6 +168,7 @@ final class AsyncWindowSearch {
         resultExpansions = Integer.MAX_VALUE; // a parked plan is never null — expansions are irrelevant
         resultBudgetHit = false; // a parked (adopted precompute) plan is a real path, not a cap-bound result
         resultRealized = null;   // never null-plan ⇒ never BLOCKED ⇒ no blame input
+        resultStart = parkedStart;
         parkedPlan = null;
         return true;
     }
@@ -197,6 +200,12 @@ final class AsyncWindowSearch {
      *  input, carried from the worker's failed search); {@code null} when the plan is non-null. */
     long[] resultRealized() {
         return resultRealized;
+    }
+
+    /** The floor cell the drained/adopted search ran FROM ({@link SearchRequest}'s start) — paired with
+     *  {@link #resultPlan()}; the blame walk's start-region input on a {@code null} plan. */
+    BlockPos resultStart() {
+        return resultStart;
     }
 
     /** Whether an unfinished search toward {@code target} is already in flight (skip-resubmit guard). */

@@ -20,9 +20,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import com.orebit.mod.Debug;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.config.ConfigLoader;
+import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.platform.DimensionId;
 import com.orebit.mod.worldmodel.hpa.CostPyramid;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
+import com.orebit.mod.worldmodel.hpa.RegionCrossingMemory;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import com.orebit.mod.worldmodel.hpa.RegionShardResidency;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
@@ -221,10 +223,15 @@ public final class RegionPersistence {
         return out;
     }
 
-    /** Decode one cost file (shard or coarse) DIRECTLY into the grid's cost pyramid — no coarse re-merge. */
+    /**
+     * Decode one cost file (shard or coarse) DIRECTLY into the grid's cost pyramid — no coarse re-merge — and
+     * merge its trailing invalidation section into the dimension's {@link RegionCrossingMemory} (#5 Stage 3).
+     * The dominance order is supplied HERE ({@code BotCaps::sigDominates}) so neither the store nor the codec
+     * ever imports pathfinding — the same consumer-supplies-the-order pattern as the Phase-1 record sites.
+     */
     private static void loadCostFile(RegionGrid grid, Path file) {
         try (InputStream in = Files.newInputStream(file)) {
-            CostPyramidCodec.decode(in, grid.pyramid());
+            CostPyramidCodec.decode(in, grid.pyramid(), null, grid.crossingMemory(), BotCaps::sigDominates);
         } catch (Throwable t) {
             onLoadFailure(file, t);
         }
@@ -284,13 +291,15 @@ public final class RegionPersistence {
 
         final CostPyramid cp = grid.pyramid();
         final ResourcePyramid rp = grid.resourcePyramid();
+        final RegionCrossingMemory mem = grid.crossingMemory();
 
-        // Cost shard files — one per shard that holds a built level-0..5 cost row.
+        // Cost shard files — one per shard that holds a built level-0..5 cost row. Each carries its
+        // invalidation section (the shard's FROM-assigned crossing rows, levels 0..5).
         for (long key : enumerateCostShards(cp)) {
             if (onlyShards != null && !onlyShards.contains(key)) continue;
             final int sx = shardX(key), sz = shardZ(key);
             writeAtomic(dir.resolve("hpa." + sx + "." + sz + ".bin"),
-                    out -> CostPyramidCodec.encodeShard(cp, sx, sz, out));
+                    out -> CostPyramidCodec.encodeShard(cp, sx, sz, mem, out));
         }
         // Resource shard files — one per shard that holds a built level-0..5 resource tally.
         for (long key : enumerateResourceShards(rp)) {
@@ -300,10 +309,10 @@ public final class RegionPersistence {
                     out -> ResourcePyramidCodec.encodeShard(rp, sx, sz, out));
         }
 
-        // Per-dimension coarse files.
+        // Per-dimension coarse files (the cost coarse file carries the level-6 invalidation rows).
         if (writeCoarse) {
             if (hasBuiltCostLevel(cp, RegionAddress.MAX_COARSE_LEVEL)) {
-                writeAtomic(dir.resolve(COST_COARSE_FILE), out -> CostPyramidCodec.encodeCoarse(cp, out));
+                writeAtomic(dir.resolve(COST_COARSE_FILE), out -> CostPyramidCodec.encodeCoarse(cp, mem, out));
             }
             if (hasBuiltResourceCoarse(rp)) {
                 writeAtomic(dir.resolve(RESOURCE_COARSE_FILE), out -> ResourcePyramidCodec.encodeCoarse(rp, out));
@@ -422,6 +431,24 @@ public final class RegionPersistence {
     }
 
     /**
+     * Mark shard {@code (shardX, shardZ)} dirty by its SHARD coordinates directly (no coarse mark). The
+     * invalidation-expiry seam ({@code HpaMaintenance}): an evicted crossing row's FROM shard may be a
+     * <i>neighbouring</i> shard of the rebuilt leaf (a TO-side straddle match), which {@link #markDirty}'s
+     * chunk-based addressing can't name — re-flushing that shard regenerates its invalidation section from the
+     * (now row-less) memory, persisting the deletion wholesale with no file surgery. Tick-thread, cheap,
+     * idempotent.
+     */
+    public static void markShardDirty(ServerLevel level, int shardX, int shardZ) {
+        DIRTY_SHARDS.computeIfAbsent(level, l -> ConcurrentHashMap.newKeySet()).add(shardKey(shardX, shardZ));
+    }
+
+    /** Mark only the dimension's coarse files dirty — the level-6 invalidation rows ride
+     *  {@code hpa.coarse.bin}, so evicting one re-flushes the coarse files without touching any shard. */
+    public static void markCoarseDirty(ServerLevel level) {
+        COARSE_DIRTY.add(level);
+    }
+
+    /**
      * The periodic-flush driver, wired off {@code onWorldTickEnd} — <b>interval-triggered, then a budgeted
      * resuming drain</b>. Every {@code hpa.persistIntervalTicks} ticks for a level the flush pass BEGINS; from
      * then on each tick writes as many dirty shards as fit the per-tick {@code hpa.persistFlushBudgetMs}
@@ -503,6 +530,7 @@ public final class RegionPersistence {
         final long start = System.nanoTime();
         final CostPyramid cp = grid.pyramid();
         final ResourcePyramid rp = grid.resourcePyramid();
+        final RegionCrossingMemory mem = grid.crossingMemory();
 
         int wrote = 0;
         long shardEncNanos = 0L;
@@ -527,7 +555,7 @@ public final class RegionPersistence {
                 final CostPyramidCodec.ShardColumns cb = CostPyramidCodec.bucketShard(cp, key);
                 if (cb != null) {
                     ok &= writeAtomic(dir.resolve("hpa." + sx + "." + sz + ".bin"),
-                            out -> CostPyramidCodec.encodeShardBucket(cb, out));
+                            out -> CostPyramidCodec.encodeShardBucket(cb, sx, sz, mem, out));
                 }
                 final ResourcePyramidCodec.ShardRows rb = ResourcePyramidCodec.bucketShard(rp, key);
                 if (rb != null) {
@@ -552,7 +580,7 @@ public final class RegionPersistence {
             final long cStart = System.nanoTime();
             boolean ok = true;
             if (hasBuiltCostLevel(cp, RegionAddress.MAX_COARSE_LEVEL)) {
-                ok &= writeAtomic(dir.resolve(COST_COARSE_FILE), out -> CostPyramidCodec.encodeCoarse(cp, out));
+                ok &= writeAtomic(dir.resolve(COST_COARSE_FILE), out -> CostPyramidCodec.encodeCoarse(cp, mem, out));
             }
             if (hasBuiltResourceCoarse(rp)) {
                 ok &= writeAtomic(dir.resolve(RESOURCE_COARSE_FILE), out -> ResourcePyramidCodec.encodeCoarse(rp, out));

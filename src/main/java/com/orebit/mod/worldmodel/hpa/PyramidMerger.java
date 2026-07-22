@@ -69,8 +69,9 @@ public final class PyramidMerger {
         return 2;
     }
 
-    /** Max fragment items in one merge = childCount × cap (8 × 63), rounded up — the union-find universe. */
-    private static final int MAX_ITEMS = 8 * RegionFragments.MAX_FRAGMENTS + 8; // 512
+    /** Max fragment items in one merge = childCount × cap (8 × 63), rounded up — the union-find universe.
+     *  Package-private: {@link InvalidationRollup} sizes its containment scratch to the same universe. */
+    static final int MAX_ITEMS = 8 * RegionFragments.MAX_FRAGMENTS + 8; // 512
 
     // Reusable per-merge scratch (one merge is single-threaded; reset at the top of combineFragments).
     private static final ThreadLocal<int[]> ITEM_SLOT = ThreadLocal.withInitial(() -> new int[MAX_ITEMS]);
@@ -85,10 +86,11 @@ public final class PyramidMerger {
     private static final ThreadLocal<int[]> ACC_MAXV = ThreadLocal.withInitial(() -> new int[RegionFragments.MAX_FRAGMENTS * 6]);
     private static final ThreadLocal<int[]> PACKED    = ThreadLocal.withInitial(() -> new int[6]);
 
-    /** The +face for an internal split axis: X(0)→+X(1), Z(1)→+Z(5), Y(2)→+Y(3). */
-    private static int plusFace(int axis) { return axis == 0 ? 1 : (axis == 1 ? 5 : 3); }
+    /** The +face for an internal split axis: X(0)→+X(1), Z(1)→+Z(5), Y(2)→+Y(3). Package-private:
+     *  {@link InvalidationRollup} re-derives the same union-find, so it must use the same face mapping. */
+    static int plusFace(int axis) { return axis == 0 ? 1 : (axis == 1 ? 5 : 3); }
     /** The −face for an internal split axis: X(0)→−X(0), Z(1)→−Z(4), Y(2)→−Y(2). */
-    private static int minusFace(int axis) { return axis == 0 ? 0 : (axis == 1 ? 4 : 2); }
+    static int minusFace(int axis) { return axis == 0 ? 0 : (axis == 1 ? 4 : 2); }
 
     // ---------------------------------------------------------------------------------------------------
     // Fragment drivers (the fragment model is the only model — the center mergeUp/mergeLevel and the
@@ -454,8 +456,9 @@ public final class PyramidMerger {
         return n + 1;
     }
 
-    /** Whether child slot (bitX,bitY,bitZ) is flush with parent outer {@code face} (its quadrant on that face). */
-    private static boolean childFlushWithParentFace(int face, int bitX, int bitY, int bitZ, int children) {
+    /** Whether child slot (bitX,bitY,bitZ) is flush with parent outer {@code face} (its quadrant on that face).
+     *  Package-private: {@link InvalidationRollup} enumerates a parent crossing's constituents with it. */
+    static boolean childFlushWithParentFace(int face, int bitX, int bitY, int bitZ, int children) {
         switch (face) {
             case 0: return bitX == 0;                       // -X
             case 1: return bitX == 1;                       // +X
@@ -509,8 +512,9 @@ public final class PyramidMerger {
         return bit * 8 + (childBucket >> 1);               // 16 child buckets → 8 parent buckets at the offset
     }
 
-    /** Footprint overlap on both in-face axes (a {@link RegionFragments#NO_FACE} ⇒ a full 0..15 face). */
-    private static boolean overlap(int a, int b) {
+    /** Footprint overlap on both in-face axes (a {@link RegionFragments#NO_FACE} ⇒ a full 0..15 face).
+     *  Package-private: the same predicate decides crossing validity in {@link InvalidationRollup}. */
+    static boolean overlap(int a, int b) {
         int minUA, maxUA, minVA, maxVA, minUB, maxUB, minVB, maxVB;
         if (a == RegionFragments.NO_FACE) { minUA = 0; maxUA = 15; minVA = 0; maxVA = 15; }
         else { minUA = RegionFragments.footprintMinU(a); maxUA = RegionFragments.footprintMaxU(a);
@@ -522,12 +526,12 @@ public final class PyramidMerger {
                 && Math.max(minVA, minVB) <= Math.min(maxVA, maxVB);
     }
 
-    private static int find(int[] uf, int x) {
+    static int find(int[] uf, int x) {
         while (uf[x] != x) { uf[x] = uf[uf[x]]; x = uf[x]; }
         return x;
     }
 
-    private static void union(int[] uf, int a, int b) {
+    static void union(int[] uf, int a, int b) {
         int ra = find(uf, a), rb = find(uf, b);
         if (ra != rb) uf[ra] = rb;
     }

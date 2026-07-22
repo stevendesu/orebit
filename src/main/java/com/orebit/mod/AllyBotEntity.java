@@ -660,7 +660,10 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                 // what a real goto evaluates — NOT a single unbounded direct-L0 search (which was the old
                 // trace). Each level's per-node flood is captured, level-tagged in the 'E <seq> L<level>' lines,
                 // so the TOP level's flooding (e.g. L1 up-and-over) is greppable: grep '^E .* L1 '.
-                hier = HierarchicalRegionPlan.build(grid, minY, startFloor, goalFloor, caps, mine);
+                // traceInv rides along so the seed-time dominance sig matches the live plan's; a build never
+                // RECORDS into the crossing memory (only onBlocked/blacklistCurrentHop do, which a trace
+                // never drives), so the trace stays a pure diagnostic.
+                hier = HierarchicalRegionPlan.build(grid, minY, startFloor, goalFloor, caps, mine, traceInv);
             } finally {
                 RegionPathfinder.TRACE = false;
                 RegionPathfinder.TRACE_OUT = null;

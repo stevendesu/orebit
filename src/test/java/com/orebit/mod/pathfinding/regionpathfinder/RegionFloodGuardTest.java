@@ -113,15 +113,17 @@ public class RegionFloodGuardTest {
         assertTrue(h.topLevel() > capSafe, "the cascade must ESCALATE past the cap-safe top on the flood");
 
         // NOTE — what this test does NOT assert, and why. This is a NO-BREAK bot facing a thin wall that dilutes
-        // into passable MIXED regions when rolled up, so the coarse level routes THROUGH it (a walkable go-around
-        // exists at the fine level but the coarse abstraction doesn't see the wall as a barrier). The region tier
-        // ends up reporting FAILED. This is NOT the flood fix — it is a coarse-abstraction + capability interaction
-        // (the collapsed-MIXED transit cost includes a dig term regardless of canBreak — RegionPathfinder
-        // uniformTransitCost KIND_MIXED — so a no-break bot is offered a dig-dependent route through a rolled-up
-        // wall). The end-to-end flood→escalate→REACH for a real (digging) bot is validated by the live bare-handed
-        // repro, whose region cascade reaches the goal region (top=L2). Fix 3b (a lower-level tube) was prototyped
-        // for the escalation-bounding but reverted (~20% region-tier cost on the shared relax path, and it is not a
-        // correctness requirement — §3a handles the real flood). So this test asserts the guard + escalation only.
+        // into passable MIXED regions when rolled up, so the coarse level may route THROUGH it (a walkable
+        // go-around exists at the fine level but the coarse abstraction doesn't see the wall as a barrier) — a
+        // coarse-abstraction + capability interaction (the collapsed-MIXED transit cost includes a dig term
+        // regardless of canBreak — RegionPathfinder uniformTransitCost KIND_MIXED). Historically the tubed L0
+        // refinement of such a through-the-wall corridor drained and the cascade FALSE-FAILED here; since the
+        // tube-drain escalation fix (rederiveWithTubeEscalation + blameTubeConfined) a tubed drain instead
+        // blames the parent crossing and re-plans, so the cascade MAY now route this fixture end-to-end (see
+        // RegionTubeEscalationTest, which asserts exactly that on this geometry). This test deliberately keeps
+        // asserting only the two robust flood facts — the §3a guard fires and the top escalates — independent
+        // of how far the escalation then gets. Fix 3b (a lower-level tube) was prototyped for the
+        // escalation-bounding but reverted (~20% region-tier cost on the shared relax path).
     }
 
     // ---- seed helpers (real FragmentBuilder flood) --------------------------------------------------------

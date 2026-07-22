@@ -431,6 +431,25 @@ public final class HpaMaintenance {
         // re-enqueues it). Ascending packed-key order makes the drain SEQUENCE a deterministic function of the
         // set's contents, independent of enqueue/iteration order (see the "Deterministic drain" class note).
         if (haveCost) {
+            // #5 invalidation expiry (DESIGN-persisted-invalidation-memory.md §4): a rebuilt leaf's nav content
+            // changed, so every remembered dead crossing touching it (FROM or TO, at every level whose cell
+            // contains it) is no longer a proven theorem — stale NEGATIVES are the poison, re-learning is cheap.
+            // Each evicted row's FROM shard is re-marked dirty so the deletion persists (rows are FROM-sharded;
+            // a TO-side match may live in a NEIGHBOURING shard's file, which the chunk-based markDirty of the
+            // rebuilt leaf can't name — re-flushing that FROM shard regenerates its whole invalidation section
+            // from memory, so no cross-shard file scan is ever needed). Level-6 rows ride the coarse file. The
+            // sink is hoisted out of the drain loop (one small allocation per flush pass — the cold block-change
+            // path, and only when something is actually dirty).
+            final RegionCrossingMemory mem = grid.crossingMemory();
+            final RegionCrossingMemory.EvictSink evictSink = (lvl, fromKey) -> {
+                if (lvl >= RegionAddress.MAX_COARSE_LEVEL) {
+                    RegionPersistence.markCoarseDirty(level);
+                } else {
+                    RegionPersistence.markShardDirty(level,
+                            RegionAddress.shardOf(RegionAddress.unpackRX(fromKey), lvl),
+                            RegionAddress.shardOf(RegionAddress.unpackRZ(fromKey), lvl));
+                }
+            };
             Long boxed;
             while (processed < MAX_LEAVES_PER_TICK && System.nanoTime() - start < budgetNanos
                     && (boxed = dirty.pollFirst()) != null) {
@@ -446,6 +465,10 @@ public final class HpaMaintenance {
                 buildLeafSafe(level, pyramid, rx, ry, rz);
                 // This leaf (rx,rz = chunk coords) + its coarse ancestors changed ⇒ mark its shard dirty (§5.2).
                 RegionPersistence.markDirty(level, rx, rz);
+                // Expire the crossing rows this rebuild invalidates (cheap linear scan; empty-store no-op).
+                if (mem.total() > 0) {
+                    mem.evictLeafTouching(rx, ry, rz, evictSink);
+                }
 
                 processed++;
             }

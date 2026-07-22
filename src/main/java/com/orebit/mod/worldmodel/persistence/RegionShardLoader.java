@@ -6,6 +6,7 @@ import java.nio.file.Path;
 
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.config.ConfigLoader;
+import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import com.orebit.mod.worldmodel.hpa.RegionShardResidency;
 import com.orebit.mod.worldmodel.hpa.StraddleSet;
@@ -103,10 +104,14 @@ public final class RegionShardLoader {
         final StraddleSet resStraddle = new StraddleSet();
 
         // Cost leaves (levels 0..5). A missing file → no cost data for this shard (absent, like the cache semantic).
+        // The trailing invalidation section merges into the dimension's crossing memory (dominance supplied here,
+        // per the load-site rule — BotCaps never leaks into hpa); record()'s antichain makes the merge idempotent
+        // beside rows already learned live this session.
         final Path costFile = dir.resolve("hpa." + sx + "." + sz + ".bin");
         if (Files.isRegularFile(costFile)) {
             try (InputStream in = Files.newInputStream(costFile)) {
-                CostPyramidCodec.decode(in, grid.pyramid(), costStraddle);
+                CostPyramidCodec.decode(in, grid.pyramid(), costStraddle,
+                        grid.crossingMemory(), BotCaps::sigDominates);
             } catch (Throwable t) {
                 onLoadFailure(costFile, t);
             }

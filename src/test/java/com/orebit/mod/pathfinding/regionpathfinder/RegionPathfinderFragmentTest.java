@@ -10,10 +10,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
+import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.worldmodel.hpa.CostPyramid;
 import com.orebit.mod.worldmodel.hpa.FragmentBuilder;
 import com.orebit.mod.worldmodel.hpa.RegionFragments;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 import net.minecraft.core.BlockPos;
 
@@ -278,6 +281,61 @@ public class RegionPathfinderFragmentTest {
         assertTrue(blamed.size() >= 2,
                 "the fixture offers multiple approaches — the repair must have rerouted at least once "
                         + "(got " + blamed.size() + ")");
+    }
+
+    /**
+     * Virtual-goal journey scoping (the cascade's {@code onBlocked} record site): an (approach → V) blame is
+     * blacklisted for THIS plan — the reroute picks another approach, exactly the family above — but is never
+     * recorded to the dimension's {@link com.orebit.mod.worldmodel.hpa.RegionCrossingMemory}: (1) blameHop
+     * condemns V-hops as unrealized-by-definition on BLOCKED (no realized-crossing evidence), and (2) the V key
+     * names only the goal REGION, not the goal cell, so a durable row would poison every later goal there.
+     */
+    @Test
+    void virtualGoal_onBlockedApproach_blacklistedButNeverRecorded() {
+        // The open-portal fixture again: goal in B-low ⇒ the skeleton terminates at the virtual goal V.
+        boolean[] aPass = new boolean[CELLS];
+        boolean[] aStand = new boolean[CELLS];
+        carveTunnelX(aPass, aStand, 0, G - 1, 1);
+        seed(0, 0, 0, aPass, aStand);
+        boolean[] bPass = new boolean[CELLS];
+        boolean[] bStand = new boolean[CELLS];
+        carveTunnelX(bPass, bStand, 0, G - 1, 1);
+        carveTunnelX(bPass, bStand, 0, G - 1, 10);
+        seed(1, 0, 0, bPass, bStand);
+
+        BlockPos start = new BlockPos(8, 1, 8);
+        BlockPos goal = new BlockPos(24, 1, 8);
+        // A RECORDING-CAPABLE plan (real InventoryView — the null-inv §3.3 rule must not be what skips the
+        // record; mirrors HierarchicalCascadeTest.sigSkewInventory).
+        int[] tiers = new int[NavBlock.Tool.values().length];
+        tiers[NavBlock.Tool.PICKAXE.ordinal()] = MiningModel.Tier.IRON.ordinal();
+        MovementContext.InventoryView inv = new MovementContext.InventoryView(
+                MiningModel.snapshot(tiers, 255, true), true, 0, 0f, 0f, 0f);
+        HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, 0, start, goal, BotCaps.DEFAULT,
+                RegionMineModel.DEFAULT, inv);
+        RegionPathPlan l0 = h.l0Skeleton();
+        assertNotNull(l0);
+        int last = l0.size() - 1;
+        assertTrue(RegionPathfinder.isVirtualGoal(l0.fragmentId(last)), "the skeleton must terminate at V");
+        long approach = RegionPathfinder.fragmentNodeKey(l0.rx(last - 1), l0.ry(last - 1),
+                l0.rz(last - 1), l0.fragmentId(last - 1));
+        long vKey = RegionPathfinder.fragmentNodeKey(l0.rx(last), l0.ry(last), l0.rz(last),
+                l0.fragmentId(last));
+
+        // Blame the (approach → V) hop. searchStartFloor is placed in an UNRELATED region so the start-region
+        // journey scoping cannot be what skips the record — the skip must be the virtual-goal rule alone.
+        assertTrue(h.onBlocked(approach, vKey, start, new BlockPos(-200, 1, -200)),
+                "the journey-scoped repair still reroutes to another approach");
+        RegionPathPlan after = h.l0Skeleton();
+        assertNotNull(after);
+        int lastA = after.size() - 1;
+        assertTrue(RegionPathfinder.isVirtualGoal(after.fragmentId(lastA)),
+                "the re-derived skeleton still terminates at V");
+        long approachAfter = RegionPathfinder.fragmentNodeKey(after.rx(lastA - 1), after.ry(lastA - 1),
+                after.rz(lastA - 1), after.fragmentId(lastA - 1));
+        assertTrue(approachAfter != approach, "the reroute must use a DIFFERENT approach into V");
+        assertEquals(0, grid.crossingMemory().total(),
+                "an (approach -> V) blame is journey-scoped — never recorded to the crossing memory");
     }
 
     // ===================================================================================================

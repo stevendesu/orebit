@@ -427,7 +427,9 @@ public final class PathPlan {
         // javadoc). The ctor's replanBlock() below performs the first build on the tick thread, so the first
         // window search already runs with a field.
 
-        this.hier = HierarchicalRegionPlan.build(regionGrid, minY, startFloor, goalFloor, caps, mine);
+        // The inventory snapshot rides along so the cascade's #5 crossing-memory sig is the EFFECTIVE sig of
+        // the searches this plan runs (and so null-inv plans — headless/trace/tests — never record, §3.3).
+        this.hier = HierarchicalRegionPlan.build(regionGrid, minY, startFloor, goalFloor, caps, mine, inventory);
         this.skeleton = hier.l0Skeleton();
         this.windowStart = 0;
         this.committedIndex = 0;
@@ -823,7 +825,7 @@ public final class PathPlan {
         this.lastPlanPartial = blockPlan != null && BlockPathfinder.lastWasPartial();
         this.status = resultStatus(blockPlan, BlockPathfinder.lastExpansions(),
                 BlockPathfinder.lastWasPartial(), BlockPathfinder.lastWasBudgetHit(),
-                blockPlan == null ? BlockPathfinder.lastRealizedCrossings() : null);
+                blockPlan == null ? BlockPathfinder.lastRealizedCrossings() : null, botFloor);
         if (Debug.ENABLED && blockPlan != null) {
             logBlockPlan();
         }
@@ -845,7 +847,7 @@ public final class PathPlan {
      * </ul>
      */
     private PathStatus resultStatus(BlockPathPlan plan, int expansions, boolean partial, boolean budgetHit,
-                                    long[] realized) {
+                                    long[] realized, BlockPos searchStart) {
         // Telemetry (pure observation — the single choke every installed result passes through): record the
         // search's node count, whether it was a best-effort PARTIAL, and whether its node/time cap bound it.
         if (stats != null) stats.onBlockSearch(expansions, partial, budgetHit);
@@ -858,7 +860,12 @@ public final class PathPlan {
             blockedGeneration++;
             // Snapshot the failed search's realized crossings WITH the window geometry it ran under, so
             // repairBlocked (a later tick) blames the search that actually failed, not the live window.
+            // The search's START floor rides along (the from-floor the sync findPath / async SearchRequest
+            // ran from): the blame walk needs the start's skeleton position to skip hops behind it — a
+            // cameFrom walk grows outward from the start, so a crossing INTO the start's own region can
+            // never appear realized (the start-position blind spot).
             blockedRealized = realized;
+            blockedStartFloor = searchStart;
             blockedWindowStart = windowStart;
             blockedTargetStep = windowTargetStep;
         }
@@ -897,8 +904,29 @@ public final class PathPlan {
      *  (a later tick) blames the search that actually failed, not the live window. {@code null} = no realized
      *  data (defensive / legacy positional fallback). */
     private long[] blockedRealized;
+    /** The START floor cell of the search that produced the current BLOCKED result (the sync
+     *  {@code findPath}'s from-floor / the async {@link SearchRequest}'s start), snapshotted in
+     *  {@link #resultStatus} beside {@link #blockedRealized}. The blame walk uses it to skip hops that end
+     *  at-or-before the start's own skeleton position — unrealizable-by-construction (the start-position
+     *  blind spot). {@code null} = unknown (defensive) ⇒ the historical windowStart walk. */
+    private BlockPos blockedStartFloor;
     private int blockedWindowStart;
     private int blockedTargetStep;
+
+    /** Realized region-crossing count of the search behind the current BLOCKED result, or {@code -1} when
+     *  no realized data travelled with it (diagnostic read for the repair log line). */
+    public int blockedRealizedCount() {
+        return blockedRealized == null ? -1 : blockedRealized.length / 2;
+    }
+
+    /** The failing search's start region as {@code (rx,ry,rz)} (minY-rebased level-0 region coords, the
+     *  skeleton convention), or {@code "?"} when unknown — diagnostic read for the repair log line. */
+    public String blockedStartRegionDesc() {
+        if (blockedStartFloor == null) return "?";
+        return "(" + RegionAddress.regionX(blockedStartFloor.getX(), 0) + ","
+                + RegionAddress.regionY(blockedStartFloor.getY(), 0, minY) + ","
+                + RegionAddress.regionZ(blockedStartFloor.getZ(), 0) + ")";
+    }
 
     /** Build this submission's {@link SearchRequest} and hand it to the {@link AsyncWindowSearch mailbox}
      *  (which supersedes any in-flight search and, for a boundary replan, drops the parked pre-plan). */
@@ -954,7 +982,8 @@ public final class PathPlan {
                 this.blockPlan = async.resultPlan();
                 this.lastPlanPartial = blockPlan != null && async.resultPartial();
                 this.status = resultStatus(blockPlan, async.resultExpansions(),
-                        async.resultPartial(), async.resultBudgetHit(), async.resultRealized());
+                        async.resultPartial(), async.resultBudgetHit(), async.resultRealized(),
+                        async.resultStart());
                 if (Debug.ENABLED && blockPlan != null) logBlockPlan();
                 break;
             default: // NONE — nothing finished / pre-plan parked or dropped internally
@@ -966,7 +995,8 @@ public final class PathPlan {
             this.blockPlan = async.resultPlan();
             this.lastPlanPartial = async.resultPartial();
             this.status = resultStatus(blockPlan, async.resultExpansions(),
-                    async.resultPartial(), async.resultBudgetHit(), null); // parked plans are never null
+                    async.resultPartial(), async.resultBudgetHit(), null, // parked plans are never null
+                    async.resultStart());
             if (Debug.ENABLED) logBlockPlan();
         }
     }
@@ -1063,7 +1093,20 @@ public final class PathPlan {
             // No realized data travelled with this BLOCKED result (defensive / legacy): positional.
             return (windowStart + 1 < skeleton.size()) ? windowStart : -1;
         }
-        return blameHop(skeleton, blockedWindowStart, blockedTargetStep, blockedRealized, minY);
+        return blameHop(skeleton, blockedWindowStart, blockedTargetStep, blockedRealized, minY,
+                blockedStartFloor == null ? NO_START_REGION : startRegionRawKey(blockedStartFloor));
+    }
+
+    /** Sentinel for "the failing search's start region is unknown" — the blame walk then keeps the
+     *  historical windowStart behaviour. */
+    static final long NO_START_REGION = Long.MIN_VALUE;
+
+    /** The raw {@code cell>>4} region key of a search-start floor cell — the same key space
+     *  {@link #rawRegionKey} converts skeleton steps into (the realized-set convention), so the blame
+     *  walk's start-region compare happens at region granularity in one key space. */
+    private static long startRegionRawKey(BlockPos floor) {
+        return RegionAddress.packLevelKey(floor.getX() >> RegionAddress.LEAF_BITS,
+                floor.getY() >> RegionAddress.LEAF_BITS, floor.getZ() >> RegionAddress.LEAF_BITS);
     }
 
     /**
@@ -1083,11 +1126,48 @@ public final class PathPlan {
      * crossing's far side elsewhere on the face did not yield a route to its committed portal, so the
      * committed {@code (region, fragment)} hop is unrealizable as routed (and a hop is always blamed, which
      * closes the give-up loop). Returns the blamed hop index, or {@code -1} = no onward hop.
+     *
+     * <p><b>Start-position blind spot (the treadmill fix).</b> {@code startRegionRawKey} is the failing
+     * search's START region (raw {@code cell>>4} key; {@link #NO_START_REGION} = unknown). A block search
+     * that starts inside skeleton region {@code S_k} can never "realize" any hop {@code i → i+1} with
+     * {@code i+1 ≤ k}: {@code collectRealizedCrossings} walks surviving cameFrom edges, which grow OUTWARD
+     * from the start, so a boundary edge INTO the start's own region (or any region behind it on the
+     * skeleton) never survives. Blaming such a hop recorded a PROOF row against a crossing the bot had just
+     * physically walked (the wall-repro treadmill: the valid lateral {@code S0→S1} blamed every cycle while
+     * the truly-unrealizable ascent was never reached). So: find {@code k} = the LAST index in
+     * {@code [windowStart..hi]} whose skeleton region equals the start region and begin the walk at
+     * {@code max(windowStart, k)}; hops ending at-or-before {@code k} are never blamed. {@code k == hi}
+     * (the start region IS the target step's region) ⇒ every window hop ends at-or-before the start —
+     * the failure is intra-region, no crossing is blamable ⇒ {@code -1} (give-up semantics, NOT the
+     * hop-into-target fallback, which would blacklist a crossing behind the bot). An off-skeleton start
+     * (no {@code k}) keeps the historical windowStart walk. The V-hop rule and the all-realized fallback
+     * are unchanged within the (possibly shortened) walk.
      */
     static int blameHop(RegionPathPlan sk, int windowStart, int targetStep, long[] realized, int minY) {
+        return blameHop(sk, windowStart, targetStep, realized, minY, NO_START_REGION);
+    }
+
+    /** See {@link #blameHop(RegionPathPlan, int, int, long[], int)} — this form carries the failing
+     *  search's start-region raw key ({@link #NO_START_REGION} = unknown ⇒ identical behaviour). */
+    static int blameHop(RegionPathPlan sk, int windowStart, int targetStep, long[] realized, int minY,
+                        long startRegionRawKey) {
         final int hi = Math.min(targetStep, sk.size() - 1);
         if (hi <= windowStart) return -1;                       // no onward hop — genuine give-up
-        for (int i = windowStart; i < hi; i++) {
+        int lo = windowStart;
+        if (startRegionRawKey != NO_START_REGION) {
+            // Start-position blind spot: begin at the LAST window step sharing the search-start's region —
+            // hops ending at-or-before it are unrealizable-by-construction (see the javadoc above).
+            for (int i = hi; i >= windowStart; i--) {
+                if (rawRegionKey(sk, i, minY) == startRegionRawKey) {
+                    lo = i;
+                    break;
+                }
+            }
+            if (lo >= hi) {
+                return -1; // the start region IS the target step's region — no onward crossing to blame
+            }
+        }
+        for (int i = lo; i < hi; i++) {
             if (RegionPathfinder.isVirtualGoal(sk.fragmentId(i + 1))) return i;
             final long fromRaw = rawRegionKey(sk, i, minY);
             final boolean sameRegion = sk.rx(i) == sk.rx(i + 1) && sk.ry(i) == sk.ry(i + 1)
@@ -1135,7 +1215,13 @@ public final class PathPlan {
         if (!blockedHop(repairHopScratch)) {
             return false;
         }
-        final boolean rerouted = hier.onBlocked(repairHopScratch[0], repairHopScratch[1], botFloor);
+        // The 4th arg is the HONEST search start — the failing search's snapshotted from-floor
+        // (blockedStartFloor; == botFloor in sync mode, possibly older in async), which scopes the cascade's
+        // #5 record decision: a blame whose FROM region is the search's own start region is proven only for
+        // the caps-connected component the search started in, so it stays in this plan's blacklists and is
+        // never recorded to the dimension's crossing memory. botFloor stays the re-plan origin.
+        final boolean rerouted = hier.onBlocked(repairHopScratch[0], repairHopScratch[1], botFloor,
+                blockedStartFloor != null ? blockedStartFloor : botFloor);
         // Telemetry: the escalation re-planned regions — count a flood if its last region search tripped the
         // guard (pure observation; onBlocked ran on this tick thread, so its lastWasFlood is current).
         if (stats != null && RegionPathfinder.lastWasFlood()) stats.onRegionFlood();
