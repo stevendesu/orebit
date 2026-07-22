@@ -388,16 +388,41 @@ public class FragmentBuilderTest {
         assertEquals(RegionFragments.KIND_SOLID, solid.kind(), "no passable cell ⇒ SOLID");
         assertEquals(0, solid.fragmentCount());
 
-        // All air: passable everywhere, no floor.
+        // All air: passable everywhere, no floor, ZERO water — the only floorless case that may claim AIR.
         boolean[] airPass = new boolean[CELLS];
         boolean[] airStand = new boolean[CELLS];
         for (int i = 0; i < CELLS; i++) airPass[i] = true;
         RegionFragments air = build(airPass, airStand);
-        assertEquals(RegionFragments.KIND_AIR, air.kind(), "passable, no floor, dry ⇒ AIR");
+        assertEquals(RegionFragments.KIND_AIR, air.kind(), "passable, no floor, provably dry ⇒ AIR");
 
-        // All water: passable everywhere, no floor, mostly water — call the builder directly with waterCount.
+        // All water: passable everywhere, no floor, all water — call the builder directly with waterCount.
         RegionFragments water = new RegionFragments();
         FragmentBuilder.build(airPass, airStand, G, CELLS, 0, CELLS, 0, 0, water);
-        assertEquals(RegionFragments.KIND_WATER, water.kind(), "passable, no floor, mostly water ⇒ WATER");
+        assertEquals(RegionFragments.KIND_WATER, water.kind(), "passable, no floor, all water ⇒ WATER");
+    }
+
+    // ===================================================================================================
+    // Floorless air-vs-water is NOT a majority vote: KIND_AIR is a capability gate's proof obligation
+    // ("provably nothing swimmable here" — the no-place lateral/up gate relies on it), so ANY water
+    // forces KIND_WATER. The old `waterCount*2 >= passCount` vote labeled a mostly-air surface leaf with
+    // a sliver of ocean KIND_AIR and false-disconnected no-place routes through swimmable cells.
+    // ===================================================================================================
+    @Test
+    void floorlessAnyWaterIsWater_majorityIrrelevant() {
+        boolean[] airPass = new boolean[CELLS];
+        boolean[] airStand = new boolean[CELLS];
+        for (int i = 0; i < CELLS; i++) airPass[i] = true;
+
+        // One water cell among 4095 air: far below any majority, still WATER.
+        RegionFragments oneWater = new RegionFragments();
+        FragmentBuilder.build(airPass, airStand, G, CELLS, 0, 1, 0, 0, oneWater);
+        assertEquals(RegionFragments.KIND_WATER, oneWater.kind(),
+                "floorless with ANY water (1 in 4095) ⇒ WATER — AIR must be provably dry");
+
+        // Just under the old majority threshold: identical answer (the vote is gone).
+        RegionFragments minority = new RegionFragments();
+        FragmentBuilder.build(airPass, airStand, G, CELLS, 0, CELLS / 2 - 1, 0, 0, minority);
+        assertEquals(RegionFragments.KIND_WATER, minority.kind(),
+                "floorless minority water ⇒ WATER — majority is irrelevant");
     }
 }

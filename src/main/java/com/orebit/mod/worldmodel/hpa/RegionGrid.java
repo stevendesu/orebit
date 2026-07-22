@@ -116,8 +116,9 @@ public final class RegionGrid {
      * The dimension's long-lived memory of forbidden region→region crossings (#5 invalidation memory). Created
      * with the grid; survives every navigation's {@code HierarchicalRegionPlan} boundary so a fresh plan can be
      * SEEDED with the dead crossings already proven, instead of re-discovering them from scratch on each new
-     * goal. Never {@code null}. In-memory only for now (disk persistence into the reserved shard invalidation
-     * section is a later increment).
+     * goal. Never {@code null}. Persisted with the cost tier (the v4 shard/coarse invalidation sections —
+     * {@code CostPyramidCodec}): loads merge into it, flushes encode from it, and {@code HpaMaintenance}'s
+     * block-change flush expires rows whose regions were rebuilt.
      */
     private final RegionCrossingMemory crossingMemory;
     /** Dimension floor, resolved once through the {@link LevelBounds} seam (overworld −64). */

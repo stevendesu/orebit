@@ -185,14 +185,39 @@ public record BotCaps(
 
     // ---- realizability signature (#5 RegionCrossingMemory caps-dominance tag) --------------------------
     //
-    // Packs the caps axes that determine whether a region crossing is PHYSICALLY REALIZABLE into one long, so
-    // a persisted invalidation can be tagged with the caps that failed it and a later bot can decide by
+    // Packs the axes that determine whether a region crossing is PHYSICALLY REALIZABLE into one long, so
+    // a persisted invalidation can be tagged with the conditions that failed it and a later bot can decide by
     // DOMINANCE whether that failure binds it. Deliberately EXCLUDES the search knobs (maxNodes/greedyWeight)
     // and the cost knob (costPerHitpoint — a damage-priced-but-passable hop is still realizable; the
     // realizability boundary is takesDamage + the fall window, not the price). Each field occupies a disjoint
     // bit range, encoded so a LARGER field value == MORE capable: takesDamage is stored INVERTED as an
-    // "invuln" bit (an immune bot is strictly more capable across hazards), and maxBreakHardness is zeroed
-    // when !canBreak so a can't-break bot's stale hardness can't fake extra capability. ~43 bits, one long.
+    // "invuln" bit (an immune bot is strictly more capable across hazards), and maxBreakHardness + the tool
+    // tiers are zeroed when !canBreak so a can't-break bot's stale mining state can't fake extra capability.
+    //
+    // Bit layout (DESIGN-persisted-invalidation-memory.md §3):
+    //   bit  0        canBreak
+    //   bit  1        EFFECTIVE canPlace — caps.canPlace AND, when an InventoryView is supplied with
+    //                 consumesBlocks on, at least one carried placeable block (the search's own placement
+    //                 gate, MovementContext.placeable — existence, not count). Null inv = the raw caps bit.
+    //   bit  2        allowUnbreakable
+    //   bit  3        mayToggleDoors
+    //   bit  4        invuln (= !takesDamage)
+    //   bits 5..12    maxBreakHardness (8 bits, 0..255; zeroed when !canBreak)
+    //   bits 13..16   jumpHeight (4 bits)
+    //   bits 17..29   safeFallDistance (13 bits)
+    //   bits 30..42   maxFallDistance (13 bits)
+    //   bit  43       RESERVED: hasBreath. NOT set, NOT read — a sig bit for an unmodeled constraint would be
+    //                 a false hypothesis on every recorded theorem; claim it only when the search actually
+    //                 models submersion budgets (§2).
+    //   bits 44..61   six 3-bit tool-tier fields, one per real NavBlock.Tool category (ordinals 1..6 =
+    //                 PICKAXE, AXE, SHOVEL, HOE, SWORD, SHEARS; category c at shift 44 + 3·(c−1)). Value =
+    //                 the MiningModel.Snapshot's best carried Tier ordinal for that category (monotone in
+    //                 destroy speed, BARE = 0). NONE (ordinal 0) is deliberately excluded: its tier is inert
+    //                 in the mining formula (a NONE-category block mines at speed 1 for every tier). Zeroed
+    //                 when !canBreak (mirrors the maxBreakHardness zeroing) and when no InventoryView was
+    //                 supplied — a null-inv search prices breaks at bare hand (MiningModel.bareHandTicks),
+    //                 so BARE(0) is exactly faithful there.
+    //   bits 62..63   free
     private static final int  SIG_INVULN         = 4;                              // bit 4 (= !takesDamage)
     private static final long SIG_BOOL_MASK      = 0b11111L;                       // bits 0..4 (the 5 bools)
     private static final int  SIG_MBH_SHIFT      = 5;                              // bits 5..12  (8 bits 0..255)
@@ -203,15 +228,44 @@ public record BotCaps(
     private static final long SIG_SAFEFALL_MASK  = 0x1FFFL << SIG_SAFEFALL_SHIFT;
     private static final int  SIG_MAXFALL_SHIFT  = 30;                             // bits 30..42 (13 bits)
     private static final long SIG_MAXFALL_MASK   = 0x1FFFL << SIG_MAXFALL_SHIFT;
+    // bit 43 RESERVED (hasBreath — see the layout note above; deliberately no constant sets or reads it)
+    private static final int  SIG_TIER_SHIFT      = 44;                            // bits 44..61 (6 × 3 bits)
+    private static final int  SIG_TIER_BITS       = 3;
+    /** Tool categories carried in the sig: {@code NavBlock.Tool} ordinals 1..6 (NONE excluded — inert). */
+    private static final int  SIG_TIER_FIELDS     = 6;
+    private static final long SIG_TIER_FIELD_MASK = 0x7L;
 
     /**
      * Pack the realizability-relevant caps into one long — the caps-dominance tag a {@code RegionCrossingMemory}
-     * (#5) stores with each remembered dead crossing. See the field-layout note above.
+     * (#5) stores with each remembered dead crossing. Caps-only form: equivalent to {@link
+     * #realizabilitySig(MovementContext.InventoryView) realizabilitySig(null)} — raw {@code canPlace}, tool
+     * tiers at BARE — for callers with no inventory model (headless / trace / tests). See the field-layout
+     * note above.
      */
     public long realizabilitySig() {
+        return realizabilitySig(null);
+    }
+
+    /**
+     * The EFFECTIVE realizability signature of one search: these caps under the given per-search {@link
+     * MovementContext.InventoryView} (DESIGN-persisted-invalidation-memory.md §3). The sig must record the
+     * conditions the failing search actually proved under, so two axes come from the inventory:
+     * <ul>
+     *   <li><b>effective place</b> (bit 1): the search's own placement gate ({@link MovementContext#placeable})
+     *       refuses every placement when {@code consumesBlocks} is on and the bot carries no placeable block, so
+     *       the sig's place bit clears in exactly that case;</li>
+     *   <li><b>tool tiers</b> (bits 44..61): the {@link MiningModel.Snapshot}'s best carried tier per real tool
+     *       category — the tiers the search priced every break at.</li>
+     * </ul>
+     * {@code null} inv = the caps-only semantics (raw place bit, BARE tiers — matching the null-inv search's own
+     * bare-hand break pricing). See the field-layout note above for the full bit map.
+     */
+    public long realizabilitySig(MovementContext.InventoryView inv) {
         long s = 0L;
+        // Effective place: the raw capability AND the search's placement-existence gate (see the layout note).
+        boolean effectivePlace = canPlace && !(inv != null && inv.consumesBlocks() && inv.placeableBlocks() <= 0);
         if (canBreak)         s |= 1L << 0;
-        if (canPlace)         s |= 1L << 1;
+        if (effectivePlace)   s |= 1L << 1;
         if (allowUnbreakable) s |= 1L << 2;
         if (mayToggleDoors)   s |= 1L << 3;
         if (!takesDamage)     s |= 1L << SIG_INVULN;
@@ -219,6 +273,13 @@ public record BotCaps(
         s |= clampField(jumpHeight, 0xF)        << SIG_JUMP_SHIFT;
         s |= clampField(safeFallDistance, 0x1FFF) << SIG_SAFEFALL_SHIFT;
         s |= clampField(maxFallDistance, 0x1FFF)  << SIG_MAXFALL_SHIFT;
+        if (canBreak && inv != null && inv.mining() != null) {
+            MiningModel.Snapshot mining = inv.mining();
+            for (int cat = 1; cat <= SIG_TIER_FIELDS; cat++) {
+                s |= clampField(mining.bestTierOrdinal(cat), (int) SIG_TIER_FIELD_MASK)
+                        << (SIG_TIER_SHIFT + (cat - 1) * SIG_TIER_BITS);
+            }
+        }
         return s;
     }
 
@@ -237,9 +298,15 @@ public record BotCaps(
         // every capability bool set in b must also be set in a (else b has a capability a lacks → a ⊉ b)
         if ((b & SIG_BOOL_MASK & ~a) != 0L) return false;
         // each numeric field lives in a disjoint bit range → a masked compare orders that field alone
-        return (a & SIG_MBH_MASK)      >= (b & SIG_MBH_MASK)
-            && (a & SIG_JUMP_MASK)     >= (b & SIG_JUMP_MASK)
-            && (a & SIG_SAFEFALL_MASK) >= (b & SIG_SAFEFALL_MASK)
-            && (a & SIG_MAXFALL_MASK)  >= (b & SIG_MAXFALL_MASK);
+        if ((a & SIG_MBH_MASK)      < (b & SIG_MBH_MASK)
+         || (a & SIG_JUMP_MASK)     < (b & SIG_JUMP_MASK)
+         || (a & SIG_SAFEFALL_MASK) < (b & SIG_SAFEFALL_MASK)
+         || (a & SIG_MAXFALL_MASK)  < (b & SIG_MAXFALL_MASK)) return false;
+        // the per-category tool-tier fields (bits 44..61) — the same masked-field rule, one per category
+        for (int i = 0; i < SIG_TIER_FIELDS; i++) {
+            long m = SIG_TIER_FIELD_MASK << (SIG_TIER_SHIFT + i * SIG_TIER_BITS);
+            if ((a & m) < (b & m)) return false;
+        }
+        return true;
     }
 }
