@@ -125,6 +125,26 @@ final class BotGatherer {
         this.bot = bot;
     }
 
+    // ---- Read-only observation seams (HeadlessAutotest only; NO logic change) -------------------
+    // The gather state machine's phase + accrued count are otherwise private; the headless gather autotest
+    // needs them to write a granular, failure-mode-distinguishing result file (phaseReached / collected).
+    // These are pure getters — they never mutate gather state and are not called by any production path.
+
+    /** Current gather phase name for the harness ({@code "IDLE"} when no run is active). Read-only. */
+    String phaseName() {
+        return gatherPhase == null ? "IDLE" : gatherPhase.name();
+    }
+
+    /** Items accrued toward the quota so far this run (the §10 picked-up count). Read-only. */
+    int gatheredCount() {
+        return gathered;
+    }
+
+    /** The RETURN target — where {@code /bot gather} was issued (null before a run starts). Read-only. */
+    BlockPos gatherStartPos() {
+        return gatherStartPos;
+    }
+
     /**
      * {@code /bot gather <resource> [count]} entry point (the gather half — mode switch/plan reset live on
      * {@link AllyBotEntity#startGather}). Begin the loop for locatable {@code resourceId}, targeting
