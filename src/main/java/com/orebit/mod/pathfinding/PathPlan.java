@@ -822,7 +822,8 @@ public final class PathPlan {
                 startMode, baseline, 0L, regionFieldFor(target), tolXZFor(target), tolYFor(target));
         this.lastPlanPartial = blockPlan != null && BlockPathfinder.lastWasPartial();
         this.status = resultStatus(blockPlan, BlockPathfinder.lastExpansions(),
-                BlockPathfinder.lastWasPartial(), BlockPathfinder.lastWasBudgetHit());
+                BlockPathfinder.lastWasPartial(), BlockPathfinder.lastWasBudgetHit(),
+                blockPlan == null ? BlockPathfinder.lastRealizedCrossings() : null);
         if (Debug.ENABLED && blockPlan != null) {
             logBlockPlan();
         }
@@ -843,7 +844,8 @@ public final class PathPlan {
      *       instead (dig out, {@code BotNavigator.selfRescue}).</li>
      * </ul>
      */
-    private PathStatus resultStatus(BlockPathPlan plan, int expansions, boolean partial, boolean budgetHit) {
+    private PathStatus resultStatus(BlockPathPlan plan, int expansions, boolean partial, boolean budgetHit,
+                                    long[] realized) {
         // Telemetry (pure observation — the single choke every installed result passes through): record the
         // search's node count, whether it was a best-effort PARTIAL, and whether its node/time cap bound it.
         if (stats != null) stats.onBlockSearch(expansions, partial, budgetHit);
@@ -852,7 +854,14 @@ public final class PathPlan {
             return PathStatus.RUNNING;
         }
         startDead = expansions <= 1;
-        if (!startDead) blockedGeneration++;
+        if (!startDead) {
+            blockedGeneration++;
+            // Snapshot the failed search's realized crossings WITH the window geometry it ran under, so
+            // repairBlocked (a later tick) blames the search that actually failed, not the live window.
+            blockedRealized = realized;
+            blockedWindowStart = windowStart;
+            blockedTargetStep = windowTargetStep;
+        }
         return PathStatus.BLOCKED;
     }
 
@@ -882,6 +891,14 @@ public final class PathPlan {
 
     private int blockedGeneration;
     private boolean startDead;
+    /** Realized region-crossing pairs of the search that produced the current BLOCKED result (raw-cell>>4
+     *  {@link RegionAddress#packLevelKey} pairs from {@link BlockPathfinder#lastRealizedCrossings}), with the
+     *  window geometry it ran under — snapshotted atomically in {@link #resultStatus} so {@link #repairBlocked}
+     *  (a later tick) blames the search that actually failed, not the live window. {@code null} = no realized
+     *  data (defensive / legacy positional fallback). */
+    private long[] blockedRealized;
+    private int blockedWindowStart;
+    private int blockedTargetStep;
 
     /** Build this submission's {@link SearchRequest} and hand it to the {@link AsyncWindowSearch mailbox}
      *  (which supersedes any in-flight search and, for a boundary replan, drops the parked pre-plan). */
@@ -937,7 +954,7 @@ public final class PathPlan {
                 this.blockPlan = async.resultPlan();
                 this.lastPlanPartial = blockPlan != null && async.resultPartial();
                 this.status = resultStatus(blockPlan, async.resultExpansions(),
-                        async.resultPartial(), async.resultBudgetHit());
+                        async.resultPartial(), async.resultBudgetHit(), async.resultRealized());
                 if (Debug.ENABLED && blockPlan != null) logBlockPlan();
                 break;
             default: // NONE — nothing finished / pre-plan parked or dropped internally
@@ -949,7 +966,7 @@ public final class PathPlan {
             this.blockPlan = async.resultPlan();
             this.lastPlanPartial = async.resultPartial();
             this.status = resultStatus(blockPlan, async.resultExpansions(),
-                    async.resultPartial(), async.resultBudgetHit()); // parked plans are never null
+                    async.resultPartial(), async.resultBudgetHit(), null); // parked plans are never null
             if (Debug.ENABLED) logBlockPlan();
         }
     }
@@ -1017,26 +1034,93 @@ public final class PathPlan {
     }
 
     /**
-     * The onward skeleton crossing the bot is stuck on — {@code windowStart → windowStart+1} — for the cascade's
-     * online repair ({@link #repairBlocked}). When the bot is {@link PathStatus#BLOCKED} the block tier couldn't
-     * leave the bot's committed region ({@code windowStart}, the window's leading step) toward the next
-     * skeleton step, so <i>that</i> hop is the unrealizable one; the bot blacklists it and the next region
-     * replan routes around it. Using {@code windowStart} (not a hardcoded 0) makes this correct whether the
-     * plan is freshly built ({@code windowStart == 0}) or a committed skeleton the bot has already advanced
-     * along. Fills {@code out[0]=fromKey, out[1]=toKey} and returns {@code true}; returns {@code false} when
-     * there is no onward hop (no skeleton, or the bot is in the final skeleton region but can't reach the goal
-     * cell — a genuine give-up, no edge to blame).
+     * The skeleton crossing the failed window search proved unrealizable — the <b>first window hop the search
+     * did NOT realize</b> ({@link #blameHop}, judged against the {@link #blockedRealized} snapshot) — for the
+     * cascade's online repair ({@link #repairBlocked}). When the bot is {@link PathStatus#BLOCKED} the block
+     * tier explored toward the window target and failed; the crossings it realized en route exonerate the
+     * hops it DID make, so the blame lands on the first hop it couldn't — not blindly on
+     * {@code windowStart → windowStart+1}, which mis-blacklisted a realizable first hop whenever the search
+     * died deeper in the window (the up-cliff give-up loop). Fills {@code out[0]=fromKey, out[1]=toKey} and
+     * returns {@code true}; returns {@code false} when there is no onward hop to blame ({@link
+     * #blamedHopIndex} = -1 — no skeleton, or no hop between the window start and its target: a genuine
+     * give-up).
      */
     public boolean blockedHop(long[] out) {
-        if (skeleton == null) return false;
-        final int from = windowStart;
-        final int to = windowStart + 1;
-        if (to >= skeleton.size()) return false;
-        out[0] = RegionPathfinder.fragmentNodeKey(skeleton.rx(from), skeleton.ry(from), skeleton.rz(from),
-                skeleton.fragmentId(from));
-        out[1] = RegionPathfinder.fragmentNodeKey(skeleton.rx(to), skeleton.ry(to), skeleton.rz(to),
-                skeleton.fragmentId(to));
+        final int hop = blamedHopIndex();
+        if (hop < 0) return false;
+        out[0] = RegionPathfinder.fragmentNodeKey(skeleton.rx(hop), skeleton.ry(hop),
+                skeleton.rz(hop), skeleton.fragmentId(hop));
+        out[1] = RegionPathfinder.fragmentNodeKey(skeleton.rx(hop + 1), skeleton.ry(hop + 1),
+                skeleton.rz(hop + 1), skeleton.fragmentId(hop + 1));
         return true;
+    }
+
+    /** The hop index {@link #blockedHop} would blame right now, or {@code -1} (no onward hop) — the single
+     *  dispatch both it and the driver's debug line read, so the two can't drift. */
+    public int blamedHopIndex() {
+        if (skeleton == null) return -1;
+        if (blockedRealized == null) {
+            // No realized data travelled with this BLOCKED result (defensive / legacy): positional.
+            return (windowStart + 1 < skeleton.size()) ? windowStart : -1;
+        }
+        return blameHop(skeleton, blockedWindowStart, blockedTargetStep, blockedRealized, minY);
+    }
+
+    /**
+     * Fix-A blame walk: the first window hop the failed search did NOT realize. Hop {@code i} is the edge
+     * {@code skeleton[i] → skeleton[i+1]}; hops considered are {@code i} in {@code [windowStart,
+     * targetStep-1]} — up to and including the hop INTO the step whose portal/goal was the window target,
+     * never beyond (the search was not asked to reach later hops). Per hop:
+     * <ul>
+     *   <li>approach → V (virtual goal): realized ONLY if the goal cell itself was reached, which would have
+     *       been a FOUND — on a BLOCKED result it is unrealized by definition;</li>
+     *   <li>intra-region hop (fragA → fragB of one region, a dig): region-pair realization cannot see
+     *       fragments — judge the observable half: no realized crossing EXITS the region ⇒ the search never
+     *       got past the dig, blame it; otherwise treat as realized at this granularity and walk on;</li>
+     *   <li>inter-region hop: realized iff the directed region pair is in the search's realized set.</li>
+     * </ul>
+     * All hops realized but the target cell unreached ⇒ blame the hop INTO the target step — reaching the
+     * crossing's far side elsewhere on the face did not yield a route to its committed portal, so the
+     * committed {@code (region, fragment)} hop is unrealizable as routed (and a hop is always blamed, which
+     * closes the give-up loop). Returns the blamed hop index, or {@code -1} = no onward hop.
+     */
+    static int blameHop(RegionPathPlan sk, int windowStart, int targetStep, long[] realized, int minY) {
+        final int hi = Math.min(targetStep, sk.size() - 1);
+        if (hi <= windowStart) return -1;                       // no onward hop — genuine give-up
+        for (int i = windowStart; i < hi; i++) {
+            if (RegionPathfinder.isVirtualGoal(sk.fragmentId(i + 1))) return i;
+            final long fromRaw = rawRegionKey(sk, i, minY);
+            final boolean sameRegion = sk.rx(i) == sk.rx(i + 1) && sk.ry(i) == sk.ry(i + 1)
+                    && sk.rz(i) == sk.rz(i + 1);
+            if (sameRegion) {
+                if (!anyExitRealized(realized, fromRaw)) return i;
+                continue;
+            }
+            if (!containsEdge(realized, fromRaw, rawRegionKey(sk, i + 1, minY))) return i;
+        }
+        return hi - 1;
+    }
+
+    /** Skeleton step → the raw cell>>4 region key {@link BlockPathfinder}'s realized set uses. rx/rz are
+     *  identical to region coords (plain >>4); only ry is minY-rebased, so convert via the region's base
+     *  world-Y: {@code (minY + (ry << LEAF_BITS)) >> LEAF_BITS} — exact for MC's section-aligned minY. */
+    private static long rawRegionKey(RegionPathPlan sk, int step, int minY) {
+        final int rawRy = (minY + (sk.ry(step) << RegionAddress.LEAF_BITS)) >> RegionAddress.LEAF_BITS;
+        return RegionAddress.packLevelKey(sk.rx(step), rawRy, sk.rz(step));
+    }
+
+    private static boolean containsEdge(long[] realized, long from, long to) {
+        for (int i = 0; i < realized.length; i += 2) {
+            if (realized[i] == from && realized[i + 1] == to) return true;
+        }
+        return false;
+    }
+
+    private static boolean anyExitRealized(long[] realized, long from) {
+        for (int i = 0; i < realized.length; i += 2) {
+            if (realized[i] == from) return true;
+        }
+        return false;
     }
 
     /**

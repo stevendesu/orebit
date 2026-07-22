@@ -331,10 +331,11 @@ public final class RegionPathfinder {
         grid.ensureLeaf(grx, gry, grz);
         final int startFrag = startFragment(grid, 0, srx, sry, srz, startFloor);
 
-        // Skeleton-side dig-flood: seed the goal as a virtual node reached from its dig pockets (the buried/walled
-        // goal case). When it engages, the goal fragment is VIRTUAL_GOAL_FRAG and the trivial short-circuit is
-        // skipped (even a start-pocket-adjacent goal routes through its dig edge). Falls back to nearest-centroid.
-        final DigSeedSet digSeeds = buildDigSeeds(grid, minY, goalFloor, canBreak, fwdMine);
+        // Skeleton-side virtual goal: seed the goal as a virtual node V reached from its APPROACHES (its own
+        // fragment + walkable face-neighbors for a MIXED goal, dig pockets for a break-capable buried goal). When
+        // it engages, the goal fragment is VIRTUAL_GOAL_FRAG and the trivial short-circuit is skipped (even a
+        // start-adjacent goal routes through an approach edge). Falls back to nearest-centroid.
+        final DigSeedSet digSeeds = buildGoalApproaches(grid, minY, goalFloor, canBreak, fwdMine);
         final int goalFrag = digSeeds != null ? VIRTUAL_GOAL_FRAG
                 : nearestFragment(grid, 0, grx, gry, grz, goalFloor);
 
@@ -478,11 +479,12 @@ public final class RegionPathfinder {
         // the caller's real `mine` is retained for API symmetry (the reverse cost-to-goal field uses it).
         final RegionMineModel fwdMine = FORWARD_MINE;
 
-        // Skeleton-side dig-flood, but only at LEVEL 0 (needs the leaf NavSection) AND only when this level's
-        // clamped goal region IS the real goal region (reached) — a mid-route clamped sub-goal isn't the goal, so
-        // its centroid fragment stays the target. Rooted at the REAL goal cell.
+        // Skeleton-side virtual goal, but only at LEVEL 0 (walkable-neighbor overlap + the dig-flood are leaf-scale)
+        // AND only when this level's clamped goal region IS the real goal region (reached) — a mid-route clamped
+        // sub-goal isn't the goal, so its centroid fragment stays the target. Rooted at the REAL goal cell. Note a
+        // no-break bot now also gets multi-approach walkable seeds (new: the per-approach reachability fix).
         final DigSeedSet digSeeds = (level == 0 && reached)
-                ? buildDigSeeds(grid, minY, realGoal, caps.canBreak(), fwdMine) : null;
+                ? buildGoalApproaches(grid, minY, realGoal, caps.canBreak(), fwdMine) : null;
         final int gFrag = digSeeds != null ? VIRTUAL_GOAL_FRAG
                 : nearestFragment(grid, level, gx, gy, gz, subGoalWorld);
 
@@ -586,15 +588,34 @@ public final class RegionPathfinder {
                     startWx, startWy, startWz, canBreak, canPlace, safeFall, blacklist, mine,
                     PILLAR_PER_BLOCK_FIELD, hScale, null, tube, false);
 
-            // Skeleton-side dig-flood: if this popped node is a dig-reachable pocket of the (buried/walled) goal,
-            // also offer a virtual edge into V at the pocket's dig cost — so the search can terminate by digging in
-            // from HERE instead of routing the fragment graph around to the goal's centroid pocket. goalFrag is
-            // VIRTUAL_GOAL_FRAG in this mode, so V's pop trips the goal test above on the next iteration.
+            // Skeleton-side virtual goal: if this popped node is one of the goal's APPROACHES (its own fragment, a
+            // walkable face-neighbor, or a dig-reachable pocket), offer a virtual edge into V at that approach's
+            // cost — so the search can terminate through HERE instead of routing the fragment graph around to the
+            // goal's centroid. goalFrag is VIRTUAL_GOAL_FRAG in this mode, so V's pop trips the goal test above on
+            // the next iteration.
             if (digSeeds != null) {
-                final float digCost = digSeeds.costFor(fragmentKey(crx, cry, crz, fragA));
-                if (digCost >= 0f) {
-                    relaxVirtualGoal(nodes, current, digCost, grx, gry, grz,
-                            digSeeds.goalWx, digSeeds.goalWy, digSeeds.goalWz);
+                final int idx = digSeeds.indexOf(fragmentKey(crx, cry, crz, fragA));
+                if (idx >= 0) {
+                    final float approachCost;
+                    if (digSeeds.dig[idx]) {
+                        approachCost = digSeeds.costs[idx]; // dig pocket: adjacency dig cost (goalDigSeeds distance)
+                    } else {
+                        // Walkable approach: the region tier's own octile walkCost from where the search ENTERED
+                        // this region (its portal cell, or the search start for the start node) to the goal cell —
+                        // lateral Traverse + vertical Pillar/MineDown. Measuring from the ENTRY (not the far
+                        // crossing into the goal region) is what re-charges this region's own within-region
+                        // traverse — g(node) only covers reaching its entry (§4 prices the FROM-region's
+                        // traverse), so a far-corner entry pays the full corner-to-corner span (no cost bypass).
+                        // Pillar-priced vertical also steers a no-place bot away from a LOW entry into an
+                        // over-connected goal fragment before the blacklist even engages.
+                        final int px = nodes.portalX[current] == NO_PORTAL ? startWx : nodes.portalX[current];
+                        final int py = nodes.portalX[current] == NO_PORTAL ? startWy : nodes.portalY[current];
+                        final int pz = nodes.portalX[current] == NO_PORTAL ? startWz : nodes.portalZ[current];
+                        approachCost = walkCost(digSeeds.goalWx - px, digSeeds.goalWy - py, digSeeds.goalWz - pz,
+                                canPlace, safeFall, false, PILLAR_PER_BLOCK_FIELD);
+                    }
+                    relaxVirtualGoal(nodes, current, approachCost, digSeeds.dig[idx], grx, gry, grz,
+                            digSeeds.goalWx, digSeeds.goalWy, digSeeds.goalWz, blacklist);
                 }
             }
         }
@@ -626,107 +647,216 @@ public final class RegionPathfinder {
     }
 
     // ---------------------------------------------------------------------------------------------------
-    // Skeleton-side dig-flood (the virtual goal node). A buried/walled goal is reached by digging in from a
-    // nearby pocket; instead of routing to a nearest-centroid pocket, seed the goal as a synthetic node V that
-    // every dig-reachable pocket connects to by a virtual edge priced at that pocket's dig cost — the forward
-    // analog of costToGoalField's multi-source seed. Level-0 only (the dig-flood reads the leaf NavSection).
+    // Skeleton-side virtual goal node V — the goal reached by any of its APPROACHES. Two approach kinds feed the
+    // one virtual node: (a) WALKABLE approaches (the goal fragment G itself + every neighbor-region fragment
+    // whose face footprint overlaps G's on the shared face) — the per-approach reachability fix: a MIXED goal
+    // fragment over-connects vertically (a bot swims/falls into its low cell but can't ascend to the goal cell),
+    // so each entry face is an INDEPENDENTLY-blacklistable hop; the block tier prunes the approaches it can't
+    // realize and the region A* reroutes to a reachable one; (b) DIG approaches (a break-capable bot's
+    // dig-reachable pockets of a buried/walled goal). Instead of routing to a nearest-centroid pocket, each
+    // approach connects to V by a virtual edge priced at its crossing/dig cost — the forward analog of
+    // costToGoalField's multi-source seed. Level-0 only.
     // ---------------------------------------------------------------------------------------------------
 
     /**
-     * The dig-flood pockets for one goal: parallel {@code keys[]} (physical {@link #fragmentKey}) and {@code
-     * costs[]} (the dig cost from that pocket to the goal), plus the goal world cell (the virtual node's portal).
-     * A small per-plan value (few pockets); {@link #costFor} is a linear scan — no per-pop map boxing on the
-     * region A* loop.
+     * The goal approaches for one goal: parallel {@code keys[]} (physical {@link #fragmentKey}), {@code costs[]}
+     * (the virtual-edge cost from that approach into the goal cell — {@link #APPROACH_COST} for a walk, the dig
+     * cost for a dig-through, {@code 0} for the goal's own fragment), and {@code dig[]} (whether the last hop is a
+     * dig-through, so the block tier aims at a buried cell vs. snaps a normal crossing). A small per-plan value
+     * (few approaches); {@link #indexOf} is a linear scan — no per-pop map boxing on the region A* loop.
      */
     static final class DigSeedSet {
         final long[] keys;
         final float[] costs;
+        final boolean[] dig;
         final int goalWx, goalWy, goalWz;
-        DigSeedSet(long[] keys, float[] costs, int goalWx, int goalWy, int goalWz) {
-            this.keys = keys; this.costs = costs;
+        DigSeedSet(long[] keys, float[] costs, boolean[] dig, int goalWx, int goalWy, int goalWz) {
+            this.keys = keys; this.costs = costs; this.dig = dig;
             this.goalWx = goalWx; this.goalWy = goalWy; this.goalWz = goalWz;
         }
-        /** The dig cost for physical fragment key {@code physKey}, or {@code -1} if it isn't a dig pocket. */
-        float costFor(long physKey) {
+        /** The index of physical fragment key {@code physKey} among the approaches, or {@code -1} if not one. */
+        int indexOf(long physKey) {
             for (int i = 0; i < keys.length; i++) {
-                if (keys[i] == physKey) return costs[i];
+                if (keys[i] == physKey) return i;
             }
-            return -1f;
+            return -1;
         }
     }
 
-    /** Max distinct dig pockets seeded (the {@code MAX_GOAL_DIG_CELLS}-bounded flood finds few; extras dropped). */
-    private static final int MAX_DIG_POCKETS = 16;
+    /**
+     * Max distinct approaches seeded: the self-approach + ≤6 faces × a few overlapping neighbor fragments + the
+     * {@code MAX_GOAL_DIG_CELLS}-bounded dig pockets. Extras beyond this are dropped (a very fragmented goal
+     * neighborhood — rare).
+     */
+    private static final int MAX_APPROACHES = 40;
 
     /**
-     * Run the goal dig-flood ({@link RegionGrid#goalDigSeeds}) and collect the reachable pockets + their dig costs
-     * into a {@link DigSeedSet}, or {@code null} for a no-break bot / no reachable pocket (the caller then routes
-     * to a single nearest-centroid goal fragment as before). Level-0 only. Dedups to the minimum cost per pocket.
+     * Nominal placeholder cost a WALKABLE approach is enumerated with. The forward search OVERRIDES it with the
+     * entry-aware octile {@code walkCost(node.portal → goal)} at relax time (see {@link #relaxVirtualGoal}'s
+     * caller), so this value is not the real forward cost; it only stands in as the sink's {@code cost} argument
+     * (the field no longer seeds walkable approaches). Kept a small positive so any future stored-cost read is sane.
      */
-    private static DigSeedSet buildDigSeeds(RegionGrid grid, int minY, BlockPos goalFloor,
-                                            boolean canBreak, RegionMineModel mine) {
-        if (!canBreak || grid.level() == null) {
-            // No-break bot ⇒ can't dig; headless grid (tests / JMH) ⇒ no resident sections to flood. Either way
-            // skip the flood + its scratch allocation and keep nearest-centroid — so the region A* is byte-
-            // identical (no per-plan cost) wherever the dig-flood can't engage.
+    private static final float APPROACH_COST = WALK_PER_BLOCK;
+
+    /**
+     * Enumerate the goal's approaches (walkable self + face-neighbors for a MIXED goal region; dig pockets for a
+     * break-capable bot) and collect them into a {@link DigSeedSet}, or {@code null} when there is no approach
+     * OTHER than the goal's own fragment (the caller then routes to a single nearest-centroid goal fragment as
+     * before — a fully-sealed / same-fragment goal has no per-side distinction to make, so the virtual goal would
+     * only add a redundant hop). Level-0 only. Dedups to the minimum cost per approach.
+     */
+    private static DigSeedSet buildGoalApproaches(RegionGrid grid, int minY, BlockPos goalFloor,
+                                                  boolean canBreak, RegionMineModel mine) {
+        final int grx = RegionAddress.regionX(goalFloor.getX(), 0);
+        final int gry = RegionAddress.regionY(goalFloor.getY(), 0, minY);
+        final int grz = RegionAddress.regionZ(goalFloor.getZ(), 0);
+        final long[] keys = new long[MAX_APPROACHES];
+        final float[] costs = new float[MAX_APPROACHES];
+        final boolean[] dig = new boolean[MAX_APPROACHES];
+        final int[] count = { 0 };
+        // The virtual goal is only worth engaging when there is an approach OTHER than the goal's own fragment
+        // (a walkable neighbor, or a dig pocket) — i.e. a genuinely distinct, individually-blamable way in. A
+        // lone self-approach is just today's nearest-centroid with a redundant V hop, so gate it out.
+        final boolean[] hasAlternative = { false };
+        enumerateGoalApproaches(grid, minY, goalFloor, canBreak, mine,
+                (rx, ry, rz, frag, cost, isDig) -> {
+                    addApproach(keys, costs, dig, count, fragmentKey(rx, ry, rz, frag), cost, isDig);
+                    if (isDig || rx != grx || ry != gry || rz != grz) hasAlternative[0] = true;
+                });
+        if (count[0] == 0 || !hasAlternative[0]) {
             return null;
         }
+        return new DigSeedSet(java.util.Arrays.copyOf(keys, count[0]), java.util.Arrays.copyOf(costs, count[0]),
+                java.util.Arrays.copyOf(dig, count[0]),
+                goalFloor.getX(), goalFloor.getY(), goalFloor.getZ());
+    }
+
+    /** Add one approach to the parallel arrays, deduping by physical key (keep the cheapest, adopt its dig tag). */
+    private static void addApproach(long[] keys, float[] costs, boolean[] dig, int[] count,
+                                    long key, float cost, boolean isDig) {
+        for (int i = 0; i < count[0]; i++) {
+            if (keys[i] == key) {
+                if (cost < costs[i]) { costs[i] = cost; dig[i] = isDig; }
+                return;
+            }
+        }
+        if (count[0] < MAX_APPROACHES) {
+            keys[count[0]] = key;
+            costs[count[0]] = cost;
+            dig[count[0]] = isDig;
+            count[0]++;
+        }
+    }
+
+    /** Sink for {@link #enumerateGoalApproaches}: one approach — its level-0 region/fragment, the virtual-edge
+     *  cost into the goal cell, and whether that last hop is a dig-through. */
+    @FunctionalInterface
+    private interface ApproachSink {
+        void accept(int rx, int ry, int rz, int frag, float cost, boolean isDig);
+    }
+
+    /**
+     * Enumerate the goal's approaches into {@code sink} — the source for the forward virtual-goal seed
+     * ({@link #buildGoalApproaches}). Two kinds:
+     * <ul>
+     *   <li><b>Walkable</b> (a MIXED goal region only — a uniform AIR/WATER/SOLID goal has no per-approach
+     *       reachability distinction, so it keeps nearest-centroid): the goal cell's own fragment {@code G} is a
+     *       self-approach at cost {@code 0} (reaching the goal fragment = reaching the goal, today's behavior,
+     *       made a blamable crossing), and every neighbor-region fragment whose face footprint OVERLAPS {@code G}'s
+     *       on the shared face is an approach at {@link #APPROACH_COST}. A uniform-SOLID neighbor is skipped (no
+     *       fragment to walk from; a break-capable dig-in is the dig block's job); an AIR/WATER/unbuilt neighbor
+     *       contributes its fragment {@code 0}. Approaches are emitted OPTIMISTICALLY — the forward A*'s own
+     *       caps gates decide which neighbor is actually reachable, and every seed only makes the admissible cost
+     *       field smaller, so over-emission is harmless.</li>
+     *   <li><b>Dig</b> (break-capable bot): the goal dig-flood ({@link RegionGrid#goalDigSeeds}) pockets with
+     *       {@code digCells >= 1}, each at its dig cost. The {@code digCells == 0} exposed-goal seed is skipped —
+     *       it is already the walkable self-approach.</li>
+     * </ul>
+     */
+    private static void enumerateGoalApproaches(RegionGrid grid, int minY, BlockPos goalFloor,
+                                                boolean canBreak, RegionMineModel mine, ApproachSink sink) {
         final int grx = RegionAddress.regionX(goalFloor.getX(), 0);
         final int gry = RegionAddress.regionY(goalFloor.getY(), 0, minY);
         final int grz = RegionAddress.regionZ(goalFloor.getZ(), 0);
         grid.ensureLeaf(grx, gry, grz);
         final RegionFragments rfGoal = grid.fragmentRecord(0, grx, gry, grz);
-        final float mineUnit = mine.unitsPerBlock(rfGoal != null ? rfGoal.avgSolidHardness() : STONE_REF_NIBBLE);
-        final long[] keys = new long[MAX_DIG_POCKETS];
-        final float[] costs = new float[MAX_DIG_POCKETS];
-        final int[] count = { 0 };
-        grid.goalDigSeeds(goalFloor.getX(), goalFloor.getY(), goalFloor.getZ(), MAX_GOAL_DIG_CELLS,
-                (rx, ry, rz, frag, digCells) -> {
-                    // Skip the exposed-goal seed (digCells == 0, the goal is already IN a fragment) — that case
-                    // keeps the unchanged nearest-centroid target; the virtual goal is only for a goal reached by
-                    // getting adjacent + digging (a solid/buried/walled goal, digCells >= 1).
-                    if (digCells <= 0) {
-                        return;
+
+        // (1) Walkable approaches — MIXED goal region with a real goal fragment only.
+        if (rfGoal != null && rfGoal.kind() == RegionFragments.KIND_MIXED) {
+            final int gFrag = startFragment(grid, 0, grx, gry, grz, goalFloor);
+            if (gFrag >= 0 && gFrag < rfGoal.fragmentCount()) {
+                sink.accept(grx, gry, grz, gFrag, 0f, false); // self-approach (the goal's own fragment)
+                for (int f = 0; f < 6; f++) {
+                    if (!rfGoal.touchesFace(gFrag, f)) continue;
+                    final int packedG = rfGoal.footprint(gFrag, f);
+                    final int nrx = RegionAddress.neighborRX(grx, f);
+                    final int nry = RegionAddress.neighborRY(gry, f);
+                    final int nrz = RegionAddress.neighborRZ(grz, f);
+                    grid.ensureLeaf(nrx, nry, nrz);
+                    final RegionFragments rfN = grid.fragmentRecord(0, nrx, nry, nrz);
+                    final int oppF = RegionAddress.opposite(f);
+                    if (rfN == null || rfN.kind() != RegionFragments.KIND_MIXED) {
+                        // Uniform / unbuilt neighbor: a uniform-SOLID one is unwalkable (the dig block covers a
+                        // break-capable dig-in); AIR/WATER/unbuilt ⇒ its single fragment 0 is the approach.
+                        if (rfN != null && rfN.kind() == RegionFragments.KIND_SOLID) continue;
+                        sink.accept(nrx, nry, nrz, 0, APPROACH_COST, false);
+                        continue;
                     }
-                    grid.ensureLeaf(rx, ry, rz);
-                    final long key = fragmentKey(rx, ry, rz, frag);
-                    final float cost = digCost(digCells, 0, mineUnit);
-                    if (TRACE) trace("  DIG-SEED pocket region=" + rx + "," + ry + "," + rz + " frag=" + frag
-                            + " digCells=" + digCells + " -> V cost=" + cost);
-                    for (int i = 0; i < count[0]; i++) {
-                        if (keys[i] == key) { // dedup: keep the cheapest dig to this pocket
-                            if (cost < costs[i]) costs[i] = cost;
-                            return;
+                    final int countN = rfN.fragmentCount();
+                    for (int fb = 0; fb < countN; fb++) {
+                        if (rfN.touchesFace(fb, oppF)
+                                && footprintsOverlap(packedG, rfN.footprint(fb, oppF))) {
+                            sink.accept(nrx, nry, nrz, fb, APPROACH_COST, false);
                         }
                     }
-                    if (count[0] < MAX_DIG_POCKETS) {
-                        keys[count[0]] = key;
-                        costs[count[0]] = cost;
-                        count[0]++;
-                    }
-                });
-        if (count[0] == 0) {
-            return null;
+                }
+            }
         }
-        return new DigSeedSet(java.util.Arrays.copyOf(keys, count[0]), java.util.Arrays.copyOf(costs, count[0]),
-                goalFloor.getX(), goalFloor.getY(), goalFloor.getZ());
+
+        // (2) Dig approaches — break-capable bot only (goalDigSeeds self-guards the headless/unresident grid).
+        if (canBreak) {
+            final float mineUnit = mine.unitsPerBlock(rfGoal != null ? rfGoal.avgSolidHardness() : STONE_REF_NIBBLE);
+            grid.goalDigSeeds(goalFloor.getX(), goalFloor.getY(), goalFloor.getZ(), MAX_GOAL_DIG_CELLS,
+                    (rx, ry, rz, frag, digCells) -> {
+                        if (digCells <= 0) {
+                            return; // exposed-goal seed — already the walkable self-approach
+                        }
+                        grid.ensureLeaf(rx, ry, rz);
+                        final float cost = digCost(digCells, 0, mineUnit);
+                        if (TRACE) trace("  DIG-SEED pocket region=" + rx + "," + ry + "," + rz + " frag=" + frag
+                                + " digCells=" + digCells + " -> V cost=" + cost);
+                        sink.accept(rx, ry, rz, frag, cost, true);
+                    });
+        }
     }
 
     /**
-     * Relax the virtual dig edge from a dig pocket {@code curRow} into the virtual goal node V =
-     * {@code (grx,gry,grz,}{@link #VIRTUAL_GOAL_FRAG}{@code )} at {@code digCost}. V's heuristic is 0 (it sits at
-     * the goal), its portal is the goal cell (so the reconstructed skeleton tail carries it), and its parent is the
-     * cheapest pocket — so the forward A* terminates at V having routed through the pocket that minimises
-     * {@code path-to-pocket + dig-cost}. Idempotent (a dearer later edge is ignored).
+     * Relax the virtual approach edge from an approach {@code curRow} into the virtual goal node V =
+     * {@code (grx,gry,grz,}{@link #VIRTUAL_GOAL_FRAG}{@code )} at {@code approachCost}. V's heuristic is 0 (it sits
+     * at the goal), its portal is the goal cell (so the reconstructed skeleton tail carries it), and its parent is
+     * the cheapest approach — so the forward A* terminates at V having routed through the approach that minimises
+     * {@code path-to-approach + approach-cost}. {@code isDig} marks a dig-through last hop (the block tier aims at
+     * the buried cell) vs. a walk (it snaps a normal crossing). Idempotent (a dearer later edge is ignored).
      */
-    private static void relaxVirtualGoal(Nodes nodes, int curRow, float digCost,
-                                         int grx, int gry, int grz, int goalWx, int goalWy, int goalWz) {
-        final float tentative = nodes.g[curRow] + digCost;
+    private static void relaxVirtualGoal(Nodes nodes, int curRow, float approachCost, boolean isDig,
+                                         int grx, int gry, int grz, int goalWx, int goalWy, int goalWz,
+                                         RegionEdgeBlacklist blacklist) {
+        // Online repair — the load-bearing half of the per-approach model: each (approach → V) is an
+        // INDEPENDENTLY-blacklistable crossing. Skip the approach the block tier proved it cannot realize, so
+        // the region A* is FORCED to route to a DIFFERENT approach (a different side of the goal) instead of
+        // re-offering the same dead entry every replan. Keyed physically (region, fragment) exactly as
+        // relaxFrag does, so it matches the (fromKey,toKey) the driver's blockedHop/repairBlocked records.
+        if (blacklist != null
+                && blacklist.contains(fragmentKey(nodes.x[curRow], nodes.y[curRow], nodes.z[curRow],
+                        nodes.frag[curRow]), fragmentKey(grx, gry, grz, VIRTUAL_GOAL_FRAG))) {
+            return;
+        }
+        final float tentative = nodes.g[curRow] + approachCost;
         final long key = searchKey(fragmentKey(grx, gry, grz, VIRTUAL_GOAL_FRAG), ENTRY_INTERIOR);
         final int row = nodes.intern(key, grx, gry, grz, VIRTUAL_GOAL_FRAG, ENTRY_INTERIOR);
-        if (TRACE) traceCand("virtual-goal(dig from " + nodes.x[curRow] + "," + nodes.y[curRow] + ","
-                + nodes.z[curRow] + " frag=" + nodes.frag[curRow] + " g=" + nodes.g[curRow] + ")",
-                grx, gry, grz, VIRTUAL_GOAL_FRAG, digCost, goalWx, goalWy, goalWz, tentative < nodes.g[row]);
+        if (TRACE) traceCand("virtual-goal(" + (isDig ? "dig" : "walk") + " from " + nodes.x[curRow] + ","
+                + nodes.y[curRow] + "," + nodes.z[curRow] + " frag=" + nodes.frag[curRow] + " g=" + nodes.g[curRow]
+                + ")", grx, gry, grz, VIRTUAL_GOAL_FRAG, approachCost, goalWx, goalWy, goalWz, tentative < nodes.g[row]);
         if (tentative >= nodes.g[row]) return;
         nodes.g[row] = tentative;
         nodes.f[row] = tentative; // h == 0 at the goal
@@ -735,7 +865,7 @@ public final class RegionPathfinder {
         nodes.portalX[row] = goalWx;
         nodes.portalY[row] = goalWy;
         nodes.portalZ[row] = goalWz;
-        nodes.dig[row] = true; // the virtual edge is a dig-through crossing (the block tier digs the last blocks)
+        nodes.dig[row] = isDig; // a dig-through last hop digs the last blocks; a walk crosses a real opening
         nodes.push(row);
     }
 
@@ -812,7 +942,9 @@ public final class RegionPathfinder {
         // flood-from-bot start fix. nearest-centroid alone would mis-assign the goal to the pocket whose CENTROID
         // is nearest (not the one 2 blocks through the wall); the multi-source Dijkstra instead lets each entry
         // pocket compete, and the field resolves which is cheapest for the bot to reach. A no-break bot cannot
-        // dig, so it keeps the plain nearest-centroid single seed.
+        // dig, so it keeps the plain nearest-centroid single seed. (The forward search's walkable virtual-goal
+        // approaches are NOT seeded here — the field is only the region-refined heuristic, kept admissible; the
+        // walkable approach cost lives on the forward relax, priced entry-aware, see relaxVirtualGoal's caller.)
         if (canBreak) {
             final RegionFragments rfGoal = grid.fragmentRecord(0, grx, gry, grz);
             final float mineUnit = mine.unitsPerBlock(rfGoal != null ? rfGoal.avgSolidHardness() : STONE_REF_NIBBLE);

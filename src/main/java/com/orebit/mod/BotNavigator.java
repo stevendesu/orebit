@@ -938,11 +938,12 @@ final class BotNavigator {
     }
 
     /** The skeleton hop {@link PathPlan#repairBlocked} is about to blame, as {@code S<i>(rx,ry,rz)->S<i+1>(…)}
-     *  — mirroring {@link PathPlan#blockedHop}'s {@code windowStart -> windowStart+1}. A {@code ?} to-step
-     *  means no onward hop exists (the give-up branch). Never throws. */
+     *  — {@link PathPlan#blamedHopIndex}, the same dispatch {@link PathPlan#blockedHop} uses (the realized-
+     *  crossing blame walk, no longer a hardcoded {@code windowStart -> windowStart+1}). {@code ?->?} means
+     *  no onward hop exists (the give-up branch). Never throws. */
     private String describeBlockedHop() {
         try {
-            final int from = pathPlan.windowStartIndex();
+            final int from = pathPlan.blamedHopIndex();
             final RegionPathPlan sk = pathPlan.skeletonPlan();
             return describeStep(sk, from) + "->" + describeStep(sk, from + 1);
         } catch (Throwable ignored) {

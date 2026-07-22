@@ -1,6 +1,7 @@
 package com.orebit.mod.pathfinding.regionpathfinder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -31,9 +32,9 @@ import net.minecraft.core.BlockPos;
  *       out-and-back air detour of ~192). Asserts the plan is found (no FAIL), stays in the one region, and
  *       crosses fragments — i.e. an intra-region mine edge was taken.</li>
  *   <li><b>Open portal</b> — a start region adjacent to a two-fragment goal region whose lower fragment lines
- *       up with the start's opening (footprints overlap) and whose upper fragment does not. Asserts the plan
- *       routes into the <i>overlapping</i> fragment (the open portal), not the misaligned one, with the portal
- *       cell on the low opening.</li>
+ *       up with the start's opening (footprints overlap) and whose upper fragment does not. The goal is in the
+ *       lower fragment; asserts the plan terminates at the virtual goal carrying the goal cell (the low/open
+ *       target), never the misaligned high tunnel.</li>
  * </ul>
  */
 public class RegionPathfinderFragmentTest {
@@ -165,15 +166,16 @@ public class RegionPathfinderFragmentTest {
         assertTrue(plan.isFragmentModel());
         int last = plan.size() - 1;
         assertEquals(1, plan.rx(last), "the path ends in region B");
-        assertEquals(0, plan.fragmentId(last), "it commits to the LOW fragment (0) reached via the open portal");
-
-        // The portal cell into region B sits on the low opening (Y ≤ 5), never the misaligned high tunnel.
-        assertTrue(plan.hasPortal(last), "the portal step carries the boundary cell");
-        BlockPos portal = plan.portalCell(last);
-        assertNotNull(portal);
-        assertTrue(portal.getY() <= 5,
-                "portal must be the LOW open opening (Y≈1..2), not the high misaligned one; got y=" + portal.getY());
-        assertEquals(16, portal.getX(), "portal is on region B's −X boundary plane (world x = 16)");
+        // The goal (24,1,8) is in region B's LOW fragment, reachable through the open portal. The region tier
+        // now terminates at the virtual goal V (the per-approach model): the skeleton ends at V — sitting at the
+        // goal region and carrying the GOAL CELL as its portal — reached from region A's overlapping (open)
+        // opening. The misaligned HIGH tunnel (feet y=10) is never targeted; V's portal proves it (y=1 = the low
+        // fragment). (Pre-virtual-goal this step was the low fragment id with the x=16 boundary portal.)
+        assertTrue(RegionPathfinder.isVirtualGoal(plan.fragmentId(last)),
+                "the skeleton commits to the goal cell via the virtual goal (the per-approach terminus)");
+        assertTrue(plan.hasPortal(last), "the virtual-goal step carries the goal cell");
+        assertEquals(new BlockPos(24, 1, 8), plan.portalCell(last),
+                "the virtual goal's portal is the goal cell in the LOW open fragment (y=1), not the high tunnel");
     }
 
     // ===================================================================================================
@@ -221,7 +223,61 @@ public class RegionPathfinderFragmentTest {
         assertNotNull(plan, "a no-break bot must still route through a genuine open portal (walk, not mine)");
         int last = plan.size() - 1;
         assertEquals(1, plan.rx(last), "the path ends in region B via the open portal");
-        assertEquals(0, plan.fragmentId(last), "it commits to the LOW (open) fragment, reached by walking");
+        assertTrue(RegionPathfinder.isVirtualGoal(plan.fragmentId(last)),
+                "it commits to the goal cell (LOW open fragment) via the virtual goal, reached by walking");
+        assertEquals(new BlockPos(24, 1, 8), plan.portalCell(last),
+                "the virtual goal's portal is the goal cell in the LOW fragment (y=1), reached by a walk not a mine");
+    }
+
+    // ===================================================================================================
+    // Per-approach online repair (the Fix-A consumer): a blacklisted (approach → V) crossing forces the
+    // re-derived skeleton to terminate at V via a DIFFERENT approach; exhausting every approach is an
+    // honest FAIL, never a re-offer of a dead entry.
+    // ===================================================================================================
+    @Test
+    void virtualGoal_blacklistedApproach_reroutesThenHonestlyFails() {
+        // The open-portal fixture: region A's tunnel, region B with a LOW (open, goal) and HIGH (misaligned)
+        // tunnel; the goal is in B-low, so the virtual-goal mode engages with several approaches (B-low's own
+        // fragment, region A's opening, and the optimistic unbuilt neighbours of B-low).
+        boolean[] aPass = new boolean[CELLS];
+        boolean[] aStand = new boolean[CELLS];
+        carveTunnelX(aPass, aStand, 0, G - 1, 1);
+        seed(0, 0, 0, aPass, aStand);
+        boolean[] bPass = new boolean[CELLS];
+        boolean[] bStand = new boolean[CELLS];
+        carveTunnelX(bPass, bStand, 0, G - 1, 1);
+        carveTunnelX(bPass, bStand, 0, G - 1, 10);
+        seed(1, 0, 0, bPass, bStand);
+
+        BlockPos start = new BlockPos(8, 1, 8);
+        BlockPos goal = new BlockPos(24, 1, 8);
+        RegionEdgeBlacklist blacklist = new RegionEdgeBlacklist();
+
+        // Blacklist each plan's used approach (the step before V, keyed exactly as PathPlan.repairBlocked
+        // records it) and re-plan: every re-derived skeleton must reach V via an approach not blamed before,
+        // and once every approach is exhausted the region tier must FAIL honestly.
+        java.util.Set<Long> blamed = new java.util.HashSet<>();
+        RegionPathPlan plan = RegionPathfinder.planWithin(0, grid, 0, start, goal, goal,
+                BotCaps.DEFAULT, blacklist);
+        int rounds = 0;
+        while (plan != null && rounds++ < 16) {
+            int last = plan.size() - 1;
+            assertTrue(RegionPathfinder.isVirtualGoal(plan.fragmentId(last)),
+                    "every found plan terminates at the virtual goal");
+            long approach = RegionPathfinder.fragmentNodeKey(plan.rx(last - 1), plan.ry(last - 1),
+                    plan.rz(last - 1), plan.fragmentId(last - 1));
+            assertFalse(blamed.contains(approach),
+                    "a blacklisted approach must never be re-offered (round " + rounds + ")");
+            blamed.add(approach);
+            long vKey = RegionPathfinder.fragmentNodeKey(plan.rx(last), plan.ry(last), plan.rz(last),
+                    plan.fragmentId(last));
+            blacklist.add(approach, vKey);
+            plan = RegionPathfinder.planWithin(0, grid, 0, start, goal, goal, BotCaps.DEFAULT, blacklist);
+        }
+        assertNull(plan, "with every approach blacklisted the region tier must FAIL honestly");
+        assertTrue(blamed.size() >= 2,
+                "the fixture offers multiple approaches — the repair must have rerouted at least once "
+                        + "(got " + blamed.size() + ")");
     }
 
     // ===================================================================================================
