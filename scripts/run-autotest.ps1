@@ -4,7 +4,10 @@
 #
 # What it does:
 #   1. resets run/autotest to a deterministic state (deletes the world -> same seed regenerates it,
-#      drops the seed/eula/bot-config templates, clears any stale result file),
+#      drops the seed/eula/bot-config templates, clears any stale result file). -MasterWorld replaces the
+#      seed-regen with a byte-identical copy of a frozen master; -KeepWorld skips the world reset entirely
+#      (reuses the previous run's world, incl. its persisted orebit/ HPA + invalidation state — the
+#      two-boot restart oracle) while still clearing stale result/trace files,
 #   2. runs :fabric:<ver>:runAutotest (dedicated server, headless -- Loom's server() preset adds nogui),
 #   3. asserts on run/autotest/orebit-autotest-result.properties.
 # Exit codes: 0 = PASS, 1 = FAIL (result file says so), 2 = no result file (crash / hook never armed).
@@ -81,7 +84,14 @@ param(
     # world's seed -> back to non-deterministic vegetation. The start-AREA chunks (where the early tree-
     # descent bug lives) are always covered if you explored to the tree; the full start->goal corridor needs
     # pre-gen. "" = legacy seed-regen mode (backward compatible).
-    [string]$MasterWorld = ""
+    [string]$MasterWorld = "",
+    # -KeepWorld: REUSE run/autotest/world from the PREVIOUS run instead of deleting/re-copying it — the
+    # two-boot restart oracle for persisted state (DESIGN-persisted-invalidation-memory.md §5): boot 1 (with
+    # -MasterWorld) learns + flushes <world>/orebit/** (HPA shards, invalidation rows); boot 2 (-KeepWorld)
+    # boots the SAME mutated world dir and must benefit from what it persisted. Stale result/trace files are
+    # still cleared (they belong to a RUN, not the world). Overrides -MasterWorld (no re-copy happens); errors
+    # out if no previous world exists.
+    [switch]$KeepWorld
 )
 
 $ErrorActionPreference = "Stop"
@@ -94,22 +104,32 @@ $resultFile = Join-Path $runDir "orebit-autotest-result.properties"
 # ---- 1. Deterministic run-dir state ----------------------------------------------------------
 New-Item -ItemType Directory -Force -Path (Join-Path $runDir "config") | Out-Null
 $world = Join-Path $runDir "world"
-if (Test-Path $world) {
-    Write-Host "[autotest] deleting previous run world (disposable copy)"
-    Remove-Item -Recurse -Force $world
-}
-if ($MasterWorld -ne "") {
-    # FROZEN-WORLD mode: copy the pristine master in. The master itself is NEVER launched, so it stays
-    # byte-identical across runs -> deterministic blocks (no parallel-gen vegetation variance), and the
-    # bot's edits land only in this disposable copy.
-    if (-not (Test-Path $MasterWorld)) { Write-Error "master world not found: $MasterWorld"; exit 2 }
-    Write-Host "[autotest] FROZEN-WORLD mode: copying master '$MasterWorld' -> run world"
-    Copy-Item -Recurse -Force $MasterWorld $world
-    # A stale session.lock copied from the master (if it was ever launched) would block the server; drop it.
+if ($KeepWorld) {
+    # KEEP-WORLD mode (restart oracle): boot the previous run's world dir as-is — its orebit/ persisted state
+    # (HPA shards + invalidation sections) is exactly what the second boot is asserting against. Only the
+    # stale session.lock is dropped (the previous server wrote one into the run world).
+    if (-not (Test-Path $world)) { Write-Error "-KeepWorld: no previous run world at $world"; exit 2 }
+    Write-Host "[autotest] KEEP-WORLD mode: reusing previous run world (persisted orebit/ state intact)"
     $lock = Join-Path $world "session.lock"
     if (Test-Path $lock) { Remove-Item -Force $lock }
 } else {
-    Write-Host "[autotest] seed-regen mode: MC will freshly generate the world from the pinned seed"
+    if (Test-Path $world) {
+        Write-Host "[autotest] deleting previous run world (disposable copy)"
+        Remove-Item -Recurse -Force $world
+    }
+    if ($MasterWorld -ne "") {
+        # FROZEN-WORLD mode: copy the pristine master in. The master itself is NEVER launched, so it stays
+        # byte-identical across runs -> deterministic blocks (no parallel-gen vegetation variance), and the
+        # bot's edits land only in this disposable copy.
+        if (-not (Test-Path $MasterWorld)) { Write-Error "master world not found: $MasterWorld"; exit 2 }
+        Write-Host "[autotest] FROZEN-WORLD mode: copying master '$MasterWorld' -> run world"
+        Copy-Item -Recurse -Force $MasterWorld $world
+        # A stale session.lock copied from the master (if it was ever launched) would block the server; drop it.
+        $lock = Join-Path $world "session.lock"
+        if (Test-Path $lock) { Remove-Item -Force $lock }
+    } else {
+        Write-Host "[autotest] seed-regen mode: MC will freshly generate the world from the pinned seed"
+    }
 }
 if (Test-Path $resultFile) { Remove-Item -Force $resultFile }
 # Stale per-search trace files from a previous -Trace run would mix into this run's numbering.
