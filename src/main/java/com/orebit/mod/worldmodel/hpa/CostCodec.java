@@ -74,18 +74,22 @@ public final class CostCodec {
     //       fragments. This is the §5 "uniform = 6 bits" sizing; the in-RAM RegionFragments still exposes a
     //       passFrac field, but it is meaningful only for MIXED. ---
     //   passFrac         : 4 bits   (MIXED only — the collapsed/uniform-mass crossing cost)
-    //   fragmentCount    : 6 bits   (MIXED only — 1..63 real fragments; 0 = collapsed / occupiability-stripped
-    //                                uniform mass, no fragment records, cross-cost from passFrac)
+    //   fragmentCount    : 6 bits   (MIXED only — 0 = honestly-ZERO kept fragments (occupiability-stripped /
+    //                                coarse no-passable-item mass, collapsed=false); 1..62 = exact count;
+    //                                63 = RegionFragments.FRAGMENT_COUNT_COLLAPSED, the cap-collapsed sentinel
+    //                                (collapsed=true). Both 0 and 63 carry no fragment records; cross-cost
+    //                                comes from passFrac. Depth-nibble precedent: 0..N exact, top code = flag.)
     //   fragment[count] {
     //     faceMask       : 6 bits
     //     per set face f : 16 bits  (the packed footprint = minU<<12|maxU<<8|minV<<4|maxV, 4 bits each)
     //   }
     //
     // The on-disk form does NOT persist gridSize (it is a build-time/level attribute; footprints are stored
-    // in face-relative 16-bucket units regardless of G — §5 roll-up note) nor the build-time collapsed-vs-
-    // stripped distinction (both are count==0 uniform mass on reload, treated identically at query time —
-    // §5: "0 = COLLAPSED"; unpack re-flags count==0 MIXED as collapsed for the cost path). The packer is a
-    // cold disk path (persistence), not the A* read hot path, so it may allocate.
+    // in face-relative 16-bucket units regardless of G — §5 roll-up note). The build-time collapsed-vs-
+    // stripped distinction DOES survive the trip (the count-field sentinel above) — the old schema conflated
+    // the two into count==0-reloads-as-collapsed, which broke round-trip identity (contentSignature drift on
+    // reload of a stripped record). The packer is a cold disk path (persistence), not the A* read hot path,
+    // so it may allocate.
 
     /**
      * Pack one region's fragment record into {@code buf} starting at bit offset {@code bitPos}, returning the
@@ -100,8 +104,13 @@ public final class CostCodec {
             return p; // uniform — 6 bits, no passFrac / count / fragments
         }
         p = writeBits(buf, p, rf.passFrac(), 4);
-        int count = rf.fragmentCount();
+        // A cap-collapsed record (fragmentCount 0 in RAM, collapsed flag set) writes the count-field
+        // sentinel; an honestly-zero record writes 0. Neither carries fragment records.
+        int count = rf.isCollapsed() ? RegionFragments.FRAGMENT_COUNT_COLLAPSED : rf.fragmentCount();
         p = writeBits(buf, p, count, 6);
+        if (count == RegionFragments.FRAGMENT_COUNT_COLLAPSED) {
+            return p; // collapsed sentinel — no fragment records follow
+        }
         for (int f = 0; f < count; f++) {
             int mask = rf.faceMask(f);
             p = writeBits(buf, p, mask, 6);
@@ -118,9 +127,10 @@ public final class CostCodec {
      * Unpack a region's fragment record from {@code buf} at bit offset {@code bitPos} into {@code out}
      * (reset at flood grid side {@code gridSize}), returning the end bit offset. The inverse of
      * {@link #packRegion}; a packed-then-unpacked record is field-identical for everything the schema
-     * persists (kind, hardness, passFrac, count, per-fragment faceMask + footprints). A MIXED record with
-     * {@code count == 0} is flagged {@link RegionFragments#isCollapsed() collapsed} (the schema's uniform-mass
-     * marker).
+     * persists (kind, hardness, passFrac, count, per-fragment faceMask + footprints, and the collapsed
+     * flag). A MIXED record whose on-wire count is {@link RegionFragments#FRAGMENT_COUNT_COLLAPSED} decodes
+     * as {@code fragmentCount == 0} with {@link RegionFragments#isCollapsed() collapsed}{@code == true};
+     * a count of {@code 0} decodes as honestly-zero ({@code collapsed == false}).
      */
     public static int unpackRegion(byte[] buf, int bitPos, int gridSize, RegionFragments out) {
         out.reset(gridSize);
@@ -135,9 +145,16 @@ public final class CostCodec {
         int passFrac = readBits(buf, p, 4); p += 4;
         out.setPassFrac(passFrac);
         int count = readBits(buf, p, 6); p += 6;
+        if (count == RegionFragments.FRAGMENT_COUNT_COLLAPSED) {
+            out.setFragmentCount(0);   // the sentinel is a flag, not a count — no fragment records on the wire
+            out.setCollapsed(true);    // cap-collapsed spongey mass; cross-cost from passFrac
+            return p;
+        }
         out.setFragmentCount(count);
         if (count == 0) {
-            out.setCollapsed(true); // §5: a count==0 MIXED region is the collapsed / uniform-mass case
+            // Honestly zero kept fragments (stripped / no-passable-item mass) — collapsed stays FALSE
+            // (reset() cleared it). The old re-flag-as-collapsed conflation is gone: collapse now rides
+            // the FRAGMENT_COUNT_COLLAPSED sentinel above.
             return p;
         }
         int[] packed = new int[6]; // cold disk path; alloc fine
