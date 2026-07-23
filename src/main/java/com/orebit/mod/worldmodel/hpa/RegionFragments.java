@@ -29,12 +29,16 @@ import java.util.Arrays;
  * stripped every component (checkerboard / speckle noise → {@link #isCollapsed()}{@code == false}) or the
  * occupiable component count exceeded the {@value #MAX_FRAGMENTS} cap ({@link #isCollapsed()}{@code == true}).
  * In both cases the crossing cost is derived from {@link #passFrac} at query time (S3) — more air ⇒ cheaper.
+ * The persisted form keeps the two apart via the {@link #FRAGMENT_COUNT_COLLAPSED} count-field sentinel
+ * (modeled on the block tier's depth-nibble "0..14 exact, 15 = more" precedent), so a save/load cycle
+ * round-trips {@link #isCollapsed()} honestly.
  *
  * <h2>Storage (HPA-FRAGMENTS.md §5)</h2>
  * On disk a region is a sub-byte {@code CostCodec} bitstream (S2); in RAM it is the convenient
  * struct-of-arrays below (favour-cpu-over-ram, like {@link CostPyramid}'s not-bit-packed rows). The bit
  * widths the on-disk form targets are: {@code kind} 2, {@code avgSolidHardness} 4, {@code passFrac} 4,
- * {@code fragmentCount} 6 (cap {@value #MAX_FRAGMENTS}); then per fragment a 6-bit {@code faceMask} and, per
+ * {@code fragmentCount} 6 (0 = honestly-zero, 1..{@value #MAX_FRAGMENTS} exact,
+ * {@value #FRAGMENT_COUNT_COLLAPSED} = the collapsed sentinel); then per fragment a 6-bit {@code faceMask} and, per
  * set face, a 2-byte footprint (a 2D bbox on the face's two in-face axes, 4 bits per min/max). <b>No costs
  * are stored</b> — every edge cost is derived per expansion (HPA-FRAGMENTS.md §2.2).
  *
@@ -64,8 +68,25 @@ public final class RegionFragments {
     /** Floorless with ANY water — symmetric swim; no fragments. */
     public static final int KIND_WATER = 3;
 
-    /** Hard cap on fragments per region — a 6-bit id (HPA-FRAGMENTS.md §3, §5). Over-cap ⇒ collapse. */
-    public static final int MAX_FRAGMENTS = 63;
+    /**
+     * Hard cap on fragments per region (HPA-FRAGMENTS.md §3, §5). Over-cap ⇒ collapse. Real fragment ids are
+     * {@code 0..MAX_FRAGMENTS-1} = 0..61 in the 6-bit id space; id 62 is unused/reserved and id 63 is the
+     * search-only virtual-goal id ({@code RegionPathfinder.VIRTUAL_GOAL_FRAG}) — so any id
+     * {@code >= MAX_FRAGMENTS} is never a real fragment. The cap is 62 (not 63) so the persisted 6-bit
+     * fragment-count field can spend 63 on the {@link #FRAGMENT_COUNT_COLLAPSED} sentinel.
+     */
+    public static final int MAX_FRAGMENTS = 62;
+
+    /**
+     * Persisted-count-field sentinel (the on-wire {@code fragmentCount} value, NOT a fragment id and NOT an
+     * in-RAM count): 63 = "cap-collapsed" ({@link #isCollapsed()}{@code == true} — the occupiable component
+     * count exceeded {@link #MAX_FRAGMENTS}, a spongey mess crossed via {@link #passFrac}). This frees
+     * {@code 0} to honestly mean "zero kept fragments" (occupiability-stripped / coarse no-passable-item
+     * mass, {@code collapsed == false}). In RAM a collapsed record still carries {@code fragmentCount == 0};
+     * only {@code CostCodec.packRegion}/{@code unpackRegion} speak the sentinel. Modeled on the depth-nibble
+     * precedent (0..14 exact, 15 = "more than 14").
+     */
+    public static final int FRAGMENT_COUNT_COLLAPSED = 63;
 
     /** Sentinel returned by {@link #footprint(int, int)} for a face the fragment does not touch. */
     public static final int NO_FACE = -1;
@@ -78,7 +99,8 @@ public final class RegionFragments {
     private int passFrac;
     /** Real fragment records present (0..{@value #MAX_FRAGMENTS}); 0 with {@link #KIND_MIXED} ⇒ uniform mass. */
     private int fragmentCount;
-    /** True iff the occupiable component count exceeded {@value #MAX_FRAGMENTS} (distinguishes over-cap from 0). */
+    /** True iff the occupiable component count exceeded {@value #MAX_FRAGMENTS} (distinguishes over-cap from 0);
+     *  persisted via the {@link #FRAGMENT_COUNT_COLLAPSED} count-field sentinel. */
     private boolean collapsed;
     /** The flood grid side this record was built at ({@code G}); 16 at the leaf (HPA-FRAGMENTS.md §3.1). */
     private int gridSize;

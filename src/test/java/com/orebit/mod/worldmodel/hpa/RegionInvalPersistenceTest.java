@@ -211,11 +211,13 @@ public class RegionInvalPersistenceTest {
     }
 
     // ===================================================================================================
-    // The virtual-goal decode filter (journey-scoped rows must not be durable): a row whose TO fragment is
-    // the search's VIRTUAL_GOAL_FRAG sentinel (63 = RegionFragments.MAX_FRAGMENTS) carries no realized
-    // evidence and names only the goal REGION — not the goal cell — so a persisted V-row from one goal would
-    // poison every later goal in that region. The record site no longer writes them; decode drops any a
-    // LEGACY file still carries (self-cleaning on load), so they never survive an encode → decode round-trip.
+    // The virtual-goal decode filter (journey-scoped rows must not be durable): a row whose TO fragment id
+    // is not a real fragment (>= RegionFragments.MAX_FRAGMENTS = 62 — the reserved id 62 or the search's
+    // VIRTUAL_GOAL_FRAG 63, which lives in the fragment-ID space, deliberately NOT MAX_FRAGMENTS since the
+    // 63→62 cap change) carries no realized evidence and names only the goal REGION — not the goal cell —
+    // so a persisted V-row from one goal would poison every later goal in that region. The record site no
+    // longer writes them; decode drops any a LEGACY file still carries (self-cleaning on load), so they
+    // never survive an encode → decode round-trip.
     // ===================================================================================================
     @Test
     void virtualGoalRows_doNotSurviveRoundTrip_legacyFilesSelfClean() throws IOException {
@@ -228,7 +230,7 @@ public class RegionInvalPersistenceTest {
         // A hand-recorded (approach → V) row: TO fragment = VIRTUAL_GOAL_FRAG (63). Simulates a legacy file
         // written before the onBlocked record-site scoping existed (the archived autotest worlds have them).
         long fv = key(2, 3, 3, 1);
-        long tv = key(3, 3, 3, RegionFragments.MAX_FRAGMENTS);
+        long tv = key(3, 3, 3, RegionPathfinder.VIRTUAL_GOAL_FRAG);
         mem.record(0, fp, tp, sig, RegionCrossingMemory.PROV_PROOF, BotCaps::sigDominates);
         mem.record(0, fv, tv, sig, RegionCrossingMemory.PROV_PROOF, BotCaps::sigDominates);
 

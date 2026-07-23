@@ -1,6 +1,7 @@
 package com.orebit.mod.worldmodel.hpa;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -13,9 +14,11 @@ import org.junit.jupiter.api.Test;
  * field the schema persists must survive the trip unchanged.
  *
  * <p>The schema persists: {@code kind}, {@code avgSolidHardness}, {@code passFrac} (MIXED only),
- * {@code fragmentCount}, and per fragment {@code faceMask} + the packed footprint of each touched face. It does
- * NOT persist {@code gridSize} (a build/level attribute — unpack restores it from the caller's {@code G}) nor
- * the build-time collapsed-vs-stripped distinction (a {@code count==0} MIXED record reloads as collapsed).
+ * {@code fragmentCount}, per fragment {@code faceMask} + the packed footprint of each touched face, and the
+ * collapsed flag (via the {@link RegionFragments#FRAGMENT_COUNT_COLLAPSED} count-field sentinel: on-wire
+ * count 0 = honestly-zero/stripped ({@code collapsed=false}), 1..62 exact, 63 = cap-collapsed
+ * ({@code collapsed=true})). It does NOT persist {@code gridSize} (a build/level attribute — unpack restores
+ * it from the caller's {@code G}).
  */
 public class CostCodecTest {
 
@@ -154,10 +157,12 @@ public class CostCodecTest {
     }
 
     // ===================================================================================================
-    // MIXED collapsed (count == 0): reloads as collapsed (the schema's uniform-mass marker).
+    // The count-field sentinel (v6): collapsed and honestly-stripped count-0 records are DISTINCT on the
+    // wire (63 vs 0) and round-trip their collapsed flag — the old schema conflated them (count==0 reloaded
+    // as collapsed), so a stripped record could not survive a save/load cycle with collapsed == false.
     // ===================================================================================================
     @Test
-    void mixedCollapsed_roundTrips() {
+    void mixedCollapsed_writesSentinel_reloadsCollapsed() {
         RegionFragments rf = new RegionFragments();
         rf.reset(G);
         rf.setKind(RegionFragments.KIND_MIXED);
@@ -166,9 +171,67 @@ public class CostCodecTest {
         rf.setFragmentCount(0);
         rf.setCollapsed(true);
 
+        // The on-wire count field (bits 10..15: kind 2 + hardness 4 + passFrac 4, then count 6) must carry
+        // the FRAGMENT_COUNT_COLLAPSED sentinel, not the in-RAM count 0.
+        byte[] buf = new byte[4];
+        CostCodec.packRegion(rf, buf, 0);
+        assertEquals(RegionFragments.FRAGMENT_COUNT_COLLAPSED, CostCodec.readBits(buf, 10, 6),
+                "a collapsed record writes count=63 (the sentinel) on the wire");
+
         RegionFragments back = roundTrip(rf);
         assertSchemaEqual(rf, back);
         assertEquals(9, back.passFrac(), "collapsed mass keeps passFrac (the crossing cost)");
-        assertTrue(back.isCollapsed(), "a count==0 MIXED record reloads as collapsed");
+        assertTrue(back.isCollapsed(), "the sentinel decodes to collapsed == true");
+        assertEquals(0, back.fragmentCount(), "…with fragmentCount 0 in RAM (the sentinel is a flag, not a count)");
+    }
+
+    @Test
+    void mixedStripped_reloadsNotCollapsed() {
+        // Honestly-zero kept fragments (the checkerboard/speckle strip, or a coarse no-passable-item mass):
+        // count 0 on the wire, and — the previously-impossible assertion — collapsed stays FALSE on reload.
+        RegionFragments rf = new RegionFragments();
+        rf.reset(G);
+        rf.setKind(RegionFragments.KIND_MIXED);
+        rf.setAvgSolidHardness(4);
+        rf.setPassFrac(2);
+        rf.setFragmentCount(0); // reset() left collapsed == false
+
+        byte[] buf = new byte[4];
+        CostCodec.packRegion(rf, buf, 0);
+        assertEquals(0, CostCodec.readBits(buf, 10, 6), "a stripped record writes count=0 on the wire");
+
+        RegionFragments back = roundTrip(rf);
+        assertSchemaEqual(rf, back);
+        assertEquals(0, back.fragmentCount());
+        assertFalse(back.isCollapsed(), "count==0 now reloads as honestly-zero, NOT collapsed");
+    }
+
+    // ===================================================================================================
+    // Cap boundary: a record with the full 62 fragments round-trips exactly (the largest legal count —
+    // one below the sentinel in the 6-bit field).
+    // ===================================================================================================
+    @Test
+    void mixedAtCap_62Fragments_roundTripsExactly() {
+        // 62 isolated 2-tall pockets on the 8×8 odd-(x,z) grid (the FragmentBuilderTest cap fixture, two
+        // pockets short of 64 so the build keeps every component).
+        boolean[] passable = new boolean[CELLS];
+        boolean[] standable = new boolean[CELLS];
+        int columns = 0;
+        for (int x = 1; x < G && columns < RegionFragments.MAX_FRAGMENTS; x += 2) {
+            for (int z = 1; z < G && columns < RegionFragments.MAX_FRAGMENTS; z += 2) {
+                standable[idx(x, 0, z)] = true;
+                passable[idx(x, 1, z)] = true;
+                passable[idx(x, 2, z)] = true;
+                columns++;
+            }
+        }
+        RegionFragments rf = build(passable, standable);
+        assertFalse(rf.isCollapsed(), "62 components sit AT the cap — no collapse");
+        assertEquals(RegionFragments.MAX_FRAGMENTS, rf.fragmentCount(), "fixture builds the full 62 fragments");
+
+        RegionFragments back = roundTrip(rf);
+        assertSchemaEqual(rf, back);
+        assertFalse(back.isCollapsed(), "an at-cap record reloads exact, never as the sentinel");
+        assertEquals(RegionFragments.MAX_FRAGMENTS, back.fragmentCount());
     }
 }

@@ -113,6 +113,81 @@ public final class PyramidMergerTest {
         assertEquals(2, parent.fragmentCount(), "two disjoint air columns = two parent fragments");
     }
 
+    /** Seed level-0 child {@code i} as a built MIXED region with {@code nFrags} isolated (no-face) fragments. */
+    private static void seedMixedFragments(CostPyramid p, int i, int nFrags) {
+        final int rx = i & 1, rz = (i >> 1) & 1, ry = (i >> 2) & 1;
+        final int row = p.rowFor(0, rx, ry, rz);
+        final RegionFragments rf = p.ensureFragments(0, row);
+        rf.reset(RegionAddress.LEAF_SIZE);
+        rf.setKind(RegionFragments.KIND_MIXED);
+        rf.setPassFrac(8);
+        final int[] noFaces = new int[6];
+        java.util.Arrays.fill(noFaces, RegionFragments.NO_FACE);
+        for (int f = 0; f < nFrags; f++) rf.setFragment(f, 0, noFaces); // faceMask 0 ⇒ never unions
+        rf.setFragmentCount(nFrags);
+        p.setBuilt(0, row, true);
+    }
+
+    /** Seed level-0 child {@code i} as a built MIXED collapsed/stripped mass ({@code fc==0}) with {@code passFrac}. */
+    private static void seedMixedMass(CostPyramid p, int i, int passFrac, boolean collapsed) {
+        final int rx = i & 1, rz = (i >> 1) & 1, ry = (i >> 2) & 1;
+        final int row = p.rowFor(0, rx, ry, rz);
+        final RegionFragments rf = p.ensureFragments(0, row);
+        rf.reset(RegionAddress.LEAF_SIZE);
+        rf.setKind(RegionFragments.KIND_MIXED);
+        rf.setPassFrac(passFrac);
+        rf.setFragmentCount(0);
+        rf.setCollapsed(collapsed);
+        p.setBuilt(0, row, true);
+    }
+
+    // ===================================================================================================
+    // The component cap at merge (62 = RegionFragments.MAX_FRAGMENTS): exactly 62 disjoint components are
+    // kept; a 63rd collapses the parent. Faceless fragments never union, so each child fragment is its own
+    // component and the counts are exact.
+    // ===================================================================================================
+    @Test
+    void mergeAtCap_62Components_notCollapsed() {
+        final CostPyramid p = new CostPyramid();
+        for (int i = 1; i < 8; i++) seedUniform(p, i, RegionFragments.KIND_SOLID); // walls — no items
+        seedMixedFragments(p, 0, RegionFragments.MAX_FRAGMENTS); // 62 disjoint fragments in one child
+        final RegionFragments parent = merge8(p);
+
+        assertEquals(RegionFragments.KIND_MIXED, parent.kind());
+        assertFalse(parent.isCollapsed(), "62 components sit AT the cap — no collapse");
+        assertEquals(RegionFragments.MAX_FRAGMENTS, parent.fragmentCount(), "all 62 components kept exactly");
+    }
+
+    @Test
+    void mergeOverCap_63rdComponent_collapses() {
+        final CostPyramid p = new CostPyramid();
+        for (int i = 1; i < 8; i++) seedUniform(p, i, RegionFragments.KIND_SOLID);
+        seedMixedFragments(p, 0, RegionFragments.MAX_FRAGMENTS); // 62 components…
+        seedMixedFragments(p, 3, 1);                             // …plus a 63rd (diagonal child, faceless anyway)
+        final RegionFragments parent = merge8(p);
+
+        assertEquals(RegionFragments.KIND_MIXED, parent.kind());
+        assertTrue(parent.isCollapsed(), "the 63rd component exceeds the 62 cap → collapsed");
+        assertEquals(0, parent.fragmentCount(), "a collapsed parent stores no fragment records");
+    }
+
+    // ===================================================================================================
+    // The nItems == 0 mine-through path: a MIXED parent with no passable item (solid children + an
+    // impassable count-0 mass) is fc=0 / collapsed=FALSE — an honestly-zero uniform mass, NOT the cap
+    // collapse (the distinction the v6 count-field sentinel now persists).
+    // ===================================================================================================
+    @Test
+    void mineThroughParent_fcZero_notCollapsed() {
+        final CostPyramid p = new CostPyramid();
+        for (int i = 0; i < 7; i++) seedUniform(p, i, RegionFragments.KIND_SOLID);
+        seedMixedMass(p, 7, /*passFrac*/ 0, /*collapsed*/ false); // impassable stripped mass — no item
+        final RegionFragments parent = merge8(p);
+
+        assertEquals(RegionFragments.KIND_MIXED, parent.kind(), "solid + MIXED-mass children ⇒ MIXED parent");
+        assertEquals(0, parent.fragmentCount(), "no passable item ⇒ uniform mine-through mass");
+        assertFalse(parent.isCollapsed(), "mine-through mass is honestly-zero, NOT the cap collapse");
+    }
+
     @Test
     void mergeLevelFragments_bulkBuildsParents() {
         // The bulk driver builds level 1 from every interned level-0 row.

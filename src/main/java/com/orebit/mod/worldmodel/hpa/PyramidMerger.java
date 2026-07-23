@@ -69,9 +69,9 @@ public final class PyramidMerger {
         return 2;
     }
 
-    /** Max fragment items in one merge = childCount × cap (8 × 63), rounded up — the union-find universe.
+    /** Max fragment items in one merge = childCount × cap (8 × 62) + 8 synthetic slots — the union-find universe.
      *  Package-private: {@link InvalidationRollup} sizes its containment scratch to the same universe. */
-    static final int MAX_ITEMS = 8 * RegionFragments.MAX_FRAGMENTS + 8; // 512
+    static final int MAX_ITEMS = 8 * RegionFragments.MAX_FRAGMENTS + 8; // 504
 
     // Reusable per-merge scratch (one merge is single-threaded; reset at the top of combineFragments).
     private static final ThreadLocal<int[]> ITEM_SLOT = ThreadLocal.withInitial(() -> new int[MAX_ITEMS]);
@@ -302,7 +302,9 @@ public final class PyramidMerger {
                 default: // MIXED
                     final int fc = rf.fragmentCount();
                     if (fc == 0) {
-                        // Collapsed/uniform mass: passable-enough → one synthetic open item; else a wall.
+                        // Uniform mass — BOTH cap-collapsed (isCollapsed) and honestly-stripped children land
+                        // here (fc==0 in RAM for both; only the wire distinguishes). Deliberately treated
+                        // alike: passable-enough → one synthetic open item; else a wall (passFrac decides).
                         if (rf.passFrac() > 0) {
                             nItems = addSynthetic(itemSlot, itemMask, itemFp, nItems, i);
                         }
