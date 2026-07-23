@@ -20,7 +20,8 @@ import org.junit.jupiter.api.Test;
  *   <li>OPEN (floor + air above) → 1 fragment;</li>
  *   <li>two disjoint tunnels → 2 fragments;</li>
  *   <li>checkerboard → 0 fragments (occupiability strips every singleton), not collapsed;</li>
- *   <li>&gt;63 isolated occupiable pockets → COLLAPSED;</li>
+ *   <li>&gt;{@value RegionFragments#MAX_FRAGMENTS} isolated occupiable pockets → COLLAPSED (with the exact
+ *       62-kept / 63rd-collapses cap boundary);</li>
  *   <li>a single tunnel exiting one face → known footprint bbox.</li>
  * </ul>
  */
@@ -132,28 +133,69 @@ public class FragmentBuilderTest {
     }
 
     // ===================================================================================================
-    // OVER-CAP — 64 isolated 2-tall occupiable pockets (>63) → COLLAPSED.
+    // OVER-CAP — 64 isolated 2-tall occupiable pockets (> the 62 cap) → COLLAPSED.
+    // (Cap moved 63 → 62 for the persisted count-field sentinel: 63 on the wire = FRAGMENT_COUNT_COLLAPSED.)
     // ===================================================================================================
-    @Test
-    void overCap_collapses() {
-        boolean[] passable = new boolean[CELLS];
-        boolean[] standable = new boolean[CELLS];
-        // 8×8 = 64 columns at odd (x,z), separated by solid even rows so none connect.
+
+    /** Carve {@code n} isolated 2-tall occupiable pockets from the 8×8 odd-(x,z) grid (row-major order). */
+    private static int carvePockets(boolean[] passable, boolean[] standable, int n) {
         int columns = 0;
-        for (int x = 1; x < G; x += 2) {
-            for (int z = 1; z < G; z += 2) {
+        for (int x = 1; x < G && columns < n; x += 2) {
+            for (int z = 1; z < G && columns < n; z += 2) {
                 standable[idx(x, 0, z)] = true;     // floor
                 passable[idx(x, 1, z)] = true;      // feet
                 passable[idx(x, 2, z)] = true;      // head (≥2-tall headroom)
                 columns++;
             }
         }
-        assertEquals(64, columns, "fixture should build 64 isolated pockets (> the 63 cap)");
+        return columns;
+    }
+
+    @Test
+    void overCap_collapses() {
+        boolean[] passable = new boolean[CELLS];
+        boolean[] standable = new boolean[CELLS];
+        // 8×8 = 64 columns at odd (x,z), separated by solid even rows so none connect.
+        int columns = carvePockets(passable, standable, 64);
+        assertEquals(64, columns, "fixture should build 64 isolated pockets (> the 62 cap)");
 
         RegionFragments rf = build(passable, standable);
 
         assertEquals(RegionFragments.KIND_MIXED, rf.kind());
-        assertTrue(rf.isCollapsed(), "64 occupiable components exceeds the 63 cap → collapsed");
+        assertTrue(rf.isCollapsed(), "64 occupiable components exceeds the "
+                + RegionFragments.MAX_FRAGMENTS + " cap → collapsed");
+        assertEquals(0, rf.fragmentCount(), "a collapsed region stores no fragment records");
+    }
+
+    @Test
+    void capBoundary_exactly62Kept_notCollapsed() {
+        // EXACTLY at the cap: 62 isolated pockets all survive as real fragments — no collapse. Guards the
+        // 63 → 62 threshold move (a build must keep components while kept < MAX_FRAGMENTS).
+        boolean[] passable = new boolean[CELLS];
+        boolean[] standable = new boolean[CELLS];
+        assertEquals(RegionFragments.MAX_FRAGMENTS,
+                carvePockets(passable, standable, RegionFragments.MAX_FRAGMENTS), "fixture carves 62 pockets");
+
+        RegionFragments rf = build(passable, standable);
+
+        assertEquals(RegionFragments.KIND_MIXED, rf.kind());
+        assertFalse(rf.isCollapsed(), "62 components is AT the cap, not over it — no collapse");
+        assertEquals(RegionFragments.MAX_FRAGMENTS, rf.fragmentCount(), "all 62 components kept exactly");
+    }
+
+    @Test
+    void capBoundary_63rdComponent_collapses() {
+        // ONE past the cap: the 63rd occupiable component trips the collapse (the mechanism is unchanged from
+        // the old 63-cap; only the threshold moved so the persisted count field can spend 63 on the sentinel).
+        boolean[] passable = new boolean[CELLS];
+        boolean[] standable = new boolean[CELLS];
+        assertEquals(RegionFragments.MAX_FRAGMENTS + 1,
+                carvePockets(passable, standable, RegionFragments.MAX_FRAGMENTS + 1), "fixture carves 63 pockets");
+
+        RegionFragments rf = build(passable, standable);
+
+        assertEquals(RegionFragments.KIND_MIXED, rf.kind());
+        assertTrue(rf.isCollapsed(), "the 63rd occupiable component exceeds the 62 cap → collapsed");
         assertEquals(0, rf.fragmentCount(), "a collapsed region stores no fragment records");
     }
 

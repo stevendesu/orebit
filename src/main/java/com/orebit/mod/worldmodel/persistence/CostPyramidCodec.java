@@ -88,10 +88,10 @@ import com.orebit.mod.worldmodel.hpa.StraddleSet;
  * (cascade-inferred realized-blame picks) are filtered out of every encode ({@link #persistableProv}) —
  * session-memory only — while {@code PROV_PROOF} and {@code PROV_ROLLED_UP} rows persist; decode merges
  * whatever a file carries (legacy escalation rows still load, they just stop being re-written) — EXCEPT
- * virtual-goal rows (TO fragment == {@link RegionFragments#MAX_FRAGMENTS}, the search's
- * {@code VIRTUAL_GOAL_FRAG} sentinel), which decode drops: journey-scoped by nature (no realized-evidence
- * backing, and the key names only the goal REGION, not the goal cell), no longer recorded at the source,
- * filtered here so legacy files self-clean on load.
+ * rows whose TO fragment id is not a real fragment (id {@code >= }{@link RegionFragments#MAX_FRAGMENTS} —
+ * the reserved id 62 and the search's {@code VIRTUAL_GOAL_FRAG} 63), which decode drops: virtual-goal rows
+ * are journey-scoped by nature (no realized-evidence backing, and the key names only the goal REGION, not
+ * the goal cell), no longer recorded at the source, filtered here so legacy files self-clean on load.
  *
  * <h2>{@code gridSize} on decode (the per-level gotcha)</h2>
  * {@code gridSize} is not persisted (a build-time attribute). It is passed to {@link CostCodec#unpackRegion} per
@@ -130,8 +130,13 @@ public final class CostPyramidCodec {
      * routes through swimmable cells, so they must read as absent and regenerate from live classify
      * (cache semantics: bad/old ⇒ rebuilt, never trusted). Covers both shard and coarse files (they share
      * this constant).
+     * v6 is the fragment-count-sentinel change (encoding + semantics): {@code RegionFragments.MAX_FRAGMENTS}
+     * 63 → 62 and the persisted 6-bit count field became 0 = honestly-zero (collapsed=false), 1..62 = exact,
+     * 63 = {@code FRAGMENT_COUNT_COLLAPSED} (collapsed=true) — un-conflating the two old count==0 meanings.
+     * A v5 file's count==63 record would mis-decode as a 63-fragment read under the new codec, and its
+     * collapsed records would lose the flag, so old files must cache-miss and rebuild from live.
      */
-    static final short VERSION = 5;
+    static final short VERSION = 6;
 
     /** Invalidation-section sig schema (the {@code BotCaps.realizabilitySig} bit layout generation). Bump when a
      *  sig dimension is added/changed (breath, count buckets); old sections then read as absent (re-learn). */
@@ -665,16 +670,18 @@ public final class CostPyramidCodec {
                 long capsSig = in.readLong();
                 int level = (int) (fromStored >>> INVAL_LEVEL_SHIFT) & 0xFF;
                 if (level > RegionAddress.MAX_COARSE_LEVEL) continue; // corrupt row — skip, keep reading
-                // Virtual-goal legacy filter: a row whose TO fragment is the search's virtual-goal sentinel
-                // ({@code RegionPathfinder.VIRTUAL_GOAL_FRAG} == {@link RegionFragments#MAX_FRAGMENTS} = 63,
-                // read from the key's fragment bits 50..55) is journey-scoped knowledge that should never have
-                // been durable: an (approach → V) blame carries no realized evidence, and the key encodes only
+                // Non-real-fragment legacy filter: a row whose TO fragment id (key bits 50..55) is not a real
+                // fragment — id >= {@link RegionFragments#MAX_FRAGMENTS} (62), i.e. the reserved id 62 or the
+                // search's virtual-goal id 63 ({@code RegionPathfinder.VIRTUAL_GOAL_FRAG}; this codec never
+                // imports pathfinding, so the bound is expressed in the fragment-ID space's own terms) — is
+                // dropped. The virtual-goal case is journey-scoped knowledge that should never have been
+                // durable: an (approach → V) blame carries no realized evidence, and the key encodes only
                 // the goal REGION, not the goal cell — so a persisted V-row from one goal poisons every later
                 // goal in that region. The record site (HierarchicalRegionPlan.onBlocked) no longer writes
                 // them, so this is purely a LEGACY cleanup, and decode is the single choke point: the row
                 // never enters the memory, so seeding never sees it and the shard's next dirty flush rewrites
                 // the section without it.
-                if ((int) ((toStored >>> INVAL_FRAG_SHIFT) & INVAL_FRAG_MASK) == RegionFragments.MAX_FRAGMENTS) {
+                if ((int) ((toStored >>> INVAL_FRAG_SHIFT) & INVAL_FRAG_MASK) >= RegionFragments.MAX_FRAGMENTS) {
                     continue;
                 }
                 int provenance = (int) ((toStored >>> INVAL_PROV_SHIFT) & INVAL_PROV_MASK);

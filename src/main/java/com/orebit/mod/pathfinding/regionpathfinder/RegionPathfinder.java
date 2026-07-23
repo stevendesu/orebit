@@ -229,12 +229,15 @@ public final class RegionPathfinder {
      * belongs to no real fragment; instead of routing to a nearest-centroid pocket, the level-0 skeleton A* gets a
      * synthetic node V at the goal region, reachable from each dig-flood pocket by a virtual edge priced at that
      * pocket's dig cost — so the search routes to whichever pocket is <b>cheapest to reach</b>, then digs in.
-     * Real fragments top out at {@link RegionFragments#MAX_FRAGMENTS}−1 = 62 ({@link FragmentBuilder} keeps a
-     * component only while {@code kept < MAX_FRAGMENTS}), so 63 is free and packs into the 6-bit fragment field.
+     * Real fragments top out at {@link RegionFragments#MAX_FRAGMENTS}−1 = 61 ({@link FragmentBuilder} keeps a
+     * component only while {@code kept < MAX_FRAGMENTS}); id 62 is unused/reserved, so 63 is free and packs into
+     * the 6-bit fragment field. NOTE: 63 lives in the fragment-ID/key space — it is deliberately NOT
+     * {@code RegionFragments.MAX_FRAGMENTS} (now 62) and must not collide with the persisted count field's
+     * {@link RegionFragments#FRAGMENT_COUNT_COLLAPSED} (also 63, a different value space entirely).
      * V is a search-only node: it never enters a {@link RegionFragments} record or a {@link RegionCostField}, so
      * consumers that read a fragment record by a skeleton step's id MUST guard it via {@link #isVirtualGoal}.
      */
-    public static final int VIRTUAL_GOAL_FRAG = RegionFragments.MAX_FRAGMENTS; // 63
+    public static final int VIRTUAL_GOAL_FRAG = 63;
 
     /** Whether {@code frag} is the {@link #VIRTUAL_GOAL_FRAG} sentinel (a skeleton step with no real fragment record). */
     public static boolean isVirtualGoal(int frag) {
@@ -1615,7 +1618,10 @@ public final class RegionPathfinder {
         return fragmentKey(rx, ry, rz, frag);
     }
 
-    /** A node with no real fragment records: a {@code null}/unbuilt record, a uniform kind, or collapsed mass. */
+    /** A node with no real fragment records: a {@code null}/unbuilt record, a uniform kind, or a count-0 MIXED
+     *  mass — cap-collapsed ({@code isCollapsed}) and honestly-stripped alike. The search deliberately does NOT
+     *  distinguish the two: both are crossed as a uniform mass priced from {@code passFrac}
+     *  ({@link #uniformTransitCost}'s MIXED branch), which already encodes "how spongey". */
     private static boolean isUniformNode(RegionFragments rf) {
         return rf == null || rf.isUniform() || rf.fragmentCount() == 0;
     }
