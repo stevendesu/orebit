@@ -215,29 +215,36 @@ public final class RegionAddress {
     // ---------------------------------------------------------------------------------------------------
 
     /**
-     * Pack region coords into one {@code long} key for the per-level open-addressed map. Layout:
-     * <pre>22 bits rx | 22 bits rz | 6 bits ry</pre>
+     * Pack region coords into one {@code long} key for the per-level open-addressed map. Layout
+     * (2026-07 packLevelKey repack — {@code ry} narrowed 6→5 bits so the physical key shrinks by one bit,
+     * freeing the high bits for a future from-fragment field):
+     * <pre>bits 0-4: ry (5) | bits 5-26: rz (22) | bits 27-48: rx (22)   →  region = bits 0-48 (49 bits)</pre>
      * Each level has its own map, so keys are only ever compared for <b>equality</b> — masking without
-     * sign-extension is fine: at level 0 {@code |rx| ≤ 30_000_000>>4 ≈ 1.875M} fits in 22 signed bits and
-     * {@code ry ≤ 32} fits in 6 bits, so two distinct coords never collide within a level.
+     * sign-extension is fine for rx/rz: at level 0 {@code |rx| ≤ 30_000_000>>4 ≈ 1.875M} fits in 22 signed bits.
+     * {@code ry} is a non-negative offset from {@code minY} in {@code 0..31} (32 leaf Y-regions), so it needs
+     * only 5 bits and is unpacked as a PLAIN MASK (see {@link #unpackRY}).
      */
     public static long packLevelKey(int rx, int ry, int rz) {
-        return ((rx & 0x3FFFFFL) << 28) | ((rz & 0x3FFFFFL) << 6) | (ry & 0x3FL);
+        return ((rx & 0x3FFFFFL) << 27) | ((rz & 0x3FFFFFL) << 5) | (ry & 0x1FL);
     }
 
     /** Recover {@code rx} from a packed key, sign-extending the 22-bit field. */
     public static int unpackRX(long key) {
-        return signExtend((int) ((key >>> 28) & 0x3FFFFFL), 22);
+        return signExtend((int) ((key >>> 27) & 0x3FFFFFL), 22);
     }
 
     /** Recover {@code rz} from a packed key, sign-extending the 22-bit field. */
     public static int unpackRZ(long key) {
-        return signExtend((int) ((key >>> 6) & 0x3FFFFFL), 22);
+        return signExtend((int) ((key >>> 5) & 0x3FFFFFL), 22);
     }
 
-    /** Recover {@code ry} from a packed key, sign-extending the 6-bit field. */
+    /**
+     * Recover {@code ry} from a packed key. {@code ry} is a non-negative offset from {@code minY} in the
+     * range {@code 0..31}, so this is a PLAIN 5-bit MASK with NO sign-extension — sign-extending would
+     * corrupt values 16..31 (their bit 4 would be read as a sign bit and yield negatives).
+     */
     public static int unpackRY(long key) {
-        return signExtend((int) (key & 0x3FL), 6);
+        return (int) (key & 0x1FL);
     }
 
     /** Sign-extend the low {@code bits} of {@code v} to a full {@code int}. */

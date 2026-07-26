@@ -7,39 +7,66 @@ import java.util.Arrays;
  * the replacement for the lossy single-center-node representation ({@link LeafCostComputer}'s six
  * face→center buckets, {@code CostPyramid}'s 12 face-bytes).
  *
- * <h2>What a fragment is</h2>
- * An abstract node is {@code (region, fragment)}, where a <b>fragment</b> is one 6-connected component of
- * the region's <i>occupiable</i> cells (a passable cell with a standable floor below and ≥2-tall headroom —
- * see {@link FragmentBuilder}). A region contributes one node per fragment: usually 1 (open terrain or solid
- * rock), a handful in caves. Same fragment → cheap-pathable (walk, no mining); different fragments → an
- * expensive intra-region mine edge. The region graph is therefore always fully connected (a sealed region
- * just routes through a dig), so there is no disconnected FAIL.
+ * <h2>What a fragment is (typed-fragments model, DESIGN-typed-fragments.md §1–§2)</h2>
+ * An abstract node is {@code (region, fragment)}, where a <b>fragment</b> is one maximal 6-connected
+ * component of the region's <i>passable</i> cells — <b>ALL</b> components are kept (the old occupiability
+ * filter became a per-fragment type computation; see {@link FragmentBuilder}). A region contributes one node
+ * per fragment: usually 1 (open terrain or solid rock), a handful in caves. Same fragment → cheap-pathable
+ * (walk/swim, no mining); different fragments → an expensive intra-region mine edge. The region graph is
+ * therefore always fully connected (a sealed region just routes through a dig), so there is no disconnected
+ * FAIL.
  *
- * <h2>Region kind (HPA-FRAGMENTS.md §2.3)</h2>
- * A region with no occupiable fragment is one of three uniform kinds (no fragment records):
+ * <h2>Fragment types (2 independent bits per fragment — NOT a partition)</h2>
  * <ul>
- *   <li>{@link #KIND_SOLID} — mine straight through (cost from {@link #avgSolidHardness}).</li>
- *   <li>{@link #KIND_AIR} — floorless AND provably dry (zero water cells): a one-way down chute (fall
- *       in/out cheap, pillar up dear). Capability gates may rely on "nothing swimmable here".</li>
- *   <li>{@link #KIND_WATER} — floorless with ANY water: symmetric swim (over-classified toward WATER on a
- *       mostly-air leaf — optimism is the safe direction; see {@link FragmentBuilder#build}).</li>
+ *   <li><b>W — {@link #typeW hasWater}</b>: the component contains ≥1 water cell. {@code W ⇒} swim-priced
+ *       transit downstream (swim &lt; walk).</li>
+ *   <li><b>S — {@link #typeS surfaceable}</b>: ∃ a component cell whose FOOTING is (standable floor
+ *       directly below <b>OR</b> water at the cell) AND whose HEADROOM is <b>air-only</b> — the cell above
+ *       is passable and NOT water (grid-top stays optimistic-open). Dry land (floor + air above) → S;
+ *       open-ocean surface (water cell + air above — tread and breathe) → S; submerged floor → ¬S; sealed
+ *       underwater pocket → ¬S·W; pure air → ¬S·¬W.</li>
  * </ul>
+ * Media mixes live INSIDE one fragment (no medium-splitting); ¬S·W is the future breath model's
+ * committed-transit corridor class. Types are existence claims — path/state-dependence (2-deep sprint-swim
+ * initiation etc.) stays at the block tier.
+ *
+ * <h2>Region kind (HPA-FRAGMENTS.md §2.3; DESIGN-typed-fragments.md §5.5, amended)</h2>
+ * A region is one of three uniform kinds (no fragment records) only when it is TRULY uniform:
+ * <ul>
+ *   <li>{@link #KIND_SOLID} — no passable cells: mine straight through (cost from
+ *       {@link #avgSolidHardness}).</li>
+ *   <li>{@link #KIND_AIR} — floorless, fully-passable, provably DRY box (every cell air): a one-way down
+ *       chute (fall in/out cheap, pillar up dear). Kind is exact by construction — AIR IMPLIES no
+ *       water.</li>
+ *   <li>{@link #KIND_WATER} — floorless, fully-passable, ALL-water box: symmetric swim. Kind IMPLIES
+ *       water; ¬S is genuinely correct (a fully-submerged cube's surface lives in the leaf above).</li>
+ * </ul>
+ * Every other floorless leaf (mixed media, or any solid content — pillars/walls over void) takes the
+ * fragment path and carries EXACT per-fragment types: an ocean-surface leaf is one fragment
+ * {@code {S,W}}; a wall-bisected air leaf is components with honest disjoint footprints (previously a
+ * blind uniform-AIR). The v5 any-water⇒WATER rule and the interim majority-vote scheme are both gone.
  * {@link #KIND_MIXED} is the only kind that carries fragment records. A MIXED region with
- * {@link #fragmentCount()}{@code == 0} is a <b>collapsed / uniform-mass</b> region: either occupiability
- * stripped every component (checkerboard / speckle noise → {@link #isCollapsed()}{@code == false}) or the
- * occupiable component count exceeded the {@value #MAX_FRAGMENTS} cap ({@link #isCollapsed()}{@code == true}).
+ * {@link #fragmentCount()}{@code == 0} is a <b>collapsed / uniform-mass</b> region: either a coarse merge
+ * found no passable item (mine-through mass → {@link #isCollapsed()}{@code == false}; under keep-all a leaf
+ * with passable cells always keeps ≥1 fragment, so honestly-zero is coarse-only) or the component count
+ * exceeded the {@value #MAX_FRAGMENTS} cap ({@link #isCollapsed()}{@code == true}).
  * In both cases the crossing cost is derived from {@link #passFrac} at query time (S3) — more air ⇒ cheaper.
  * The persisted form keeps the two apart via the {@link #FRAGMENT_COUNT_COLLAPSED} count-field sentinel
  * (modeled on the block tier's depth-nibble "0..14 exact, 15 = more" precedent), so a save/load cycle
  * round-trips {@link #isCollapsed()} honestly.
  *
- * <h2>Storage (HPA-FRAGMENTS.md §5)</h2>
+ * <h2>Storage (HPA-FRAGMENTS.md §5; DESIGN-typed-fragments.md §5.3–§5.4)</h2>
  * On disk a region is a sub-byte {@code CostCodec} bitstream (S2); in RAM it is the convenient
  * struct-of-arrays below (favour-cpu-over-ram, like {@link CostPyramid}'s not-bit-packed rows). The bit
- * widths the on-disk form targets are: {@code kind} 2, {@code avgSolidHardness} 4, {@code passFrac} 4,
+ * widths the on-disk form targets are: {@code kind} 2, {@code avgSolidHardness} 4 (uniform kinds STOP
+ * here — 6 bits); for MIXED: {@code passFrac} 4,
  * {@code fragmentCount} 6 (0 = honestly-zero, 1..{@value #MAX_FRAGMENTS} exact,
- * {@value #FRAGMENT_COUNT_COLLAPSED} = the collapsed sentinel); then per fragment a 6-bit {@code faceMask} and, per
- * set face, a 2-byte footprint (a 2D bbox on the face's two in-face axes, 4 bits per min/max). <b>No costs
+ * {@value #FRAGMENT_COUNT_COLLAPSED} = the collapsed sentinel); then per fragment a 6-bit {@code faceMask},
+ * 2 type bits (S, W), and, per set face, a 2-byte footprint (a 2D bbox on the face's two in-face axes,
+ * 4 bits per min/max). In RAM the type bits ride a parallel {@code byte[]} beside {@code faceMask} (house
+ * style: parallel struct-of-arrays, sized to the cap). Uniform records carry no type bits — their kind
+ * already implies W exactly (WATER ⇒ water, AIR ⇒ dry) and never claims S (a fully-submerged cube's
+ * surface lives in the leaf above; the S signal is authoritative on MIXED records' fragments). <b>No costs
  * are stored</b> — every edge cost is derived per expansion (HPA-FRAGMENTS.md §2.2).
  *
  * <h2>Faces &amp; in-face axes (canonical {@link RegionAddress} order)</h2>
@@ -91,6 +118,13 @@ public final class RegionFragments {
     /** Sentinel returned by {@link #footprint(int, int)} for a face the fragment does not touch. */
     public static final int NO_FACE = -1;
 
+    // ---- Per-fragment type bits (DESIGN-typed-fragments.md §2) ----------------------------------------
+    /** S — <b>surfaceable</b>: ∃ a component cell with footing (standable floor below OR water at the cell)
+     *  and air-only headroom (cell above passable and NOT water; grid-top optimistic-open). */
+    public static final int TYPE_S = 1;
+    /** W — <b>hasWater</b>: the component contains ≥1 water cell (⇒ swim-priced transit downstream). */
+    public static final int TYPE_W = 2;
+
     // ---- Region header --------------------------------------------------------------------------------
     private int kind;
     /** Mean quantized hardness over the region's SOLID cells, packed to a nibble (0..15). The mine-edge cost. */
@@ -99,7 +133,7 @@ public final class RegionFragments {
     private int passFrac;
     /** Real fragment records present (0..{@value #MAX_FRAGMENTS}); 0 with {@link #KIND_MIXED} ⇒ uniform mass. */
     private int fragmentCount;
-    /** True iff the occupiable component count exceeded {@value #MAX_FRAGMENTS} (distinguishes over-cap from 0);
+    /** True iff the passable-component count exceeded {@value #MAX_FRAGMENTS} (distinguishes over-cap from 0);
      *  persisted via the {@link #FRAGMENT_COUNT_COLLAPSED} count-field sentinel. */
     private boolean collapsed;
     /** The flood grid side this record was built at ({@code G}); 16 at the leaf (HPA-FRAGMENTS.md §3.1). */
@@ -108,6 +142,8 @@ public final class RegionFragments {
     // ---- Per-fragment records (struct-of-arrays, sized to the cap) -------------------------------------
     /** Which of the 6 faces each fragment reaches (6-bit mask, bit f = face f). */
     private final byte[] faceMask = new byte[MAX_FRAGMENTS];
+    /** Per-fragment type bits ({@link #TYPE_S}|{@link #TYPE_W}) — the parallel array beside {@code faceMask}. */
+    private final byte[] types = new byte[MAX_FRAGMENTS];
     /**
      * Packed footprint per {@code (fragment, face)} = {@code [frag*6 + face]}: four nibbles
      * {@code (minU<<12)|(maxU<<8)|(minV<<4)|maxV}, or {@link #NO_FACE} when the face bit is clear. Valid only
@@ -138,6 +174,7 @@ public final class RegionFragments {
         this.gridSize = G;
         this.labeled = false;
         Arrays.fill(faceMask, (byte) 0);
+        Arrays.fill(types, (byte) 0);
         Arrays.fill(footprint, NO_FACE);
     }
 
@@ -159,13 +196,20 @@ public final class RegionFragments {
     /** Publish/retract the label slab (set by {@link FragmentBuilder#build} after the flood decides). */
     void setLabeled(boolean l) { this.labeled = l; }
 
-    /** Record one fragment's faces + packed footprints. {@code packed[face]} = {@link #NO_FACE} when unset. */
+    /** Record one fragment's faces + packed footprints. {@code packed[face]} = {@link #NO_FACE} when unset.
+     *  Resets the fragment's type bits to 0 — set them via {@link #setFragmentTypes} afterwards. */
     void setFragment(int frag, int faceMaskBits, int[] packedByFace) {
         this.faceMask[frag] = (byte) faceMaskBits;
+        this.types[frag] = 0;
         int base = frag * 6;
         for (int f = 0; f < 6; f++) {
             this.footprint[base + f] = ((faceMaskBits >> f) & 1) != 0 ? packedByFace[f] : NO_FACE;
         }
+    }
+
+    /** Record one fragment's type bits ({@link #TYPE_S}|{@link #TYPE_W}). */
+    void setFragmentTypes(int frag, int typeBits) {
+        this.types[frag] = (byte) (typeBits & (TYPE_S | TYPE_W));
     }
 
     // ---- Public accessors -----------------------------------------------------------------------------
@@ -182,7 +226,7 @@ public final class RegionFragments {
     /** Number of real fragment records (0..{@value #MAX_FRAGMENTS}); 0 ⇒ uniform mass for a MIXED region. */
     public int fragmentCount() { return fragmentCount; }
 
-    /** True iff this region collapsed because its occupiable component count exceeded the cap. */
+    /** True iff this region collapsed because its passable-component count exceeded the cap. */
     public boolean isCollapsed() { return collapsed; }
 
     /** The flood grid side ({@code G}) this record was built at (16 at the leaf). */
@@ -207,6 +251,15 @@ public final class RegionFragments {
 
     /** Whether fragment {@code frag} reaches face {@code f} (0..5). */
     public boolean touchesFace(int frag, int f) { return (faceMask[frag] & (1 << f)) != 0; }
+
+    /** Fragment {@code frag}'s raw type bits ({@link #TYPE_S}|{@link #TYPE_W}) — one mask read (hot path). */
+    public int typeBits(int frag) { return types[frag] & (TYPE_S | TYPE_W); }
+
+    /** S — whether fragment {@code frag} is <b>surfaceable</b> (see {@link #TYPE_S}). */
+    public boolean typeS(int frag) { return (types[frag] & TYPE_S) != 0; }
+
+    /** W — whether fragment {@code frag} contains water (see {@link #TYPE_W}). */
+    public boolean typeW(int frag) { return (types[frag] & TYPE_W) != 0; }
 
     /**
      * The packed footprint of fragment {@code frag} on face {@code f}, or {@link #NO_FACE} if it does not
@@ -245,6 +298,7 @@ public final class RegionFragments {
         h = h * 31 + (collapsed ? 1 : 0);
         for (int frag = 0; frag < fragmentCount; frag++) {
             h = h * 31 + (faceMask[frag] & 0x3F);
+            h = h * 31 + (types[frag] & (TYPE_S | TYPE_W));
             int base = frag * 6;
             for (int f = 0; f < 6; f++) {
                 h = h * 31 + footprint[base + f];

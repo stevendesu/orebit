@@ -25,15 +25,35 @@ because the bot stepped around a tree. The top level *slides* toward far goals a
 *collapses* as the bot nears them, which is what lets one mechanism cover everything
 from "come here" to a cross-continent trek.
 
-Two robustness rules matter in practice:
+Four robustness rules matter in practice:
 
 - **Commit to the skeleton.** Once the bot is executing a region route, near-equal
   alternatives are not allowed to flip-flop it mid-route; the plan re-routes when
   reality disagrees, not when a fresh search would score 2% cheaper.
-- **Repair by blacklist.** If a promised region crossing turns out unrealizable at
-  the block level (the coarse tier is optimistic about unexplored terrain — see the
-  world-model page), that specific crossing is blacklisted and the level re-plans
-  around it, escalating to coarser levels only if the local repair fails.
+- **Repair by blacklist — and remember it.** If a promised region crossing turns out
+  unrealizable at the block level (the coarse tier is optimistic about unexplored
+  terrain — see the world-model page), that specific crossing is blacklisted and the
+  level re-plans around it, escalating to coarser levels only if the local repair
+  fails. These learned dead ends aren't scratch notes for one search: they're kept for
+  the capability profile that proved them (a crossing impossible for a no-dig bot may
+  be fine for one that mines) and **saved with the [region map](persistence.md)**, so
+  a restarted server doesn't march the bot back into a dead end it already paid to
+  discover.
+- **A dead approach isn't a dead destination.** When the planner rules a way in
+  unrealizable, it remembers *which direction the bot was coming from* — so ruling out
+  one approach to a place leaves every other approach to it open. This matters most
+  when the goal shares a region with the obstacle guarding it: a goal on top of a cliff
+  the bot is standing beneath is, to the coarse planner, "right here", so the direct
+  climb straight up looks trivial and the fine search floods against the cliff face.
+  Because approaches are tracked separately, the planner blames only *that* approach —
+  the straight-up one — and reroutes the long way around to the staircase, instead of
+  concluding the whole destination is unreachable and giving up.
+- **Buried goals get dug to.** A goal with no open space around it at all — an ore
+  seam, a sealed room — is still a real goal: the region planner enumerates the
+  reachable pockets *around* it, prices the dig from each (for a bot allowed to
+  mine), and routes to the cheapest approach. `/bot goto` at an underground
+  coordinate tunnels there; it doesn't refuse because no corridor happens to exist
+  yet.
 
 ## Block-level
 
@@ -86,9 +106,13 @@ load-bearing pieces:
   diff of its planned edits, and every geometry read consults the diff before the
   grid — so a later move correctly sees the block an earlier move plans to place.
 - **Honest partial paths.** When the search exhausts its budget, it returns its best
-  progress instead of failing — but truncated to the last *reversible* point, so a
-  bot that can't place blocks is never marched off a ledge it can't climb back from
-  on the strength of an unfinished plan.
+  progress instead of failing — but only if that progress *genuinely gets closer to
+  the goal*, measured geometrically, so a cheap-but-sideways wander doesn't count —
+  and truncated to the last *reversible* point, so a bot that can't place blocks is
+  never marched off a ledge it can't climb back from on the strength of an unfinished
+  plan. The bot walks a partial to its end and replans from there, converging on far
+  goals in strides; a search whose best effort got no closer reports failure instead
+  of walking it.
 
 ### Movements
 
@@ -104,17 +128,20 @@ per-movement reference, with every cost constant and its derivation:
 | Ascend          | Step up one block (jump, possibly placing a step)                          |
 | Descend         | Step down one block                                                        |
 | Fall            | Drop multiple blocks off an edge (damage priced as cost, capped at lethal) |
+| WalkOff         | Walk a one-block gap and land one down — the no-jump gap cross for spots where a jump is refused |
 | Pillar          | Jump and place beneath yourself — straight up in the same column           |
 | MineDown        | Dig the block underfoot and drop one — straight down in the same column    |
 | Climb           | Ascend or descend a ladder, vine, or scaffolding                           |
-| Parkour         | Sprint-jump a gap to a flat (1–3), rising (1–3), or falling (1–4) landing — plus offset landings one cell off the line |
-| DiagonalParkour | The same running jump along a diagonal (gaps 1–3)                          |
+| Parkour         | Sprint-jump a gap to a flat (1–3), rising (1–2), or falling (1–4) landing — plus offset landings one cell off the line |
+| DiagonalParkour | The same running jump along a diagonal (gaps 1–2)                          |
 | Swim            | Paddle at the water surface (slow)                                         |
 | Sprint-swim     | Fast prone swimming — the 3D underwater workhorse                          |
+| Diagonal sprint-swim | The same stroke along 2- and 3-axis diagonals — true 3D corner-cutting underwater |
 | Start sprint-swim / Surface | The transitions into and out of the prone swimming pose        |
+| Ride bubble column | Step into an upward bubble column and let it carry you — the free elevator |
 
-The last row is worth a note: sprint-swimming is *stateful* (you must be in deep
-water to start it, but can continue through shallows), so the search's node identity
+The pose-transition row is worth a note: sprint-swimming is *stateful* (you must be in
+deep water to start it, but can continue through shallows), so the search's node identity
 includes the bot's pose — going prone is a real search edge, not a bookkeeping trick.
 
 **Planned, extensible** (added later through the same interface): Crawl (1-tall gaps),

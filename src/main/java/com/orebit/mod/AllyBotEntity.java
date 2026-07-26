@@ -939,6 +939,10 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         } else {
             WorldEdits.placeBlock(level, p, placeBlock()); // conjured, infinite supply
         }
+        // P7 attribution: one cold line per ACTUAL world edit (bounded by placements, never per-tick) tying
+        // the placement to the step frame that requested it — the executor-side half of the plan's plc count.
+        OrebitCommon.LOGGER.info("[Orebit] place executed at ({},{},{}) for step {} -> ({},{},{})",
+                x, y, z, lastSteerMove, navigator.segToX(), navigator.segToY(), navigator.segToZ());
         this.swing(InteractionHand.MAIN_HAND);
     }
 

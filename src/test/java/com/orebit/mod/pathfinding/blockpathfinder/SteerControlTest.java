@@ -262,4 +262,70 @@ public class SteerControlTest {
         SteerControl.recenterOnTarget(onColumn, column);
         assertEquals(0.0f, onColumn.forward, 1e-6f, "no shove when already centred");
     }
+
+    // ---- Gate-point steering (steerViaGate/pastGate — the corner-gate primitive) ----------------------
+    // The P5 §3.2 hug frame: a diagonal step (0,0)→(1,1), centres (0.5,0.5)→(1.5,1.5); the side column
+    // (x+dx, z) is blocked, so the hug's gate is the shared corner (1,1) offset 0.3 toward the OPEN side:
+    // (0.7, 1.3). Along-track axis u = (1,1)/√2; the gate projects at 0.5·√2 ≈ 0.7071 (exactly the corner).
+
+    @Test
+    void steerViaGate_shortOfTheGate_aimsTheGatePoint_neverTheCenterline() {
+        View seg = new View(0.5, 1, 0.5, 1.5, 1, 1.5);
+        // Off the s→t line toward the OPEN side (+z), short of the gate (along ≈ 0.495 < 0.7071 − deadband).
+        FakeBot b = new FakeBot(0.6, 1, 1.1); // vel 0 → the servo error IS the aim direction
+        SteerControl.steerViaGate(b, seg, 0.7, 1.3);
+        // Aim = gate − bot = (0.1, 0.2): both positive, z-dominant — the drive keeps (deepens) the open-side
+        // offset. Line-tracking (steerTowards/groundServo pursuit) would aim x-dominant here, pulling the bot
+        // back toward the centerline and the blocked corner — exactly the recentering the hug refutation bans.
+        assertTrue(b.faceDx > 0 && b.faceDz > 0, "advances toward the gate");
+        assertEquals(2.0, b.faceDz / b.faceDx, 1e-9, "aims the gate POINT exactly — no centerline return term");
+        assertEquals(1.0f, b.forward, 1e-6f, "pass-through aim: full cruise into the gate, never eased");
+    }
+
+    @Test
+    void steerViaGate_pastTheGate_aimsTheRealTarget() {
+        View seg = new View(0.5, 1, 0.5, 1.5, 1, 1.5);
+        // Past the gate's projection (along ≈ 0.813 > 0.7071): the destination centre owns the aim.
+        FakeBot b = new FakeBot(0.8, 1, 1.35);
+        SteerControl.steerViaGate(b, seg, 0.7, 1.3);
+        // Aim = target − bot = (0.7, 0.15) — the heading has swung off the gate onto the destination.
+        assertTrue(b.faceDx > 0 && b.faceDz > 0, "advances toward the target");
+        assertEquals(0.0, b.faceDx * 0.15 - b.faceDz * 0.7, 1e-9, "aims the target POINT (collinear with target − bot)");
+        assertEquals(1.0f, b.forward, 1e-6f, "carries speed through the target (reached is the stopper, not the drive)");
+    }
+
+    @Test
+    void steerViaGate_handoffSwitchesAtTheGateProjection_withTheEarlyDeadband() {
+        View seg = new View(0.5, 1, 0.5, 1.5, 1, 1.5);
+        double ux = 1.0 / Math.sqrt(2.0), uz = ux;       // along-track unit
+        // ON the line just short of the handoff (along 0.60 < 0.7071 − GATE_PASS_DEADBAND ≈ 0.657): the gate
+        // owns the aim, which points OFF the line toward the open side (−x, +z from here).
+        FakeBot shortOf = new FakeBot(0.5 + 0.60 * ux, 1, 0.5 + 0.60 * uz);
+        SteerControl.steerViaGate(shortOf, seg, 0.7, 1.3);
+        assertTrue(shortOf.faceDx < 0 && shortOf.faceDz > 0,
+                "short of the gate the drive leaves the centerline for the gate (the hug's whole point)");
+        // ON the line just past it (along 0.66 ≥ the deadbanded threshold): the target owns the aim — dead
+        // ahead along the diagonal, equal components.
+        FakeBot past = new FakeBot(0.5 + 0.66 * ux, 1, 0.5 + 0.66 * uz);
+        SteerControl.steerViaGate(past, seg, 0.7, 1.3);
+        assertTrue(past.faceDx > 0 && past.faceDz > 0, "past the gate: forward along the diagonal");
+        assertEquals(past.faceDx, past.faceDz, 1e-9, "…aimed at the target centre (on-line → equal components)");
+        // The predicate itself, at the same two states.
+        assertTrue(!SteerControl.pastGate(shortOf, 0.5, 0.5, 1.5, 1.5, 0.7, 1.3), "along 0.60 is short");
+        assertTrue(SteerControl.pastGate(past, 0.5, 0.5, 1.5, 1.5, 0.7, 1.3), "along 0.66 is past (deadband fires early)");
+    }
+
+    @Test
+    void steerViaGate_servoActuation_bleedsMomentumOffTheGateLine() {
+        View seg = new View(0.5, 1, 0.5, 1.5, 1, 1.5);
+        // At the segment start with purely lateral (+x) momentum: the velocity error faces −x (reverse-thrust
+        // the off-line component) while still +z (advance toward the gate) — the parkourRunupAlign property,
+        // now anchored to the gate POINT so position converges too, not just velocity.
+        FakeBot b = new FakeBot(0.5, 1, 0.5);
+        b.velX = 0.2;
+        SteerControl.steerViaGate(b, seg, 0.7, 1.3);
+        assertTrue(b.faceDx < 0, "faces against the lateral momentum (bleeds it)");
+        assertTrue(b.faceDz > 0, "while still thrusting toward the gate");
+        assertEquals(1.0f, b.forward, 1e-6f, "error well past the servo deadband → saturated forward");
+    }
 }

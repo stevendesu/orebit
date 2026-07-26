@@ -20,7 +20,7 @@ simple goal, not from an elaborate command grammar.
 | `/bot find <resource>` | Report the nearest known concentration of a resource — see [Finding & Gathering](gathering.md). |
 | `/bot gather <resource> [count]` | Go get it: find, path, mine, and come back with the goods. |
 | `/bot drop <what>` | Toss items on the ground for you to pick up. `<what>` tab-completes: `all`, `resources` (ores/ingots/gems/logs), `tools`, `trash` (everything that isn't a resource, tool, or armor), or a specific resource name (`iron`, `diamond`, `gold`, `wood`, …). Dropped items get a short pickup delay so the bot doesn't vacuum them back. |
-| `/bot report` | Dump the bot's resource knowledge (the "compass") as a table: each resource it has mapped, with approximate counts at a few scales — `near`/`mid`/`far` (within ~64 / ~512 / ~8192 blocks of you, full depth) out to `global` (everything it has explored **this session, anywhere** — even resources it walked past thousands of blocks away). The near/mid/far windows are centered on you, so the numbers stay steady as you move a few blocks (no jump at the world origin). Big numbers show as `~2^n`. The `global` tally is not saved across a server restart yet. See [Finding & Gathering](gathering.md). |
+| `/bot report` | Dump the bot's resource knowledge (the "compass") as a table: each resource it has mapped, with approximate counts at a few scales — `near`/`mid`/`far` (within ~64 / ~512 / ~8192 blocks of you, full depth) out to `global` (everything it has **ever explored, anywhere** — even resources it walked past thousands of blocks away). The near/mid/far windows are centered on you, so the numbers stay steady as you move a few blocks (no jump at the world origin). Big numbers show as `~2^n`. The whole census is [saved with the world](persistence.md), so it survives a server restart. See [Finding & Gathering](gathering.md). |
 | `/bot config <…>` | Read or reload the bot's [configuration](configuration.md) without a server restart. |
 
 The bot is a real server-side player, so `follow` / `come` / `goto` are not teleports —
@@ -51,6 +51,12 @@ tuning and bug reports, not everyday play.
   versus the price to break it, and the capability gate in force. This is the
   stale-grid-versus-stale-flags-versus-caps discriminator when a bot behaves oddly at a
   specific spot.
+- **`/bot stats`** — a read-only dump of the bot's search-health telemetry for the
+  current journey and the last completed one: searches run, positions examined, partial
+  paths, replans and route repairs, plus a route-efficiency figure (distance actually
+  traveled versus the straight line). It's the live, mid-journey view of the same numbers
+  the bot logs when a journey ends — the quick way to see a flood or a roundabout route
+  developing without tailing the console.
 - **`/bot debug on|off`** — toggle verbose per-tick planner logging (skeleton dumps,
   window swaps, block-plan summaries) for watching the two-tier driver work in real time.
 

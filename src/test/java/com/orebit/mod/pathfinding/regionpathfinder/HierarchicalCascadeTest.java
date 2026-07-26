@@ -2,6 +2,7 @@ package com.orebit.mod.pathfinding.regionpathfinder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -91,17 +92,19 @@ public class HierarchicalCascadeTest {
     }
 
     // ===================================================================================================
-    // Selective re-plan — moving within L1's window re-plans only L0; exhausting L1's window re-plans L1.
-    // (HPA-CASCADE §5: re-plan frequency halves per level up — the amortization guarantee.)
+    // Selective re-plan under the ROLLING SKELETON (DESIGN-rolling-skeleton.md §3, §13 increment A).
+    // REWRITTEN from the static-head geometry this test previously pinned (per the
+    // dont-weaken-model-for-outdated-test rule — the TEST moves, not the model, §11): the old assertions
+    // ("L0 re-plans every 64 blocks; L1 re-plans at 128 blocks") pinned exactly the per-window re-derive
+    // cadence rolling removes. Now: within the parent window, crossing L0 cells SLIDES the window (the
+    // committed cursor IS the window base, §3.1) and EXTENDS the L0 skeleton by suffix-splice (§4) — it
+    // never RE-DERIVES; the coarse levels re-plan only when genuinely consumed (`exhausted` retained
+    // verbatim as the safety net — L1 at its TAIL under the slid window, L2 at its static head).
     // ===================================================================================================
     @Test
     void onBotMoved_selectiveReplan_fineBeforeCoarse() {
-        // Beeline at SURFACE level (y≥63). The §2 unbuilt cost (Option B) prices below-sea-level lateral travel
-        // through UNKNOWN space at 2× so a long underground traversal RISES toward the surface band to cross —
-        // a reasonable prior when the cave structure is unknown (surface travel beats blind tunneling). This test
-        // exercises the selective-replan window math, not that routing choice, so it walks the bot along a flat
-        // surface-band beeline (63..128, where lateral cost is uniform) where a straight +X walk stays ON the
-        // skeleton — below the surface the risen skeleton would read the flat walk as a deviation.
+        // Beeline at SURFACE level (y≥63) — see the note on the §2 unbuilt cost prior: a flat surface-band
+        // walk stays ON the skeleton, so this exercises the window math, not the routing choice.
         final int y = 70;
         HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, 0, new BlockPos(8, y, 8),
                 new BlockPos(8 + 1000, y, 8), CAPS);
@@ -110,22 +113,34 @@ public class HierarchicalCascadeTest {
         RegionPathPlan l1Before = h.skeletonAt(1);
         RegionPathPlan l2Before = h.skeletonAt(2);
 
-        // Walk +X within L1's window (< 128 blocks = 4 L1 cells): L0 exhausts its 4-cell window (every 64 blocks)
-        // and re-plans, but L1/L2 do not. Step in 16-block (one L0 cell) increments so commit advances cleanly.
-        boolean anyL0Replan = false;
-        for (int x = 24; x <= 72; x += 16) { // up to +64 blocks from start (x=8)
-            boolean changed = h.onBotMoved(new BlockPos(x, y, 8));
-            anyL0Replan |= changed;
+        // Phase 1 — walk +X through many L0 cells while every coarse window still contains the bot: rolling
+        // slides/extends (verdict UNCHANGED or EXTENDED), never SWAPPED, and the coarse skeletons survive
+        // untouched. (OLD pinned behavior: an L0 re-derive every 4 cells — the §1 waste class.)
+        boolean sawExtended = false;
+        for (int x = 24; x <= 248; x += 16) {
+            HierarchicalRegionPlan.Verdict v = h.onBotMoved(new BlockPos(x, y, 8), false, 0);
+            assertNotEquals(HierarchicalRegionPlan.Verdict.SWAPPED, v,
+                    "x=" + x + ": in-window progress must slide/extend, never re-derive (rolling §3.1)");
+            sawExtended |= v == HierarchicalRegionPlan.Verdict.EXTENDED;
         }
-        assertTrue(anyL0Replan, "crossing L0 cells must re-plan the L0 segment");
-        assertSame(l1Before, h.skeletonAt(1), "L1 must NOT re-plan while the bot is still inside its window");
+        assertTrue(sawExtended, "the clamping L0 window must have EXTENDED at least once (§3.2)");
+        assertSame(l1Before, h.skeletonAt(1), "L1 must NOT re-plan while the bot is inside its (slid) window");
         assertSame(l2Before, h.skeletonAt(2), "L2 must NOT re-plan either");
+        assertEquals(0, h.exhaustedFires(), "INV-4: the L0 safety net never fires on a healthy walk");
+        assertEquals(0, h.degradedSettles(), "no extension may fail over open optimistic terrain");
 
-        // Now walk far enough to exhaust L1's window (≥128 blocks from start) → L1 re-plans (and L0 with it).
-        for (int x = 88; x <= 200; x += 16) {
-            h.onBotMoved(new BlockPos(x, y, 8));
+        // Phase 2 — walk into the coarse windows' genuine consumption (L2's static window-far at ~256
+        // blocks): the retained exhausted machinery re-plans the coarse suffix exactly as today (§3.1
+        // "exhausted is retained verbatim"), and L1 is re-derived with it.
+        boolean sawSwap = false;
+        for (int x = 264; x <= 360; x += 16) {
+            sawSwap |= h.onBotMoved(new BlockPos(x, y, 8), false, 0)
+                    == HierarchicalRegionPlan.Verdict.SWAPPED;
         }
-        assertNotSame(l1Before, h.skeletonAt(1), "exhausting L1's window must re-plan L1");
+        assertTrue(sawSwap, "consuming the coarse windows must still re-derive (the safety net, §3.1)");
+        assertNotSame(l1Before, h.skeletonAt(1), "the coarse re-derive replaces L1");
+        assertEquals(0, h.exhaustedFires(),
+                "the coarse-level exhaustion is not an L0 rolling failure — the L0 counter stays 0 (§9)");
     }
 
     // ===================================================================================================

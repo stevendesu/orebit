@@ -115,7 +115,9 @@ public final class ChunkNavLoader {
         events.onChunkUnload((level, chunk) -> {
             long key = NavStore.key(ChunkCoords.x(chunk.getPos()), ChunkCoords.z(chunk.getPos()));
             NavStore.remove(level, key);
-            NavGridUpdater.bumpEpoch(level); // dropped nav data changes the grid the same as building it
+            // dropped nav data changes the grid the same as building it — but only for a plan that traverses
+            // THIS chunk (per-chunk version, owner 2026-07-24; a distant unload never re-arms a local plan).
+            NavGridUpdater.bumpChunk(level, NavStore.keyX(key), NavStore.keyZ(key));
             NetherPortalIndex.remove(level, key); // the portal index lives exactly as long as the nav data
         });
     }
@@ -134,11 +136,12 @@ public final class ChunkNavLoader {
         // SLOWTICK navBuild phase: the NavGrid section build + its portal/epoch riders (diagnosis only).
         final long navStart = System.nanoTime();
         NavStore.put(level, k, ChunkNavBuilder.buildAllSections(level, chunk, portals));
-        // Newly BUILT nav data is as plan-relevant as an edit: advance the edit epoch so the
-        // follower's terrain-recheck debounce re-searches over the fresh area (without this a
+        // Newly BUILT nav data is as plan-relevant as an edit: advance THIS chunk's version so the
+        // follower's terrain-recheck re-searches only a plan that traverses this chunk (without this a
         // bot whose first search ran before its chunks built waited on an unrelated block change
-        // — the s52b cold-open false START-DEAD). One bump per chunk build, cold.
-        NavGridUpdater.bumpEpoch(level);
+        // — the s52b cold-open false START-DEAD). Per-chunk (owner 2026-07-24): a build at the exploration
+        // frontier no longer re-arms a plan whose path lies behind it (the open-ocean flap). One bump per build, cold.
+        NavGridUpdater.bumpChunk(level, NavStore.keyX(k), NavStore.keyZ(k));
         NetherPortalIndex.record(level, k, portals.toArray());
         com.orebit.mod.SlowTickMonitor.navBuild(navStart);
         // Eager HPA* region build (HPA-IMPLEMENTATION.md §12): build the region leaves as the chunk's

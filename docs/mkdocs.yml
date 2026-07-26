@@ -32,6 +32,7 @@ nav:
       - Paying for the Map: Optimizations/12_field_build.md
       - Persisting the Map: Optimizations/13_persisting_the_map.md
       - Catching the Spike: Optimizations/14_catching_the_spike.md
+      - Batching the Repairs: Optimizations/15_batching_the_repairs.md
 theme:
   name: material
   icon:

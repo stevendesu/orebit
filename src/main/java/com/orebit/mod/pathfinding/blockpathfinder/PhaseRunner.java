@@ -10,6 +10,9 @@ package com.orebit.mod.pathfinding.blockpathfinder;
  * <ol>
  *   <li><b>Reality override.</b> If the plan's {@link MovePlan#resetWhen regression} guard fires, snap the
  *       cursor back to the first phase — the move physically fell back and must re-attempt.</li>
+ *   <li><b>Validity envelope.</b> If the plan's {@link MovePlan#failWhen} guard fires, report the step
+ *       {@link #failed FAILED} — the live state is outside the move's model, so no phase can complete and
+ *       nothing is driven; the follower drops the plan and replans from the bot's real floor.</li>
  *   <li><b>Establish geometry.</b> Re-check the current phase's {@link MovePlan.Need needs} against the LIVE
  *       world and act on any unmet one: {@code AIR} still solid &rarr; {@link BotSteering#mine} it (timed, one
  *       at a time); {@code FOOTING} still missing &rarr; {@link BotSteering#place} it (instant). While anything
@@ -34,6 +37,8 @@ public final class PhaseRunner {
     /** The unmet need {@link #run} held on THIS tick ({@code null} = not holding), plus its cell. */
     private MovePlan.Need holdNeed;
     private int holdX, holdY, holdZ;
+    /** Whether the last {@link #run} hit the plan's {@link MovePlan#failWhen validity envelope} — see {@link #failed}. */
+    private boolean failed;
 
     /** Begin executing {@code plan} from its first phase (called when a new step's plan is built). */
     public void begin(MovePlan plan) {
@@ -41,11 +46,22 @@ public final class PhaseRunner {
         this.cursor = 0;
         this.regressions = 0;
         this.holdNeed = null;
+        this.failed = false;
     }
 
     /** Whether a plan is currently loaded (the follower runs {@link #run} only then; else it uses {@code steer}). */
     public boolean active() {
         return plan != null;
+    }
+
+    /**
+     * Whether the last {@link #run} reported the step FAILED: the plan's {@link MovePlan#failWhen validity
+     * envelope} fired, so the live state is outside the move's model and no phase of this plan can ever
+     * complete from it. Terminal like done but unsuccessful — the follower drops its block plan (the plan's
+     * frame is fiction from here) and lets the normal planless replan re-search from the bot's real floor.
+     */
+    public boolean failed() {
+        return failed;
     }
 
     /** Drop the current plan (step finished / window swapped) so the next step rebuilds from scratch. */
@@ -54,6 +70,7 @@ public final class PhaseRunner {
         this.cursor = 0;
         this.regressions = 0;
         this.holdNeed = null;
+        this.failed = false;
     }
 
     // ---- Diagnostic getters (Debug.VERBOSE only; see AllyBotEntity.logPhaseDiagnostics) ---------------
@@ -83,6 +100,20 @@ public final class PhaseRunner {
     public int holdZ() { return holdZ; }
 
     /**
+     * Evaluate the loaded plan's TERMINAL {@code done} guard against the CURRENT bot state — pure (no cursor
+     * motion, no needs established, no inputs driven). For the follower's advance-boundary forensics: {@link
+     * #run}'s return is necessarily one tick stale by the time the cursor-advance loop runs (it sampled last
+     * tick's physics state), so a step whose {@code done} and {@code reached} predicates flip on the SAME
+     * state — every single-phase converted move, and a grounded-gated parkour landing — would read as
+     * "abandoned mid-phase" on 100% of its normal completions. Asking the terminal guard on the live state
+     * discriminates a same-state completion (not abandoned — log nothing) from a genuinely mid-flight plan.
+     * {@code false} when no plan is loaded or the cursor has not reached the terminal phase.
+     */
+    public boolean doneNow(BotSteering bot) {
+        return plan != null && cursor == plan.size() - 1 && plan.phaseAt(cursor).isDone(bot);
+    }
+
+    /**
      * Advance the plan one tick against the live world. Returns {@code true} when the move is complete (the last
      * phase's {@code done} guard fired), so the follower can advance its waypoint cursor.
      */
@@ -90,9 +121,20 @@ public final class PhaseRunner {
         if (plan == null) {
             return false;
         }
+        failed = false;
         if (cursor > 0 && plan.regressed(bot)) {
             cursor = 0; // reality override: the move fell back to its start — re-attempt from phase 0
             regressions++;
+        }
+        // Validity envelope — checked AFTER resetWhen (so the legitimate balk-at-the-start retry keeps
+        // precedence; an envelope always excludes the reset cell, so both can't be true at once) and BEFORE
+        // any doors/needs/drive (a plan whose frame reality has left must never mine, place, or press inputs
+        // from it). Firing is terminal: the follower drops the plan and the normal replan path re-searches
+        // from the bot's real floor.
+        if (plan.failed(bot)) {
+            failed = true;
+            holdNeed = null;
+            return false;
         }
 
         MovePlan.Phase phase = plan.phaseAt(cursor);

@@ -57,7 +57,7 @@ public class OriginWanderReproTest {
         CostPyramid pyr = grid.pyramid();
         int row = pyr.rowFor(0, rx, ry, rz);
         RegionFragments rf = pyr.ensureFragments(0, row);
-        FragmentBuilder.build(passable, standable, G, passCount, standCount, 0, hardnessSumSolid, solidCount, rf);
+        FragmentBuilder.build(passable, standable, null, G, passCount, standCount, 0, hardnessSumSolid, solidCount, rf);
         pyr.setBuilt(0, row, true);
     }
 

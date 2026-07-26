@@ -31,6 +31,7 @@ which is what lets hazards be *costs* instead of walls.
 | Ascend | 4.633 (+ place) | jump-up ≈ one walk step |
 | Descend | 4.633 | step-down ≈ one walk step |
 | Fall | 4.633 + 2.5 / block | walk-off step + fast-drop average |
+| WalkOff | 9.27 | two walk steps — cross a 1-wide gap and land one down, no jump |
 | Pillar | 4.633 + place ≈ 10.6 | jump-in-place + the placed footing |
 | MineDown | 4.633 + mining time | one-block drop + the real dig |
 | Climb (up) | 8.51 / block | 20 ÷ 2.35 (ladder ascent speed) |
@@ -39,7 +40,9 @@ which is what lets hazards be *costs* instead of walls.
 | DiagonalParkour | ≈ 20.1 / 24.1 | the Parkour table at diagonal reach (base cap 2) |
 | Swim (surface) | 9.09 / block | 20 ÷ 2.2 (surface paddle speed) |
 | Sprint-swim | 3.564 / block | 20 ÷ 5.612 (sprint-swim speed) |
+| Diagonal sprint-swim | 5.04 / 6.17 | 3.564 × √2 (two axes) / × √3 (all three) |
 | Start sprint-swim / Surface | 2 each | pose transitions |
+| Ride bubble column | 4 + 1.43 / block | step in and out + the column's ~0.7 blocks/tick push |
 
 Some sanity checks fall out for free: an existing ladder (8.51/block up) beats
 building a pillar (~10.6/block) but loses to a natural staircase (4.633/block) —
@@ -87,16 +90,28 @@ fall. Costs one walk-off step plus **2.5 ticks per block dropped** (falling is f
 Damage is a cost, not a wall: each block past the safe distance (3) is priced at one
 hitpoint — `pathing.costPerHitpoint` ticks — so a mortal bot prefers the 2-block drop
 into the cave over the 5-block one, and an invulnerable bot (`survival.takesDamage =
-false`) drops any depth for free. Every cell the drop passes through is also priced
-(falling *through* a berry bush still pricks). Finding the landing used to mean
-scanning the column downward cell by cell; the nav grid now stores a per-cell
+false`) drops any depth for free. Soft landings are priced like vanilla treats them: a
+bed halves the damage term, hay and honey cut it to a fifth, and a slime block zeroes
+it — so a slime landing legitimizes a drop of any depth. Every cell the drop passes
+through is also priced (falling *through* a berry bush still pricks). Finding the
+landing used to mean scanning the column downward cell by cell; the nav grid now
+stores a per-cell
 ["distance to the floor below" nibble](Optimizations/09_depth_nibbles.md) that answers it
 in one read.
 
+**WalkOff** — the no-jump gap cross: walk straight over a one-block gap and land one
+level down on the far side, letting momentum carry the bot across the lip. Two walk
+steps (**9.27 ticks** — the drop itself is the free one-block drop). It exists for
+exactly the spots where a jump is *refused* — a honey takeoff, a cobweb in the body
+space, or a ceiling too low to jump under — so Parkour stays the owner of every gap a
+jump can legally cross, and WalkOff quietly covers the rest.
+
 ## Climbing
 
-**Climb** — move up or down an existing ladder, vine, or scaffolding column, plus the
-sideways "grab" step into the column (priced as the plain walk step it is). Ascent is
+**Climb** — move up or down an existing ladder, vine, or scaffolding column, plus a
+sideways "grab" step into an open-air column — priced as a *sneak-speed* step
+(4.633 ÷ 0.3 ≈ **15.4 ticks**, since edging out to grab a ladder over a drop is done
+carefully), and only offered where plain walking can't already reach the spot. Ascent is
 20 ÷ 2.35 ≈ **8.51 ticks/block** (vanilla's +0.2/tick climb velocity); descent is
 20 ÷ 3.0 ≈ **6.67** (the −0.15/tick fall clamp — you just hold on). Edit-free by
 design: Climb never places ladders, and mining one *out of the way* belongs to the
@@ -108,9 +123,8 @@ and holds jump when the target is above.
 
 **Parkour** — a running jump across open columns to a landing at, above, or below the
 takeoff level. Which gaps are offered is no longer a hand-tuned table: it is **derived
-from closed-form Minecraft ballistics** (the model validated in
-`internal_docs/parkour_envelope_params.py`, which supersedes the prose table in
-`internal_docs/DESIGN-parkour-envelope.md`). A jump for gap *g* is admitted when the
+from closed-form Minecraft ballistics** — the jump arc computed from vanilla's actual
+gravity, drag, and sprint-jump constants. A jump for gap *g* is admitted when the
 horizontal reach the bot can build within the airtime that keeps its feet at or above
 the landing surface covers the required travel — subject to a policy cap of **≤ 3.0
 blocks of cleared air** for a level-or-rising jump (plus the drop for a falling one).
@@ -176,12 +190,28 @@ hitbox higher.
 un-walls water: without it every river is a wall to be bridged.
 
 **Sprint-swim** — prone underwater swimming at 20 ÷ 5.612 ≈ **3.564 ticks/block**, the
-3D underwater workhorse and the only movement faster than walking.
+3D underwater workhorse and the fastest way to cover ground under the bot's own power.
+
+**Diagonal sprint-swim** — the full 3D diagonal set of the same stroke: two-axis
+diagonals (horizontal *or* rising/sinking) at 3.564 × √2 ≈ **5.04**, and true
+three-axis corner moves at 3.564 × √3 ≈ **6.17** — so an underwater path cuts corners
+in all three dimensions instead of staircasing.
 
 **Start sprint-swim / Surface** — the transitions into and out of the prone pose,
 2 ticks each. Sprint-swimming is *stateful*: you need deep water to go prone but can
 continue through shallows, so the search's node identity includes the bot's pose —
 going prone is a real search edge with a real cost, not bookkeeping.
+
+**Ride bubble column** — an upward bubble column is a free elevator, and the planner
+treats it as one: step in, let the column push (~0.7 blocks *per tick* — several times
+faster than any climb), step out at the top. Priced at a flat 4 ticks for the step-in
+and step-out plus ≈ **1.43 ticks per block of lift**, it handily beats ladders and
+pillaring wherever one exists.
+
+Lava, for the record, is priced as water's miserable cousin, not forbidden: swimming a
+lava cell costs 2.5× the water stroke *plus* ten hitpoints of damage per cell for a
+mortal bot (~1,000+ ticks per block at defaults) — so the bot crosses lava only when
+every alternative is catastrophically worse, which is how a player treats it too.
 
 ## What the config changes
 

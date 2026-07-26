@@ -1,8 +1,34 @@
 # Physics-Derived Parkour Envelopes — Design
 
-**Status:** design for owner review. No code changed anywhere; read-only investigation of
-`C:/Users/steve/Repos/personal/orebit-mc121-wt` (mc-1.21 era worktree) + javap of the
-loom-cached, mojang-mapped 1.21.11 Minecraft jar.
+**Status: SUPERSEDED IN MODEL, IMPLEMENTED IN SPIRIT — kept as the derivation record.**
+`movements/ParkourEnvelope.java` EXISTS and is consumed by `Parkour.candidates`/`DiagonalParkour.candidates`
+(hoisted table reads, per §7.2's hot-path contract), but it implements the **coast-corrected,
+height-aware model** of `DESIGN-parkour-envelope-heightaware.md` + `parkour_envelope_params.py`
+(the validated reference), NOT this doc's §5 closed form. What changed vs. this doc:
+
+- **The model:** this doc measures reach from the takeoff TRIGGER point; the executor actually
+  coasts ~1 block further before leaving the ground, so §5's budgets are ~1 block conservative
+  (rise-3 is excluded on the wiggle-room bar, not impossibility — see the heightaware doc §3; note
+  that doc's own §1 claim "`ParkourEnvelope.java` does not exist" is in turn outdated).
+- **The table:** baked as `MAX_GAP[startTopY 1..16][gsfBucket][occBucket]` → six-outcome rows
+  {flat, rise, fall1..3, diag} — takeoff-surface-height aware (§ heightaware) AND additionally
+  slow-floor (`gsf`, soul-sand 0.4) and slow-body-cell (`occ`, berry-bush 0.8, clamped so an
+  occupied row never exceeds its own occ=none ceiling) aware. `MAX_CLEARED_AIR = 3.0` shipped as
+  ratified. Shipped maxima for a clean full-block takeoff: flat 3, rise 2, fall 4/4/4, diag 2 —
+  §5.7's table, reached by the corrected model.
+- **Consumption:** `Parkour.RISE_MAX`/`FALL_MAX` and `DiagonalParkour.MAX_GAP` are gone;
+  `PARKOUR_MAX_GAP` survives as the public narrowing knob (min'd with the envelope), per §7.3.
+- **`TAKEOFF_EDGE_ALONG` no longer exists in `DiagonalParkour`:** the diagonal takeoff is now
+  GATE-triggered (`SteerControl.pastGate`, gate ≈ 0.357 along-line — see
+  `DESIGN-validity-envelopes.md` §8); `ParkourEnvelope` keeps its own private 0.40 derivation copy,
+  so the envelope math is unchanged while the executor fires slightly earlier (documented slack).
+- This doc's §5.1–§5.3 closed forms, §3 physics constants/javap evidence, and §6's rising-3
+  closure remain valid inputs to the shipped model and are cited by the Java; the §5.5 margins are
+  superseded where the coast term applies.
+
+**Original status (historical):** design for owner review. No code changed anywhere; read-only
+investigation of `C:/Users/steve/Repos/personal/orebit-mc121-wt` (mc-1.21 era worktree) + javap of
+the loom-cached, mojang-mapped 1.21.11 Minecraft jar.
 
 **Deliverable of:** the owner-ratified direction to replace the hard-coded Parkour /
 DiagonalParkour gap envelopes with boot-time constants derived from a **closed-form solution

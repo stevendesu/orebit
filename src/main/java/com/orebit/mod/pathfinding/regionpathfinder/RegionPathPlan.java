@@ -173,6 +173,80 @@ public final class RegionPathPlan {
         this.reachedGoalRegion = reachedGoalRegion;
     }
 
+    /**
+     * <b>Splice</b> an extension {@code suffix} onto {@code old} (DESIGN-rolling-skeleton.md §4.2, the rolling
+     * skeleton's slide-and-extend primitive): produce a fresh immutable plan
+     * {@code old[drop .. size-1] ++ suffix[1 ..]} — the consumed head is dropped, the tail is appended, and the
+     * kept prefix is preserved <b>verbatim</b> (INV-1: a splice never re-derives any prefix step; the caller
+     * shifts its index-valued cursors by {@code drop}). {@code suffix[0]} is by contract the same
+     * {@code (region, fragment)} node as {@code old}'s tail (the suffix search starts AT the tail — §4.1), so it
+     * is deduplicated at the join. The result carries {@code old}'s level and the <b>suffix's</b>
+     * {@code reachedGoalRegion} flag (an extension that reaches the goal region makes the spliced plan final).
+     *
+     * <p>One cold array copy at crossing cadence (§10 — no ring/deque; the immutable-swap identity is what the
+     * driver's change-detection relies on). The result is a fragment-model plan iff either input is (a
+     * center-model step contributes fragment {@code 0} / {@link #NO_PORTAL}, via the same accessors the
+     * readers use); two center-model inputs splice to a center-model plan.
+     *
+     * @param old    the current skeleton (its tail is the append point)
+     * @param drop   how many consumed head steps to discard ({@code 0 ≤ drop ≤ old.size()-1}); this IS the
+     *               index shift the caller applies to its cursors
+     * @param suffix the extension ({@code suffix[0]} == {@code old}'s tail node; {@code size() ≥ 1})
+     */
+    public static RegionPathPlan splice(RegionPathPlan old, int drop, RegionPathPlan suffix) {
+        if (old.level != suffix.level || old.minY != suffix.minY) {
+            throw new IllegalArgumentException("splice across levels/dimensions: old L" + old.level
+                    + "/minY " + old.minY + " vs suffix L" + suffix.level + "/minY " + suffix.minY);
+        }
+        if (drop < 0 || drop > old.size() - 1) {
+            throw new IllegalArgumentException("splice drop " + drop + " out of range for size " + old.size());
+        }
+        final int keep = old.size() - drop;             // old[drop .. size-1], preserved verbatim
+        final int extra = Math.max(0, suffix.size() - 1); // suffix[1 ..] (suffix[0] == old tail, deduped)
+        final int n = keep + extra;
+        final int[] rx = new int[n];
+        final int[] ry = new int[n];
+        final int[] rz = new int[n];
+        for (int i = 0; i < keep; i++) {
+            rx[i] = old.rxs[drop + i];
+            ry[i] = old.rys[drop + i];
+            rz[i] = old.rzs[drop + i];
+        }
+        for (int i = 0; i < extra; i++) {
+            rx[keep + i] = suffix.rxs[1 + i];
+            ry[keep + i] = suffix.rys[1 + i];
+            rz[keep + i] = suffix.rzs[1 + i];
+        }
+        if (!old.isFragmentModel() && !suffix.isFragmentModel()) {
+            return new RegionPathPlan(rx, ry, rz, n, old.minY, old.level, suffix.reachedGoalRegion);
+        }
+        final int[] fr = new int[n];
+        final int[] px = new int[n];
+        final int[] py = new int[n];
+        final int[] pz = new int[n];
+        final boolean anyDigs = old.digs != null || suffix.digs != null;
+        final boolean[] dg = anyDigs ? new boolean[n] : null;
+        for (int i = 0; i < keep; i++) {
+            final int j = drop + i;
+            fr[i] = old.fragmentId(j);
+            px[i] = old.portalX == null ? NO_PORTAL : old.portalX[j];
+            py[i] = old.portalY == null ? NO_PORTAL : old.portalY[j];
+            pz[i] = old.portalZ == null ? NO_PORTAL : old.portalZ[j];
+            if (dg != null) dg[i] = old.isDig(j);
+        }
+        for (int i = 0; i < extra; i++) {
+            final int j = 1 + i;
+            final int k = keep + i;
+            fr[k] = suffix.fragmentId(j);
+            px[k] = suffix.portalX == null ? NO_PORTAL : suffix.portalX[j];
+            py[k] = suffix.portalY == null ? NO_PORTAL : suffix.portalY[j];
+            pz[k] = suffix.portalZ == null ? NO_PORTAL : suffix.portalZ[j];
+            if (dg != null) dg[k] = suffix.isDig(j);
+        }
+        return new RegionPathPlan(rx, ry, rz, fr, px, py, pz, dg, n, old.minY, old.level,
+                suffix.reachedGoalRegion);
+    }
+
     /** Trim {@code a} to exactly {@code size} (returns it unchanged when already that length). */
     private static int[] trim(int[] a, int size) {
         if (a.length == size) {

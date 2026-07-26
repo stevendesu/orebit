@@ -40,6 +40,10 @@ import org.openjdk.jmh.annotations.Warmup;
  *       components. The pathological worst case for component COUNT (the checkerboard stress).</li>
  * </ul>
  *
+ * <p>Beside the two raw component-count algorithms, {@link #fragmentBuild} runs the PRODUCTION
+ * {@link FragmentBuilder#build} over the same grids — the typed-fragments §9 flood-cost gate (keep-all now
+ * extracts footprints + types for every component, including ones the old occupiability filter discarded).
+ *
  * <p>Run (JDK 21, active 1.21.x node):
  * {@code ./gradlew :1.21.4:jmh -Pbench=ConnectivityBenchmark}. Pin one with {@code -Pscenario=CHECKER}.
  */
@@ -60,6 +64,14 @@ public class ConnectivityBenchmark {
     /** The region's passable mask, section-local linear index {@code (y<<8)|(z<<4)|x}. */
     private boolean[] passable;
 
+    // ---- Production keep-all build inputs (the typed-fragments §9 flood-cost gate) ----
+    /** Standable mask for {@link #fragmentBuild}: solid (non-passable) cells read as walkable tops — the
+     *  FragmentBuilderTest checkerboard idiom, giving each scenario a realistic floor structure. */
+    private boolean[] standable;
+    private int passCount, standCount, solidCount;
+    private long hardnessSumSolid;
+    private final RegionFragments fragOut = new RegionFragments();
+
     // ---- Reusable scratch (no per-invocation allocation; reset inside the measured op) ----
     private final int[] floodLabel = new int[CELLS];
     private final int[] floodQueue = new int[CELLS];
@@ -76,6 +88,34 @@ public class ConnectivityBenchmark {
             throw new IllegalStateException(
                     "CC mismatch on " + scenario + ": flood=" + a + " union=" + b);
         }
+        // fragmentBuild inputs: standable = the solid cells (walkable tops), tallies from the masks.
+        standable = new boolean[CELLS];
+        passCount = standCount = solidCount = 0;
+        hardnessSumSolid = 0;
+        for (int i = 0; i < CELLS; i++) {
+            if (passable[i]) {
+                passCount++;
+            } else {
+                standable[i] = true;
+                standCount++;
+                solidCount++;
+                hardnessSumSolid += 8; // stone
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------------------------------------------
+    // The PRODUCTION leaf build (typed-fragments keep-all): flood + per-component S/W types + footprint
+    // extraction for EVERY component + cap/collapse — the §9 "flood cost" gate this benchmark early-warns
+    // on (keep-all extracts footprints for components the old occupiability filter used to discard).
+    // OPEN exercises the truly-uniform fast path (no flood); HALF two big components; SPECKLE/CHECKER the
+    // many-component collapse shapes.
+    // ----------------------------------------------------------------------------------------------------
+    @Benchmark
+    public RegionFragments fragmentBuild() {
+        FragmentBuilder.build(passable, standable, null, SIZE,
+                passCount, standCount, 0, hardnessSumSolid, solidCount, fragOut);
+        return fragOut;
     }
 
     private static boolean[] buildGrid(String scenario) {

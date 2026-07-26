@@ -1,6 +1,38 @@
 # PERF DESIGN — block-edit → NavGrid batching (dirty-cell defer + dedup)
 
-> **STATUS: PROPOSED.** Design-review input per the CLAUDE.md perf process (mechanism + invariants +
+> **STATUS: IMPLEMENTED + KEPT (s54 — supersedes the original PROPOSED header and §5's
+> "hold Phases 1–2 PARKED" recommendation; the owner ruled to build all three phases, with the
+> keep/revert decision riding on the §6 BATCH A/B bars).** All three phases are live:
+> Phase 0 (navtype no-op early-out, commit `24e0173`/`b581016`), Phases 1+2 (defer+dedup
+> `PendingPatches` queue + phased per-section `NavSectionBuilder.patchCells` drain + the §4.4 flush
+> barriers, commit `f57c65e`/`dd7d395`; sequential-baseline seam + `BatchEditBenchmark` in
+> `92d7880`/`44d1340`). **Measured (paired interleaved A/B vs the sequential seam, two clean
+> runs/side, from the `f57c65e` commit record):** BATCH_PISTON 37,982 → 16,541 ns/op (**−56.5%**,
+> 1,461 → 636 ns/cell); BATCH_BLAST 117,155 → 38,126 ns/op (**−67.5%**, 2,055 → 669 ns/cell);
+> TOGGLE_PAIR 47,163 → 84 ns/op (**−99.8%** — the deferred extend/retract pair dedups to zero
+> patches). Gates flat: PatchStorm SCATTER −2.5% / DIG −0.2% / TOGGLE −0.4% / SEAM −1.3%
+> (`patchCell` untouched); Pathfinder SHORT −0.6% / MULTI −0.4%. Keep-bar (≥3% BATCH_* win, no
+> gate regression) met. Guards shipped: `BatchDrainIdentityTest` (randomized sequential-vs-drain
+> byte-identity incl. depth), `NavGridEpochTest` (Phase-0 skip/bump contract). Public writeup:
+> `docs/Optimizations/15_batching_the_repairs.md`.
+>
+> **Two implementation deviations from the text below (kept for the record, do not "fix" them):**
+> 1. §4.3's ordered-P3 depth phase is **UNSOUND** and was NOT built — with two same-column changes
+>    both resident, the first cell's propagation truncates at the 15-cell cap on a non-fixpoint
+>    frontier and the second cell's repair early-outs on the freshly-written prefix (caught by
+>    `BatchDrainIdentityTest`). Depth repairs run **interleaved per cell inside P1** (the sequential
+>    single-cell regime the cap+saturation argument is sound for); only the flags scratch/window
+>    work is phased. Depth was never the amortization target, so this costs nothing the batch bought.
+> 2. §6's REDSTONE shape was not built as a benchmark — the Phase-0 gate lives in
+>    `NavGridUpdater.onBlockChanged`, which needs a live `ServerLevel` the Knot test classloader
+>    can't stand up; `NavGridEpochTest` covers it through the package-private `changesGrid` seam.
+>
+> Original proposal follows unedited (its §1–§3 cost accounting remains the reference analysis;
+> line numbers reference the pre-s54 tree).
+
+---
+
+> ~~**STATUS: PROPOSED.**~~ *(superseded — see above)* Design-review input per the CLAUDE.md perf process (mechanism + invariants +
 > expected win + risk). No code has been written. Honest headline up front: at the measured
 > ~1.4–2.1 µs/patch, vanilla-scale play spends **≤0.2% of the 50 ms tick** on nav-grid maintenance —
 > full batching is worst-case **spike insurance**, not a median win. The one component that looks
@@ -340,7 +372,8 @@ behavior is unchanged while the patch work disappears.
   unconfirmed hypothesis, §1.3) on CLUSTERED storms only — realistic ceiling ~2–2.5× on a
   100-TNT-chain tick (~10.5 ms → ~4–5 ms). Real but only visible in the same worst cases that are
   already outside V1 scale.
-- **Net recommendation**: adopt **Phase 0 now**; hold **Phases 1–2 PARKED** unless (a) a real
+- **Net recommendation** *(SUPERSEDED — the owner ruled to build Phases 1–2; see the s54 status
+  header for the measured outcome)*: adopt **Phase 0 now**; hold **Phases 1–2 PARKED** unless (a) a real
   server profile shows patch storms or epoch-driven re-search churn above ~1% of tick time, or (b)
   the product scope grows toward industrial-redstone/multi-bot servers (the V2 colony-sim memory).
   This doc then serves as the pre-approved design. Betting the complexity budget on the flush-barrier

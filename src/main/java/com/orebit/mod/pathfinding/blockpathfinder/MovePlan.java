@@ -52,6 +52,7 @@ public final class MovePlan {
 
     private final List<Phase> phases = new ArrayList<>(4);
     private Predicate<BotSteering> resetWhen = b -> false;
+    private Predicate<BotSteering> failWhen = b -> false;
     /** Plan-level door {@link Need#OPEN} reqs (DOORS P3); almost always empty (a door crossing is rare). */
     private final List<Req> doorReqs = new ArrayList<>(0);
 
@@ -73,6 +74,23 @@ public final class MovePlan {
     }
 
     /**
+     * Set the <b>validity envelope</b>: when it tests true the runner reports the whole move FAILED
+     * ({@link PhaseRunner#failed}) instead of driving — the live state is provably outside the move's
+     * model (for a committed jump: grounded on a cell that is neither the takeoff stand nor the planned
+     * landing column), so no phase's {@code advanceWhen}/{@code done} can ever fire from here and
+     * re-attempting in place is a permanent latch. Distinct from {@link #resetWhen}, which the runner
+     * checks FIRST and which keeps owning the legitimate balk-at-the-start retry: reset says "physically
+     * back at the start — re-attempt from phase 0", fail says "somewhere this plan has no answer for —
+     * the follower must drop the plan and replan from where the bot really is." Purely state-derived (a
+     * predicate over the live pose and cells the plan already carries — no timers, no motion signatures);
+     * the default never fires, so a plan that declares no envelope is byte-identical.
+     */
+    public MovePlan failWhen(Predicate<BotSteering> guard) {
+        this.failWhen = guard;
+        return this;
+    }
+
+    /**
      * Require the door at cell {@code (x,y,z)} reach {@code open} before the crossing drives (DOORS P3) — a
      * plan-level {@link Need#OPEN}. Injected by {@link com.orebit.mod.BotNavigator} from the step's folded
      * door-set ({@link StepEdits}) after the movement builds its geometry plan, since a door-open is a
@@ -90,6 +108,7 @@ public final class MovePlan {
     int size() { return phases.size(); }
     Phase phaseAt(int i) { return phases.get(i); }
     boolean regressed(BotSteering bot) { return resetWhen.test(bot); }
+    boolean failed(BotSteering bot) { return failWhen.test(bot); }
     List<Req> doorReqs() { return doorReqs; }
 
     /** Whether cell {@code (x,y,z)} is governed by a door {@link Need#OPEN} (so a {@code Need.AIR} must NOT mine

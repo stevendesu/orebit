@@ -100,19 +100,27 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * per-cell rate — {@link Diagonal}'s conservative rule); corner node-level cells are geometry-only,
  * unpriced (the cardinal move's node-level proxy rule).
  *
- * <h2>Execution — the takeoff-edge trigger under a diagonal unit vector (the chosen math)</h2>
+ * <h2>Execution — gate-point runup + the corner-gate takeoff trigger (the chosen math)</h2>
  * Reuses cardinal {@link Parkour}'s RUNUP → TAKEOFF → AIRBORNE → LAND phase shape, including the
  * airborne-ARMED {@code resetWhen} balk guard (see Parkour's plan Javadoc — the arming derivation is
- * identical). The one diagonal-specific piece is the takeoff trigger: with {@code ux,uz = ±1} BOTH
- * nonzero, the raw progress projection {@code ux·(x−cx) + uz·(z−cz)} of a point {@code t} blocks along
- * the diagonal line equals {@code t·√2} — it over-reads along-line distance by √2. Rather than pay a
- * per-tick normalization, the threshold itself is expressed in raw units: {@link #TAKEOFF_EDGE_RAW}
- * {@code = TAKEOFF_EDGE_ALONG · √2}. The along-line budget also differs from the cardinal 0.35 (whose
- * convention is "centre ~0.15 short of the cell boundary at +0.5"): the diagonal boundary is the cell
- * CORNER at {@code 0.5·√2 ≈ 0.71} along-line, so the same margin would allow ~0.55 — but near the corner
- * the 0.6-wide box's overlap with the takeoff block shrinks to a sliver (a corner is a point of support,
- * not an edge), so {@link #TAKEOFF_EDGE_ALONG} = 0.40 keeps a doubled ~0.3 margin instead. Jump as late
- * as is safely supported; tune in-game like the cardinal knob.
+ * identical). The diagonal-specific piece is the runup/takeoff geometry. A diagonal takeoff must pass
+ * NEAR the takeoff cell's exit CORNER (the diagonal boundary is a corner at {@code 0.5·√2 ≈ 0.71}
+ * along-line, a point of support rather than an edge), and the old edge-overshoot trigger — drive the
+ * line until along-progress 0.40, then jump — had a lateral hole: the runup drive controlled only the
+ * cross-axis <i>velocity</i>, so an approach arriving laterally offset could spill its grounded foot
+ * cell into the DIAGONAL-ADJACENT ground cell before the trigger fired, landing in the validity
+ * envelope's fail set (the longrun-7 Traverse↔DiagonalParkour replan churn). The point-mass insight:
+ * the hitbox overhang only matters while GROUNDED, and support only matters at the jump tick — so both
+ * problems are one GATE POINT ({@link SteerControl#steerViaGate}): the exit corner pulled
+ * {@link #GATE_SETBACK} (the 0.3 body radius + {@link #GATE_MARGIN}) back INTO the takeoff cell along
+ * the diagonal line. The runup AIMS at the gate — position pursuit + momentum-bleed servo, so a lateral
+ * approach is pulled back onto the diagonal instead of drifting past the lip — and the takeoff TRIGGERS
+ * the jump EARLY, when the bot's along-line progress reaches the gate ({@link SteerControl#pastGate},
+ * whose dead-band fires it a touch earlier still) while grounded: the centre is then still at least the
+ * body radius inside the cell, so the lateral spill is impossible in normal execution and support at the
+ * jump tick is guaranteed. The reach given up by the earlier jump is recovered by the sprint-injection
+ * predictor + the predictive airborne servo (both ask the physics, not a constant). A mis-trigger now
+ * presents as a clean envelope FAIL → replan, never a silent latch.
  */
 public final class DiagonalParkour implements Movement {
 
@@ -125,14 +133,21 @@ public final class DiagonalParkour implements Movement {
     /** Ticks for the approach step onto the takeoff corner — one diagonal walk step. */
     public static final float RUNUP_COST = Diagonal.COST;
 
-    /**
-     * How far past the takeoff cell's centre, in blocks ALONG the diagonal line, the bot runs before
-     * jumping (see the trigger-math derivation in the class Javadoc). Tune 0.35–0.42 in-game.
-     */
-    public static final double TAKEOFF_EDGE_ALONG = 0.40;
+    /** The player hitbox half-width (blocks) — the overhang the takeoff gate must keep inside the cell
+     *  while the bot is grounded (the point-mass insight: overhang only matters ON the ground). */
+    public static final double BODY_RADIUS = 0.3;
 
-    /** The same threshold in RAW {@code ux·Δx + uz·Δz} projection units ({@code = ALONG · √2}). */
-    public static final double TAKEOFF_EDGE_RAW = TAKEOFF_EDGE_ALONG * 1.41421356;
+    /** Small support margin (blocks) past the body radius folded into {@link #GATE_SETBACK} — slack for the
+     *  one grounded tick between the trigger crossing and liftoff. */
+    public static final double GATE_MARGIN = 0.05;
+
+    /**
+     * How far back INTO the takeoff cell, in blocks ALONG the diagonal line, the takeoff GATE sits from the
+     * cell's exit corner ({@code = BODY_RADIUS + GATE_MARGIN}). The gate is therefore
+     * {@code 0.5·√2 − GATE_SETBACK ≈ 0.357} along-line past the cell centre — the runup's aim point and the
+     * takeoff trigger's crossing (class Javadoc, execution section).
+     */
+    public static final double GATE_SETBACK = BODY_RADIUS + GATE_MARGIN;
 
     private static final int[][] DIAGONALS = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
 
@@ -349,10 +364,11 @@ public final class DiagonalParkour implements Movement {
 
     /**
      * Cardinal {@link Parkour}'s four phases verbatim (RUNUP → TAKEOFF → AIRBORNE → LAND, with the
-     * airborne-armed balk guard) — only the takeoff trigger differs: the raw diagonal projection
-     * {@code ux·Δx + uz·Δz} over-reads along-line distance by √2, so it is compared against
-     * {@link #TAKEOFF_EDGE_RAW} (the along-line edge pre-multiplied by √2; derivation on the class
-     * Javadoc). Sprint for {@code g >= 2} ({@code |Δx| == |Δz| == g+1} on a diagonal step).
+     * airborne-armed balk guard) — only the runup drive and the takeoff trigger differ: gate-point
+     * steering toward the takeoff-corner GATE ({@link SteerControl#steerViaGate}, anchored on the plan's
+     * own takeoff→landing cells so a mid-path adoption can't skew the axis) and the early corner-gate
+     * trigger ({@link SteerControl#pastGate} while grounded — derivation on the class Javadoc, execution
+     * section). Sprint for {@code g >= 2} ({@code |Δx| == |Δz| == g+1} on a diagonal step).
      */
     @Override
     public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
@@ -366,6 +382,15 @@ public final class DiagonalParkour implements Movement {
         // block here (magma/lava/honey) forces the early takeoff below; threshold in the same RAW √2 units.
         final int gapX = fx + ux, gapZ = fz + uz;
         final double hazardRaw = Parkour.HAZARD_TAKEOFF_LOOKAHEAD * 1.41421356;
+        // The takeoff-corner GATE (class Javadoc, execution section): the cell's exit corner along the
+        // diagonal — centre + 0.5·(ux,uz) — pulled GATE_SETBACK back INTO the cell along the line, i.e.
+        // centre + (0.5 − GATE_SETBACK/√2)·(ux,uz) per axis. The runup aims it; the takeoff fires on
+        // crossing its along-line projection. The frame is the plan's OWN takeoff/landing cells (not the
+        // live segment view) so an off-plan adoption can't skew the projection axis.
+        final double startX = fx + 0.5, startZ = fz + 0.5;
+        final double landX = tx + 0.5, landZ = tz + 0.5;
+        final double gateX = startX + ux * (0.5 - GATE_SETBACK * inv2);
+        final double gateZ = startZ + uz * (0.5 - GATE_SETBACK * inv2);
         final boolean sprint = Math.abs(tx - fx) - 1 >= 2; // diagonal: |Δx| == |Δz| == g+1
         final boolean[] airborneOnce = new boolean[1];
         // Take-off SPRINT INJECTION (decided once, on the grounded jump tick): a gap-1 diagonal defaults to no
@@ -379,26 +404,45 @@ public final class DiagonalParkour implements Movement {
         MovePlan plan = new MovePlan();
         plan.resetWhen(b -> airborneOnce[0] && b.grounded()
                 && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+        // VALIDITY ENVELOPE (the P1 off-plan wedge — cardinal {@link Parkour}'s envelope in its flat-only
+        // form): this move's world is exactly TWO grounded cells — the takeoff stand and the landing stand
+        // (v1 is FLAT, so there is no descent column to admit). The first grounded tick anywhere else — the
+        // observed off-plan fly-through adoption cell a level below the plan frame, a short landing in the
+        // gap, a deflected landing — is provably outside the move's model: the terminal LAND phase demands
+        // the exact landing stand and never jumps, so re-attempting in place is a permanent latch. Purely
+        // positional over the plan's own cells. It cannot fire during normal execution: runup/takeoff ticks
+        // are grounded ON the takeoff stand (the takeoff GATE keeps the centre ≥ GATE_SETBACK inside the
+        // cell, and the gate-aim drive holds the lateral — the pre-gate trigger's spill hole is closed),
+        // airborne ticks are not grounded, and the touchdown tick is the landing stand. resetWhen — checked
+        // first by the runner, its cell inside the allowed set — keeps owning the balk-retry.
+        plan.failWhen(b -> b.grounded()
+                && !(b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz)
+                && !(b.footX() == tx && b.footY() == ty + 1 && b.footZ() == tz));
         plan.phase("runup")
                 .drive((b, v) -> {
                     airborneOnce[0] = false; // re-attempt begins → disarm until the next arc is live
                     sprintInject[1] = false; // re-attempt begins → allow the launch predict to run again
-                    // Velocity-alignment servo: bleed any cross-axis (off-jump-line) momentum so the launch is a
-                    // clean 45° arc (the +X-runup skew that clipped the landing near-face). Along-axis progress
-                    // still saturates forward, so the takeoff trigger fires on schedule.
-                    SteerControl.parkourRunupAlign(b, uxn, uzn);
+                    // Gate-point steering (the lateral-spill fix, class Javadoc): aim the takeoff-corner
+                    // GATE. Position pursuit pulls a laterally offset approach back onto the diagonal
+                    // (the hole the pure velocity-alignment servo left — it bled cross-axis SPEED but
+                    // never corrected cross-axis POSITION), and the same servo actuation still bleeds
+                    // off-line momentum toward a clean 45° launch. On-axis it is identical to the old
+                    // parkourRunupAlign (desired velocity = the diagonal at cruise).
+                    SteerControl.steerViaGate(b, startX, startZ, landX, landZ, gateX, gateZ);
                     b.setSprinting(sprint);
                 })
                 // Fix 3: hazardous diagonal gap-floor → predictive early takeoff (raw √2 units), else the
-                // normal late-corner trigger.
+                // corner-gate trigger: jump EARLY, on the along-line crossing of the gate — the centre is
+                // still ≥ BODY_RADIUS inside the takeoff cell, so support is guaranteed and the foot cell
+                // cannot have spilled.
                 .advanceWhen(b -> {
                     if (!b.grounded()) return false;
-                    double projRaw = ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5));
                     if (b.gapFloorHazardAt(gapX, fy, gapZ)) {
+                        double projRaw = ux * (b.x() - startX) + uz * (b.z() - startZ);
                         double vRaw = ux * b.velX() + uz * b.velZ();
                         return projRaw + Parkour.HAZARD_TAKEOFF_TICKS * vRaw >= hazardRaw;
                     }
-                    return projRaw >= TAKEOFF_EDGE_RAW;
+                    return SteerControl.pastGate(b, startX, startZ, landX, landZ, gateX, gateZ);
                 });
         plan.phase("takeoff")
                 .drive((b, v) -> {

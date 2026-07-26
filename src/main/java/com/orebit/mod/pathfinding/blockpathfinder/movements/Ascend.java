@@ -194,6 +194,16 @@ public final class Ascend implements Movement {
      */
     @Override
     public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+        // Contract tripwire (PATHOLOGY P1B): an Ascend is BY CONTRACT a cardinal unit step one up (ty == fy+1,
+        // the geometry candidates resolved — see the class doc). A caller handing us any other frame (the
+        // historical +1 floor drift) would have us build a physically-impossible fiction (a 2-block jump) and
+        // livelock; report it through the EXISTING validity-envelope FAILED path instead — detection, not
+        // recovery: the follower drops the plan and replans from the bot's real floor.
+        if (ty != fy + 1) {
+            MovePlan broken = new MovePlan();
+            broken.failWhen(b -> true);
+            return broken;
+        }
         final int fromFootY = fy + 1;              // feet BLOCK Y standing on the from-floor
         final int landFootY = ty + 1;              // feet BLOCK Y standing on the destination floor (= fy+2)
         final boolean[] launched = new boolean[1]; // reset-guard arm (Parkour's airborneOnce precedent)
@@ -204,6 +214,24 @@ public final class Ascend implements Movement {
         plan.resetWhen(b -> launched[0]
                 && b.grounded()
                 && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
+        // Validity envelope (PATHOLOGY P1 family — the Parkour failWhen precedent, extended to the FLUID
+        // medium): a bot SETTLED — grounded, or bodily in fluid (a displaced ground-move executor that fell
+        // into water is never "grounded"; the longrun-5 under-wall pocket latch) — at a foot cell outside
+        // the plan's own two columns is off-plan: the plan is fiction there, resetWhen/done can never fire,
+        // and re-attempting in place latches forever. Allowed set (cells the plan already carries — no world
+        // reads, no timers): the FROM column's stand-to-landing feet band (a water-leaving climb legitimately
+        // swims that band; the from stand itself stays resetWhen's, which the runner checks first) and the
+        // TARGET column's feet band [landFootY-1 .. landFootY] — landFootY is the landing stand, and
+        // landFootY-1 is the FACE-PRESS transit: approaching the step, the bot's centre crosses into the
+        // target column at the pre-jump height while its box is still grounded on the from-block (the
+        // longrun-9 second-hold false positive — the exact mirror of Descend's lip transit). Deeper in the
+        // target column (fell into a hole or fluid pocket) is off-plan. Airborne dry-climb ticks are
+        // neither grounded nor in fluid — exempt.
+        plan.failWhen(b -> (b.grounded() || b.inWater() || b.inLava())
+                && !(b.footX() == fx && b.footZ() == fz
+                        && b.footY() >= fromFootY && b.footY() <= landFootY)
+                && !(b.footX() == tx && b.footZ() == tz
+                        && b.footY() >= landFootY - 1 && b.footY() <= landFootY));
         // BUILD: mine the takeoff head + landing body clear (AIR needs, self-healing), then — once those hold —
         // build the step up in open air. The drive places nothing on a natural step (footing already solid);
         // digging into terrain places just the footing (support cell has a face); an open-air staircase places

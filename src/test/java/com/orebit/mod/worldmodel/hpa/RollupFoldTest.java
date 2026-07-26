@@ -32,7 +32,7 @@ import com.orebit.mod.worldmodel.persistence.CostPyramidCodec;
 public class RollupFoldTest {
 
     private static final int G = 16;
-    private static final long REGION_MASK = (1L << 50) - 1;
+    private static final long REGION_MASK = (1L << 49) - 1; // 2026-07 repack: region 0..48, frag 49..54
 
     private static BotCaps walkOnly() {
         return new BotCaps(1, 3, 16, true, 100.0f, false, false, 255, false, 10000, 2.0f);
