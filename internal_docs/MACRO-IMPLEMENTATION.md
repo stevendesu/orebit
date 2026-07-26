@@ -27,5 +27,11 @@
 - §8 macro-aware movements; §8.1 the shape of the three axis-aligned macros (Pillar up / MineDown down /
   Traverse lateral); §8.2 `EditScratch` folds N edits; §8.3 the `MACRO_MOVES` flag (since removed —
   unconditional); §8.4 Diagonal/Ascend macros (never built).
-- §9 `reconstruct` — expand a macro edge to N waypoints (the follower is unchanged).
+- §9 `reconstruct` — expand a macro edge to N waypoints (the follower is unchanged). **Update
+  (2026-07-23):** `reconstruct` now ALSO fills the per-step `BlockPathPlan.floorYs` carry in both
+  the single-waypoint and the macro re-expansion branches (search-native floors, so the follower
+  never re-derives a floor from a feet waypoint — `DESIGN-validity-envelopes.md` §6); and the
+  expanded macro steps execute via the phase framework (a Traverse macro run = one phase per run
+  cell with FOOTING/AIR needs under the case-A run-line validity envelope; Pillar's macro rises
+  execute its JUMP→PLACE→LAND plan, no envelope yet).
 - §10 verify (the milestone). §11 build order.

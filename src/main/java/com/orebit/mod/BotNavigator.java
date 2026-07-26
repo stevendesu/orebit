@@ -134,6 +134,7 @@ final class BotNavigator {
     private int planGoalTolY = BlockPathfinder.DEFAULT_GOAL_TOL_Y;
     private int stuckTicks;         // consecutive ticks grinding in place; drives the stuck diagnostic
     private int lastEditedIndex = -1; // last step whose break/place edits were applied (apply once per step)
+    private int lastFailLoggedStep = -1; // last step whose validity-envelope FAILURE was logged (log once per step)
     private boolean loggedHasPath;  // dedupe the path/no-path diagnostic so it logs only on change
     private boolean loggedPlanError; // log a two-tier replan exception only once (then degrade silently)
     /** COMPLETE-but-not-arrived ratchet (s52b): once the plan declared done short of the caller's
@@ -396,10 +397,13 @@ final class BotNavigator {
      * #steerAlongPath} advances the cursor past this step the same tick, so the next tick this reads the next
      * (uncommitted) move — or {@code waypointIndex >= size} — and COMPLETE may fire.
      *
-     * <p>DEFERRED KNOWN RISK (owner-accepted, watch in-game): a TERMINAL committed move that mispredicts onto an
-     * unwalkable off-cell spot leaves this gate latched (its {@code done} never fires because the bot never
-     * reaches the exact target cell) → COMPLETE stays suppressed → a possible wedge with no re-plan. DEFERRED per
-     * owner — revisit only if seen in-game. Firing COMPLETE on proximity regardless of an in-flight commitment is
+     * <p>RESOLVED KNOWN RISK (the P1 wedge — seen in-game, as the deferral predicted): a TERMINAL committed move
+     * that mispredicted onto an unwalkable off-cell spot used to leave this gate latched (its {@code done} never
+     * fires because the bot never reaches the exact target cell) → COMPLETE stayed suppressed → a wedge with no
+     * re-plan. The state-derived resolution is the committed moves' plan-level validity envelope ({@link
+     * MovePlan#failWhen}): grounded anywhere off the plan's own cells FAILS the step, {@link #steerAlongPath}
+     * clears the plan, and the normal replan path re-searches from the live floor — so this gate can no longer
+     * latch on an off-cell landing. Firing COMPLETE on proximity regardless of an in-flight commitment remains
      * intentionally NOT done: that is the very mid-jump preemption this gate removes (the ice-STOP undershoot).
      */
     private boolean midCommittedMove() {
@@ -579,10 +583,20 @@ final class BotNavigator {
                     // nav grid actually changed since this plan's last search — an unchanged epoch means
                     // the re-search would be byte-identical, so just re-arm. A CONSUMED plan always
                     // refreshes (that's forward progress, not a terrain poll).
-                    final int epoch = NavGridUpdater.editEpoch((ServerLevel) Worlds.of(bot));
-                    if (consumed || epoch != lastRefreshEditEpoch) {
+                    // PLAN-RELEVANCE gate (owner 2026-07-24): re-search on the periodic recheck only when a
+                    // chunk the current PLAN traverses actually changed — not on any dimension-global grid
+                    // mutation. A travelling bot's own frontier chunk builds/drops (and a house built 50k
+                    // blocks away) formerly re-armed this every window forever (the open-ocean flap). A
+                    // CONSUMED plan always refreshes (forward progress, not a poll).
+                    if (consumed || pathPlan.planImpacted()) {
+                        if (Debug.ENABLED) {
+                            OrebitCommon.LOGGER.info(
+                                    "[Orebit] block re-search: site=refreshWindow reason={} wpIdx={}/{} bot={}",
+                                    consumed ? "consumed-plan" : "plan-impacted",
+                                    waypointIndex, path == null ? -1 : path.size(),
+                                    AllyBotEntity.compact(bot.blockPosition()));
+                        }
                         pathPlan.refreshWindow();
-                        lastRefreshEditEpoch = epoch;
                     }
                     blockRefreshTicks = TERRAIN_RECHECK_TICKS;
                 }
@@ -592,6 +606,7 @@ final class BotNavigator {
                     this.lastBlockPlanRef = now;
                     this.waypointIndex = 0;
                     this.lastEditedIndex = -1;
+        this.lastFailLoggedStep = -1;
                     this.activePlanStep = -1; // rebuild the phase plan for the new window's first step
                     this.planStartFloor = settledFloor; // follower anchor == the search source (both settledFloor)
                     if (Debug.ENABLED) logWindowSwap(goalFloor); // capture boundary-wiggle: alternating targets/hops
@@ -604,7 +619,7 @@ final class BotNavigator {
                 // submit — in particular never in sync mode and never twice per window target.
                 if (path != null && !path.isEmpty() && waypointIndex > path.size() / 2
                         && waypointIndex < path.size() && pathPlan.wantsPreplan()) {
-                    pathPlan.preplan(floorOf(path.waypoint(path.size() - 1)),
+                    pathPlan.preplan(path.floor(path.size() - 1),
                             EditSnapshot.fromRemainingSteps(path, lastEditedIndex + 1),
                             bot.currentStartMode());
                 }
@@ -627,6 +642,7 @@ final class BotNavigator {
                 this.lastBlockPlanRef = adopted;
                 this.waypointIndex = 0;
                 this.lastEditedIndex = -1;
+        this.lastFailLoggedStep = -1;
                 this.activePlanStep = -1;
                 this.planStartFloor = liveFloor;
                 this.settledFloor = liveFloor;
@@ -802,6 +818,7 @@ final class BotNavigator {
         this.lastBlockPlanRef = this.path;
         this.waypointIndex = 0;
         this.lastEditedIndex = -1;
+        this.lastFailLoggedStep = -1;
         this.activePlanStep = -1; // rebuild any phase plan for the new plan's first step
         this.planStartFloor = startFloor; // first segment begins at the bot's current floor cell
         this.settledFloor = startFloor;   // the commit/replan anchor starts at the fresh plan's start cell
@@ -1082,9 +1099,11 @@ final class BotNavigator {
                 waypointIndex = j + 1;
                 // A move just COMPLETED — this is the settled stand cell the driver commits/replans off (its
                 // edits are now applied). Advancing the anchor only here is what keeps a mid-move transient from
-                // triggering a boundary replan (see settledFloor). w is the stand position; floorOf() = its floor
-                // (topY-aware: on a bottom-partial the stand cell IS the floor, so floorOf != w.below()).
-                this.settledFloor = floorOf(w);
+                // triggering a boundary replan (see settledFloor). The anchor is the step's SEARCH-NATIVE floor
+                // (carried through reconstruct — path.floor(j)), not a floorOf(w) re-inversion: with the step
+                // completed and its edits applied the two agree (the bot cannot stand IN a solid cell), and the
+                // carried floor stays exact on partials and never depends on the live cell's current solidity.
+                this.settledFloor = path.floor(j);
                 break;
             }
         }
@@ -1098,21 +1117,39 @@ final class BotNavigator {
 
         // Build (once per step) this move's phase-model plan, if it has one. A change of waypoint (a new step, or
         // a window swap that reset the cursor) rebuilds it and resets the runner. The plan is written in the
-        // search-native FLOOR cells; waypoints are floor.above() (stand positions), so the floor is one below.
+        // search-native FLOOR cells, carried per-waypoint through reconstruct (BlockPathPlan.floorY).
         if (waypointIndex != activePlanStep) {
-            if (Debug.VERBOSE && phaseRunner.active() && !lastPhaseDone && activePlanStep >= 0) {
+            if (Debug.VERBOSE && phaseRunner.active() && !lastPhaseDone && activePlanStep >= 0
+                    && !phaseRunner.doneNow(bot)) {
                 // The reached-before-done seam: the cursor moved on while the old step's phase plan was still
                 // mid-flight — whatever breaks/places its remaining phases owed were dropped on the floor.
+                // lastPhaseDone is necessarily ONE TICK STALE here (it sampled last tick's run against last
+                // tick's physics state), so a step whose done and reached flip on the SAME state — every
+                // single-phase converted move (the sprint-swim flood), and a grounded-gated parkour landing —
+                // would log on 100% of its normal completions. Re-asking the outgoing plan's TERMINAL done on
+                // the CURRENT state (doneNow — pure, no side effects) suppresses exactly those same-state
+                // completions, keeping this the rare-event tripwire it was written as: genuinely mid-phase,
+                // or terminal-done still false on the very state that advanced the cursor.
                 bot.vlog("ABANDONED " + lastPlanMove + " step " + activePlanStep + " mid-phase "
                         + phaseRunner.phase() + "/" + phaseRunner.phases() + " (reached fired before done)");
             }
             activePlanStep = waypointIndex;
-            BlockPos toFloor = floorOf(wp);
-            BlockPos fromFloor = (waypointIndex == 0)
-                    ? (planStartFloor != null ? planStartFloor : floorOf(bot.blockPosition()))
-                    : floorOf(path.waypoint(waypointIndex - 1));
-            MovePlan mp = movement.plan(fromFloor.getX(), fromFloor.getY(), fromFloor.getZ(),
-                    toFloor.getX(), toFloor.getY(), toFloor.getZ());
+            // Anchor the phase-plan frame on the step's SEARCH-NATIVE floors, carried per-waypoint through
+            // reconstruct (path.floorY) — NOT re-derived via floorOf(waypoint). The inversion assumed the feet
+            // cell is air or a bottom-partial; on a break-at-feet step (the feet cell solid until the plan's
+            // own AIR needs mine it) it read that cell as a standable floor and shifted the whole frame +1 —
+            // so the block to be mined became the FOOTING and was never mined (PATHOLOGY P1B). floorOf remains
+            // for the bot's LIVE position only (settle anchor, adoption), where inverting real feet is correct.
+            final int tfy = path.floorY(waypointIndex); // to-floor: (wp.x, tfy, wp.z)
+            final int ffx, ffy, ffz;                    // from-floor
+            if (waypointIndex == 0) {
+                BlockPos ff = (planStartFloor != null ? planStartFloor : floorOf(bot.blockPosition()));
+                ffx = ff.getX(); ffy = ff.getY(); ffz = ff.getZ();
+            } else {
+                BlockPos pw = path.waypoint(waypointIndex - 1);
+                ffx = pw.getX(); ffy = path.floorY(waypointIndex - 1); ffz = pw.getZ();
+            }
+            MovePlan mp = movement.plan(ffx, ffy, ffz, wp.getX(), tfy, wp.getZ());
             if (mp != null) {
                 // DOORS P3: fold this step's door-set (SET_OPEN entering / SET_CLOSED on the exit double-toggle)
                 // into the plan as Need.OPEN reqs. A movement's cell-geometry plan(...) can't derive a door-open
@@ -1153,6 +1190,29 @@ final class BotNavigator {
         // self-heals. An UNCONVERTED move keeps the original path: apply its folded edits once, then steer.
         if (phaseRunner.active()) {
             lastPhaseDone = phaseRunner.run(bot, cursor);
+            if (phaseRunner.failed()) {
+                // VALIDITY-ENVELOPE FAILURE (the P1 off-plan wedge): the step's plan declared the live state
+                // outside its model (MovePlan.failWhen — e.g. a committed jump grounded on a cell that is
+                // neither its takeoff stand nor its landing column). OWNER POLICY (2026-07-23): fail → log →
+                // HOLD, not replan. Deviation from the plan is either external force (creeper knockback — a
+                // future repair concern) or a MOVEMENT BUG (a mis-executed step) — and while the movement
+                // pathologies are still being burned down, a silent auto-replan would MASK the bugs this
+                // envelope exists to surface. So: log ONCE per failed step (ungated — rare and meaningful,
+                // the STUCK/logRepair idiom), stop driving, and hold the failed plan frozen for inspection.
+                // The bot stalls visibly at the failure point; the log carries the step/phase/position needed
+                // to reproduce. Flipping this back to clearPlan() (auto-replan) is the ratified future step
+                // once the failure classes are fixed.
+                if (activePlanStep != lastFailLoggedStep) {
+                    lastFailLoggedStep = activePlanStep;
+                    OrebitCommon.LOGGER.info(
+                            "[Orebit] step FAILED (validity envelope) {} step {} phase {}/{} bot={} — holding"
+                                    + " (fail->hold policy; no auto-replan while movement bugs are hunted)",
+                            lastPlanMove, activePlanStep, phaseRunner.phase(), phaseRunner.phases(),
+                            AllyBotEntity.compact(bot.blockPosition()));
+                }
+                bot.setForward(0.0f);
+                return;
+            }
             if (Debug.VERBOSE) logPhaseDiagnostics(movement);
         } else {
             StepEdits edits = path.edits(waypointIndex);
@@ -1190,9 +1250,11 @@ final class BotNavigator {
     /**
      * The floor cell a feet-block stands on, topY-aware. Byte-identical to {@code feetBlock.below()} EXCEPT
      * when the feet cell is itself a standable partial floor (a bottom slab / snow layer / carpet / pressure
-     * plate / repeater), where the feet block IS the floor cell. The search models nodes as floor cells and
-     * builds waypoints as the topY-aware feet block ({@link BlockPathfinder} reconstruct); localization must
-     * invert that with the same rule or the settle anchor / phase-plan floor drifts a cell on partials.
+     * plate / repeater), where the feet block IS the floor cell. For the bot's <b>LIVE position only</b>
+     * (settle/adoption anchors, damaging-floor probe) — a real standing bot's feet cell is never solid, so
+     * the inversion is exact there. Plan waypoints must NOT come through here: a break-at-feet step's feet
+     * cell is solid (standable) until its folded break runs, so the inversion drifts +1 — the follower uses
+     * the search-native floors carried on the plan instead ({@link BlockPathPlan#floorY}, PATHOLOGY P1B).
      */
     private BlockPos floorOf(BlockPos feetBlock) {
         return isStandableFloor(feetBlock) ? feetBlock : feetBlock.below();

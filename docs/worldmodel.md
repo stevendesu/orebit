@@ -123,7 +123,9 @@ Two more pieces round out the layer:
   classify pass that builds the nav grid — so it costs no extra world scan.
 
 The fine nav grid costs no disk at all (recomputed). The coarse layer **persists**:
-each dimension's cost and resource pyramids are written to `<world>/orebit/<dim>/`, split
+each dimension's cost and resource pyramids — along with the
+[learned dead-end crossings](pathfinding.md#region-level) the region planner
+accumulates — are written to `<world>/orebit/<dim>/`, split
 into per-region shard files (one per 32×32-chunk area, the same footprint as a vanilla
 `.mca` region) plus a small per-dimension summary, so a restart doesn't have to re-explore
 and the bot still knows the lay of distant land it visited sessions ago. The files are a

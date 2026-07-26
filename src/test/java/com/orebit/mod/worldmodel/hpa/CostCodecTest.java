@@ -13,12 +13,14 @@ import org.junit.jupiter.api.Test;
  * through the package-private setters, then packed into a bitstream and unpacked into a fresh record; every
  * field the schema persists must survive the trip unchanged.
  *
- * <p>The schema persists: {@code kind}, {@code avgSolidHardness}, {@code passFrac} (MIXED only),
- * {@code fragmentCount}, per fragment {@code faceMask} + the packed footprint of each touched face, and the
+ * <p>The schema persists (v7, typed fragments): {@code kind}, {@code avgSolidHardness}, {@code passFrac}
+ * (MIXED only), {@code fragmentCount}, per fragment {@code faceMask} + the 2 type bits (S, W — after the
+ * faceMask, before the footprints) + the packed footprint of each touched face, and the
  * collapsed flag (via the {@link RegionFragments#FRAGMENT_COUNT_COLLAPSED} count-field sentinel: on-wire
  * count 0 = honestly-zero/stripped ({@code collapsed=false}), 1..62 exact, 63 = cap-collapsed
- * ({@code collapsed=true})). It does NOT persist {@code gridSize} (a build/level attribute — unpack restores
- * it from the caller's {@code G}).
+ * ({@code collapsed=true})). Uniform records stay 6 bits — under the amended truly-uniform fast path the
+ * kind alone is exact (AIR implies dry, WATER implies all-water), so there is no extra water flag. It does
+ * NOT persist {@code gridSize} (a build/level attribute — unpack restores it from the caller's {@code G}).
  */
 public class CostCodecTest {
 
@@ -31,16 +33,23 @@ public class CostCodecTest {
 
     /** Build a record from masks, computing the tallies the builder needs (stone-hardness solids). */
     private static RegionFragments build(boolean[] passable, boolean[] standable) {
-        int passCount = 0, standCount = 0, solidCount = 0;
+        return build(passable, standable, null);
+    }
+
+    /** Build a record from masks incl. a water mask, computing the tallies the builder needs. */
+    private static RegionFragments build(boolean[] passable, boolean[] standable, boolean[] water) {
+        int passCount = 0, standCount = 0, waterCount = 0, solidCount = 0;
         long hardnessSumSolid = 0;
         for (int i = 0; i < CELLS; i++) {
-            if (passable[i]) passCount++;
-            else { solidCount++; hardnessSumSolid += 8; }
+            if (passable[i]) {
+                passCount++;
+                if (water != null && water[i]) waterCount++;
+            } else { solidCount++; hardnessSumSolid += 8; }
             if (standable[i]) standCount++;
         }
         RegionFragments out = new RegionFragments();
-        FragmentBuilder.build(passable, standable, G,
-                passCount, standCount, 0, hardnessSumSolid, solidCount, out);
+        FragmentBuilder.build(passable, standable, water, G,
+                passCount, standCount, waterCount, hardnessSumSolid, solidCount, out);
         return out;
     }
 
@@ -66,6 +75,7 @@ public class CostCodecTest {
             assertEquals(a.passFrac(), b.passFrac(), "passFrac");
             for (int f = 0; f < a.fragmentCount(); f++) {
                 assertEquals(a.faceMask(f), b.faceMask(f), "faceMask[" + f + "]");
+                assertEquals(a.typeBits(f), b.typeBits(f), "typeBits[" + f + "]");
                 for (int face = 0; face < 6; face++) {
                     assertEquals(a.footprint(f, face), b.footprint(f, face),
                             "footprint[" + f + "][" + face + "]");
@@ -100,9 +110,51 @@ public class CostCodecTest {
         air.setAvgSolidHardness(0);
         air.setFragmentCount(0);
 
+        assertEquals(6, CostCodec.regionBitLength(air), "uniform AIR stays 6 bits (no water flag — §5.5 amended)");
         RegionFragments back = roundTrip(air);
         assertSchemaEqual(air, back);
         assertEquals(RegionFragments.KIND_AIR, back.kind());
+    }
+
+    @Test
+    void uniformWater_roundTrips_sixBits() {
+        // A truly-uniform all-water cube: kind alone carries the water truth (WATER ⇒ all water).
+        boolean[] pass = new boolean[CELLS];
+        boolean[] water = new boolean[CELLS];
+        java.util.Arrays.fill(pass, true);
+        java.util.Arrays.fill(water, true);
+        RegionFragments rf = build(pass, new boolean[CELLS], water);
+        assertEquals(RegionFragments.KIND_WATER, rf.kind(), "fixture is a truly-uniform WATER cube");
+        assertEquals(6, CostCodec.regionBitLength(rf), "uniform WATER is 6 bits");
+
+        RegionFragments back = roundTrip(rf);
+        assertSchemaEqual(rf, back);
+        assertEquals(RegionFragments.KIND_WATER, back.kind());
+    }
+
+    // ===================================================================================================
+    // v7: the per-fragment type bits (S, W) survive the trip — an ocean-surface leaf's {S,W} fragment and
+    // a dry tunnel's {S} fragment reload bit-exact (assertSchemaEqual covers typeBits; this pins the
+    // interesting values).
+    // ===================================================================================================
+    @Test
+    void fragmentTypeBits_roundTrip() {
+        // Ocean-surface leaf: water y0..7 + air above, no solid ⇒ MIXED, one {S,W} fragment.
+        boolean[] pass = new boolean[CELLS];
+        boolean[] water = new boolean[CELLS];
+        java.util.Arrays.fill(pass, true);
+        for (int x = 0; x < G; x++)
+            for (int z = 0; z < G; z++)
+                for (int y = 0; y <= 7; y++) water[idx(x, y, z)] = true;
+        RegionFragments rf = build(pass, new boolean[CELLS], water);
+        assertEquals(RegionFragments.KIND_MIXED, rf.kind());
+        assertEquals(1, rf.fragmentCount());
+        assertTrue(rf.typeS(0) && rf.typeW(0), "fixture fragment is {S,W}");
+
+        RegionFragments back = roundTrip(rf);
+        assertSchemaEqual(rf, back);
+        assertTrue(back.typeS(0), "S survives the trip");
+        assertTrue(back.typeW(0), "W survives the trip");
     }
 
     // ===================================================================================================

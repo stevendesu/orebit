@@ -77,8 +77,11 @@ public final class PyramidMerger {
     private static final ThreadLocal<int[]> ITEM_SLOT = ThreadLocal.withInitial(() -> new int[MAX_ITEMS]);
     private static final ThreadLocal<int[]> ITEM_MASK = ThreadLocal.withInitial(() -> new int[MAX_ITEMS]);
     private static final ThreadLocal<int[]> ITEM_FP   = ThreadLocal.withInitial(() -> new int[MAX_ITEMS * 6]);
+    private static final ThreadLocal<int[]> ITEM_TYPE = ThreadLocal.withInitial(() -> new int[MAX_ITEMS]);
     private static final ThreadLocal<int[]> UF        = ThreadLocal.withInitial(() -> new int[MAX_ITEMS]);
     private static final ThreadLocal<int[]> COMP_OF   = ThreadLocal.withInitial(() -> new int[MAX_ITEMS]);
+    /** Per-component OR of the merged items' type bits (typed fragments §5.5: parent S/W = OR of children). */
+    private static final ThreadLocal<int[]> COMP_TYPE = ThreadLocal.withInitial(() -> new int[RegionFragments.MAX_FRAGMENTS]);
     // Per-component × face bbox accumulators (componentCount ≤ cap; faces 6). Reset per merge.
     private static final ThreadLocal<int[]> ACC_MINU = ThreadLocal.withInitial(() -> new int[RegionFragments.MAX_FRAGMENTS * 6]);
     private static final ThreadLocal<int[]> ACC_MAXU = ThreadLocal.withInitial(() -> new int[RegionFragments.MAX_FRAGMENTS * 6]);
@@ -198,7 +201,11 @@ public final class PyramidMerger {
      *       connect when both touch the shared face and their footprints overlap there.</li>
      *   <li>Each union component becomes one parent fragment; project its outer-flush child footprints onto the
      *       parent's six outer faces (per-axis downsample: a split axis maps 16 child buckets → 8 parent
-     *       buckets at the child's half-offset; an unsplit axis — the quadtree's Y — maps 1:1).</li>
+     *       buckets at the child's half-offset; an unsplit axis — the quadtree's Y — maps 1:1). The component's
+     *       type bits are the <b>OR</b> of its merged items' bits (typed fragments §5.5): real MIXED fragments
+     *       carry their own S/W; synthetic optimistic items (unbuilt / collapsed mass) claim S; a uniform
+     *       AIR item claims nothing (truly uniform ⇒ provably dry, and uniform records never claim S); a
+     *       uniform WATER item claims W (kind implies water).</li>
      * </ol>
      * Header: {@code passFrac}/{@code avgSolidHardness} are means over built children; the parent stays a
      * uniform kind only when <b>every</b> child is built and the same SOLID/AIR/WATER. {@code built = any child
@@ -255,6 +262,7 @@ public final class PyramidMerger {
         final int[] itemSlot = ITEM_SLOT.get();
         final int[] itemMask = ITEM_MASK.get();
         final int[] itemFp = ITEM_FP.get();
+        final int[] itemType = ITEM_TYPE.get();
         final int[] packed = PACKED.get();
 
         int nItems = 0;
@@ -274,8 +282,11 @@ public final class PyramidMerger {
             if (rf == null) {
                 // Unbuilt/unloaded child: optimistic open (one synthetic full-face item) so unexplored terrain
                 // never blocks a merge. NOT counted as a built uniform kind (keeps the parent MIXED, and the
-                // anyChildBuilt gate below may leave the whole parent unbuilt = the §6 default).
-                nItems = addSynthetic(itemSlot, itemMask, itemFp, nItems, i);
+                // anyChildBuilt gate below may leave the whole parent unbuilt = the §6 default). Typed
+                // OPTIMISTICALLY as S (walkable) — the type-level expression of the same optimism: a gate must
+                // never refuse a crossing because unexplored terrain "proved" ¬S·¬W. No W claim (don't
+                // swim-price the unknown).
+                nItems = addSynthetic(itemSlot, itemMask, itemFp, itemType, nItems, i, RegionFragments.TYPE_S);
                 continue;
             }
             anyChildBuilt = true;
@@ -293,11 +304,14 @@ public final class PyramidMerger {
                     break;
                 case RegionFragments.KIND_AIR:
                     airBuilt++;
-                    nItems = addSynthetic(itemSlot, itemMask, itemFp, nItems, i);
+                    // Truly-uniform AIR ⇒ provably dry (§5.5 amended); uniform records never claim S.
+                    nItems = addSynthetic(itemSlot, itemMask, itemFp, itemType, nItems, i, 0);
                     break;
                 case RegionFragments.KIND_WATER:
                     waterBuilt++;
-                    nItems = addSynthetic(itemSlot, itemMask, itemFp, nItems, i);
+                    // Truly-uniform WATER ⇒ all water (kind implies W); ¬S is exact for a submerged cube.
+                    nItems = addSynthetic(itemSlot, itemMask, itemFp, itemType, nItems, i,
+                            RegionFragments.TYPE_W);
                     break;
                 default: // MIXED
                     final int fc = rf.fragmentCount();
@@ -305,14 +319,19 @@ public final class PyramidMerger {
                         // Uniform mass — BOTH cap-collapsed (isCollapsed) and honestly-stripped children land
                         // here (fc==0 in RAM for both; only the wire distinguishes). Deliberately treated
                         // alike: passable-enough → one synthetic open item; else a wall (passFrac decides).
+                        // Typed optimistically as S like the unbuilt case: collapse is the §8 "coarse enough
+                        // ⇒ pathable" optimism, and the collapsed record kept no per-fragment water truth
+                        // to claim W from.
                         if (rf.passFrac() > 0) {
-                            nItems = addSynthetic(itemSlot, itemMask, itemFp, nItems, i);
+                            nItems = addSynthetic(itemSlot, itemMask, itemFp, itemType, nItems, i,
+                                    RegionFragments.TYPE_S);
                         }
                     } else {
                         for (int f = 0; f < fc && nItems < MAX_ITEMS; f++) {
                             final int base = nItems * 6;
                             itemSlot[nItems] = i;
                             itemMask[nItems] = rf.faceMask(f);
+                            itemType[nItems] = rf.typeBits(f); // real fragments carry their own S/W bits
                             for (int face = 0; face < 6; face++) {
                                 itemFp[base + face] = rf.footprint(f, face); // NO_FACE where untouched
                             }
@@ -343,6 +362,10 @@ public final class PyramidMerger {
             p.setBuilt(parentLevel, parentRow, true);
             return;
         }
+        // Coarse uniform roll-up unchanged (all-children-same-uniform-kind rule): kind alone stays exact
+        // under §5.5-amended truly-uniform leaves (all-AIR children ⇒ a provably-dry parent; all-WATER ⇒
+        // all-water). No water signal is lost through this path: any child that isn't truly uniform (mixed
+        // media, water fragments, cap-collapse) keeps kind MIXED and forces the parent MIXED.
         if (builtChildren == children && airBuilt == children) {
             out.setKind(RegionFragments.KIND_AIR);
             out.setFragmentCount(0);
@@ -387,6 +410,7 @@ public final class PyramidMerger {
 
         // --- components → parent fragments --------------------------------------------------------------
         final int[] compOf = COMP_OF.get();
+        final int[] compType = COMP_TYPE.get();
         final int[] accMinU = ACC_MINU.get(), accMaxU = ACC_MAXU.get();
         final int[] accMinV = ACC_MINV.get(), accMaxV = ACC_MAXV.get();
         Arrays.fill(compOf, 0, nItems, -1);
@@ -400,11 +424,13 @@ public final class PyramidMerger {
                 if (compCount >= RegionFragments.MAX_FRAGMENTS) { collapsed = true; continue; }
                 comp = compCount++;
                 compOf[root] = comp;
+                compType[comp] = 0;
                 final int cb = comp * 6;
                 for (int f = 0; f < 6; f++) { accMinU[cb + f] = Integer.MAX_VALUE; accMaxU[cb + f] = -1;
                                               accMinV[cb + f] = Integer.MAX_VALUE; accMaxV[cb + f] = -1; }
             }
             compOf[k] = comp;
+            compType[comp] |= itemType[k]; // union-merge ORs the type bits (parent S/W = OR of merged children)
         }
 
         if (collapsed) {
@@ -443,16 +469,19 @@ public final class PyramidMerger {
                 }
             }
             out.setFragment(comp, faceMaskBits, packed);
+            out.setFragmentTypes(comp, compType[comp]);
         }
         out.setFragmentCount(compCount);
         p.setBuilt(parentLevel, parentRow, true);
     }
 
-    /** Append one synthetic full-face item (uniform-open / unbuilt child) for child slot {@code i}. */
-    private static int addSynthetic(int[] slot, int[] mask, int[] fp, int n, int i) {
+    /** Append one synthetic full-face item (uniform-open / unbuilt / collapsed-mass child) for child slot
+     *  {@code i}, typed {@code typeBits} (see the call sites for the per-case optimism rationale). */
+    private static int addSynthetic(int[] slot, int[] mask, int[] fp, int[] type, int n, int i, int typeBits) {
         if (n >= MAX_ITEMS) return n;
         slot[n] = i;
         mask[n] = 0x3F; // all six faces
+        type[n] = typeBits;
         final int base = n * 6;
         for (int f = 0; f < 6; f++) fp[base + f] = RegionFragments.NO_FACE; // full face
         return n + 1;

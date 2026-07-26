@@ -68,10 +68,12 @@ public final class RegionPathfinder {
 
     /**
      * Cap-safe search-box budget (HPA-FRAGMENTS.md §S5 / cap-safety). The cascade picks the FINEST region level
-     * whose start→goal box (horizontal area × vertical depth) fits within this many nodes, so a per-level
-     * fragment A* cannot flood the {@link #MAX_REGION_EXPANSIONS} backstop by area. Sized well under the backstop
-     * (~2.4×) to absorb A* detours/walk-arounds (which explore outside the start→goal box) and the
-     * {@code (region,fragment)} node multiplier.
+     * whose start→goal box (horizontal area × vertical depth) fits within this many nodes, sized well under the
+     * {@link #MAX_REGION_EXPANSIONS} backstop (~2.4×) to absorb A* detours/walk-arounds (which explore outside
+     * the start→goal box). NOTE: the box bound no longer strictly bounds in-box node COUNT — per-cell identity is
+     * now up to ~8×62 (entry-face × from-fragment), not ≤8, since from-fragment was folded into the node key, so
+     * a dense merged-fragment cluster can exceed CAP_SAFE_NODES and hit MAX_REGION_EXPANSIONS (returning a
+     * partial). Accepted degradation, retired by capability-aware fragments (#6).
      */
     public static final int CAP_SAFE_NODES = 8192;
 
@@ -205,6 +207,33 @@ public final class RegionPathfinder {
     /** Per-block downward FALL ticks (cheap): falling is near-free; charged ~one walk-tick/block of descent. */
     public static final float FALL_PER_BLOCK = WALK_PER_BLOCK;                                     // 1.0
 
+    /**
+     * Per-block <b>horizontal</b> SWIM ticks (DESIGN-typed-fragments.md §3, pricing amendment
+     * 2026-07-23): sprint-swim is FASTER than walking (5.61 b/s vs 4.32 b/s), so a laterally swum block
+     * costs {@code 4.32/5.61 ≈ 0.77} of a walked block in the region tier's relative units. Charged for
+     * the HORIZONTAL (octile) component of a transit through a {@code hasWater} (W) fragment and for
+     * lateral crossings of uniform {@link RegionFragments#KIND_WATER} records. The VERTICAL component is
+     * priced separately — see {@link #SWIM_VERTICAL_PER_BLOCK} and {@link #transitCost} (W is an
+     * existence bit; discounting {@code |dy|} through a fragment that merely CONTAINS water deleted
+     * walkCost's vertical capability shaping and manufactured ~8×-discounted phantom ascents through wet
+     * caves — the cliff-repro regression).
+     */
+    public static final float SWIM_PER_BLOCK = 0.77f * WALK_PER_BLOCK;                             // 0.77
+
+    /**
+     * Per-block <b>vertical</b> SWIM ticks (DESIGN-typed-fragments.md §3, pricing amendment 2026-07-23),
+     * charged for the {@code |dy|} component only through a <b>fully-submerged</b> fragment
+     * ({@code ¬S·W} — no surfaceable cell, so every vertical block of the leg is provably swum) and for
+     * vertical crossings of uniform {@link RegionFragments#KIND_WATER} records (truly fully submerged by
+     * construction — the §5.5 narrowed fast-path). Derivation: vanilla vertical swimming ascends/descends
+     * at ~2 b/s vs the 4.32 b/s walk ⇒ {@code 4.32/2 ≈ 2.16 ≈ 2.2} relative units — SLOWER than lateral
+     * walking, far cheaper than pillaring (6.0), honest for water that is genuinely climbable in place.
+     * Direction-symmetric (swimming up ≈ down; water absorbs falls ⇒ no cliff penalty). Any W fragment
+     * that is NOT fully submerged (S·W — surface water, or a wet cave with dry floors) keeps walkCost's
+     * full dy shaping ({@link #PILLAR_PER_BLOCK} + the no-place {@link #UNSAFE_VERTICAL_PENALTY}) instead.
+     */
+    public static final float SWIM_VERTICAL_PER_BLOCK = 2.2f * WALK_PER_BLOCK;                     // 2.2
+
     // Block-honest PILLAR/FALL ratios for the cost-to-goal FIELD only (the heuristic must be commensurate with
     // block ticks). The region A* keeps its behavioral compressed costs above (PILLAR 6 / FALL 1 — self-consistent
     // within the region search); but as a BLOCK heuristic (rc × WALK_REAL_TICKS ≈ block ticks) those ratios are
@@ -244,6 +273,21 @@ public final class RegionPathfinder {
         return frag == VIRTUAL_GOAL_FRAG;
     }
 
+    /**
+     * Reserved <b>from-fragment SENTINEL</b> for the search ROOT (the bot's fragment A, which has no predecessor)
+     * and for every reverse-Dijkstra / virtual node whose from-fragment is not load-bearing. Real fragments top
+     * out at {@link RegionFragments#MAX_FRAGMENTS}−1 = 61; 62 was the reserved id, 63 = {@link #VIRTUAL_GOAL_FRAG}.
+     * Stamping the root's from-fragment with this sentinel keeps {@code (A|from=S → V)} and {@code (A′|from=B → V)}
+     * distinct rows — the A==G cliff collapse — AND journey-scopes {@code from=S} rows structurally (S differs each
+     * {@code /bot goto}, so a row naming it can't be world knowledge). DESIGN-virtual-start-fragment §0.5.
+     */
+    public static final int VIRTUAL_START_FRAG = 62;
+
+    /** Whether {@code frag} is the {@link #VIRTUAL_START_FRAG} sentinel (the search root's / a reverse node's from-fragment). */
+    public static boolean isVirtualStart(int frag) {
+        return frag == VIRTUAL_START_FRAG;
+    }
+
     /** Per-block MINE ticks at the reference (stone) hardness; scaled by {@code avgSolidHardness/STONE_REF}. */
     public static final float MINE_PER_BLOCK = LeafCostComputer.MINE_PER_BLOCK;                    // 3.0
 
@@ -272,19 +316,59 @@ public final class RegionPathfinder {
     // Entry-face node identity (PERF-DESIGN-region-dig-through.md §2). The SEARCH node is
     // (region, fragment, entryFace) — the face (0..5) through which the node was entered, plus two sentinels.
     // Making entry part of the key keeps the §4 entry→exit walk cost a FIXED edge cost (consistent A*): a
-    // fragment "entered from north" and "…from south" are distinct rows. Folded into the free high bits 56..58
+    // fragment "entered from north" and "…from south" are distinct rows. Folded into the free high bits 55..57
     // of the physical fragmentKey; CONSUMERS stay physical (see fragmentNodeKey) — entryFace never leaks out.
+    // (2026-07 packLevelKey repack: entry-face moved down one bit, 56→55, tracking the 6→5-bit ry narrowing.)
     // ---------------------------------------------------------------------------------------------------
 
     /** Entry-face sentinel: the start node (no incoming crossing; hop-0 traversal anchors on the bot's cell). */
-    private static final int ENTRY_START = 6;
+    public static final int ENTRY_START = 6;
 
     /** Entry-face sentinel: reached by an intra-region mine edge (entry opening is the sibling centroid, no face). */
-    private static final int ENTRY_INTERIOR = 7;
+    public static final int ENTRY_INTERIOR = 7;
 
-    /** Fold a 3-bit {@code entryFace} (0..5 face, or {@link #ENTRY_START}/{@link #ENTRY_INTERIOR}) into the key. */
-    private static long searchKey(long physKey, int entryFace) {
-        return physKey ^ ((long) (entryFace & 0x7) << 56);
+    /**
+     * Fold a 3-bit {@code entryFace} (0..5 face, or {@link #ENTRY_START}/{@link #ENTRY_INTERIOR}) into bits 55..57
+     * AND the 6-bit {@code fromFrag} (the fragment the search last hopped FROM; {@link #VIRTUAL_START_FRAG} at the
+     * root) into bits 58..63 of the physical key — so the SEARCH node identity is
+     * {@code (region, current-fragment, entry-face, from-fragment)} (DESIGN-virtual-start-fragment §0.5). Two
+     * approaches into one fragment from the same face but different predecessors are now DISTINCT nodes, so the
+     * search can try the second after the first is blamed (the two-hallways / A==G cliff fixes).
+     */
+    private static long searchKey(long physKey, int entryFace, int fromFrag) {
+        return physKey ^ ((long) (entryFace & 0x7) << 55) ^ ((long) (fromFrag & 0x3F) << 58);
+    }
+
+    /**
+     * The FULL search-node key {@code (region, fragment, entry-face, from-fragment)} — the single shared builder
+     * used by BOTH the search-time V-approach blacklist check ({@link #relaxVirtualGoal}) AND the blame add-side
+     * ({@link com.orebit.mod.pathfinding.PathPlan#blockedHop}) so the two can never drift (parity requirement,
+     * DESIGN-virtual-start-fragment §0.5). Entry-face is retained in the row (not reduced away) to avoid
+     * over-invalidation when two predecessors share a region-local fragment id but enter through different faces.
+     */
+    public static long approachRowKey(int rx, int ry, int rz, int frag, int entryFace, int fromFrag) {
+        return searchKey(fragmentKey(rx, ry, rz, frag), entryFace, fromFrag);
+    }
+
+    /** The full V-approach row key for skeleton step {@code step} (the approach into V) — the ONE builder
+     *  {@link PathPlan#blockedHop} and the region tests share, so the add-side key can never drift from the
+     *  relaxVirtualGoal check. from-fragment = the predecessor step's fragment (VIRTUAL_START_FRAG at the
+     *  root); entry-face = reconstructed geometrically from the predecessor region delta (FROM-TO). */
+    public static long approachRowKeyForStep(RegionPathPlan sk, int step) {
+        final int fromFrag = (step - 1 >= 0) ? sk.fragmentId(step - 1) : VIRTUAL_START_FRAG;
+        return approachRowKey(sk.rx(step), sk.ry(step), sk.rz(step), sk.fragmentId(step),
+                approachEntryFaceForStep(sk, step), fromFrag);
+    }
+
+    private static int approachEntryFaceForStep(RegionPathPlan sk, int step) {
+        if (step - 1 < 0) return ENTRY_START;
+        final int dx = sk.rx(step - 1) - sk.rx(step);
+        final int dy = sk.ry(step - 1) - sk.ry(step);
+        final int dz = sk.rz(step - 1) - sk.rz(step);
+        if (dx == 0 && dy == 0 && dz == 0) return ENTRY_INTERIOR;
+        if (dx != 0) return dx > 0 ? 1 : 0;
+        if (dy != 0) return dy > 0 ? 3 : 2;
+        return dz > 0 ? 5 : 4;
     }
 
     /** One reusable region-search state per thread, reset at the top of each {@link #plan}. */
@@ -365,7 +449,7 @@ public final class RegionPathfinder {
         final RegionMineModel fwdMine = FORWARD_MINE;
         grid.ensureLeaf(srx, sry, srz);
         grid.ensureLeaf(grx, gry, grz);
-        final int startFrag = startFragment(grid, 0, srx, sry, srz, startFloor);
+        final int startFrag = anchorFragment(grid, 0, srx, sry, srz, startFloor);
 
         // Skeleton-side virtual goal: seed the goal as a virtual node V reached from its APPROACHES (its own
         // fragment + walkable face-neighbors for a MIXED goal, dig pockets for a break-capable buried goal). When
@@ -509,7 +593,7 @@ public final class RegionPathfinder {
 
         ensureNode(grid, level, sx, sy, sz);
         ensureNode(grid, level, gx, gy, gz);
-        final int sFrag = startFragment(grid, level, sx, sy, sz, botFloor);
+        final int sFrag = anchorFragment(grid, level, sx, sy, sz, botFloor);
 
         // §1: the FORWARD skeleton prices digging with a fixed wooden-pickaxe economy (inventory-independent);
         // the caller's real `mine` is retained for API symmetry (the reverse cost-to-goal field uses it).
@@ -521,8 +605,12 @@ public final class RegionPathfinder {
         // no-break bot now also gets multi-approach walkable seeds (new: the per-approach reachability fix).
         final DigSeedSet digSeeds = (level == 0 && reached)
                 ? buildGoalApproaches(grid, minY, realGoal, caps.canBreak(), fwdMine) : null;
+        // Goal anchor: the same containment resolution as the start (a faceless sealed pocket captures the
+        // goal's centroid guess exactly as it captures the start's). A CLAMPED sub-goal (subGoalWorld outside
+        // the (gx,gy,gz) region) fails containedFragment's ancestor check and falls back to nearest-centroid
+        // — the pre-existing behavior for waypoint regions.
         final int gFrag = digSeeds != null ? VIRTUAL_GOAL_FRAG
-                : nearestFragment(grid, level, gx, gy, gz, subGoalWorld);
+                : anchorFragment(grid, level, gx, gy, gz, subGoalWorld);
 
         return planLevelFragments(level, grid, minY, sx, sy, sz, sFrag,
                 botFloor.getX(), botFloor.getY(), botFloor.getZ(),
@@ -572,8 +660,9 @@ public final class RegionPathfinder {
         // terrain (the level-0 Dijkstra-flood failure mode, re-expressed at coarse resolution). Level 0 ⇒ ×1.
         final float hScale = 1 << level;
 
-        final int startRow = nodes.intern(searchKey(fragmentKey(srx, sry, srz, startFrag), ENTRY_START),
-                srx, sry, srz, startFrag, ENTRY_START);
+        final int startRow = nodes.intern(
+                searchKey(fragmentKey(srx, sry, srz, startFrag), ENTRY_START, VIRTUAL_START_FRAG),
+                srx, sry, srz, startFrag, ENTRY_START, VIRTUAL_START_FRAG);
         nodes.g[startRow] = 0f;
         nodes.f[startRow] = HEURISTIC.estimate(srx, sry, srz, grx, gry, grz) * hScale;
         nodes.portalX[startRow] = NO_PORTAL;
@@ -829,7 +918,7 @@ public final class RegionPathfinder {
 
         // (1) Walkable approaches — MIXED goal region with a real goal fragment only.
         if (rfGoal != null && rfGoal.kind() == RegionFragments.KIND_MIXED) {
-            final int gFrag = startFragment(grid, 0, grx, gry, grz, goalFloor);
+            final int gFrag = anchorFragment(grid, 0, grx, gry, grz, goalFloor);
             if (gFrag >= 0 && gFrag < rfGoal.fragmentCount()) {
                 sink.accept(grx, gry, grz, gFrag, 0f, false); // self-approach (the goal's own fragment)
                 for (int f = 0; f < 6; f++) {
@@ -890,16 +979,21 @@ public final class RegionPathfinder {
         // Online repair — the load-bearing half of the per-approach model: each (approach → V) is an
         // INDEPENDENTLY-blacklistable crossing. Skip the approach the block tier proved it cannot realize, so
         // the region A* is FORCED to route to a DIFFERENT approach (a different side of the goal) instead of
-        // re-offering the same dead entry every replan. Keyed physically (region, fragment) exactly as
-        // relaxFrag does, so it matches the (fromKey,toKey) the driver's blockedHop/repairBlocked records.
+        // re-offering the same dead entry every replan. The FROM side is the FULL approach node key
+        // (region + fragment + entry-face + from-fragment), so blaming (A|from=S → V) leaves (A|from=staircase
+        // → V) alive when A==G — the load-bearing approach-conditioning (DESIGN-virtual-start-fragment §0.5).
+        // Must equal PathPlan.blockedHop's add-side approachRowKey for the same realized route (parity).
         if (blacklist != null
-                && blacklist.contains(fragmentKey(nodes.x[curRow], nodes.y[curRow], nodes.z[curRow],
-                        nodes.frag[curRow]), fragmentKey(grx, gry, grz, VIRTUAL_GOAL_FRAG))) {
+                && blacklist.contains(approachRowKey(nodes.x[curRow], nodes.y[curRow], nodes.z[curRow],
+                        nodes.frag[curRow], nodes.entryFace[curRow], nodes.fromFrag[curRow]),
+                        fragmentKey(grx, gry, grz, VIRTUAL_GOAL_FRAG))) {
             return;
         }
         final float tentative = nodes.g[curRow] + approachCost;
-        final long key = searchKey(fragmentKey(grx, gry, grz, VIRTUAL_GOAL_FRAG), ENTRY_INTERIOR);
-        final int row = nodes.intern(key, grx, gry, grz, VIRTUAL_GOAL_FRAG, ENTRY_INTERIOR);
+        // V is a single terminal; its from-fragment is not load-bearing (discrimination happens on the APPROACH's
+        // key at the blacklist check above), so stamp it VIRTUAL_START_FRAG.
+        final long key = searchKey(fragmentKey(grx, gry, grz, VIRTUAL_GOAL_FRAG), ENTRY_INTERIOR, VIRTUAL_START_FRAG);
+        final int row = nodes.intern(key, grx, gry, grz, VIRTUAL_GOAL_FRAG, ENTRY_INTERIOR, VIRTUAL_START_FRAG);
         if (TRACE) traceCand("virtual-goal(" + (isDig ? "dig" : "walk") + " from " + nodes.x[curRow] + ","
                 + nodes.y[curRow] + "," + nodes.z[curRow] + " frag=" + nodes.frag[curRow] + " g=" + nodes.g[curRow]
                 + ")", grx, gry, grz, VIRTUAL_GOAL_FRAG, approachCost, goalWx, goalWy, goalWz, tentative < nodes.g[row]);
@@ -1017,7 +1111,7 @@ public final class RegionPathfinder {
             srz = RegionAddress.regionZ(startFloor.getZ(), 0);
             if (bound.contains(srx, sry, srz)) {
                 grid.ensureLeaf(srx, sry, srz);
-                startFrag = startFragment(grid, 0, srx, sry, srz, startFloor);
+                startFrag = anchorFragment(grid, 0, srx, sry, srz, startFloor);
                 armed = true;
             }
         }
@@ -1155,7 +1249,8 @@ public final class RegionPathfinder {
      * onward 0), and {@code f == g} (Dijkstra).
      */
     private static void seedField(Nodes nodes, int rx, int ry, int rz, int frag, float g) {
-        int row = nodes.intern(searchKey(fragmentKey(rx, ry, rz, frag), ENTRY_START), rx, ry, rz, frag, ENTRY_START);
+        int row = nodes.intern(searchKey(fragmentKey(rx, ry, rz, frag), ENTRY_START, VIRTUAL_START_FRAG),
+                rx, ry, rz, frag, ENTRY_START, VIRTUAL_START_FRAG);
         if (g >= nodes.g[row]) return; // a cheaper (or equal) seed for this pocket is already queued
         nodes.g[row] = g;
         nodes.f[row] = g;
@@ -1253,6 +1348,12 @@ public final class RegionPathfinder {
         final RegionFragments rfN = grid.fragmentRecord(level, crx, cry, crz);
         final boolean uniformN = isUniformNode(rfN);
         final int countN = uniformN ? 1 : rfN.fragmentCount();
+        // Typed transit pricing (DESIGN-typed-fragments.md §3): the entry→exit leg across THIS node swims
+        // iff its fragment carries W. One mask read per pop, hoisted out of the face loop. A uniform kind
+        // implies its type exactly (WATER ⇒ W, AIR ⇒ dry); collapsed/unbuilt mass stays walk-priced.
+        final int typeA = uniformN
+                ? (rfN != null && rfN.kind() == RegionFragments.KIND_WATER ? RegionFragments.TYPE_W : 0)
+                : rfN.typeBits(fragA);
         final float gCur = nodes.g[current];
         // Entry opening of THIS node — where we crossed INTO it (the §4 entry→exit walk anchor). The start
         // node has no incoming crossing, so hop-0 traversal anchors on the bot's actual start floor cell
@@ -1372,8 +1473,20 @@ public final class RegionPathfinder {
             int bestFrag = -1;
             long bestDist = Long.MAX_VALUE;
             final int countM = rfM.fragmentCount();
+            // Per-fragment relocation of the no-place air gate (DESIGN-typed-fragments.md §3, §5.6): the
+            // ¬S·¬W row — loop-invariant arm hoisted so the per-fragment test below is ONE mask read.
+            final boolean airGated = !canPlace && f != 2;
             for (int fb = 0; fb < countM; fb++) {
                 if (!rfM.touchesFace(fb, oppF)) continue;
+                final int typeB = rfM.typeBits(fb);
+                // §3 gate table, ¬S·¬W: a typeless fragment is PURE AIR (no floor anywhere, nothing
+                // swimmable), so a no-place bot can only FALL into it (our −Y exit, f == 2) — lateral and
+                // upward entry are physically impossible for it, exactly the uniform-AIR gate's semantics
+                // read per-fragment. W fragments pass for everyone toward any touched face (swim, incl.
+                // +Y); S-only fragments walk. A place-capable bot passes at the place pricing (the
+                // transit's pillar term). A gated fragment is skipped OUTRIGHT (it is not a mine-fallback
+                // target either — a no-place bot cannot enter it however the wall is opened).
+                if (airGated && typeB == 0) continue;
                 int packedB = rfM.footprint(fb, oppF);
                 footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, packedB, wb);
                 if (footprintsOverlap(packedA, packedB)) {
@@ -1382,15 +1495,19 @@ public final class RegionPathfinder {
                     // is the missing "moving within a 16-block region isn't free" term that made lateral
                     // walks cost ~1 and turned open caverns near-free. entryFace in the node key (§2) makes
                     // this a FIXED edge cost (the entry opening is pinned per node), keeping A* consistent.
-                    float edge = walkCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, canPlace, safeFall, dijkstra, pillarField)
-                            + walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall, dijkstra, pillarField);
+                    // Each leg is typed (§3): the traversal leg by OUR fragment's bits, the boundary hop by
+                    // the target fragment's — a W leg swims its HORIZONTAL at SWIM_PER_BLOCK; its |dy| is
+                    // capability-shaped unless the fragment is fully submerged (¬S·W → SWIM_VERTICAL — the
+                    // §3 pricing amendment); the rest walk unchanged.
+                    float edge = transitCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, typeA, canPlace, safeFall, dijkstra, pillarField)
+                            + transitCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], typeB, canPlace, safeFall, dijkstra, pillarField);
                     boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, fb,
                             wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, tube, dijkstra);
                     if (TRACE) {
                         traceCand("walk", mrx, mry, mrz, fb, edge, wb[0], wb[1], wb[2], ok);
-                        traceBreakdown("traverse[" + walkBreakdown(wa[0] - entX, wa[1] - entY, wa[2] - entZ,
-                                canPlace, safeFall) + "]  +  cross[" + walkBreakdown(wb[0] - wa[0],
-                                wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall) + "]");
+                        traceBreakdown("traverse[" + transitBreakdown(wa[0] - entX, wa[1] - entY, wa[2] - entZ,
+                                typeA, canPlace, safeFall) + "]  +  cross[" + transitBreakdown(wb[0] - wa[0],
+                                wb[1] - wa[1], wb[2] - wa[2], typeB, canPlace, safeFall) + "]");
                     }
                     emitted = true;
                 } else {
@@ -1452,8 +1569,13 @@ public final class RegionPathfinder {
             return false;
         }
         float tentative = gCur + Math.max(edge, WALK_PER_BLOCK);
-        // The SEARCH node folds entryFace into the key (§2) so "fragment entered from north" ≠ "…from south".
-        int row = nodes.intern(searchKey(physKey, entryFace), mrx, mry, mrz, mFrag, entryFace);
+        // The SEARCH node folds entryFace AND from-fragment into the key (§0.5) so "fragment entered from north"
+        // ≠ "…from south" AND "…reached via H1" ≠ "…via H2". CRITICAL: the reverse cost-field (dijkstra=true) MUST
+        // stamp the VIRTUAL_START_FRAG constant so the goal-rooted field is NOT split by from-fragment — that keeps
+        // RegionFieldBuildBenchmark and the field's (region,frag) queries byte-identical. Only the forward search
+        // splits by the predecessor fragment (nodes.frag[curRow]).
+        final int cfrom = dijkstra ? VIRTUAL_START_FRAG : nodes.frag[curRow];
+        int row = nodes.intern(searchKey(physKey, entryFace, cfrom), mrx, mry, mrz, mFrag, entryFace, cfrom);
         if (tentative >= nodes.g[row]) return false; // new rows start at +inf → first visit admitted
         nodes.g[row] = tentative;
         nodes.f[row] = dijkstra ? tentative : tentative + HEURISTIC.estimate(mrx, mry, mrz, grx, gry, grz) * hScale;
@@ -1496,17 +1618,49 @@ public final class RegionPathfinder {
         final StringBuilder sb = new StringBuilder();
         sb.append("horiz=").append(oct * WALK_PER_BLOCK)
                 .append(" (octile ").append(oct).append("×").append(WALK_PER_BLOCK).append("/blk)");
+        if (dy != 0) sb.append(" + ").append(dyBreakdown(dy, canPlace, safeFall));
+        return sb.toString();
+    }
+
+    /** The Δy half of {@link #walkBreakdown} — mirrors {@link #dyCost}'s forward shaping (TRACE). */
+    private static String dyBreakdown(int dy, boolean canPlace, int safeFall) {
+        final StringBuilder sb = new StringBuilder();
         if (dy > 0) {
-            sb.append(" + up=").append(dy * PILLAR_PER_BLOCK)
+            sb.append("up=").append(dy * PILLAR_PER_BLOCK)
                     .append(" (").append(dy).append("×PILLAR ").append(PILLAR_PER_BLOCK).append("/blk)");
             if (!canPlace && dy > safeFall) sb.append(" +cliff=").append((dy - safeFall) * UNSAFE_VERTICAL_PENALTY);
         } else if (dy < 0) {
             final int drop = -dy;
-            sb.append(" + down=").append(drop * FALL_PER_BLOCK)
+            sb.append("down=").append(drop * FALL_PER_BLOCK)
                     .append(" (").append(drop).append("×FALL ").append(FALL_PER_BLOCK).append("/blk)");
             if (drop > safeFall) sb.append(" +cliff=").append((drop - safeFall) * UNSAFE_VERTICAL_PENALTY);
         }
         return sb.toString();
+    }
+
+    /** TRACE only: the typed-transit counterpart of {@link #walkBreakdown} — a W (hasWater) leg prints its
+     *  decomposed price (§3 pricing amendment): horizontal swim discount, plus either the vertical swim rate
+     *  (¬S·W, fully submerged) or the walk-shaped Δy terms (S·W); dry legs delegate to the walk breakdown
+     *  unchanged. */
+    private static String transitBreakdown(int dx, int dy, int dz, int typeBits, boolean canPlace, int safeFall) {
+        if ((typeBits & RegionFragments.TYPE_W) != 0) {
+            final float oct = octile(dx, dz);
+            final StringBuilder sb = new StringBuilder();
+            sb.append("swimH=").append(oct * SWIM_PER_BLOCK)
+                    .append(" (octile ").append(oct).append("×SWIM ").append(SWIM_PER_BLOCK).append("/blk)");
+            if (dy != 0) {
+                if ((typeBits & RegionFragments.TYPE_S) == 0) {
+                    final int ady = Math.abs(dy);
+                    sb.append(" + swimV=").append(ady * SWIM_VERTICAL_PER_BLOCK)
+                            .append(" (").append(ady).append("×SWIMV ").append(SWIM_VERTICAL_PER_BLOCK)
+                            .append("/blk)");
+                } else {
+                    sb.append(" + ").append(dyBreakdown(dy, canPlace, safeFall)); // S·W: walk-shaped |dy|
+                }
+            }
+            return sb.toString();
+        }
+        return walkBreakdown(dx, dy, dz, canPlace, safeFall);
     }
 
     /** The own-kind label of the expanded node (the {@code E} line tag). */
@@ -1600,13 +1754,15 @@ public final class RegionPathfinder {
 
     /**
      * The {@code (region, fragment)} node key: {@link RegionAddress#packLevelKey} XOR the 6-bit fragment id
-     * shifted into bits 50..55. {@code packLevelKey} uses only bits 0..49 (rx[28..49] | rz[6..27] | ry[0..5]),
+     * shifted into bits 49..54. {@code packLevelKey} uses only bits 0..48 (rx[27..48] | rz[5..26] | ry[0..4]),
      * so placing the fragment in the free high bits keeps the XOR collision-free — a low-bit XOR would clash
      * with the packed {@code ry} field. Fragment {@code 0} leaves the key == {@code packLevelKey}, so a
      * single-fragment / uniform region keys exactly as the center model does.
+     * (2026-07 packLevelKey repack: {@code ry} narrowed 6→5 bits, so region occupies bits 0..48 and the
+     * fragment shift dropped 50→49; a future from-fragment field will occupy bits 58..63.)
      */
     private static long fragmentKey(int rx, int ry, int rz, int frag) {
-        return RegionAddress.packLevelKey(rx, ry, rz) ^ ((long) (frag & 0x3F) << 50);
+        return RegionAddress.packLevelKey(rx, ry, rz) ^ ((long) (frag & 0x3F) << 49);
     }
 
     /**
@@ -1677,19 +1833,29 @@ public final class RegionPathfinder {
      */
     private static float walkCost(int dx, int dy, int dz, boolean canPlace, int safeFall, boolean reverse,
                                   float pillarField) {
+        return octile(dx, dz) * WALK_PER_BLOCK + dyCost(dy, canPlace, safeFall, reverse, pillarField);
+    }
+
+    /**
+     * The directional Δy term of {@link #walkCost}, factored out so {@link #transitCost} can reuse the
+     * EXACT capability shaping (pillar/fall asymmetry + cliff penalties) for the vertical component of a
+     * not-fully-submerged W leg without duplicating the constants (DESIGN-typed-fragments.md §3 pricing
+     * amendment).
+     */
+    private static float dyCost(int dy, boolean canPlace, int safeFall, boolean reverse, float pillarField) {
         // Field mode (reverse): use the block-honest FALL ratio and the CAPABILITY-AWARE pillar cost
         // (pillarField, from RegionPlaceModel — the bot's place base + removal premium) so the cost-to-goal
         // heuristic matches the block tier's real build economy; the forward A* keeps its compressed behavioral
         // costs. pillarField defaults to the PILLAR_PER_BLOCK_FIELD stand-in for a block-less/headless bot.
         final float pillar = reverse ? pillarField : PILLAR_PER_BLOCK;
         final float fall = reverse ? FALL_PER_BLOCK_FIELD : FALL_PER_BLOCK;
-        float c = octile(dx, dz) * WALK_PER_BLOCK;
         // Reverse edge (goal-rooted cost-TO-goal Dijkstra): the ONLY asymmetry is vertical — traversing this edge
         // in the opposite direction swaps up (dear PILLAR) and down (cheap FALL). Negating dy yields the reverse
         // cost (octile horizontal is symmetric). Forward A* passes reverse=false → identical.
         if (reverse) dy = -dy;
+        float c = 0f;
         if (dy > 0) {
-            c += dy * pillar;
+            c = dy * pillar;
             // No-place bot can't pillar a wall taller than a step — a big net rise must be existing terrain
             // (gradual stairs ⇒ small dy); penalize the excess so the search prefers the gradual route.
             if (!canPlace && dy > safeFall) {
@@ -1697,7 +1863,7 @@ public final class RegionPathfinder {
             }
         } else if (dy < 0) {
             final int drop = -dy;
-            c += drop * fall;
+            c = drop * fall;
             // Damage cost for a fall past the safe window — applies to EVERY bot (falling needs no placing,
             // unlike a wall-climb), so it biases the region A* toward gradual descents (small per-transit drop)
             // over cliffs, matching the block tier's Fall cost-not-blocker model. Not gated on canPlace.
@@ -1706,6 +1872,38 @@ public final class RegionPathfinder {
             }
         }
         return c;
+    }
+
+    /**
+     * The typed per-fragment transit cost (DESIGN-typed-fragments.md §3, pricing amendment 2026-07-23) —
+     * a DECOMPOSED price for {@link RegionFragments#TYPE_W W} (hasWater) fragments:
+     * <ul>
+     *   <li><b>Horizontal</b> (octile) — {@link #SWIM_PER_BLOCK} (0.77): sprint-swim beats walking
+     *       LATERALLY, and W guarantees water exists along the lateral corridor the gate admitted.</li>
+     *   <li><b>Vertical</b> ({@code |dy|}) — capability-shaped: only a <b>fully-submerged</b> fragment
+     *       ({@code ¬S·W} — no surfaceable cell anywhere, so the vertical leg is provably swum) prices at
+     *       {@link #SWIM_VERTICAL_PER_BLOCK} (2.2, direction-symmetric — no reverse swap needed). Every
+     *       OTHER W fragment (S·W: surface water, wet caves with dry floors) keeps {@link #dyCost
+     *       walkCost's exact dy shaping} — dear {@link #PILLAR_PER_BLOCK} up + the no-place
+     *       {@link #UNSAFE_VERTICAL_PENALTY} — because W is an EXISTENCE bit: a fragment that merely
+     *       CONTAINS water offers no proof its vertical extent is climbable-by-swimming, and discounting
+     *       it manufactured ~8×-cheap phantom ascents through wet caves (the cliff-repro regression).</li>
+     * </ul>
+     * Everything else falls through to {@link #walkCost}: S-only = plain walk (1.0, unchanged), and
+     * ¬S·¬W = the existing air/place pricing relocated per-fragment (walkCost's dear pillar-up term IS
+     * the place pricing; its fall/cliff terms the drop). HOT PATH: two mask tests on one hoisted read —
+     * no allocation, no dispatch. Package-private for the pricing unit tests.
+     */
+    static float transitCost(int dx, int dy, int dz, int typeBits, boolean canPlace, int safeFall,
+                             boolean reverse, float pillarField) {
+        if ((typeBits & RegionFragments.TYPE_W) != 0) {
+            final float horiz = octile(dx, dz) * SWIM_PER_BLOCK;
+            if ((typeBits & RegionFragments.TYPE_S) == 0) {
+                return horiz + Math.abs(dy) * SWIM_VERTICAL_PER_BLOCK; // ¬S·W: provably-swum vertical
+            }
+            return horiz + dyCost(dy, canPlace, safeFall, reverse, pillarField); // S·W: walk-shaped |dy|
+        }
+        return walkCost(dx, dy, dz, canPlace, safeFall, reverse, pillarField);
     }
 
     /**
@@ -1729,7 +1927,7 @@ public final class RegionPathfinder {
      *   <li><b>SOLID</b> / unbuilt-as-solid → mine across a full leaf side, hardness-scaled.</li>
      *   <li><b>AIR</b> → one-way down chute: cheap ({@link #FALL_PER_BLOCK}) only when exiting downward
      *       (face {@code 2} = −Y); dear ({@link #PILLAR_PER_BLOCK}) every other direction.</li>
-     *   <li><b>WATER</b> → symmetric swim ({@link LeafCostComputer#WATER_TRANSIT_TICKS}).</li>
+     *   <li><b>WATER</b> → symmetric swim ({@link #SWIM_PER_BLOCK} × the side — §3's 0.77-relative rate).</li>
      *   <li><b>collapsed MIXED</b> → passability-weighted mass: {@code airWalk·passFrac + solidMine·(1−passFrac)}.</li>
      * </ul>
      * A {@code null}/unbuilt (unloaded) record is <b>NOT free</b> (it once was — the "teleporter through the
@@ -1742,9 +1940,9 @@ public final class RegionPathfinder {
      * from a genuine built {@link RegionFragments#KIND_AIR KIND_AIR} region (which keeps the directional
      * pillar/fall chute).
      */
-    private static float uniformTransitCost(int level, RegionFragments rfM, int f, boolean canPlace, int safeFall,
-                                            RegionMineModel mine, float pillarField, boolean reverse,
-                                            int neighborRy, int minY) {
+    static float uniformTransitCost(int level, RegionFragments rfM, int f, boolean canPlace, int safeFall,
+                                    RegionMineModel mine, float pillarField, boolean reverse,
+                                    int neighborRy, int minY) {
         // UNBUILT / unloaded (null record): FINDINGS-region-pillar-flood.md §2. This was FREE (return 0) — the
         // "teleporter through the unknown" — which DEFEATED the cap-safe area bound: a free field is cheaper than
         // every real move, so the search floods the whole unloaded void (the pillar-to-ceiling bug: 83% of the
@@ -1785,7 +1983,16 @@ public final class RegionPathfinder {
             case RegionFragments.KIND_SOLID:
                 return digCost(sideH, 0, mine.unitsPerBlock(rfM.avgSolidHardness()));
             case RegionFragments.KIND_WATER:
-                return LeafCostComputer.WATER_TRANSIT_TICKS;
+                // §3 pricing amendment: a truly-uniform water cube is FULLY SUBMERGED by construction
+                // (the §5.5 narrowed fast-path — waterCount == passCount, no floor, no solid), i.e. the
+                // ¬S·W class, so its vertical crossings honestly price at the vertical swim rate
+                // (SWIM_VERTICAL_PER_BLOCK, 2.2 — slower than lateral walk, far cheaper than pillar) and
+                // its lateral crossings keep the sprint-swim discount (SWIM_PER_BLOCK, 0.77 — swimming
+                // BEATS walking laterally; replaces the old flat WATER_TRANSIT_TICKS 3.6/block that made
+                // the region A* dodge open water). Swim is direction-symmetric, so no reverse face remap
+                // is needed (opposite(2) = 3 — both vertical).
+                if (f == 2 || f == 3) return vExtent * SWIM_VERTICAL_PER_BLOCK;
+                return sideH * SWIM_PER_BLOCK;
             case RegionFragments.KIND_AIR:
             default:
                 // Face 2 = −Y exit (falling out the bottom) is the only cheap air motion; all else is dear.
@@ -1915,22 +2122,60 @@ public final class RegionPathfinder {
     }
 
     /**
-     * The <b>start</b> fragment for the search: at level 0, the fragment that actually <b>contains</b> the bot's
-     * floor cell (flood-from-bot, PERF-DESIGN region §4) rather than the one whose centroid is nearest. A bot at
-     * the bottom of a tall fragment is closer to a small sibling pocket's centroid than to the giant mass's (high)
-     * centroid, so {@link #nearestFragment} mis-assigns it — and the search then prices/emits the wrong region's
-     * face crossings (the cave repro's phantom {@code +X} dig-through). Falls back to nearest-centroid when the
-     * flood is inconclusive (cell not in an occupiable fragment, region collapsed, section not resident) or at
-     * coarse levels (no backing section — flood only resolves leaf-scale membership).
+     * The <b>anchor</b> fragment for a search endpoint (start, and the coarse goal when the goal cell lies in
+     * the goal region): the fragment that actually <b>contains</b> the cell, at EVERY level — level-0
+     * flood-from-bot (PERF-DESIGN region §4) walked upward through the merge's own containment
+     * ({@link RegionGrid#containedFragment}: which parent fragment each child fragment unioned into). The
+     * nearest-centroid guess this replaces mis-anchors twice over: at level 0 a bot at the bottom of a tall
+     * fragment is closer to a small sibling pocket's centroid than to the giant mass's high centroid (the cave
+     * repro's phantom {@code +X} dig-through), and at coarse levels a FACELESS sealed-pocket fragment's
+     * centroid defaults to the region center, out-attracting every real fragment for a mid-region bot — the
+     * search then anchors sealed and drains after one expansion (the t=35 cliff FAIL). Falls back to
+     * nearest-centroid only when containment cannot be proven (cell not in an occupiable fragment, leaf not
+     * resident, a stale/deferred record on the walk, or a clamped region that doesn't contain the cell).
      */
-    private static int startFragment(RegionGrid grid, int level, int rx, int ry, int rz, BlockPos floor) {
-        if (level == 0) {
-            int f = grid.startFragmentByFlood(rx, ry, rz, floor.getX(), floor.getY(), floor.getZ());
-            if (f >= 0) {
-                return f;
+    private static int anchorFragment(RegionGrid grid, int level, int rx, int ry, int rz, BlockPos floor) {
+        final int f = grid.containedFragment(level, rx, ry, rz, floor.getX(), floor.getY(), floor.getZ());
+        if (f >= 0) {
+            return f;
+        }
+        return nearestFacedFragment(grid, level, rx, ry, rz, floor);
+    }
+
+    /**
+     * The centroid fallback for {@link #anchorFragment}, restricted to fragments with at least one face
+     * opening. Sound because the fallback's domain is "containment could not PROVE membership" — and a cell
+     * actually inside a sealed (faceless) fragment of a resident leaf always resolves BY containment (the
+     * level-0 flood + upward walk), so within this fallback a faceless fragment is never the true anchor.
+     * Without the restriction a faceless pocket's centroid — the REGION CENTER
+     * ({@link #fragmentCentroidWorld}'s no-face default) — out-attracts every real fragment's face-averaged
+     * centroid for a mid-region cell, anchoring the search to a fragment with zero admissible edges (the
+     * t=35 cliff drain: a seam-top start whose membership is honestly unprovable in the floor cell's
+     * region). All-faceless records (degenerate) keep the unrestricted nearest-centroid answer. Known
+     * residual: a stale-record walk refusal for a cell truly inside a coarse pocket mis-anchors here —
+     * transient (one maintenance pass) and no worse than the pre-containment guess.
+     */
+    private static int nearestFacedFragment(RegionGrid grid, int level, int rx, int ry, int rz, BlockPos floor) {
+        final RegionFragments rf = grid.fragmentRecord(level, rx, ry, rz);
+        if (isUniformNode(rf)) {
+            return 0;
+        }
+        final int[] cent = new int[3], tmp = new int[3]; // cold (twice per plan) — fresh scratch is fine
+        int best = -1;
+        long bestD = Long.MAX_VALUE;
+        for (int f = 0; f < rf.fragmentCount(); f++) {
+            if (rf.faceMask(f) == 0) {
+                continue;
+            }
+            fragmentCentroidWorld(level, rf, f, grid.minY(), rx, ry, rz, cent, tmp);
+            final long d = Math.abs(cent[0] - floor.getX()) + Math.abs(cent[1] - floor.getY())
+                    + Math.abs(cent[2] - floor.getZ());
+            if (d < bestD) {
+                bestD = d;
+                best = f;
             }
         }
-        return nearestFragment(grid, level, rx, ry, rz, floor);
+        return best >= 0 ? best : nearestFragment(grid, level, rx, ry, rz, floor);
     }
 
     /** Ensure the node {@code (level, rx,ry,rz)} is built: leaf build at level 0, fragment merge above. */
@@ -1982,13 +2227,13 @@ public final class RegionPathfinder {
 
     /**
      * Human form of a {@link #fragmentNodeKey}: {@code (rx,ry,rz:<frag>)} — region coords via
-     * {@link RegionAddress#unpackRX}/{@code RY}/{@code RZ} (the fragment bits 50..55 sit outside every
+     * {@link RegionAddress#unpackRX}/{@code RY}/{@code RZ} (the fragment bits 49..54 sit outside every
      * unpacked field, so the plain unpackers apply), fragment via the XOR-free high bits ({@code packLevelKey}
-     * uses only bits 0..49, so the XORed 6-bit fragment reads back directly). Cold (seed dump / blame lines).
+     * uses only bits 0..48, so the XORed 6-bit fragment reads back directly). Cold (seed dump / blame lines).
      */
     static String describeFragKey(long key) {
         return "(" + RegionAddress.unpackRX(key) + "," + RegionAddress.unpackRY(key) + ","
-                + RegionAddress.unpackRZ(key) + ":" + (int) ((key >>> 50) & 0x3F) + ")";
+                + RegionAddress.unpackRZ(key) + ":" + (int) ((key >>> 49) & 0x3F) + ")";
     }
 
     /**
@@ -2002,7 +2247,9 @@ public final class RegionPathfinder {
      * This is a RE-DERIVATION on the cold failure path only — the hot {@link #expandNode}/{@link #relaxFrag}
      * loop is untouched; enumeration mirrors its edge cases verbatim (mine siblings, sealed-face dig-through,
      * uniform transits, portal overlap, mine-fallback / mine-solid).
-     * Format (greppable): {@code start=(rx,ry,rz:f<id>) edges: (rx,ry,rz:f<id>)=<disposition> ...}.
+     * Format (greppable): {@code start=(rx,ry,rz:f<id>[SW]) edges: (rx,ry,rz:f<id>[SW])=<disposition> ...} —
+     * the {@code [SW]} tag is the target fragment's §2 type bits ({@link #typeSuffix}; absent on
+     * uniform/unbuilt targets).
      */
     static String describeStartEdges(int level, RegionGrid grid, int minY, BlockPos botFloor,
                                      boolean canBreak, boolean canPlace,
@@ -2011,20 +2258,30 @@ public final class RegionPathfinder {
         final int sy = RegionAddress.regionY(botFloor.getY(), level, minY);
         final int sz = RegionAddress.regionZ(botFloor.getZ(), level);
         ensureNode(grid, level, sx, sy, sz);
-        final int sFrag = startFragment(grid, level, sx, sy, sz, botFloor);
+        final int sFrag = anchorFragment(grid, level, sx, sy, sz, botFloor);
         final long fromKey = fragmentKey(sx, sy, sz, sFrag);
         final RegionFragments rfN = grid.fragmentRecord(level, sx, sy, sz);
         final boolean uniformN = isUniformNode(rfN);
         final int countN = uniformN ? 1 : rfN.fragmentCount();
         final StringBuilder sb = new StringBuilder(192);
         sb.append("start=(").append(sx).append(',').append(sy).append(',').append(sz)
-                .append(":f").append(sFrag).append(") edges:");
+                .append(":f").append(sFrag).append(typeSuffix(rfN, sFrag)).append(')');
+        // Anchor-walk trace (cold): how the containment anchor resolved — or where it refused and fell back
+        // to nearest-centroid — so a mis-anchored FAIL is attributable per level.
+        final StringBuilder anchorTrace = new StringBuilder(64);
+        final int contained = grid.containedFragment(level, sx, sy, sz,
+                botFloor.getX(), botFloor.getY(), botFloor.getZ(), anchorTrace);
+        sb.append(" anchor[").append(anchorTrace);
+        if (contained < 0) {
+            sb.append(" ->fallback-centroid");
+        }
+        sb.append("] edges:");
         final int[] wa = new int[3], wb = new int[3]; // cold — fresh scratch is fine here
         // (A) intra-region mine edges to sibling fragments (expandNode block A).
         if (!uniformN && countN > 1) {
             for (int fragC = 0; fragC < countN; fragC++) {
                 if (fragC == sFrag) continue;
-                appendEdge(sb, sx, sy, sz, fragC, !canBreak ? "caps-gated"
+                appendEdge(sb, sx, sy, sz, fragC, typeSuffix(rfN, fragC), !canBreak ? "caps-gated"
                         : dispositionOf(fromKey, sx, sy, sz, fragC, blacklist, tube));
             }
         }
@@ -2036,7 +2293,7 @@ public final class RegionPathfinder {
             final int mrz = RegionAddress.neighborRZ(sz, f);
             if (!uniformN && !rfN.touchesFace(sFrag, f)) {
                 // Sealed face: only the break-capable dig-through (into the neighbour's fragment 0) exists.
-                appendEdge(sb, mrx, mry, mrz, 0, !canBreak ? "caps-gated"
+                appendEdge(sb, mrx, mry, mrz, 0, "", !canBreak ? "caps-gated"
                         : dispositionOf(fromKey, mrx, mry, mrz, 0, blacklist, tube));
                 continue;
             }
@@ -2054,23 +2311,30 @@ public final class RegionPathfinder {
                 } else {
                     disp = dispositionOf(fromKey, mrx, mry, mrz, 0, blacklist, tube);
                 }
-                appendEdge(sb, mrx, mry, mrz, 0, disp);
+                appendEdge(sb, mrx, mry, mrz, 0, "", disp);
                 continue;
             }
             boolean emitted = false;
             int bestFrag = -1;
             long bestDist = Long.MAX_VALUE;
             final int countM = rfM.fragmentCount();
+            final boolean airGated = !canPlace && f != 2; // the relax loop's §3 ¬S·¬W gate arm, mirrored
             for (int fb = 0; fb < countM; fb++) {
                 if (!rfM.touchesFace(fb, oppF)) continue;
+                if (airGated && rfM.typeBits(fb) == 0) {
+                    // §3 per-fragment air gate: a no-place bot cannot enter a pure-air (¬S·¬W) fragment
+                    // laterally/upward — and a gated fragment is no mine-fallback target either.
+                    appendEdge(sb, mrx, mry, mrz, fb, typeSuffix(rfM, fb), "caps-gated");
+                    continue;
+                }
                 final int packedB = rfM.footprint(fb, oppF);
                 footprintCenterWorld(level, minY, mrx, mry, mrz, oppF, packedB, wb);
                 if (footprintsOverlap(packedA, packedB)) {
-                    appendEdge(sb, mrx, mry, mrz, fb,
+                    appendEdge(sb, mrx, mry, mrz, fb, typeSuffix(rfM, fb),
                             dispositionOf(fromKey, mrx, mry, mrz, fb, blacklist, tube));
                     emitted = true;
                 } else {
-                    appendEdge(sb, mrx, mry, mrz, fb, "no-footprint-overlap");
+                    appendEdge(sb, mrx, mry, mrz, fb, typeSuffix(rfM, fb), "no-footprint-overlap");
                     final long d = Math.abs(wb[0] - wa[0]) + Math.abs(wb[1] - wa[1])
                             + Math.abs(wb[2] - wa[2]);
                     if (d < bestDist) { bestDist = d; bestFrag = fb; }
@@ -2080,10 +2344,10 @@ public final class RegionPathfinder {
                 // The search would substitute a mine edge (nearest touching fragment, else fragment 0) —
                 // surface its disposition too, tagged so the row is distinguishable from a portal edge.
                 if (bestFrag != -1) {
-                    appendEdge(sb, mrx, mry, mrz, bestFrag, "mine-fallback:"
+                    appendEdge(sb, mrx, mry, mrz, bestFrag, typeSuffix(rfM, bestFrag), "mine-fallback:"
                             + dispositionOf(fromKey, mrx, mry, mrz, bestFrag, blacklist, tube));
                 } else {
-                    appendEdge(sb, mrx, mry, mrz, 0, "mine-solid:"
+                    appendEdge(sb, mrx, mry, mrz, 0, typeSuffix(rfM, 0), "mine-solid:"
                             + dispositionOf(fromKey, mrx, mry, mrz, 0, blacklist, tube));
                 }
             }
@@ -2091,10 +2355,21 @@ public final class RegionPathfinder {
         return sb.toString();
     }
 
-    /** One post-mortem edge row: {@code  (rx,ry,rz:f<frag>)=<disposition>}. */
-    private static void appendEdge(StringBuilder sb, int rx, int ry, int rz, int frag, String disp) {
+    /** One post-mortem edge row: {@code  (rx,ry,rz:f<frag>[SW])=<disposition>} — {@code types} is the
+     *  {@link #typeSuffix} of the target fragment ({@code ""} when no real fragment record backs the id). */
+    private static void appendEdge(StringBuilder sb, int rx, int ry, int rz, int frag, String types, String disp) {
         sb.append(" (").append(rx).append(',').append(ry).append(',').append(rz)
-                .append(":f").append(frag).append(")=").append(disp);
+                .append(":f").append(frag).append(types).append(")=").append(disp);
+    }
+
+    /** The post-mortem type tag of fragment {@code frag} (DESIGN-typed-fragments.md §2): {@code [SW]} /
+     *  {@code [S]} / {@code [W]} / {@code []} (¬S·¬W pure air), or {@code ""} when {@code rf} is
+     *  uniform/unbuilt/collapsed (no per-fragment record to read). Cold — post-mortem lines only. */
+    private static String typeSuffix(RegionFragments rf, int frag) {
+        if (rf == null || rf.isUniform() || frag < 0 || frag >= rf.fragmentCount()) return "";
+        final int t = rf.typeBits(frag);
+        return "[" + ((t & RegionFragments.TYPE_S) != 0 ? "S" : "")
+                + ((t & RegionFragments.TYPE_W) != 0 ? "W" : "") + "]";
     }
 
     /** The relax loop's admission predicates, re-applied cold in {@link #relaxFrag}'s exact order:
@@ -2126,6 +2401,7 @@ public final class RegionPathfinder {
         int[] x, y, z;          // level-0 region coords
         int[] frag;             // fragment id within (x,y,z) — 0 for center-model / uniform nodes
         int[] entryFace;        // face (0..5) / ENTRY_START / ENTRY_INTERIOR this node was entered through (§2)
+        int[] fromFrag;         // fragment the search hopped FROM into this node (VIRTUAL_START_FRAG at the root / reverse field) — §0.5 node identity
         boolean[] dig;          // parent edge is a Fix-1 dig-through (buried crossing cell) — §5 consumer tag
         int[] portalX, portalY, portalZ; // world portal cell of the parent edge (NO_PORTAL on the start node)
         float[] g, f;
@@ -2163,6 +2439,7 @@ public final class RegionPathfinder {
             z = new int[nodeHint];
             frag = new int[nodeHint];
             entryFace = new int[nodeHint];
+            fromFrag = new int[nodeHint];
             dig = new boolean[nodeHint];
             portalX = new int[nodeHint];
             portalY = new int[nodeHint];
@@ -2191,15 +2468,15 @@ public final class RegionPathfinder {
 
         /**
          * Row for {@code k}, creating it ({@code g=+inf}, unlinked) if absent. One probe. {@code cf} = fragment
-         * id; {@code cface} = the entry face (§2), stored on first creation (it is part of {@code k}, so a row's
-         * entry face is fixed for its lifetime).
+         * id; {@code cface} = the entry face (§2); {@code cfrom} = the from-fragment (§0.5). Both are part of
+         * {@code k}, so a row's entry face and from-fragment are fixed for its lifetime.
          */
-        int intern(long k, int cx, int cy, int cz, int cf, int cface) {
+        int intern(long k, int cx, int cy, int cz, int cf, int cface, int cfrom) {
             int slot = slotFor(k, mapMask);
             for (;;) {
                 int row = mapRow[slot];
                 if (row == -1) {
-                    row = newRow(k, cx, cy, cz, cf, cface);
+                    row = newRow(k, cx, cy, cz, cf, cface, cfrom);
                     mapKey[slot] = k;
                     mapRow[slot] = row;
                     if (++mapSize >= mapGrowAt) growMap();
@@ -2210,13 +2487,14 @@ public final class RegionPathfinder {
             }
         }
 
-        private int newRow(long k, int cx, int cy, int cz, int cf, int cface) {
+        private int newRow(long k, int cx, int cy, int cz, int cf, int cface, int cfrom) {
             int n = count;
             if (n == key.length) growNodes();
             key[n] = k;
             x[n] = cx; y[n] = cy; z[n] = cz;
             frag[n] = cf;
             entryFace[n] = cface;
+            fromFrag[n] = cfrom;
             dig[n] = false;
             portalX[n] = NO_PORTAL; portalY[n] = NO_PORTAL; portalZ[n] = NO_PORTAL;
             g[n] = Float.POSITIVE_INFINITY;
@@ -2277,6 +2555,7 @@ public final class RegionPathfinder {
             z = Arrays.copyOf(z, cap);
             frag = Arrays.copyOf(frag, cap);
             entryFace = Arrays.copyOf(entryFace, cap);
+            fromFrag = Arrays.copyOf(fromFrag, cap);
             dig = Arrays.copyOf(dig, cap);
             portalX = Arrays.copyOf(portalX, cap);
             portalY = Arrays.copyOf(portalY, cap);

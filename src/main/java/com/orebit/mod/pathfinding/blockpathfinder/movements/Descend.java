@@ -136,6 +136,19 @@ public final class Descend implements Movement {
         // disarmed on (re)entry to CLEAR, so it can't alias the first STEP tick (bot still grounded at start).
         plan.resetWhen(b -> left[0]
                 && b.grounded() && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+        // Validity envelope (PATHOLOGY P1 family — the Parkour/Ascend failWhen precedent): settled
+        // (grounded, or bodily in fluid) at a foot cell outside the step's own cells is off-plan —
+        // done/resetWhen can never fire there and re-attempting latches. Allowed: the from stand
+        // (fx, fy+1, fz) and the destination COLUMN's feet band [fy .. fy+1] — fy is the destination
+        // stand (a shallow-water landing is in-fluid there, still inside), and fy+1 is the LIP TRANSIT:
+        // stepping off the edge, the bot's centre crosses into the destination column while its box is
+        // still grounded on the from-block's lip (foot cell (tx, fy+1, tz)) — a legitimate mid-step
+        // state, NOT displacement (the longrun-8 first-hold false positive). The drop itself is
+        // airborne-exempt.
+        plan.failWhen(b -> (b.grounded() || b.inWater() || b.inLava())
+                && !(b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz)
+                && !(b.footX() == tx && b.footZ() == tz
+                        && b.footY() >= fy && b.footY() <= fy + 1));
         // CLEAR: break the step-off transit column and build the step-down floor. The runner mines one AIR cell
         // per tick (holding, recentring) and places the FOOTING once the AIR cells are clear; while the transit
         // is still solid the bot is walled in, so it cannot walk off before the floor exists.

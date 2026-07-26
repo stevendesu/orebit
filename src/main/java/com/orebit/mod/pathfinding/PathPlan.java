@@ -19,7 +19,9 @@ import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPlaceModel;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
+import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
+import com.orebit.mod.worldmodel.pathing.NavStore;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -270,6 +272,15 @@ public final class PathPlan {
      *  previous region so the region-based commit never fires; this is the anti-boundary-bounce). */
     private int windowTargetStep;
     private RegionBound windowCorridor;
+
+    // Plan-relevance terrain-recheck gate (owner 2026-07-24): the current block plan's chunk-version
+    // fingerprint. The periodic recheck re-searches only when a chunk the PATH traverses changed — not on
+    // any dimension-global grid mutation (frontier chunk builds, a house 50k blocks away). Grow-only scratch,
+    // re-baselined by snapshotPlanChunks() after every block-plan install; parallel arrays, no per-tick alloc.
+    private long[] planChunks = new long[16];  // distinct chunk keys the block plan traverses
+    private int[] planChunkVers = new int[16];  // NavGridUpdater.chunkVersion of each, at snapshot time
+    private int planChunkCount;                 // used length of the two arrays above
+    private int planSnapshotEpoch;              // the dimension epoch at snapshot time (the O(1) early-out)
 
     /**
      * How {@link WindowTargeting#target} chose the current target — surfaced so the debug chat can explain a movement
@@ -566,9 +577,24 @@ public final class PathPlan {
 
         // Cascade step (HPA-CASCADE.md §5): advance the per-level commits and re-derive only the suffix the bot
         // exited. When the L0 segment changed, swap it in and reset the block window from the bot's region;
-        // otherwise fall through to the block-window slide over the unchanged skeleton.
+        // otherwise fall through to the block-window slide over the unchanged (or EXTENDED — rolling) skeleton.
         if (stepCascade()) {
             return;
+        }
+
+        // INV-4, driver form (DESIGN-rolling-skeleton.md §9, §13-A): on a healthy non-final, non-degraded L0
+        // skeleton, windowLast() < size-1 — the window target never pins at a tail. Debug-gated observation,
+        // never a throw: a violation logs and the retained exhausted-on-occupancy machinery degrades per
+        // INV-5. The cascade-clamp conjunct (the cascade's own committed cursor also clamped) keeps the
+        // transient forward-slide-ahead-of-occupancy settle from false-alarming; l0RollingExempt() carries
+        // the ratified exemptions (degraded interim, topLevel 0, parent clamped at ITS tail — increment B).
+        if (Debug.ENABLED && !skeleton.reachedGoalRegion() && windowLast() >= skeleton.size() - 1
+                && hier.committedAt(0) + HierarchicalRegionPlan.WINDOW_CELLS > skeleton.size() - 1
+                && !hier.l0RollingExempt()) {
+            OrebitCommon.LOGGER.warn(
+                    "[Orebit] INV-4 violated: block window [{}..{}] clamped at the tail of a non-final, "
+                            + "non-degraded L0 skeleton (size {}, cascade committed {})",
+                    windowStart, windowLast(), skeleton.size(), hier.committedAt(0));
         }
 
         // (Window commit-on-approach lives in replanBlock's FORWARD-SLIDE now: a target the bot satisfies
@@ -603,6 +629,14 @@ public final class PathPlan {
                 // boundary crossing, which produces the oscillation that stops the bot ever settling at the
                 // terminal dead-end where the region crossing would be blamed. A COMPLETE window plan still
                 // commits and slides exactly as before.
+                if (Debug.ENABLED) {
+                    final boolean goalInWindow = skeleton.reachedGoalRegion() && last == skeleton.size() - 1;
+                    OrebitCommon.LOGGER.info(
+                            "[Orebit] block re-search: site=forward-slide commit {}->{} goalInWindow={} "
+                                    + "planWasPartial={} bot=({},{},{})",
+                            committedIndex, curRegion, goalInWindow, lastPlanPartial,
+                            botFloor.getX(), botFloor.getY(), botFloor.getZ());
+                }
                 committedIndex = curRegion;
                 windowStart = curRegion;
                 replanBlock();
@@ -615,25 +649,57 @@ public final class PathPlan {
 
         // Terrain changed under us (BLOCKED) — recompute the current window's block plan from where we are.
         if (blockPlan == null) {
+            if (Debug.ENABLED) {
+                OrebitCommon.LOGGER.info("[Orebit] block re-search: site=blocked-null bot=({},{},{})",
+                        botFloor.getX(), botFloor.getY(), botFloor.getZ());
+            }
             replanBlock();
         }
     }
 
     /**
-     * One step of the region-tier cascade (HPA-CASCADE.md §5): advance the per-level commits and re-derive only
-     * the suffix the bot exited. Returns {@code true} (and {@link #onBotMoved} stops) when the level-0 skeleton
-     * changed — we swap it in, reset the block window from the bot's region, and replan the block path; or when
-     * the cascade ran out of route (→ FAILED). Returns {@code false} when L0 is unchanged, so the caller proceeds
-     * with the normal block-window slide over the same skeleton. Only called when {@link #hier} is present.
+     * One step of the region-tier cascade (HPA-CASCADE.md §5; DESIGN-rolling-skeleton.md §4.3): advance the
+     * per-level commits, extend/re-derive as the three-way verdict directs. Returns {@code true} (and
+     * {@link #onBotMoved} stops) only on a {@code SWAPPED} re-derive — we swap the skeleton in, reset the
+     * block window from the bot's region, and replan the block path; or when the cascade ran out of route
+     * (→ FAILED). {@code UNCHANGED} and {@code EXTENDED} both return {@code false} so the caller proceeds
+     * with the normal block-window slide: an EXTENDED splice keeps the live block plan (its waypoints and
+     * target cell are unchanged — the plan is still exactly as valid) and merely shifts every index-valued
+     * cursor by the head-drop, so the block replan for the crossing fires through <b>T2 itself</b> — the same
+     * wiggle-gated commit-slide as today, now over an un-clamped window. Rolling adds NO replan trigger.
      */
     private boolean stepCascade() {
         // onRoute: the block plan vouches for the bot's position (it stands at/near a plan waypoint), so an
         // off-window excursion (a fall-lineup clip into an adjacent region) is intentional, not a deviation —
         // the cascade only re-derives for a bot that is off-window AND off its plan (s52; replaced the old
-        // BOUNDARY_CLIP_CHEB spatial tolerance with asking the plan).
-        if (!hier.onBotMoved(botFloor, botOnBlockPlan(botFloor))) {
+        // BOUNDARY_CLIP_CHEB spatial tolerance with asking the plan). windowStart is the §4.2/D3 head-drop
+        // bound — a bound, not a behavior; the cascade still never reads driver state.
+        final HierarchicalRegionPlan.Verdict verdict =
+                hier.onBotMoved(botFloor, botOnBlockPlan(botFloor), windowStart);
+        if (verdict == HierarchicalRegionPlan.Verdict.UNCHANGED) {
             return false; // still within every level's window — slide the block window over the unchanged L0
         }
+        if (verdict == HierarchicalRegionPlan.Verdict.EXTENDED) {
+            // EXTENDED(shift) (DESIGN-rolling-skeleton.md §4.3/§4.4): the L0 skeleton was SPLICED — head
+            // dropped by `shift`, tail appended, prefix content identical (INV-1). Swap the skeleton
+            // REFERENCE and shift every index-valued live state so each keeps addressing the SAME skeleton
+            // step (INV-3: all blame/blacklist rows are content-keyed — verified — so only these cursors and
+            // the BLOCKED snapshot are index-valued). KEEP the live block plan; NO resetWindow() here — that
+            // call stays on the true swap paths (cascade SWAPPED, repair). The max(0,·) clamps are defensive
+            // only: the drop is bounded by windowStart, so live cursors never go negative; a stale BLOCKED
+            // snapshot from before the drop is already meaningless and clamps harmlessly.
+            this.skeleton = hier.l0Skeleton();
+            final int shift = hier.lastExtensionShift();
+            if (shift > 0) {
+                windowStart = Math.max(0, windowStart - shift);
+                committedIndex = Math.max(0, committedIndex - shift);
+                windowTargetStep = Math.max(0, windowTargetStep - shift);
+                blockedWindowStart = Math.max(0, blockedWindowStart - shift);
+                blockedTargetStep = Math.max(0, blockedTargetStep - shift);
+            }
+            return false; // fall through: T2's commit logic replans over the now-un-clamped window
+        }
+        // SWAPPED — a genuine re-derive (deviation, exhaustion, flood-widen, top-collapse) or FAILED.
         // Telemetry: a re-derivation ran (L0 changed) — count a flood if its region search tripped the guard.
         if (stats != null && RegionPathfinder.lastWasFlood()) stats.onRegionFlood();
         this.skeleton = hier.l0Skeleton();
@@ -653,6 +719,62 @@ public final class PathPlan {
      * exactly on waypoint floors, so while it executes the plan this is a hit by construction; the ±1 slack
      * absorbs seam-adoption drift. Alloc-free scan of ≤ a window of waypoints, settle cadence only.
      */
+    /**
+     * Re-baseline the plan-relevance fingerprint (owner 2026-07-24): record the current dimension epoch and,
+     * for each distinct chunk column the block plan's waypoints traverse, its {@link NavGridUpdater#chunkVersion}.
+     * {@link #planImpacted} compares against this. Called after every block-plan install (sync + async adoption).
+     * Cold (once per search); the dedup is a short linear scan because a path stays in a chunk for many
+     * consecutive waypoints, so the distinct-chunk count is small (a handful per window).
+     */
+    private void snapshotPlanChunks() {
+        planSnapshotEpoch = NavGridUpdater.editEpoch(level);
+        planChunkCount = 0;
+        final BlockPathPlan bp = blockPlan;
+        if (bp == null || bp.isEmpty()) {
+            return;
+        }
+        final int n = bp.size();
+        for (int i = 0; i < n; i++) {
+            final BlockPos wp = bp.waypoint(i);
+            final long ck = NavStore.key(wp.getX() >> 4, wp.getZ() >> 4);
+            boolean seen = false;
+            for (int j = 0; j < planChunkCount; j++) {
+                if (planChunks[j] == ck) { seen = true; break; }
+            }
+            if (seen) {
+                continue;
+            }
+            if (planChunkCount == planChunks.length) {
+                planChunks = java.util.Arrays.copyOf(planChunks, planChunkCount * 2);
+                planChunkVers = java.util.Arrays.copyOf(planChunkVers, planChunkCount * 2);
+            }
+            planChunks[planChunkCount] = ck;
+            planChunkVers[planChunkCount] = NavGridUpdater.chunkVersion(level, ck);
+            planChunkCount++;
+        }
+    }
+
+    /**
+     * Whether a grid change since the last search impacted a chunk THIS plan traverses — the terrain-recheck
+     * gate (owner 2026-07-24, replacing the dimension-global epoch compare). O(1) common case: if the
+     * dimension epoch is unchanged nothing changed anywhere. Only on a change does it scan the plan's few
+     * chunks. A {@code null} plan is always "impacted" (there is nothing to keep following). Server thread.
+     */
+    public boolean planImpacted() {
+        if (blockPlan == null) {
+            return true;
+        }
+        if (NavGridUpdater.editEpoch(level) == planSnapshotEpoch) {
+            return false; // nothing changed anywhere in the dimension since this plan's search
+        }
+        for (int i = 0; i < planChunkCount; i++) {
+            if (NavGridUpdater.chunkVersion(level, planChunks[i]) != planChunkVers[i]) {
+                return true; // a chunk the path traverses changed → the plan may be stale, re-search
+            }
+        }
+        return false; // changes happened, but not in a chunk this plan traverses — keep following
+    }
+
     private boolean botOnBlockPlan(BlockPos floor) {
         if (blockPlan == null || blockPlan.isEmpty()) {
             return false;
@@ -745,7 +867,7 @@ public final class PathPlan {
      * over a fresh full {@link NavGridView}. Sets {@link #status} to RUNNING (found) or BLOCKED (null).
      */
     private void replanBlock() {
-        WindowTargeting.Result choice = targeting.target(skeleton, windowStart, windowLast());
+        WindowTargeting.Result choice = targeting.target(skeleton, windowStart, windowLast(), botFloor);
         // FORWARD-SLIDE (s52 — replaces both slideWindowOnEmptyPlan and the REPLAN_NEAR_TARGET
         // commit-on-approach): never aim a search at a target the bot ALREADY satisfies within the block
         // tier's own goal tolerance (±1 horizontal / ±2 vertical). Such a search returns a FOUND
@@ -761,7 +883,7 @@ public final class PathPlan {
                 && withinTolerance(botFloor, choice.pos)) {
             committedIndex = choice.step;
             windowStart = choice.step;
-            choice = targeting.target(skeleton, windowStart, windowLast());
+            choice = targeting.target(skeleton, windowStart, windowLast(), botFloor);
         }
         final BlockPos target = choice.pos;
         this.windowTargetStep = choice.step;
@@ -829,6 +951,7 @@ public final class PathPlan {
         if (Debug.ENABLED && blockPlan != null) {
             logBlockPlan();
         }
+        snapshotPlanChunks(); // plan-relevance baseline for the terrain recheck (owner 2026-07-24)
     }
 
     /**
@@ -888,6 +1011,18 @@ public final class PathPlan {
      *  {@code crossingsInvalidated} (a plan rebuild resets it to 0, which the delta handles). */
     public int blacklistedCrossings() {
         return hier != null ? hier.totalBlacklisted() : 0;
+    }
+
+    /** §9 rolling counter (DESIGN-rolling-skeleton.md §9/§12, pure observation): cascade {@code exhausted}
+     *  firings at L0 — the rolling safety net engaging. Must be 0 on healthy battery routes. */
+    public int exhaustedFires() {
+        return hier != null ? hier.exhaustedFires() : 0;
+    }
+
+    /** §9 rolling counter (DESIGN-rolling-skeleton.md §9/§12, pure observation): settles where the L0
+     *  extension search failed (the §7 degraded interim). Must be 0 on healthy battery routes. */
+    public int degradedSettles() {
+        return hier != null ? hier.degradedSettles() : 0;
     }
 
     /** Whether the last BLOCKED came from a START-DEAD search (≤1 expansion — see {@link #resultStatus}).
@@ -985,6 +1120,7 @@ public final class PathPlan {
                         async.resultPartial(), async.resultBudgetHit(), async.resultRealized(),
                         async.resultStart());
                 if (Debug.ENABLED && blockPlan != null) logBlockPlan();
+                snapshotPlanChunks(); // adopted an async result — re-baseline the plan-relevance snapshot
                 break;
             default: // NONE — nothing finished / pre-plan parked or dropped internally
                 break;
@@ -998,6 +1134,7 @@ public final class PathPlan {
                     async.resultPartial(), async.resultBudgetHit(), null, // parked plans are never null
                     async.resultStart());
             if (Debug.ENABLED) logBlockPlan();
+            snapshotPlanChunks(); // adopted a parked pre-plan — re-baseline the plan-relevance snapshot
         }
     }
 
@@ -1078,6 +1215,18 @@ public final class PathPlan {
     public boolean blockedHop(long[] out) {
         final int hop = blamedHopIndex();
         if (hop < 0) return false;
+        if (RegionPathfinder.isVirtualGoal(skeleton.fragmentId(hop + 1))) {
+            // The blamed hop is (approach → V). The row must be the FULL approach node key so it equals the one
+            // relaxVirtualGoal checks (parity — DESIGN-virtual-start-fragment §0.5): region + fragment +
+            // entry-face + from-fragment. The skeleton stores only region+fragment per step, so entry-face is
+            // reconstructed geometrically and from-fragment is the previous step's fragment (VIRTUAL_START_FRAG
+            // at the root). This makes (A|from=S → V) independently blameable from (A|from=staircase → V) when
+            // A==G — the cliff false-give-up fix.
+            out[0] = RegionPathfinder.approachRowKeyForStep(skeleton, hop);
+            out[1] = RegionPathfinder.fragmentNodeKey(skeleton.rx(hop + 1), skeleton.ry(hop + 1),
+                    skeleton.rz(hop + 1), skeleton.fragmentId(hop + 1));
+            return true;
+        }
         out[0] = RegionPathfinder.fragmentNodeKey(skeleton.rx(hop), skeleton.ry(hop),
                 skeleton.rz(hop), skeleton.fragmentId(hop));
         out[1] = RegionPathfinder.fragmentNodeKey(skeleton.rx(hop + 1), skeleton.ry(hop + 1),
@@ -1158,6 +1307,11 @@ public final class PathPlan {
             // Start-position blind spot: begin at the LAST window step sharing the search-start's region —
             // hops ending at-or-before it are unrealizable-by-construction (see the javadoc above).
             for (int i = hi; i >= windowStart; i--) {
+                // The unreached virtual goal V is NOT a physical bot position — it shares the goal region, so when
+                // A==G it would falsely match the start region and anchor the walk at V (⇒ lo==hi ⇒ -1 give-up).
+                // Skip virtual fragments so the anchor lands on the real start step and the V-hop below fires
+                // (the A==G false-give-up fix — DESIGN-virtual-start-fragment §0.5).
+                if (RegionPathfinder.isVirtualGoal(sk.fragmentId(i))) continue;
                 if (rawRegionKey(sk, i, minY) == startRegionRawKey) {
                     lo = i;
                     break;

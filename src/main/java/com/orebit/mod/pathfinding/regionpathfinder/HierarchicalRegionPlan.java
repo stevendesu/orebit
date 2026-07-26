@@ -56,6 +56,29 @@ public final class HierarchicalRegionPlan {
      */
     public static final int WINDOW_CELLS = 4;
 
+    /**
+     * Rolling-skeleton coverage ceiling (DESIGN-rolling-skeleton.md §13 increment A): levels {@code ≤} this
+     * SLIDE their window with the committed cursor ({@link #windowFar} — the window base IS the committed
+     * cursor, §3.1/D1), and L0 additionally EXTENDS by suffix-splice when its window-far clamps at the tail
+     * ({@link #maybeExtendL0}, §3.2/§4). Coarser levels keep today's static-head window and exhausted
+     * machinery until increment B generalizes the top-down extension pass.
+     */
+    private static final int ROLLING_MAX_LEVEL = 1;
+
+    /**
+     * The three-way {@link #onBotMoved(BlockPos, boolean, int)} verdict (DESIGN-rolling-skeleton.md §4.3/D4):
+     * <ul>
+     *   <li>{@link #UNCHANGED} — the L0 skeleton object is untouched; the driver slides its block window.</li>
+     *   <li>{@link #EXTENDED} — the L0 skeleton was SPLICED (head-dropped {@link #lastExtensionShift()},
+     *       tail appended, prefix content identical — INV-1). The driver swaps the skeleton <i>reference</i>,
+     *       shifts its index-valued cursors + BLOCKED snapshot by the shift (§4.4), KEEPS the live block plan,
+     *       and falls through to its normal commit logic — rolling adds no replan trigger.</li>
+     *   <li>{@link #SWAPPED} — a genuine re-derive (deviation, exhaustion, flood-widen, top-collapse) or
+     *       FAILED: today's swap + window-reset + replan semantics.</li>
+     * </ul>
+     */
+    public enum Verdict { UNCHANGED, EXTENDED, SWAPPED }
+
     /** §3b tube half-width: every sub-top level plans PERMANENTLY confined to within this many parent cells of
      *  the level-above skeleton ({@link RegionPathfinder.RegionTube}). A tube-confined {@code null} is handled
      *  by {@link #rederiveWithTubeEscalation} (blame a parent-window hop, re-plan the parent) — it is never a
@@ -118,6 +141,21 @@ public final class HierarchicalRegionPlan {
      *  {@link #rederiveWithTubeEscalation} purely for the FAIL post-mortem ({@link #logFailPostMortem});
      *  never a control input. */
     private int lastFailedLevel = -1;
+
+    // ---- rolling-skeleton state (DESIGN-rolling-skeleton.md §13 increment A) --------------------------
+    /** The head-drop of the most recent {@link Verdict#EXTENDED} splice — the index shift the driver applies
+     *  to its cursors + BLOCKED snapshot (§4.2/§4.4). Reset to 0 at each {@link #onBotMoved} entry. */
+    private int lastExtendShift;
+    /** One-extension-attempt latch (§3.2 cadence: the pass "does work only on the settle where a cursor
+     *  actually advanced"): armed by any L0/L1 committed advance or a fresh L0 skeleton, consumed by one
+     *  {@link #maybeExtendL0} attempt — a failing/no-op suffix search is never re-run per settle. */
+    private boolean l0ExtAttempted;
+    /** §9 journey counter: cascade {@code exhausted} firings at L0 — the rolling safety net engaging (must
+     *  be 0 on healthy battery routes; nonzero only in the §7 degraded interim). Pure observation. */
+    private int exhaustedFires;
+    /** §9 journey counter: settles where the L0 extension search failed and the level entered/stayed in the
+     *  §7 degraded interim (increment A: degrade immediately, no escalation — that is increment C). */
+    private int degradedSettles;
 
     private HierarchicalRegionPlan(RegionGrid grid, int minY, BlockPos goal, BotCaps caps, RegionMineModel mine,
                                    MovementContext.InventoryView inventory) {
@@ -265,6 +303,52 @@ public final class HierarchicalRegionPlan {
         return (level < 0 || level > topLevel) ? -1 : levels[level].committedIndex;
     }
 
+    /** The head-drop of the most recent {@link Verdict#EXTENDED} verdict (0 otherwise) — the index shift the
+     *  driver applies to every index-valued live cursor (DESIGN-rolling-skeleton.md §4.2/§4.4). */
+    public int lastExtensionShift() {
+        return lastExtendShift;
+    }
+
+    /** §9 counter: cascade {@code exhausted} firings at L0 (the rolling safety net) — 0 on healthy routes. */
+    public int exhaustedFires() {
+        return exhaustedFires;
+    }
+
+    /** §9 counter: settles where the L0 extension search failed (the §7 degraded interim) — 0 on healthy routes. */
+    public int degradedSettles() {
+        return degradedSettles;
+    }
+
+    /** Whether L0 is in the §7 degraded interim (its last extension search failed; cleared by any rolling
+     *  commit advance or a fresh L0 skeleton) — exposed for the INV-4 exemption + tests. */
+    public boolean l0Degraded() {
+        return levels[0].degraded;
+    }
+
+    /**
+     * Whether L0's window-tail clamp is currently EXPECTED — the INV-4 exemptions (DESIGN-rolling-skeleton.md
+     * §9, §13-A): the plan FAILED; the stack has no L1 to extend toward ({@code topLevel == 0} — top-level
+     * extension is increment B); the skeleton is FINAL (INV-7 — never extends); L0 is in the §7 degraded
+     * interim; or the tail already sits in the L1 hand-down's region (the parent's own window is clamped at
+     * ITS tail, so a suffix search has nothing to aim past — L1 extension is likewise increment B). Consumed
+     * by the driver's Debug-gated INV-4 check ({@code PathPlan.onBotMoved}); cold, settle cadence.
+     */
+    public boolean l0RollingExempt() {
+        if (failed || topLevel < 1) {
+            return true;
+        }
+        final LevelPlan lp = levels[0];
+        final RegionPathPlan sk = lp.skeleton;
+        if (sk == null || sk.isEmpty() || sk.reachedGoalRegion() || lp.degraded) {
+            return true;
+        }
+        final BlockPos hd = handDown(1, levels[1]);
+        final int tail = sk.size() - 1;
+        return sk.rx(tail) == RegionAddress.regionX(hd.getX(), 0)
+                && sk.ry(tail) == RegionAddress.regionY(hd.getY(), 0, minY)
+                && sk.rz(tail) == RegionAddress.regionZ(hd.getZ(), 0);
+    }
+
     /** As {@link #onBotMoved(BlockPos, boolean)} with {@code onRoute=false} — for callers (tests, headless)
      *  that have no block plan to vouch for an off-window excursion. */
     public boolean onBotMoved(BlockPos botFloor) {
@@ -285,17 +369,47 @@ public final class HierarchicalRegionPlan {
      * the commit cursor and flip-flopped the target every settle — the old cliff bug). An off-window bot NOT
      * on its plan is a genuine deviation and re-derives immediately. (s52: this replaced the old
      * {@code BOUNDARY_CLIP_CHEB} spatial guess — "within 1 region counts as on-route" — with asking the plan.)
+     *
+     * <p><b>Legacy boolean form</b> (tests / headless callers with no driver window): delegates to the
+     * three-way {@link #onBotMoved(BlockPos, boolean, int)} with a zero driver-window bound — extension still
+     * runs but never head-drops ({@code drop == 0}, indices stable) — and reports {@code true} only on a
+     * {@link Verdict#SWAPPED} (the historical "swap it in + reset the window" signal). An
+     * {@link Verdict#EXTENDED} splice reports {@code false}: nothing to reset — a caller that re-reads
+     * {@link #l0Skeleton()} sees the strictly-longer skeleton with its prefix content unchanged.
      */
     public boolean onBotMoved(BlockPos botFloor, boolean onRoute) {
+        return onBotMoved(botFloor, onRoute, 0) == Verdict.SWAPPED;
+    }
+
+    /**
+     * The rolling-skeleton form of the per-tick hook (DESIGN-rolling-skeleton.md §3/§4.3, §13 increment A).
+     * The commit pass is byte-identical (INV-2 — nearest-first, fragment-gated at L0); what rolling changes
+     * is derived from it: at levels {@code ≤} {@link #ROLLING_MAX_LEVEL} the window-far is
+     * {@code committedIndex + WINDOW_CELLS} ({@link #windowFar} — the slide, §3.1), and when the L0 window-far
+     * clamps at a non-final skeleton's tail, a synchronous 1-hop suffix search extends it toward the L1
+     * hand-down ({@link #maybeExtendL0} — the extension, §4; sync per D6/INV-6, tick-thread-confined).
+     * {@code exhausted} is retained verbatim as the degraded-mode safety net (§3.1/D7): while extension
+     * succeeds it is structurally unreachable at L0 (INV-4).
+     *
+     * @param driverWindowStart the driver's wiggle-gated window-start cursor, bounding the splice head-drop
+     *        ({@code drop = min(committedIndex, driverWindowStart)} — §4.2/D3: an occupancy-only signal never
+     *        forces a deliberately-deferred driver commit forward); pass {@code 0} to never head-drop
+     */
+    public Verdict onBotMoved(BlockPos botFloor, boolean onRoute, int driverWindowStart) {
+        lastExtendShift = 0;
         if (failed) {
-            return false;
+            return Verdict.UNCHANGED;
         }
         final int bx = botFloor.getX(), by = botFloor.getY(), bz = botFloor.getZ();
         int exited = -1; // coarsest exited level (top-down scan ⇒ first match is the coarsest)
+        boolean exitedExhausted = false; // the exit cause at `exited`: true = window exhausted (committed>=far),
+                                         // false = deviated (off-window AND off-plan) — for the re-derive log demux
+        boolean rollingAdvanced = false; // any L0/L1 committed advance this settle (the §3.2 extension cadence)
         for (int L = topLevel; L >= 0; L--) {
             final LevelPlan lp = levels[L];
             final RegionPathPlan sk = lp.skeleton;
-            final int far = Math.min(WINDOW_CELLS, sk.size() - 1);
+            final int far = windowFar(L, lp);
+            final int committedBefore = lp.committedIndex;
             final int brx = RegionAddress.regionX(bx, L);
             final int bry = RegionAddress.regionY(by, L, minY);
             final int brz = RegionAddress.regionZ(bz, L);
@@ -362,15 +476,35 @@ public final class HierarchicalRegionPlan {
             // removes the known false trigger; the invariant to preserve is that exhausted/deviated imply real
             // bot progress or displacement, never a matcher artifact. (Do NOT paper over a recurrence with a
             // "skip swap if content identical" mask — that hides the broken trigger instead of fixing it.)
+            if (L <= ROLLING_MAX_LEVEL && lp.committedIndex > committedBefore) {
+                rollingAdvanced = true; // the slide happened at this level — new extension input (§3.1/§3.2)
+            }
             final boolean reachedEnd = sk.reachedGoalRegion() && far == sk.size() - 1;
             final boolean exhausted = !reachedEnd && lp.committedIndex >= far;
             final boolean deviated = !inWindow && !onRoute;
             if (exited == -1 && (exhausted || deviated)) {
                 exited = L;
+                exitedExhausted = exhausted; // exhausted takes precedence in the demux; else it was a deviation
+                if (L == 0 && exhausted) {
+                    // §9 telemetry: the rolling safety net fired — under a slid L0 window this is only
+                    // reachable when extension has failed/no-op'd and the bot physically occupied the tail
+                    // (the §7 degraded interim). Must stay 0 on the healthy battery.
+                    exhaustedFires++;
+                }
             }
         }
+        if (rollingAdvanced) {
+            // §3.2 cadence: a rolling-cursor advance is new extension input (the L1 hand-down slid / the L0
+            // window base moved) — re-arm the one-attempt latch and clear the §7 degraded interim so the
+            // next pass may retry with the changed inputs. No timer, event-driven only.
+            l0ExtAttempted = false;
+            levels[0].degraded = false;
+        }
         if (exited == -1) {
-            return false; // still within every window — PathPlan slides its block window over the unchanged L0
+            // Still within every window. The one rolling addition (§3.2): if the L0 window-far now clamps at
+            // a non-final tail, splice a suffix extension so INV-4 holds again; otherwise byte-identical to
+            // today's "PathPlan slides its block window over the unchanged L0".
+            return maybeExtendL0(driverWindowStart);
         }
 
         // The top exited → recompute the cap-safe top level (collapse as the goal nears / slide for a far goal,
@@ -380,7 +514,10 @@ public final class HierarchicalRegionPlan {
             if (newTop != topLevel) {
                 final RegionPathPlan beforeL0 = levels[0].skeleton;
                 rebuild(botFloor);
-                return failed || levels[0].skeleton != beforeL0;
+                final Verdict v = (failed || levels[0].skeleton != beforeL0)
+                        ? Verdict.SWAPPED : Verdict.UNCHANGED;
+                logRederive("top-collapse", exited, exitedExhausted, onRoute, v, botFloor);
+                return v;
             }
         }
         // Re-plan the suffix exited..0 (levels above are untouched — their windows still contain the bot). A
@@ -392,13 +529,117 @@ public final class HierarchicalRegionPlan {
             // a full flood-aware rebuild (which escalates topLevel) before reporting FAILED.
             if (RegionPathfinder.lastWasFlood()) {
                 rebuild(botFloor);
-                return failed || levels[0].skeleton != beforeL0;
+                final Verdict v = (failed || levels[0].skeleton != beforeL0)
+                        ? Verdict.SWAPPED : Verdict.UNCHANGED;
+                logRederive("flood-widen", exited, exitedExhausted, onRoute, v, botFloor);
+                return v;
             }
             failed = true;
             logFailPostMortem(botFloor);
-            return true; // l0Skeleton() now null → the driver reports FAILED
+            logRederive("failed", exited, exitedExhausted, onRoute, Verdict.SWAPPED, botFloor);
+            return Verdict.SWAPPED; // l0Skeleton() now null → the driver reports FAILED
         }
-        return levels[0].skeleton != beforeL0;
+        final Verdict v = levels[0].skeleton != beforeL0 ? Verdict.SWAPPED : Verdict.UNCHANGED;
+        logRederive("suffix-rederive", exited, exitedExhausted, onRoute, v, botFloor);
+        return v;
+    }
+
+    /**
+     * Cold diagnostic (Debug-gated): name the distinct region re-derive cause instead of collapsing all four
+     * into one {@code SWAPPED}. {@code cause} = the terminal outcome (top-collapse / flood-widen / failed /
+     * suffix-rederive); {@code exited} = the coarsest level that exited its window; {@code exhausted} = whether
+     * that exit was a window exhaustion ({@code committed>=far}) vs a deviation ({@code off-window && off-plan});
+     * {@code onRoute} = whether the bot still vouched as on its block plan (a re-derive while onRoute==true and
+     * verdict==SWAPPED is the "discarded a valid, in-progress plan" pathology — the ocean-swim flap). Only the
+     * SWAPPED path actually discards the block plan; UNCHANGED is logged too so a benign no-op re-derive is
+     * distinguishable from a churning one. Bounded by the re-derive rate (the thing under investigation).
+     */
+    private void logRederive(String cause, int exited, boolean exhausted, boolean onRoute,
+                             Verdict verdict, BlockPos botFloor) {
+        if (!Debug.ENABLED) {
+            return;
+        }
+        OrebitCommon.LOGGER.info(
+                "[Orebit] region re-derive: cause={} exitedLevel=L{} exit={} onRoute={} verdict={} bot=({},{},{})",
+                cause, exited, exhausted ? "exhausted" : "deviated", onRoute, verdict,
+                botFloor.getX(), botFloor.getY(), botFloor.getZ());
+    }
+
+    /**
+     * The L0 <b>extension pass</b> (DESIGN-rolling-skeleton.md §3.2, §4, §13 increment A), run only when the
+     * bot is inside every level's window: when a NON-FINAL L0 skeleton's window-far clamps at its tail
+     * ({@code committedIndex + WINDOW_CELLS > size-1}), run a synchronous 1-hop suffix search from the
+     * existing tail's portal cell (NEVER the bot — INV-1, the flip-flop lesson) toward the L1 hand-down under
+     * the slid window, tube-confined to L1's current skeleton (§4.1 — verbatim {@code planWithin} with the
+     * tail as from-cell), and SPLICE {@code old[drop..] ++ suffix[1..]} ({@link RegionPathPlan#splice}),
+     * shifting the L0 cursor by {@code drop} (§4.2). The prefix is never re-derived.
+     *
+     * <p><b>Increment-A interim on failure (§7/INV-5/D8):</b> a {@code null}/mismatched suffix degrades
+     * IMMEDIATELY to today's behavior — the window clamps at the tail; the retained exhausted-on-occupancy
+     * test plus the existing repair own recovery. No blame, no escalation, no new failure state (extension
+     * tube-null escalation is increment C). A zero-length suffix (the tail already AT the hand-down node —
+     * the parent's own window is clamped at ITS tail) is a documented no-op, not a failure: L1 extension is
+     * increment B. Not attempted at {@code topLevel == 0} (top-level extension toward the real goal is
+     * increment B) — those stacks keep today's machinery whole.
+     */
+    private Verdict maybeExtendL0(int driverWindowStart) {
+        if (topLevel < 1) {
+            return Verdict.UNCHANGED; // §13-A scope: no L1 parent — top-level extension is increment B
+        }
+        final LevelPlan lp = levels[0];
+        final RegionPathPlan sk = lp.skeleton;
+        if (sk == null || sk.isEmpty() || sk.reachedGoalRegion()) {
+            return Verdict.UNCHANGED; // INV-7: a final skeleton never extends (endgame rides to COMPLETE)
+        }
+        if (lp.committedIndex + WINDOW_CELLS <= sk.size() - 1) {
+            return Verdict.UNCHANGED; // window-far not clamped — INV-4 already holds, nothing to do
+        }
+        if (l0ExtAttempted) {
+            return Verdict.UNCHANGED; // one attempt per rolling-cursor advance (§3.2 — no per-settle re-search)
+        }
+        l0ExtAttempted = true;
+        final int tail = sk.size() - 1;
+        BlockPos from = sk.portalCell(tail); // the tail's real on-face cell — anchors the search AT the tail node
+        if (from == null) {
+            from = sk.centerOf(tail); // NO_PORTAL tail (§4.1 — start step / center-model fallback)
+        }
+        final BlockPos subGoal = handDown(1, levels[1]); // the SLID parent hand-down (§3.1 — recomputed live)
+        final RegionPathfinder.RegionTube tube =
+                new RegionPathfinder.RegionTube(levels[1].skeleton, 1, 0, TUBE_MARGIN);
+        final RegionPathPlan suffix = RegionPathfinder.planWithin(0, grid, minY, from, subGoal, goal, caps,
+                blacklists[0], mine, tube);
+        if (suffix == null || suffix.isEmpty()
+                || suffix.rx(0) != sk.rx(tail) || suffix.ry(0) != sk.ry(tail)
+                || suffix.rz(0) != sk.rz(tail) || suffix.fragmentId(0) != sk.fragmentId(tail)) {
+            // §7/D8 increment-A interim: degrade immediately — today's machinery (exhausted-on-occupancy +
+            // repair) owns recovery. A start-anchor mismatch (the search resolved a node other than the tail)
+            // is treated the same conservative way rather than splicing a guessed join.
+            lp.degraded = true;
+            degradedSettles++;
+            if (Debug.ENABLED) {
+                OrebitCommon.LOGGER.info("[Orebit] L0 extension DEGRADED (suffix {}), window clamps at tail "
+                        + "(size {}, committed {})", suffix == null ? "null" : "mismatched",
+                        sk.size(), lp.committedIndex);
+            }
+            return Verdict.UNCHANGED;
+        }
+        if (suffix.size() <= 1) {
+            // Zero-length (§4.1 degenerate): the tail is already AT the hand-down node — the parent's window
+            // is clamped at ITS tail (increment B extends L1). Expected near L1 segment ends; exempted from
+            // INV-4 via l0RollingExempt(). Not a failure, not degraded.
+            return Verdict.UNCHANGED;
+        }
+        final int drop = Math.min(lp.committedIndex, Math.max(0, driverWindowStart)); // §4.2/D3 head-drop bound
+        final int oldSize = sk.size();
+        lp.skeleton = RegionPathPlan.splice(sk, drop, suffix);
+        lp.committedIndex -= drop; // shift, never reset (INV-1)
+        lp.degraded = false;
+        lastExtendShift = drop;
+        if (Debug.ENABLED) {
+            OrebitCommon.LOGGER.info("[Orebit] L0 skeleton EXTENDED +{} hops, head-dropped {} ({} -> {} steps)",
+                    suffix.size() - 1, drop, oldSize, lp.skeleton.size());
+        }
+        return Verdict.EXTENDED;
     }
 
     /**
@@ -448,7 +689,7 @@ public final class HierarchicalRegionPlan {
                 && RegionAddress.unpackRX(l0FromKey) == RegionAddress.regionX(searchStartFloor.getX(), 0)
                 && RegionAddress.unpackRY(l0FromKey) == RegionAddress.regionY(searchStartFloor.getY(), 0, minY)
                 && RegionAddress.unpackRZ(l0FromKey) == RegionAddress.regionZ(searchStartFloor.getZ(), 0);
-        // VIRTUAL-GOAL JOURNEY SCOPING: a blame whose TO node is the virtual goal V (fragment bits 50..55 of
+        // VIRTUAL-GOAL JOURNEY SCOPING: a blame whose TO node is the virtual goal V (fragment bits 49..54 of
         // the key == RegionPathfinder.VIRTUAL_GOAL_FRAG — the same read describeFragKey uses) is likewise
         // journey-scoped, for two principled reasons. (1) No realized-evidence backing: PathPlan.blameHop
         // treats an (approach → V) hop as unrealized BY DEFINITION on a BLOCKED result — reaching V IS
@@ -460,7 +701,14 @@ public final class HierarchicalRegionPlan {
         // structurally poison goal B's approaches forever. The per-plan blacklists[0].add above (already
         // per-goal by construction) is the correct scope: this navigation still reroutes to another approach.
         // Legacy files written before this rule may still carry V-rows; CostPyramidCodec.decode filters them.
-        final boolean virtualGoalHop = RegionPathfinder.isVirtualGoal((int) ((l0ToKey >>> 50) & 0x3F));
+        final boolean virtualGoalHop = RegionPathfinder.isVirtualGoal((int) ((l0ToKey >>> 49) & 0x3F));
+        // COLD diagnostic (one line per BLOCKED result): the #5 record decision with the exact guard inputs,
+        // so a repeated-blame oracle anomaly is attributable to record-time scoping vs persistence loss.
+        com.orebit.mod.OrebitCommon.LOGGER.info(
+                "[Orebit] #5 record-decision hop={}->{} startScoped={} vGoal={} recorded={} searchStartFloor={}",
+                RegionPathfinder.describeFragKey(l0FromKey), RegionPathfinder.describeFragKey(l0ToKey),
+                startScoped, virtualGoalHop, recordToMemory && !startScoped && !virtualGoalHop,
+                searchStartFloor);
         if (recordToMemory && !startScoped && !virtualGoalHop) {
             crossingMemory.record(0, l0FromKey, l0ToKey, capsSig,
                     RegionCrossingMemory.PROV_PROOF, BotCaps::sigDominates);
@@ -568,7 +816,7 @@ public final class HierarchicalRegionPlan {
      * LAST {@code planWithin} call, which is exactly the failing one (the descent stops there).
      */
     private int rederiveSuffix(int fromLevel, BlockPos botFloor) {
-        BlockPos subGoal = (fromLevel >= topLevel) ? goal : handDown(levels[fromLevel + 1]);
+        BlockPos subGoal = (fromLevel >= topLevel) ? goal : handDown(fromLevel + 1, levels[fromLevel + 1]);
         for (int L = fromLevel; L >= 0; L--) {
             RegionPathfinder.RegionTube tube = (L < topLevel)
                     ? new RegionPathfinder.RegionTube(levels[L + 1].skeleton, L + 1, L, TUBE_MARGIN)
@@ -580,7 +828,11 @@ public final class HierarchicalRegionPlan {
             }
             levels[L].skeleton = skel;
             levels[L].committedIndex = 0;
-            subGoal = handDown(levels[L]);
+            levels[L].degraded = false; // a fresh skeleton clears the §7 degraded interim (rolling, §7)
+            if (L == 0) {
+                l0ExtAttempted = false; // fresh L0 — re-arm the extension latch (§3.2 cadence)
+            }
+            subGoal = handDown(L, levels[L]);
         }
         return -1;
     }
@@ -633,7 +885,10 @@ public final class HierarchicalRegionPlan {
     private boolean blameTubeConfined(int childLevel) {
         final int parent = childLevel + 1;
         final RegionPathPlan sk = levels[parent].skeleton;
-        final int far = Math.min(WINDOW_CELLS, sk.size() - 1);
+        // The parent's CURRENT window (DESIGN-rolling-skeleton.md §3.1: at a rolling level the window base is
+        // the committed cursor) — with a static far, an L1 cursor past the static head would make the blame
+        // walk's [committedIndex+1 .. far] range empty and the fallback blame a hop BEHIND the commit.
+        final int far = windowFar(parent, levels[parent]);
         if (far == 0) {
             return false; // degenerate one-cell window — nothing to blame
         }
@@ -664,14 +919,30 @@ public final class HierarchicalRegionPlan {
     }
 
     /**
-     * The world sub-goal a level hands its finer neighbour: the portal cell (fallback: the center) of its
-     * window-far cell — the {@link #WINDOW_CELLS}-th skeleton cell, clamped to the skeleton tail. When this level
-     * already reaches the true goal region at that far cell, hand down the <b>real goal</b> instead of the coarse
-     * cell center, so the finer levels aim precisely at the goal as the stack collapses (§7).
+     * The level's window-<b>far</b> index (DESIGN-rolling-skeleton.md §3.1/D1): at ROLLING levels
+     * ({@code L ≤} {@link #ROLLING_MAX_LEVEL}, §13 increment A) the window is
+     * {@code [committedIndex .. committedIndex + WINDOW_CELLS]} — the committed cursor, which already advances
+     * per crossing under the ratified hysteresis (INV-2), IS the window base, so the hand-down recedes ahead
+     * of the bot one hop per commit instead of jumping {@code WINDOW_CELLS} hops per exhaustion. Levels above
+     * the ceiling keep today's static head {@code min(WINDOW_CELLS, size-1)} until increment B generalizes
+     * the pass. Clamped to the skeleton tail either way; pure int math on existing state (zero per-tick cost).
      */
-    private BlockPos handDown(LevelPlan lp) {
+    private int windowFar(int L, LevelPlan lp) {
+        final int base = (L <= ROLLING_MAX_LEVEL) ? lp.committedIndex : 0;
+        return Math.min(base + WINDOW_CELLS, lp.skeleton.size() - 1);
+    }
+
+    /**
+     * The world sub-goal a level hands its finer neighbour: the portal cell (fallback: the center) of its
+     * window-far cell ({@link #windowFar} — SLID with the committed cursor at rolling levels,
+     * DESIGN-rolling-skeleton.md §3.1; the static {@link #WINDOW_CELLS}-th cell above the rolling ceiling),
+     * clamped to the skeleton tail. When this level already reaches the true goal region at that far cell,
+     * hand down the <b>real goal</b> instead of the coarse cell center, so the finer levels aim precisely at
+     * the goal as the stack collapses (§7).
+     */
+    private BlockPos handDown(int L, LevelPlan lp) {
         final RegionPathPlan sk = lp.skeleton;
-        final int far = Math.min(WINDOW_CELLS, sk.size() - 1);
+        final int far = windowFar(L, lp);
         if (sk.reachedGoalRegion() && far == sk.size() - 1) {
             return goal;
         }
@@ -733,9 +1004,12 @@ public final class HierarchicalRegionPlan {
         return RegionPathfinder.chooseCapSafeLevel(srx, sry, srz, grx, gry, grz);
     }
 
-    /** One level of the cascade: its skeleton (region coords at {@link RegionPathPlan#level}) + commit cursor. */
+    /** One level of the cascade: its skeleton (region coords at {@link RegionPathPlan#level}) + commit cursor
+     *  + the rolling §7 degraded-interim flag (extension search failed; cleared by any rolling commit advance
+     *  or a fresh skeleton at this level — DESIGN-rolling-skeleton.md §7, increment-A interim). */
     private static final class LevelPlan {
         RegionPathPlan skeleton;
         int committedIndex;
+        boolean degraded;
     }
 }

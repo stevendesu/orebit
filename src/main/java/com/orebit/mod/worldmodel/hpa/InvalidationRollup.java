@@ -77,16 +77,17 @@ public final class InvalidationRollup {
 
     private InvalidationRollup() {}
 
-    /** The region part of a fragment-node key — {@code packLevelKey} bits 0..49 (mirrors
-     *  {@link RegionCrossingMemory}'s mask; the 6-bit fragment id sits at bits 50..55). */
-    private static final long REGION_MASK = (1L << 50) - 1;
-    /** The fragment id's shift in a fragment-node key (bits 50..55). */
-    private static final int FRAG_SHIFT = 50;
+    /** The region part of a fragment-node key — {@code packLevelKey} bits 0..48 (mirrors
+     *  {@link RegionCrossingMemory}'s mask; the 6-bit fragment id sits at bits 49..54).
+     *  (2026-07 packLevelKey repack: ry narrowed 6→5 bits, region 0..48, frag shift 50→49.) */
+    private static final long REGION_MASK = (1L << 49) - 1;
+    /** The fragment id's shift in a fragment-node key (bits 49..54). */
+    private static final int FRAG_SHIFT = 49;
 
     /**
      * The {@code (region, fragment)} node key — MUST stay bit-identical to
      * {@code RegionPathfinder.fragmentNodeKey} ({@code packLevelKey} XOR the 6-bit fragment id at bits
-     * 50..55; pinned by {@code RollupFoldTest.keyLayoutMatchesRegionPathfinder}). Duplicated here because
+     * 49..54; pinned by {@code RollupFoldTest.keyLayoutMatchesRegionPathfinder}). Duplicated here because
      * {@code worldmodel/hpa} must not import {@code pathfinding} (the layering the injected Dominance
      * exists for).
      */
@@ -94,7 +95,7 @@ public final class InvalidationRollup {
         return RegionAddress.packLevelKey(rx, ry, rz) ^ ((long) (frag & 0x3F) << FRAG_SHIFT);
     }
 
-    /** The fragment id of a fragment-node key ({@code packLevelKey} bits 50+ are zero, so XOR reads back). */
+    /** The fragment id of a fragment-node key ({@code packLevelKey} bits 49+ are zero, so XOR reads back). */
     static int fragOf(long key) {
         return (int) ((key >>> FRAG_SHIFT) & 0x3F);
     }
@@ -438,5 +439,43 @@ public final class InvalidationRollup {
             }
         }
         return -1;
+    }
+
+    /**
+     * The parent fragment id (at {@code parentLevel}) that child fragment {@code (crx,cry,crz):frag} at
+     * {@code parentLevel-1} merged into — the same gather + internal-face union-find the fold uses, exposed
+     * read-only for the coarse start/goal anchor walk ({@link RegionGrid#containedFragment}): exact membership
+     * walked up the pyramid instead of a nearest-centroid guess. Returns {@code 0} through an all-zero parent
+     * (uniform/collapsed/fragmentless record — exactly how the A* keys such a node) and {@code -1} when
+     * containment cannot be trusted (Stage-2 deferral, a stale record's component-count mismatch, or a child
+     * fragment id the merge never saw) — the caller falls back to nearest-centroid.
+     */
+    static int containedParentFragment(CostPyramid p, int parentLevel, int prx, int pry, int prz,
+                                       int crx, int cry, int crz, int frag) {
+        return containedParentFragment(p, parentLevel, prx, pry, prz, crx, cry, crz, frag, null);
+    }
+
+    /** As {@link #containedParentFragment}, appending the refusal reason to {@code trace} when non-null
+     *  (COLD diagnostics only — the anchor-walk trace in the region FAIL post-mortem). */
+    static int containedParentFragment(CostPyramid p, int parentLevel, int prx, int pry, int prz,
+                                       int crx, int cry, int crz, int frag, StringBuilder trace) {
+        final Side s = SIDE_A.get();
+        if (!gather(p, parentLevel, prx, pry, prz, s)) {
+            if (trace != null) {
+                final int parentRow = p.rowIfPresent(parentLevel, prx, pry, prz);
+                final RegionFragments prf = (parentRow >= 0 && p.isBuilt(parentLevel, parentRow))
+                        ? p.fragmentRecord(parentLevel, parentRow) : null;
+                trace.append(" [gather-refused n=").append(s.n).append(" comps=").append(s.compCount)
+                        .append(s.collapsed ? " collapsed" : "")
+                        .append(" recFc=").append(prf == null ? -1 : prf.fragmentCount()).append(']');
+            }
+            return -1;
+        }
+        final int f = parentFragOfChild(s, crx, cry, crz, frag);
+        if (f < 0 && trace != null) {
+            trace.append(" [no-item child=(").append(crx).append(',').append(cry).append(',').append(crz)
+                    .append("):f").append(frag).append(" n=").append(s.n).append(']');
+        }
+        return f;
     }
 }

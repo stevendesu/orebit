@@ -14,12 +14,20 @@ misattributed; dig cost was tool-blind and hardness-flat. Three independent caus
   lateral walks stop paying phantom pillar climbs to mid-air portal centroids →
   `RegionPathfinder.footprintCenterWorld` (the standable-Δy anchor).
 - **§4 Fix 2 — start-fragment membership via flood-from-bot:** the start node is the fragment that
-  actually CONTAINS the bot's cell → `FragmentBuilder.fragmentContaining`,
-  `FragmentLeafComputer` (~line 104), `RegionGrid` (~line 256). Unblocks the walk-around route.
+  actually CONTAINS the bot's cell → `FragmentLeafComputer.fragmentContaining`,
+  `RegionGrid.startFragmentByFlood`. Unblocks the walk-around route. *Since generalized to EVERY level as
+  the containment anchor: `RegionGrid.containedFragment` walks the L0 flood membership up the pyramid via
+  `InvalidationRollup.containedParentFragment`, with a faced-only centroid fallback
+  (`RegionPathfinder.nearestFacedFragment`) when containment can't be proven — see HPA-CASCADE.md "The
+  containment anchor".*
 - **§5 Fix 3 — tool-aware region dig cost:** `RegionMineModel` — a precomputed per-block dig-cost table
   built once from the bot's REAL inventory ("honest ratios, compressed scale": WALK=1 ↔ 4.633 ticks),
-  consumed by `RegionPathfinder` mine/dig-through edges, `HierarchicalRegionPlan` (built at plan
-  construction), `PathPlan`, and `AllyBotEntity`'s rtrace. Input seam: `MiningModel` category index.
+  consumed by `HierarchicalRegionPlan` (built at plan construction), `PathPlan`, and `AllyBotEntity`'s
+  rtrace. Input seam: `MiningModel` category index. *Amended (s53): the FORWARD skeleton searches now price
+  digs with a FIXED wooden-pickaxe economy (`RegionPathfinder.FORWARD_MINE = RegionMineModel.WOODEN` —
+  inventory-independent route SHAPE); the bot's real tool model feeds the REVERSE cost-to-goal field
+  (`costToGoalField`) and diagnostics. The `mine` param on the forward entries is retained for API
+  symmetry.*
 
 **Code:** `pathfinding/regionpathfinder/RegionPathfinder.java` (anchor + costs + traceBreakdown),
 `RegionMineModel.java`, `worldmodel/hpa/FragmentBuilder.java` / `FragmentLeafComputer.java` /

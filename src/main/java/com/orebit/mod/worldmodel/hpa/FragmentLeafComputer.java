@@ -7,14 +7,16 @@ import com.orebit.mod.worldmodel.pathing.NavSection;
  * Builds a level-0 leaf's {@link RegionFragments} connectivity record from the resident nav grid — the
  * fragment-model counterpart of {@link LeafCostComputer} (HPA-FRAGMENTS.md §7, the
  * {@code LeafCostComputer → FragmentLeafComputer} row). It is the thin MC read that fills the passability /
- * standability masks + occupancy tallies for the pure {@link FragmentBuilder} core, which does the actual
- * flood-fill, occupiability filter, cap, and footprint extraction.
+ * standability / water masks + occupancy tallies for the pure {@link FragmentBuilder} core, which does the
+ * actual flood-fill, keep-all typed-fragment annotation, cap, and footprint extraction
+ * (DESIGN-typed-fragments.md §5.1–§5.2).
  *
  * <h2>What it reads</h2>
  * A level-0 region is one 16³ {@link NavSection}. This mirrors {@link LeafCostComputer}'s occupancy scan
  * exactly: for each of the 4096 local cells, look up the cell's resident navtype → {@link NavBlock}
  * descriptor (no live block reads) and tally {@link NavBlock#isStandable standable} /
- * {@link NavBlock#isPassable passable}, the water count (to tell an all-water column from an all-air one),
+ * {@link NavBlock#isPassable passable}, fill the water mask (descriptor fluid == WATER on a passable cell —
+ * the per-fragment W/S type source) + its count (the truly-uniform all-dry/all-water split),
  * and the Σ-hardness over SOLID cells (the mine-edge cost scale). It then hands the masks + tallies to
  * {@link FragmentBuilder#build} at {@code G = 16}.
  *
@@ -48,6 +50,9 @@ public final class FragmentLeafComputer {
     // buffers in the canonical (ly<<8)|(lz<<4)|lx order so the occupancy scan allocates nothing per cell.
     private static final ThreadLocal<boolean[]> STANDABLE = ThreadLocal.withInitial(() -> new boolean[CELLS]);
     private static final ThreadLocal<boolean[]> PASSABLE = ThreadLocal.withInitial(() -> new boolean[CELLS]);
+    /** Water mask (descriptor fluid == WATER on a passable cell) — the typed-fragments type source
+     *  (DESIGN-typed-fragments.md §5.1), same pattern as the passable/standable masks. */
+    private static final ThreadLocal<boolean[]> WATER = ThreadLocal.withInitial(() -> new boolean[CELLS]);
 
     /** Flat cell index for local coords (0..15 each) — the {@code G == 16} form of {@link FragmentBuilder}'s. */
     private static int idx(int lx, int ly, int lz) {
@@ -63,10 +68,11 @@ public final class FragmentLeafComputer {
     public static void computeLeaf(NavSection section, RegionFragments out) {
         final boolean[] standable = STANDABLE.get();
         final boolean[] passable = PASSABLE.get();
+        final boolean[] water = WATER.get();
 
         int standCount = 0;
         int passCount = 0;
-        int waterCount = 0;     // passable cells that hold water (all-water column vs all-air)
+        int waterCount = 0;     // passable cells that hold water (the truly-uniform split + the tally)
         long hardnessSumSolid = 0; // Σ quantized hardness over SOLID (non-passable) cells
         int solidCount = 0;
 
@@ -79,20 +85,25 @@ public final class FragmentLeafComputer {
                     int i = idx(lx, ly, lz);
                     standable[i] = st;
                     passable[i] = pa;
+                    boolean wa = false;
                     if (st) standCount++;
                     if (pa) {
                         passCount++;
-                        if (NavBlock.fluid(desc) == FLUID_WATER) waterCount++;
+                        if (NavBlock.fluid(desc) == FLUID_WATER) {
+                            waterCount++;
+                            wa = true;
+                        }
                     } else {
                         // SOLID (non-passable) cell: contributes to the mine-edge hardness average.
                         solidCount++;
                         hardnessSumSolid += NavBlock.hardness(desc);
                     }
+                    water[i] = wa;
                 }
             }
         }
 
-        FragmentBuilder.build(passable, standable, LEAF,
+        FragmentBuilder.build(passable, standable, water, LEAF,
                 passCount, standCount, waterCount,
                 hardnessSumSolid, solidCount,
                 out);
@@ -102,9 +113,10 @@ public final class FragmentLeafComputer {
      * The kept fragment id that contains local cell {@code (lx,ly,lz)} in this leaf's {@link NavSection},
      * reproduced by re-flooding the section — the MC read behind the flood-from-bot start-fragment resolver
      * (PERF-DESIGN region §4, {@link FragmentBuilder#fragmentContaining}). Returns {@code -1} when the cell isn't
-     * in an occupiable fragment, the region collapsed, or the coords are out of range — the caller falls back to
-     * nearest-centroid. Fills the same thread-local passable/standable masks as {@link #computeLeaf} (a subset of
-     * its scan — no hardness/water tallies needed here); single-threaded on the tick/planner thread.
+     * passable, the region collapsed or stores a truly-uniform record (no fragments), or the coords are out of
+     * range — the caller falls back to nearest-centroid. Fills the same thread-local passable/standable/water
+     * masks as {@link #computeLeaf} (a subset of its scan — no hardness work needed here); single-threaded on
+     * the tick/planner thread.
      *
      * @param section the 16³ section backing this leaf (resolved by the caller, same as {@link #computeLeaf})
      * @param lx,ly,lz section-local cell coords (0..15)
@@ -115,17 +127,25 @@ public final class FragmentLeafComputer {
         }
         final boolean[] standable = STANDABLE.get();
         final boolean[] passable = PASSABLE.get();
+        final boolean[] water = WATER.get();
+        fillMasks(section, standable, passable, water);
+        return FragmentBuilder.fragmentContaining(passable, standable, water, LEAF, idx(lx, ly, lz));
+    }
+
+    /** Fill the three thread-local masks from a section's resident navtypes (the shared wrapper scan). */
+    private static void fillMasks(NavSection section, boolean[] standable, boolean[] passable, boolean[] water) {
         for (int y = 0; y < LEAF; y++) {
             for (int z = 0; z < LEAF; z++) {
                 for (int x = 0; x < LEAF; x++) {
                     long desc = NavBlock.descriptor((short) section.getNavtype(x, y, z));
                     int i = idx(x, y, z);
+                    boolean pa = NavBlock.isPassable(desc);
                     standable[i] = NavBlock.isStandable(desc);
-                    passable[i] = NavBlock.isPassable(desc);
+                    passable[i] = pa;
+                    water[i] = pa && NavBlock.fluid(desc) == FLUID_WATER;
                 }
             }
         }
-        return FragmentBuilder.fragmentContaining(passable, standable, LEAF, idx(lx, ly, lz));
     }
 
     /**
@@ -143,16 +163,8 @@ public final class FragmentLeafComputer {
     public static void labelFragments(NavSection section, byte[] out) {
         final boolean[] standable = STANDABLE.get();
         final boolean[] passable = PASSABLE.get();
-        for (int y = 0; y < LEAF; y++) {
-            for (int z = 0; z < LEAF; z++) {
-                for (int x = 0; x < LEAF; x++) {
-                    long desc = NavBlock.descriptor((short) section.getNavtype(x, y, z));
-                    int i = idx(x, y, z);
-                    standable[i] = NavBlock.isStandable(desc);
-                    passable[i] = NavBlock.isPassable(desc);
-                }
-            }
-        }
-        FragmentBuilder.labelAll(passable, standable, LEAF, out);
+        final boolean[] water = WATER.get();
+        fillMasks(section, standable, passable, water);
+        FragmentBuilder.labelAll(passable, standable, water, LEAF, out);
     }
 }

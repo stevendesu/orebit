@@ -196,6 +196,18 @@ unaffected.
 
 The piece Baritone lacks (and the reason Orebit scales to long distances).
 
+> **Evolution note (2026-07 — reading guide; the built system diverges from three bullets below).**
+> The **face-to-center cost model was deleted (s36)** in favor of per-region **fragments**
+> (HPA-FRAGMENTS.md): a region stores its passable connected components with per-face footprints and
+> per-fragment S/W type bits (DESIGN-typed-fragments.md); **no costs are stored at all** — every edge cost
+> is DERIVED at query time. So "cost, not connectivity" inverted: the layer stores *connectivity facts* and
+> derives costs. The "fully connected / no disconnected" claim is now capability-qualified: a **no-break**
+> bot's graph drops every mining edge and can honestly FAIL. The **no-entrances ruling stands** (footprints
+> are per-fragment face *facts* recomputed with the leaf, not crossing points or stored edges).
+> Persistence is the `.mca`-style sharded format (`hpa.<X>.<Z>.bin` L0–5 + `hpa.coarse.bin`, codec v7,
+> incl. the #5 crossing-invalidation section — DESIGN-worldmodel-persistence.md,
+> DESIGN-persisted-invalidation-memory.md). §7.1's evolution note covers the search-side arcs.
+
 - **Cost, not connectivity.** In Minecraft *everything* is traversable — you can
   always mine through — so the lattice is **fully connected**; there is no
   "disconnected." We therefore store **a crossing cost per face**, never adjacency
@@ -275,7 +287,14 @@ Two-tier, lazy, hierarchical A\*.
 > one windowed plan per pyramid level, re-planned only at the level whose window the bot exited, with
 > per-level blacklist repair), and the window target is a **standable portal/representative cell**, not
 > the raw region center (the mid-air-center bug). The description below remains correct as the model's
-> rationale and its level-0 behavior.
+> rationale and its level-0 behavior. Subsequent region-tier arcs (each with its own design card):
+> **entry-face nodes + dig-through edges** (PERF-DESIGN-region-dig-through.md), **flood-from-bot /
+> containment anchoring + tool-aware dig costs** (PERF-DESIGN-region-cost-and-fragment.md, HPA-CASCADE.md
+> "The containment anchor"), the **virtual goal fragment** (per-approach goal seeding + dig-seed pockets —
+> HPA-CASCADE.md "The virtual goal fragment"), **typed fragments** (DESIGN-typed-fragments.md), the
+> **#5 persisted crossing-invalidation memory** (DESIGN-persisted-invalidation-memory.md), **persistence
+> sharding + lazy load** (DESIGN-worldmodel-persistence.md), and the **rolling skeleton**
+> (DESIGN-rolling-skeleton.md — increment A in flight).
 
 **The ratified region→block execution model: a sliding window (no portal/entry points).**
 The region skeleton gives the *sequence* of regions to pass through; the block tier does
@@ -614,6 +633,9 @@ Ratified during design review (with rationale recorded in project memory):
    cost. Region→block planning is a **sliding window** (block-A\* to the goal-or-farthest-
    region-center, replan per boundary crossing — §7.1), not stored crossing points.
    Regions stay simple by design; that pairs with keeping the block tier fast.
+   *(Evolved s36+: the stored quantity flipped to per-region fragment CONNECTIVITY records with costs
+   DERIVED at query time — see the §6.5 evolution note. The no-entrances ruling, the 16³ leaf, portals
+   local, and the 8:1-heuristic-only rule all stand.)*
 6. Disk budget ~6–8%/dimension, under the 10–15% target.
 7. Movement vocabulary = **Baritone set + EnterPortal**, **extensible interface**,
    **break/place/door folded into moves**.

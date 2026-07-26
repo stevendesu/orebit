@@ -336,6 +336,97 @@ public final class RegionGrid {
         return FragmentLeafComputer.fragmentContaining(column[ry], wx & 15, (wy - minY) & 15, wz & 15);
     }
 
+    /**
+     * The fragment of node {@code (level, rx,ry,rz)} that <b>contains</b> world cell {@code (wx,wy,wz)} —
+     * exact at every level, the coarse generalization of {@link #startFragmentByFlood}: level-0 flood
+     * membership walked upward through the merge's own containment ({@link
+     * InvalidationRollup#containedParentFragment} — which parent fragment each child fragment unioned into).
+     * The nearest-centroid anchor this replaces guesses; the failure mode is a faceless sealed-pocket
+     * fragment, whose centroid defaults to the region center and out-attracts every real fragment's
+     * face-averaged centroid for a mid-region bot — the search then anchors sealed and drains instantly.
+     *
+     * <p>Returns {@code -1} when membership cannot be <i>proven</i>: the cell's leaf isn't resident / the
+     * cell isn't in an occupiable fragment, a walk step refuses (stale or deferred parent record), or
+     * {@code (rx,ry,rz)} is not the cell's level-{@code level} ancestor (a clamped goal region). The caller
+     * falls back to nearest-centroid — the pre-existing behavior.
+     */
+    public int containedFragment(int level, int rx, int ry, int rz, int wx, int wy, int wz) {
+        return containedFragment(level, rx, ry, rz, wx, wy, wz, null);
+    }
+
+    /** COLD diagnostics only: one cell's flood preconditions for the anchor-walk trace — column/section
+     *  residency and the decoded seed-cell state the flood would test. */
+    private String floodProbe(int rx, int ry, int rz, int wx, int wy, int wz) {
+        if (level == null && sections == null) {
+            return "headless";
+        }
+        final NavSection[] column = columnCached(rx, rz);
+        if (column == COL_MISSING) {
+            return "col-missing";
+        }
+        if (ry < 0 || ry >= column.length || column[ry] == null) {
+            return "section-null(ry=" + ry + ")";
+        }
+        final int lx = wx & 15, ly = (wy - minY) & 15, lz = wz & 15;
+        final long d = com.orebit.mod.worldmodel.navblock.NavBlock.descriptor(
+                (short) column[ry].getNavtype(lx, ly, lz));
+        return "(" + lx + "," + ly + "," + lz + ")pass="
+                + com.orebit.mod.worldmodel.navblock.NavBlock.isPassable(d);
+    }
+
+    /** As {@link #containedFragment(int, int, int, int, int, int, int)}, appending a per-step walk trace to
+     *  {@code trace} when non-null (COLD diagnostics only — the region FAIL post-mortem). */
+    public int containedFragment(int level, int rx, int ry, int rz, int wx, int wy, int wz,
+                                 StringBuilder trace) {
+        int crx = RegionAddress.regionX(wx, 0);
+        int cry = RegionAddress.regionY(wy, 0, minY);
+        int crz = RegionAddress.regionZ(wz, 0);
+        // Flood-seed selection (the botFragmentL0 convention, HierarchicalRegionPlan): the canonical cell is
+        // the solid FLOOR cell, but the flood needs a PASSABLE seed — seed at the FEET cell (wy+1) when it is
+        // still inside this level-0 region (a floor at local y=15 has its feet in the region above, a
+        // different node's fragment ids), falling back to the floor cell itself (a swimming bot's floor is
+        // passable water).
+        final boolean feetInRegion = ((wy - minY) & 15) != 15;
+        int f = startFragmentByFlood(crx, cry, crz, wx, feetInRegion ? wy + 1 : wy, wz);
+        if (f < 0 && feetInRegion) {
+            f = startFragmentByFlood(crx, cry, crz, wx, wy, wz);
+        }
+        if (trace != null) {
+            trace.append("L0(").append(crx).append(',').append(cry).append(',').append(crz)
+                    .append(")=f").append(f);
+            if (f < 0) {
+                // Cold flood-failure probe: which -1 path fired (column/section residency vs seed cell state).
+                trace.append(" probe[feet:").append(floodProbe(crx, cry, crz, wx, wy + 1, wz))
+                        .append(" floor:").append(floodProbe(crx, cry, crz, wx, wy, wz)).append(']');
+            }
+        }
+        if (f < 0) {
+            return -1;
+        }
+        for (int l = 1; l <= level; l++) {
+            final int prx = RegionAddress.parentRX(crx);
+            final int prz = RegionAddress.parentRZ(crz);
+            final int pry = RegionAddress.parentRY(cry, l - 1);
+            f = InvalidationRollup.containedParentFragment(pyramid, l, prx, pry, prz, crx, cry, crz, f,
+                    trace);
+            if (trace != null) {
+                trace.append(" L").append(l).append('(').append(prx).append(',').append(pry).append(',')
+                        .append(prz).append(")=f").append(f);
+            }
+            if (f < 0) {
+                return -1;
+            }
+            crx = prx; cry = pry; crz = prz;
+        }
+        if (crx != rx || cry != ry || crz != rz) {
+            if (trace != null) {
+                trace.append(" ancestor-mismatch");
+            }
+            return -1;
+        }
+        return f;
+    }
+
     /** Sink for {@link #goalDigSeeds}: one dig-reachable pocket — its level-0 region {@code (rx,ry,rz)} and kept
      *  fragment id, plus the {@code digCells} of breakable rock between that pocket and the goal cell. */
     @FunctionalInterface

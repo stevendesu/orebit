@@ -3,10 +3,11 @@ package com.orebit.mod.worldmodel.hpa;
 import java.util.Arrays;
 
 /**
- * The <b>pure connectivity core</b> of the HPA* fragment model (HPA-FRAGMENTS.md §3) — flood-fill the
- * 6-connected components of a region's passable cells, drop the non-occupiable ones (the checkerboard /
- * speckle filter), cap the survivor count, and extract a per-{@code (fragment, face)} 2D footprint bbox into
- * a {@link RegionFragments} record.
+ * The <b>pure connectivity core</b> of the HPA* fragment model (HPA-FRAGMENTS.md §3;
+ * DESIGN-typed-fragments.md §5) — flood-fill the 6-connected components of a region's passable cells,
+ * <b>keep ALL of them</b> (typed-fragments keep-all: the old occupiability filter became a per-component
+ * type computation), cap the count, and extract a per-{@code (fragment, face)} 2D footprint bbox + 2 type
+ * bits into a {@link RegionFragments} record.
  *
  * <h2>No Minecraft</h2>
  * This class takes raw {@code boolean} masks + primitive tallies and contains <b>no MC imports</b>, so it is
@@ -21,20 +22,25 @@ import java.util.Arrays;
  * two (16 at the leaf; 4/2 at coarse levels — HPA-FRAGMENTS.md §3.1), so the per-cell coord decode is shifts
  * and masks, never division.
  *
- * <h2>Algorithm (HPA-FRAGMENTS.md §3)</h2>
+ * <h2>Algorithm (HPA-FRAGMENTS.md §3; DESIGN-typed-fragments.md §5.2)</h2>
  * <ol>
- *   <li><b>Uniform fast-paths.</b> {@code passCount == 0} ⇒ {@link RegionFragments#KIND_SOLID};
- *       {@code standCount == 0} (no floor) ⇒ {@link RegionFragments#KIND_AIR} (provably dry:
- *       {@code waterCount == 0}) or {@link RegionFragments#KIND_WATER} (ANY water present — see the body
- *       comment: AIR is a capability gate's proof obligation). These fold in {@link LeafCostComputer}'s existing all-solid /
- *       all-air / all-water shortcuts and store no fragments.</li>
- *   <li><b>Flood fill</b> (BFS) the passable cells, 6-connected → raw components (beats union-find ~2.2× on
- *       the common large-component case — HPA-FRAGMENTS.md §4).</li>
- *   <li><b>Occupiability filter.</b> Drop any component with no cell that is a real stand position: a passable
- *       cell with a standable floor directly below and ≥2-tall headroom (the cell above also passable). The
- *       checkerboard → 0 fragments → uniform mass; speckle/gravel noise collapses the same way. Principled (a
- *       movement fact), not a tuned size threshold.</li>
- *   <li><b>Cap.</b> {@code > }{@value RegionFragments#MAX_FRAGMENTS} surviving components ⇒ collapse to a
+ *   <li><b>Uniform fast-paths (TRULY-uniform only — §5.5 amended).</b> {@code passCount == 0} ⇒
+ *       {@link RegionFragments#KIND_SOLID}. {@code standCount == 0 && solidCount == 0 &&
+ *       (waterCount == 0 || waterCount == passCount)} ⇒ uniform {@link RegionFragments#KIND_AIR} /
+ *       {@link RegionFragments#KIND_WATER} with NO flood (deep ocean and open sky stay cheap, 6-bit
+ *       records) — kind is exact by construction and IMPLIES W; ¬S is genuinely correct for an all-water
+ *       cube (its surface lives in the leaf above). Every OTHER floorless leaf (mixed media, or any solid
+ *       content — pillars/walls over void) takes the fragment path below and gets exact per-fragment
+ *       types (an ocean-surface leaf = one fragment {@code {S,W}}).</li>
+ *   <li><b>Flood fill</b> (BFS) the passable cells, 6-connected → components (beats union-find ~2.2× on
+ *       the common large-component case — HPA-FRAGMENTS.md §4). During the flood each component accumulates
+ *       its type bits: {@code W |= water[c]}; {@code S |= footing && airOnlyHeadroom} where footing =
+ *       (standable floor directly below OR water at the cell) and airOnlyHeadroom = the cell above is
+ *       passable and NOT water (grid-top optimistic-open, out-of-grid-below conservative no-floor).</li>
+ *   <li><b>Keep all.</b> Every component is a fragment — no discard. (The old occupiability filter's
+ *       checkerboard/speckle strip is gone; such noise now trips the cap instead, which the §8 census
+ *       ratified as the de-facto coarse abstraction policy.)</li>
+ *   <li><b>Cap.</b> {@code > }{@value RegionFragments#MAX_FRAGMENTS} components ⇒ collapse to a
  *       passability-weighted uniform mass ({@link RegionFragments#isCollapsed()}), bounding storage and the
  *       abstract-node count under adversarial terrain. Safe because the block tier is the source of truth.</li>
  *   <li><b>Footprint.</b> For each kept fragment, the 2D bbox of its cells on each touched face (its opening),
@@ -62,6 +68,9 @@ public final class FragmentBuilder {
      */
     public static final int STONE_HARDNESS_NIBBLE = 4;
 
+    /** All-false water mask standing in for {@code water == null} (a provably-dry build) — never written. */
+    private static final boolean[] DRY = new boolean[MAX_CELLS];
+
     // Reusable scratch (no per-cell allocation; reset at the top of each build).
     private static final ThreadLocal<int[]> LABEL = ThreadLocal.withInitial(() -> new int[MAX_CELLS]);
     private static final ThreadLocal<int[]> QUEUE = ThreadLocal.withInitial(() -> new int[MAX_CELLS]);
@@ -73,19 +82,24 @@ public final class FragmentBuilder {
     private static final ThreadLocal<int[]> PACKED = ThreadLocal.withInitial(() -> new int[6]);
 
     /**
-     * Build a region's fragment record from passability + standability masks and pre-tallied counts.
+     * Build a region's fragment record from passability + standability + water masks and pre-tallied counts.
      *
      * @param passable          per-cell passable mask (no collision: air/plant/fluid), the flood membership
      * @param standable         per-cell standable mask (a solid-topped block you stand ON)
+     * @param water             per-cell water mask (descriptor fluid == WATER on a passable cell), the
+     *                          per-fragment type source; {@code null} = provably dry (every cell non-water).
+     *                          Must be consistent with {@code waterCount} — a non-null mask's set-bit count
+     *                          over passable cells IS the tally.
      * @param G                 grid side (a power of two ≤ {@link #MAX_G}); 16 at the leaf
      * @param passCount         number of passable cells (for {@code passFrac} + the all-solid fast-path)
-     * @param standCount        number of standable cells (for the floorless air/water fast-path)
-     * @param waterCount        number of passable cells holding water (air-vs-water split for a floorless leaf)
+     * @param standCount        number of standable cells (the truly-uniform floorless eligibility)
+     * @param waterCount        number of passable cells holding water (the truly-uniform all-dry/all-water
+     *                          split)
      * @param hardnessSumSolid  Σ quantized NavBlock hardness over the region's SOLID (non-passable) cells
      * @param solidCount        number of SOLID cells (the divisor for {@code avgSolidHardness})
      * @param out               the record to reset and fill
      */
-    public static void build(boolean[] passable, boolean[] standable, int G,
+    public static void build(boolean[] passable, boolean[] standable, boolean[] water, int G,
                              int passCount, int standCount, int waterCount,
                              long hardnessSumSolid, int solidCount,
                              RegionFragments out) {
@@ -96,27 +110,23 @@ public final class FragmentBuilder {
         out.setPassFrac(nibbleFraction(passCount, cells));
         out.setAvgSolidHardness(avgSolidHardnessNibble(hardnessSumSolid, solidCount));
 
-        // 1) Uniform fast-paths (HPA-FRAGMENTS.md §2.3): store no fragments.
+        // 1) Uniform fast-paths (HPA-FRAGMENTS.md §2.3; DESIGN-typed-fragments.md §5.5 AMENDED): store no
+        // fragments. Only TRULY-uniform leaves qualify — kind is then exact by construction (AIR IMPLIES
+        // dry, WATER implies all-water; ¬S is genuinely correct for a fully-submerged cube, its surface
+        // lives in the leaf above). Every other floorless leaf (mixed media, or any solid content) falls
+        // through to the flood and gets exact per-fragment types.
         if (passCount == 0) {                         // fully solid → mine straight through
             out.setKind(RegionFragments.KIND_SOLID);
             return;
         }
-        if (standCount == 0) {                        // no floor → floorless air or water column
-            // KIND_AIR is a capability gate's PROOF OBLIGATION — the region tier's no-place gate
-            // (RegionPathfinder's relax loop) drops lateral/upward entry into a uniform-AIR region on the
-            // claim "provably nothing swimmable here". With ANY water present that claim is false: the old
-            // majority vote labeled a surface leaf that is mostly air over a sliver of ocean KIND_AIR, and
-            // the gate then refused transit through genuinely swimmable cells — a coarse-graph FALSE
-            // DISCONNECTION, which never converges (the block tier can invalidate an optimistic edge online,
-            // but a pessimistically-missing edge is never rediscovered). So: AIR only when waterCount == 0;
-            // any water ⇒ KIND_WATER. Over-classifying toward WATER errs toward optimism — the system's
-            // safe direction — and the cost error is bounded (a mostly-air leaf gets swim-priced transit).
+        if (standCount == 0 && solidCount == 0 && (waterCount == 0 || waterCount == passCount)) {
             out.setKind(waterCount == 0 ? RegionFragments.KIND_AIR : RegionFragments.KIND_WATER);
             return;
         }
 
-        // 2) MIXED: flood the passable cells, filter by occupiability, cap, extract footprints.
+        // 2) Flood the passable cells (keep-all), computing per-component types, cap, extract footprints.
         out.setKind(RegionFragments.KIND_MIXED);
+        final boolean[] wat = water != null ? water : DRY;
 
         // Leaf-scale label emission (label-slab membership): the flood below visits every
         // passable cell anyway and the queue holds exactly one component's cells at a time, so stamping each
@@ -143,8 +153,8 @@ public final class FragmentBuilder {
         final int[] maxV = FACE_MAX_V.get();
         final int[] packed = PACKED.get();
 
-        int comp = 0;     // raw component id (pre-filter)
-        int kept = 0;     // surviving occupiable fragments written
+        int comp = 0;     // raw component id (the flood label)
+        int kept = 0;     // fragments written (keep-all: kept == comp, both count every component)
         boolean collapsed = false;
 
         for (int seed = 0; seed < cells; seed++) {
@@ -159,7 +169,8 @@ public final class FragmentBuilder {
             int head = 0, tail = 0;
             queue[tail++] = seed;
             label[seed] = comp;
-            boolean occupiable = false;
+            boolean typeS = false; // surfaceable: footing (floor below OR water here) + air-only headroom
+            boolean typeW = false; // hasWater: any water cell in the component
 
             while (head < tail) {
                 int c = queue[head++];
@@ -167,12 +178,18 @@ public final class FragmentBuilder {
                 int z = (c >> gbits) & gmask;
                 int y = c >> g2bits;
 
-                // Occupiability: a passable cell with a standable floor below and ≥2-tall headroom above.
-                // Out-of-grid below ⇒ no floor (conservative); out-of-grid above ⇒ open (optimistic).
-                if (!occupiable) {
-                    boolean floorBelow = (y > 0) && standable[c - G2];
-                    boolean headAbove = (y == G - 1) || passable[c + G2];
-                    if (floorBelow && headAbove) occupiable = true;
+                // Type bits (DESIGN-typed-fragments.md §2, §5.2). Footing = standable floor directly below
+                // OR water at the cell (tread); headroom must be AIR-only — passable and NOT water (the
+                // verified defect in the old occupiability headroom: passable[] includes water, so submerged
+                // floors counted). Out-of-grid below ⇒ no floor (conservative); grid-top ⇒ open (optimistic).
+                boolean cellWater = wat[c];
+                if (cellWater) typeW = true;
+                if (!typeS) {
+                    boolean footing = cellWater || ((y > 0) && standable[c - G2]);
+                    if (footing) {
+                        boolean headAir = (y == G - 1) || (passable[c + G2] && !wat[c + G2]);
+                        if (headAir) typeS = true;
+                    }
                 }
 
                 // Face membership + bbox accumulation (per-face in-face axes per RegionFragments Javadoc).
@@ -193,8 +210,7 @@ public final class FragmentBuilder {
             }
             comp++;
 
-            if (!occupiable) continue;                 // filter: a non-occupiable component is not a fragment
-
+            // Keep-all: EVERY component is a fragment (the occupiability discard is gone — types annotate).
             if (kept < RegionFragments.MAX_FRAGMENTS) {
                 int faceMaskBits = 0;
                 for (int f = 0; f < 6; f++) {
@@ -206,6 +222,8 @@ public final class FragmentBuilder {
                     }
                 }
                 out.setFragment(kept, faceMaskBits, packed);
+                out.setFragmentTypes(kept, (typeS ? RegionFragments.TYPE_S : 0)
+                                         | (typeW ? RegionFragments.TYPE_W : 0));
                 if (emitLabels) {
                     // The queue holds exactly this component's cells (0..tail) — stamp them with the kept id
                     // (the labelAll() stamping idiom).
@@ -221,7 +239,7 @@ public final class FragmentBuilder {
             out.setCollapsed(true);
             out.setFragmentCount(0);                    // §5: collapsed ⇒ no fragment records
         } else {
-            // kept in 0..MAX_FRAGMENTS. 0 = occupiability stripped every component (uniform mine-through mass).
+            // kept in 1..MAX_FRAGMENTS (keep-all: passCount > 0 guarantees ≥1 component at the leaf).
             out.setFragmentCount(kept);
         }
         if (emitLabels && !collapsed && kept >= 2) {
@@ -230,33 +248,44 @@ public final class FragmentBuilder {
     }
 
     /**
-     * The kept fragment id (0..{@link RegionFragments#MAX_FRAGMENTS}-1) whose 6-connected occupiable component
+     * The kept fragment id (0..{@link RegionFragments#MAX_FRAGMENTS}-1) whose 6-connected passable component
      * contains cell {@code seedCell} — the <b>flood-from-bot start-fragment resolver</b> (PERF-DESIGN region §4).
-     * Returns {@code -1} when the seed's component is not a fragment (non-occupiable), the region over-flowed the
-     * cap and collapsed (so the stored record holds no fragments), or the seed cell isn't passable — the caller
-     * then falls back to nearest-centroid.
+     * Returns {@code -1} when the region over-flowed the cap and collapsed (so the stored record holds no
+     * fragments) or the seed cell isn't passable — the caller then falls back to nearest-centroid. Under
+     * keep-all (DESIGN-typed-fragments.md §5.2) every passable cell of an un-collapsed region belongs to a
+     * kept fragment.
      *
-     * <p>This reproduces {@link #build}'s exact deterministic flood, occupiability filter, and {@code kept}
-     * counter over the <b>same</b> {@code passable}/{@code standable} masks, so the returned id is byte-identical
+     * <p>This reproduces {@link #build}'s exact deterministic flood and {@code kept}
+     * counter over the <b>same</b> {@code passable} mask, so the returned id is byte-identical
      * to the fragment id {@code build} assigned to that component in the stored {@link RegionFragments} record —
      * no footprint signature-matching, no ambiguity. Nearest-centroid mis-assigns a bot at the bottom of a tall
      * fragment to a nearby pocket's (closer) centroid; flooding the bot's own cell is exact. Cold-start only (one
      * extra flood, a few µs); reuses the same thread-local {@link #LABEL}/{@link #QUEUE} scratch as {@link #build}
-     * and does no face-bbox work (membership only).
+     * and does no face-bbox/type work (membership only; the {@code standable}/{@code water} masks are
+     * consulted only for the truly-uniform eligibility below).
+     *
+     * <p>A TRULY-uniform region (floorless, no solid, all-dry or all-water — {@link #build}'s §5.5-amended
+     * fast path) stores a UNIFORM record (no fragments), so this resolver answers {@code -1} for its cells
+     * (the stored record holds no fragment the id could name), exactly mirroring what {@code build}
+     * publishes. Every other region's passable cells resolve to their kept component id (keep-all).
      *
      * @param passable  the SAME passable mask the stored record was built from (flood membership)
-     * @param standable the SAME standable mask (occupiability floor test)
+     * @param standable the SAME standable mask (the truly-uniform eligibility test)
+     * @param water     the SAME water mask ({@code null} = provably dry — same contract as {@link #build})
      * @param G         grid side (a power of two ≤ {@link #MAX_G}); 16 at the leaf
      * @param seedCell  the bot's cell as a flat {@code (y<<2·gbits)|(z<<gbits)|x} index
      */
-    public static int fragmentContaining(boolean[] passable, boolean[] standable, int G, int seedCell) {
+    public static int fragmentContaining(boolean[] passable, boolean[] standable, boolean[] water,
+                                         int G, int seedCell) {
         final int cells = G * G * G;
         if (seedCell < 0 || seedCell >= cells || !passable[seedCell]) {
             return -1;
         }
+        if (trulyUniform(passable, standable, water, cells)) {
+            return -1; // build() emitted a uniform record — no fragment ids exist
+        }
 
         final int gbits = Integer.numberOfTrailingZeros(G);
-        final int g2bits = gbits * 2;
         final int gmask = G - 1;
         final int G2 = G * G;
 
@@ -264,9 +293,8 @@ public final class FragmentBuilder {
         final int[] queue = QUEUE.get();
         Arrays.fill(label, 0, cells, -1);
 
-        int comp = 0;      // raw component id (pre-filter) — mirrors build()
-        int kept = 0;      // surviving occupiable fragments so far — mirrors build()'s kept
-        int target = -1;   // kept id of the seed's component (once found), if occupiable + within cap
+        int comp = 0;      // component id — mirrors build()'s kept counter (keep-all: kept == comp)
+        int target = -1;   // id of the seed's component (once found), if within cap
         boolean collapsed = false;
 
         for (int seed = 0; seed < cells; seed++) {
@@ -275,7 +303,6 @@ public final class FragmentBuilder {
             int head = 0, tail = 0;
             queue[tail++] = seed;
             label[seed] = comp;
-            boolean occupiable = false;
             boolean containsTarget = false;
 
             while (head < tail) {
@@ -283,13 +310,7 @@ public final class FragmentBuilder {
                 if (c == seedCell) containsTarget = true;
                 int x = c & gmask;
                 int z = (c >> gbits) & gmask;
-                int y = c >> g2bits;
-
-                if (!occupiable) {
-                    boolean floorBelow = (y > 0) && standable[c - G2];
-                    boolean headAbove = (y == G - 1) || passable[c + G2];
-                    if (floorBelow && headAbove) occupiable = true;
-                }
+                int y = c >> (gbits * 2);
 
                 if (x > 0     && passable[c - 1]  && label[c - 1]  == -1) { label[c - 1]  = comp; queue[tail++] = c - 1; }
                 if (x < gmask && passable[c + 1]  && label[c + 1]  == -1) { label[c + 1]  = comp; queue[tail++] = c + 1; }
@@ -298,15 +319,13 @@ public final class FragmentBuilder {
                 if (y > 0     && passable[c - G2] && label[c - G2] == -1) { label[c - G2] = comp; queue[tail++] = c - G2; }
                 if (y < gmask && passable[c + G2] && label[c + G2] == -1) { label[c + G2] = comp; queue[tail++] = c + G2; }
             }
-            comp++;
 
-            if (!occupiable) continue;               // not a fragment (matches build()'s filter)
-            if (kept < RegionFragments.MAX_FRAGMENTS) {
-                if (containsTarget) target = kept;
+            if (comp < RegionFragments.MAX_FRAGMENTS) {
+                if (containsTarget) target = comp;
             } else {
                 collapsed = true;                    // over cap → the whole region collapses (no stored fragments)
             }
-            kept++;
+            comp++;
         }
 
         // A collapsed region stores fragmentCount 0, so any id we found is meaningless → fall back to centroid.
@@ -314,28 +333,47 @@ public final class FragmentBuilder {
     }
 
     /**
+     * Mirrors {@link #build}'s truly-uniform fast-path predicate (§5.5 amended) from raw masks: floorless
+     * (no standable cell), no solid content (every cell passable), and a uniform medium (all-dry or
+     * all-water). Early-exit scan — cold-path cost, cheaper than the flood it replaces when true.
+     */
+    private static boolean trulyUniform(boolean[] passable, boolean[] standable, boolean[] water, int cells) {
+        int waterCount = 0;
+        for (int i = 0; i < cells; i++) {
+            if (standable[i] || !passable[i]) return false; // floor or solid content ⇒ fragment path
+            if (water != null && water[i]) waterCount++;
+        }
+        return waterCount == 0 || waterCount == cells;      // uniform medium (all-dry or all-water)
+    }
+
+    /**
      * Label <b>every</b> cell with its kept fragment id in one flood — the whole-region form of
      * {@link #fragmentContaining}, for callers that will query many cells of the same region (the goal
      * dig-flood's per-build label slabs). After this returns, {@code out[i]} equals what
-     * {@code fragmentContaining(passable, standable, G, i)} would return for every cell {@code i}: the kept id
-     * (0..{@link RegionFragments#MAX_FRAGMENTS}-1) of the occupiable component containing {@code i}, or
-     * {@code -1} for a non-passable cell, a non-occupiable component, or — matching the single-target resolver's
-     * collapsed contract — for <b>every</b> cell when the region over-flowed the fragment cap (the stored record
-     * holds no fragments, so no id is meaningful). Same deterministic flood order, same occupiability filter,
-     * same {@code kept} counter as {@link #build}, so the ids are byte-identical to the stored record's.
+     * {@code fragmentContaining(passable, standable, water, G, i)} would return for every cell {@code i}: the
+     * kept id (0..{@link RegionFragments#MAX_FRAGMENTS}-1) of the passable component containing {@code i}
+     * (keep-all — every component is a fragment), or {@code -1} for a non-passable cell, or — matching the
+     * single-target resolver's contract — for <b>every</b> cell when the region over-flowed the fragment cap
+     * OR is TRULY uniform (build()'s §5.5-amended fast path; either way the stored record holds no
+     * fragments, so no id is meaningful). Same deterministic flood order, same {@code kept} counter as
+     * {@link #build}, so the ids are byte-identical to the stored record's.
      *
      * <p>Reuses the same thread-local {@link #LABEL}/{@link #QUEUE} scratch as {@link #build} (single-threaded
      * per thread, like every other entry point here); the {@code out} slab is caller-owned. Cost is one flood of
      * the region — the same bill as ONE {@code fragmentContaining} call, amortized over all 4096 cells.
      *
      * @param passable  the SAME passable mask the stored record was built from (flood membership)
-     * @param standable the SAME standable mask (occupiability floor test)
+     * @param standable the SAME standable mask (the truly-uniform eligibility test)
+     * @param water     the SAME water mask ({@code null} = provably dry — same contract as {@link #build})
      * @param G         grid side (a power of two ≤ {@link #MAX_G}); 16 at the leaf
      * @param out       caller-owned slab of at least {@code G³} cells, fully overwritten
      */
-    public static void labelAll(boolean[] passable, boolean[] standable, int G, byte[] out) {
+    public static void labelAll(boolean[] passable, boolean[] standable, boolean[] water, int G, byte[] out) {
         final int cells = G * G * G;
         Arrays.fill(out, 0, cells, (byte) -1);
+        if (trulyUniform(passable, standable, water, cells)) {
+            return; // build() emitted a uniform record — fragmentContaining answers -1 everywhere
+        }
 
         final int gbits = Integer.numberOfTrailingZeros(G);
         final int gmask = G - 1;
@@ -345,8 +383,7 @@ public final class FragmentBuilder {
         final int[] queue = QUEUE.get();
         Arrays.fill(label, 0, cells, -1);
 
-        int comp = 0;      // raw component id (pre-filter) — mirrors build()
-        int kept = 0;      // surviving occupiable fragments so far — mirrors build()'s kept
+        int comp = 0;      // component id — mirrors build()'s kept counter (keep-all: kept == comp)
         boolean collapsed = false;
 
         for (int seed = 0; seed < cells; seed++) {
@@ -355,19 +392,12 @@ public final class FragmentBuilder {
             int head = 0, tail = 0;
             queue[tail++] = seed;
             label[seed] = comp;
-            boolean occupiable = false;
 
             while (head < tail) {
                 int c = queue[head++];
                 int x = c & gmask;
                 int z = (c >> gbits) & gmask;
                 int y = c >> (gbits * 2);
-
-                if (!occupiable) {
-                    boolean floorBelow = (y > 0) && standable[c - G2];
-                    boolean headAbove = (y == G - 1) || passable[c + G2];
-                    if (floorBelow && headAbove) occupiable = true;
-                }
 
                 if (x > 0     && passable[c - 1]  && label[c - 1]  == -1) { label[c - 1]  = comp; queue[tail++] = c - 1; }
                 if (x < gmask && passable[c + 1]  && label[c + 1]  == -1) { label[c + 1]  = comp; queue[tail++] = c + 1; }
@@ -376,16 +406,14 @@ public final class FragmentBuilder {
                 if (y > 0     && passable[c - G2] && label[c - G2] == -1) { label[c - G2] = comp; queue[tail++] = c - G2; }
                 if (y < gmask && passable[c + G2] && label[c + G2] == -1) { label[c + G2] = comp; queue[tail++] = c + G2; }
             }
-            comp++;
 
-            if (!occupiable) continue;               // not a fragment (matches build()'s filter)
-            if (kept < RegionFragments.MAX_FRAGMENTS) {
+            if (comp < RegionFragments.MAX_FRAGMENTS) {
                 // The queue holds exactly this component's cells (0..tail) — stamp them with the kept id.
-                for (int q = 0; q < tail; q++) out[queue[q]] = (byte) kept;
+                for (int q = 0; q < tail; q++) out[queue[q]] = (byte) comp;
             } else {
                 collapsed = true;                    // over cap → the whole region collapses (no stored fragments)
             }
-            kept++;
+            comp++;
         }
 
         if (collapsed) {

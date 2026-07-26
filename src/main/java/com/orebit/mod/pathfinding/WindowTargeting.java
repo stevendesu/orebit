@@ -79,9 +79,18 @@ final class WindowTargeting {
      * mid-air cell is acceptable is {@link #airTargetOk caps + direction}-aware (a place-capable bot climbing
      * upward may target air; everyone else needs standable ground). For a <b>center-model</b> skeleton (coarse
      * branch) or when no window step yields a cell, the far region's center projected to a standable floor.
+     *
+     * <p><b>Water targets swim level with the bot</b> (the P6 sea-floor-swimming fix): a raw PORTAL target (and
+     * the CENTER projection) that lands in swimmable water gets its Y {@link #rederiveSwimTargetY re-derived}
+     * within its own water column toward {@code botFloor}'s feet level — see the helper's Javadoc for the
+     * mechanism and why the fix lives HERE and not in the region tier's anchor. {@code botFloor} is the bot's
+     * current FLOOR cell (the block stood on / the water cell under the feet — the same convention
+     * {@code PathPlan.replanBlock} hands the block A*); feet = {@code botFloor.y + 1}. Non-water targets never
+     * read it — every dry path returns byte-identical cells.
      */
-    Result target(RegionPathPlan skeleton, int windowStart, int windowLast) {
+    Result target(RegionPathPlan skeleton, int windowStart, int windowLast, BlockPos botFloor) {
         final int last = windowLast;
+        final int botFeetY = botFloor.getY() + 1;
         // Goal in window? The goal region is the skeleton's tail iff reachedGoalRegion; treat "goal region
         // index ≤ last" by checking whether any window region equals the goal region.
         if (skeleton.reachedGoalRegion()) {
@@ -129,7 +138,10 @@ final class WindowTargeting {
                 }
                 final boolean airOK = airTargetOk(skeleton, i);
                 if (isUsableTarget(grid, p, airOK)) {
-                    return new Result(p, i, PathPlan.TargetKind.PORTAL); // the stored centroid is itself a usable target — best case
+                    // The stored centroid is itself a usable target — best case. A SWIMMABLE centroid's Y is
+                    // re-derived toward the bot's feet within its own column (P6 — see rederiveSwimTargetY);
+                    // every non-water centroid passes through untouched (the helper returns p itself).
+                    return new Result(rederiveSwimTargetY(grid, minY, p, botFeetY), i, PathPlan.TargetKind.PORTAL);
                 }
                 // BURIED centroid + break-capable bot (2026-07-06 incident): the centroid landed in solid rock
                 // without the region tier committing a dig (the lossy bbox center just missed the opening — or
@@ -192,8 +204,63 @@ final class WindowTargeting {
             }
         }
         BlockPos center = skeleton.centerOf(last);
-        BlockPos floor = projectToStandableFloor(center);
+        BlockPos floor = projectToStandableFloor(center, botFeetY);
         return new Result((floor != null) ? floor : center, last, PathPlan.TargetKind.CENTER);
+    }
+
+    /**
+     * Re-derive a <b>swimmable-water</b> target cell's Y — and ONLY its Y — toward the bot's current feet
+     * level, within the target's own water column (the P6 sea-floor-swimming fix).
+     *
+     * <p><b>The pathology</b>: a portal cell's vertical coordinate is the region tier's Standable-Δy anchor —
+     * the BOTTOM of the passable opening ({@code RegionPathfinder.footprintCenterWorld}), or the region-row
+     * bottom for a uniform-water face. That anchor is deliberately floor-referenced for WALKERS (honest Δy
+     * billing against the walking surface) and is also the region tier's Δy <i>cost</i> anchor, so it must NOT
+     * be re-anchored there. But handed raw to the block A* as a window target (which {@link #isUsableTarget}
+     * rightly accepts — a swimmable cell is occupiable), its opening-bottom Y is binding to within the block
+     * tier's ±2 goal tolerance — successive window targets all sit at opening-bottom depth and ocean travel
+     * hugs the seafloor (mixed rows) or the row-bottom plane (uniform ocean rows), diving ~14 blocks for no
+     * reason. The block heuristic (symmetric octile) then honestly pulls toward that depth; no other layer
+     * injects the dive.
+     *
+     * <p><b>The rule</b>: keep XZ (the skeleton's routing information) and pick the water cell in the target's
+     * column <b>nearest the bot's feet Y</b> — the span is contiguous, so nearest = clamp into it. The span is
+     * the contiguous swimmable run containing the raw Y, bounded to the raw cell's own 16-tall level-0 region
+     * row (the target must stay inside the skeleton step's region — the geometry {@code windowTargetStep}
+     * asserts) and stopped at the first non-swimmable cell (a waterlogged fence / bubble column breaks the
+     * span; stopping there keeps the target reachable and fragment-contiguous). The result: ocean travel stays
+     * LEVEL with the bot — no dive to the floor, no forced surfacing — and a bot entering water at depth keeps
+     * its depth. A {@code needsBreath}-aware refinement (prefer the TOP of the span for air access) is
+     * deliberately NOT implemented: {@link BotCaps} does not model breath (its realizability-sig bit 43 is
+     * reserved-unset until the search models submersion budgets), so nearest-bot-Y is the whole rule.
+     *
+     * <p>Non-water cells (including unbuilt ones) return {@code p} itself — every dry caller path is
+     * byte-identical. Cost: ≤16 descriptor reads down one column, replan cadence (cold); allocates at most one
+     * {@code BlockPos}, and none when the Y is already nearest. Package-private static so the headless unit
+     * test can drive it over a synthetic {@link NavGridView}.
+     */
+    static BlockPos rederiveSwimTargetY(NavGridView grid, int minY, BlockPos p, int botFeetY) {
+        final int x = p.getX(), y = p.getY(), z = p.getZ();
+        if (!grid.built(x, y, z) || !NavBlock.isSwimmableWater(grid.descriptorAt(x, y, z))) {
+            return p;
+        }
+        // The raw cell's own 16-tall level-0 region row — the vertical bound that keeps the re-derived target
+        // inside the skeleton step's region.
+        final int ry = RegionAddress.regionY(y, 0, minY);
+        final int y0 = minY + (ry << RegionAddress.LEAF_BITS);
+        final int y1 = y0 + RegionAddress.LEAF_SIZE - 1;
+        // Expand the contiguous swimmable span around the raw Y (stop at the first non-swimmable cell).
+        int lo = y, hi = y;
+        while (lo - 1 >= y0 && grid.built(x, lo - 1, z)
+                && NavBlock.isSwimmableWater(grid.descriptorAt(x, lo - 1, z))) {
+            lo--;
+        }
+        while (hi + 1 <= y1 && grid.built(x, hi + 1, z)
+                && NavBlock.isSwimmableWater(grid.descriptorAt(x, hi + 1, z))) {
+            hi++;
+        }
+        final int ny = Math.max(lo, Math.min(hi, botFeetY));
+        return (ny == y) ? p : new BlockPos(x, ny, z);
     }
 
     /**
@@ -367,11 +434,27 @@ final class WindowTargeting {
      * for a built cell whose descriptor is {@link NavBlock#isStandable standable}. Returns {@code null} if the
      * column has no standable floor (the caller then uses the raw center). Reads through a fresh
      * {@link NavGridView}; allocation here is bounded (one view, one scan) and happens only on replan.
+     *
+     * <p><b>Water clause</b> (P6, same rule as the PORTAL arm): when the center cell itself is swimmable
+     * water, the CENTER target is the water cell in that column nearest the bot's feet Y
+     * ({@link #rederiveSwimTargetY}) — NOT a standable floor. Without this the projection either found the
+     * seafloor (a mixed row's only standable cells — the dive) or found nothing at all (a uniform ocean row)
+     * and aimed at the raw row-center. A dry / non-swimmable center keeps the standable scan byte-identically.
      */
-    private BlockPos projectToStandableFloor(BlockPos center) {
-        final NavGridView grid = new NavGridView(level);
+    private BlockPos projectToStandableFloor(BlockPos center, int botFeetY) {
+        return projectToStandableFloor(new NavGridView(level), minY, center, botFeetY);
+    }
+
+    /** The {@link #projectToStandableFloor(BlockPos, int)} core over an explicit grid view — package-private
+     *  static so the headless unit test can drive it over a synthetic {@link NavGridView}. */
+    static BlockPos projectToStandableFloor(NavGridView grid, int minY, BlockPos center, int botFeetY) {
         final int cx = center.getX();
         final int cz = center.getZ();
+        // WATER clause (P6): a swimmable center swims level with the bot instead of demanding a floor.
+        if (grid.built(cx, center.getY(), cz)
+                && NavBlock.isSwimmableWater(grid.descriptorAt(cx, center.getY(), cz))) {
+            return rederiveSwimTargetY(grid, minY, center, botFeetY);
+        }
         // The level-0 region this center belongs to, and that region's vertical block span [y0, y0+16).
         final int ry = RegionAddress.regionY(center.getY(), 0, minY);
         final int y0 = minY + (ry << RegionAddress.LEAF_BITS);

@@ -64,9 +64,10 @@ public final class RegionCrossingMemory {
      *  {@link #evictLeafTouching}'s containing-coarse eviction when any leaf under it changes. */
     public static final int PROV_ROLLED_UP = 2;
 
-    /** The region part of a {@code RegionPathfinder.fragmentNodeKey} — {@code packLevelKey} bits 0..49 (the
-     *  6-bit fragment id sits at bits 50..55). Masking with this compares REGION identity across fragments. */
-    private static final long REGION_MASK = (1L << 50) - 1;
+    /** The region part of a {@code RegionPathfinder.fragmentNodeKey} — {@code packLevelKey} bits 0..48 (the
+     *  6-bit fragment id sits at bits 49..54). Masking with this compares REGION identity across fragments.
+     *  (2026-07 packLevelKey repack: ry narrowed 6→5 bits, region 0..48, frag shift 50→49.) */
+    private static final long REGION_MASK = (1L << 49) - 1;
 
     private final long[][] from = new long[RegionAddress.MAX_COARSE_LEVEL + 1][];
     private final long[][] to   = new long[RegionAddress.MAX_COARSE_LEVEL + 1][];

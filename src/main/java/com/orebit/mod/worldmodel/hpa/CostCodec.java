@@ -61,7 +61,7 @@ public final class CostCodec {
     }
 
     // ===================================================================================================
-    // Fragment-model region record (un)packing (HPA-FRAGMENTS.md §5)
+    // Fragment-model region record (un)packing (HPA-FRAGMENTS.md §5; DESIGN-typed-fragments.md §5.3–§5.4)
     // ===================================================================================================
     //
     // A region record is variable-length and NOT byte-aligned — a sub-byte bitstream, exactly as the
@@ -69,18 +69,21 @@ public final class CostCodec {
     //
     //   kind             : 2 bits   (MIXED=0 | SOLID=1 | AIR=2 | WATER=3)
     //   avgSolidHardness : 4 bits
-    //   --- uniform kinds (SOLID/AIR/WATER) STOP HERE: 6 bits total. A uniform region carries no passFrac
-    //       (its crossing cost is implied by kind — SOLID mines, AIR chutes, WATER swims), no count, no
-    //       fragments. This is the §5 "uniform = 6 bits" sizing; the in-RAM RegionFragments still exposes a
-    //       passFrac field, but it is meaningful only for MIXED. ---
+    //   --- uniform kinds (SOLID/AIR/WATER) STOP HERE: 6 bits total. A uniform record is TRULY uniform
+    //       (typed-fragments §5.5 amended), so kind alone is exact — AIR implies dry, WATER implies
+    //       all-water; no extra water bit. A uniform region carries no passFrac (its crossing cost is
+    //       implied by kind — SOLID mines, AIR chutes, WATER swims), no count, no fragments; the in-RAM
+    //       RegionFragments still exposes a passFrac field, but it is meaningful only for MIXED. ---
     //   passFrac         : 4 bits   (MIXED only — the collapsed/uniform-mass crossing cost)
-    //   fragmentCount    : 6 bits   (MIXED only — 0 = honestly-ZERO kept fragments (occupiability-stripped /
-    //                                coarse no-passable-item mass, collapsed=false); 1..62 = exact count;
+    //   fragmentCount    : 6 bits   (MIXED only — 0 = honestly-ZERO kept fragments (coarse no-passable-item
+    //                                mass, collapsed=false); 1..62 = exact count;
     //                                63 = RegionFragments.FRAGMENT_COUNT_COLLAPSED, the cap-collapsed sentinel
     //                                (collapsed=true). Both 0 and 63 carry no fragment records; cross-cost
     //                                comes from passFrac. Depth-nibble precedent: 0..N exact, top code = flag.)
     //   fragment[count] {
     //     faceMask       : 6 bits
+    //     typeS          : 1 bit    (surfaceable — DESIGN-typed-fragments.md §2; the type bits sit after
+    //     typeW          : 1 bit     faceMask and before the footprints; typeW = the fragment holds water)
     //     per set face f : 16 bits  (the packed footprint = minU<<12|maxU<<8|minV<<4|maxV, 4 bits each)
     //   }
     //
@@ -101,7 +104,7 @@ public final class CostCodec {
         p = writeBits(buf, p, rf.kind(), 2);
         p = writeBits(buf, p, rf.avgSolidHardness(), 4);
         if (rf.kind() != RegionFragments.KIND_MIXED) {
-            return p; // uniform — 6 bits, no passFrac / count / fragments
+            return p; // uniform — 6 bits, no passFrac / count / fragments (kind is exact, §5.5 amended)
         }
         p = writeBits(buf, p, rf.passFrac(), 4);
         // A cap-collapsed record (fragmentCount 0 in RAM, collapsed flag set) writes the count-field
@@ -114,6 +117,8 @@ public final class CostCodec {
         for (int f = 0; f < count; f++) {
             int mask = rf.faceMask(f);
             p = writeBits(buf, p, mask, 6);
+            p = writeBits(buf, p, rf.typeS(f) ? 1 : 0, 1); // type bits after faceMask, before footprints
+            p = writeBits(buf, p, rf.typeW(f) ? 1 : 0, 1);
             for (int face = 0; face < 6; face++) {
                 if ((mask & (1 << face)) != 0) {
                     p = writeBits(buf, p, rf.footprint(f, face) & 0xFFFF, 16);
@@ -127,8 +132,8 @@ public final class CostCodec {
      * Unpack a region's fragment record from {@code buf} at bit offset {@code bitPos} into {@code out}
      * (reset at flood grid side {@code gridSize}), returning the end bit offset. The inverse of
      * {@link #packRegion}; a packed-then-unpacked record is field-identical for everything the schema
-     * persists (kind, hardness, passFrac, count, per-fragment faceMask + footprints, and the collapsed
-     * flag). A MIXED record whose on-wire count is {@link RegionFragments#FRAGMENT_COUNT_COLLAPSED} decodes
+     * persists (kind, hardness, passFrac, count, per-fragment faceMask + type bits + footprints, and the
+     * collapsed flag). A MIXED record whose on-wire count is {@link RegionFragments#FRAGMENT_COUNT_COLLAPSED} decodes
      * as {@code fragmentCount == 0} with {@link RegionFragments#isCollapsed() collapsed}{@code == true};
      * a count of {@code 0} decodes as honestly-zero ({@code collapsed == false}).
      */
@@ -160,6 +165,8 @@ public final class CostCodec {
         int[] packed = new int[6]; // cold disk path; alloc fine
         for (int f = 0; f < count; f++) {
             int mask = readBits(buf, p, 6); p += 6;
+            int typeBits = (readBits(buf, p, 1) != 0 ? RegionFragments.TYPE_S : 0); p += 1;
+            typeBits |= (readBits(buf, p, 1) != 0 ? RegionFragments.TYPE_W : 0); p += 1;
             for (int face = 0; face < 6; face++) {
                 if ((mask & (1 << face)) != 0) {
                     packed[face] = readBits(buf, p, 16); p += 16;
@@ -168,6 +175,7 @@ public final class CostCodec {
                 }
             }
             out.setFragment(f, mask, packed);
+            out.setFragmentTypes(f, typeBits);
         }
         return p;
     }
@@ -180,7 +188,7 @@ public final class CostCodec {
         int bits = 2 + 4 + 4 + 6; // kind + hardness + passFrac + count
         int count = rf.fragmentCount();
         for (int f = 0; f < count; f++) {
-            bits += 6; // faceMask
+            bits += 6 + 2; // faceMask + type bits (S, W)
             bits += Integer.bitCount(rf.faceMask(f)) * 16; // one 16-bit footprint per set face
         }
         return bits;

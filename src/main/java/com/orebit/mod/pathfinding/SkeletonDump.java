@@ -168,7 +168,7 @@ final class SkeletonDump {
         BlockPos prev = plan.botFloor;
         final int lim = Math.min(plan.blockPlan.size(), 10);
         for (int i = 0; i < lim; i++) {
-            final BlockPos floor = plan.blockPlan.waypoint(i).below(); // waypoint = floor.above() (the stand position)
+            final BlockPos floor = plan.blockPlan.floor(i); // the search-native floor cell (carried, exact on partials)
             final int dx = floor.getX() - prev.getX();
             final int dy = floor.getY() - prev.getY();
             final int dz = floor.getZ() - prev.getZ();

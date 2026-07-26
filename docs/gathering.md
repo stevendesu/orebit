@@ -52,8 +52,8 @@ dig through a wall if [its tools make that cheaper](Optimizations/11_region_heur
 walking around, and route around lava if it's mortal. The gathering behaviour *is* the
 pathfinding behaviour, pointed at a block the bot found itself.
 
-> **On the roadmap.** The per-region resource census now **persists** across restarts
-> (written beside the region cost layer), so a returning bot remembers where the diamonds
-> were without re-exploring. What's still ahead: the session-global abundance tally shown
-> by `/bot report` is rebuilt each run, and prospecting *unloaded* chunks — reasoning about
-> ore the bot has never seen — is a later step.
+> **On the roadmap.** The resource census — including the global abundance tally behind
+> `/bot report` — now **persists** across restarts (written beside the region cost layer),
+> so a returning bot remembers where the diamonds were without re-exploring. What's still
+> ahead: prospecting *unloaded* chunks — reasoning about ore the bot has never seen — is a
+> later step.
