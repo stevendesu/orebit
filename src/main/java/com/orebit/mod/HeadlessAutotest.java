@@ -372,6 +372,21 @@ public final class HeadlessAutotest {
                 sb.append('\n');
             }
             sb.append("signature=").append(Long.toHexString(sig)).append('\n');
+            // Full-geometry box dump (movement-pathology forensics): every NON-AIR block in a radius-3 XZ /
+            // -3..+4 Y box around the start cell, one line per block — enough to reconstruct any single-move
+            // takeoff/landing/corner geometry (diagonals, parkour arcs, head clearance) at a stuck spot.
+            sb.append("box (dx,dy,dz -> block; r=3, dy -3..+4, non-air only):\n");
+            for (int dy = -3; dy <= 4; dy++) {
+                for (int dz = -3; dz <= 3; dz++) {
+                    for (int dx = -3; dx <= 3; dx++) {
+                        var st = level.getBlockState(new BlockPos(sx + dx, start.getY() + dy, sz + dz));
+                        if (!st.isAir()) {
+                            sb.append("  (").append(dx).append(',').append(dy).append(',').append(dz)
+                                    .append(") ").append(st).append('\n');
+                        }
+                    }
+                }
+            }
             Path file = ConfigDir.serverDir(server).resolve("orebit-autotest-startprobe.txt");
             try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
                 w.write(sb.toString());
