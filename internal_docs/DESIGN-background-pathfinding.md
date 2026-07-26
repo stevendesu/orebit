@@ -1,6 +1,8 @@
 # DESIGN — Background-thread pathfinding + time cap + pre-plan/splice (CONDENSED — SHIPPED s44; full text in git history pre-s52)
 
-**Status: fully implemented** behind `pathing.async` (default false = byte-identical sync). In-game
+**Status: fully implemented** behind `pathing.async` — **default TRUE** since the config bake-in
+(`Config.DEFAULT`: async on, 2 planner threads, 250 ms budget); `pathing.async=false` restores the
+byte-identical sync mode, whose node cap is `pathing.syncSearchBudgetNodes` (def 10k). In-game
 verified: complex-path tick time ~8–16 ms → ~3 ms; a 13.6k-node search FOUND past the old 10k cap.
 
 **Where the code lives now:**
@@ -11,8 +13,11 @@ verified: complex-path tick time ~8–16 ms → ~3 ms; a 13.6k-node search FOUND
 - `worldmodel/pathing/NavReclaim.java` — epoch-deferred NavSection retirement
 - `pathfinding/splice/SpliceSeam.java`, `blockpathfinder/EditSnapshot.java`, `PathEdits.addSnapshot`,
   `BlockPathfinder.findPath(..., baseline, budgetNanos)`
-- `pathfinding/PathPlan.java` — submit/poll/seam-adopt; config: `pathing.async` / `maxThreads` /
-  `searchBudgetMs` in `config/ConfigKeys.java`; pool start + reclaim drain in `OrebitCommon.init`
+- `pathfinding/PathPlan.java` — submit/poll/seam-adopt; config: `pathing.async` /
+  `pathing.maxThreads` / `pathing.asyncSearchBudgetMs` (the async wall-clock cap; the old
+  `searchBudgetMs` name is dead) + `pathing.syncSearchBudgetNodes` (sync-mode node cap) in
+  `config/ConfigKeys.java`; pool start + reclaim drain in `OrebitCommon.init`; `/bot config reload`
+  drains the planner pool before rebaking shared tables (§4.4)
 
 **§ map (sections cited by code Javadocs):**
 - §1 problem & scope. §2 what exists (the enablers).
@@ -26,10 +31,16 @@ verified: complex-path tick time ~8–16 ms → ~3 ms; a 13.6k-node search FOUND
   **§4.6** warm-up amendment — `NavWarmup` stays on the tick thread, JIT warmth is JVM-global.
 - §5 async `PathPlan` — the one seam that changes (submit at the settled boundary; `pollWhenPlanless`
   tick-rate first-plan adoption).
-- §6 time-based cap — wall clock is the binding limit (`searchBudgetMs` def 40, checked every 256 pops);
-  the node cap becomes the 262k `TIME_MODE_NODE_BACKSTOP` (memory-only).
+- §6 time-based cap — wall clock is the binding limit (`pathing.asyncSearchBudgetMs`, **def 250**,
+  checked every 256 pops); the node cap becomes the 262k `TIME_MODE_NODE_BACKSTOP` (memory-only).
 - §7 pre-plan + splice — eager next-window plan from the predicted end cell at half-consumed, parked
   until seam-accept; baseline (`EditSnapshot`) seeded AFTER the cameFrom walk so path edits shadow it.
+  **Follower-seam note (2026-07-23):** `BlockPathPlan` now carries per-step search-native floors
+  (`floorYs`, filled by `reconstruct`); seam-adoption/splice adopt whole `BlockPathPlan` objects, so
+  the carry rides the async path with zero seam changes, and the preplan seed uses the carried
+  `path.floor(last)` (not a `floorOf(waypoint)` re-derivation) — `DESIGN-validity-envelopes.md` §6.
+  A validity-envelope FAILED step currently HOLDs (no auto-replan, no async submit) by owner policy
+  — same doc §4.
 - §8 perf accounting. §9 phasing.
 - §10 risks — incl. the shutdown drain-on-stop and the `LAST_EXPANSIONS`/`LAST_WAS_PARTIAL` statics race
   → ThreadLocal accessors `lastExpansions()`/`lastWasPartial()` (code cites this item as §10.6).

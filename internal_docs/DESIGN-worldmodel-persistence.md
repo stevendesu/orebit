@@ -1,27 +1,48 @@
 # DESIGN — Gap B: World-Model Persistence (HPA-IMPLEMENTATION.md §11)
 
-**Status: IMPLEMENTED (core; eager-load + stop-flush + periodic dirty flush).** Persisting the per-`ServerLevel` region tier (`CostPyramid` fragment records + `ResourcePyramid` resource tallies) to disk so the bot's memory of explored terrain survives a level-unload / server restart. This closes the single deferred remainder of the HPA arc (§11) and the `§8.1` deferral of the find-mine-resources arc.
+**Status: IMPLEMENTED — and since re-shipped as the SHARDED format with lazy load + eviction (see the 2026-07 note).** Persisting the per-`ServerLevel` region tier (`CostPyramid` fragment records + `ResourcePyramid` resource tallies) to disk so the bot's memory of explored terrain survives a level-unload / server restart. This closes the single deferred remainder of the HPA arc (§11) and the `§8.1` deferral of the find-mine-resources arc.
 
-> **Implementation note (deviates from §4/§5 of the scoping below — a deliberate, owner-locked simplification).**
-> The shipped design uses **per-dimension plain blob files, NOT region sharding** (§4), and **eager load at
-> `SERVER_STARTED` + flush at `SERVER_STOPPING` + a budgeted periodic dirty flush**, NOT lazy per-shard load
-> (§5). The clean-shutdown flush is the primary trigger (the target auto-stops when idle). Sharding / lazy load
-> stay an explicit FUTURE optimization; the friend-server data set is small.
->
-> Shipped surface:
-> - `worldmodel/persistence/RegionPersistence` — the orchestrator (load-all / flush-all / periodic tick / dirty
+> **Implementation note v1 (historical — the first ship deviated from §4/§5 below as an owner-locked
+> simplification).** The FIRST shipped design used **per-dimension plain blob files** (`hpa.bin`/`res.bin`,
+> gzip body, level-0 leaves only, `mergeUp*` replayed on load) with **eager load at `SERVER_STARTED` +
+> flush at `SERVER_STOPPING` + a budgeted periodic dirty flush**. Still true from that ship:
+> - `worldmodel/persistence/RegionPersistence` — the orchestrator (load / flush / periodic tick / dirty
 >   set / path resolution), mirroring `BotManager`'s portable world-save file I/O.
-> - `worldmodel/persistence/CostPyramidCodec` + `ResourcePyramidCodec` — headless-testable `OutputStream`/
->   `InputStream` codecs (magic + version header, gzip body; cost reuses `CostCodec.packRegion`/`unpackRegion`,
->   resource writes sparse `(col, log2)` pairs). Only level-0 leaves are persisted; `mergeUp*` is replayed on load.
 > - `platform/PlatformEvents.onServerStopping` (default no-op) wired in every loader impl (Fabric
->   `SERVER_STOPPING`; Forge/NeoForge `ServerStoppingEvent`) — §5.1's missing lifecycle seam, now closed.
+>   `SERVER_STOPPING`; Forge/NeoForge `ServerStoppingEvent`) — §5.1's missing lifecycle seam, closed.
 > - `hpa.persistIntervalTicks` config key (default 6000; `0` disables the periodic flush).
 > - Headless round-trip test: `RegionPersistenceRoundTripTest`.
->
-> Concurrency (§9) is honoured by construction: all load/flush runs on the tick thread (or after it halts), so
-> nothing races a planner search or a pyramid array grow. Files are a cache (§5/§7): bad magic / version / IO →
-> treated as absent; live-built leaves are never clobbered by a decode.
+> - Concurrency (§9) by construction: all load/flush on the tick thread (or after it halts); files are a
+>   cache (§5/§7): bad magic / version / IO → absent; live-built rows never clobbered by a decode.
+
+> **Implementation note v2 (2026-07 — the sharding fork OVERTURNED the blob simplification; this is the
+> LIVE design).** The §4/§5 scoping below turned out right after all: the region tier now ships the
+> **`.mca`-style sharded layout with the coarse levels persisted DIRECTLY**, plus Stage-2 bounded RAM:
+> - **Files** (`<world>/orebit/<dim>/`): `hpa.<X>.<Z>.bin` = cost levels **0..5** for one level-5 shard
+>   (`RegionAddress.SHARD_LEVEL`, 512 blocks = 32×32 chunks; `X = chunkX>>5`); `hpa.coarse.bin` = cost
+>   level 6 (`MAX_COARSE_LEVEL`) per dimension; `res.<X>.<Z>.bin` / `res.coarse.bin` (L6..21) likewise.
+>   Magics `OBHS`/`OBHC`/`OBRS`/`OBRC`; the old `hpa.bin`/`res.bin` blobs are IGNORED (never read, never
+>   deleted).
+> - **Why persist coarse directly:** the L0-only reload's `mergeUp` replay measured **34–880 ms/shard** of
+>   tick-thread merge; direct decode interns each row AT its level (round-trip lossless — persisted coarse
+>   == recomputed coarse, `RegionPersistenceRoundTripTest`).
+> - **Codec evolution** (`CostPyramidCodec.VERSION`, currently **7**): v2 dropped gzip (inflate was 62–71%
+>   of shard-load cost for ~2–3× disk); v3 column-run body (rows grouped per (rx,rz) column, consecutive
+>   byte-identical records run-collapsed — recovers ~97% of gzip's saving at raw decode speed); v4 the #5
+>   invalidation section (24 B rows, sig-schema/graph-class header, `DESIGN-persisted-invalidation-memory.md`
+>   §4); v5 floorless-leaf reclassification (semantic); v6 the fragment-count sentinel (`MAX_FRAGMENTS` 62,
+>   count 63 = CAP-COLLAPSED, 0 = honestly-zero); v7 typed fragments (+2 S/W bits per MIXED fragment,
+>   `DESIGN-typed-fragments.md`).
+> - **Stage-2 bounded RAM (live):** `hpa.lazyLoad` → `RegionPersistence.loadCoarseOnly` at start (coarse
+>   levels + an on-disk shard index) and `RegionShardLoader` pages whole shards in atomically on demand
+>   (hpa-side consumers REQUEST via `RegionShardResidency.enqueueLoad` — the dependency arrow stays
+>   persistence→hpa; tick-thread drain under `pathing.regionShardLoadBudgetMs` with a ≥1/tick backstop;
+>   ~11–34 ms/shard un-gzipped; `StraddleSet` + `RegionReconciler` re-derive live-vs-persisted straddle
+>   cells). The opt-in `RegionEvictor` (`hpa.residentLeafCap`; **0 = UNBOUNDED/off**, the default) pages the
+>   coldest resident shards back out — evictable only when every backing chunk column is unloaded in
+>   `NavStore` (a state gate, no timers), LRU by monotonic touch stamp, flush-if-dirty first, coarse rows
+>   stay resident. Autotest convention: `hpa.lazyLoad=false` (determinism).
+> - **Flush budget:** the periodic dirty-shard flush is wall-clock budgeted (`hpa.persistFlushBudgetMs`).
 
 ---
 
@@ -60,7 +81,7 @@ The serializer is **already written and tested**: `CostCodec.packRegion(rf, buf,
 
 - Uniform region (SOLID/AIR/WATER): `kind`(2) + `avgSolidHardness`(4) = **6 bits**.
 - MIXED: 6 + `passFrac`(4) + `fragmentCount`(6) + per fragment `faceMask`(6) + 16 bits per set face. A typical surface leaf (1–3 fragments, ~2–4 faces each) ≈ **60–140 bits ≈ 8–18 bytes**.
-- `gridSize` (16 at the leaf) is **not** persisted — passed to `unpackRegion` at load. The collapsed-vs-stripped distinction is also not persisted (both reload as `count==0`).
+- `gridSize` (16 at the leaf) is **not** persisted — passed to `unpackRegion` at load (per-level `PyramidMerger.coarseG` since the sharded format). ~~The collapsed-vs-stripped distinction is also not persisted (both reload as `count==0`)~~ — fixed by the v6 count-field sentinel (63 = CAP-COLLAPSED, 0 = honestly-zero); v7 adds 2 type bits per MIXED fragment.
 
 Every loaded 16³ section gets a cost row (dense, unlike resources), but most are uniform (1 byte). A whole overworld chunk column (24 sections) is typically ~2–3 mixed + ~21 uniform ≈ **~60–90 bits of payload/section on average**.
 
@@ -112,14 +133,14 @@ The `CostCodec` bitstream is **already** our own format. Wrapping it in `SavedDa
 
 ---
 
-## 4–6. Storage layout, lifecycle, read paths — SUPERSEDED by the shipped design
+## 4–6. Storage layout, lifecycle, read paths — first superseded, then REINSTATED
 
 The scoping originally specified region **sharding** (§4), **lazy per-shard load** (§5.3), and the matching
-read-path plumbing (§6). The SHIPPED design deviated (owner-locked): **per-dimension plain blob files**,
-**eager load at `SERVER_STARTED`**, flush at `SERVER_STOPPING`, plus a budgeted periodic dirty flush — see
-the Implementation note at the top for the shipped surface. §5.1's missing lifecycle seam is closed by
-`PlatformEvents.onServerStopping`. Sharding / lazy load remain an explicit FUTURE optimization (the
-friend-server data set is small).
+read-path plumbing (§6). The FIRST ship deviated (per-dimension blobs, eager load — Implementation note v1);
+the 2026-07 sharding fork then **built the sharded + lazy design after all**, with two upgrades over this
+scoping: coarse levels are persisted DIRECTLY (no `mergeUp` replay — the replay measured 34–880 ms/shard),
+and the body is uncompressed column-run rather than gzip. See Implementation note v2 for the live surface.
+§5.1's missing lifecycle seam is closed by `PlatformEvents.onServerStopping`.
 
 ---
 

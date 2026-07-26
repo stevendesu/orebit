@@ -63,9 +63,9 @@ import com.orebit.mod.worldmodel.hpa.StraddleSet;
  *     graphClassId (byte)             = {@value #INVAL_GRAPH_CLASS_ID} ("optimistic-v1"); mismatch = same skip
  *     invalCount (int)                rows that follow
  *     per row (24 B):
- *       fromKey (long)                RegionPathfinder.fragmentNodeKey (56 bits) | LEVEL in the free bits 56..63
- *       toKey (long)                  fragmentNodeKey (56 bits) | PROVENANCE (RegionCrossingMemory.PROV_*) in
- *                                     the free bits 56..57
+ *       fromKey (long)                RegionPathfinder.fragmentNodeKey (55 bits) | LEVEL in the free bits 55..63
+ *       toKey (long)                  fragmentNodeKey (55 bits) | PROVENANCE (RegionCrossingMemory.PROV_*) in
+ *                                     the free bits 55..56
  *       capsSig (long)                the failing BotCaps.realizabilitySig the crossing was proven dead under
  * </pre>
  * A run collapses rows that are BOTH consecutive in {@code ry} AND carry a byte-identical record — this is where
@@ -78,7 +78,7 @@ import com.orebit.mod.worldmodel.hpa.StraddleSet;
  * {@link RegionCrossingMemory} at flush time. Sharding is <b>assign-to-FROM</b>: a level-0..5 row lands in the
  * shard file containing its FROM region ({@link RegionAddress#shardOf} at the row's level); level-6
  * ({@link RegionAddress#MAX_COARSE_LEVEL}) rows ride the per-dimension coarse file — exactly the cost-row
- * precedent. The stored keys are the pure 56-bit {@code fragmentNodeKey}s; the row's LEVEL travels in the
+ * precedent. The stored keys are the pure 55-bit {@code fragmentNodeKey}s; the row's LEVEL travels in the
  * fromKey's free high byte and its provenance in two free toKey bits, so a row is self-describing and the
  * section needs no per-level framing. On load the section's rows are merged into the per-dimension
  * {@link RegionCrossingMemory} via {@code record} (whose antichain rule makes the merge idempotent and
@@ -135,25 +135,37 @@ public final class CostPyramidCodec {
      * 63 = {@code FRAGMENT_COUNT_COLLAPSED} (collapsed=true) — un-conflating the two old count==0 meanings.
      * A v5 file's count==63 record would mis-decode as a 63-fragment read under the new codec, and its
      * collapsed records would lose the flag, so old files must cache-miss and rebuild from live.
+     * v7 is the typed-fragments change (DESIGN-typed-fragments.md §5.3–§5.5): every MIXED fragment record
+     * gained 2 type bits (S surfaceable, W hasWater) after its faceMask and before its footprints (uniform
+     * records stay 6 bits — kind alone is exact under the amended truly-uniform fast path) — beside the
+     * SEMANTIC changes riding the same bump (keep-all fragment populations; the uniform floorless fast-path
+     * narrowed to truly-uniform leaves, so ocean-surface / pillar-in-air leaves now carry fragments). A v6
+     * file would mis-align on the new per-fragment bits and carry stale populations, so it must cache-miss
+     * and rebuild from live.
      */
-    static final short VERSION = 6;
+    // Reset to 1 on the 2026-07 packLevelKey repack (ry narrowed 6→5 bits; region/fragment/entry fields all
+    // shifted down one bit). Disk is a CACHE — a mismatch simply cache-misses and rebuilds from live, so the
+    // long v-history is collapsed rather than bumped to v8.
+    static final short VERSION = 1;
 
     /** Invalidation-section sig schema (the {@code BotCaps.realizabilitySig} bit layout generation). Bump when a
-     *  sig dimension is added/changed (breath, count buckets); old sections then read as absent (re-learn). */
+     *  sig dimension is added/changed (breath, count buckets); old sections then read as absent (re-learn).
+     *  Reset to 1 on the 2026-07 packLevelKey repack; disk is a cache. */
     static final int INVAL_SIG_SCHEMA_VERSION = 1;
     /** Invalidation-section region-graph class — 0 = "optimistic-v1", today's single symmetric/optimistic
      *  connectivity graph. A future capability-aware graph persists its own sections under a new id; rows never
      *  transfer across graphs (fragment identities don't). */
     static final int INVAL_GRAPH_CLASS_ID = 0;
-    /** Low 56 bits of a stored inval key = the pure {@code RegionPathfinder.fragmentNodeKey}. */
-    private static final long INVAL_KEY_MASK = (1L << 56) - 1;
-    /** The row's LEVEL rides the fromKey's free high byte (bits 56..63). */
-    private static final int INVAL_LEVEL_SHIFT = 56;
-    /** The row's provenance ({@code RegionCrossingMemory.PROV_*}) rides toKey bits 56..57. */
-    private static final int INVAL_PROV_SHIFT = 56;
+    /** Low 55 bits of a stored inval key = the pure {@code RegionPathfinder.fragmentNodeKey}
+     *  (2026-07 repack: region bits 0..48 + fragment bits 49..54). */
+    private static final long INVAL_KEY_MASK = (1L << 55) - 1;
+    /** The row's LEVEL rides the fromKey's free high bits (bits 55..63). */
+    private static final int INVAL_LEVEL_SHIFT = 55;
+    /** The row's provenance ({@code RegionCrossingMemory.PROV_*}) rides toKey bits 55..56. */
+    private static final int INVAL_PROV_SHIFT = 55;
     private static final long INVAL_PROV_MASK = 0x3L;
-    /** A key's 6-bit fragment id sits at bits 50..55 (above {@code RegionAddress.packLevelKey}'s 0..49). */
-    private static final int INVAL_FRAG_SHIFT = 50;
+    /** A key's 6-bit fragment id sits at bits 49..54 (above {@code RegionAddress.packLevelKey}'s 0..48). */
+    private static final int INVAL_FRAG_SHIFT = 49;
     private static final long INVAL_FRAG_MASK = 0x3F;
 
     /** Lowest / highest cost level carried by a per-region shard file. */
@@ -345,7 +357,7 @@ public final class CostPyramidCodec {
     }
 
     /** Whether a crossing whose FROM key is {@code fromKey} (at {@code level}) belongs to the given shard scope.
-     *  The fragment bits (50..55) sit above the packed rx/rz fields, so the unpack helpers read through them. */
+     *  The fragment bits (49..54) sit above the packed rx/rz fields, so the unpack helpers read through them. */
     private static boolean invalRowInScope(long fromKey, int level, boolean shardScoped, int shardX, int shardZ) {
         if (!shardScoped) return true;
         return RegionAddress.shardOf(RegionAddress.unpackRX(fromKey), level) == shardX
@@ -670,7 +682,7 @@ public final class CostPyramidCodec {
                 long capsSig = in.readLong();
                 int level = (int) (fromStored >>> INVAL_LEVEL_SHIFT) & 0xFF;
                 if (level > RegionAddress.MAX_COARSE_LEVEL) continue; // corrupt row — skip, keep reading
-                // Non-real-fragment legacy filter: a row whose TO fragment id (key bits 50..55) is not a real
+                // Non-real-fragment legacy filter: a row whose TO fragment id (key bits 49..54) is not a real
                 // fragment — id >= {@link RegionFragments#MAX_FRAGMENTS} (62), i.e. the reserved id 62 or the
                 // search's virtual-goal id 63 ({@code RegionPathfinder.VIRTUAL_GOAL_FRAG}; this codec never
                 // imports pathfinding, so the bound is expressed in the fragment-ID space's own terms) — is

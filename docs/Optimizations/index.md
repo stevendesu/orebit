@@ -45,3 +45,7 @@ They read best in order — each chapter builds on the ones before it:
 14. [Catching the Spike](14_catching_the_spike.md) — a 2-second freeze that moved every
     run, a GC theory that was wrong, and the small whole-tick telemetry that named the real
     culprit in one line — then the budget that tamed it.
+15. [Batching the Repairs](15_batching_the_repairs.md) — the grid-repair path: a one-line
+    compare that un-polluted the "did the world change?" signal, a defer-and-dedup queue
+    that collapses piston and TNT bursts, and the identity test that caught the reviewed
+    design being subtly wrong.

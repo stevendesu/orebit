@@ -156,6 +156,15 @@ public final class BotMining {
                 // unbreakable) — after the honest grind, force the edit the way the legacy applyEdits does.
                 WorldEdits.breakBlock(level, target);
             }
+            // P7 attribution: one cold line per COMPLETED break (bounded by actual world edits, never
+            // per-tick) tying the break to the step frame that requested it — the executor-side half of
+            // the plan's brk count.
+            if (bot instanceof AllyBotEntity ally) {
+                BotNavigator nav = ally.navigator();
+                OrebitCommon.LOGGER.info("[Orebit] break executed at ({},{},{}) for step {} -> ({},{},{})",
+                        target.getX(), target.getY(), target.getZ(), ally.lastSteerMove,
+                        nav.segToX(), nav.segToY(), nav.segToZ());
+            }
             reset();
         } else {
             int stage = (int) (progress * 10.0f);                 // vanilla shows 10 crack stages (0..9)

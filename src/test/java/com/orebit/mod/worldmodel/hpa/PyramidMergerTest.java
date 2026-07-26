@@ -79,6 +79,8 @@ public final class PyramidMergerTest {
 
         assertEquals(RegionFragments.KIND_MIXED, parent.kind(), "mixed air/solid children ⇒ MIXED parent");
         assertEquals(1, parent.fragmentCount(), "the four connected air children = one parent fragment");
+        assertFalse(parent.typeS(0), "uniform AIR items claim nothing — the parent air fragment is ¬S");
+        assertFalse(parent.typeW(0), "truly-uniform AIR children are provably dry ⇒ ¬W");
 
         assertTrue(parent.touchesFace(0, 2), "−Y opening (bottom layer is flush with the parent floor)");
         assertFalse(parent.touchesFace(0, 3), "no +Y opening (top layer is solid)");
@@ -186,6 +188,65 @@ public final class PyramidMergerTest {
         assertEquals(RegionFragments.KIND_MIXED, parent.kind(), "solid + MIXED-mass children ⇒ MIXED parent");
         assertEquals(0, parent.fragmentCount(), "no passable item ⇒ uniform mine-through mass");
         assertFalse(parent.isCollapsed(), "mine-through mass is honestly-zero, NOT the cap collapse");
+    }
+
+    // ===================================================================================================
+    // Typed fragments (DESIGN-typed-fragments.md §5.5): the union-merge ORs the type bits — a parent
+    // component's S/W = OR over its merged children's bits; synthetic items type per their optimism class.
+    // ===================================================================================================
+
+    /** Seed level-0 child {@code i} as a built MIXED region with ONE full-face fragment typed {@code typeBits}. */
+    private static void seedTypedOpen(CostPyramid p, int i, int typeBits) {
+        final int rx = i & 1, rz = (i >> 1) & 1, ry = (i >> 2) & 1;
+        final int row = p.rowFor(0, rx, ry, rz);
+        final RegionFragments rf = p.ensureFragments(0, row);
+        rf.reset(RegionAddress.LEAF_SIZE);
+        rf.setKind(RegionFragments.KIND_MIXED);
+        rf.setPassFrac(8);
+        final int[] packed = new int[6];
+        for (int f = 0; f < 6; f++) packed[f] = RegionFragments.packFootprint(0, 15, 0, 15);
+        rf.setFragment(0, 0x3F, packed);
+        rf.setFragmentTypes(0, typeBits);
+        rf.setFragmentCount(1);
+        p.setBuilt(0, row, true);
+    }
+
+    @Test
+    void typeBits_orMergeAcrossUnion() {
+        // Children 0 (typed S) and 1 (typed W) are X-adjacent with overlapping full faces ⇒ they union into
+        // ONE parent fragment whose types are the OR: {S,W}. Everything else solid.
+        final CostPyramid p = new CostPyramid();
+        for (int i = 0; i < 8; i++) seedUniform(p, i, RegionFragments.KIND_SOLID);
+        seedTypedOpen(p, 0, RegionFragments.TYPE_S);
+        seedTypedOpen(p, 1, RegionFragments.TYPE_W);
+        final RegionFragments parent = merge8(p);
+
+        assertEquals(RegionFragments.KIND_MIXED, parent.kind());
+        assertEquals(1, parent.fragmentCount(), "the two open children union into one parent fragment");
+        assertTrue(parent.typeS(0), "S ORs across the union-merge");
+        assertTrue(parent.typeW(0), "W ORs across the union-merge");
+    }
+
+    @Test
+    void syntheticItems_typeByOptimismClass() {
+        // Unbuilt child: optimistic S (a gate must never refuse a crossing because unexplored terrain
+        // "proved" ¬S·¬W), no W claim.
+        final CostPyramid p = new CostPyramid();
+        for (int i = 0; i < 7; i++) seedUniform(p, i, RegionFragments.KIND_SOLID); // slot 7 left unbuilt
+        final RegionFragments parent = merge8(p);
+        assertEquals(RegionFragments.KIND_MIXED, parent.kind());
+        assertEquals(1, parent.fragmentCount(), "the unbuilt child contributes one synthetic fragment");
+        assertTrue(parent.typeS(0), "unbuilt ⇒ optimistic S");
+        assertFalse(parent.typeW(0), "unbuilt ⇒ no W claim");
+
+        // Uniform WATER child: kind implies water ⇒ the item claims W; uniform records never claim S.
+        final CostPyramid q = new CostPyramid();
+        for (int i = 0; i < 7; i++) seedUniform(q, i, RegionFragments.KIND_SOLID);
+        seedUniform(q, 7, RegionFragments.KIND_WATER);
+        final RegionFragments wparent = merge8(q);
+        assertEquals(1, wparent.fragmentCount());
+        assertTrue(wparent.typeW(0), "uniform WATER child ⇒ W");
+        assertFalse(wparent.typeS(0), "uniform records never claim S");
     }
 
     @Test

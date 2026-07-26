@@ -32,7 +32,9 @@ The map is **sharded** the same way Minecraft shards its own world data. A `.mca
 32×32-chunk area; each `hpa.<X>.<Z>.bin` covers exactly that same area (the numbers are the region
 coordinates — `chunkX >> 5`, `chunkZ >> 5`), so an area you've never been near has no shard file at
 all. `hpa.*` files hold routing cost; `res.*` files hold the resource tallies behind the abundance
-compass. The two `*.coarse.bin` files are a small per-dimension summary of the whole explored world at
+compass. The routing files also carry the bot's **learned dead ends** — region crossings it tried and
+proved impossible for its capabilities — so a restarted bot doesn't have to walk back into a dead end
+to rediscover it. The two `*.coarse.bin` files are a small per-dimension summary of the whole explored world at
 the coarsest zoom — enough to plan a rough long-distance route the instant the server starts, before
 any detailed shard has loaded.
 

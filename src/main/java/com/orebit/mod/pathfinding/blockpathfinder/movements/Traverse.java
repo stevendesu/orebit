@@ -387,6 +387,15 @@ public final class Traverse implements Movement {
             // Inert for a one-phase plan, but set for uniformity: physically regressed to the from-cell.
             plan.resetWhen(b -> b.grounded()
                     && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+            // Validity envelope (PATHOLOGY P1 family — the Parkour/Ascend failWhen precedent): settled
+            // (grounded, or bodily in fluid — a displaced executor that fell into water is never grounded)
+            // at a foot cell outside the step's two columns is off-plan: done/resetWhen can never fire
+            // there and re-attempting latches. Allowed: the from stand, and the target column's
+            // transitional band [ty, ty+1] (the auto-step's rise crosses the lower foot cell for a tick).
+            plan.failWhen(b -> (b.grounded() || b.inWater() || b.inLava())
+                    && !(b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz)
+                    && !(b.footX() == tx && b.footZ() == tz
+                            && b.footY() >= ty && b.footY() <= ty + 1));
             plan.phase("stepup")
                     .need(MovePlan.Need.AIR, tx, ty + 1, tz)                // = (tx, fy+2, tz): above the raised floor
                     .need(MovePlan.Need.AIR, tx, ty + 2, tz)                // = (tx, fy+3, tz)
@@ -400,6 +409,23 @@ public final class Traverse implements Movement {
         // only consulted once the cursor has advanced: the run physically fell back to its start cell.
         plan.resetWhen(b -> b.grounded()
                 && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+        // Validity envelope (PATHOLOGY P1 family): settled off the run LINE is off-plan — e.g. dropped off
+        // a ledge mid-run (the longrun-6 (120,64,18) latch: bot fell 3 below its Traverse and ground-looped
+        // forever). Allowed: any foot cell ON the run line at the run's height, from-stand through to-stand
+        // inclusive (walking the run through shallow water is legitimately in-fluid, so the line test — not
+        // the medium — is the discriminator). Cardinal line: one of sx/sz is 0, so the along-axis projection
+        // plus the cross-axis pin is two int compares.
+        plan.failWhen(b -> {
+            if (!(b.grounded() || b.inWater() || b.inLava())) {
+                return false;
+            }
+            if (b.footY() != fy + 1) {
+                return true; // off the run's height — fell off (or was lifted off) the line
+            }
+            final int along = (b.footX() - fx) * sx + (b.footZ() - fz) * sz;
+            final boolean crossPinned = sx != 0 ? b.footZ() == fz : b.footX() == fx;
+            return !(crossPinned && along >= 0 && along <= n);
+        });
         for (int k = 1; k <= n; k++) {
             final int kk = k;
             final int cx = fx + sx * k;

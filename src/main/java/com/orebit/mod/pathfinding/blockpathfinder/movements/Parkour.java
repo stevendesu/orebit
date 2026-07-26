@@ -260,7 +260,8 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * sprint reach) — EXCEPT a FALLING jump, which sprints only at {@code gap ≥ 3}: the drop buys airtime so a
  * walk clears the shorter gaps, and the sprint-jump takeoff boost would otherwise carry the bot past a
  * narrow landing (the fall2 overshoot; see {@link #plan}). Landing IN the gap (a missed falling jump) is
- * the follower's grounded-stall recovery arm, as in v1.
+ * a validity-envelope failure ({@link MovePlan#failWhen} — grounded off the plan's own cells), which fails
+ * the step so the driver replans from where the bot really landed.
  */
 public final class Parkour implements Movement {
 
@@ -919,7 +920,8 @@ public final class Parkour implements Movement {
      * an always-on guard would alias with the very state the jump must fire from — the runner checks
      * {@code resetWhen} before driving whenever the cursor has advanced, snapping back to RUNUP and
      * preempting {@code setJumping} every tick of the takeoff window. Landing in the gap is NOT a plan
-     * phase: the follower's grounded-stall recovery arm re-anchors and replans from inside the gap.
+     * phase: it is a {@code failWhen} validity-envelope failure (grounded off the plan's own cells), which
+     * fails the step so the driver replans from inside the gap — see the envelope derivation at the guard.
      */
     @Override
     public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
@@ -964,6 +966,32 @@ public final class Parkour implements Movement {
         MovePlan plan = new MovePlan();
         plan.resetWhen(b -> airborneOnce[0] && b.grounded()
                 && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+        // VALIDITY ENVELOPE (the P1 off-plan wedge): a committed jump's world is exactly the grounded cells
+        // the plan itself names — the takeoff stand, and the landing COLUMN between the two stand heights
+        // (for a flat/rising arc that band IS the landing stand; a falling arc's descent runs down the
+        // landing column, so a touchdown anywhere on it is the move's own geometry, never a false fail).
+        // The FIRST grounded tick anywhere else — a short landing in the gap, a deflected landing, an
+        // off-plan fly-through adoption cell — is provably outside the move's model: no phase's
+        // advanceWhen/done can fire from there and no LAND-phase drive ever jumps, so re-attempting in
+        // place is a permanent latch. Purely positional, over cells the plan already carries (no timers,
+        // no world reads). It cannot fire during normal execution: runup/takeoff ticks are grounded ON the
+        // takeoff stand (TAKEOFF_EDGE 0.35 keeps the centre inside the cell), airborne ticks are not
+        // grounded, and the touchdown tick is on the landing column. resetWhen — checked first by the
+        // runner, and its cell is inside this envelope's allowed set — keeps owning the balk-retry.
+        final int landLoY = Math.min(fy, ty) + 1; // landing-column feet band: landing stand … descent top
+        final int landHiY = Math.max(fy, ty) + 1;
+        // The LIP-CROSSING transitional cell (the battA-cliff third fail->hold false positive, the
+        // along-axis sibling of Descend's lip / Ascend's face-press): the runup's TAKEOFF_EDGE trigger
+        // lets the centre cross the takeoff cell's boundary a tick before the jump registers, so the bot
+        // is grounded on the lip with its foot cell one PAST the takeoff — (gapX, fy+1, gapZ), the first
+        // gap column at takeoff feet height. Transient by construction (the takeoff phase is pressing
+        // jump); admitting it keeps the envelope exact without the gate-early trigger straight Parkour
+        // does not yet have (DiagonalParkour's gate makes its equivalent state unreachable).
+        plan.failWhen(b -> b.grounded()
+                && !(b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz)
+                && !(b.footX() == gapX && b.footY() == fy + 1 && b.footZ() == gapZ)
+                && !(b.footX() == tx && b.footZ() == tz
+                        && b.footY() >= landLoY && b.footY() <= landHiY));
         plan.phase("runup")
                 .drive((b, v) -> {
                     airborneOnce[0] = false; // re-attempt begins → disarm until the next arc is live

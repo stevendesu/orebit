@@ -13,11 +13,17 @@ untouched face (connectivity hole); **1b** walk edges priced the crossing, not t
 
 **The fixes:**
 - **§2 entry-face node identity** — search node = (region, fragment, entry face) so edge costs stay
-  fixed per node (`RegionPathfinder.java` ~line 195).
+  fixed per node (`RegionPathfinder.searchKey` — 3-bit entryFace folded into key bits 56..58, sentinels
+  `ENTRY_START`/`ENTRY_INTERIOR`; consumers stay physical, entryFace never leaks out).
 - **§3 Fix 1: the dig-through edge** — every adjacent region pair gets an always-possible mine edge
-  priced by material span × per-block dig cost (tool-aware via `RegionMineModel`).
+  priced by material span × per-block dig cost (`RegionMineModel`; since s53 the FORWARD skeleton uses the
+  fixed `FORWARD_MINE` wooden economy — see the amendment in `PERF-DESIGN-region-cost-and-fragment.md` §5).
+  When `canBreak` is false every mining-based edge is DROPPED — the graph is no longer guaranteed
+  connected and a no-break search can honestly FAIL (the `noBreakCap` dead-end fix).
 - **§4 Fix 2: walk-across cost** — entry→exit traversal pricing (two-term walk + dig,
-  `RegionPathfinder` ~line 1125), killing the flat 1.0.
+  `RegionPathfinder.walkCost` consumed by `relaxFrag`), killing the flat 1.0. *Since typed fragments the
+  same walkCost is type-decomposed: W fragments swim-price the horizontal (0.77×walk), vertical keeps walk's
+  dy shaping except fully-submerged ¬S·W (≈2.2×walk) — `DESIGN-typed-fragments.md` §3.*
 - **§5 consumer handling** — the block tier realizes the dig: per-step `digThrough` flag on
   `RegionPathPlan` steps; a dig-through window target is known-buried, so the block tier mines to it.
 

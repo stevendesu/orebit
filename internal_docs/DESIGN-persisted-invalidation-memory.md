@@ -1,10 +1,49 @@
 # DESIGN — Persisted Invalidation Memory (#5 increment C / sharding Stage 3)
 
-Status: DRAFT for owner ratification (2026-07-22). Builds on: increment B (in-memory
-`RegionCrossingMemory`, core `02b908c`), sharding Stages 1–2 (shipped + in-game verified; every
-`hpa.X.Z.bin` already carries a reserved empty inval section), and the up-cliff arc (edge-realization
-blame + geometric partials, core `c49ae59` — which already satisfies the old "trigger must include
-unfollowable partials" requirement by converting them to honest BLOCKEDs).
+Status: **SHIPPED (2026-07-22; restart oracle PASS)** — ratified from this draft, phases 1–3 all
+implemented. Builds on: increment B (in-memory `RegionCrossingMemory`, core `02b908c`), sharding
+Stages 1–2 (shipped + in-game verified; every `hpa.X.Z.bin` already carries a reserved empty inval
+section), and the up-cliff arc (edge-realization blame + geometric partials, core `c49ae59` — which
+already satisfies the old "trigger must include unfollowable partials" requirement by converting them to
+honest BLOCKEDs).
+
+## §0 AS-SHIPPED record (verify against code; supersedes the drafting details below where they differ)
+
+- **Sig (Phase 1)** — `BotCaps.realizabilitySig(inv)`: effective-place bit 1 (`canPlace && !(consumesBlocks
+  && placeableBlocks<=0)`), invuln bit 4, maxBreakHardness 5..12, jump 13..16, safeFall 17..29, maxFall
+  30..42, bit 43 RESERVED `hasBreath` (never set/read), **SIX** 3-bit tool-tier fields at bits 44..61 (all
+  real `NavBlock.Tool` categories, ordinals 1..6 — Q2's "~5" became 6; NONE excluded as inert; zeroed when
+  `!canBreak` or null inv). Dominance = per-field masked `>=` (`sigDominates`). Record-site skew fixed at
+  the source: `HierarchicalRegionPlan` captures `capsSig` at construction from `PathPlan`'s per-replan
+  (caps, inventory) pair — that construction-time value IS every search's sig. Null-inv plans never record
+  (`recordToMemory=false`); they still seed (caps-only sig). Antichain compaction lives in
+  `RegionCrossingMemory.record` (skip-dominated / replace-strictly-dominated / coexist-incomparable).
+- **Persistence (Phase 2)** — 24 B rows in the v4 invalidation section of every shard/coarse file
+  (`CostPyramidCodec`, file VERSION now 7): `fromKey` carries LEVEL in bits 56..63, `toKey` carries
+  provenance in **two** bits 56..57 (the draft said one spare bit), `capsSig` 8 B. Section header =
+  `INVAL_SIG_SCHEMA_VERSION` (1) + `INVAL_GRAPH_CLASS_ID` (0, "optimistic-v1"); mismatch drops the SECTION
+  only. Assign-to-FROM sharding; L6 rows ride the coarse file. `PROV_ESCALATION` rows are SESSION-ONLY
+  (filtered at every encode; `PROV_PROOF`/`PROV_ROLLED_UP` persist). Decode additionally DROPS any row
+  whose TO fragment id ≥ `MAX_FRAGMENTS` (reserved 62 / `VIRTUAL_GOAL_FRAG` 63) — legacy V-row self-clean.
+- **Roll-up (§4b)** — `InvalidationRollup.foldFrom` at record time from `onBlocked` (Q1/Q3 as ratified):
+  constituents = the walk openings the A* would realize (`childFlushWithParentFace` + touchesFace +
+  footprint overlap; unbuilt child = always-alive optimistic constituent — the frontier property; a
+  zero-constituent all-sealed face never kills — no vacuous truth). Sig-sound (constituent counts only via
+  `holdsProofDominating` at ≥ S0; ESCALATION rows never count and `blameTubeConfined` never triggers a
+  fold). Containment re-derived by the merge's own partition-invariant union-find
+  (`containedParentFragment`) with a fragmentCount cross-check bail. Bench: `RollupFoldBenchmark`.
+- **Expiry** — `RegionCrossingMemory.evictLeafTouching` hooked off `HpaMaintenance`'s block-change
+  rebuild-leaf path: evicts rows whose FROM or TO region (or containing coarse ancestor — reviving
+  ROLLED_UP rows) touches the changed leaf; conservative over-eviction by design.
+- **Journey scoping (post-draft, evidence-model memory)** — two blame classes stay per-plan and are NEVER
+  recorded: start-region rows (FROM == the failing search's own start region — component-scoped proof, the
+  ravine problem; the async driver threads the snapshotted `searchStartFloor` through `onBlocked`'s 4-arg
+  form) and virtual-goal rows (TO == V; see HPA-CASCADE.md "The virtual goal fragment"). A cold one-line
+  `#5 record-decision` log per BLOCKED result makes the record/skip decision attributable.
+- **Oracle semantics (finding)** — WHICH search records a given blame varies run to run (async timing
+  decides which window search hits the dead crossing first), so the restart oracle asserts
+  **no-repeat-blames + convergence** (boot 2 skips straight to the detour with materially fewer
+  invalidations), never specific rows or counts. `-KeepWorld` (Q4) is live on `run-autotest.ps1`.
 
 ## §1 Goal
 

@@ -1444,6 +1444,12 @@ public final class BlockPathfinder {
         List<BlockPos> waypoints = new ArrayList<>();
         List<Movement> moves = new ArrayList<>();
         List<StepEdits> edits = new ArrayList<>();
+        // Per-step SEARCH-NATIVE floor-cell Y, parallel to `waypoints` (primitive array, grown by doubling —
+        // no per-waypoint boxing). The node coords below ARE the floor cells; carrying the Y through to the
+        // BlockPathPlan is what lets the follower anchor each step's execution frame on the search's own
+        // floor instead of lossily re-inverting the feet waypoint (which drifts +1 on a break-at-feet step
+        // whose solid feet cell reads as a standable floor — PATHOLOGY P1B). X/Z ride the waypoint (equal).
+        int[] floorYs = new int[16];
 
         // Each consecutive (p -> n) pair is one A* edge. A MACRO edge (Pillar/MineDown/Traverse collapsed a
         // uniform run of >1 step into one node, MACRO-IMPLEMENTATION.md §8) is re-expanded HERE into its N
@@ -1472,6 +1478,7 @@ public final class BlockPathfinder {
                 // Copy out of the per-search arena: these edits ride home in the BlockPathPlan and are
                 // replayed by the follower over many ticks, while later searches reuse the arena slots.
                 edits.add(edge == null ? null : edge.copy());
+                floorYs = pushFloorY(floorYs, waypoints.size() - 1, ny);
                 continue;
             }
 
@@ -1482,9 +1489,19 @@ public final class BlockPathfinder {
                 waypoints.add(new BlockPos(fx, feetYOf(grid, fx, fy, fz), fz)); // topY-aware stand position
                 moves.add(move);
                 edits.add(edge == null ? null : sliceStep(edge, fx, fy, fz));
+                floorYs = pushFloorY(floorYs, waypoints.size() - 1, fy);
             }
         }
-        return new BlockPathPlan(waypoints, moves, edits, nodes.g[reachedRow]);
+        return new BlockPathPlan(waypoints, moves, edits, Arrays.copyOf(floorYs, waypoints.size()),
+                nodes.g[reachedRow]);
+    }
+
+    /** Append {@code y} at index {@code i} of the growable floor-Y array (doubles on overflow); returns the
+     *  (possibly re-grown) array. Cold — one call per reconstructed waypoint. */
+    private static int[] pushFloorY(int[] arr, int i, int y) {
+        if (i == arr.length) arr = Arrays.copyOf(arr, arr.length * 2);
+        arr[i] = y;
+        return arr;
     }
 
     /**

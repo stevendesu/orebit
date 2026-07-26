@@ -85,6 +85,40 @@ public final class NavGridUpdater {
         EDIT_EPOCH.computeIfAbsent(level, l -> new int[1])[0]++;
     }
 
+    /**
+     * Per-chunk-column grid-change version — the PLAN-RELEVANCE gate (owner ratification 2026-07-24). The
+     * dimension-global {@link #EDIT_EPOCH} answers "did anything change anywhere", which a travelling bot
+     * defeats by its own exploration: chunk nav builds/drops at its frontier (and a house built 50k blocks
+     * away) all bump the global epoch, so the follower's terrain-recheck re-searches every debounce window
+     * forever (the open-ocean flap, verified 2026-07-24). A plan instead snapshots the versions of the chunks
+     * ITS PATH traverses and re-searches only when one of THOSE changed. Server-thread confined, like the epoch.
+     */
+    private static final java.util.WeakHashMap<ServerLevel, java.util.HashMap<Long, int[]>> CHUNK_VERSION =
+            new java.util.WeakHashMap<>();
+
+    /** The current change-version of chunk column {@code chunkKey} ({@link NavStore#key}); 0 until its first
+     *  tracked change. Server thread only. */
+    public static int chunkVersion(ServerLevel level, long chunkKey) {
+        final java.util.HashMap<Long, int[]> m = CHUNK_VERSION.get(level);
+        if (m == null) {
+            return 0;
+        }
+        final int[] v = m.get(chunkKey);
+        return v == null ? 0 : v[0];
+    }
+
+    /**
+     * Advance BOTH the dimension epoch (the cheap "anything changed" early-out) AND the specific chunk
+     * column's version (the plan-relevance gate). Every grid-mutation site — chunk nav build/drop and each
+     * enqueued block change — routes through here, so the global epoch stays the running max of the per-chunk
+     * versions and a plan's chunk-version snapshot is exact. Server thread only.
+     */
+    public static void bumpChunk(ServerLevel level, int chunkX, int chunkZ) {
+        EDIT_EPOCH.computeIfAbsent(level, l -> new int[1])[0]++;
+        CHUNK_VERSION.computeIfAbsent(level, l -> new java.util.HashMap<>())
+                .computeIfAbsent(NavStore.key(chunkX, chunkZ), k -> new int[1])[0]++;
+    }
+
     /** Register the nav-grid patcher against the block-change seam (once, at init). */
     public static void register() {
         BlockChangeEvents.register(NavGridUpdater::onBlockChanged);
@@ -118,10 +152,12 @@ public final class NavGridUpdater {
             return;
         }
 
-        // A grid-visible change was queued — the world visibly changed for every plan over this level.
+        // A grid-visible change was queued — the world visibly changed for every plan over THIS chunk.
         // Enqueue-time bump (§4.5): the epoch may only ever run AHEAD of the drained grid, never behind
-        // it, so a debounce read behind any barrier can never observe queued-but-unbumped state.
-        EDIT_EPOCH.computeIfAbsent(server, l -> new int[1])[0]++;
+        // it, so a debounce read behind any barrier can never observe queued-but-unbumped state. Per-chunk
+        // (owner 2026-07-24): a change bumps only its own column's version, so a plan that doesn't traverse
+        // this chunk is not re-searched (the redstone-clock / far-house false re-arm named above).
+        NavGridUpdater.bumpChunk(server, pos.getX() >> 4, pos.getZ() >> 4);
 
         // Nether-portal index maintenance (NetherPortalIndex incremental feed), from the EVENT params:
         // under deferral the resident grid can be stale-by-one-pending-write, but the event's old/new

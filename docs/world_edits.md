@@ -43,7 +43,9 @@ scaffold, and `placement.removalCostWeight` adds a premium scaled by how hard th
 placed block would be to mine back out — a bot carrying dirt and obsidian bridges with
 the dirt. By default the bot conjures an infinite supply of a throwaway block
 (`placement.conjuredBlock`); with `placement.consumesBlocks = true` it builds from its
-real inventory and can run out.
+real inventory and can run out — and every placement then carries an extra flat
+10-tick premium in the planner, so a bot spending real blocks scaffolds noticeably
+less readily than one conjuring them.
 
 One subtlety the executor handles: the planner treats any cell without real collision
 as open for placement — but "no collision" includes grass, snow layers, vines, water.
@@ -120,6 +122,21 @@ crack overlay advancing, then forces the break — the planner's price is the ex
 time, both scaled by the bot's pickaxe tier. This is its own gate, deliberately
 independent of `mining.maxHardness` (unbreakable isn't "very hard"; it's a different
 axis), and `mining.protectedBlocks` always overrides it: a protected bedrock stays.
+
+## Every edit is attributed
+
+Each block the bot actually breaks or places writes one line to the server log saying
+**what it did, where, and which movement of the plan wanted it**:
+
+```
+[Orebit] break executed at (120, 63, -35) for step Traverse -> (121, 63, -35)
+[Orebit] place executed at (88, 70, 14) for step Pillar -> (88, 71, 14)
+```
+
+Refused edits are logged the same way (e.g. a place aborted because the occupant is
+protected), so "who dug this hole?" and "why didn't it bridge here?" are both a grep
+away. If your server has bots and a block changed, the log says exactly which move of
+which plan did it — world edits are never silent.
 
 ## Checking what the planner sees
 

@@ -927,6 +927,115 @@ public final class SteerControl {
         return pred < nearEdge;
     }
 
+    // ---- gate-point steering (the corner-gate primitive: DiagonalParkour runup + the P5 hug re-landing) ----
+
+    /**
+     * Along-track dead-band (blocks) for the {@link #pastGate} crossing test: the drive hands off from the
+     * gate to the real target once the bot's along-track projection is within this of the gate's — a touch
+     * EARLY, the safe side (the gate's own setback margin covers the residual), and single-sided so the
+     * stateless test can't chatter aim points when wall-contact pushback jitters the projection right at the
+     * exact crossing. The {@link #WATER_RISE_DEADBAND}/{@link #SERVO_DEADBAND} bang-bang idiom, applied to a
+     * positional handoff.
+     */
+    static final double GATE_PASS_DEADBAND = 0.05;
+
+    /**
+     * <b>Gate-point steering</b> — drive toward an intermediate GATE point {@code (gx,gz)} until the bot's
+     * along-track progress passes the gate's own projection ({@link #pastGate}), then toward the real target.
+     * The primitive for the "pass NEAR a corner" family: a diagonal step past a blocked corner and a
+     * diagonal-parkour takeoff approach are the same geometry problem — straight line-tracking either presses
+     * the hitbox into the blocked corner (the P5 hug freeze: the ground servo's cross-track return toward the
+     * start→target centerline exactly cancels the wall-slide the hug needs) or spills the grounded foot cell
+     * laterally off the takeoff block (the DiagonalParkour envelope churn). The point-mass insight: the
+     * hitbox overhang only matters while GROUNDED, and support only matters at the jump/step tick — so aim
+     * via ONE point, the corner offset by the body radius (0.3) plus a small margin toward the side the
+     * consumer owns, and the whole corner interaction disappears.
+     *
+     * <p><b>What it deliberately does NOT do:</b> while short of the gate there is <i>no cross-track return
+     * toward the {@code start→target} line</i> — no {@code computeGeom} pursuit, no centerline term. That
+     * recentering is exactly what refuted the search-side hug (the servo and the wall reached a fixed point
+     * at the blocked corner); the gate leg is a pure point pursuit of {@code (gx,gz)}. Past the gate the aim
+     * is the target POINT (not the line either — a line-return would pull the bot back toward the corner it
+     * just cleared).
+     *
+     * <p><b>Actuation</b> is the standard velocity-servo idiom ({@link #groundServo}/{@link
+     * #parkourRunupAlign}): desired velocity = unit(aim − bot) × {@link #SERVO_GROUND_CRUISE} (an unreachable
+     * ceiling on normal friction, so forward saturates like the open-loop walk), face the velocity ERROR and
+     * thrust proportional — so momentum off the gate line is BLED (reverse-thrust component), which is what
+     * keeps a laterally arriving runup from spilling past its corner. Both aims are PASS-THROUGH (constant
+     * cruise, never eased by distance): the bot must carry speed through the gate and through the target — a
+     * consumer that wants to STOP at the target hands off to {@link #recenterOnTarget} once its reach fires.
+     *
+     * <p><b>Consumers.</b> {@code DiagonalParkour}'s runup passes the takeoff-corner gate (the cell's exit
+     * corner pulled {@code 0.3+margin} back INTO the takeoff cell along the diagonal). The intended P5 hug
+     * consumer (a one-open-side walking {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Diagonal}
+     * — the re-landing of the reverted search-side hug) passes the shared cell corner offset {@code 0.3+margin}
+     * toward its OPEN side (§3.2's gate point, e.g. corner {@code (1,1)} → gate {@code (0.7,1.3)} for a
+     * blocked {@code (x+dx,z)} column): short of the gate the bot walks INTO the open column instead of
+     * pressing the corner, past it the aim swings to the destination centre. Cold (tick-rate), primitives
+     * only, zero allocation.
+     */
+    public static void steerViaGate(BotSteering b, SteerView p, double gx, double gz) {
+        steerViaGate(b, p.sx(), p.sz(), p.tx(), p.tz(), gx, gz);
+    }
+
+    /**
+     * Explicit-coordinate core of {@link #steerViaGate(BotSteering, SteerView, double, double)} for consumers
+     * whose gate frame is their own plan geometry rather than the follower's live segment view (the
+     * {@code DiagonalParkour} runup anchors on its known takeoff/landing cells so a mid-path adoption can't
+     * skew the projection axis). {@code (sx,sz)} → {@code (tx,tz)} is the along-track axis the crossing is
+     * measured on; {@code (gx,gz)} the gate.
+     */
+    public static void steerViaGate(BotSteering b, double sx, double sz, double tx, double tz,
+                                    double gx, double gz) {
+        double aimX, aimZ;
+        if (pastGate(b, sx, sz, tx, tz, gx, gz)) {
+            aimX = tx; aimZ = tz;       // past the gate: the real target owns the aim (point, never the line)
+        } else {
+            aimX = gx; aimZ = gz;       // short of the gate: pure gate pursuit — NO centerline return
+        }
+        double dirx = aimX - b.x(), dirz = aimZ - b.z();
+        double dl = Math.sqrt(dirx * dirx + dirz * dirz);
+        if (dl < EPS) {                 // dead-on the aim point: nothing to press this tick
+            b.setForward(0.0f);
+            return;
+        }
+        dirx /= dl; dirz /= dl;
+        // Velocity-servo actuation (the groundServo/parkourRunupAlign idiom): under-speed → forward thrust
+        // along the aim; momentum OFF the aim line → the error's reverse component bleeds it.
+        double errx = dirx * SERVO_GROUND_CRUISE - b.velX();
+        double errz = dirz * SERVO_GROUND_CRUISE - b.velZ();
+        double emag = Math.sqrt(errx * errx + errz * errz);
+        if (emag < SERVO_DEADBAND) {
+            b.faceHorizontally(dirx, dirz);                // at speed on the aim line: hold heading, coast
+            b.setForward(0.0f);
+        } else {
+            b.faceHorizontally(errx, errz);                // face the error (forward thrust or momentum bleed)
+            b.setForward((float) Math.min(1.0, SERVO_GAIN * emag));
+        }
+    }
+
+    /**
+     * Whether the bot is PAST the gate: its along-track projection on the {@code (sx,sz)→(tx,tz)} axis has
+     * reached the gate's own projection minus {@link #GATE_PASS_DEADBAND} (the early-side slack — see the
+     * constant). Cross-track position is deliberately not consulted: the gate governs the handoff point
+     * ALONG the travel, and the aim/servo governs the lateral. Also the {@code DiagonalParkour} takeoff
+     * trigger ("jump early — while the centre is still safely on the takeoff block"): grounded + pastGate
+     * replaces the old drive-to-the-edge overshoot trigger whose late fire spilled the foot cell laterally.
+     * A degenerate axis ({@code len < }{@link #EPS}) has no gate geometry and reads as past (the target owns
+     * the aim).
+     */
+    public static boolean pastGate(BotSteering b, double sx, double sz, double tx, double tz,
+                                   double gx, double gz) {
+        double segX = tx - sx, segZ = tz - sz;
+        double len = Math.sqrt(segX * segX + segZ * segZ);
+        if (len < EPS) return true;
+        double ux = segX / len, uz = segZ / len;
+        double alongBot = (b.x() - sx) * ux + (b.z() - sz) * uz;
+        double alongGate = (gx - sx) * ux + (gz - sz) * uz;
+        return alongBot >= alongGate - GATE_PASS_DEADBAND;
+    }
+
     /** The current segment's horizontal travel frame into scratch {@code F}; false if degenerate (a dive/rise). */
     private static boolean travelFrame(SteerView p) {
         double cdx = p.tx() - p.sx(), cdz = p.tz() - p.sz();

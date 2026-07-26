@@ -22,4 +22,6 @@ break/place work any path must pay to reach a goal buried in / walled behind a u
 - **§5 DECIDED — the ratified decision list.** The two survivors that sessions keep wrongly
   re-simplifying (see the `macro-movement-non-negotiables` memory): (1) compute the FULL cuboid, a 1-D
   walk is wrong; (2) the escape-hedge bound MUST divide by the movement's per-step cost.
-- §6 relationship to the rest of the stack.
+- §6 relationship to the rest of the stack. (Execution side, 2026-07-23: macro edges are expanded
+  by `reconstruct` into unit waypoints that now carry search-native floors (`BlockPathPlan.floorY`)
+  and run under the phase framework's validity envelopes — see `DESIGN-validity-envelopes.md`.)

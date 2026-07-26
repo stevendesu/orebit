@@ -82,7 +82,7 @@ public class RegionPersistenceRoundTripTest {
 
         int row = p.rowFor(0, rx, ry, rz);
         RegionFragments rf = p.ensureFragments(0, row);
-        FragmentBuilder.build(passable, standable, G, passCount, standCount, ignore, hardnessSumSolid, solidCount, rf);
+        FragmentBuilder.build(passable, standable, null, G, passCount, standCount, ignore, hardnessSumSolid, solidCount, rf);
         p.setBuilt(0, row, true);
     }
 
@@ -398,6 +398,31 @@ public class RegionPersistenceRoundTripTest {
         assertTrue(rb.rowIfPresent(0, 3, 0, 3) != -1 && rb.isBuilt(0, rb.rowIfPresent(0, 3, 0, 3)),
                 "a built all-zero resource tally round-trips");
         assertEquals(-1, rb.rowIfPresent(0, 3, 1, 3), "an unbuilt resource tally is not persisted");
+    }
+
+    // ===================================================================================================
+    // Version gating: a pre-v7 file (v6 = the pre-typed-fragments layout, no per-fragment type bits and
+    // stale keep-all populations) must read as ABSENT (cache-miss → rebuild from live), never mis-decode.
+    // ===================================================================================================
+    @Test
+    void staleV6File_isRejectedAsCacheMiss() throws IOException {
+        CostPyramid src = new CostPyramid();
+        seedUniform(src, 2, 3, 4, RegionFragments.KIND_SOLID, 6);
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        CostPyramidCodec.encodeShard(src, RegionAddress.shardOf(2, 0), RegionAddress.shardOf(4, 0), bos);
+        byte[] bytes = bos.toByteArray();
+        bytes[4] = 0;
+        bytes[5] = 6; // patch the big-endian version short back to v6
+
+        CostPyramid dest = new CostPyramid();
+        boolean threw = false;
+        try {
+            CostPyramidCodec.decode(new ByteArrayInputStream(bytes), dest);
+        } catch (IOException expected) {
+            threw = true;
+        }
+        assertTrue(threw, "a v6 file must throw under the v7 typed-fragments codec (cache semantics)");
+        assertEquals(-1, dest.rowIfPresent(0, 2, 3, 4), "nothing is interned from a rejected file");
     }
 
     // ===================================================================================================

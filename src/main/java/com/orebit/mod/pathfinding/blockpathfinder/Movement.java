@@ -42,11 +42,20 @@ public interface Movement {
     /**
      * Whether the bot's feet block {@code (b.footX,footY,footZ)} has reached waypoint {@code (wx,wy,wz)} —
      * the follower's cursor-advance test. Default is an exact block match (waypoints and feet are both
-     * blocks, so this is block-exact, no distance epsilon). Swim overrides it with a vertical tolerance
-     * because a floating bot's Y bobs with buoyancy.
+     * blocks, so this is block-exact, no distance epsilon), GROUNDED-gated for a {@link
+     * #commitsAcrossArrival committed} move: a committed arc's arrival IS grounded contact (its plan's
+     * {@code done} demands standing on the landing cell), so requiring {@code grounded()} delays a
+     * legitimate advance by zero ticks — it kills only the airborne fly-through match, where a falling
+     * bot's feet block transits a waypoint stand cell mid-arc, the cursor silently advances onto a step
+     * the bot never stood at, and the settle anchor is poisoned to a cell it flew past (the
+     * DiagonalParkour off-plan wedge). Uncommitted moves keep the ungated match — in particular {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Fall Fall}, whose landing may be buoyant water
+     * (never grounded). Swim overrides it with a vertical tolerance because a floating bot's Y bobs with
+     * buoyancy.
      */
     default boolean reached(BotSteering b, int wx, int wy, int wz) {
-        return b.footX() == wx && b.footY() == wy && b.footZ() == wz;
+        return (!commitsAcrossArrival() || b.grounded())
+                && b.footX() == wx && b.footY() == wy && b.footZ() == wz;
     }
 
     /**

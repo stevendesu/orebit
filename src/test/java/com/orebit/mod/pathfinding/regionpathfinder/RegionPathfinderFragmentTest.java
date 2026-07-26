@@ -68,7 +68,7 @@ public class RegionPathfinderFragmentTest {
         CostPyramid pyr = grid.pyramid();
         int row = pyr.rowFor(0, rx, ry, rz);
         RegionFragments rf = pyr.ensureFragments(0, row);
-        FragmentBuilder.build(passable, standable, G,
+        FragmentBuilder.build(passable, standable, null, G,
                 passCount, standCount, 0, hardnessSumSolid, solidCount, rf);
         pyr.setBuilt(0, row, true);
     }
@@ -263,12 +263,15 @@ public class RegionPathfinderFragmentTest {
         RegionPathPlan plan = RegionPathfinder.planWithin(0, grid, 0, start, goal, goal,
                 BotCaps.DEFAULT, blacklist);
         int rounds = 0;
-        while (plan != null && rounds++ < 16) {
+        // Round budget must exceed the number of DISTINCT approaches into V. The full approachRowKey
+        // (region + fragment + entry-face + from-fragment) splits what the old region+fragment key collapsed,
+        // so this fixture now exposes 30 distinct approaches (was a handful) before honest exhaustion — the
+        // cap is sized with headroom above that, not a behavioural bound.
+        while (plan != null && rounds++ < 64) {
             int last = plan.size() - 1;
             assertTrue(RegionPathfinder.isVirtualGoal(plan.fragmentId(last)),
                     "every found plan terminates at the virtual goal");
-            long approach = RegionPathfinder.fragmentNodeKey(plan.rx(last - 1), plan.ry(last - 1),
-                    plan.rz(last - 1), plan.fragmentId(last - 1));
+            long approach = RegionPathfinder.approachRowKeyForStep(plan, last - 1);
             assertFalse(blamed.contains(approach),
                     "a blacklisted approach must never be re-offered (round " + rounds + ")");
             blamed.add(approach);
@@ -317,8 +320,7 @@ public class RegionPathfinderFragmentTest {
         assertNotNull(l0);
         int last = l0.size() - 1;
         assertTrue(RegionPathfinder.isVirtualGoal(l0.fragmentId(last)), "the skeleton must terminate at V");
-        long approach = RegionPathfinder.fragmentNodeKey(l0.rx(last - 1), l0.ry(last - 1),
-                l0.rz(last - 1), l0.fragmentId(last - 1));
+        long approach = RegionPathfinder.approachRowKeyForStep(l0, last - 1);
         long vKey = RegionPathfinder.fragmentNodeKey(l0.rx(last), l0.ry(last), l0.rz(last),
                 l0.fragmentId(last));
 
@@ -331,8 +333,7 @@ public class RegionPathfinderFragmentTest {
         int lastA = after.size() - 1;
         assertTrue(RegionPathfinder.isVirtualGoal(after.fragmentId(lastA)),
                 "the re-derived skeleton still terminates at V");
-        long approachAfter = RegionPathfinder.fragmentNodeKey(after.rx(lastA - 1), after.ry(lastA - 1),
-                after.rz(lastA - 1), after.fragmentId(lastA - 1));
+        long approachAfter = RegionPathfinder.approachRowKeyForStep(after, lastA - 1);
         assertTrue(approachAfter != approach, "the reroute must use a DIFFERENT approach into V");
         assertEquals(0, grid.crossingMemory().total(),
                 "an (approach -> V) blame is journey-scoped — never recorded to the crossing memory");
