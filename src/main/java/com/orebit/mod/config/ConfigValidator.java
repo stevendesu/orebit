@@ -101,6 +101,9 @@ public final class ConfigValidator {
                 floatClamped(props, ConfigKeys.PATHING_HPA_FLUSH_BUDGET_MS, d.hpaFlushBudgetMs(), 0.1f, 1000.0f),
                 // regionShardLoadBudgetMs > 0, ceilinged at 1000 ms (same rail as the other per-tick drain budgets).
                 floatClamped(props, ConfigKeys.PATHING_REGION_SHARD_LOAD_BUDGET_MS, d.regionShardLoadBudgetMs(), 0.1f, 1000.0f),
+                // boxedInScanRadius: the proactive boxed-in seal-scan box half-extent (region cells, per level);
+                // >= 1 (0 would be a degenerate 1-cell box), ceilinged at 16 (a wider box just costs more at plan-entry).
+                intClamped(props, ConfigKeys.PATHING_BOXED_IN_SCAN_RADIUS, d.boxedInScanRadius(), 1, 16),
                 // hpa: 0 disables the periodic flush; upper rail is a sanity cap (~9.5 days) against a typo.
                 intClamped(props, ConfigKeys.HPA_PERSIST_INTERVAL_TICKS, d.persistIntervalTicks(), 0, 16_000_000),
                 // persistFlushBudgetMs > 0, ceilinged at 1000 ms (same rail as the other per-tick drain budgets).

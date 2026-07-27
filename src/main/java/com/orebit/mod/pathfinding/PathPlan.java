@@ -1577,13 +1577,6 @@ public final class PathPlan {
         }
     }
 
-    /** Per-level box radius (region units) for the multi-level boxed-in scan ({@link #maybeProactiveBoxedIn}):
-     *  a {@code (2·R+1)³} box centered on the goal region at each pyramid level. {@code R=3} → 7 regions/axis,
-     *  covering seals from ~16 blocks (L0) up to ~7k blocks (L6, 1024-block regions). Each per-level field is
-     *  {@code (2R+1)³ · MAX_FRAGMENTS} floats — small — and the flood is bounded by the box (≤ a few hundred
-     *  region pops), never the 20k backstop. (A future {@code orebit.properties} knob — see #8.) */
-    private static final int BOXED_IN_BOX_RADIUS = 3;
-
     /**
      * PROACTIVE boxed-in check (#4, DESIGN-boxed-in-reachability §14 — the multi-level rework of Increment 1's
      * L0-only reactive trigger). The reactive harvest ({@link #harvestBoxedInProof}) only fires at a region-tier
@@ -1630,7 +1623,7 @@ public final class PathPlan {
         for (int lvl = RegionAddress.MAX_COARSE_LEVEL; lvl >= 0; lvl--) {
             boolean sealed;
             try {
-                sealed = RegionPathfinder.isSealedWithin(regionGrid, minY, goalFloor, lvl, BOXED_IN_BOX_RADIUS,
+                sealed = RegionPathfinder.isSealedWithin(regionGrid, minY, goalFloor, lvl, caps.boxedInScanRadius(),
                         caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), regionMine, regionPlace);
             } catch (Throwable t) {
                 sealed = false; // a sealed-probe backs a give-up, never gates it: inconclusive ⇒ descend/proceed

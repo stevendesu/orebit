@@ -298,6 +298,11 @@ public final class ConfigLoader {
             line(w, "# when hpa.lazyLoad=true). Each whole-shard load is atomic (~11-34ms); this bounds how many");
             line(w, "# shards a tick pages in, with a >=1-per-tick backstop. Clamped to (0, 1000] ms. Default 2.0.");
             kv(w, ConfigKeys.PATHING_REGION_SHARD_LOAD_BUDGET_MS, d.regionShardLoadBudgetMs());
+            line(w, "# Half-extent (in region cells, per pyramid level 0..6) of the PROACTIVE boxed-in seal scan run");
+            line(w, "# at plan-entry (1..16): a (2R+1)^3 region box centered on the goal region at each level. R=3");
+            line(w, "# (default) catches seals from ~16 blocks (level 0) up to ~7k blocks (level 6). Larger = catches");
+            line(w, "# bigger tombs but scans a wider box each time the bot picks a goal (a plan-entry cost, not per-node).");
+            kv(w, ConfigKeys.PATHING_BOXED_IN_SCAN_RADIUS, d.boxedInScanRadius());
             line(w, "");
 
             line(w, "# --- hpa: the persisted region tier (survives a server restart) ---");
