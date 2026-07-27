@@ -69,11 +69,17 @@ never used at search). Replace the per-cell **gather** (each cell scans neighbou
   read at, `:156-157`). Equivalently, F scatters to its 4 horizontal neighbours at rows `fy-1`/`fy-2`.
 
 **Bit-identical:** `adjFlow` is exactly the per-row horizontal dilation of the flowing set that
-`risksFluidFlow` gathers. **One caveat (must decide):** today's `computeFlags` is per-section with only
-*above* overscan, so at a section's bottom row it reads `fluid(below)` as **air**; a column sweep carries
-real `fluidBelow` across the seam — *more correct* but *differs* at fluid cells on a section boundary.
-**Bit-identical ⇒ reset `fluidBelow` to air at each section seam** (replicate the quirk); the carry-across
-("seam-correct") version is a separate, reviewed behavior change. Ship bit-identical first.
+`risksFluidFlow` gathers. **CORRECTION (verified in impl 2026-07-27 — this doc's earlier "reset at seam"
+claim was WRONG).** The gather is NOT air-optimistic downward for the fluid scan: `risksFluidFlow`'s lowest
+read is the floor cell's own row `y+1`, whose below-read `y` is always in-scratch or covered by the 3-row
+*above* overscan of the section below — never the below-section OOB air. So the per-section gather already
+saw the REAL cell below every flowing source, across seams. Therefore the **CONTINUOUS carry (NO seam
+reset)** is the bit-identical choice; a seam reset would *over-set* RISKY and DIVERGE (proven —
+`FluidScatterIdentityTest` fixture D fails with reset, passes with continuous carry). The "bit-identical vs
+seam-correct" split for the intra-chunk *vertical* seam is thus MOOT — they are the same. The only
+remaining optimism is the CROSS-CHUNK *lateral* edge (a NavGrid whose lateral neighbour grid isn't in
+scratch), which stays air-optimistic and is fixed by the cross-grid **scan-neighbour-face + scatter**
+follow-on (step 3, gathers nothing at runtime), NOT by any vertical-seam reset. **Ship continuous-carry.**
 
 **Why it wins (measured target):** in fluid-free terrain there are **zero** flowing cells → zero scatter →
 the ~32-read `risksFluidFlow` collapses to **1 bit-test + 2 scratch reads/cell**, and a per-column

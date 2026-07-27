@@ -28,7 +28,11 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *                                (walking through is fine). Merges the design's separate risksFluidFlow +
  *                                risksGravityFall: both mean "don't edit here", and the precise
  *                                flood/cascade check happens in the fine layer (descriptorAt) at break
- *                                time, so one prefilter bit suffices.
+ *                                time, so one prefilter bit suffices. The GRAVITY term is computed here per
+ *                                cell ({@link #compute}); the FLUID term is SCATTERED from each flowing
+ *                                source in {@link NavSectionBuilder#computeDepth}
+ *                                (PERF-DESIGN-navgrid-build §C1) and OR-ed into this bit — bit-identical to
+ *                                the old per-cell gather, since the two terms compose under OR.
  *   bit 1     CLEARABLE_HAZARD   a walk-through damaging block in the body space (fire, berry bush,
  *                                powder snow) — adds cost, not blocked. (A damaging FLOOR — lava/magma/
  *                                cactus — is intrinsic to the navtype via NavBlock.isDamaging, so it needs
@@ -107,8 +111,10 @@ public final class NavFlags {
 
     private static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
 
-    // Horizontal neighbours (x,z) for fluid-flow risk.
-    private static final int[][] HORIZONTAL = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+    // Horizontal neighbours (x,z) for fluid-flow risk. Package-visible: the flowing-fluid RISKY_EDIT term is
+    // no longer GATHERED here (see compute) — it is SCATTERED from each flowing source in
+    // NavSectionBuilder.computeDepth, which reuses this offset table.
+    static final int[][] HORIZONTAL = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
     // All six neighbours (x,y,z) for "is there a face to place against".
     private static final int[][] SIX = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
 
@@ -147,14 +153,17 @@ public final class NavFlags {
             flags |= SLOW_TRANSIT;
         }
 
-        // RISKY_EDIT: an edit in the body space could let a fluid flow in or drop a gravity block.
-        //   - gravity above (would fall when disturbed), or a gravity block here/in-the-feet we'd undercut;
-        //   - a horizontal neighbour of the body space holds a fluid not already draining straight down.
+        // RISKY_EDIT (gravity term only): an edit in the body space could drop a gravity block.
+        //   - gravity above (would fall when disturbed), or a gravity block here/in-the-feet we'd undercut.
+        // The FLUID term (a horizontal neighbour of the body space holding a fluid not already draining
+        // straight down) is no longer gathered here: it is SCATTERED from each flowing source in
+        // NavSectionBuilder.computeDepth (PERF-DESIGN-navgrid-build §C1) — bit-identically, since a flowing
+        // source at row r marks exactly the 4-horizontal-neighbour floor cells at rows r-1/r-2 that the old
+        // risksFluidFlow(y+1)/risksFluidFlow(y+2) gather selected. RISKY_EDIT is OR-idempotent, so the two
+        // terms compose. (Cross-chunk lateral edges stay air-optimistic in BOTH forms — a separate follow-on.)
         if (NavBlock.hasGravity(a2)
                 || (NavBlock.hasGravity(ground) && unsupported(desc, x, y, z))
-                || (NavBlock.hasGravity(a1) && unsupported(desc, x, y + 1, z))
-                || risksFluidFlow(desc, x, y + 1, z)
-                || risksFluidFlow(desc, x, y + 2, z)) {
+                || (NavBlock.hasGravity(a1) && unsupported(desc, x, y + 1, z))) {
             flags |= RISKY_EDIT;
         }
 
@@ -195,8 +204,16 @@ public final class NavFlags {
         return NavBlock.isPassable(at(desc, x, y - 1, z));
     }
 
-    /** A horizontal neighbour holds a fluid that is not already draining straight down. */
-    private static boolean risksFluidFlow(long[] desc, int x, int y, int z) {
+    /**
+     * A horizontal neighbour holds a fluid that is not already draining straight down (a "flowing" source at
+     * {@code (x±1/z±1, y, z)}). <b>No longer on the build hot path</b> — {@link #compute} used to gather this
+     * at {@code y+1}/{@code y+2}; the equivalent RISKY_EDIT is now scattered from each flowing source in
+     * {@link NavSectionBuilder#computeDepth} (PERF-DESIGN-navgrid-build §C1). Retained package-visible as the
+     * bit-identity reference the {@code FluidScatterIdentityTest} builds its oracle grid from (the future
+     * cross-chunk EDGE handler scatters from a neighbour's face rather than gathering, so this stays a
+     * reference, not a live edge path).
+     */
+    static boolean risksFluidFlow(long[] desc, int x, int y, int z) {
         for (int[] o : HORIZONTAL) {
             int nx = x + o[0], nz = z + o[1];
             if (NavBlock.fluid(at(desc, nx, y, nz)) != 0
