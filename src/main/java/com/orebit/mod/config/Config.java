@@ -33,7 +33,9 @@ import net.minecraft.world.level.block.state.BlockState;
  * <ul>
  *   <li>{@code canBreak  = mining.canMine}, {@code maxBreakHardness = mining.maxHardness};</li>
  *   <li>{@code canPlace  = placement.canPlace};</li>
- *   <li>{@code maxNodes  = pathing.syncSearchBudgetNodes}, {@code greedyWeight = pathing.greedyWeight};</li>
+ *   <li>{@code maxNodes  = pathing.syncSearchBudgetNodes}, {@code greedyWeight = pathing.greedyWeight},
+ *       {@code boxedInScanRadius = pathing.boxedInScanRadius} (the proactive boxed-in seal-scan box
+ *       half-extent {@code PathPlan} reads off {@code caps});</li>
  *   <li>{@code costPerHitpoint = pathing.costPerHitpoint} — the ONE damage-pricing knob: ticks the
  *       planner considers 1 HP worth (hazard-cell transit + fall damage past the safe window are both
  *       priced in it; see {@link BotCaps#costPerHitpoint}).</li>
@@ -81,6 +83,7 @@ public record Config(
         int navReadyTimeoutTicks,
         float hpaFlushBudgetMs,
         float regionShardLoadBudgetMs,
+        int boxedInScanRadius,
         // ---- hpa (persisted region tier) ----
         int persistIntervalTicks,
         float persistFlushBudgetMs,
@@ -122,6 +125,11 @@ public record Config(
                               * lazy-shard-load drain (mirrors chunkBuildBudgetMs); only bites when hpa.lazyLoad
                               * is on, else no shard is ever requested. */
                              2.0f,
+                             /* boxedInScanRadius 3 = the half-extent (region cells, per level) of the proactive
+                              * boxed-in seal scan (PathPlan.maybeProactiveBoxedIn): a (2R+1)³ region box per
+                              * level; 3 → a 7-region box catching seals from ~16 blocks (L0) to ~7k (L6). A
+                              * plan-entry cost knob (bigger = wider box scanned), never a per-node one. */
+                             3,
             /* hpa        */ 6000,
                              /* persistFlushBudgetMs 2.0 = the per-tick wall-clock budget on the periodic
                               * crash-insurance flush drain: the interval TRIGGERS the pass, then it drains dirty
@@ -164,7 +172,8 @@ public record Config(
                 /* allowUnbreakable */ allowUnbreakable,
                 /* maxNodes         */ maxNodes,
                 /* greedyWeight     */ greedyWeight,
-                /* mayToggleDoors   */ doorToggle);
+                /* mayToggleDoors   */ doorToggle,
+                /* boxedInScanRadius*/ boxedInScanRadius);
     }
 
     /**

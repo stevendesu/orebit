@@ -243,6 +243,17 @@ public final class ConfigKeys {
      * (~7.5 s at 20 t/s).
      */
     public static final String PATHING_NAV_READY_TIMEOUT_TICKS = "pathing.navReadyTimeoutTicks";
+    /**
+     * {@code int} 1..16 — the half-extent (in region cells, applied at every pyramid level 0..{@link
+     * com.orebit.mod.worldmodel.hpa.RegionAddress#MAX_COARSE_LEVEL}) of the PROACTIVE boxed-in seal scan
+     * ({@code PathPlan.maybeProactiveBoxedIn}): at each level the goal-rooted sealed-probe floods a {@code
+     * (2·R+1)³} region box centred on the goal region. {@code R=3} (default) ⇒ a 7-region box per axis,
+     * catching seals from ~16 blocks (L0) up to ~7k blocks (L6, 1024-block regions). A larger radius catches
+     * bigger tombs but scans a wider box at plan-entry (each per-level field is {@code (2R+1)³ · MAX_FRAGMENTS}
+     * floats and the flood is bounded by the box), so it is a plan-entry cost knob, not a per-node one. Default
+     * {@code 3}.
+     */
+    public static final String PATHING_BOXED_IN_SCAN_RADIUS = "pathing.boxedInScanRadius";
 
     // ---- hpa: the persisted region tier (routing fragments + resource tallies) ----------------------
     /**
