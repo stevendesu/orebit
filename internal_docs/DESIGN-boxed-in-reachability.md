@@ -414,8 +414,10 @@ read the field, only `closedFlood`) would drop it to sub-ms by skipping that all
 fast-follow, not a blocker. The hot search path is unchanged (level-0 byte-identical; JMH region-search
 flat).
 
-**Config.** Coarsest level = `RegionAddress.MAX_COARSE_LEVEL` (6); per-level box radius =
-`PathPlan.BOXED_IN_BOX_RADIUS` (3), a future `orebit.properties` knob (ties to #8's in-range threshold).
+**Config.** Coarsest level = `RegionAddress.MAX_COARSE_LEVEL` (6); per-level box radius = the
+`pathing.boxedInScanRadius` config knob (default 3), read off `caps.boxedInScanRadius()` in
+`maybeProactiveBoxedIn` (rides `BotCaps` like `maxNodes`; excluded from the realizability sig). Clamped
+`1..16`; ties to #8's in-range threshold.
 
 **Tests.** `BoxedInReachabilityTest`: `isSealedWithin` at L0 (sealed→true / connected→false /
 unbuilt-border→false) + a coarse rolled-up interior-pocket seal (closes at L0 AND L1 — validates the

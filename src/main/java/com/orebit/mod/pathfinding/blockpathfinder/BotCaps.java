@@ -13,9 +13,9 @@ package com.orebit.mod.pathfinding.blockpathfinder;
  * {@link #UNBREAKABLE}, greedy weight 2.0, 10k-node cap) so nothing changes until the owner edits config.
  *
  * <h2>The search parameters live here too</h2>
- * {@link #maxNodes} and {@link #greedyWeight} are A* search knobs, not movement capabilities, but they
- * ride on {@code BotCaps} because {@code caps} is already the one object threaded into {@link
- * BlockPathfinder#findPath} per search. The hot loop reads them into <i>locals</i> at search start (see
+ * {@link #maxNodes}, {@link #greedyWeight}, and {@link #boxedInScanRadius} are search knobs, not movement
+ * capabilities, but they ride on {@code BotCaps} because {@code caps} is already the one config-derived
+ * object threaded into {@link BlockPathfinder#findPath} per search (and held by {@code PathPlan}). The hot loop reads them into <i>locals</i> at search start (see
  * {@link BlockPathfinder}), so the per-node code still reads a local, never a field — no hot-path cost
  * for carrying them here (HOT-PATH-NO-ALLOC / favour-cpu-over-ram).
  */
@@ -109,7 +109,33 @@ public record BotCaps(
          * {@link com.orebit.mod.worldmodel.navblock.NavBlock#doorToggleable}). NOTE: the back-compat constructor
          * below still defaults this OFF for legacy {@code new BotCaps(...)} call sites (presets/benchmarks/tests).
          */
-        boolean mayToggleDoors) {
+        boolean mayToggleDoors,
+        /**
+         * Half-extent (in region cells, applied at every pyramid level) of the PROACTIVE boxed-in seal scan
+         * ({@code pathing.boxedInScanRadius}) — the {@code (2·R+1)³} goal-centred region box {@link
+         * com.orebit.mod.pathfinding.PathPlan#maybeProactiveBoxedIn} floods per level to prove a walled-off goal
+         * before the bot wanders. Like {@link #maxNodes} / {@link #greedyWeight} this is a SEARCH knob, not a
+         * movement capability, but it rides on {@code BotCaps} because {@code caps} is the config-derived object
+         * {@code PathPlan} already holds in that scope. A plan-entry cost (a wider box scans more region cells),
+         * never a per-node one — so, like the other search knobs, it is deliberately EXCLUDED from the
+         * realizability signature below. The back-compat constructors default it to {@link
+         * #DEFAULT_BOXED_IN_SCAN_RADIUS}. Default {@code 3}.
+         */
+        int boxedInScanRadius) {
+
+    /**
+     * Full back-compat constructor for the pre-boxed-in-radius component list (through {@code mayToggleDoors}),
+     * defaulting {@code boxedInScanRadius} to {@link #DEFAULT_BOXED_IN_SCAN_RADIUS}. Keeps the existing
+     * canonical-shape call sites (door tests, presets) compiling unchanged; the live config path ({@link
+     * com.orebit.mod.config.Config#toBotCaps}) uses the full constructor.
+     */
+    public BotCaps(int jumpHeight, int safeFallDistance, int maxFallDistance, boolean takesDamage,
+                   float costPerHitpoint, boolean canBreak, boolean canPlace, int maxBreakHardness,
+                   boolean allowUnbreakable, int maxNodes, float greedyWeight, boolean mayToggleDoors) {
+        this(jumpHeight, safeFallDistance, maxFallDistance, takesDamage, costPerHitpoint, canBreak, canPlace,
+             maxBreakHardness, allowUnbreakable, maxNodes, greedyWeight, mayToggleDoors,
+             DEFAULT_BOXED_IN_SCAN_RADIUS);
+    }
 
     /**
      * Back-compat constructor — the pre-DOORS-P2 component list, with {@code mayToggleDoors} defaulted OFF. Keeps
@@ -128,6 +154,13 @@ public record BotCaps(
 
     /** Default node-expansion ceiling — the historical {@code BlockPathfinder.MAX_EXPANSIONS}. */
     public static final int DEFAULT_MAX_NODES = 10000;
+
+    /**
+     * Default proactive boxed-in seal-scan box half-extent (= the {@code pathing.boxedInScanRadius} config
+     * default): a {@code 7}-region box per axis at each level (the historical hardcoded {@code
+     * PathPlan.BOXED_IN_BOX_RADIUS}). The back-compat constructors + both presets use this.
+     */
+    public static final int DEFAULT_BOXED_IN_SCAN_RADIUS = 3;
 
     /**
      * Default deepest drop the bot will take (with a damage penalty above {@link #DEFAULT_SAFE_FALL}). 16 keeps
