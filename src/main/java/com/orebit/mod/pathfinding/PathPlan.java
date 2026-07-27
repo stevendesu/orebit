@@ -164,6 +164,19 @@ public final class PathPlan {
      *  compare in {@link #regionFieldFor} gates the rebuild — an unchanged window target reuses the cached
      *  field across every replan/pre-plan toward it, never rebuilding per tick. */
     private BlockPos fieldRoot;
+    /** #4 Increment 1 (DESIGN-boxed-in-reachability §4.2): whether the last region-tier give-up
+     *  ({@link #repairBlocked}) harvested a CLOSED-flood proof that the bot's own region is provably
+     *  goal-disconnected (boxed-in) under these caps — the honest discriminator between a STRUCTURAL BLOCKED
+     *  and a mere budget artifact. Journey-scoped, never persisted (owner ruling 2026-07-25). */
+    private boolean boxedInProven;
+    /** #4 (PROACTIVE rework): the goal-neighbourhood build signal ({@link #goalNeighbourhoodBuildSignal}) at
+     *  which {@link #maybeProactiveBoxedIn} last ran its harvest, and whether that cache is valid. The
+     *  proactive harvest re-runs ONLY when this signal advances (the goal region or an adjacent chunk column —
+     *  its sealing perimeter — was (re)built or edited), so a static world pays one O(9) monotone-version read
+     *  per settled boundary, never a full harvest flood. Reset ({@code proactiveSignalValid=false}) whenever
+     *  the goal region is unbuilt, so the first post-build signal always forces a check. Journey-scoped. */
+    private long lastProactiveSignal;
+    private boolean proactiveSignalValid;
     /** Tool-aware region dig-cost model, snapshotted once from the ctor's inventory — shared by the cascade
      *  build and every {@link #regionFieldFor} field rebuild (same snapshot semantics as before). */
     private final RegionMineModel regionMine;
@@ -457,6 +470,14 @@ public final class PathPlan {
             this.status = PathStatus.FAILED;
             return;
         }
+        // #4 PROACTIVE boxed-in check (DESIGN-boxed-in-reachability §4 — the proactive rework of Increment 1's
+        // reactive give-up trigger): before committing the optimistic skeleton, prove whether the JOURNEY GOAL
+        // is walled off under these caps. A born-boxed-in goal gives up honestly NOW (no optimistic skeleton to
+        // wander) — the reactive give-up would never fire here, because optimistic-unbuilt terrain between the
+        // bot and the sealed goal keeps the forward block search returning a partial forever.
+        if (maybeProactiveBoxedIn()) {
+            return; // FAILED + boxedInProven set; no optimistic skeleton
+        }
         if (Debug.ENABLED) {
             // HPA-tier visibility: dump the whole region skeleton + per-step portal/center built-standable probe
             // (a [SOLID/buried] portal is the §6 buried-target bug). Counterpart to the block tier's /bot trace.
@@ -572,6 +593,15 @@ public final class PathPlan {
         // mirror that here so the driver completes exactly when the follower's block plan would).
         if (withinGoalTolerance(botFloor)) {
             status = PathStatus.COMPLETE;
+            return;
+        }
+
+        // #4 PROACTIVE boxed-in check (DESIGN-boxed-in-reachability §4): as the bot approaches and the goal's
+        // sealing perimeter builds in, the goal may become PROVABLY walled off even though the forward block
+        // search still returns an optimistic partial through unbuilt terrain (so no reactive give-up ever
+        // fires). Gated on the goal-neighbourhood build signal, so a static world pays one O(9) version read
+        // here, not a flood. A proven boxed-in gives up now (honest FAILED), no further wandering.
+        if (maybeProactiveBoxedIn()) {
             return;
         }
 
@@ -1367,6 +1397,9 @@ public final class PathPlan {
      */
     public boolean repairBlocked() {
         if (!blockedHop(repairHopScratch)) {
+            // No onward hop to blame — the region A* found no route at all (or the bot is in the goal region
+            // but can't reach the goal cell). A give-up: harvest the boxed-in proof to back it (§4.2).
+            harvestBoxedInProof();
             return false;
         }
         // The 4th arg is the HONEST search start — the failing search's snapshotted from-floor
@@ -1380,6 +1413,9 @@ public final class PathPlan {
         // guard (pure observation; onBlocked ran on this tick thread, so its lastWasFlood is current).
         if (stats != null && RegionPathfinder.lastWasFlood()) stats.onRegionFlood();
         if (!rerouted) {
+            // The cascade exhausted its repairs at every level — the canonical region-tier give-up. Run the
+            // ONE harvest-mode full-drain flood to back the honest FAILED with a structural boxed-in proof (§4.2).
+            harvestBoxedInProof();
             this.skeleton = null;
             this.blockPlan = null;
             this.status = PathStatus.FAILED;
@@ -1387,6 +1423,7 @@ public final class PathPlan {
         }
         this.skeleton = hier.l0Skeleton();
         if (skeleton == null || skeleton.isEmpty()) {
+            harvestBoxedInProof();
             this.blockPlan = null;
             this.status = PathStatus.FAILED;
             return false;
@@ -1478,6 +1515,156 @@ public final class PathPlan {
         this.regionField = field;
         this.fieldRoot = target;
         return field;
+    }
+
+    /**
+     * Boxed-in negative-reachability harvest at the region-tier GIVE-UP point (#4 Increment 1,
+     * DESIGN-boxed-in-reachability §4.2) — the ONLY site the harvest-mode (full-drain) flood fires. The
+     * cascade has exhausted its repairs, so run ONE reverse flood rooted at the current window target (the cell
+     * the search failed to reach — FINDINGS §1: read the field's own window-target root, never the journey
+     * goal) with the harvest flag, which suppresses the fat-skeleton early exit so the flood drains fully. If
+     * the flood was CLOSED, {@link RegionCostField#markInfinite} flags every in-box built-but-unreached region
+     * INFINITE; {@link #boxedInProven} then records whether the BOT'S OWN region is INFINITE — i.e. provably
+     * cannot reach the target under these caps (a STRUCTURAL boxed-in, distinct from a budget artifact). The
+     * harvested field is cached as {@link #regionField} so the block-A* hard reject ({@code isBlocked}) has
+     * teeth on any continuation search this journey. Journey-scoped: NO RegionCrossingMemory / persistence
+     * write (owner ruling 2026-07-25). Any failure is swallowed — the give-up proceeds regardless.
+     */
+    private void harvestBoxedInProof() {
+        // Reactive backstop: root at the failing search's window target (FINDINGS §1) and PERSIST the harvested
+        // field so a continuation search sees the INFINITE prune (the historical give-up behaviour, unchanged).
+        harvestBoxedIn(windowTargetPos != null ? windowTargetPos : goalFloor, true);
+    }
+
+    /**
+     * Run the harvest-mode (full-drain) goal-rooted flood rooted at {@code target} and record whether the
+     * BOT'S OWN region is provably goal-disconnected under these caps ({@code closedFlood ∧ isBlocked(bot)});
+     * returns that verdict. The reactive give-up backstop ({@link #harvestBoxedInProof}) roots it at the failing
+     * search's window target (FINDINGS §1) and PERSISTS the field; the PROACTIVE check now uses the multi-level
+     * {@link RegionPathfinder#isSealedWithin} scan ({@link #maybeProactiveBoxedIn}) instead of this L0 flood.
+     * When {@code persistField} the harvested {@link RegionCostField} is cached as
+     * {@link #regionField}/{@link #fieldRoot} so the block-A* hard reject ({@code isBlocked}) has teeth on any
+     * continuation search; the PROACTIVE caller passes {@code false} so a NOT-boxed verdict leaves every
+     * subsequent block search byte-identical (a persisted full-drain field with an INFINITE set would perturb
+     * both the heuristic's floored-optimistic reads and the #5 reject — INV BR-3). Always records
+     * {@link #boxedInProven}. Any failure is swallowed (a boxed-in proof backs a give-up, never gates it).
+     */
+    private boolean harvestBoxedIn(BlockPos target, boolean persistField) {
+        if (target == null || botFloor == null) return false;
+        try {
+            final int brx = RegionAddress.regionX(botFloor.getX(), 0);
+            final int bry = RegionAddress.regionY(botFloor.getY(), 0, minY);
+            final int brz = RegionAddress.regionZ(botFloor.getZ(), 0);
+            final RegionPathfinder.RegionBox box = RegionPathfinder.RegionBox.around(
+                    brx, bry, brz,
+                    RegionAddress.regionX(target.getX(), 0),
+                    RegionAddress.regionY(target.getY(), 0, minY),
+                    RegionAddress.regionZ(target.getZ(), 0), 3);
+            final RegionCostField field = RegionPathfinder.costToGoalField(regionGrid, minY, target, botFloor,
+                    caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), regionMine, regionPlace, box, true);
+            if (persistField) {
+                this.regionField = field;
+                this.fieldRoot = target;
+            }
+            // The reverse flood is rooted at the TARGET, so a region is INFINITE iff it cannot reach the target.
+            // The bot stands at botFloor: if ITS region is INFINITE, the bot is provably boxed-in from the target.
+            this.boxedInProven = field != null
+                    && field.isBlocked(botFloor.getX(), botFloor.getY(), botFloor.getZ());
+            return this.boxedInProven;
+        } catch (Throwable t) {
+            // A boxed-in proof is a diagnostic backing for the give-up, never a precondition for it: swallow.
+            return false;
+        }
+    }
+
+    /** Per-level box radius (region units) for the multi-level boxed-in scan ({@link #maybeProactiveBoxedIn}):
+     *  a {@code (2·R+1)³} box centered on the goal region at each pyramid level. {@code R=3} → 7 regions/axis,
+     *  covering seals from ~16 blocks (L0) up to ~7k blocks (L6, 1024-block regions). Each per-level field is
+     *  {@code (2R+1)³ · MAX_FRAGMENTS} floats — small — and the flood is bounded by the box (≤ a few hundred
+     *  region pops), never the 20k backstop. (A future {@code orebit.properties} knob — see #8.) */
+    private static final int BOXED_IN_BOX_RADIUS = 3;
+
+    /**
+     * PROACTIVE boxed-in check (#4, DESIGN-boxed-in-reachability §14 — the multi-level rework of Increment 1's
+     * L0-only reactive trigger). The reactive harvest ({@link #harvestBoxedInProof}) only fires at a region-tier
+     * GIVE-UP; but a goal walled off by BUILT solid with optimistic-UNBUILT terrain between never reaches a
+     * give-up — the unbuilt cells read as passable AIR, so the forward block search returns a partial forever
+     * and the bot wanders. This check runs a goal-rooted sealed-probe EAGERLY (at plan construction and, gated,
+     * as the bot approaches) so the honest "walled off" verdict is reached without wandering.
+     *
+     * <p><b>Multi-level scan.</b> A tomb is not inherently level-0: an air pocket large enough to flood L0 but
+     * ringed by solid is a seal visible only at a COARSER level. So the check scans {@code MAX_COARSE_LEVEL → 0},
+     * flooding the goal's caps-legal component in a SMALL box centered on the goal at each level
+     * ({@link RegionPathfinder#isSealedWithin}). A CLOSED flood at any level proves the goal SEALED within that
+     * box — unreachable from anywhere, so the bot's position is irrelevant (no {@code around(bot,goal)} span, so
+     * the cost is distance-INDEPENDENT: a 100k-away goal probes as cheaply as a near one, sidestepping the L0
+     * bot↔goal array-bill). The proof is monotone (a coarse seal admits no finer escape), so the FIRST close
+     * wins; a not-closed level means the component reaches beyond its small box, so descend — a finer, smaller
+     * seal may still close. L0 is the precise floor. A seal larger than the L6 box (~7k blocks) is left to the
+     * give-up backstop / super-long-range handling (#8).
+     *
+     * <p>Gate 1 — the goal region must be BUILT at L0 (an unbuilt goal is OPTIMISTIC, §6: never claim boxed-in
+     * over unclassified terrain; MC only builds nav sections for loaded chunks). Gate 2 — re-run only when the
+     * goal's sealing NEIGHBOURHOOD changed ({@link #goalNeighbourhoodBuildSignal}): the seal lives in the goal
+     * column + its 8 neighbours, whose monotone versions strictly advance whenever a seal could complete, so a
+     * static neighbourhood pays no flood.
+     *
+     * <p>On a boxed-in verdict, sets the same honest FAILED triple the reactive give-up sets (skeleton/blockPlan
+     * null, status FAILED, {@link #boxedInProven}=true) and returns {@code true}; otherwise leaves the plan
+     * exactly as it was and returns {@code false}. VERDICT-ONLY — no field persisted, so a NOT-boxed verdict
+     * leaves every subsequent block search byte-identical (INV BR-3).
+     */
+    private boolean maybeProactiveBoxedIn() {
+        if (goalFloor == null) return false;
+        regionGrid.ensureLeaf(goalRX, goalRY, goalRZ);
+        if (regionGrid.fragmentRecord(0, goalRX, goalRY, goalRZ) == null) {
+            proactiveSignalValid = false; // goal unbuilt ⇒ optimistic; a later build re-forces the first check
+            return false;
+        }
+        final long sig = goalNeighbourhoodBuildSignal();
+        if (proactiveSignalValid && sig == lastProactiveSignal) {
+            return false; // nothing in the goal's sealing neighbourhood changed since the last check
+        }
+        lastProactiveSignal = sig;
+        proactiveSignalValid = true;
+        for (int lvl = RegionAddress.MAX_COARSE_LEVEL; lvl >= 0; lvl--) {
+            boolean sealed;
+            try {
+                sealed = RegionPathfinder.isSealedWithin(regionGrid, minY, goalFloor, lvl, BOXED_IN_BOX_RADIUS,
+                        caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), regionMine, regionPlace);
+            } catch (Throwable t) {
+                sealed = false; // a sealed-probe backs a give-up, never gates it: inconclusive ⇒ descend/proceed
+            }
+            if (sealed) {
+                this.boxedInProven = true;
+                this.skeleton = null;
+                this.blockPlan = null;
+                this.status = PathStatus.FAILED;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Sum of the {@link NavGridUpdater#chunkVersion monotone chunk-versions} of the 3×3 chunk columns centred
+     *  on the goal region's column (level-0 region X/Z == chunk X/Z) — the goal's sealing-perimeter build
+     *  signal for {@link #maybeProactiveBoxedIn}. Strictly increases on any nav (re)build or block edit in that
+     *  neighbourhood (every mutation site bumps the column version via {@link NavGridUpdater#bumpChunk}), so an
+     *  advance is a sufficient re-check trigger and a steady sum means no seal could have completed. */
+    private long goalNeighbourhoodBuildSignal() {
+        long sig = 0;
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                sig += NavGridUpdater.chunkVersion(level, NavStore.key(goalRX + dx, goalRZ + dz)) & 0xFFFFFFFFL;
+            }
+        }
+        return sig;
+    }
+
+    /** Whether the last region-tier give-up harvested a boxed-in proof of the bot's own region
+     *  (see {@link #boxedInProven}) — telemetry / tests (#4 Increment 1). */
+    public boolean boxedInProven() {
+        return boxedInProven;
     }
 
     /**
