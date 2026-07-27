@@ -256,5 +256,11 @@ public final class OrebitCommon {
         // trajectory + water state to reproduce the ejection the synthetic SwimCourse can't. Inert unless armed
         // (-Dorebit.replay); registered last.
         WorldReplay.register(events);
+
+        // Headless BOXED-IN diagnostic (the :fabric:<ver>:runBoxedin run config): builds a sealed bedrock tomb
+        // + an open stone platform and drives one goto to each, proving the multi-level proactive boxed-in scan
+        // gives up honestly on the sealed goal (navGaveUp + boxedInProven) and reaches the open goal. Same
+        // inert-unless-armed discipline (-Dorebit.boxedin); registered last.
+        BoxedInCourse.register(events);
     }
 }

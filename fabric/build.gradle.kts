@@ -187,6 +187,21 @@ loom {
             project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
             isIdeConfigGenerated = false
         }
+        // Boxed-in diagnostic: a superflat server that arms the common-src BoxedInCourse hook (-Dorebit.boxedin)
+        // in its own run dir (run/boxedin). Builds a sealed bedrock tomb + an open stone platform and drives one
+        // goto to each. Launch: ./gradlew :fabric:1.21.11:runBoxedin (after scripts/run-boxedin.ps1 preps the run
+        // dir with a FLAT server.properties + config/orebit.properties). Mirrors the parkour config exactly.
+        create("boxedin") {
+            server()
+            configName = "Orebit BoxedIn ($minecraft)"
+            runDir = "../../../run/boxedin"
+            vmArg("-Dorebit.boxedin=true")
+            for (key in listOf("debug")) {
+                val v = project.findProperty("orebit.boxedin.$key")
+                if (v != null) vmArg("-Dorebit.boxedin.$key=$v")
+            }
+            isIdeConfigGenerated = false
+        }
         // Real-world REPLAY diagnostic: a server that arms the common-src WorldReplay hook (-Dorebit.replay)
         // in its own run dir (run/replay), which LOADS the owner's "Swims" world (copied in by
         // scripts/run-replay.ps1 — NOT a flat regen) and replays the reported-failing goto. Launch:
