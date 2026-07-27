@@ -46,6 +46,11 @@ public final class NavSectionBuilder {
     // cell below / navtype of the cell above). Same per-thread pattern as the scratches above.
     private static final ThreadLocal<int[]> DEPTH_COL_A = ThreadLocal.withInitial(() -> new int[256]);
     private static final ThreadLocal<int[]> DEPTH_COL_B = ThreadLocal.withInitial(() -> new int[256]);
+    // A third per-column carry beside DEPTH_COL_A/B, used by the ascending floorGap sweep to fold the
+    // flowing-fluid RISKY_EDIT SCATTER (PERF-DESIGN-navgrid-build §C1) into that same pass: 1 iff the cell
+    // directly below (previous sweep step) held a fluid — the "not already draining straight down" half of
+    // the flowing test. Per-thread, same pattern as the A/B carries.
+    private static final ThreadLocal<int[]> DEPTH_COL_FLUID = ThreadLocal.withInitial(() -> new int[256]);
     private static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
 
     // LEGACY reflection helpers, consumed ONLY by the JMH reference benchmark
@@ -430,10 +435,19 @@ public final class NavSectionBuilder {
     public static void computeDepth(NavSection[] sections) {
         final int[] colA = DEPTH_COL_A.get();
         final int[] colB = DEPTH_COL_B.get();
+        final int[] fluidBelow = DEPTH_COL_FLUID.get();
 
         {
-            // Ascending floorGap sweep. colA = gap of the cell below; colB = standability of the cell below
-            // (1/0). The bottom row of the bottom-most built section is the DEPTH_SAT seed.
+            // Ascending floorGap sweep, with the flowing-fluid RISKY_EDIT SCATTER folded in
+            // (PERF-DESIGN-navgrid-build §C1 — replacing NavFlags.risksFluidFlow's per-cell GATHER). colA =
+            // gap of the cell below; colB = standability of the cell below (1/0); fluidBelow = whether the
+            // cell below held a fluid (1/0). The bottom row of the bottom-most built section is the
+            // DEPTH_SAT seed. fluidBelow is initialised to 0 (nothing below the world bottom is fluid); it
+            // then carries CONTINUOUSLY across section seams — the old per-section gather also saw the real
+            // cell below every flowing source it read (its lowest read is the floor cell's own row y+1,
+            // whose below-read y is in-scratch/overscan, never the below-section air OOB), so the continuous
+            // carry is bit-identical (verified by FluidScatterIdentityTest); NO seam reset is needed.
+            java.util.Arrays.fill(fluidBelow, 0, 256, 0);
             boolean seeded = false;
             for (int i = 0; i < sections.length; i++) {
                 NavSection s = sections[i];
@@ -444,6 +458,13 @@ public final class NavSectionBuilder {
                 TraversalGrid grid = s.getTraversalGrid();
                 final short[] raw = grid.raw();
                 final byte[] depth = grid.depthRaw();
+                // The section directly below, for a flowing source in this section's bottom row(s) whose
+                // endangered floor cells (rows y-1/y-2) cross the seam downward — exactly the cells the old
+                // gather reached UP into this section via the section-above's overscan. Null (no section
+                // below, or a hole) ⇒ those cross-seam scatters fall off the bottom (air-optimistic, as the
+                // gather was at the world floor).
+                TraversalGrid below = (i > 0 && sections[i - 1] != null)
+                        ? sections[i - 1].getTraversalGrid() : null;
                 for (int y = 0; y < 16; y++) {
                     boolean seedRow = !seeded && y == 0;
                     for (int c = 0; c < 256; c++) {
@@ -454,6 +475,18 @@ public final class NavSectionBuilder {
                         long d = NavBlock.descriptor((short) (raw[idx] & TraversalGrid.NAVTYPE_MASK));
                         colA[c] = gap;
                         colB[c] = NavBlock.isStandable(d) ? 1 : 0;
+
+                        // Flowing-fluid scatter: a fluid cell whose own cell-below is dry is "flowing"; it
+                        // endangers the floor cells one and two rows below its 4 in-bounds horizontal
+                        // neighbours (the exact set the old risksFluidFlow(y+1)/risksFluidFlow(y+2) gather
+                        // selected). Detection reuses the already-decoded descriptor d — ~1 bit-test/cell
+                        // when fluid-free.
+                        int fl = NavBlock.fluid(d) != 0 ? 1 : 0;
+                        boolean flowing = fl != 0 && fluidBelow[c] == 0;
+                        fluidBelow[c] = fl;
+                        if (flowing) {
+                            scatterFluidRisky(grid, below, c & 15, y, (c >> 4) & 15);
+                        }
                     }
                     if (seedRow) seeded = true;
                 }
@@ -486,6 +519,33 @@ public final class NavSectionBuilder {
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Scatter the flowing-fluid RISKY_EDIT bit from a flowing source at section-local {@code (x,y,z)} onto
+     * the floor cells it endangers: its 4 in-bounds horizontal neighbours at rows {@code y-1} and
+     * {@code y-2}. Rows that fall below the source's own section cross into {@code below} (the section
+     * directly beneath) — the seam the old per-section gather crossed via the section-above's overscan
+     * ({@code y-1 → below row 15}, {@code y-2 → below row 14}); when {@code below} is null those scatters
+     * drop off the world floor (air-optimistic, matching the gather). Allocation-free — iterates the shared
+     * {@link NavFlags#HORIZONTAL} offset table, OR-ing RISKY_EDIT while preserving navtype + existing flags.
+     */
+    private static void scatterFluidRisky(TraversalGrid grid, TraversalGrid below, int x, int y, int z) {
+        for (int[] o : NavFlags.HORIZONTAL) {
+            int nx = x + o[0], nz = z + o[1];
+            if (nx < 0 || nx > 15 || nz < 0 || nz > 15) continue; // lateral OOB: air-optimistic (as the gather)
+            markRiskyRow(grid, below, nx, y - 1, nz);
+            markRiskyRow(grid, below, nx, y - 2, nz);
+        }
+    }
+
+    /** OR RISKY_EDIT into cell {@code (nx, ry, nz)}, crossing into {@code below}'s top rows when {@code ry<0}. */
+    private static void markRiskyRow(TraversalGrid grid, TraversalGrid below, int nx, int ry, int nz) {
+        if (ry >= 0) {
+            grid.orFlags(nx, ry, nz, NavFlags.RISKY_EDIT);
+        } else if (below != null) {
+            below.orFlags(nx, 16 + ry, nz, NavFlags.RISKY_EDIT); // ry=-1 → row 15, ry=-2 → row 14
         }
     }
 
@@ -769,13 +829,49 @@ public final class NavSectionBuilder {
         }
     }
 
-    /** The inverse-footprint flags recompute around a changed cell (which may sit in the overscan rows —
-     *  the window then clamps to this grid's top rows). Navtypes stay resident. */
+    /**
+     * The inverse-footprint flags recompute around a changed cell (which may sit in the overscan rows —
+     * the window then clamps to this grid's top rows). Navtypes stay resident.
+     *
+     * <p><b>Flowing-fluid RISKY_EDIT re-dilation (the patch-path counterpart of the build-path SCATTER —
+     * PERF-DESIGN-navgrid-build §C1).</b> {@link NavFlags#compute} no longer gathers the flowing-fluid
+     * RISKY_EDIT term (the build moved it to {@link #computeDepth}'s scatter), so on its own it would leave
+     * that term stale after a live edit that adds/removes a flowing fluid (or the block below one). The
+     * patch path therefore re-derives it HERE, authoritatively, per window cell:
+     * {@code RISKY_EDIT = gravity(compute) | anyFlowingHorizontalNeighbour(y+1 | y+2)} via the retained
+     * reference GATHER {@link NavFlags#risksFluidFlow} over the freshly-rebuilt {@code desc} scratch.
+     * <ul>
+     *   <li><b>Authoritative, not additive</b> — {@code compute} writes the gravity-only RISKY_EDIT from
+     *       scratch (clearing the bit when gravity no longer sets it), then the gather OR-s the fluid term
+     *       back in. A cell that LOSES its only flowing neighbour has RISKY_EDIT correctly CLEARED unless
+     *       gravity also sets it — the {@code grid.set} below stores the whole recomputed flags, never an
+     *       accumulate.</li>
+     *   <li><b>The window is a superset of the affected set</b> — an edit at {@code (lx,ly,lz)} can change
+     *       the fluid term only of floor cells in the 4-neighbour columns of {@code (lx,lz)} at rows
+     *       {@code ly-2..ly} (a floor cell's term reads its horizontal neighbours' fluid at rows
+     *       {@code y..y+2}); the box {@code (lx±1, ly-3..ly+1, lz±1)} covers all of them. The below-seam
+     *       caller runs this same window on the section below (rows {@code 13+ly..15}) with THIS grid as its
+     *       overscan, catching the cross-seam-downward cells the same footprint reaches. Cells outside the
+     *       window keep their already-correct stored term.</li>
+     *   <li><b>Bit-identical to a rebuild</b> — over the final navtypes the per-cell gather equals the
+     *       whole-column scatter (the {@code FluidScatterIdentityTest} oracle), and it reads only the rows
+     *       {@code y..y+2} of 4-neighbour columns present in {@code desc} (this section + its vertical
+     *       overscan), exactly what a full build reads for that cell. Cross-chunk lateral faces stay
+     *       air-optimistic in both forms (a separate follow-on — step 3).</li>
+     * </ul>
+     * O(window) gathers per patch (a patch touches O(1) cells), so the reference gather is cheap here even
+     * though it was the build hot path — see PERF-DESIGN-navgrid-build §C1.
+     */
     private static void recomputeWindow(TraversalGrid grid, long[] desc, int lx, int ly, int lz) {
         for (int y = clampCell(ly - 3); y <= clampCell(ly + 1); y++) {
             for (int z = clampCell(lz - 1); z <= clampCell(lz + 1); z++) {
                 for (int x = clampCell(lx - 1); x <= clampCell(lx + 1); x++) {
-                    grid.set(x, y, z, grid.navtype(x, y, z), NavFlags.compute(desc, x, y, z));
+                    int flags = NavFlags.compute(desc, x, y, z);
+                    if (NavFlags.risksFluidFlow(desc, x, y + 1, z)
+                            || NavFlags.risksFluidFlow(desc, x, y + 2, z)) {
+                        flags |= NavFlags.RISKY_EDIT;
+                    }
+                    grid.set(x, y, z, grid.navtype(x, y, z), flags);
                 }
             }
         }
