@@ -121,6 +121,15 @@ public class TraversalGrid {
                 (short) (((flags & FLAGS_MASK) << FLAGS_SHIFT) | (navtype & NAVTYPE_MASK));
     }
 
+    /**
+     * OR the given {@link NavFlags} bit(s) into this cell's flag field, preserving its navtype and any flags
+     * already set. The build seam for a SCATTER pass that folds a neighbour-derived bit onto an
+     * already-computed cell (the flowing-fluid RISKY_EDIT scatter in {@link NavSectionBuilder#computeDepth}).
+     */
+    public void orFlags(int x, int y, int z, int flags) {
+        data[getLinearIndex(x, y, z)] |= (short) ((flags & FLAGS_MASK) << FLAGS_SHIFT);
+    }
+
     // ---- Depth-nibble reads/writes (see the field comment above; canonical (y<<8)|(z<<4)|x indexing) ----
 
     /**
