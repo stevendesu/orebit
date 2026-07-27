@@ -206,7 +206,17 @@ public final class NavGridUpdater {
         final int n = queue == null ? 0 : queue.count();
         if (n == 0) return;
         pendingGlobal -= n;
-        drain(queue, LevelBounds.minY(level), NavStore.chunksOf(level));
+        final int minY = LevelBounds.minY(level);
+        final ConcurrentHashMap<Long, NavSection[]> chunks = NavStore.chunksOf(level);
+        // DURABLE cross-chunk fluid edge fold (#7 step 3): the drain's authoritative recomputeWindow rewrites
+        // each edge cell's flags from the LOCAL scratch, dropping the cross-face fluid RISKY_EDIT term. Note
+        // which faces the batch touches BEFORE the drain clears the queue, then re-derive that term
+        // authoritatively (both sides) AFTER — resolving the lateral neighbour from the same live store. This
+        // sits OUTSIDE drain() deliberately: BatchDrainIdentityTest drives drain() directly against a
+        // lateral-free sequential reference, and flush() is not exercised under the Knot test classloader.
+        EdgeFluidScatter.collect(queue, minY);
+        drain(queue, minY, chunks);
+        EdgeFluidScatter.reconcile(chunks, minY, k -> bumpChunk(level, NavStore.keyX(k), NavStore.keyZ(k)));
     }
 
     // Drain sort-key layout (one long per pending cell, grouped by section when sorted):
