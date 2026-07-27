@@ -321,6 +321,13 @@ final class BotNavigator {
         this.navGaveUp = false;
     }
 
+    /** Whether the current plan's reverse-Dijkstra harvest PROVED the goal is unreachable from the bot's
+     *  own region (genuinely boxed-in) — as opposed to a budget/other give-up. Distinguishes an honest
+     *  boxed-in give-up in the owner chat + autotest reporting (#4 Increment 1). Null-plan → false. */
+    boolean boxedInProven() {
+        return pathPlan != null && pathPlan.boxedInProven();
+    }
+
     /** The floor cell of the last completed waypoint — the bot's last SETTLED stand position (see
      *  {@link #settledFloor}); GATHER's opportunistic re-target challenge keys off changes to this. */
     BlockPos settledFloor() {
@@ -1029,7 +1036,13 @@ final class BotNavigator {
     private void giveUp() {
         navGaveUp = true;
         abandonJourney(); // NAVSTATS: the region tier exhausted its options — journey abandoned
-        bot.chat("I can't find a way to reach you.");
+        if (pathPlan != null && pathPlan.boxedInProven()) {
+            // Reverse-Dijkstra proved the bot's own region cannot reach the goal — an honest boxed-in
+            // give-up, distinct from a budget/other exhaustion (#4 Increment 1).
+            bot.chat("I can't reach you — you're walled off (no route exists from here).");
+        } else {
+            bot.chat("I can't find a way to reach you.");
+        }
     }
 
     /**

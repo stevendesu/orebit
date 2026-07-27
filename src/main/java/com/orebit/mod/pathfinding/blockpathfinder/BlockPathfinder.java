@@ -1098,6 +1098,16 @@ public final class BlockPathfinder {
                 if (TRACE) traceCand(nx, ny, nz, cost, "corridor");
                 return;
             }
+            // Boxed-in negative-reachability hard reject (#4/#5, DESIGN-boxed-in-reachability §5): never relax a
+            // candidate whose enclosing L0 region a closed harvest flood proved goal-disconnected under these
+            // caps. Identical shape to the geometric corridor reject above, keyed on a reachability set instead
+            // of a box. isBlocked returns false for EVERY cell unless the field carries a closed-flood INFINITE
+            // set (only a post-give-up harvest field does), so on a normal per-search field this is one
+            // predictable false branch → byte-identical search (INV BR-3).
+            if (regionField != null && regionField.isBlocked(nx, ny, nz)) {
+                if (TRACE) traceCand(nx, ny, nz, cost, "infinite");
+                return;
+            }
             float tentative = currentG + cost;
             long nKey = key(nx, ny, nz, destMode);     // mode is part of the identity → distinct row per mode
             int row = nodes.intern(nKey, nx, ny, nz, destMode);

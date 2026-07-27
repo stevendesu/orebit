@@ -119,6 +119,19 @@ public final class RegionCostField {
      * to exhaustion (no early exit). One small array per build; not read on any hot path.
      */
     int[] chainRegions;
+    /**
+     * Per-region boxed-in <b>INFINITE</b> proof (negative reachability, DESIGN-boxed-in-reachability §2/§3):
+     * {@code infinite[regionIndex]} is set only by {@link #markInfinite} after a CLOSED goal-rooted harvest
+     * flood, for a box region that is BUILT ({@code grid.fragmentRecord(0,R) != null}) yet received NO cost
+     * label ({@code reachedFrags == 0}) — a region the optimistic coarse flood could not connect to the goal
+     * under these caps, hence provably goal-disconnected (region-optimism ⊇ block-reachability, §2).
+     * <b>Lazily allocated</b>: {@code null} until a harvest proves ≥1 region dead, so a field built by the
+     * normal per-search path (no harvest) leaves it {@code null} and {@link #isBlocked} is one null check that
+     * returns {@code false} everywhere — the block-A* hard reject that consults it is then byte-identical
+     * (INV BR-3). Indexed by {@link #regionIndex}, so box-containment (S3) is intrinsic (out-of-box ⇒ ri &lt; 0
+     * ⇒ never blocked).
+     */
+    private boolean[] infinite;
 
     RegionCostField(RegionPathfinder.RegionBox b, int minY, int goalRx, int goalRy, int goalRz,
                     int goalX, int goalY, int goalZ) {
@@ -201,6 +214,61 @@ public final class RegionCostField {
             byte[] labels = rf == null ? null : rf.labels();
             if (labels != null) slabs[ri] = labels.clone();
         }
+    }
+
+    /**
+     * Harvest the boxed-in <b>INFINITE</b> (negative-reachability) set from a CLOSED goal-rooted flood
+     * (DESIGN-boxed-in-reachability §2/§3, #4 Increment 1): sweep every box region and flag INFINITE the ones
+     * that are BUILT ({@code grid.fragmentRecord(0,R) != null}) yet UNREACHED ({@code reachedFrags[ri] == 0}).
+     * Box-containment (S3) is intrinsic — the sweep only visits in-box regions ({@code regionIndex >= 0}); an
+     * unbuilt region ({@code fragmentRecord == null}) stays optimistic (it is already reached-if-reachable, §4b
+     * of the findings, so an unreached unbuilt region is either sealed by built terrain — excluded here — or
+     * out of the flood's concern), matching the §6 optimism boundary exactly.
+     *
+     * <p><b>Precondition (caller-enforced): the producing flood was CLOSED</b> — it drained to heap exhaustion
+     * within the box, hit neither the 20k expansion backstop nor the fat-skeleton early exit, and never
+     * rejected an out-of-box target. Only then is {@code reached} the COMPLETE caps-conditioned goal-connected
+     * component within the box, so an in-box BUILT UNREACHED region is provably disconnected. Calling this
+     * after an open flood would falsely flag reachable regions. Runs on the build (tick) thread, the same
+     * thread family that mutates the records (like {@link #bakeSlabs} above). Returns the number of regions
+     * flagged (0 leaves {@link #isBlocked} byte-identical — the array stays {@code null}).
+     */
+    int markInfinite(RegionGrid grid) {
+        final int regions = reachedFrags.length;
+        int marked = 0;
+        for (int ri = 0; ri < regions; ri++) {
+            if ((reachedFrags[ri] & 0xFF) != 0) continue;            // reached ⇒ in the component ⇒ optimistic/settled
+            int ix = ri % dimX, iz = (ri / dimX) % dimZ, iy = ri / (dimX * dimZ);
+            if (grid.fragmentRecord(0, minRx + ix, minRy + iy, minRz + iz) == null) continue; // unbuilt ⇒ optimistic
+            if (infinite == null) infinite = new boolean[regions];
+            infinite[ri] = true;
+            marked++;
+        }
+        return marked;
+    }
+
+    /**
+     * Whether the level-0 region enclosing world cell {@code (wx,wy,wz)} is provably goal-disconnected under
+     * the search's caps — the boxed-in negative-reachability proof harvested by {@link #markInfinite}
+     * (DESIGN-boxed-in-reachability §5). The block-A* hard reject consults this beside its geometric corridor
+     * reject. {@code true} ONLY for a region a closed harvest flood flagged; {@code false} for EVERY cell (a
+     * single null check, no region math) when no harvest ran — so a search handed a normal per-search field is
+     * byte-identical (INV BR-3). Out-of-box cells are never blocked ({@code regionIndex < 0}).
+     */
+    public boolean isBlocked(int wx, int wy, int wz) {
+        if (infinite == null) return false;
+        int ri = regionIndex(wx >> 4, (wy - minY) >> 4, wz >> 4);
+        return ri >= 0 && infinite[ri];
+    }
+
+    /**
+     * Test seam: whether the field flagged region cell {@code (rx,ry,rz)} (RAW region coords) INFINITE. Mirrors
+     * {@link #isBlocked} without the world→region quantization, so a fixture can pin the harvested set exactly.
+     */
+    boolean isInfiniteRegion(int rx, int ry, int rz) {
+        if (infinite == null) return false;
+        int ri = regionIndex(rx, ry, rz);
+        return ri >= 0 && infinite[ri];
     }
 
     /**

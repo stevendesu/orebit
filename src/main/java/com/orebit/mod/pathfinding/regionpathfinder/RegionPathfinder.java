@@ -1062,6 +1062,47 @@ public final class RegionPathfinder {
     public static RegionCostField costToGoalField(RegionGrid grid, int minY, BlockPos goalFloor, BlockPos startFloor,
                                                   boolean canBreak, boolean canPlace, int safeFall,
                                                   RegionMineModel mine, RegionPlaceModel place, RegionBox bound) {
+        return costToGoalField(grid, minY, goalFloor, startFloor, canBreak, canPlace, safeFall, mine, place, bound, false);
+    }
+
+    /**
+     * As the 10-arg {@link #costToGoalField(RegionGrid, int, BlockPos, BlockPos, boolean, boolean, int,
+     * RegionMineModel, RegionPlaceModel, RegionBox)} overload, with the boxed-in negative-reachability
+     * <b>harvest</b> (#4 Increment 1, DESIGN-boxed-in-reachability §3): when {@code harvest} is {@code true} the
+     * fat-skeleton early exit is SUPPRESSED so the flood drains fully (heap exhaustion), and if the flood was
+     * <b>closed</b> (drained to exhaustion, no 20k backstop hit, no out-of-box reject) the resulting
+     * {@link RegionCostField} has its INFINITE set harvested via {@link RegionCostField#markInfinite} — every
+     * in-box BUILT UNREACHED region is flagged as provably goal-disconnected under these caps. {@code harvest}
+     * is priced (a full drain, not an early exit) so it is invoked at exactly ONE site: the region-tier
+     * give-up decision ({@code PathPlan.repairBlocked}); the normal per-search field build passes
+     * {@code harvest == false} and stays byte-identical (fat-skeleton early exit, no INFINITE set → the
+     * block-A* prune is inert).
+     */
+    public static RegionCostField costToGoalField(RegionGrid grid, int minY, BlockPos goalFloor, BlockPos startFloor,
+                                                  boolean canBreak, boolean canPlace, int safeFall,
+                                                  RegionMineModel mine, RegionPlaceModel place, RegionBox bound,
+                                                  boolean harvest) {
+        return costToGoalField(grid, minY, goalFloor, startFloor, canBreak, canPlace, safeFall,
+                mine, place, bound, harvest, 0);
+    }
+
+    /**
+     * As the 11-arg harvest overload, parameterized by pyramid {@code level} (#4 rework — the multi-level
+     * boxed-in scan, DESIGN-boxed-in-reachability §14). {@code level == 0} floods the level-0 leaf grid (the
+     * byte-identical default taken by every existing caller — {@code regionFieldFor} and the reactive
+     * {@code harvestBoxedIn}). {@code level > 0} floods the COARSE fragment pyramid at that level, over a
+     * {@code bound} expressed in level-{@code level} region units, for the goal-box sealed check
+     * ({@link #isSealedWithin}). Because {@link RegionCostField}'s per-cell reads ({@code costAt}/{@code isBlocked})
+     * and its L0 bakes ({@code bakeSlabs}/{@code markInfinite}) are level-0-only, a {@code level > 0} build is
+     * <b>VERDICT-ONLY</b>: read {@link #lastFieldClosedFlood()} (the flood-termination verdict, computed from the
+     * node set independent of any bake), never the returned field. The goal dig-flood multi-seed is L0-only too
+     * (no resident section at coarse levels), so a coarse break-capable build falls back to the single
+     * nearest-centroid seed — acceptable for a gross-seal probe (grounding Snag 2).
+     */
+    public static RegionCostField costToGoalField(RegionGrid grid, int minY, BlockPos goalFloor, BlockPos startFloor,
+                                                  boolean canBreak, boolean canPlace, int safeFall,
+                                                  RegionMineModel mine, RegionPlaceModel place, RegionBox bound,
+                                                  boolean harvest, int level) {
         // Bracket the whole field build so ensureLeaf/rebuildLeaf/startFragmentByFlood box each chunk key at most
         // once per build instead of once per edge-relaxation (RegionGrid per-search column cache).
         final long colTok = grid.beginColumnCache();
@@ -1069,10 +1110,10 @@ public final class RegionPathfinder {
         // Capability-aware pillar cost for the field's upward-climb term (place-side sibling of the mine model);
         // replaces the hardcoded PILLAR_PER_BLOCK_FIELD stand-in. Only the reverse (field) edges read it.
         final float pillarField = place.pillarPerBlock();
-        final int grx = RegionAddress.regionX(goalFloor.getX(), 0);
-        final int gry = RegionAddress.regionY(goalFloor.getY(), 0, minY);
-        final int grz = RegionAddress.regionZ(goalFloor.getZ(), 0);
-        grid.ensureLeaf(grx, gry, grz);
+        final int grx = RegionAddress.regionX(goalFloor.getX(), level);
+        final int gry = RegionAddress.regionY(goalFloor.getY(), level, minY);
+        final int grz = RegionAddress.regionZ(goalFloor.getZ(), level);
+        if (level == 0) grid.ensureLeaf(grx, gry, grz); else grid.ensureLevel(level, grx, gry, grz);
 
         final Nodes nodes = FIELD_SEARCH.get();
         nodes.reset();
@@ -1085,7 +1126,7 @@ public final class RegionPathfinder {
         // dig, so it keeps the plain nearest-centroid single seed. (The forward search's walkable virtual-goal
         // approaches are NOT seeded here — the field is only the region-refined heuristic, kept admissible; the
         // walkable approach cost lives on the forward relax, priced entry-aware, see relaxVirtualGoal's caller.)
-        if (canBreak) {
+        if (canBreak && level == 0) {
             final RegionFragments rfGoal = grid.fragmentRecord(0, grx, gry, grz);
             final float mineUnit = mine.unitsPerBlock(rfGoal != null ? rfGoal.avgSolidHardness() : STONE_REF_NIBBLE);
             grid.goalDigSeeds(goalFloor.getX(), goalFloor.getY(), goalFloor.getZ(), MAX_GOAL_DIG_CELLS,
@@ -1097,7 +1138,7 @@ public final class RegionPathfinder {
         if (nodes.heapSize == 0) {
             // No dig-reachable pocket (no-break bot, unresident goal section, or deep-buried past the budget):
             // fall back to the single nearest-centroid goal fragment at zero cost (the pre-dig-flood behaviour).
-            int goalFrag = nearestFragment(grid, 0, grx, gry, grz, goalFloor);
+            int goalFrag = nearestFragment(grid, level, grx, gry, grz, goalFloor);
             seedField(nodes, grx, gry, grz, goalFrag, 0f);
         }
 
@@ -1105,13 +1146,15 @@ public final class RegionPathfinder {
         // start ⇒ stay unarmed ⇒ exhaustive (the ratified fallback).
         int srx = 0, sry = 0, srz = 0, startFrag = -1;
         boolean armed = false;
-        if (startFloor != null) {
-            srx = RegionAddress.regionX(startFloor.getX(), 0);
-            sry = RegionAddress.regionY(startFloor.getY(), 0, minY);
-            srz = RegionAddress.regionZ(startFloor.getZ(), 0);
+        // Harvest mode drains the box fully (no fat-skeleton early exit) so the reached set is the COMPLETE
+        // component — the precondition RegionCostField.markInfinite requires. So never arm when harvesting.
+        if (startFloor != null && !harvest) {
+            srx = RegionAddress.regionX(startFloor.getX(), level);
+            sry = RegionAddress.regionY(startFloor.getY(), level, minY);
+            srz = RegionAddress.regionZ(startFloor.getZ(), level);
             if (bound.contains(srx, sry, srz)) {
-                grid.ensureLeaf(srx, sry, srz);
-                startFrag = anchorFragment(grid, 0, srx, sry, srz, startFloor);
+                if (level == 0) grid.ensureLeaf(srx, sry, srz); else grid.ensureLevel(level, srx, sry, srz);
+                startFrag = anchorFragment(grid, level, srx, sry, srz, startFloor);
                 armed = true;
             }
         }
@@ -1121,6 +1164,7 @@ public final class RegionPathfinder {
         boolean marking = false;   // start settled + fat skeleton marked — phase 2
         int pendingMarked = 0;     // reached-but-unsettled rows in marked regions (phase-2 termination gate)
         boolean earlyExit = false;
+        boolean backstopHit = false; // S1: the 20k expansion backstop tripped (⇒ NOT a closed flood)
 
         final RegionCostField field = new RegionCostField(bound, minY, grx, gry, grz,
                 goalFloor.getX(), goalFloor.getY(), goalFloor.getZ());
@@ -1145,9 +1189,9 @@ public final class RegionPathfinder {
             settles++;
             if (nodes.g[current] > maxSettled) maxSettled = nodes.g[current];
             if (marking && regionMarked(nodes, bound, dimX, dimZ, crx, cry, crz)) pendingMarked--;
-            if (++expansions > MAX_REGION_EXPANSIONS) break;
+            if (++expansions > MAX_REGION_EXPANSIONS) { backstopHit = true; break; }
             final int rowsBefore = nodes.count;
-            expandNode(nodes, current, expansions, grid, 0, minY, grx, gry, grz,
+            expandNode(nodes, current, expansions, grid, level, minY, grx, gry, grz,
                     goalFloor.getX(), goalFloor.getY(), goalFloor.getZ(),
                     canBreak, canPlace, safeFall, null, mine, pillarField, 1.0f, bound, null, true);
             if (marking) {
@@ -1179,18 +1223,38 @@ public final class RegionPathfinder {
         field.setFloor(maxSettled);
         // Bake EXACT membership slabs for the ≥2-reached-slot regions (a 4 KB record-label copy each, on this
         // build thread) so costAt's slot resolution reads only field-owned arrays — see RegionCostField.
-        field.bakeSlabs(grid);
+        // L0-ONLY: the slab bake reads level-0 records + costAt maps world→region at level 0. A coarse
+        // (level>0) build is verdict-only (isSealedWithin reads closedFlood, never costAt), so skip it.
+        if (level == 0) field.bakeSlabs(grid);
+        // A CLOSED flood (S1, DESIGN-boxed-in-reachability §2): it drained to heap exhaustion (neither the
+        // fat-skeleton early exit — suppressed under harvest — nor the 20k backstop broke the loop) AND never
+        // rejected an out-of-box target. Only then is the reached set the COMPLETE caps-conditioned goal
+        // component within the box, so an in-box BUILT UNREACHED region is provably disconnected.
+        final boolean exhausted = !earlyExit && !backstopHit;
+        final boolean closedFlood = exhausted && !nodes.outOfBoxRejected;
+        // Harvest the INFINITE (negative-reachability) set only under a closed flood; on any open flood
+        // (early-exit / backstop / out-of-box reject) harvest NOTHING — every unreached region stays optimistic
+        // (§6 optimism boundary). The normal per-search build (harvest == false) never closes (it early-exits)
+        // and never calls this, so its field carries no INFINITE set → the block-A* prune is byte-identical.
+        if (harvest && closedFlood && level == 0) {
+            field.markInfinite(grid);
+        }
         final int[] stats = LAST_FIELD_STATS.get();
         stats[0] = settles;
         stats[1] = earlyExit ? 1 : 0;
+        stats[2] = nodes.outOfBoxRejected ? 1 : 0;
+        stats[3] = backstopHit ? 1 : 0;
+        stats[4] = closedFlood ? 1 : 0;
         return field;
         } finally {
             grid.endColumnCache(colTok);
         }
     }
 
-    /** Diagnostics for the last {@link #costToGoalField} build on this thread: [0] = settles, [1] = early exit. */
-    private static final ThreadLocal<int[]> LAST_FIELD_STATS = ThreadLocal.withInitial(() -> new int[2]);
+    /** Diagnostics for the last {@link #costToGoalField} build on this thread: [0] = settles, [1] = early exit,
+     *  [2] = out-of-box reject fired, [3] = 20k backstop hit, [4] = CLOSED flood (S1 — exhausted, no backstop,
+     *  no out-of-box reject). */
+    private static final ThreadLocal<int[]> LAST_FIELD_STATS = ThreadLocal.withInitial(() -> new int[5]);
 
     /** Settled-pop count of this thread's last {@link #costToGoalField} build (bench/test diagnostics). */
     static int lastFieldSettles() {
@@ -1200,6 +1264,46 @@ public final class RegionPathfinder {
     /** Whether this thread's last {@link #costToGoalField} build terminated via the fat-skeleton early exit. */
     static boolean lastFieldEarlyExit() {
         return LAST_FIELD_STATS.get()[1] != 0;
+    }
+
+    /** Whether this thread's last {@link #costToGoalField} build rejected any out-of-box target (S1). */
+    static boolean lastFieldOutOfBoxRejected() {
+        return LAST_FIELD_STATS.get()[2] != 0;
+    }
+
+    /** Whether this thread's last {@link #costToGoalField} build hit the 20k expansion backstop (S1). */
+    static boolean lastFieldBackstopHit() {
+        return LAST_FIELD_STATS.get()[3] != 0;
+    }
+
+    /** Whether this thread's last {@link #costToGoalField} build was a CLOSED flood (S1 — the harvest
+     *  precondition: drained to exhaustion, no backstop, no out-of-box reject). */
+    static boolean lastFieldClosedFlood() {
+        return LAST_FIELD_STATS.get()[4] != 0;
+    }
+
+    /**
+     * Multi-level boxed-in probe (#4 rework, DESIGN-boxed-in-reachability §14): flood the goal's caps-legal
+     * component within a small {@code radius}-region box centered on the goal at pyramid {@code level}, and
+     * report whether that flood was CLOSED — it drained to heap exhaustion WITHOUT ever leaving the box (no
+     * out-of-box reject, no expansion backstop). A closed flood proves the goal's component is SEALED within the
+     * box at this level: no caps-legal move leaves it, so nothing exterior can reach the goal and vice-versa —
+     * the goal is unreachable from ANY outside cell regardless of the bot's position. The proof is monotone
+     * across levels (a coarse seal admits no finer escape), so the caller scans coarse→fine and takes the first
+     * close. An OPEN flood (left the box / hit the backstop) is inconclusive at this level — the component
+     * reaches beyond the box, so descend to a finer level where a smaller seal may close. An unbuilt in-box
+     * region reads optimistically (uniform air), so a goal bordered by unbuilt terrain never closes — exploration
+     * stays legitimate (the §6 optimism boundary). VERDICT-ONLY: no field is consumed.
+     */
+    public static boolean isSealedWithin(RegionGrid grid, int minY, BlockPos goalFloor, int level, int radius,
+                                         boolean canBreak, boolean canPlace, int safeFall,
+                                         RegionMineModel mine, RegionPlaceModel place) {
+        final int grx = RegionAddress.regionX(goalFloor.getX(), level);
+        final int gry = RegionAddress.regionY(goalFloor.getY(), level, minY);
+        final int grz = RegionAddress.regionZ(goalFloor.getZ(), level);
+        final RegionBox box = RegionBox.around(grx, gry, grz, grx, gry, grz, radius);
+        costToGoalField(grid, minY, goalFloor, null, canBreak, canPlace, safeFall, mine, place, box, true, level);
+        return LAST_FIELD_STATS.get()[4] != 0; // [4] = closedFlood
     }
 
     /**
@@ -1554,8 +1658,10 @@ public final class RegionPathfinder {
                                      float hScale, RegionEdgeBlacklist blacklist,
                                      int entryFace, boolean dig, RegionBox bound, RegionTube tube, boolean dijkstra) {
         // Bounded search (goal-rooted Dijkstra field): reject a target outside the search box BEFORE interning,
-        // so out-of-box nodes never enter the table / heap (the field is confined to its bbox).
-        if (bound != null && !bound.contains(mrx, mry, mrz)) return false;
+        // so out-of-box nodes never enter the table / heap (the field is confined to its bbox). Record the
+        // reject (S1): a component that reaches the box edge is not proven complete WITHIN the box, so any
+        // out-of-box reject disqualifies the closed-flood harvest (DESIGN-boxed-in-reachability §2 Leg 2).
+        if (bound != null && !bound.contains(mrx, mry, mrz)) { nodes.outOfBoxRejected = true; return false; }
         if (tube != null && !tube.contains(mrx, mry, mrz)) return false;
         // The blacklist keys crossings PHYSICALLY (region, fragment) — a dead crossing is unrealizable
         // regardless of how the FROM region was entered (§2), so the online-repair probe uses the plain
@@ -2413,6 +2519,12 @@ public final class RegionPathfinder {
         int[] markScratch = new int[0];  // box-region-indexed stamps; marked ⇔ markScratch[i] == markGen
         int markGen;
 
+        // costToGoalField closed-flood signal (S1, DESIGN-boxed-in-reachability §3): set by relaxFrag when the
+        // per-relax box gate rejected a target OUTSIDE the field's box — proof the component could exit and
+        // re-enter the box, so the flood is NOT closed. Cleared per build in reset(); only ever set on the
+        // FIELD_SEARCH state (the forward A* passes bound == null, so the gate never fires there).
+        boolean outOfBoxRejected;
+
         // ---- key→row index (open addressing, linear probe) ----
         long[] mapKey;
         int[] mapRow;           // -1 marks an empty slot
@@ -2463,6 +2575,7 @@ public final class RegionPathfinder {
             count = 0;
             heapSize = 0;
             mapSize = 0;
+            outOfBoxRejected = false;
             Arrays.fill(mapRow, -1);
         }
 

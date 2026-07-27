@@ -345,3 +345,79 @@ pocket → optimistic). The block-A* prune is testable via expansion counts on t
 - **R3 — RESOLVED (owner 2026-07-25): harvest on flood-partial.** "If we're having trouble finding the
   goal, pause to make sure it's actually possible." The reachability check folds into the flood/partial
   decision point (§4), not a separate terminal-flood-only trigger.
+
+---
+
+## §14. IMPLEMENTED (2026-07-27) — the multi-level PROACTIVE goal-box scan (supersedes §4's reactive trigger + §0's `around(bot,goal)` box)
+
+Increment 1 first shipped the §4.2 mechanism as a single **L0** harvest rooted at the window target
+(reactive, `PathPlan.harvestBoxedInProof`) plus a proactive L0 probe rooted at the journey goal over an
+`around(bot, goal, pad=3)` box. In-session grounding + owner rulings evolved that into the mechanism that
+actually ships. All four changes are **owner-directed this session** (not unilateral):
+
+1. **PROACTIVE, at plan entry** (owner: "do the boxed-in check at the very beginning… the reverse
+   Dijkstra is fast"). A goal walled by BUILT solid with optimistic-UNBUILT terrain between never reaches
+   a region-tier give-up — the unbuilt reads as passable AIR, `PARTIAL_PATH` keeps the forward search
+   RUNNING, and the bot wanders forever. So the check runs **before** committing an optimistic skeleton
+   (`PathPlan` ctor) and, gated, as the bot approaches (`onBotMoved`), not only at a terminal flood.
+2. **MULTI-LEVEL coarse→fine** (owner: "small box around the goal at L5; if not boxed-in, L4; … down to
+   L0"). A tomb is not inherently L0 — a pocket large enough to flood L0 but ringed by solid seals only at
+   a coarser level (e.g. a 1024³ obsidian box is an L3/L4 seal). So the scan runs
+   `level = MAX_COARSE_LEVEL(6) → 0`, flooding at each level over a small box centered on the goal, and
+   takes the **first CLOSED flood**. This unifies §4.1's coarse fast-filter and §4.2's L0 harvest into one
+   descending scan and generalizes both.
+3. **Small GOAL-centered box** (`RegionBox.around(goalRegion, goalRegion, radius)`), NOT §0's
+   `around(bot, goal, pad=3)`. The bot↔goal span made the L0 field array (`dimX·dimY·dimZ·MAX_FRAGMENTS`,
+   sized to the box) explode for a far goal — a 100k-away goal → a ~6250-region-long corridor → tens of MB
+   alloc + fill on the tick thread. The goal-centered box makes the scan **distance-INDEPENDENT**: a
+   100k-away goal probes exactly as cheaply as a near one. (Rolling the search up to a coarser level for
+   far goals — the general "don't build a 10M-block skeleton" problem — is **#8**, separate.)
+4. **Verdict = `closedFlood`, not `isBlocked(bot)`.** With a small goal box the bot is typically OUTSIDE
+   it, so its region carries no INFINITE mark. But a CLOSED flood at any level already proves the goal's
+   caps-legal component is SEALED within the box — unreachable from **any** exterior cell, so the bot's
+   position is irrelevant. `RegionPathfinder.isSealedWithin(grid, minY, goal, level, radius, caps…)`
+   returns exactly that (`LAST_FIELD_STATS[4]`), VERDICT-ONLY.
+
+**Monotone soundness (the load-bearing property of the descent).** "Sealed at level N" is a hard,
+monotone proof: if the goal's level-N component has no caps-legal crossing leaving a box centered on it,
+nothing at any *finer* scale can escape either. Region-tier optimism (§2 Leg 1) only ever *over*-connects,
+so a coarse CLOSED flood is a real seal (no false INFINITE); a coarse NOT-closed is a *soft* signal
+(over-connection may hide a finer seal) → **descend**. Hence the first close at any level is sound, and L0
+is the precise floor. A seal larger than the L6 box (~7k blocks at radius 3) falls through to the give-up
+backstop / #8.
+
+**Caps.** The coarse crossings are **walk-sound for no-dig bots** (the common boxed-in case — `faceMask`
+roll-up, FINDINGS §6 / §8). For **dig** bots the coarse view is optimistic about dig-through (no
+unbreakable-seal bit), so a dig bot's coarse flood stays open → the scan descends/proceeds (correct: a
+breakable-walled region is not a tomb for a digger). A dig bot's genuinely-unbreakable tomb is the rare
+residual deferred to **#6**. The scan never produces a false give-up; worst case it descends a level.
+
+**Level-parameterization (implementation).** `costToGoalField` gained an `int level` (12-arg overload;
+the 10/11-arg delegate with `level=0` — byte-identical, every region derivation was already
+`regionX(w,0)`). `level>0` floods the coarse fragment pyramid; `bakeSlabs`/`markInfinite` and the
+per-cell `costAt`/`isBlocked` reads are L0-only, so a `level>0` build is VERDICT-ONLY (read `closedFlood`,
+never the field). The goal dig-flood multi-seed is L0-only too (no resident section at coarse) → a coarse
+break-capable build falls back to the single nearest-centroid seed (grounding Snag 2 — acceptable for a
+gross-seal probe). `ensureLevel(level,…)` builds the coarse node on demand.
+
+**The reactive L0 harvest is RETAINED** (`harvestBoxedIn` via `harvestBoxedInProof`) as the region-tier
+give-up backstop: it roots at the window target and PERSISTS the harvested `RegionCostField` so #5's
+block-A* `isBlocked` prune has teeth on a continuation search. The proactive multi-level scan is
+verdict-only (no field persisted → a NOT-boxed verdict leaves every subsequent block search
+byte-identical, INV BR-3).
+
+**Perf (measured, JMH `RegionFieldBuildBenchmark`).** A radius-3 box ≈ `boxSize=7` → ~510 µs per level
+(worst-case EXHAUST); the scan is up to ~5 full-Y levels + 2 collapsed coarse ones → **~2–3 ms per scan**,
+once per journey and gated by the goal-neighbourhood build signal. Dominated by the per-level
+`RegionCostField` alloc+fill, NOT the flood. A **field-less verdict-only mode** (the coarse levels never
+read the field, only `closedFlood`) would drop it to sub-ms by skipping that alloc — a worthwhile
+fast-follow, not a blocker. The hot search path is unchanged (level-0 byte-identical; JMH region-search
+flat).
+
+**Config.** Coarsest level = `RegionAddress.MAX_COARSE_LEVEL` (6); per-level box radius =
+`PathPlan.BOXED_IN_BOX_RADIUS` (3), a future `orebit.properties` knob (ties to #8's in-range threshold).
+
+**Tests.** `BoxedInReachabilityTest`: `isSealedWithin` at L0 (sealed→true / connected→false /
+unbuilt-border→false) + a coarse rolled-up interior-pocket seal (closes at L0 AND L1 — validates the
+level-parameterized flood reads coarse fragments). Full suite green (575). End-to-end give-up-vs-wander:
+the paired far-tomb autotest (A).
