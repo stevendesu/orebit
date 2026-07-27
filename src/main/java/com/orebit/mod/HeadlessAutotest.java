@@ -563,6 +563,7 @@ public final class HeadlessAutotest {
                     kv(w, "distY", fmt(Math.abs(dy)));
                     kv(w, "bestDistXZ", fmt(bestDistXZ));
                     kv(w, "navGaveUp", bot.navigator().navGaveUp());
+                    kv(w, "navstat_boxedIn", bot.navigator().boxedInProven());
                     kv(w, "alive", bot.isAlive());
                     kv(w, "waypoint", bot.navigator().waypointIndex());
                     kv(w, "pathSize", bot.navigator().pathSize());
@@ -683,6 +684,7 @@ public final class HeadlessAutotest {
                     kv(w, "maxDistFromStart", fmt(maxDistFromStart));
                     kv(w, "mode_bot", bot.mode());
                     kv(w, "navGaveUp", bot.navigator().navGaveUp());
+                    kv(w, "navstat_boxedIn", bot.navigator().boxedInProven());
                     kv(w, "alive", bot.isAlive());
                     writeNavStats(w, bot.navigator().journeyStats()); // NAVSTATS search-health aggregates
                 }
