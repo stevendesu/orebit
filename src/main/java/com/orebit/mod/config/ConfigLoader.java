@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Properties;
+import java.util.function.Consumer;
 
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
@@ -20,8 +21,10 @@ import net.minecraft.server.MinecraftServer;
  * Loads {@code config/orebit.properties} at server start and holds the active {@link Config} (PRD §10
  * Phase 1a). Zero new dependencies: the file is plain {@link Properties} ({@code key=value}, {@code #}
  * comments), parsed by the JDK. On a missing file it WRITES a fully-commented default (documenting every
- * key), so a server owner gets a self-describing template the first time they run the mod — and because
- * the defaults reproduce today's behaviour, generating it changes nothing.
+ * key), so a server owner gets a self-describing template the first time they run the mod. The generated
+ * defaults reproduce today's follower behaviour with ONE deliberate exception: {@code mining.protectedBlocks}
+ * defaults to a broad "don't wreck the build" set ({@link ProtectedBlocks#DEFAULT_SPEC}) rather than empty,
+ * so out of the box the bot routes around player-placed/decorative blocks instead of mining through them.
  *
  * <h2>Where the file lives — the loader-agnostic config dir</h2>
  * The run/config directory is resolved through the {@link ConfigDir} platform seam (which reads it off the
@@ -138,10 +141,16 @@ public final class ConfigLoader {
             return Config.DEFAULT;
         }
 
+        Consumer<String> sink = msg -> OrebitCommon.LOGGER.warn("[Orebit] config: {}", msg);
+
         if (!Files.exists(file)) {
             writeDefault(file);
             OrebitCommon.LOGGER.info("[Orebit] wrote default config to {}", file);
-            return Config.DEFAULT;
+            // Validate an EMPTY Properties so first-run gets every key's default THIS session — critically
+            // including the built-in mining.protectedBlocks set (an absent key parses ProtectedBlocks.DEFAULT_SPEC;
+            // the registry + datapack tags are bound at this SERVER_STARTED point, so it resolves). Without this
+            // the freshly-written protection wouldn't take effect until the next start/reload.
+            return new ConfigValidator(sink).validate(new Properties());
         }
 
         Properties props = new Properties();
@@ -152,9 +161,7 @@ public final class ConfigLoader {
             return Config.DEFAULT;
         }
 
-        ConfigValidator validator = new ConfigValidator(
-                msg -> OrebitCommon.LOGGER.warn("[Orebit] config: {}", msg));
-        Config c = validator.validate(props);
+        Config c = new ConfigValidator(sink).validate(props);
         OrebitCommon.LOGGER.info("[Orebit] loaded config from {}", file);
         return c;
     }
@@ -162,8 +169,10 @@ public final class ConfigLoader {
     /**
      * Write the documented default {@code orebit.properties}. Hand-written (not {@link Properties#store})
      * so each key carries its own {@code #} comment explaining what it controls and its range — a
-     * self-describing template. The values are {@link Config#DEFAULT}, so the generated file reproduces
-     * today's behaviour verbatim.
+     * self-describing template. The values are {@link Config#DEFAULT}, except {@code mining.protectedBlocks}
+     * is written as {@link ProtectedBlocks#DEFAULT_SPEC} (the record holds {@code EMPTY} — it can't parse at
+     * static-init — but the effective default is the broad protection set the validator applies to an absent
+     * key, so the generated file must show it).
      */
     private static void writeDefault(Path file) {
         Config d = Config.DEFAULT;
@@ -217,13 +226,19 @@ public final class ConfigLoader {
             line(w, "# discourage gratuitous world edits (digging shortcuts, punching through bushes/cobwebs);");
             line(w, "# 0 (default) prices breaks at mining time alone.");
             kv(w, ConfigKeys.MINING_BREAK_BASE_COST, d.breakBaseCost());
-            line(w, "# Blocks the bot must NEVER break (or clear/replace by placing): a comma-separated list of block ids and #-prefixed");
-            line(w, "# block tags, e.g.  mining.protectedBlocks=minecraft:chest, #minecraft:beds, minecraft:diamond_ore");
-            line(w, "# Enforced when planning routes AND when actually breaking. Malformed entries are skipped");
-            line(w, "# with a warning. NOTE: changing this list requires a SERVER RESTART (or waiting for chunks");
-            line(w, "# to rebuild) to fully apply -- protected-ness is baked into the cached nav data; the");
-            line(w, "# hard refusal to break applies immediately on /bot config reload.");
-            kv(w, ConfigKeys.MINING_PROTECTED_BLOCKS, d.protectedBlocks().spec());
+            line(w, "# Blocks the bot must NEVER break (or clear/replace by placing): a comma-separated list of block ids");
+            line(w, "# and #-prefixed block tags, e.g.  minecraft:chest, #minecraft:beds, minecraft:diamond_ore");
+            line(w, "# The DEFAULT below is a broad 'don't wreck the build' set -- logs/planks, cobblestone variants,");
+            line(w, "# stairs/slabs/walls, fences/gates, doors+trapdoors, glass, carpets, ladders, decorative plants,");
+            line(w, "# workbenches/stations/storage (chests, furnaces, ...), torches/lanterns/campfires, glowing blocks,");
+            line(w, "# redstone components, and beds/signs/banners. Hand-toggleable doors are still OPENED to pass (only");
+            line(w, "# BREAKING is refused); iron doors are routed around. To let the bot break anything, set this empty");
+            line(w, "# (mining.protectedBlocks=). Tags that don't exist on your version are ignored silently; ids that don't");
+            line(w, "# exist warn once and are skipped. Enforced when planning routes AND when actually breaking. NOTE:");
+            line(w, "# changing this list requires a SERVER RESTART (or waiting for chunks to rebuild) to fully apply --");
+            line(w, "# protected-ness is baked into the cached nav data; the hard refusal to break applies immediately");
+            line(w, "# on /bot config reload.");
+            kv(w, ConfigKeys.MINING_PROTECTED_BLOCKS, ProtectedBlocks.DEFAULT_SPEC);
             line(w, "# Bot may mine vanilla-UNBREAKABLE blocks (bedrock, barriers, end portal frames, ...) at the");
             line(w, "# tool-derived cost below. A separate axis from mining.maxHardness (which only ranges over");
             line(w, "# breakable blocks); mining.protectedBlocks always overrides.");

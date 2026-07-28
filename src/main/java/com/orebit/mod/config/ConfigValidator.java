@@ -33,7 +33,9 @@ import net.minecraft.world.level.block.Block;
  *       the {@link BlockLookup} platform seam) → on a malformed id or an unknown block, warn and fall back
  *       to the default ({@code minecraft:cobblestone});</li>
  *   <li>{@code mining.protectedBlocks} is parsed per entry ({@link ProtectedBlocks#parse}) — each
- *       malformed id / tag warns and is skipped individually, the remaining entries still apply.</li>
+ *       malformed id / tag warns and is skipped individually, the remaining entries still apply; an ABSENT
+ *       key uses the built-in {@link ProtectedBlocks#DEFAULT_SPEC default set}, a present (even empty) key
+ *       is honored verbatim.</li>
  * </ul>
  *
  * <p>A smart object, not a static helper bag: one {@code ConfigValidator} carries the warning sink (so the
@@ -74,7 +76,7 @@ public final class ConfigValidator {
                 bool(props, ConfigKeys.MINING_TICKS_BY_HARDNESS, d.ticksByHardness()),
                 intClamped(props, ConfigKeys.MINING_TICKS_TO_MINE_FLAT, d.ticksToMineFlat(), 0, Integer.MAX_VALUE),
                 weightNonNeg(props, ConfigKeys.MINING_BREAK_BASE_COST, d.breakBaseCost()),
-                protectedBlocks(props, ConfigKeys.MINING_PROTECTED_BLOCKS, d.protectedBlocks()),
+                protectedBlocks(props, ConfigKeys.MINING_PROTECTED_BLOCKS),
                 bool(props, ConfigKeys.MINING_ALLOW_UNBREAKABLE, d.allowUnbreakable()),
                 intClamped(props, ConfigKeys.MINING_UNBREAKABLE_HARDNESS, d.unbreakableHardness(), 1, 10_000_000),
                 // pathing
@@ -200,11 +202,14 @@ public final class ConfigValidator {
     /**
      * Parse the {@code mining.protectedBlocks} comma list (block ids + {@code #}-prefixed tags) into a
      * {@link ProtectedBlocks}. Per the clamp-and-warn rule each malformed / unknown entry warns and is
-     * skipped individually — the rest of the list still applies; an absent key keeps the default.
+     * skipped individually — the rest of the list still applies. An ABSENT key gets the built-in
+     * {@link ProtectedBlocks#DEFAULT_SPEC default protection set} (parsed here, where the block registry +
+     * datapack tags are bound — not at {@code Config.DEFAULT} static-init); a PRESENT key (even empty) is
+     * honored verbatim, so an existing config that set the key keeps its value.
      */
-    private ProtectedBlocks protectedBlocks(Properties props, String key, ProtectedBlocks def) {
+    private ProtectedBlocks protectedBlocks(Properties props, String key) {
         String raw = props.getProperty(key);
-        if (raw == null) return def;
+        if (raw == null) raw = ProtectedBlocks.DEFAULT_SPEC;
         return ProtectedBlocks.parse(raw, warn);
     }
 
