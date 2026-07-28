@@ -74,7 +74,7 @@ mining.maxHardness      = 255
 mining.ticksByHardness  = true
 mining.ticksToMineFlat  = 0
 mining.breakBaseCost    = 0.0
-mining.protectedBlocks  =
+mining.protectedBlocks  = #minecraft:logs, #minecraft:planks, ...   # a broad default set — see below
 mining.allowUnbreakable = false
 mining.unbreakableHardness = 3200
 ```
@@ -87,9 +87,39 @@ mining.unbreakableHardness = 3200
 | `mining.ticksByHardness` | `true` | If `true`, harder blocks take realistically longer to mine (and a better tool is faster) — so the bot prefers routes through softer material. If `false`, every block takes the same fixed time (below). |
 | `mining.ticksToMineFlat` | `0` | The fixed time, in game ticks, to mine one block when `ticksByHardness` is `false`. `0` means instant. Ignored when `ticksByHardness` is `true`. |
 | `mining.breakBaseCost` | `0.0` | A flat surcharge (in ticks) added to **every break the planner considers**, on top of the real mining time — the mining-side mirror of `placement.placeBaseCost`. It's a behavioral "reluctance to edit the world": raise it and the bot detours around obstacles (and wades through berry bushes) it would otherwise punch through; at `0` breaks are priced at mining time alone. |
-| `mining.protectedBlocks` | *(empty)* | A comma-separated list of block ids and `#`-prefixed block tags the bot must **never break** — nor destroy by placing over — e.g. `minecraft:chest, #minecraft:beds`. Enforced both when planning (routes go *around* protected blocks) and again at the moment of breaking. Malformed entries warn and are skipped. **Changing this list needs a server restart** to fully apply (the planner caches block classifications); the at-the-moment-of-breaking refusal applies immediately on reload. See [Breaking & Placing](world_edits.md#protected-blocks). |
+| `mining.protectedBlocks` | *(a broad "don't wreck the build" set — see below)* | A comma-separated list of block ids and `#`-prefixed block tags the bot must **never break** — nor destroy by placing over — e.g. `minecraft:chest, #minecraft:beds`. Enforced both when planning (routes go *around* protected blocks) and again at the moment of breaking. Malformed entries warn and are skipped. Unlike every other key, this one does **not** default to empty: out of the box it protects a large set of player-placed and decorative blocks so a bot won't tear through someone's build (full list below). To let the bot break anything, set it explicitly empty (`mining.protectedBlocks=`). **Changing this list needs a server restart** to fully apply (the planner caches block classifications); the at-the-moment-of-breaking refusal applies immediately on reload. See [Breaking & Placing](world_edits.md#protected-blocks). |
 | `mining.allowUnbreakable` | `false` | If `true`, the bot may "mine" vanilla-unbreakable blocks (bedrock, barriers, end portal frames — anything with negative destroy time) at the tool-derived cost set by `mining.unbreakableHardness` below: it stands and grinds that long, then the block breaks. Independent of `mining.maxHardness` (unbreakable is its own axis, not "very hard"); `mining.protectedBlocks` always wins. |
 | `mining.unbreakableHardness` | `3200` | The pretend "hardness" of those unbreakable blocks (they have none in vanilla) when `allowUnbreakable` is on. It feeds the normal mining-time formula assuming a pickaxe, so a **better pickaxe digs faster** and bare hands are far slower. Same scale as real blocks (obsidian, the hardest, is ~250) but may go past 255 to make unbreakable mining a stronger deterrent. The default `3200` works out to ~2 minutes per block with a diamond pickaxe. |
+
+#### The default protected-blocks set
+
+To keep a bot from tearing through a player's build, `mining.protectedBlocks` ships with a broad default
+covering the things people place and decorate with:
+
+- **Structure & finish:** logs, planks, cobblestone variants, stairs, slabs, walls, fences, fence gates,
+  glass (blocks + panes), carpets
+- **Openings:** doors and trapdoors (see the door note below)
+- **Utility & storage:** crafting table and the other work stations, furnaces, chests, barrels, beehives, …
+- **Light & decoration:** torches, lanterns, campfires, glowstone / sea lanterns / shroomlight / froglights
+  and other glowing blocks, candles, flower pots
+- **Redstone:** wire, repeaters, comparators, pistons, observers, hoppers, buttons, pressure plates, rails, …
+- **Plants:** saplings, flowers, crops, vines, and other cultivated/decorative plants (but **not** wild grass,
+  ferns, or seagrass — the bot may still clear those)
+- **Personal touches:** beds, signs, banners
+- **Ladders**
+
+**Doors are still used, not just avoided.** Protection forbids *breaking* a block, not operating it — so the
+bot still **opens and closes** wooden/copper doors, trapdoors, and fence gates to pass through (a
+non-destructive action). Iron doors (which need redstone) can't be hand-operated, so a protected iron door is
+**routed around** rather than smashed.
+
+**Leaves are intentionally not protected** — the bot may cut through foliage. **Ores are not protected either**
+— protecting a block only stops the bot breaking it *to make a path*; a block you explicitly send the bot to
+mine (e.g. `/bot mine iron`) is a target, not path terrain, and is unaffected.
+
+Everything here is just a starting point — edit the list freely, or set `mining.protectedBlocks=` (empty) to
+let the bot break anything. Tags and ids that don't exist on your Minecraft version are ignored (a missing
+tag silently, a missing id with a one-line startup warning), so the same default works across versions.
 
 ### Pathfinding — how the bot plans routes
 

@@ -93,11 +93,15 @@ public record Config(
         boolean doorToggle) {
 
     /**
-     * The all-defaults configuration — reproduces TODAY's hardcoded follower behaviour exactly (break +
-     * place on, insta-mine anything below hardness 255, infinite cobblestone, 10k-node cap, greedy weight
-     * 2.0, invulnerable / no hunger / no breath). {@link ConfigLoader} writes this out as the generated
-     * default file, and falls back to it when the file is missing or unreadable, so nothing changes until
-     * the owner edits the config. The pathing/break/place defaults line up with {@link BotCaps#BREAK_PLACE}.
+     * The all-defaults configuration — reproduces TODAY's hardcoded follower behaviour (break + place on,
+     * insta-mine anything below hardness 255, infinite cobblestone, 10k-node cap, greedy weight 2.0,
+     * invulnerable / no hunger / no breath), with ONE exception: this record holds {@link
+     * ProtectedBlocks#EMPTY} for {@code protectedBlocks} because it cannot parse the list at static-init
+     * (the block registry / datapack tags aren't bound yet), but the EFFECTIVE default an absent config key
+     * gets is the broad {@link ProtectedBlocks#DEFAULT_SPEC} set — parsed by {@link ConfigValidator} at load
+     * time and written into the generated file. So a fresh install routes around player-placed blocks; only
+     * the unreadable-file degradation falls back to this record's {@code EMPTY} (protect nothing). The
+     * pathing/break/place defaults line up with {@link BotCaps#BREAK_PLACE}.
      */
     public static final Config DEFAULT = new Config(
             /* survival   */ false, false, false,

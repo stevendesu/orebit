@@ -46,8 +46,9 @@ class TimeBudgetConfigTest {
     @Test
     void absentKeysTakeTheDefaults() {
         List<String> warnings = new ArrayList<>();
-        Config c = new ConfigValidator(warnings::add).validate(new Properties());
-        assertTrue(warnings.isEmpty(), "an empty file must not warn: " + warnings);
+        Properties props = protectedBlocksOff();
+        Config c = new ConfigValidator(warnings::add).validate(props);
+        assertTrue(warnings.isEmpty(), "absent time-budget keys must not warn: " + warnings);
         assertEquals(2.0f, c.chunkBuildBudgetMs());
         assertEquals(1.0f, c.hpaFlushBudgetMs());
         assertEquals(64, c.chunkBuildsPerTick());
@@ -55,7 +56,7 @@ class TimeBudgetConfigTest {
 
     @Test
     void validValuesParseCleanly() {
-        Properties props = new Properties();
+        Properties props = protectedBlocksOff();
         props.setProperty(ConfigKeys.PATHING_CHUNK_BUILD_BUDGET_MS, "3.5");
         props.setProperty(ConfigKeys.PATHING_HPA_FLUSH_BUDGET_MS, "0.5");
         props.setProperty(ConfigKeys.PATHING_CHUNK_BUILDS_PER_TICK, "128");
@@ -72,7 +73,7 @@ class TimeBudgetConfigTest {
     @Test
     void budgetsClampToPositiveAndCeiling() {
         // zero / negative → clamp up to the 0.1 ms floor; above 1000 → clamp down to the 1 s ceiling.
-        Properties props = new Properties();
+        Properties props = protectedBlocksOff();
         props.setProperty(ConfigKeys.PATHING_CHUNK_BUILD_BUDGET_MS, "0");
         props.setProperty(ConfigKeys.PATHING_HPA_FLUSH_BUDGET_MS, "5000");
 
@@ -88,7 +89,7 @@ class TimeBudgetConfigTest {
     void highBudgetForAutotestDeterminismIsAcceptedNotClamped() {
         // The autotest pins high, never-binding budgets (100 ms) so the deterministic count backstop governs.
         // 100 ms must pass through un-clamped (it is well under the 1000 ms ceiling).
-        Properties props = new Properties();
+        Properties props = protectedBlocksOff();
         props.setProperty(ConfigKeys.PATHING_CHUNK_BUILD_BUDGET_MS, "100");
         props.setProperty(ConfigKeys.PATHING_HPA_FLUSH_BUDGET_MS, "100");
         props.setProperty(ConfigKeys.PATHING_CHUNK_BUILDS_PER_TICK, "8");
@@ -104,7 +105,7 @@ class TimeBudgetConfigTest {
 
     @Test
     void nonNumberBudgetFallsBackToDefaultWithWarning() {
-        Properties props = new Properties();
+        Properties props = protectedBlocksOff();
         props.setProperty(ConfigKeys.PATHING_CHUNK_BUILD_BUDGET_MS, "fast");
 
         List<String> warnings = new ArrayList<>();
@@ -112,5 +113,16 @@ class TimeBudgetConfigTest {
 
         assertEquals(2.0f, c.chunkBuildBudgetMs(), "a non-number falls back to the default");
         assertFalse(warnings.isEmpty(), "a non-number value warns");
+    }
+
+    /**
+     * A {@link Properties} with {@code mining.protectedBlocks} pinned EMPTY, so these time-budget tests are
+     * isolated from the broad built-in default protection set an absent key would otherwise parse (which can
+     * legitimately warn about blocks absent on older MC versions — irrelevant to the keys under test here).
+     */
+    private static Properties protectedBlocksOff() {
+        Properties props = new Properties();
+        props.setProperty(ConfigKeys.MINING_PROTECTED_BLOCKS, "");
+        return props;
     }
 }
