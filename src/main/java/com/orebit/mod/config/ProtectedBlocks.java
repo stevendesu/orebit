@@ -44,8 +44,102 @@ import net.minecraft.world.level.block.state.BlockState;
  */
 public final class ProtectedBlocks {
 
-    /** The empty list (the default): protects nothing, matches nothing. */
+    /** The empty list: protects nothing, matches nothing. Note this is NOT the effective default any more —
+     *  an ABSENT {@code mining.protectedBlocks} key parses {@link #DEFAULT_SPEC} (see {@link ConfigValidator});
+     *  {@code EMPTY} is only the fallback the {@code Config.DEFAULT} record holds (it can't parse at static-init,
+     *  before the block registry is bound) and the unreadable-file degradation. */
     public static final ProtectedBlocks EMPTY = new ProtectedBlocks("", Set.of(), List.of());
+
+    /**
+     * The built-in default protected-block list — a broad "don't wreck the build" set applied when {@code
+     * mining.protectedBlocks} is ABSENT (a fresh install, or a config that omits the key). Parsed at config
+     * LOAD time ({@link ConfigValidator}), NOT here at class-init, because tag/id resolution needs the block
+     * registry + datapack tags bound (only true at server start). A PRESENT key (even empty) is honored
+     * verbatim, so an existing config keeps whatever it set — only new/omitting configs get this set.
+     *
+     * <h2>Portability discipline (MC 1.17.1 → 26.x)</h2>
+     * Entries are TAGS wherever a covering vanilla tag exists (version-adaptive + they fail SILENTLY when
+     * absent), and exact ids only for the untagged categories. Renamed/late tags are <b>composed</b> — both
+     * the old and new id are listed ({@code #carpets}+{@code #wool_carpets} across the 1.19 rename;
+     * {@code #wooden_doors}+{@code #doors}+{@code minecraft:iron_door}; {@code #small_flowers}+{@code
+     * #tall_flowers}+{@code #flowers}; {@code #signs}+{@code #all_signs}) — so the one that doesn't exist on a
+     * given version no-ops and the other matches. A block id absent on an older version (froglights 1.19,
+     * sculk sensors 1.19/1.20, crafter/copper bulbs 1.21) is skipped with one load-time warning — harmless.
+     *
+     * <p><b>Doors are safe to protect:</b> protection blocks BREAKING (and destroy-by-placing-over) only —
+     * the non-destructive door OPEN/CLOSE toggle rides a separate edit path ({@code MovementContext}'s
+     * {@code doorSetClears}/{@code canToggleExitDoor}, executor {@code AllyBotEntity.setDoorOpen}) that never
+     * consults the PROTECTED bit, so hand-toggleable doors are still operated; iron doors are routed around
+     * rather than smashed. <b>Wild ground cover is deliberately NOT protected</b> (short grass, ferns,
+     * seagrass, dead bush) so the bot can still clear/path through it — only cultivated/decorative plants are.
+     */
+    public static final String DEFAULT_SPEC = String.join(", ",
+            // logs + planks
+            "#minecraft:logs", "#minecraft:planks",
+            // cobblestone variants (no vanilla tag)
+            "minecraft:cobblestone", "minecraft:mossy_cobblestone", "minecraft:cobbled_deepslate",
+            // stairs / slabs / walls
+            "#minecraft:stairs", "#minecraft:slabs", "#minecraft:walls",
+            // fences / fence gates
+            "#minecraft:fences", "#minecraft:fence_gates",
+            // doors + trapdoors (wooden_* everywhere; iron id for <=1.19; broad tag adds iron+copper on 1.20+)
+            "#minecraft:wooden_doors", "#minecraft:doors", "minecraft:iron_door",
+            "#minecraft:wooden_trapdoors", "#minecraft:trapdoors", "minecraft:iron_trapdoor",
+            // carpets (renamed carpets -> wool_carpets at 1.19; list both)
+            "#minecraft:carpets", "#minecraft:wool_carpets",
+            // glass blocks + panes (no umbrella tag)
+            "minecraft:glass", "minecraft:tinted_glass",
+            "minecraft:white_stained_glass", "minecraft:orange_stained_glass", "minecraft:magenta_stained_glass",
+            "minecraft:light_blue_stained_glass", "minecraft:yellow_stained_glass", "minecraft:lime_stained_glass",
+            "minecraft:pink_stained_glass", "minecraft:gray_stained_glass", "minecraft:light_gray_stained_glass",
+            "minecraft:cyan_stained_glass", "minecraft:purple_stained_glass", "minecraft:blue_stained_glass",
+            "minecraft:brown_stained_glass", "minecraft:green_stained_glass", "minecraft:red_stained_glass",
+            "minecraft:black_stained_glass",
+            "minecraft:glass_pane", "minecraft:white_stained_glass_pane", "minecraft:orange_stained_glass_pane",
+            "minecraft:magenta_stained_glass_pane", "minecraft:light_blue_stained_glass_pane",
+            "minecraft:yellow_stained_glass_pane", "minecraft:lime_stained_glass_pane",
+            "minecraft:pink_stained_glass_pane", "minecraft:gray_stained_glass_pane",
+            "minecraft:light_gray_stained_glass_pane", "minecraft:cyan_stained_glass_pane",
+            "minecraft:purple_stained_glass_pane", "minecraft:blue_stained_glass_pane",
+            "minecraft:brown_stained_glass_pane", "minecraft:green_stained_glass_pane",
+            "minecraft:red_stained_glass_pane", "minecraft:black_stained_glass_pane",
+            // ladders
+            "minecraft:ladder",
+            // plants — cultivated/decorative only (wild grass/fern/seagrass/dead_bush stay breakable)
+            "#minecraft:saplings", "#minecraft:small_flowers", "#minecraft:tall_flowers", "#minecraft:flowers",
+            "#minecraft:crops",
+            "minecraft:vine", "minecraft:glow_lichen", "minecraft:lily_pad", "minecraft:sugar_cane",
+            "minecraft:cactus", "minecraft:sweet_berry_bush", "minecraft:cocoa", "minecraft:sea_pickle",
+            "minecraft:big_dripleaf", "minecraft:small_dripleaf", "minecraft:spore_blossom",
+            "minecraft:hanging_roots", "minecraft:flower_pot",
+            // workbenches / stations / storage
+            "minecraft:crafting_table", "minecraft:cartography_table", "minecraft:fletching_table",
+            "minecraft:smithing_table", "minecraft:loom", "minecraft:stonecutter", "minecraft:grindstone",
+            "minecraft:enchanting_table", "minecraft:brewing_stand", "minecraft:anvil", "minecraft:chipped_anvil",
+            "minecraft:damaged_anvil", "minecraft:lectern", "minecraft:composter", "minecraft:barrel",
+            "minecraft:furnace", "minecraft:blast_furnace", "minecraft:smoker", "minecraft:bell",
+            "minecraft:beacon", "minecraft:chest", "minecraft:trapped_chest", "minecraft:ender_chest",
+            "minecraft:beehive", "minecraft:bee_nest", "minecraft:crafter",
+            // torches / campfires / lanterns
+            "#minecraft:campfires", "minecraft:torch", "minecraft:wall_torch", "minecraft:soul_torch",
+            "minecraft:soul_wall_torch", "minecraft:lantern", "minecraft:soul_lantern",
+            // glowing / light-emitting decorative
+            "minecraft:glowstone", "minecraft:sea_lantern", "minecraft:shroomlight", "minecraft:jack_o_lantern",
+            "minecraft:end_rod", "minecraft:redstone_lamp", "minecraft:conduit", "#minecraft:candles",
+            "minecraft:ochre_froglight", "minecraft:verdant_froglight", "minecraft:pearlescent_froglight",
+            // redstone components
+            "#minecraft:buttons", "#minecraft:pressure_plates", "#minecraft:rails",
+            "minecraft:redstone_wire", "minecraft:repeater", "minecraft:comparator", "minecraft:redstone_torch",
+            "minecraft:redstone_wall_torch", "minecraft:redstone_block", "minecraft:lever", "minecraft:piston",
+            "minecraft:sticky_piston", "minecraft:dispenser", "minecraft:dropper", "minecraft:hopper",
+            "minecraft:observer", "minecraft:daylight_detector", "minecraft:note_block", "minecraft:tripwire",
+            "minecraft:tripwire_hook", "minecraft:target", "minecraft:lightning_rod", "minecraft:sculk_sensor",
+            "minecraft:calibrated_sculk_sensor", "minecraft:copper_bulb", "minecraft:exposed_copper_bulb",
+            "minecraft:weathered_copper_bulb", "minecraft:oxidized_copper_bulb", "minecraft:waxed_copper_bulb",
+            "minecraft:waxed_exposed_copper_bulb", "minecraft:waxed_weathered_copper_bulb",
+            "minecraft:waxed_oxidized_copper_bulb",
+            // bonus aesthetic / player-placed
+            "#minecraft:beds", "#minecraft:signs", "#minecraft:all_signs", "#minecraft:banners");
 
     /** The normalized accepted entries, comma-joined — for display and reload change-detection. */
     private final String spec;

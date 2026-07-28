@@ -103,9 +103,16 @@ class ProtectedBlocksParseTest {
         assertTrue(c.protectedBlocks().matches(Blocks.CHEST.defaultBlockState()));
         assertTrue(c.allowUnbreakable());
         assertTrue(c.toBotCaps().allowUnbreakable(), "allowUnbreakable rides into BotCaps");
-        // Defaults stay byte-identical: absent keys → nothing protected, opt-in off.
-        Config d = new ConfigValidator(warnings::add).validate(new Properties());
-        assertTrue(d.protectedBlocks().isEmpty());
+        // An ABSENT mining.protectedBlocks key now installs the built-in default protection set
+        // (ProtectedBlocks.DEFAULT_SPEC) — a deliberate "don't wreck the build" default, NOT empty. Chest is
+        // an exact-id entry in that set (resolves even with headless tags unbound); stone is not on the list.
+        // allowUnbreakable is unaffected (still off by default).
+        Config d = new ConfigValidator(msg -> {}).validate(new Properties());
+        assertFalse(d.protectedBlocks().isEmpty(), "absent key installs the default protection set");
+        assertTrue(d.protectedBlocks().matches(Blocks.CHEST.defaultBlockState()),
+                "the default set protects storage like chests");
+        assertFalse(d.protectedBlocks().matches(Blocks.STONE.defaultBlockState()),
+                "the default set does not protect ordinary stone");
         assertFalse(d.allowUnbreakable());
         assertFalse(d.toBotCaps().allowUnbreakable());
     }

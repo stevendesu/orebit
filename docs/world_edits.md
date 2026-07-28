@@ -87,6 +87,20 @@ grass-like cell destroys its occupant, so protection covers that path too):
 mining.protectedBlocks = minecraft:chest, #minecraft:beds, minecraft:diamond_ore
 ```
 
+**This is the one setting that doesn't default to empty.** Out of the box it protects a broad set of
+player-placed and decorative blocks — logs, planks, stairs, slabs, walls, fences, doors, glass, carpets,
+work stations, chests, torches and other light sources, redstone components, cultivated plants, beds, signs,
+banners, ladders, and more — so a bot won't chew through someone's build. Wild grass/ferns and leaves are
+**not** protected (the bot may cut through those), and the list is fully editable — set
+`mining.protectedBlocks=` (empty) to let the bot break anything. See
+[the default set in the config reference](configuration.md#the-default-protected-blocks-set).
+
+Protection stops the bot **breaking** a block, not **using** it: a protected wooden or copper door is still
+opened and closed to walk through (a non-destructive action) — only iron doors, which can't be hand-operated,
+get routed around. And protecting a block never stops it being a deliberate *target*: `/bot mine iron` still
+works even though ores can appear in a protected list, because protection only governs breaking blocks *to
+clear a path*.
+
 It's enforced on both sides of the parity rule:
 
 - **Planner:** protection is folded into the block-fingerprint table itself, so every
