@@ -77,10 +77,13 @@ public final class ConfigLoader {
         install(read(server));
     }
 
-    /** Re-read the file and re-install (the {@code /bot config reload} path). Returns the new config. */
+    /** Re-read the file and re-install (the {@code /bot config reload} path). Returns the new config.
+     *  Also re-bakes the {@code /bot craft} recipe index as a courtesy, so a datapack {@code /reload}'s
+     *  recipe changes are picked up without a server restart (DESIGN-bot-abilities.md §3.3). */
     public static Config reload(MinecraftServer server) {
         Config c = read(server);
         install(c);
+        com.orebit.mod.crafting.RecipeIndex.bake(server);
         return c;
     }
 
@@ -350,6 +353,18 @@ public final class ConfigLoader {
             line(w, "# later feature), so for now an already-open door is walked through and a closed door is mined.");
             line(w, "# Iron doors are never hand-toggleable regardless of this.");
             kv(w, ConfigKeys.DOORS_TOGGLE, d.doorToggle());
+            line(w, "");
+
+            line(w, "# --- crafting: how /bot craft handles 3x3 recipes needing a crafting table ---");
+            line(w, "# When a recipe needs a table and none is nearby, the bot may place a temporary one from its");
+            line(w, "# inventory (crafting the table itself first, from planks, when it only carries the makings).");
+            kv(w, ConfigKeys.CRAFTING_PLACE_TABLE, d.placeTable());
+            line(w, "# After crafting on a temporary table the bot placed, break it and take it back. This is the one");
+            line(w, "# narrow exception to mining.protectedBlocks: it applies only to the exact table the bot placed.");
+            kv(w, ConfigKeys.CRAFTING_RECLAIM_TABLE, d.reclaimTable());
+            line(w, "# How far (blocks, 0-48) to look for an existing crafting table before placing one. 0 disables");
+            line(w, "# the search. Only loaded chunks are seen.");
+            kv(w, ConfigKeys.CRAFTING_TABLE_SEARCH_RADIUS, d.tableSearchRadius());
         } catch (IOException e) {
             OrebitCommon.LOGGER.warn("[Orebit] could not write default config {} — using defaults in memory",
                     file, e);

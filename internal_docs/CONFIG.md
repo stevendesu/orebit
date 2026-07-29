@@ -111,6 +111,14 @@ start. Out-of-range or unparseable individual values are clamped/defaulted with 
 | --- | --- | --- | --- | --- |
 | `hpa.persistIntervalTicks` | int `>= 0` | `6000` | Cadence (server ticks) of the background crash-insurance flush of the persisted HPA region tier (`<world>/orebit/<dim>/hpa.bin` cost fragments + `res.bin` resource tallies; `DESIGN-worldmodel-persistence.md`), and only for dimensions marked dirty since their last flush. **A safety net only** — the authoritative flush runs on a graceful `SERVER_STOPPING` regardless (the primary trigger for the idle-auto-stop deployment). `0` disables the periodic flush (stop flush still runs). Not read into `BotCaps`; read per tick by `RegionPersistence.tick`. Persisted files are a **cache** — a bad magic / version / IO error treats the file as absent and the live world rebuilds it. Load is eager at `SERVER_STARTED` (all dimensions, tick thread, replaying `mergeUp*`); only level-0 leaves are stored. | `hpa.persistIntervalTicks=1200` |
 
+### `crafting.*` — how does `/bot craft` deal with 3x3 recipes needing a table?
+
+| Key | Type / range | Default | Meaning | Example |
+| --- | --- | --- | --- | --- |
+| `crafting.placeTable` | boolean | `true` | When a 3x3 recipe needs a crafting table and none is within `crafting.tableSearchRadius`, the bot may PLACE a temporary one from its inventory — crafting the table itself first (a 2x2 craft from planks) when it only carries the makings (DESIGN-bot-abilities.md §3.5, the owner's "conditionally place-then-break" note). `false` → the bot refuses instead ("no crafting table nearby"). Executor-read (`BotCrafter`), hot-reloadable, never in `BotCaps`. | `crafting.placeTable=false` |
+| `crafting.reclaimTable` | boolean | `true` | After crafting on a temporary table the bot itself placed, break it (timed, real drops) and take it back. This reclaim is the ONE narrowly-waived exception to `mining.protectedBlocks` (whose default set shields the OWNER's tables): the waiver applies only to the exact cell the bot placed this run, and only while that cell is still a crafting table (`BotMining.requestReclaim`, §10-D3). `false` → placed tables stay in the world and the bot says where. | `crafting.reclaimTable=false` |
+| `crafting.tableSearchRadius` | int `0..48` | `16` | How far (blocks) `/bot craft` looks for an existing crafting table before considering placing one — the resource layer's live section sweep (`ResourceScan.nearestLoadedCell`; only loaded chunks are seen; the 48 ceiling matches the sweep volume, a wider radius would silently find nothing). `0` disables the search entirely. | `crafting.tableSearchRadius=32` |
+
 ## Mapping to `BotCaps`
 
 `Config.toBotCaps()` folds the placement / mining / pathing knobs into the capability gate the block-tier A\*
@@ -155,6 +163,10 @@ surcharge), so mortality is a move-generation fact too.
   or resize the pool (the reload does drain the pool before rebaking the shared cost tables — see
   `internal_docs/DESIGN-background-pathfinding.md`). `pathing.asyncSearchBudgetMs` is read per search, so a reload
   does change it live while async is already on — but toggling async itself is restart-only.
+- **`crafting.*` is fully hot:** all three keys are executor-read by `BotCrafter` per run/phase, so a
+  `/bot config reload` applies to the next `/bot craft`. The reload also re-bakes the `/bot craft`
+  RECIPE INDEX (`RecipeIndex.bake`) as a courtesy, so a datapack `/reload`'s recipe changes are picked
+  up without a server restart (the index otherwise bakes once at `SERVER_STARTED`).
 - **When it takes effect on the bot:** the follower reads the live `ConfigLoader` cache **per replan**
   (`caps()` → `ConfigLoader.botCaps()`, `placeBlock()` → `ConfigLoader.config().conjuredBlockState()`), so a
   reload applies on the bot's **next plan** — no per-tick or per-A\*-node cost (the parse is paid once; the hot
@@ -186,6 +198,8 @@ fix, and never failing the load:
   skipped individually — the remaining entries still apply. An **absent** key parses `ProtectedBlocks.DEFAULT_SPEC`
   (the broad default set); a **present** key (even empty) is honored verbatim. On older MC versions the
   version-variant ids in the default set warn+skip (harmless); missing tags are silent.
+- `crafting.tableSearchRadius` clamped to `0..48` (`0` disables the search; the ceiling matches the live-scan
+  sweep volume).
 - Booleans default to their `Config.DEFAULT` value on anything that isn't exactly `true`/`false`.
 - `placement.conjuredBlock` falls back to `minecraft:cobblestone` if it doesn't resolve to a real block on the
   running version.

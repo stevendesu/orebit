@@ -36,6 +36,7 @@ public final class OrebitCommands {
             new MineCommand(),
             new FindCommand(),
             new GatherCommand(),
+            new CraftCommand(),
             new DropCommand(),
             new ReportCommand(),
             new StatsCommand(),

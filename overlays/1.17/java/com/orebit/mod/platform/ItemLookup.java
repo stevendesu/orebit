@@ -29,4 +29,12 @@ public final class ItemLookup {
         ResourceLocation rl = Registry.ITEM.getKey(item);
         return rl == null ? "" : rl.toString();
     }
+
+    /** The registered {@link Item} for id {@code "namespace:path"}, or {@code null} (the item-side mirror
+     *  of {@link BlockLookup#byId} — same shape, same flavors). */
+    public static Item byId(String id) {
+        ResourceLocation rl = ResourceLocation.tryParse(id);
+        if (rl == null) return null;
+        return Registry.ITEM.getOptional(rl).orElse(null);
+    }
 }
