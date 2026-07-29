@@ -90,7 +90,11 @@ public record Config(
         boolean lazyLoad,
         int residentLeafCap,
         // ---- doors ----
-        boolean doorToggle) {
+        boolean doorToggle,
+        // ---- crafting ----
+        boolean placeTable,
+        boolean reclaimTable,
+        int tableSearchRadius) {
 
     /**
      * The all-defaults configuration — reproduces TODAY's hardcoded follower behaviour (break + place on,
@@ -149,8 +153,11 @@ public record Config(
                               * resident built L0 cost-leaf count, so bounded region RAM is opt-in + in-game
                               * verifiable. */
                              0,
-            /* doors      */ true); // doors.toggle ON — the P3 executor operates doors (open before crossing,
+            /* doors      */ true,  // doors.toggle ON — the P3 executor operates doors (open before crossing,
                                      // close on the exit double-toggle); the flag stays a config kill-switch.
+            /* crafting   */ true, true, 16); // placeTable + reclaimTable ON (the place-then-reclaim
+                                     // temporary-table affordance, DESIGN-bot-abilities.md §3.5);
+                                     // tableSearchRadius 16 blocks (the proven Mindcraft radius).
 
     /**
      * The capability gate the block-tier A* reads, derived from the placement / mining / pathing knobs

@@ -209,6 +209,24 @@ doors.toggle = true
 | --- | --- | --- |
 | `doors.toggle` | `true` | Whether the bot may open and close hand-operable doors (wooden, copper) by right-clicking them, rather than smashing through or routing around — it opens a closed door before crossing and closes it again behind itself on a hallway corner. Set `false` as a kill-switch: an already-open door is walked through, a closed one is mined. Iron doors are never hand-operable regardless of this setting (they need redstone). |
 
+### Crafting — how `/bot craft` handles recipes that need a crafting table
+
+```properties
+crafting.placeTable        = true
+crafting.reclaimTable      = true
+crafting.tableSearchRadius = 16
+```
+
+`/bot craft <item> [count]` crafts from the bot's real inventory: small (2x2) recipes anywhere,
+big (3x3) recipes only within arm's reach of a crafting table. These knobs govern what the bot
+does when a big recipe needs a table and there isn't one around.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `crafting.placeTable` | `true` | When no crafting table is nearby, the bot may set down a temporary one from its inventory — and if it only carries planks, it crafts the table first (that's a small recipe). Set `false` to make it refuse instead. |
+| `crafting.reclaimTable` | `true` | After using a temporary table it placed, the bot breaks it and takes it back. This is the one exception to `mining.protectedBlocks` (which normally keeps the bot's hands off crafting tables): it applies only to the exact table the bot just placed. Set `false` to leave placed tables standing (the bot tells you where). |
+| `crafting.tableSearchRadius` | `16` | How far (blocks, up to 48) the bot looks for an existing crafting table before considering placing one. `0` skips the search entirely. Only loaded chunks are searched. |
+
 ## Example configurations
 
 **A pacifist guide** — never digs, never builds, just finds its way through what's already

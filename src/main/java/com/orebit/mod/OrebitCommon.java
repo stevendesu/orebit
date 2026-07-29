@@ -51,6 +51,14 @@ public final class OrebitCommon {
                 ConfigLoader.config().ticksByHardness(), ConfigLoader.config().ticksToMineFlat(),
                 ConfigLoader.config().unbreakableHardness()));
 
+        // Craftable-recipe index (DESIGN-bot-abilities.md §3.3): enumerate the server's shaped +
+        // shapeless crafting recipes into the version-free RecipeIndex behind /bot craft. Recipes
+        // are DATAPACK-loaded per server (they don't exist at static-init or under a bare registry
+        // bootstrap), and SERVER_STARTED fires after the datapack load — the same window the
+        // MiningModel bake above relies on. One cold enumeration per boot; a datapack /reload is
+        // picked up on the next /bot config reload (ConfigLoader.reload re-bakes as a courtesy).
+        events.onServerStarted(com.orebit.mod.crafting.RecipeIndex::bake);
+
         // Boot-time pathfinder JIT warm-up (worldmodel.pathing.NavWarmup): ~500 synthetic
         // searches over a private in-memory fixture so the first REAL search doesn't run interpreted/C1-cold
         // (~16 ms for a 2-node search — landing on a live player tick, since the

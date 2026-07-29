@@ -202,18 +202,35 @@ trace`/`rtrace` one-shots. Behavior lives on components it constructs and ticks:
   (`NetherPortalIndex`), path to its bottom cell, ENTER terminal state (face, walk in, stand still);
   success = event-detected level change, failure = state-detected (portal broke / vanilla-derived
   100-tick in-column bound → one retry, then give up).
+- **`BotCrafter`** — the `/bot craft` machine (DESIGN-bot-abilities.md §3): `CraftPhase {PLAN,
+  SEEK_TABLE, PLACE_TABLE, CRAFT, RECLAIM}`; one craft op per tick, each re-planned against the
+  LIVE inventory; 2x2 recipes anywhere, 3x3 within reach (4.5) of a crafting table — seeks the
+  nearest via `ResourceScan.nearestLoadedCell` (`crafting.tableSearchRadius`), else places a
+  temporary one from inventory (crafting it first from planks when needed, `crafting.placeTable`)
+  and reclaims it after (`crafting.reclaimTable` — the ONE narrow `mining.protectedBlocks` waiver:
+  `BotMining.requestReclaim`, exact bot-placed cell only, state re-verified). Headless server-side
+  crafting (no menus/recipe book — the vanilla-Crafter/Carpet precedent) via `crafting/RecipeIndex`
+  (result-name → `KnownRecipe` index baked at SERVER_STARTED + on `/bot config reload`; recipes are
+  datapack-loaded, NOT available under Bootstrap) + `KnownRecipe.planFrom` (deterministic
+  index-order slot assignment, storage slots 0-35 only) + `CraftAssignment.execute` (vanilla
+  matches/assemble/remainders through the `platform/CraftingOps` seam — 10 overlay flavors,
+  anchored on the byte-stable `MinecraftServer#getRecipeManager`).
 - **`BotMining`** — the per-tick timed-break actuator: callers `request(pos)` every tick; equips
   fastest/goal tool, accumulates vanilla `getDestroyProgress`, crack overlay, real survival break
-  (drops/XP/wear), `Config.mayBreak` backstop; `busy()` gates forward motion.
+  (drops/XP/wear), `Config.mayBreak` backstop (waived only for `requestReclaim` of a bot-placed
+  crafting table); `busy()` gates forward motion.
 - **`BotManager`** — static owner-UUID→bot registry: production spawn (deterministic UUID,
   `orebit-bots.properties` orphan adoption, `BotSpawn.place`, revive, forced SURVIVAL, cross-dimension
   teleport-back), remove on disconnect. `BotPositioning` = safe-spot/face helpers. `Debug` = the two
   static toggles (`/bot debug`). `SlowTickMonitor` = slow-tick attribution (ourOps/gc/other +
   per-phase buckets, logs when `Debug.VERBOSE`). `FakePlayerEntity`/`FakeClientConnection` live in
   `overlays/` (version-fragile network internals; `FakeNetworkHandler` is gone).
-- Files: `AllyBotEntity.java`, `BotNavigator.java`, `BotGatherer.java`, `BotPortalFollower.java`,
-  `BotMining.java`, `BotManager.java`, `BotPositioning.java`, `NavJourneyStats.java`,
-  `SlowTickMonitor.java`, `Debug.java`, `overlays/<era>/java/com/orebit/mod/FakePlayerEntity.java`
+- Files: `AllyBotEntity.java`, `BotNavigator.java`, `BotGatherer.java`, `BotCrafter.java`,
+  `BotPortalFollower.java`, `BotMining.java`, `BotManager.java`, `BotPositioning.java`,
+  `NavJourneyStats.java`, `SlowTickMonitor.java`, `Debug.java`,
+  `crafting/{RecipeIndex,KnownRecipe,IngredientSlot,CraftAssignment}.java`,
+  `overlays/<era>/java/com/orebit/mod/FakePlayerEntity.java`,
+  `overlays/<era>/java/com/orebit/mod/platform/CraftingOps.java`
 - Entry: `OrebitCommon.init` join/disconnect/tick events → `BotManager`; the entity's vanilla `tick()`
   drives everything else.
 
@@ -244,8 +261,9 @@ arms it; each writes an `orebit-<x>-result.properties` + traces, then halts the 
 
 ## commands/ — the /bot surface
 `OrebitCommands.register` builds the Brigadier `/bot` root at the `PlatformEvents.onRegisterCommands`
-seam; each subcommand is a stateless `BotCommand` Strategy. Present (**17**): Spawn, Follow, Stay,
-Come, Goto, Mine, Find, Gather, **Drop** (`/bot drop <all|resources|tools|trash|name>` — tosses
+seam; each subcommand is a stateless `BotCommand` Strategy. Present (**18**): Spawn, Follow, Stay,
+Come, Goto, Mine, Find, Gather, **Craft** (`/bot craft <item> [count]` — result names tab-completed
+from `crafting/RecipeIndex`; see `BotCrafter`), **Drop** (`/bot drop <all|resources|tools|trash|name>` — tosses
 matching inventory via `BotInventory.dropMatching` + the `ItemClasses` taxonomy), **Report** (`/bot
 report` — the resource-compass abundance table: near/mid/far player-centered box sums + true-global,
 from `ResourcePyramid`), **Stats** (`/bot stats` — the NAVSTATS current + last-journey tables), Here,
@@ -261,11 +279,14 @@ Trace, RegionTrace (`/bot rtrace`), Probe, Config, Debug. The `ChatCommandParser
 `allowUnbreakable`, `unbreakableHardness`), `pathing.*` (incl. `greedyWeight`, `costPerHitpoint`,
 `warmup*`, the async trio, `chunkBuildsPerTick`/`chunkBuildBudgetMs`, `navReadyRadiusChunks`/
 `navReadyTimeoutTicks`, `hpaFlushBudgetMs`, `regionShardLoadBudgetMs`), `hpa.*`
-(`persistIntervalTicks`, `persistFlushBudgetMs`, `lazyLoad`, `residentLeafCap`), and **`doors.*`**
-(`doors.toggle`, default true → `BotCaps.mayToggleDoors`). `toBotCaps()` folds knobs into the
+(`persistIntervalTicks`, `persistFlushBudgetMs`, `lazyLoad`, `residentLeafCap`), **`doors.*`**
+(`doors.toggle`, default true → `BotCaps.mayToggleDoors`), and **`crafting.*`**
+(`placeTable`/`reclaimTable`/`tableSearchRadius` — executor-read by `BotCrafter`, fully hot).
+`toBotCaps()` folds knobs into the
 pathfinder's `BotCaps`; `mayBreak()` = executor-side break-policy backstop; `conjuredBlockState()`.
 `ConfigLoader.load` reads `config/orebit.properties` at SERVER_STARTED (writes commented defaults
-first run); reload re-bakes `MiningModel` and drains the planner pool first. `ConfigValidator`
+first run); reload re-bakes `MiningModel` and drains the planner pool first (and re-bakes the
+`/bot craft` `RecipeIndex` as a courtesy). `ConfigValidator`
 clamps-and-warns, never fatal. `ProtectedBlocks` parses ids + `#tags` → NavBlock PROTECTED bit
 (planner) + `mayBreak` (executor). Key reference: `internal_docs/CONFIG.md`.
 - Files: `config/Config.java`, `ConfigLoader.java`, `ConfigValidator.java`, `ConfigKeys.java`,

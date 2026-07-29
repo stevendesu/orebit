@@ -115,7 +115,12 @@ public final class ConfigValidator {
                 // never binds), so Integer.MAX_VALUE.
                 intClamped(props, ConfigKeys.HPA_RESIDENT_LEAF_CAP, d.residentLeafCap(), 0, Integer.MAX_VALUE),
                 // doors
-                bool(props, ConfigKeys.DOORS_TOGGLE, d.doorToggle()));
+                bool(props, ConfigKeys.DOORS_TOGGLE, d.doorToggle()),
+                // crafting: tableSearchRadius 0 disables the table search; the 48 ceiling matches the
+                // resource layer's live-scan sweep volume (a wider radius would silently find nothing).
+                bool(props, ConfigKeys.CRAFTING_PLACE_TABLE, d.placeTable()),
+                bool(props, ConfigKeys.CRAFTING_RECLAIM_TABLE, d.reclaimTable()),
+                intClamped(props, ConfigKeys.CRAFTING_TABLE_SEARCH_RADIUS, d.tableSearchRadius(), 0, 48));
     }
 
     // ---- per-type parse + clamp (each warns through the sink and never throws) ----------------------

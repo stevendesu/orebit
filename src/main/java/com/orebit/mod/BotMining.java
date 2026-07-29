@@ -50,6 +50,8 @@ public final class BotMining {
     // lifecycle: EITHER (the default) equips the fastest correct tool as before; a silk condition (from a
     // gather with a drop goal) equips the goal tool so the fastest-tool re-select does NOT override it.
     private DropModel.ToolCondition requestedCondition = DropModel.ToolCondition.EITHER;
+    // THIS tick's request is a bot-placed-table reclaim (see requestReclaim) — consumed like `requested`.
+    private boolean requestedReclaim;
     private BlockPos target;      // cell currently being mined across ticks (null = idle)
     private float progress;       // accumulated destroy progress in [0,1) toward breaking `target`
     private int lastStage = -1;   // last crack-overlay stage 0..9 pushed for `target` (-1 = none shown)
@@ -78,6 +80,21 @@ public final class BotMining {
         this.requestedCondition = condition == null ? DropModel.ToolCondition.EITHER : condition;
     }
 
+    /**
+     * Ask to mine {@code pos} this tick as a RECLAIM of a bot-placed crafting table
+     * (DESIGN-bot-abilities.md §10-D3): identical to {@link #request(BlockPos)} except the
+     * {@code mining.protectedBlocks} refusal is waived — narrowly: only while the LIVE state at the
+     * cell is still a crafting table. The shipped protected-list default includes
+     * {@code minecraft:crafting_table} to keep the bot off the OWNER's tables; a temporary table
+     * the bot itself just placed for a craft is not the owner's build, so {@code BotCrafter} may
+     * take it back. Everything else (timing, drops, overlay, tool) is the normal timed break.
+     */
+    public void requestReclaim(BlockPos pos) {
+        this.requested = pos;
+        this.requestedCondition = DropModel.ToolCondition.EITHER;
+        this.requestedReclaim = true;
+    }
+
     /** Whether a break is currently in progress — for the follower to gate forward motion while digging. */
     public boolean busy() {
         return target != null;
@@ -91,8 +108,10 @@ public final class BotMining {
     public void tick(ServerLevel level) {
         BlockPos want = this.requested;
         DropModel.ToolCondition cond = this.requestedCondition;
+        boolean reclaim = this.requestedReclaim;
         this.requested = null; // consume; the mover must re-request next tick to keep digging
         this.requestedCondition = DropModel.ToolCondition.EITHER;
+        this.requestedReclaim = false;
 
         if (want == null) {                 // nothing requested → release (matches vanilla progress reset)
             stop(level);
@@ -114,7 +133,11 @@ public final class BotMining {
         // break; re-checking the LIVE state here also covers a stale nav grid. Refusal releases the break
         // (like an un-request), so the follower's stall/replan loop routes around it.
         Config cfg = ConfigLoader.config();
-        if (!cfg.mayBreak(state, state.getDestroySpeed(level, target))) {
+        // The one waiver: a reclaim request may break a crafting table the bot itself placed
+        // (§10-D3) even though the default protected list shields the owner's tables — gated on the
+        // LIVE state still being a crafting table, so the exemption can never leak onto other blocks.
+        final boolean reclaimWaiver = reclaim && state.is(Blocks.CRAFTING_TABLE);
+        if (!reclaimWaiver && !cfg.mayBreak(state, state.getDestroySpeed(level, target))) {
             stop(level);
             return;
         }
