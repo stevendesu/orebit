@@ -74,6 +74,14 @@ param(
     # -Silk: add Silk Touch to the pre-equipped tool. Required for `gather stone` (SILK_REQUIRED); harmless
     # for NO_SILK resources like cobblestone (which then refuse — use a plain -Tool, no -Silk, for those).
     [switch]$Silk,
+    # -Craft <result-name>: CRAFT mode. Drive /bot craft <result> [count] instead of /bot goto — the bot
+    # crafts from an inventory injected via -Give (2x2 recipes in place; 3x3 recipes seek/place/reclaim a
+    # crafting table per the crafting.* config). When set, -Goal is IGNORED. The result file gains the
+    # craft schema (phaseReached / crafted / target / inventoryCount / outcome[PASS/FAIL/TIMEOUT]).
+    [string]$Craft = "",
+    # -Give "item:count,item:count": the inventory injected at spawn for a -Craft run (e.g.
+    # "oak_planks:7,stick:2"). Plain names get the minecraft: namespace.
+    [string]$Give = "",
     # -MasterWorld <path>: FROZEN-WORLD mode. Instead of seed-regenerating the world each run (which is
     # non-deterministic for VEGETATION -- trees generate in parallel-chunk-gen order; proven by the
     # startprobe: same seed -> 3 distinct tree layouts in 5 runs), copy a pristine, pre-generated master
@@ -152,6 +160,8 @@ if ($Barehanded)      { $gradleArgs += "-Porebit.autotest.barehanded=true" }
 if ($Rtrace)          { $gradleArgs += "-Porebit.autotest.rtrace=true" }
 if ($TraceGoal -ne "") { $gradleArgs += "-Porebit.autotest.traceGoal=$TraceGoal" }
 if ($Gather -ne "")   { $gradleArgs += "-Porebit.autotest.gather=$Gather" }
+if ($Craft -ne "")    { $gradleArgs += "-Porebit.autotest.craft=$Craft" }
+if ($Give -ne "")     { $gradleArgs += "-Porebit.autotest.give=$Give" }
 if ($Count -gt 1)     { $gradleArgs += "-Porebit.autotest.count=$Count" }
 if ($Tool -ne "")     { $gradleArgs += "-Porebit.autotest.tool=$Tool" }
 if ($Silk)            { $gradleArgs += "-Porebit.autotest.silk=true" }

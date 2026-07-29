@@ -110,10 +110,19 @@ public final class HeadlessAutotest {
                 System.getProperty("orebit.autotest.gather"),
                 Integer.getInteger("orebit.autotest.count", 1),
                 System.getProperty("orebit.autotest.tool", "diamond_pickaxe"),
-                Boolean.getBoolean("orebit.autotest.silk"));
+                Boolean.getBoolean("orebit.autotest.silk"),
+                // CRAFT mode (-Dorebit.autotest.craft=<result name>): drive /bot craft instead of /bot
+                // goto — <result> ×count from an injected inventory (-Dorebit.autotest.give=
+                // "item:count,item:count", e.g. "oak_planks:7,stick:2"). Null = not a craft run.
+                System.getProperty("orebit.autotest.craft"),
+                System.getProperty("orebit.autotest.give", ""));
         events.onServerStarted(scenario::start);
         events.onWorldTickEnd(scenario::tick);
-        if (scenario.gatherResource != null) {
+        if (scenario.craftItem != null) {
+            OrebitCommon.LOGGER.info("[Orebit/autotest] armed CRAFT: item={} count={} give='{}' start={} budget={}t",
+                    scenario.craftItem, scenario.gatherQuota, scenario.giveSpec,
+                    compact(scenario.start), scenario.budgetTicks);
+        } else if (scenario.gatherResource != null) {
             OrebitCommon.LOGGER.info("[Orebit/autotest] armed GATHER: resource={} count={} tool={}{} start={} budget={}t",
                     scenario.gatherResource, scenario.gatherQuota, scenario.toolId,
                     scenario.silk ? "+silk" : "", compact(scenario.start), scenario.budgetTicks);
@@ -170,6 +179,16 @@ public final class HeadlessAutotest {
         /** Max distance the bot ever reached from its gather-start cell (exposes a wander). */
         double maxDistFromStart;
 
+        // ---- CRAFT mode (null craftItem = not a craft run; mirrors GATHER's deferred-issue shape) ----
+        /** Result name for {@code /bot craft} (a RecipeIndex name, e.g. "crafting_table"); null = off. */
+        final String craftItem;
+        /** Inventory injection spec {@code "item:count,item:count"} applied at spawn (craft mode only). */
+        final String giveSpec;
+        /** True once the craft has been issued (after the nav-readiness gate). */
+        boolean craftIssued;
+        /** Last non-terminal craft phase observed (for the TIMEOUT/FAIL result). */
+        String lastCraftPhase = "IDLE";
+
         // ---- TRACE mode (-Dorebit.autotest.traceGoal=x,y,z): mirror /bot trace, headlessly ----
         /**
          * The {@code goalFloor} cell for a one-shot {@link AllyBotEntity#traceTo} — the EXACT entry point
@@ -197,15 +216,18 @@ public final class HeadlessAutotest {
         int traceSearches;
 
         Scenario(BlockPos start, BlockPos goal, int budgetTicks, int startDelayTicks,
-                 String gatherResource, int gatherQuota, String toolId, boolean silk) {
+                 String gatherResource, int gatherQuota, String toolId, boolean silk,
+                 String craftItem, String giveSpec) {
             this.start = start;
             this.goal = goal;
             this.budgetTicks = budgetTicks;
             this.startDelayTicks = startDelayTicks;
             this.gatherResource = gatherResource;
-            this.gatherQuota = Math.max(1, gatherQuota);
+            this.gatherQuota = Math.max(1, gatherQuota); // shared count knob (gather quota / craft target)
             this.toolId = toolId;
             this.silk = silk;
+            this.craftItem = craftItem;
+            this.giveSpec = giveSpec;
         }
 
         /**
@@ -264,6 +286,33 @@ public final class HeadlessAutotest {
                 // bare-handed pillar-to-the-sky: the empty-air highway out-prices a dig-down descent).
                 bot.getInventory().clearContent();
                 final boolean barehanded = Boolean.getBoolean("orebit.autotest.barehanded");
+
+                // ---- CRAFT mode (-Dorebit.autotest.craft=<result name>): drive /bot craft ----
+                // Inject the -give inventory into the bot's REAL ServerPlayer inventory, then defer the
+                // startCraft to the poll behind the same nav-readiness gate the goto/gather use (SEEK_TABLE
+                // may need to path). The craft poll (craftTick) takes over from here.
+                if (craftItem != null) {
+                    int slot = 0;
+                    for (String entry : giveSpec.split(",")) {
+                        final String e = entry.trim();
+                        if (e.isEmpty()) continue;
+                        final int sep = e.lastIndexOf(':');
+                        final String name = sep < 0 ? e : e.substring(0, sep);
+                        final int count = sep < 0 ? 1 : Integer.parseInt(e.substring(sep + 1).trim());
+                        final String id = name.indexOf(':') >= 0 ? name : "minecraft:" + name;
+                        final var item = ItemLookup.byId(id);
+                        if (item == null) {
+                            finishCraft("FAIL", "unknown give item '" + name + "'", "FAIL");
+                            return;
+                        }
+                        bot.getInventory().setItem(slot++, new ItemStack(item, count));
+                    }
+                    bot.setMode(AllyBotEntity.Mode.STAY);
+                    OrebitCommon.LOGGER.info("[Orebit/autotest] bot spawned at {}; craft {} x{} (give '{}') "
+                                    + "pending (startDelay {}t + nav readiness)",
+                            compact(bot.blockPosition()), craftItem, gatherQuota, giveSpec, startDelayTicks);
+                    return;
+                }
 
                 // ---- GATHER mode (-Dorebit.autotest.gather=<resource>): drive /bot gather ----
                 // Pre-equip the correct/silk tool into the bot's REAL ServerPlayer inventory BEFORE the
@@ -437,7 +486,11 @@ public final class HeadlessAutotest {
                 return;
             }
 
-            // GATHER mode has its own poll (find→mine→return); GOTO's arrival/give-up poll is below.
+            // CRAFT / GATHER modes have their own polls; GOTO's arrival/give-up poll is below.
+            if (craftItem != null) {
+                craftTick(level);
+                return;
+            }
             if (gatherResource != null) {
                 gatherTick(level);
                 return;
@@ -653,6 +706,113 @@ public final class HeadlessAutotest {
                         ticks, compact(bot.blockPosition()), phase, collected, gatherQuota,
                         fmt(dStart), fmt(maxDistFromStart));
             }
+        }
+
+        /**
+         * CRAFT-mode poll: defer {@code startCraft} behind the shared nav-readiness gate, then read only
+         * the bot's own signals — {@link AllyBotEntity#craftPhaseName}/{@link AllyBotEntity#craftedCount}
+         * (read-only observation seams) and the terminal mode flip to STAY — plus the harness budget.
+         * PASS = crafted ≥ count, cross-checked against the physical inventory ({@code countCraftItems}).
+         */
+        void craftTick(ServerLevel level) {
+            if (!bot.isAlive()) {
+                finishCraft("FAIL", "bot died", "FAIL");
+                return;
+            }
+            if (!craftIssued) {
+                if (ticks < startDelayTicks) {
+                    return;
+                }
+                if (!navReadyAround(level, start)) {
+                    if (ticks >= budgetTicks) {
+                        finishCraft("FAIL", "nav grid never built around start (waited " + ticks + "t)", "TIMEOUT");
+                    } else if (ticks % PROGRESS_LOG_TICKS == 0) {
+                        OrebitCommon.LOGGER.info("[Orebit/autotest] t={} waiting for nav readiness around start {}",
+                                ticks, compact(start));
+                    }
+                    return;
+                }
+                bot.startCraft(craftItem, gatherQuota);
+                craftIssued = true;
+                OrebitCommon.LOGGER.info("[Orebit/autotest] craft issued at tick {} (startDelay {}t + nav ready): {} x{}",
+                        ticks, startDelayTicks, craftItem, gatherQuota);
+                return;
+            }
+            final String phase = bot.craftPhaseName();
+            if (!"IDLE".equals(phase)) {
+                lastCraftPhase = phase;
+            }
+            final int crafted = bot.craftedCount();
+            // The craft machine ends by flipping to STAY (quota met, missing ingredients, table trouble).
+            if (bot.mode() == AllyBotEntity.Mode.STAY) {
+                final int inInv = countCraftItems();
+                if (crafted >= gatherQuota && inInv >= gatherQuota) {
+                    finishCraft("PASS", "crafted " + crafted + "/" + gatherQuota + " (inventory holds " + inInv + ")", "PASS");
+                } else if (crafted >= gatherQuota) {
+                    finishCraft("FAIL", "machine reports " + crafted + "/" + gatherQuota
+                            + " but inventory holds only " + inInv, "FAIL");
+                } else {
+                    finishCraft("FAIL", "crafted only " + crafted + "/" + gatherQuota
+                            + " (ended in phase " + lastCraftPhase + ")", "FAIL");
+                }
+                return;
+            }
+            if (ticks >= budgetTicks) {
+                finishCraft("FAIL", "tick budget exhausted (phase " + lastCraftPhase
+                        + ", crafted " + crafted + "/" + gatherQuota + ")", "TIMEOUT");
+                return;
+            }
+            if (ticks % PROGRESS_LOG_TICKS == 0) {
+                OrebitCommon.LOGGER.info("[Orebit/autotest] t={} pos={} phase={} crafted={}/{}",
+                        ticks, compact(bot.blockPosition()), phase, crafted, gatherQuota);
+            }
+        }
+
+        /** Write the CRAFT result file (granular: phase / crafted / target / physical inventory), halt. */
+        void finishCraft(String result, String reason, String outcome) {
+            done = true;
+            Path file = ConfigDir.serverDir(server).resolve(RESULT_FILE);
+            try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
+                kv(w, "result", result);
+                kv(w, "outcome", outcome);
+                kv(w, "reason", reason);
+                kv(w, "mode", "craft");
+                kv(w, "item", craftItem);
+                kv(w, "target", gatherQuota);
+                kv(w, "give", giveSpec);
+                kv(w, "ticks", ticks);
+                kv(w, "budgetTicks", budgetTicks);
+                kv(w, "start", start.getX() + "," + start.getY() + "," + start.getZ());
+                if (bot != null) {
+                    kv(w, "phaseReached", "PASS".equals(result) ? "DONE" : lastCraftPhase);
+                    kv(w, "crafted", bot.craftedCount());
+                    kv(w, "inventoryCount", countCraftItems());
+                    kv(w, "finalX", fmt(bot.getX()));
+                    kv(w, "finalY", fmt(bot.getY()));
+                    kv(w, "finalZ", fmt(bot.getZ()));
+                    kv(w, "mode_bot", bot.mode());
+                    kv(w, "navGaveUp", bot.navigator().navGaveUp());
+                    kv(w, "alive", bot.isAlive());
+                }
+            } catch (IOException e) {
+                OrebitCommon.LOGGER.error("[Orebit/autotest] could not write {}", file, e);
+            }
+            endRun(result, reason);
+        }
+
+        /** Physical count of the craft-target item in the bot's real inventory (cross-checks craftedCount). */
+        int countCraftItems() {
+            if (bot == null || craftItem == null) return 0;
+            final String wantedId = craftItem.indexOf(':') >= 0 ? craftItem : "minecraft:" + craftItem;
+            var inv = bot.getInventory();
+            int total = 0;
+            for (int i = 0, n = inv.getContainerSize(); i < n; i++) {
+                ItemStack s = inv.getItem(i);
+                if (!s.isEmpty() && wantedId.equals(ItemLookup.idOf(s.getItem()))) {
+                    total += s.getCount();
+                }
+            }
+            return total;
         }
 
         /** Write the GATHER result file (granular: phase / collected / quota / returned / trajectory), halt. */
