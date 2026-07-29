@@ -73,6 +73,8 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private final BotNavigator navigator;
     /** The {@code /bot gather} find→mine→return state machine. */
     private final BotGatherer gatherer;
+    /** The {@code /bot craft} craft-from-inventory state machine. */
+    private final BotCrafter crafter;
     /** The cross-dimension FOLLOW/COME portal-seek/ENTER component. */
     private final BotPortalFollower portalFollower;
 
@@ -143,9 +145,11 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      *   <li>{@link Mode#COME} — path once to a fixed summon cell, then drop to {@link Mode#STAY}.
      *   <li>{@link Mode#GATHER} — the find→mine→return resource loop ({@code /bot gather}); see
      *       {@link BotGatherer}.
+     *   <li>{@link Mode#CRAFT} — the craft-from-inventory loop ({@code /bot craft}); see
+     *       {@link BotCrafter}.
      * </ul>
      */
-    public enum Mode { FOLLOW, STAY, COME, GATHER }
+    public enum Mode { FOLLOW, STAY, COME, GATHER, CRAFT }
 
     private Mode mode = Mode.FOLLOW;
     private BlockPos comeTarget;    // fixed summon cell (owner's feet block at /bot come time)
@@ -176,6 +180,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.mining = new BotMining(this);
         this.navigator = new BotNavigator(this);
         this.gatherer = new BotGatherer(this);
+        this.crafter = new BotCrafter(this);
         this.portalFollower = new BotPortalFollower(this);
     }
 
@@ -221,6 +226,16 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         return gatherer.gatherStartPos();
     }
 
+    /** Current {@link BotCrafter} phase name for the harness ({@code "IDLE"} when not crafting). */
+    String craftPhaseName() {
+        return crafter.phaseName();
+    }
+
+    /** Result items produced toward the current craft target. */
+    int craftedCount() {
+        return crafter.craftedCount();
+    }
+
     public void lookAtPlayer(Player player) {
         double dx = player.getX() - this.getX();
         double dy = (player.getEyeY()) - this.getEyeY();
@@ -239,8 +254,9 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     /** Aim the head (yaw + pitch) at the centre of world cell {@code (x,y,z)} — the "look at what you interact
      *  with" a player does when placing (mirrors {@link BotMining}'s mining look). For a pillar footing directly
-     *  below, this is a straight-down look. */
-    private void lookAtCell(int x, int y, int z) {
+     *  below, this is a straight-down look. Package-private: task components (e.g. {@link BotCrafter}) face
+     *  their work cell through this. */
+    void lookAtCell(int x, int y, int z) {
         double dx = x + 0.5 - this.getX();
         double dy = y + 0.5 - this.getEyeY();
         double dz = z + 0.5 - this.getZ();
@@ -310,6 +326,17 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         gatherer.startGather(output, quota);
     }
 
+    /** {@code /bot craft <item> [count]}: switch to {@link Mode#CRAFT} and start the {@link BotCrafter}
+     *  loop for result name {@code item} (a {@link com.orebit.mod.crafting.RecipeIndex} name), targeting
+     *  {@code count} result items. */
+    public void startCraft(String item, int count) {
+        this.mode = Mode.CRAFT;
+        this.comeTarget = null;
+        navigator.clearPlan();
+        portalFollower.resetPortalSeek();
+        crafter.startCraft(item, count);
+    }
+
     @Override
     public void tick() {
         // Tick the bot as a real player: forge its movement inputs, then run the FULL vanilla player tick.
@@ -376,6 +403,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         switch (mode) {
             case STAY -> holdPosition();
             case GATHER -> gatherer.gatherLoopTick();
+            case CRAFT -> crafter.craftLoopTick();
             case COME -> {
                 // Summon to a fixed cell; once there, settle into STAY (distinct from FOLLOW, which
                 // would keep chasing). comeTarget can't be null in COME, but guard defensively.

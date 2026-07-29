@@ -316,4 +316,29 @@ public final class ConfigKeys {
      * closed door is mined). Iron doors are never hand-toggleable regardless of this flag.
      */
     public static final String DOORS_TOGGLE = "doors.toggle";
+
+    // ---- crafting: how /bot craft deals with 3x3 recipes needing a crafting table -------------------
+    /**
+     * {@code boolean} — when a 3x3 recipe needs a crafting table and none is within {@link
+     * #CRAFTING_TABLE_SEARCH_RADIUS}, the bot may PLACE a temporary one from its inventory (crafting the
+     * table itself first — a 2x2 craft from planks — when it only carries the makings). <b>Default
+     * {@code true}</b>. Set {@code false} to make the bot refuse instead ("no crafting table nearby").
+     */
+    public static final String CRAFTING_PLACE_TABLE = "crafting.placeTable";
+    /**
+     * {@code boolean} — after crafting on a temporary table the bot itself placed, break it and take it
+     * back into inventory. The reclaim break is the ONE narrowly-waived exception to {@code
+     * mining.protectedBlocks} (which shields the OWNER's tables by default): it applies only to the exact
+     * cell the bot placed this run, and only while that cell is still a crafting table
+     * (DESIGN-bot-abilities.md §10-D3). <b>Default {@code true}</b>; {@code false} leaves placed tables
+     * in the world (the bot says where).
+     */
+    public static final String CRAFTING_RECLAIM_TABLE = "crafting.reclaimTable";
+    /**
+     * {@code int} (blocks, {@code 0..48}) — how far {@code /bot craft} looks for an existing crafting
+     * table before considering placing one. {@code 0} disables the search (always place/refuse).
+     * <b>Default {@code 16}</b>. The scan is the resource layer's live section sweep, so only loaded
+     * chunks are seen; the ceiling matches the sweep volume.
+     */
+    public static final String CRAFTING_TABLE_SEARCH_RADIUS = "crafting.tableSearchRadius";
 }
