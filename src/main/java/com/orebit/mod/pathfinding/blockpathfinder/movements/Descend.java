@@ -129,13 +129,13 @@ public final class Descend implements Movement {
      * case — that is the follower's grounded-stall recovery / replan arm (as with {@link Fall}/{@link Parkour}).
      */
     @Override
-    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
         final boolean[] left = new boolean[1]; // reset-guard arm — set once the bot leaves the start floor
         MovePlan plan = new MovePlan();
         // Physically back on the START floor AFTER having left it → re-establish geometry. Armed by STEP and
         // disarmed on (re)entry to CLEAR, so it can't alias the first STEP tick (bot still grounded at start).
         plan.resetWhen(b -> left[0]
-                && b.grounded() && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+                && b.grounded() && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
         // Validity envelope (PATHOLOGY P1 family — the Parkour/Ascend failWhen precedent): settled
         // (grounded, or bodily in fluid) at a foot cell outside the step's own cells is off-plan —
         // done/resetWhen can never fire there and re-attempting latches. Allowed: the from stand
@@ -145,18 +145,24 @@ public final class Descend implements Movement {
         // still grounded on the from-block's lip (foot cell (tx, fy+1, tz)) — a legitimate mid-step
         // state, NOT displacement (the longrun-8 first-hold false positive). The drop itself is
         // airborne-exempt.
+        // Allowed band = the two REAL feet heights (topY-aware): the destination stand (toFootY) up through
+        // the from-stand / lip transit (fromFootY). For a full block this is [fy, fy+1] — unchanged.
+        final int bandLo = Math.min(fromFootY, toFootY);
+        final int bandHi = Math.max(fromFootY, toFootY);
         plan.failWhen(b -> (b.grounded() || b.inWater() || b.inLava())
-                && !(b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz)
+                && !(b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz)
                 && !(b.footX() == tx && b.footZ() == tz
-                        && b.footY() >= fy && b.footY() <= fy + 1));
+                        && b.footY() >= bandLo && b.footY() <= bandHi));
         // CLEAR: break the step-off transit column and build the step-down floor. The runner mines one AIR cell
         // per tick (holding, recentring) and places the FOOTING once the AIR cells are clear; while the transit
-        // is still solid the bot is walled in, so it cannot walk off before the floor exists.
-        plan.phase("clear")
-                .need(MovePlan.Need.AIR,     tx, fy + 2, tz)   // break: step-off head clearance
-                .need(MovePlan.Need.AIR,     tx, fy + 1, tz)   // break: transit / new head
-                .need(MovePlan.Need.AIR,     tx, fy,     tz)   // break: new feet
-                .need(MovePlan.Need.FOOTING, tx, fy - 1, tz)   // place: step-down floor (no-op on real terrain)
+        // is still solid the bot is walled in, so it cannot walk off before the floor exists. The transit column
+        // spans the bot's body from the new feet (toFootY) up through the step-off head (fromFootY+1) — a
+        // topY-aware span (a partial destination makes a deeper foot-drop than the full-block fy..fy+2 run).
+        MovePlan.Phase clear = plan.phase("clear");
+        for (int cy = toFootY; cy <= fromFootY + 1; cy++) {
+            clear.need(MovePlan.Need.AIR, tx, cy, tz);         // break: step-off transit column (new feet … step-off head)
+        }
+        clear.need(MovePlan.Need.FOOTING, tx, ty, tz)          // place: step-down floor (no-op on real terrain)
                 .drive((b, v) -> left[0] = false)              // disarm on (re)entry; advances same tick
                 .advanceWhen(b -> true);                       // geometry held (runner drives only when met) → STEP
         // STEP: walk off the edge toward the dest column; gravity does the one-block drop. Complete once
@@ -167,7 +173,7 @@ public final class Descend implements Movement {
                     SteerControl.drive(b, v);                  // medium-aware (walk on land, swim if submerged)
                 })
                 .done(b -> b.grounded()
-                        && b.footX() == tx && b.footY() == fy && b.footZ() == tz);
+                        && b.footX() == tx && b.footY() == toFootY && b.footZ() == tz);
         return plan;
     }
 }

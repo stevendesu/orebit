@@ -120,6 +120,21 @@ public interface BotSteering {
      *  {@link #solidAt} exposed for guards/plans that read positively. */
     boolean airAt(int x, int y, int z);
 
+    /**
+     * Whether the block at {@code (x,y,z)} genuinely OBSTRUCTS the bot's body moving through the cell — a
+     * geometry test (does the live collision shape intrude into the bot's centred body corridor above the
+     * auto-step height), NOT the blunt "has any collision" of {@link #solidAt}. The {@code Need.AIR} reconcile
+     * (PhaseRunner) mines a body cell only when THIS is true, so the bot walks through an already-open door /
+     * open trapdoor (thin edge panel) and stands on a carpet / plate / slab in its feet cell (collision below
+     * the step) instead of swinging at them, while a real full-block obstruction is still cleared. General by
+     * construction — no per-block-type ("is it a door") special-casing. {@code (dx,dz)} is the step's horizontal
+     * movement direction (signum or raw delta; {@code (0,0)} = a vertical move): the corridor spans the full cell
+     * ALONG it and only the centred band ACROSS it, so a panel across the path (a closed door) is caught while
+     * one along a side (an open door) is not. Reads the LIVE level like {@link #solidAt}. See the impl ({@code
+     * AllyBotEntity.movementBlockedAt}) for the corridor geometry.
+     */
+    boolean movementBlockedAt(int x, int y, int z, int dx, int dz);
+
     /** Ask to mine the block at {@code (x,y,z)} this tick — routed to the timed {@link com.orebit.mod.BotMining}
      *  actuator (equip tool, face, swing, real destroy time, drops). Reactive: call it every tick the cell must
      *  go; stopping the calls aborts the break. */

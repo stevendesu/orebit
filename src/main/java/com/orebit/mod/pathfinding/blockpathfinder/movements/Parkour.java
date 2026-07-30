@@ -924,7 +924,7 @@ public final class Parkour implements Movement {
      * fails the step so the driver replans from inside the gap — see the envelope derivation at the guard.
      */
     @Override
-    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
         final int ddx = tx - fx;
         final int ddz = tz - fz;
         // Fix 3: the FIRST gap-floor cell just past the takeoff lip (node level fy). A hazardous block here
@@ -965,7 +965,7 @@ public final class Parkour implements Movement {
         final boolean[] airborneOnce = new boolean[1];
         MovePlan plan = new MovePlan();
         plan.resetWhen(b -> airborneOnce[0] && b.grounded()
-                && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+                && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
         // VALIDITY ENVELOPE (the P1 off-plan wedge): a committed jump's world is exactly the grounded cells
         // the plan itself names — the takeoff stand, and the landing COLUMN between the two stand heights
         // (for a flat/rising arc that band IS the landing stand; a falling arc's descent runs down the
@@ -978,8 +978,10 @@ public final class Parkour implements Movement {
         // takeoff stand (TAKEOFF_EDGE 0.35 keeps the centre inside the cell), airborne ticks are not
         // grounded, and the touchdown tick is on the landing column. resetWhen — checked first by the
         // runner, and its cell is inside this envelope's allowed set — keeps owning the balk-retry.
-        final int landLoY = Math.min(fy, ty) + 1; // landing-column feet band: landing stand … descent top
-        final int landHiY = Math.max(fy, ty) + 1;
+        // Landing-column feet band: landing stand … descent top, in REAL feet heights (topY-aware). For a full
+        // block these are (fy+1, ty+1) — unchanged; a partial takeoff/landing floor shifts its own foot down.
+        final int landLoY = Math.min(fromFootY, toFootY);
+        final int landHiY = Math.max(fromFootY, toFootY);
         // The LIP-CROSSING transitional cell (the battA-cliff third fail->hold false positive, the
         // along-axis sibling of Descend's lip / Ascend's face-press): the runup's TAKEOFF_EDGE trigger
         // lets the centre cross the takeoff cell's boundary a tick before the jump registers, so the bot
@@ -988,8 +990,8 @@ public final class Parkour implements Movement {
         // jump); admitting it keeps the envelope exact without the gate-early trigger straight Parkour
         // does not yet have (DiagonalParkour's gate makes its equivalent state unreachable).
         plan.failWhen(b -> b.grounded()
-                && !(b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz)
-                && !(b.footX() == gapX && b.footY() == fy + 1 && b.footZ() == gapZ)
+                && !(b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz)
+                && !(b.footX() == gapX && b.footY() == fromFootY && b.footZ() == gapZ)
                 && !(b.footX() == tx && b.footZ() == tz
                         && b.footY() >= landLoY && b.footY() <= landHiY));
         plan.phase("runup")
@@ -1081,7 +1083,7 @@ public final class Parkour implements Movement {
                     }
                 })
                 .done(b -> b.grounded()
-                        && b.footX() == tx && b.footY() == ty + 1 && b.footZ() == tz);
+                        && b.footX() == tx && b.footY() == toFootY && b.footZ() == tz);
         return plan;
     }
 

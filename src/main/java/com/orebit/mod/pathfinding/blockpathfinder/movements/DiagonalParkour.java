@@ -371,7 +371,7 @@ public final class DiagonalParkour implements Movement {
      * section). Sprint for {@code g >= 2} ({@code |Δx| == |Δz| == g+1} on a diagonal step).
      */
     @Override
-    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
         final int ux = Integer.signum(tx - fx);
         final int uz = Integer.signum(tz - fz);
         // The UNIT jump axis for the predictive airborne servo (the raw signum axis has magnitude √2, so the
@@ -403,7 +403,7 @@ public final class DiagonalParkour implements Movement {
         final boolean[] sprintInject = new boolean[2];
         MovePlan plan = new MovePlan();
         plan.resetWhen(b -> airborneOnce[0] && b.grounded()
-                && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+                && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
         // VALIDITY ENVELOPE (the P1 off-plan wedge — cardinal {@link Parkour}'s envelope in its flat-only
         // form): this move's world is exactly TWO grounded cells — the takeoff stand and the landing stand
         // (v1 is FLAT, so there is no descent column to admit). The first grounded tick anywhere else — the
@@ -416,8 +416,8 @@ public final class DiagonalParkour implements Movement {
         // airborne ticks are not grounded, and the touchdown tick is the landing stand. resetWhen — checked
         // first by the runner, its cell inside the allowed set — keeps owning the balk-retry.
         plan.failWhen(b -> b.grounded()
-                && !(b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz)
-                && !(b.footX() == tx && b.footY() == ty + 1 && b.footZ() == tz));
+                && !(b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz)
+                && !(b.footX() == tx && b.footY() == toFootY && b.footZ() == tz));
         plan.phase("runup")
                 .drive((b, v) -> {
                     airborneOnce[0] = false; // re-attempt begins → disarm until the next arc is live
@@ -472,7 +472,7 @@ public final class DiagonalParkour implements Movement {
                 // cell centre, the ice-slide arrest).
                 .drive((b, v) -> SteerControl.parkourAirborne(b, v, uxn, uzn, tx, ty, tz, sprint || sprintInject[0]))
                 .done(b -> b.grounded()
-                        && b.footX() == tx && b.footY() == ty + 1 && b.footZ() == tz);
+                        && b.footX() == tx && b.footY() == toFootY && b.footZ() == tz);
         return plan;
     }
 

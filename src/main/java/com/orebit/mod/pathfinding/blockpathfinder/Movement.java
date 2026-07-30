@@ -93,8 +93,21 @@ public interface Movement {
      * <p>Default {@code null} — the move has no plan and the follower drives it the old way ({@link #steer} plus
      * the follower's one-shot edit application). Moves are converted to the phase model one at a time (Pillar
      * first); an unconverted move is untouched.
+     *
+     * <p><b>Floor vs. foot Y (partial-block height awareness).</b> {@code (fx,fy,fz)}/{@code (tx,ty,tz)} are the
+     * search-native <i>floor</i> cells (the block the bot stands ON — where support/footing edits and reach
+     * geometry are anchored). {@code fromFootY}/{@code toFootY} are the bot's <i>feet block</i> Y when standing
+     * on each floor — {@code floorY + 1} for a full-topped floor (full block / TOP slab), but the floor cell
+     * ITSELF ({@code floorY}) for a BOTTOM-partial floor (bottom slab / snow / carpet / pressure plate /
+     * repeater / amethyst, whose collision top is mid-cell so the feet occupy the floor's own cell). This is the
+     * same topY-aware value the search reconstruct carries as the waypoint Y ({@code BlockPathfinder.feetYOf}),
+     * supplied here so a plan's stand GUARDS ({@code failWhen}/{@code done}/{@code resetWhen} — they compare the
+     * bot's live {@code footY()}) and its BODY-clearance {@code Need.AIR} cells (feet/head) sit at the real feet,
+     * not a blanket {@code floorY+1}. Support/footing {@code Need.FOOTING} cells stay FLOOR-relative. For a full
+     * block {@code fromFootY == fy+1} and {@code toFootY == ty+1}, so a plan that uses these is byte-identical to
+     * the old {@code fy+1}/{@code ty+1} on ordinary (full-block) terrain — only partial floors shift.
      */
-    default MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+    default MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
         return null;
     }
 

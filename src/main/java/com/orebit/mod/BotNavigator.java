@@ -174,6 +174,15 @@ final class BotNavigator {
     private final PhaseRunner phaseRunner = new PhaseRunner();
     /** The waypoint index the active plan was built for; a change rebuilds the plan for the new step (-1 = none). */
     private int activePlanStep = -1;
+    /** The active phase plan's search-native FROM-floor / TO-floor frame, snapshotted at plan BUILD so the
+     *  validity-envelope failure forensic (which runs every tick, outside the plan-build block) can compare the
+     *  plan's expected takeoff-stand foot (fromFloorY+1) against the bot's real foot cell — the one-block
+     *  mismatch a PARTIAL standable from-floor (carpet/slab/snow, where floorOf returns the feet cell itself so
+     *  foot==floor, not floor+1) produces. Diagnostic only; never drives behavior. */
+    private int planFromX, planFromY, planFromZ, planToX, planToY, planToZ;
+    /** The plan's topY-aware FEET-block Y for the from/to stands (fed to plan() as fromFootY/toFootY) — the
+     *  forensic's real expected takeoff/landing foot (== floorY for a partial standable floor, floorY+1 else). */
+    private int planFromFootY, planToFootY;
 
     // ---- region-tier online repair (the "recover when stuck" half of the stuck arc) ------------------
     /**
@@ -1173,8 +1182,40 @@ final class BotNavigator {
                 BlockPos pw = path.waypoint(waypointIndex - 1);
                 ffx = pw.getX(); ffy = path.floorY(waypointIndex - 1); ffz = pw.getZ();
             }
-            MovePlan mp = movement.plan(ffx, ffy, ffz, wp.getX(), tfy, wp.getZ());
+            // The bot's real FEET-block Y standing on each floor — topY-aware (mirrors BlockPathfinder.feetYOf,
+            // the same value the reconstruct carries as the waypoint Y): the floor cell ITSELF for a bottom-
+            // partial floor (carpet/slab/snow/plate, feet occupy the floor's own cell), else floorY+1. Fed into
+            // plan() so the move's stand guards + body-clearance cells sit at the real feet, not a blanket +1.
+            // TO is the waypoint Y (already topY-aware); FROM is the previous waypoint's Y, or the start floor's
+            // derived feet-Y for step 0 (the bot's own stand cell).
+            final int toFootY = wp.getY();
+            final int fromFootY = (waypointIndex == 0)
+                    ? feetYForFloor(ffx, ffy, ffz)
+                    : path.waypoint(waypointIndex - 1).getY();
+            // Snapshot the plan frame for the validity-envelope failure forensic (the fail site runs every tick,
+            // outside this plan-build block).
+            planFromX = ffx; planFromY = ffy; planFromZ = ffz; planFromFootY = fromFootY;
+            planToX = wp.getX(); planToY = tfy; planToZ = wp.getZ(); planToFootY = toFootY;
+            MovePlan mp = movement.plan(ffx, ffy, ffz, wp.getX(), tfy, wp.getZ(), fromFootY, toFootY);
+            if (mp != null && Debug.VERBOSE) {
+                // Plan-begin execution forensic: the search-native FROM/TO floor cells this move drives between,
+                // the takeoff-stand foot the plan's guards now expect (topY-aware fromFootY), and the bot's ACTUAL
+                // live pose. A partial standable FROM-floor (carpet/slab/snow) shows takeoffTopY<16 with
+                // expectTakeoffFoot.y == botFoot.y (the fix: foot==floor for a partial, not floor+1).
+                OrebitCommon.LOGGER.info(
+                        "[Orebit] PLAN {} from-floor=({},{},{}) to-floor=({},{},{}) expectTakeoffFoot.y={} "
+                                + "botFoot=({},{},{}) botY={} grounded={} fromFloorStandable={} takeoffTopY={} toFloorTopY={}",
+                        movement.getClass().getSimpleName(), ffx, ffy, ffz, wp.getX(), tfy, wp.getZ(), fromFootY,
+                        bot.footX(), bot.footY(), bot.footZ(),
+                        String.format("%.3f", bot.y()), bot.grounded(),
+                        isStandableFloor(new BlockPos(ffx, ffy, ffz)),
+                        takeoffTopY(new BlockPos(ffx, ffy, ffz)), takeoffTopY(new BlockPos(wp.getX(), tfy, wp.getZ())));
+            }
             if (mp != null) {
+                // The step's horizontal movement direction (signum) → the runner's direction-aware body-obstruction
+                // test (Need.AIR mines a cell only if the block blocks the corridor ALONG this route — a closed
+                // door across the path, not an open door along a side).
+                mp.moveDir(Integer.signum(wp.getX() - ffx), Integer.signum(wp.getZ() - ffz));
                 // DOORS P3: fold this step's door-set (SET_OPEN entering / SET_CLOSED on the exit double-toggle)
                 // into the plan as Need.OPEN reqs. A movement's cell-geometry plan(...) can't derive a door-open
                 // from floor coords alone, but the search already folded it onto the step's StepEdits — inject it
@@ -1233,6 +1274,18 @@ final class BotNavigator {
                                     + " (fail->hold policy; no auto-replan while movement bugs are hunted)",
                             lastPlanMove, activePlanStep, phaseRunner.phase(), phaseRunner.phases(),
                             AllyBotEntity.compact(bot.blockPosition()));
+                    // Envelope forensic: the plan's FROM/TO floor frame + the topY-aware expected takeoff foot
+                    // (planFromFootY) vs the bot's real grounded pose. After the partial-floor fix these agree
+                    // (foot == floorY for a partial standable); a surviving mismatch here is a genuine off-plan.
+                    OrebitCommon.LOGGER.info(
+                            "[Orebit]   envelope: from-floor=({},{},{}) to-floor=({},{},{}) expectTakeoffFoot.y={}"
+                                    + " | botFoot=({},{},{}) botY={} grounded={} fromFloorStandable={} takeoffTopY={} toFloorTopY={}",
+                            planFromX, planFromY, planFromZ, planToX, planToY, planToZ, planFromFootY,
+                            bot.footX(), bot.footY(), bot.footZ(),
+                            String.format("%.3f", bot.y()), bot.grounded(),
+                            isStandableFloor(new BlockPos(planFromX, planFromY, planFromZ)),
+                            takeoffTopY(new BlockPos(planFromX, planFromY, planFromZ)),
+                            takeoffTopY(new BlockPos(planToX, planToY, planToZ)));
                 }
                 bot.setForward(0.0f);
                 return;
@@ -1297,6 +1350,34 @@ final class BotNavigator {
         NavGridView grid = NavGridView.background((ServerLevel) Worlds.of(bot));
         return grid.built(pos.getX(), pos.getY(), pos.getZ())
                 && NavBlock.isStandable(grid.descriptorAt(pos.getX(), pos.getY(), pos.getZ()));
+    }
+
+    /**
+     * Diagnostic ONLY (validity-envelope forensic): the takeoff SURFACE height (sixteenths within the cell)
+     * the PLANNER's {@code MovementContext.floorSurface} reads for a floor cell — {@code NavBlock.topY} of the
+     * built descriptor (full block 16, slab 8, carpet ~1), or {@code -1} if unbuilt. Lets the fail log show
+     * which {@code ParkourEnvelope} row the search selected, i.e. whether planning factored the from-height. */
+    private int takeoffTopY(BlockPos pos) {
+        NavGridView grid = NavGridView.background((ServerLevel) Worlds.of(bot));
+        if (!grid.built(pos.getX(), pos.getY(), pos.getZ())) return -1;
+        return NavBlock.topY(grid.descriptorAt(pos.getX(), pos.getY(), pos.getZ()));
+    }
+
+    /**
+     * The bot's feet-block Y standing on floor cell {@code (fx,fy,fz)} — topY-aware, mirroring the search's
+     * {@link com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder}{@code .feetYOf} (the value the
+     * reconstruct carries as the waypoint Y): the floor cell ITSELF for a bottom-partial standable floor
+     * (bottom slab / snow / carpet / plate, whose collision top is mid-cell so the feet occupy the floor's own
+     * cell), else {@code fy + 1} (full block / TOP slab / non-standable → full-block behaviour). Used to derive
+     * the FROM-foot for a step-0 phase plan (later steps read the previous waypoint's already-topY-aware Y).
+     */
+    private int feetYForFloor(int fx, int fy, int fz) {
+        NavGridView grid = NavGridView.background((ServerLevel) Worlds.of(bot));
+        if (grid.built(fx, fy, fz)) {
+            long d = grid.descriptorAt(fx, fy, fz);
+            if (NavBlock.isStandable(d)) return fy + (NavBlock.topY(d) == 16 ? 1 : 0);
+        }
+        return fy + 1;
     }
 
     /**

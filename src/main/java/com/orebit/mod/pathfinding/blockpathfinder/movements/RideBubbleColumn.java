@@ -191,7 +191,9 @@ public final class RideBubbleColumn implements Movement {
     }
 
     @Override
-    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
+        // Bubble-column nodes are in fluid (non-standable floor) → feetYOf returns floorY+1; fromFootY/toFootY
+        // == fy+1/ty+1 (the partial-floor frame does not apply here).
         MovePlan plan = new MovePlan();
         // ENTER: swim laterally into the adjacent up-column. Done once carried (in water + feet in the column).
         plan.phase("enter")

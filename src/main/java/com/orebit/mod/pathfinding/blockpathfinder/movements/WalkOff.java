@@ -221,19 +221,19 @@ public final class WalkOff implements Movement {
      * only on a genuine grounded return to the start cell (a balked step-off to re-attempt).
      */
     @Override
-    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
         final int ddx = tx - fx, ddz = tz - fz;
         // Unit travel axis (cardinal today ⇒ degenerates to the ±1 signum axis). ONE sqrt at plan BUILD time
         // (cold — one MovePlan per waypoint step, the Pillar/Parkour precedent); per-tick predicates stay
         // multiply-adds. dist is never 0 (WalkOff always spans 2 cells).
         final double dist = Math.sqrt((double) (ddx * ddx + ddz * ddz));
         final double ux = ddx / dist, uz = ddz / dist;
-        final int landFeetY = ty + 1; // feet BLOCK Y once standing on the landing floor
+        final int landFeetY = toFootY; // feet BLOCK Y once standing on the landing floor (topY-aware)
 
         MovePlan plan = new MovePlan();
         // Balked step-off: physically back on the start floor with no drop taken → re-attempt from WALKOFF.
         plan.resetWhen(b -> b.grounded()
-                && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+                && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
         // WALKOFF: sprint off the lip toward the landing, NO jump. steerTowards (not the medium-aware drive) —
         // the honey/reach race needs full sprint at the lip.
         plan.phase("walkoff")
