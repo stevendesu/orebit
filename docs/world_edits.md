@@ -106,9 +106,13 @@ It's enforced on both sides of the parity rule:
 - **Planner:** protection is folded into the block-fingerprint table itself, so every
   break decision in the search refuses a protected block with a single bit test —
   routes are planned *around* protected blocks, never through them.
-- **Executor:** every live break re-checks the actual block state against the list at
-  the moment of breaking — the backstop that also covers a nav grid built before the
-  list changed.
+- **Executor:** every ROUTE break (a path's folded break/place edits, the line-of-sight
+  dig on the way to an ore, a build clearing what's in a schematic cell's way) re-checks
+  the actual block state against the list at the moment of breaking — the backstop that
+  also covers a nav grid built before the list changed. Deliberate task breaks (a gather
+  target, a mature-crop harvest, reclaiming the bot's own temporary crafting table,
+  `/bot mine`) never consult the list — that's what makes `/bot gather wood` work with
+  logs protected.
 
 One caveat worth knowing: because protection is baked into cached nav data at
 classification time, **changing the list needs a server restart** (or waiting for

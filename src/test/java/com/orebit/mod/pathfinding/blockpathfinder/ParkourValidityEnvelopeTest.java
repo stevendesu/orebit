@@ -66,6 +66,7 @@ class ParkourValidityEnvelopeTest {
         @Override public void sinkInWater() { }
         @Override public boolean solidAt(int x, int y, int z) { return false; }
         @Override public boolean airAt(int x, int y, int z) { return true; }
+        @Override public boolean movementBlockedAt(int x, int y, int z, int dx, int dz) { return false; }
         @Override public void mine(int x, int y, int z) { }
         @Override public void place(int x, int y, int z) { }
         @Override public void setDoorOpen(int x, int y, int z, boolean open) { }
@@ -128,7 +129,7 @@ class ParkourValidityEnvelopeTest {
 
     /** The P1 frame: a flat diagonal jump, takeoff floor (0,10,0) → landing floor (2,10,2) (g=1). */
     private static MovePlan diagPlan() {
-        return MovementRegistry.DIAGONAL_PARKOUR.plan(0, 10, 0, 2, 10, 2);
+        return MovementRegistry.DIAGONAL_PARKOUR.plan(0, 10, 0, 2, 10, 2, 11, 11); // full-block feet == floor+1
     }
 
     @Test
@@ -169,7 +170,7 @@ class ParkourValidityEnvelopeTest {
     void fallingParkourAdmitsItsDescentColumnButNotTheGap() {
         // A falling cardinal 2-gap: takeoff floor (0,10,0) → landing floor (3,7,0); the descent runs down
         // the landing column, so a grounded touch there (feet band ty+1..fy+1) is the move's own geometry.
-        MovePlan plan = MovementRegistry.PARKOUR.plan(0, 10, 0, 3, 7, 0);
+        MovePlan plan = MovementRegistry.PARKOUR.plan(0, 10, 0, 3, 7, 0, 11, 8); // full-block feet == floor+1
         PhaseRunner runner = new PhaseRunner();
         View view = new View();
         PoseBot bot = new PoseBot();
@@ -235,7 +236,7 @@ class ParkourValidityEnvelopeTest {
     void descendLipTransitIsInsideTheEnvelope() {
         // Descend from floor (70,71,-53) to floor (69,70,-53): from-stand foot (70,72,-53),
         // dest stand foot (69,71,-53), lip transit foot (69,72,-53).
-        MovePlan plan = MovementRegistry.DESCEND.plan(70, 71, -53, 69, 70, -53);
+        MovePlan plan = MovementRegistry.DESCEND.plan(70, 71, -53, 69, 70, -53, 72, 71); // full-block feet == floor+1
         PoseBot bot = new PoseBot();
         assertFalse(plan.failed(bot.at(70, 72, -53, true)), "from stand is inside the envelope");
         assertFalse(plan.failed(bot.at(69, 72, -53, true)), "the lip transit must NOT fail (longrun-8)");
@@ -253,7 +254,7 @@ class ParkourValidityEnvelopeTest {
     void ascendFacePressTransitIsInsideTheEnvelope() {
         // Ascend from floor (87,63,-32) to floor (87,64,-31): from-stand foot (87,64,-32),
         // landing stand foot (87,65,-31), face-press transit foot (87,64,-31).
-        MovePlan plan = MovementRegistry.ASCEND.plan(87, 63, -32, 87, 64, -31);
+        MovePlan plan = MovementRegistry.ASCEND.plan(87, 63, -32, 87, 64, -31, 64, 65); // full-block feet == floor+1
         PoseBot bot = new PoseBot();
         assertFalse(plan.failed(bot.at(87, 64, -32, true)), "from stand is inside the envelope");
         assertFalse(plan.failed(bot.at(87, 64, -31, true)), "the face-press transit must NOT fail (longrun-9)");
@@ -271,7 +272,7 @@ class ParkourValidityEnvelopeTest {
     void parkourLipCrossingTransitIsInsideTheEnvelope() {
         // Flat 2-gap Parkour from floor (0,10,0) to floor (3,10,0): takeoff foot (0,11,0),
         // lip-crossing transit foot (1,11,0), landing foot (3,11,0).
-        MovePlan plan = MovementRegistry.PARKOUR.plan(0, 10, 0, 3, 10, 0);
+        MovePlan plan = MovementRegistry.PARKOUR.plan(0, 10, 0, 3, 10, 0, 11, 11); // full-block feet == floor+1
         PoseBot bot = new PoseBot();
         assertFalse(plan.failed(bot.at(0, 11, 0, true)), "takeoff stand is inside the envelope");
         assertFalse(plan.failed(bot.at(1, 11, 0, true)), "the lip-crossing transit must NOT fail (battA-cliff)");

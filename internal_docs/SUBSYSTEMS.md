@@ -207,23 +207,27 @@ trace`/`rtrace` one-shots. Behavior lives on components it constructs and ticks:
   LIVE inventory; 2x2 recipes anywhere, 3x3 within reach (4.5) of a crafting table — seeks the
   nearest via `ResourceScan.nearestLoadedCell` (`crafting.tableSearchRadius`), else places a
   temporary one from inventory (crafting it first from planks when needed, `crafting.placeTable`)
-  and reclaims it after (`crafting.reclaimTable` — the ONE narrow `mining.protectedBlocks` waiver:
-  `BotMining.requestReclaim`, exact bot-placed cell only, state re-verified). Headless server-side
+  and reclaims it after (`crafting.reclaimTable` — a deliberate task break; `mining.protectedBlocks`
+  is a PATHING policy and never gates the hands). Headless server-side
   crafting (no menus/recipe book — the vanilla-Crafter/Carpet precedent) via `crafting/RecipeIndex`
   (result-name → `KnownRecipe` index baked at SERVER_STARTED + on `/bot config reload`; recipes are
   datapack-loaded, NOT available under Bootstrap) + `KnownRecipe.planFrom` (deterministic
   index-order slot assignment, storage slots 0-35 only) + `CraftAssignment.execute` (vanilla
   matches/assemble/remainders through the `platform/CraftingOps` seam — 10 overlay flavors,
   anchored on the byte-stable `MinecraftServer#getRecipeManager`).
-- **`BotFarmer`** — the `/bot farm` machine (DESIGN-bot-abilities.md §4): one tending PASS —
-  `FarmPhase {SURVEY, WORK, SWEEPUP}` over `farming.workRadius` around the issue cell. Harvests
-  mature crops (`BotMining.requestHarvest`, the crop-side protected waiver), replants/plants bare
+- **`BotFarmer`** — the `/bot farm` machine (DESIGN-bot-abilities.md §4): a PERSISTENT,
+  follow-like farming state — `FarmPhase {SURVEY, WORK, SWEEPUP, WATCH}` over `farming.workRadius`
+  around the issue cell; WATCH re-surveys on a 10s debounce (crop growth is random-tick), so the
+  bot keeps tending the same land until another command switches the mode. Only barren ground
+  ("no farm substrate ever seen, nothing done") ends the run. Harvests
+  mature crops (a deliberate task break through the hands; maturity is the FARMER's own contract —
+  protection never gates the hands), replants/plants bare
   farmland, tills hydrated ground with a carried hoe (`farming.till`; the EXACT vanilla water
   rule — any water fluid in the 9×9×2 Chebyshev-4 box via the `platform/FluidRead` seam), all
   through the REAL vanilla use path (`platform/ItemUse.useOnTop` → `ItemStack#useOn`) and
   VERIFIED by re-reading the world (never the drifting InteractionResult). SWEEPUP collects the
-  pass's own drops by item lifecycle (yield + replant seeds ride vanilla's pickup delay) before
-  the final re-survey ends the pass. Crop facts = `farming/CropKinds` Strategy classes
+  cycle's own drops by item lifecycle (yield + replant seeds ride vanilla's pickup delay) before
+  the cycle ends into WATCH. Crop facts = `farming/CropKinds` Strategy classes
   (wheat/carrots/potatoes/beetroots v1; age read generically off the `age` property; kinds baked
   at SERVER_STARTED). Seeds are EXCLUDED from bridging (`consumeOnePlaceable`/premium skip
   `CropKinds.isSeedItem`).
@@ -255,8 +259,11 @@ trace`/`rtrace` one-shots. Behavior lives on components it constructs and ticks:
   `<server dir>/orebit-schematics/`.
 - **`BotMining`** — the per-tick timed-break actuator: callers `request(pos)` every tick; equips
   fastest/goal tool, accumulates vanilla `getDestroyProgress`, crack overlay, real survival break
-  (drops/XP/wear), `Config.mayBreak` backstop (waived only for `requestReclaim` of a bot-placed
-  crafting table and `requestHarvest` of a known MATURE crop); `busy()` gates forward motion.
+  (drops/XP/wear). The hands are the DELIBERATE-action path: `mining.protectedBlocks` is a PATHING
+  policy (owner ruling 2026-07-29) enforced by the planner + the route executors (`applyEdits`/
+  `place`, the gather occluder dig, builder clears — each checks `Config.mayBreak` itself), never
+  here — so protecting logs doesn't refuse `/bot gather wood`. The hands' one physics gate:
+  vanilla-unbreakables refuse without `mining.allowUnbreakable`. `busy()` gates forward motion.
 - **`BotManager`** — static owner-UUID→bot registry: production spawn (deterministic UUID,
   `orebit-bots.properties` orphan adoption, `BotSpawn.place`, revive, forced SURVIVAL, cross-dimension
   teleport-back), remove on disconnect. `BotPositioning` = safe-spot/face helpers. `Debug` = the two

@@ -193,19 +193,19 @@ public final class Ascend implements Movement {
      * documents). A balked ascend snaps back to phase 0, which re-mines and rebuilds the step and re-jumps.
      */
     @Override
-    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
         // Contract tripwire (PATHOLOGY P1B): an Ascend is BY CONTRACT a cardinal unit step one up (ty == fy+1,
         // the geometry candidates resolved — see the class doc). A caller handing us any other frame (the
         // historical +1 floor drift) would have us build a physically-impossible fiction (a 2-block jump) and
         // livelock; report it through the EXISTING validity-envelope FAILED path instead — detection, not
-        // recovery: the follower drops the plan and replans from the bot's real floor.
+        // recovery: the follower drops the plan and replans from the bot's real floor. FLOOR-level contract
+        // (the foot deltas below are topY-aware and may differ when either floor is a partial standable).
         if (ty != fy + 1) {
             MovePlan broken = new MovePlan();
             broken.failWhen(b -> true);
             return broken;
         }
-        final int fromFootY = fy + 1;              // feet BLOCK Y standing on the from-floor
-        final int landFootY = ty + 1;              // feet BLOCK Y standing on the destination floor (= fy+2)
+        final int landFootY = toFootY;             // feet BLOCK Y standing on the destination floor (topY-aware)
         final boolean[] launched = new boolean[1]; // reset-guard arm (Parkour's airborneOnce precedent)
         MovePlan plan = new MovePlan();
         // Launched the jump then fell back onto the from-floor → a balked ascend; re-mine + rebuild + re-jump.
@@ -238,9 +238,9 @@ public final class Ascend implements Movement {
         // support then footing (the two-block step, the only path that ever calls place). Hold on the column
         // (recenter) while building; advance the instant the footing is established (built or naturally present).
         plan.phase("build")
-                .need(MovePlan.Need.AIR, fx, fy + 3, fz)
-                .need(MovePlan.Need.AIR, tx, ty + 1, tz)
-                .need(MovePlan.Need.AIR, tx, ty + 2, tz)
+                .need(MovePlan.Need.AIR, fx, fromFootY + 2, fz)   // takeoff head-clearance (2 above the feet)
+                .need(MovePlan.Need.AIR, tx, landFootY, tz)        // landing feet
+                .need(MovePlan.Need.AIR, tx, landFootY + 1, tz)    // landing head
                 .drive((b, v) -> {
                     launched[0] = false;                        // disarm the reset until the jump truly launches
                     if (!b.solidAt(tx, ty, tz)) {               // footing needs building (skip on a natural step)

@@ -161,11 +161,19 @@ public final class PhaseRunner {
         // anything is unmet, hold on the target column instead of driving the phase (stop and fix the geometry).
         for (MovePlan.Req r : phase.needs()) {
             if (r.kind == MovePlan.Need.AIR) {
-                // A door cell is governed by a Need.OPEN (opened by hand above) — NEVER mine it, even though an
-                // open door reads solidAt (its thin collision). Without this a Need.AIR on the door body cell
-                // would smash the door the crossing just opened.
+                // A door cell is governed by a Need.OPEN (opened by hand above) — NEVER mine it, even a CLOSED
+                // toggleable door (which DOES obstruct the corridor): the crossing opens it by hand, not by force.
                 if (plan.isDoorCell(r.x, r.y, r.z)) continue;
-                if (bot.solidAt(r.x, r.y, r.z)) {
+                // Mine only a GENUINE obstruction — the block's live collision actually intrudes into the bot's
+                // body corridor (movementBlockedAt), NOT merely "has some collision" (solidAt). This is the
+                // general fix for the whole passable-collision class: a movement's plan() declares Need.AIR on its
+                // body column blind to what occupies it (Traverse.plan), and many blocks the bot moves THROUGH or
+                // stands ON still read solidAt (thin panel / low floor) — an already-open door or open trapdoor
+                // (edge panel outside the corridor), and a carpet / pressure plate / bottom slab / snow layer in
+                // the feet cell (collision below the auto-step). solidAt made the runner swing at all of them
+                // (arm-swing + crack overlay on blocks that need nothing); the geometry test lets the bot pass/
+                // stand while still clearing a real full-block wall. No per-block-type ("is it a door") gate.
+                if (bot.movementBlockedAt(r.x, r.y, r.z, plan.moveDx(), plan.moveDz())) {
                     bot.mine(r.x, r.y, r.z);
                     if (holdNeed == null) { holdNeed = r.kind; holdX = r.x; holdY = r.y; holdZ = r.z; }
                     holding = true;

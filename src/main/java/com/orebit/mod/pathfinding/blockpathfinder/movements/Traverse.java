@@ -361,7 +361,7 @@ public final class Traverse implements Movement {
      * the previous cell, so it is never placed into an occupied cell.
      */
     @Override
-    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
         int ddx = tx - fx;
         int ddy = ty - fy;
         int ddz = tz - fz;
@@ -386,40 +386,50 @@ public final class Traverse implements Movement {
         if (ddy == 1) {
             // Inert for a one-phase plan, but set for uniformity: physically regressed to the from-cell.
             plan.resetWhen(b -> b.grounded()
-                    && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+                    && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
             // Validity envelope (PATHOLOGY P1 family — the Parkour/Ascend failWhen precedent): settled
             // (grounded, or bodily in fluid — a displaced executor that fell into water is never grounded)
             // at a foot cell outside the step's two columns is off-plan: done/resetWhen can never fire
-            // there and re-attempting latches. Allowed: the from stand, and the target column's
-            // transitional band [ty, ty+1] (the auto-step's rise crosses the lower foot cell for a tick).
+            // there and re-attempting latches. Allowed: the from stand, and the target column's transitional
+            // band [fromFootY .. toFootY] (topY-aware — the auto-step's rise crosses the lower foot cell for a
+            // tick; for full blocks this is the old [ty, ty+1]).
+            final int bandLo = Math.min(fromFootY, toFootY);
+            final int bandHi = Math.max(fromFootY, toFootY);
             plan.failWhen(b -> (b.grounded() || b.inWater() || b.inLava())
-                    && !(b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz)
+                    && !(b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz)
                     && !(b.footX() == tx && b.footZ() == tz
-                            && b.footY() >= ty && b.footY() <= ty + 1));
+                            && b.footY() >= bandLo && b.footY() <= bandHi));
             plan.phase("stepup")
-                    .need(MovePlan.Need.AIR, tx, ty + 1, tz)                // = (tx, fy+2, tz): above the raised floor
-                    .need(MovePlan.Need.AIR, tx, ty + 2, tz)                // = (tx, fy+3, tz)
+                    .need(MovePlan.Need.AIR, tx, toFootY, tz)               // landing feet (above the raised floor)
+                    .need(MovePlan.Need.AIR, tx, toFootY + 1, tz)           // landing head
                     .drive(SteerControl::drive)                             // hold forward + face; vanilla auto-steps the lip
                     .done(b -> b.grounded()
-                            && b.footX() == tx && b.footY() == ty + 1 && b.footZ() == tz);
+                            && b.footX() == tx && b.footY() == toFootY && b.footZ() == tz);
             return plan;
         }
 
         // Case A — horizontal run (ddy == 0): flat / bridge / macro, one phase per run cell. The reset guard is
-        // only consulted once the cursor has advanced: the run physically fell back to its start cell.
+        // only consulted once the cursor has advanced: the run physically fell back to its start cell. A macro
+        // run is collapsed only from a UNIFORM run, so for n>1 every cell shares one surface height
+        // (fromFootY == toFootY); wp.getY() (toFootY) is path-edit-aware, so a BRIDGED plank reads as a full
+        // block (foot == floor+1). Using fromFootY for the start guard and toFootY for the run body is therefore
+        // exact for the single-cell case and for the uniform macro run; for full blocks both are floor+1 → the
+        // old fy+1 behaviour byte-for-byte.
         plan.resetWhen(b -> b.grounded()
-                && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+                && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
         // Validity envelope (PATHOLOGY P1 family): settled off the run LINE is off-plan — e.g. dropped off
         // a ledge mid-run (the longrun-6 (120,64,18) latch: bot fell 3 below its Traverse and ground-looped
-        // forever). Allowed: any foot cell ON the run line at the run's height, from-stand through to-stand
-        // inclusive (walking the run through shallow water is legitimately in-fluid, so the line test — not
+        // forever). Allowed: any foot cell ON the run line at the run's height band [min .. max of the two
+        // foot heights] (walking the run through shallow water is legitimately in-fluid, so the line test — not
         // the medium — is the discriminator). Cardinal line: one of sx/sz is 0, so the along-axis projection
         // plus the cross-axis pin is two int compares.
+        final int runLo = Math.min(fromFootY, toFootY);
+        final int runHi = Math.max(fromFootY, toFootY);
         plan.failWhen(b -> {
             if (!(b.grounded() || b.inWater() || b.inLava())) {
                 return false;
             }
-            if (b.footY() != fy + 1) {
+            if (b.footY() < runLo || b.footY() > runHi) {
                 return true; // off the run's height — fell off (or was lifted off) the line
             }
             final int along = (b.footX() - fx) * sx + (b.footZ() - fz) * sz;
@@ -431,9 +441,9 @@ public final class Traverse implements Movement {
             final int cx = fx + sx * k;
             final int cz = fz + sz * k;
             MovePlan.Phase ph = plan.phase("walk" + k)
-                    .need(MovePlan.Need.FOOTING, cx, fy, cz)               // plank under the cell (bridge places; flat/macro noop)
-                    .need(MovePlan.Need.AIR, cx, fy + 1, cz)               // feet-body cell clear (mine a solid, leave slow-passable)
-                    .need(MovePlan.Need.AIR, cx, fy + 2, cz)               // head-body cell clear
+                    .need(MovePlan.Need.FOOTING, cx, fy, cz)               // plank under the cell (bridge places; flat/macro noop) — FLOOR-relative
+                    .need(MovePlan.Need.AIR, cx, toFootY, cz)              // feet-body cell clear (topY-aware; mine a solid, leave slow-passable)
+                    .need(MovePlan.Need.AIR, cx, toFootY + 1, cz)          // head-body cell clear
                     .drive(SteerControl::drive);                           // medium-aware line-track walk (Traverse's default)
             if (k < n) {
                 // Non-terminal: advance once grounded AT OR PAST cell k. Progress is monotone along the cardinal
@@ -444,7 +454,7 @@ public final class Traverse implements Movement {
             } else {
                 // Terminal: the whole move is done standing on the to-cell.
                 ph.done(b -> b.grounded()
-                        && b.footX() == tx && b.footY() == ty + 1 && b.footZ() == tz);
+                        && b.footX() == tx && b.footY() == toFootY && b.footZ() == tz);
             }
         }
         return plan;

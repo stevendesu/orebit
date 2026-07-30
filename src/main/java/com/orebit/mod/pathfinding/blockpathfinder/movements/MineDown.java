@@ -167,8 +167,8 @@ public final class MineDown implements Movement {
      * pacing the descent to real mining speed.
      */
     @Override
-    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
-        final int landedFeetBlockY = ty + 1; // feet BLOCK Y once standing on the destination floor (fy - J)
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
+        final int landedFeetBlockY = toFootY; // feet BLOCK Y once standing on the destination floor (topY-aware)
         MovePlan plan = new MovePlan();
 
         MovePlan.Phase descend = plan.phase("descend");

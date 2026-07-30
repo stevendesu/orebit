@@ -133,7 +133,9 @@ public final class Swim implements Movement {
     }
 
     @Override
-    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
+        // A swim node's floor is the (non-standable) water cell below the feet, so feetYOf always returns
+        // floorY+1 — fromFootY/toFootY equal fy+1/ty+1 here; the water frame is unaffected by partial floors.
         MovePlan plan = new MovePlan();
         plan.phase("paddle")
                 .drive((b, v) -> { SteerControl.swimTowardsDirectional(b, v); SteerControl.holdDepth(b, v, 0.0); })

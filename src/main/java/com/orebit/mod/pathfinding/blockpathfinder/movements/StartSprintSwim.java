@@ -62,7 +62,8 @@ public final class StartSprintSwim implements Movement {
     }
 
     @Override
-    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
+        // Swim floors are non-standable water → feetYOf returns floorY+1; fromFootY/toFootY == fy+1/ty+1.
         MovePlan plan = new MovePlan();
         plan.phase("submerge")
                 .drive((b, v) -> {

@@ -84,11 +84,18 @@ public class NavFlagsTest {
         put(g, 8, 10, 8, state(Blocks.SAND));
         assertTrue(NavFlags.risksEdit(flags(g)), "sand overhead = risky edit");
 
-        // A fluid in a horizontal neighbour of the body space, not draining down -> risky.
+        // The FLUID term of RISKY_EDIT is NOT gathered by compute() any more — it was moved to the per-source
+        // SCATTER in NavSectionBuilder.computeDepth (PERF-DESIGN-navgrid-build §C1): a flowing source marks its
+        // horizontal-neighbour floor cells during the section build, not here. So compute() over a bare grid
+        // leaves an adjacent flowing source CLEAR; the fluid RISKY_EDIT is proven at the build/patch level by
+        // FluidScatterIdentityTest / FluidPatchIdentityTest / CrossChunkFluidScatterTest. (This assertion was
+        // flipped from the pre-scatter GATHER behaviour when the term moved — compute() now owns only the
+        // gravity term above.)
         g = freshGrid();
         put(g, 8, 8, 8, state(Blocks.STONE));
         put(g, 7, 9, 8, state(Blocks.WATER)); // beside the feet cell; (7,8,8) stays air (not draining)
-        assertTrue(NavFlags.risksEdit(flags(g)), "adjacent water = risky edit");
+        assertFalse(NavFlags.risksEdit(flags(g)),
+                "compute() no longer gathers the fluid term — it is scattered during the section build");
 
         // --- CLEARABLE_HAZARD (walk-through, cost not block) -------------------------------------
         // Fire in the body space over a solid floor.

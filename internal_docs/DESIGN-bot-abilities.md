@@ -279,10 +279,12 @@ fast-forward/cherry-pick into `mc-1.21` proper. The user's worktree is never tou
 - **D1** Vanilla RecipeManager as execution truth (§3.1) — the stub's hand-authored-recipes rule
   is interpreted as planning-layer-only. Default: implemented as designed.
 - **D2** Fighting as pre-dispatch interrupt, not a Mode (§2.3). Default: implemented as designed.
-- **D3** Reclaiming a bot-placed crafting table requires a narrowly-scoped exemption from the
-  `mining.protectedBlocks` refusal (exact tracked position, state re-verified, this session
-  only). Alternative considered and rejected as default: leaving placed tables in the world
-  whenever `crafting_table` is in the protected list (the shipped default list includes it).
+- **D3** ~~Reclaim waiver~~ SUPERSEDED by the owner's 2026-07-29 ruling: `mining.protectedBlocks`
+  is a PATHING policy — it gates the planner and the route executors (`applyEdits`/`place`, the
+  gather occluder dig, builder clears), never the deliberate hands (`BotMining`). Gather targets,
+  harvests, reclaims, and `/bot mine` proceed regardless of the protected list (protecting logs
+  must not refuse `/bot gather wood`); the hands' only refusal is vanilla-unbreakables without
+  `mining.allowUnbreakable`. The waiver machinery this decision originally introduced was removed.
 - **D4** Building places EXACT palette states directly (survival costs charged) instead of
   simulating survival placement (§6). A strict survival-placement mode is possible later.
 - **D5** Special/dynamic recipes excluded from crafting (§3.1).

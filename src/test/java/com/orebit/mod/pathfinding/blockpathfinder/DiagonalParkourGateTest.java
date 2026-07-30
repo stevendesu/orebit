@@ -69,6 +69,7 @@ class DiagonalParkourGateTest {
         @Override public void sinkInWater() { }
         @Override public boolean solidAt(int x, int y, int z) { return false; }
         @Override public boolean airAt(int x, int y, int z) { return true; }
+        @Override public boolean movementBlockedAt(int x, int y, int z, int dx, int dz) { return false; }
         @Override public void mine(int x, int y, int z) { }
         @Override public void place(int x, int y, int z) { }
         @Override public void setDoorOpen(int x, int y, int z, boolean open) { }
@@ -99,7 +100,7 @@ class DiagonalParkourGateTest {
     /** The g=1 flat diagonal frame the P1/churn forensics used: takeoff floor (0,10,0) → landing (2,10,2).
      *  Takeoff stand (0,11,0), centre (0.5, 0.5); exit corner (1,1); gate ≈ (0.7525, 0.7525) (along ≈ 0.357). */
     private static MovePlan plan() {
-        return MovementRegistry.DIAGONAL_PARKOUR.plan(0, 10, 0, 2, 10, 2);
+        return MovementRegistry.DIAGONAL_PARKOUR.plan(0, 10, 0, 2, 10, 2, 11, 11); // full-block feet == floor+1
     }
 
     /** Position the bot ON the takeoff diagonal, {@code along} blocks along-line past the cell centre. */

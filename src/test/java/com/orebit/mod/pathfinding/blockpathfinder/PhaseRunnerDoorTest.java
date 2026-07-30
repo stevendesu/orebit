@@ -47,6 +47,7 @@ class PhaseRunnerDoorTest {
 
         @Override public boolean solidAt(int x, int y, int z) { return solid.contains(key(x, y, z)); }
         @Override public boolean airAt(int x, int y, int z) { return !solidAt(x, y, z); }
+        @Override public boolean movementBlockedAt(int x, int y, int z, int dx, int dz) { return solidAt(x, y, z); } // fake: solid == full obstruction
         @Override public void mine(int x, int y, int z) { mineCalls.add(key(x, y, z)); }
         @Override public void place(int x, int y, int z) { }
         @Override public boolean doorOpenAt(int x, int y, int z) {

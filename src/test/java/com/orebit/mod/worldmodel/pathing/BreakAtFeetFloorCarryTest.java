@@ -155,7 +155,8 @@ class BreakAtFeetFloorCarryTest {
 
         // Build the step's MovePlan in the CARRIED frame — exactly what steerAlongPath now does.
         MovePlan mp = plan.movement(i).plan(from.getX(), from.getY(), from.getZ(),
-                wp.getX(), plan.floorY(i), wp.getZ());
+                wp.getX(), plan.floorY(i), wp.getZ(),
+                from.getY() + 1, wp.getY()); // full-block from-foot; wp.getY() is the topY-aware to-foot
         assertNotNull(mp, "Ascend is a converted move — it must produce a phase plan for its contract frame");
 
         // Drive the runner against a bot double seeded with the fixture's live riser cells.
@@ -188,7 +189,7 @@ class BreakAtFeetFloorCarryTest {
         // The historical failure frame: floorOf drifted the to-floor +1, so Ascend.plan saw ty == fy + 2.
         // The tripwire reports it through the EXISTING validity-envelope FAILED path — detection, not
         // recovery: no phase runs, nothing is mined or placed from the fictional frame.
-        MovePlan drifted = ((Ascend) MovementRegistry.ASCEND).plan(2, 0, Z, 3, 2, Z);
+        MovePlan drifted = ((Ascend) MovementRegistry.ASCEND).plan(2, 0, Z, 3, 2, Z, 1, 3); // tripwire fires before using feet
         FakeBot bot = new FakeBot();
         bot.solid.add(key(3, 2, Z));
         PhaseRunner runner = new PhaseRunner();
@@ -201,7 +202,7 @@ class BreakAtFeetFloorCarryTest {
         assertTrue(bot.placeCalls.isEmpty(), "a failed plan must never place from its fictional frame");
 
         // And the contract-satisfying frame is untouched by the tripwire.
-        MovePlan sane = ((Ascend) MovementRegistry.ASCEND).plan(2, 0, Z, 3, 1, Z);
+        MovePlan sane = ((Ascend) MovementRegistry.ASCEND).plan(2, 0, Z, 3, 1, Z, 1, 2); // full-block feet == floor+1
         bot.standAt(2, 1, Z); // on the from-stand — the position envelope must stay silent here
         runner.begin(sane);
         runner.run(bot, new View());
@@ -301,6 +302,7 @@ class BreakAtFeetFloorCarryTest {
 
         @Override public boolean solidAt(int x, int y, int z) { return solid.contains(key(x, y, z)); }
         @Override public boolean airAt(int x, int y, int z) { return !solidAt(x, y, z); }
+        @Override public boolean movementBlockedAt(int x, int y, int z, int dx, int dz) { return solidAt(x, y, z); } // fake: solid == full obstruction
         @Override public void mine(int x, int y, int z) {
             mineCalls.add(key(x, y, z));
             solid.remove(key(x, y, z)); // the timed break completes; the runner re-validates next tick
