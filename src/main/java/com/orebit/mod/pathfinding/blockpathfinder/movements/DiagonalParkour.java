@@ -405,18 +405,26 @@ public final class DiagonalParkour implements Movement {
         plan.resetWhen(b -> airborneOnce[0] && b.grounded()
                 && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
         // VALIDITY ENVELOPE (the P1 off-plan wedge — cardinal {@link Parkour}'s envelope in its flat-only
-        // form): this move's world is exactly TWO grounded cells — the takeoff stand and the landing stand
-        // (v1 is FLAT, so there is no descent column to admit). The first grounded tick anywhere else — the
-        // observed off-plan fly-through adoption cell a level below the plan frame, a short landing in the
-        // gap, a deflected landing — is provably outside the move's model: the terminal LAND phase demands
-        // the exact landing stand and never jumps, so re-attempting in place is a permanent latch. Purely
-        // positional over the plan's own cells. It cannot fire during normal execution: runup/takeoff ticks
-        // are grounded ON the takeoff stand (the takeoff GATE keeps the centre ≥ GATE_SETBACK inside the
-        // cell, and the gate-aim drive holds the lateral — the pre-gate trigger's spill hole is closed),
-        // airborne ticks are not grounded, and the touchdown tick is the landing stand. resetWhen — checked
-        // first by the runner, its cell inside the allowed set — keeps owning the balk-retry.
+        // form): this move's world is the takeoff stand, the landing stand (v1 is FLAT, so there is no
+        // descent column to admit) — plus the two LIP-CROSSING transitional cells, the diagonal's version
+        // of straight Parkour's admitted (gapX, fromFootY, gapZ): the face-neighbours of the takeoff stand
+        // along each jump component, at takeoff foot height. The takeoff GATE keeps the centre inside the
+        // cell at the gate-crossing tick, but the TAKEOFF phase still has 1–2 grounded ticks before the
+        // jump registers, and an axis-DOMINANT approach momentum (a −z-heavy walk-in onto a +x−z jump)
+        // carries the centre across that axis's face in the window — grounded with the foot one cell along
+        // ONE component (live cliff repro: foot (42,148,221) on a (42,147,222)→(45,147,219) jump, the
+        // z-face spill during phase 1). Transient by construction — the takeoff phase is pressing jump —
+        // exactly the ratified Descend-lip / Ascend-face-press / Parkour-lip-crossing admission. The first
+        // grounded tick anywhere ELSE — the observed off-plan fly-through adoption cell a level below the
+        // plan frame, a short landing in the gap corner, a deflected landing — is provably outside the
+        // move's model: the terminal LAND phase demands the exact landing stand and never jumps, so
+        // re-attempting in place is a permanent latch. Purely positional over the plan's own cells.
+        // resetWhen — checked first by the runner, its cell inside the allowed set — keeps the balk-retry.
         plan.failWhen(b -> b.grounded()
                 && !(b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz)
+                && !(b.footY() == fromFootY
+                        && ((b.footX() == fx + ux && b.footZ() == fz)
+                                || (b.footX() == fx && b.footZ() == fz + uz)))
                 && !(b.footX() == tx && b.footY() == toFootY && b.footZ() == tz));
         plan.phase("runup")
                 .drive((b, v) -> {
