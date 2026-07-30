@@ -52,6 +52,8 @@ public final class BotMining {
     private DropModel.ToolCondition requestedCondition = DropModel.ToolCondition.EITHER;
     // THIS tick's request is a bot-placed-table reclaim (see requestReclaim) — consumed like `requested`.
     private boolean requestedReclaim;
+    // THIS tick's request is a mature-crop harvest (see requestHarvest) — consumed like `requested`.
+    private boolean requestedHarvest;
     private BlockPos target;      // cell currently being mined across ticks (null = idle)
     private float progress;       // accumulated destroy progress in [0,1) toward breaking `target`
     private int lastStage = -1;   // last crack-overlay stage 0..9 pushed for `target` (-1 = none shown)
@@ -95,6 +97,21 @@ public final class BotMining {
         this.requestedReclaim = true;
     }
 
+    /**
+     * Ask to mine {@code pos} this tick as a HARVEST of a fully-grown crop (DESIGN-bot-abilities.md
+     * §4): identical to {@link #request(BlockPos)} except the {@code mining.protectedBlocks}
+     * refusal is waived — narrowly: only while the LIVE state at the cell is a known crop at full
+     * maturity ({@code CropKinds.byState(...).isMature}). The shipped protected default shields
+     * cultivated plants so the PATHFINDER never chews through the owner's farm; harvesting a
+     * mature crop (and replanting it — {@code BotFarmer}'s contract) is the stewardship the farm
+     * exists for, not wrecking it. An immature or unknown plant still refuses.
+     */
+    public void requestHarvest(BlockPos pos) {
+        this.requested = pos;
+        this.requestedCondition = DropModel.ToolCondition.EITHER;
+        this.requestedHarvest = true;
+    }
+
     /** Whether a break is currently in progress — for the follower to gate forward motion while digging. */
     public boolean busy() {
         return target != null;
@@ -109,9 +126,11 @@ public final class BotMining {
         BlockPos want = this.requested;
         DropModel.ToolCondition cond = this.requestedCondition;
         boolean reclaim = this.requestedReclaim;
+        boolean harvest = this.requestedHarvest;
         this.requested = null; // consume; the mover must re-request next tick to keep digging
         this.requestedCondition = DropModel.ToolCondition.EITHER;
         this.requestedReclaim = false;
+        this.requestedHarvest = false;
 
         if (want == null) {                 // nothing requested → release (matches vanilla progress reset)
             stop(level);
@@ -133,11 +152,13 @@ public final class BotMining {
         // break; re-checking the LIVE state here also covers a stale nav grid. Refusal releases the break
         // (like an un-request), so the follower's stall/replan loop routes around it.
         Config cfg = ConfigLoader.config();
-        // The one waiver: a reclaim request may break a crafting table the bot itself placed
-        // (§10-D3) even though the default protected list shields the owner's tables — gated on the
-        // LIVE state still being a crafting table, so the exemption can never leak onto other blocks.
+        // The two narrow waivers of the protected-block refusal: a RECLAIM may break a crafting
+        // table the bot itself placed (§10-D3), and a HARVEST may break a known crop at FULL
+        // maturity (§4) — each gated on the LIVE state, so neither can leak onto other blocks.
         final boolean reclaimWaiver = reclaim && state.is(Blocks.CRAFTING_TABLE);
-        if (!reclaimWaiver && !cfg.mayBreak(state, state.getDestroySpeed(level, target))) {
+        final boolean harvestWaiver = harvest && isMatureCrop(state);
+        if (!reclaimWaiver && !harvestWaiver
+                && !cfg.mayBreak(state, state.getDestroySpeed(level, target))) {
             stop(level);
             return;
         }
@@ -196,6 +217,12 @@ public final class BotMining {
                 lastStage = stage;
             }
         }
+    }
+
+    /** Whether {@code state} is a known crop at full maturity — the harvest waiver's live gate. */
+    private static boolean isMatureCrop(BlockState state) {
+        final com.orebit.mod.farming.CropKind kind = com.orebit.mod.farming.CropKinds.byState(state);
+        return kind != null && kind.isMature(state);
     }
 
     /** Point the bot's head (yaw + pitch) at the centre of {@code pos} — the mining look, for the animation. */

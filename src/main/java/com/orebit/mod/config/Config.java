@@ -94,7 +94,10 @@ public record Config(
         // ---- crafting ----
         boolean placeTable,
         boolean reclaimTable,
-        int tableSearchRadius) {
+        int tableSearchRadius,
+        // ---- farming ----
+        int workRadius,
+        boolean till) {
 
     /**
      * The all-defaults configuration — reproduces TODAY's hardcoded follower behaviour (break + place on,
@@ -155,9 +158,11 @@ public record Config(
                              0,
             /* doors      */ true,  // doors.toggle ON — the P3 executor operates doors (open before crossing,
                                      // close on the exit double-toggle); the flag stays a config kill-switch.
-            /* crafting   */ true, true, 16); // placeTable + reclaimTable ON (the place-then-reclaim
+            /* crafting   */ true, true, 16, // placeTable + reclaimTable ON (the place-then-reclaim
                                      // temporary-table affordance, DESIGN-bot-abilities.md §3.5);
                                      // tableSearchRadius 16 blocks (the proven Mindcraft radius).
+            /* farming    */ 16, true); // workRadius 16 = a comfortable field in one pass; till ON
+                                     // (the pass may expand the farm onto hydrated ground).
 
     /**
      * The capability gate the block-tier A* reads, derived from the placement / mining / pathing knobs

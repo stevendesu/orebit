@@ -59,6 +59,11 @@ public final class OrebitCommon {
         // picked up on the next /bot config reload (ConfigLoader.reload re-bakes as a courtesy).
         events.onServerStarted(com.orebit.mod.crafting.RecipeIndex::bake);
 
+        // Farmable-crop kinds (DESIGN-bot-abilities.md §4): resolve each CropKind's vanilla
+        // block/item through the id seams once the registries are bound. Registry-only (no
+        // datapack dependency); unit tests bake the same table under Bootstrap.
+        events.onServerStarted(server -> com.orebit.mod.farming.CropKinds.bake());
+
         // Boot-time pathfinder JIT warm-up (worldmodel.pathing.NavWarmup): ~500 synthetic
         // searches over a private in-memory fixture so the first REAL search doesn't run interpreted/C1-cold
         // (~16 ms for a 2-node search — landing on a live player tick, since the

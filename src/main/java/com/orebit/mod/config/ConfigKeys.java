@@ -341,4 +341,19 @@ public final class ConfigKeys {
      * chunks are seen; the ceiling matches the sweep volume.
      */
     public static final String CRAFTING_TABLE_SEARCH_RADIUS = "crafting.tableSearchRadius";
+
+    // ---- farming: how /bot farm tends the fields ----------------------------------------------------
+    /**
+     * {@code int} (blocks, {@code 4..48}) — the horizontal half-extent of the box {@code /bot farm}
+     * surveys around where the command was issued (vertical band is fixed at ±4). <b>Default
+     * {@code 16}</b>.
+     */
+    public static final String FARMING_WORK_RADIUS = "farming.workRadius";
+    /**
+     * {@code boolean} — a farm pass may TILL new hydrated ground (grass/dirt/dirt path with air above
+     * and water within the vanilla 9×9×2 hydration box) when the bot carries a hoe and seeds — i.e. it
+     * may EXPAND the farm, not just tend existing farmland. <b>Default {@code true}</b>; {@code false}
+     * limits the pass to harvesting + replanting + planting existing farmland.
+     */
+    public static final String FARMING_TILL = "farming.till";
 }

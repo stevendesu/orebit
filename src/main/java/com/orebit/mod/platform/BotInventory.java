@@ -393,6 +393,9 @@ public final class BotInventory {
         for (int i = 0, n = inv.getContainerSize(); i < n; i++) {
             ItemStack s = inv.getItem(i);
             if (s.isEmpty() || !(s.getItem() instanceof BlockItem bi)) continue;
+            // Crop seeds are BlockItems with hardness-~0 blocks — softest-first would spend them
+            // as prime bridging material. They are farming stock, never footing (§4).
+            if (com.orebit.mod.farming.CropKinds.isSeedItem(s.getItem())) continue;
             long desc = NavBlock.descriptorFor(bi.getBlock().defaultBlockState());
             int t = MiningModel.fastestTicks(desc);
             if (t < bestTicks) { bestTicks = t; bestDesc = desc; }
@@ -418,6 +421,9 @@ public final class BotInventory {
         for (int i = 0, n = inv.getContainerSize(); i < n; i++) {
             ItemStack s = inv.getItem(i);
             if (s.isEmpty() || !(s.getItem() instanceof BlockItem bi)) continue;
+            // Same seed exclusion as softestPlaceableDescriptor (planner/executor parity): the
+            // consumed block must be the one the premium assumed, and seeds are never footing.
+            if (com.orebit.mod.farming.CropKinds.isSeedItem(s.getItem())) continue;
             int t = MiningModel.fastestTicks(NavBlock.descriptorFor(bi.getBlock().defaultBlockState()));
             if (t < bestTicks) { bestTicks = t; bestSlot = i; }
         }
@@ -472,6 +478,35 @@ public final class BotInventory {
             bot.drop(s, false);
         }
         return dropped;
+    }
+
+    /**
+     * The first STORAGE slot (hotbar 0–8 + main 9–35; never worn armor) whose stack the
+     * {@code filter} accepts, or {@code -1}. Cold — a per-action scan for the ability components
+     * (find the hoe, find a seed), the item-side sibling of the Block-typed queries above.
+     */
+    public int findSlotMatching(java.util.function.Predicate<ItemStack> filter) {
+        final int n = Math.min(36, inv.getContainerSize());
+        for (int i = 0; i < n; i++) {
+            ItemStack s = inv.getItem(i);
+            if (!s.isEmpty() && filter.test(s)) return i;
+        }
+        return -1;
+    }
+
+    /**
+     * Put storage slot {@code slot}'s stack into the bot's MAIN HAND by swapping it with whatever
+     * the hand held (the two-slot rearrange {@link #selectBestHotbarTool} uses, generalized to any
+     * storage slot — never scrolls the selection, which went private in 26.x). No-op-safe when
+     * {@code slot} already IS the selected hotbar slot. Returns false for a negative slot.
+     */
+    public boolean equipSlot(int slot) {
+        if (slot < 0) return false;
+        final ItemStack want = inv.getItem(slot);
+        final ItemStack held = bot.getMainHandItem();
+        inv.setItem(slot, held);
+        bot.setItemInHand(InteractionHand.MAIN_HAND, want);
+        return true;
     }
 
     /** The wrapped bot (for callers that need the raw {@link ServerPlayer}, e.g. to equip before mining). */
