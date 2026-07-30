@@ -85,6 +85,9 @@ param(
     # -Farm: FARM mode. Build a deterministic wheat plot next to -Start (8 mature wheat, 2 hydrated
     # grass till candidates, hoe given) and drive /bot farm; PASS = harvested 8, tilled 2, planted >=1.
     [switch]$Farm,
+    # -Fight: FIGHT mode. Difficulty NORMAL, iron sword given, one zombie spawned targeting the bot;
+    # PASS = zombie killed with the self-defense interrupt engaged and >=1 landed strike, bot alive.
+    [switch]$Fight,
     # -MasterWorld <path>: FROZEN-WORLD mode. Instead of seed-regenerating the world each run (which is
     # non-deterministic for VEGETATION -- trees generate in parallel-chunk-gen order; proven by the
     # startprobe: same seed -> 3 distinct tree layouts in 5 runs), copy a pristine, pre-generated master
@@ -166,6 +169,7 @@ if ($Gather -ne "")   { $gradleArgs += "-Porebit.autotest.gather=$Gather" }
 if ($Craft -ne "")    { $gradleArgs += "-Porebit.autotest.craft=$Craft" }
 if ($Give -ne "")     { $gradleArgs += "-Porebit.autotest.give=$Give" }
 if ($Farm)            { $gradleArgs += "-Porebit.autotest.farm=true" }
+if ($Fight)           { $gradleArgs += "-Porebit.autotest.fight=true" }
 if ($Count -gt 1)     { $gradleArgs += "-Porebit.autotest.count=$Count" }
 if ($Tool -ne "")     { $gradleArgs += "-Porebit.autotest.tool=$Tool" }
 if ($Silk)            { $gradleArgs += "-Porebit.autotest.silk=true" }

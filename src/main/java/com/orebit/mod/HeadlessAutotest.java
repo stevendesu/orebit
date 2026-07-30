@@ -121,10 +121,19 @@ public final class HeadlessAutotest {
                 // the start (24 farmland around a water hole, 8 MATURE wheat, 2 hydrated grass till
                 // candidates), give a hoe, and drive /bot farm. Deterministic: crops are placed
                 // pre-grown (growth is random-tick and never waited on).
-                Boolean.getBoolean("orebit.autotest.farm"));
+                Boolean.getBoolean("orebit.autotest.farm"),
+                // FIGHT mode (-Dorebit.autotest.fight=true): raise difficulty to NORMAL, give an
+                // iron sword, spawn one zombie 6 blocks off with the bot as its declared target,
+                // and let the self-defense interrupt do the rest (no command issued — the bot sits
+                // in STAY and the ZOMBIE closes the distance, so the scenario is independent of
+                // the committed follower increment's partial-floor walking gap).
+                Boolean.getBoolean("orebit.autotest.fight"));
         events.onServerStarted(scenario::start);
         events.onWorldTickEnd(scenario::tick);
-        if (scenario.farmMode) {
+        if (scenario.fightMode) {
+            OrebitCommon.LOGGER.info("[Orebit/autotest] armed FIGHT: start={} budget={}t",
+                    compact(scenario.start), scenario.budgetTicks);
+        } else if (scenario.farmMode) {
             OrebitCommon.LOGGER.info("[Orebit/autotest] armed FARM: start={} budget={}t",
                     compact(scenario.start), scenario.budgetTicks);
         } else if (scenario.craftItem != null) {
@@ -205,6 +214,13 @@ public final class HeadlessAutotest {
         /** Last non-terminal farm phase observed (for the TIMEOUT/FAIL result). */
         String lastFarmPhase = "IDLE";
 
+        // ---- FIGHT mode (false = not a fight run) ----
+        final boolean fightMode;
+        /** The sparring zombie (spawned targeting the bot at scenario start). */
+        net.minecraft.world.entity.Mob sparringMob;
+        /** Whether the self-defense interrupt was ever observed engaged. */
+        boolean fighterEverEngaged;
+
         // ---- TRACE mode (-Dorebit.autotest.traceGoal=x,y,z): mirror /bot trace, headlessly ----
         /**
          * The {@code goalFloor} cell for a one-shot {@link AllyBotEntity#traceTo} — the EXACT entry point
@@ -233,7 +249,7 @@ public final class HeadlessAutotest {
 
         Scenario(BlockPos start, BlockPos goal, int budgetTicks, int startDelayTicks,
                  String gatherResource, int gatherQuota, String toolId, boolean silk,
-                 String craftItem, String giveSpec, boolean farmMode) {
+                 String craftItem, String giveSpec, boolean farmMode, boolean fightMode) {
             this.start = start;
             this.goal = goal;
             this.budgetTicks = budgetTicks;
@@ -245,6 +261,7 @@ public final class HeadlessAutotest {
             this.craftItem = craftItem;
             this.giveSpec = giveSpec;
             this.farmMode = farmMode;
+            this.fightMode = fightMode;
         }
 
         /**
@@ -303,6 +320,28 @@ public final class HeadlessAutotest {
                 // bare-handed pillar-to-the-sky: the empty-air highway out-prices a dig-down descent).
                 bot.getInventory().clearContent();
                 final boolean barehanded = Boolean.getBoolean("orebit.autotest.barehanded");
+
+                // ---- FIGHT mode (-Dorebit.autotest.fight=true): spawn a sparring zombie ----
+                // Difficulty NORMAL (the template pins peaceful, which would insta-despawn it);
+                // iron sword given; the zombie spawns 6 blocks east with the bot DECLARED its
+                // target (the exact signal BotFighter's threat scan reads). No command issued —
+                // the interrupt preempts STAY the moment the zombie targets the bot.
+                if (fightMode) {
+                    server.setDifficulty(net.minecraft.world.Difficulty.NORMAL, true);
+                    bot.getInventory().setItem(0, new ItemStack(ItemLookup.byId("minecraft:iron_sword")));
+                    bot.setMode(AllyBotEntity.Mode.STAY);
+                    // A PROVEN-CLEAR spawn cell (air feet+head, solid floor) via the existing
+                    // safe-spot helper — a fixed offset buried the zombie in the cliff face and it
+                    // suffocated in ~200t before the bot could land a hit (diagnosed live).
+                    BlockPos spawn = BotPositioning.findSafeSpotNear(bot, 6);
+                    if (spawn == null) spawn = bot.blockPosition().offset(1, 0, 0);
+                    sparringMob = com.orebit.mod.platform.MobKinds.spawnZombieAt(level,
+                            spawn.getX() + 0.5, spawn.getY(), spawn.getZ() + 0.5);
+                    sparringMob.setTarget(bot);
+                    OrebitCommon.LOGGER.info("[Orebit/autotest] bot spawned at {}; sparring zombie at {} targeting the bot",
+                            compact(bot.blockPosition()), compact(sparringMob.blockPosition()));
+                    return;
+                }
 
                 // ---- FARM mode (-Dorebit.autotest.farm=true): build the plot, drive /bot farm ----
                 // Deterministic wheat plot EAST of the start on the ground plane (start.y-1):
@@ -560,7 +599,11 @@ public final class HeadlessAutotest {
                 return;
             }
 
-            // FARM / CRAFT / GATHER modes have their own polls; GOTO's arrival/give-up poll is below.
+            // FIGHT / FARM / CRAFT / GATHER modes have their own polls; GOTO's poll is below.
+            if (fightMode) {
+                fightTick(level);
+                return;
+            }
             if (farmMode) {
                 farmTick(level);
                 return;
@@ -844,6 +887,68 @@ public final class HeadlessAutotest {
                 OrebitCommon.LOGGER.info("[Orebit/autotest] t={} pos={} phase={} crafted={}/{}",
                         ticks, compact(bot.blockPosition()), phase, crafted, gatherQuota);
             }
+        }
+
+        /**
+         * FIGHT-mode poll: pure observation — the self-defense interrupt engages on its own the
+         * moment the zombie's declared target is the bot. PASS = the zombie is gone (killed),
+         * the bot is alive, and the interrupt actually engaged with ≥1 landed strike (so a
+         * sunburnt zombie can't fake a pass); FAIL = bot died; TIMEOUT = budget.
+         */
+        void fightTick(ServerLevel level) {
+            if (!bot.isAlive()) {
+                finishFight("FAIL", "bot died", "FAIL");
+                return;
+            }
+            if (bot.fighterEngaged()) {
+                fighterEverEngaged = true;
+            }
+            if (sparringMob == null || sparringMob.isRemoved() || !sparringMob.isAlive()) {
+                final int strikes = bot.combatStrikes();
+                if (fighterEverEngaged && strikes >= 1) {
+                    finishFight("PASS", "zombie down after " + strikes + " strikes", "PASS");
+                } else {
+                    finishFight("FAIL", "zombie gone but the bot never fought (engaged="
+                            + fighterEverEngaged + ", strikes=" + strikes + ")", "FAIL");
+                }
+                return;
+            }
+            if (ticks >= budgetTicks) {
+                finishFight("FAIL", "tick budget exhausted (engaged=" + fighterEverEngaged
+                        + ", strikes=" + bot.combatStrikes() + ")", "TIMEOUT");
+                return;
+            }
+            if (ticks % PROGRESS_LOG_TICKS == 0) {
+                OrebitCommon.LOGGER.info(
+                        "[Orebit/autotest] t={} pos={} engaged={} strikes={} zombieHp={}",
+                        ticks, compact(bot.blockPosition()), bot.fighterEngaged(),
+                        bot.combatStrikes(), fmt(sparringMob.getHealth()));
+            }
+        }
+
+        /** Write the FIGHT result file, halt. */
+        void finishFight(String result, String reason, String outcome) {
+            done = true;
+            Path file = ConfigDir.serverDir(server).resolve(RESULT_FILE);
+            try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
+                kv(w, "result", result);
+                kv(w, "outcome", outcome);
+                kv(w, "reason", reason);
+                kv(w, "mode", "fight");
+                kv(w, "ticks", ticks);
+                kv(w, "budgetTicks", budgetTicks);
+                kv(w, "start", start.getX() + "," + start.getY() + "," + start.getZ());
+                if (bot != null) {
+                    kv(w, "engaged", fighterEverEngaged);
+                    kv(w, "strikes", bot.combatStrikes());
+                    kv(w, "botHp", fmt(bot.getHealth()));
+                    kv(w, "zombieAlive", sparringMob != null && sparringMob.isAlive());
+                    kv(w, "alive", bot.isAlive());
+                }
+            } catch (IOException e) {
+                OrebitCommon.LOGGER.error("[Orebit/autotest] could not write {}", file, e);
+            }
+            endRun(result, reason);
         }
 
         /**
