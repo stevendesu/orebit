@@ -166,10 +166,21 @@ public final class Descend implements Movement {
                 .drive((b, v) -> left[0] = false)              // disarm on (re)entry; advances same tick
                 .advanceWhen(b -> true);                       // geometry held (runner drives only when met) → STEP
         // STEP: walk off the edge toward the dest column; gravity does the one-block drop. Complete once
-        // standing on the new floor (feet block == (tx, ty+1, tz) == (tx, fy, tz)).
+        // standing on the new floor (feet block == (tx, ty+1, tz) == (tx, fy, tz)). While still standing on
+        // the FROM column, the step-off is gated on VELOCITY ALIGNMENT (SteerControl.stepOffGate — the
+        // chained-step corner-slip fix): a previous step's cross-axis carry (a −z Descend chaining into
+        // this +x one) would drift the bot across the one-wide lane during the walk-off and ground it on
+        // the diagonally adjacent cell — a real off-plan settle the envelope fail→HOLDs. The gate arrests
+        // the carry (pure cross servo toward the lane centreline) until the friction-horizon prediction
+        // keeps the bot inside the lane, then the normal drive commits. Once the bot has left the from
+        // column (foot moved or airborne) the gate never re-engages — the drop is gravity's.
         plan.phase("step")
                 .drive((b, v) -> {
                     if (!b.grounded() || b.footX() != fx || b.footZ() != fz) left[0] = true; // left start → arm
+                    if (b.grounded() && b.footX() == fx && b.footZ() == fz
+                            && SteerControl.stepOffGate(b, v)) {
+                        return;                                // carry uncontained — arrest this tick, commit later
+                    }
                     SteerControl.drive(b, v);                  // medium-aware (walk on land, swim if submerged)
                 })
                 .done(b -> b.grounded()

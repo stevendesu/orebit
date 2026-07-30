@@ -1,6 +1,7 @@
 package com.orebit.mod.pathfinding.blockpathfinder;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -64,7 +65,8 @@ public class SteerControlTest {
         @Override public void setDoorOpen(int x, int y, int z, boolean open) { }
         @Override public boolean doorOpenAt(int x, int y, int z) { return false; }
         // Parkour-servo seams (Phase 1-3) — stubbed: ordinary stone friction, no takeoff hazard.
-        @Override public double slipperinessAt(int x, int y, int z) { return 0.6; }
+        double slip = 0.6; // settable: the stepOffGate friction-horizon tests flip this to ice
+        @Override public double slipperinessAt(int x, int y, int z) { return slip; }
         @Override public boolean gapFloorHazardAt(int x, int y, int z) { return false; }
     }
 
@@ -328,5 +330,41 @@ public class SteerControlTest {
         assertTrue(b.faceDx < 0, "faces against the lateral momentum (bleeds it)");
         assertTrue(b.faceDz > 0, "while still thrusting toward the gate");
         assertEquals(1.0f, b.forward, 1e-6f, "error well past the servo deadband → saturated forward");
+    }
+
+    /** The flagship-cliff corner-slip frame: a +x one-cell step-off entered with −z carry (vz −0.18 at
+     *  z 246.3, lane centre 246.5). Stone horizon v/(1−0.546) ≈ ×2.2 → predicted offset −0.6, far outside
+     *  the ±0.2 lane margin → the gate must HOLD and write a counter-thrust against the carry. */
+    @Test
+    void stepOffGate_arrestsHotCrossEntry() {
+        View seg = new View(67.5, 150, 246.5, 68.5, 149, 246.5); // +x step, lane centreline z = 246.5
+        FakeBot b = new FakeBot(67.5, 150, 246.3);
+        b.velZ = -0.18;
+        assertTrue(SteerControl.stepOffGate(b, seg), "hot cross entry must hold at the gate");
+        assertTrue(b.faceDz > 0, "arrest faces +z — against the −z carry, toward the centreline");
+        assertTrue(b.forward > 0.0f, "arrest thrusts (the pure cross servo, along-speed zero)");
+    }
+
+    /** Centred and still → contained by construction: the gate commits and writes NOTHING. */
+    @Test
+    void stepOffGate_commitsWhenAligned() {
+        View seg = new View(67.5, 150, 246.5, 68.5, 149, 246.5);
+        FakeBot b = new FakeBot(67.5, 150, 246.5);
+        assertFalse(SteerControl.stepOffGate(b, seg), "no carry, on the centreline → commit");
+        assertTrue(Float.isNaN(b.forward), "a committing gate writes no inputs (the caller drives)");
+    }
+
+    /** The friction horizon is the SUPPORT block's, not a constant: a −0.05 carry coasts out to ~0.11 on
+     *  stone (contained) but ~0.46 on ice (slip 0.98 → v/(1−0.892) ≈ ×9.2) — the gate must hold on ice. */
+    @Test
+    void stepOffGate_iceExtendsTheHorizon() {
+        View seg = new View(67.5, 150, 246.5, 68.5, 149, 246.5);
+        FakeBot stone = new FakeBot(67.5, 150, 246.5);
+        stone.velZ = -0.05;
+        assertFalse(SteerControl.stepOffGate(stone, seg), "a mild carry coasts out inside the lane on stone");
+        FakeBot ice = new FakeBot(67.5, 150, 246.5);
+        ice.velZ = -0.05;
+        ice.slip = 0.98;
+        assertTrue(SteerControl.stepOffGate(ice, seg), "the same carry on ice coasts far past the lane — hold");
     }
 }

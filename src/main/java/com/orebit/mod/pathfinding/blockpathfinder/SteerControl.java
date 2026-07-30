@@ -287,6 +287,64 @@ public final class SteerControl {
     }
 
     /**
+     * The STEP-OFF <b>velocity-alignment gate</b> (owner-ratified 2026-07-30) — the chained-step
+     * momentum-corner-slip fix, the {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour} takeoff-gate concept
+     * generalized to grounded step-offs. A short (one-cell) step-off entered with CROSS-axis momentum from
+     * the previous step (a −z Descend chaining into a +x Descend) drifts the bot across the lane boundary
+     * during the 2–3 ticks ground friction needs to bleed the carry — it grounds on the diagonally
+     * adjacent cell, a REAL off-plan settle the validity envelope rightly fail→HOLDs (the flagship-cliff
+     * (68,149,245)-vs-column-(68,*,246) freeze). The gate makes the commit conditional on a PREDICTION,
+     * not a timer: with zero further input, a grounded bot's future cross drift is the geometric sum of
+     * its velocity under the per-tick ground retention {@code f = slipperiness × 0.91} (displacement uses
+     * {@code v_t} before the multiply — the {@link #predictAlongTouchdown} recurrence — so the sum is
+     * {@code v/(1−f)}: ×2.2 on stone at slip 0.6, ×9+ on ice). The step-off may drive only when
+     * {@code |botCrossOffset + vCross/(1−f)| ≤ 0.5 − }{@link #PARKOUR_CELL_MARGIN} — the bot's centre,
+     * after coasting out its carry, stays inside the one-wide landing lane with the player half-width to
+     * spare. While that fails, this method WRITES the arrest inputs for the tick — the pure cross servo
+     * ({@link #SERVO_CROSS_GAIN}/{@link #SERVO_CROSS_CAP} toward the lane centreline, desired along-speed
+     * ZERO, the {@link #parkourAirborne} actuation) — and returns {@code true}: bleed the carry and pull
+     * the centreline FIRST, commit after. On ice the horizon is honestly long, so the bot all but stops
+     * before stepping off — the physically right caution, at worst a visible pause on the lip (never a
+     * slide off it). Conservative by construction: the arrest beats pure friction, and post-commit the
+     * normal drive's cross-gain only shrinks the carry further, so the prediction is an upper bound.
+     * Callers gate on {@code b.grounded()} and on still standing on the FROM column — once the step-off
+     * is under way (foot moved / airborne) the gate must not re-engage.
+     *
+     * @return {@code true} = held at the gate (arrest inputs written for this tick);
+     *         {@code false} = aligned/contained (nothing written — the caller drives the step).
+     */
+    public static boolean stepOffGate(BotSteering b, SteerView p) {
+        double dx = p.tx() - p.sx(), dz = p.tz() - p.sz();
+        double len = Math.sqrt(dx * dx + dz * dz);
+        if (len < EPS) return false;                        // degenerate segment — nothing to align to
+        final double ux = dx / len, uz = dz / len;
+        final double crossUx = -uz, crossUz = ux;
+        // Lane centreline through the target centre; +crossErr = the centreline is +cross of the bot.
+        final double crossErr = (p.tx() * crossUx + p.tz() * crossUz) - (b.x() * crossUx + b.z() * crossUz);
+        final double vCross = b.velX() * crossUx + b.velZ() * crossUz;
+        // Zero-input drift horizon on the CURRENT support block (the drift happens on the from-side floor;
+        // vanilla reads the block under the feet — for a bottom-partial stand this reads one below it, a
+        // negligible mismatch). f→1 (modded super-slip) degrades to always-gated: conservative, never a slip.
+        final double f = b.slipperinessAt(b.footX(), b.footY() - 1, b.footZ()) * PARKOUR_H_DRAG;
+        final double predictedOffset = -crossErr + vCross / (1.0 - f);
+        if (Math.abs(predictedOffset) <= 0.5 - PARKOUR_CELL_MARGIN) return false; // contained — commit
+        // Arrest: the pure cross servo — desired along-speed 0, desired cross velocity toward the centreline.
+        final double desiredCross = Math.max(-SERVO_CROSS_CAP, Math.min(SERVO_CROSS_CAP, SERVO_CROSS_GAIN * crossErr));
+        final double errx = crossUx * desiredCross - b.velX();
+        final double errz = crossUz * desiredCross - b.velZ();
+        final double emag = Math.sqrt(errx * errx + errz * errz);
+        if (emag < EPS) {
+            b.faceHorizontally(ux, uz);
+            b.setForward(0.0f);
+        } else {
+            b.faceHorizontally(errx, errz);
+            b.setForward((float) Math.min(1.0, SERVO_GAIN * emag));
+        }
+        return true;
+    }
+
+    /**
      * Swim along the planned line, HORIZONTALLY: face the look-ahead pursuit point and hold forward (the same
      * W-key + look a player uses). Vertical is the caller's {@link #holdDepth} (each swim move calls it with
      * its own bias — the moves own their vertical control). A pure vertical (degenerate) segment has no line
