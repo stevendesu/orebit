@@ -193,7 +193,10 @@ public final class Climb implements Movement {
 
     /**
      * Hold the column and let the vanilla climbable physics do the vertical work, keyed on the MOVE's
-     * intended Δy — {@code path.ty() - path.sy()}, the planned dest-floor minus source-floor — NOT the bot's
+     * intended Δy — {@code path.ty() - path.sy()} in the cursor's UNIFORM feet-cell frame (both cells feet,
+     * so the delta is the planned climb direction; the follower guarantees the step-0 start is lifted into
+     * that frame — a mixed floor/feet feed once read a first-step climb-down as lateral and sneak-pinned
+     * the bot on a lip at the head of a vine descent) — NOT the bot's
      * current (possibly sagging) height. Keying on {@code b.y()} was the vine-flood bug: on a non-solid vine
      * "floor" the bot sags below the feet-target {@code ty}, so {@code ty > b.y()} held jump on a LATERAL
      * move and ratcheted the bot UP the vine ({@code +0.2}/t) instead of easing across it. The three cases:
