@@ -38,6 +38,7 @@ public final class OrebitCommands {
             new GatherCommand(),
             new CraftCommand(),
             new FarmCommand(),
+            new BuildCommand(),
             new DropCommand(),
             new ReportCommand(),
             new StatsCommand(),

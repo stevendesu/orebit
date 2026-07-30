@@ -58,13 +58,36 @@ fixes it. After it lands on mc-1.21: cherry-pick `53fb13e`+`ae26a17`, merge core
 - `... -MasterWorld ../orebit-autotest-world/scripts/gather-issues-repro-master/world -Start 70,63,-68 -Farm -BudgetTicks 6000` (FARM, expect PASS; then re-widen the template's farming.workRadius=5 pin)
 - the two CRAFT scenarios (already PASS on the committed base).
 
-## NEXT — Fighting, then Building
+## DONE — Fighting (SHIPPED)
 
-Fighting plan (DESIGN-bot-abilities.md §5 + javap): BotFighter = PRE-DISPATCH consumed-tick
-interrupt (followThroughPortal precedent, NOT a Mode; un-ticked mode components pause/resume
-free). Combat surface javap-pinned BYTE-STABLE 1.17.1→26.2: Player#attack(Entity),
-getAttackStrengthScale(float) (read the REAL charge — no derived clock), Mob#getTarget/setTarget.
-Target rule: nearest Mob whose getTarget()==bot within combat.scanRadius. Strategies by
-instanceof (Creeper / AbstractSkeleton / default melee), one class per archetype. Weapon pick by
-id ranking (sword > axe, tier by prefix). NOTE: mobs only target the bot when
-survival.takesDamage=true (abilities.invulnerable exempts via canBeSeenAsEnemy).
+- core `171ae95` feat(combat), merged → main `f239c82`; verify branch `69eec46` (FIGHT harness) +
+  `5334adb` (core merge).
+- BotFighter = pre-dispatch consumed-tick interrupt (NOT a Mode; paused mode machines resume
+  free). Strategies: CreeperStrategy (source-verified swell constants), SkeletonStrategy (family
+  classed via the new `platform/MobKinds` seam — the skeleton/zombie CLASSES moved to
+  monster.skeleton / monster.zombie subpackages at exactly 1.21.11), MeleeStrategy fallback.
+  Cadence reads the REAL getAttackStrengthScale ticker. `combat.*` config;
+  BotInventory.equipBestWeapon (id-string ranking, WeaponRankTest).
+- Verified: 28+4 matrices green; suite 601 (only the pre-existing NavFlags failure); headless
+  FIGHT autotest PASS on 1.21.11 (zombie targets bot → interrupt preempts STAY → 4 full-charge
+  strikes → dead in 79t, bot 20hp — the zombie WALKS to the bot, so the scenario dodges the
+  committed follower gap entirely).
+
+## NEXT — Building (task #5), then the arc close-out (task #6)
+
+Building plan (DESIGN-bot-abilities.md §6 + the building-formats recon): (1) `.litematic` parser
+in core — gzip NBT (consider a dependency-free mini-NBT reader for full version independence);
+per-region minCorner = per-axis `min(pos, pos + (size>=0 ? size-1 : size+1))`, dims=abs(size);
+palette = list of {Name, Properties(strings)}; BlockStates long[] with
+bits = max(2, ceil(log2(paletteSize))), LSB-first and SPANNING long boundaries (LitematicaBitArray
+semantics — vanilla SimpleBitStorage PADS and mis-decodes); index = x + z*dimX + y*dimX*dimZ;
+palette→BlockState behind a platform seam (BlockLookup.byId + property-by-name application).
+(2) BotBuilder (Mode.BUILD): diff-vs-world reactive loop, bottom-up support-aware, SKIP
+self-healing connection props (stair SHAPE, fence/pane/wall sides — updateShape converges),
+dedupe multi-block roots (door lower, bed foot), direct exact-state placement
+`setBlock(pos, state, 0x12)` + real-inventory consumption + reach gating, missing-materials
+chat, unreachable-cell terminal state (no timers). Schematics in `<world>/orebit/schematics/`
+(ConfigDir pattern); `/bot build <name> <x y z>`; `building.*` config. Tests: pure-JVM parser
+round-trip with a fixture file + a superflat-plot autotest (movement-light so the follower gap
+doesn't block: build a small flat 5×5 platform schematic within reach). NOTE walking-dependent
+scenarios stay blocked until the follower arc lands.

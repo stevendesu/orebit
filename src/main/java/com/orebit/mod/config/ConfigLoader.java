@@ -381,6 +381,12 @@ public final class ConfigLoader {
             kv(w, ConfigKeys.COMBAT_DEFEND, d.defend());
             line(w, "# Half-extent (blocks, 8-32) of the per-tick threat scan box.");
             kv(w, ConfigKeys.COMBAT_SCAN_RADIUS, d.scanRadius());
+            line(w, "");
+
+            line(w, "# --- building: how /bot build executes schematics ---");
+            line(w, "# A build may BREAK blocks occupying a schematic cell with the wrong state (timed break, real");
+            line(w, "# drops; mining.protectedBlocks still refuses). false = only place into empty cells.");
+            kv(w, ConfigKeys.BUILDING_CLEAR_MISMATCHES, d.clearMismatches());
         } catch (IOException e) {
             OrebitCommon.LOGGER.warn("[Orebit] could not write default config {} — using defaults in memory",
                     file, e);

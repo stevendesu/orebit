@@ -267,6 +267,23 @@ swings (it picks the best weapon it carries — swords over axes, better tiers f
 | `combat.defend` | `true` | Fight back when targeted. Note: with the default invulnerable bot (`survival.takesDamage=false`) mobs never even target it, so this only matters for mortal bots. Set `false` for a strict pacifist. |
 | `combat.scanRadius` | `16` | How far (blocks, 8–32) the bot checks each tick for mobs that are targeting it. Mobs hunting it from farther away are engaged as they close in. |
 
+### Building — how `/bot build` executes schematics
+
+```properties
+building.clearMismatches = true
+```
+
+Drop Litematica `.litematic` files into `<server dir>/orebit-schematics/` (the folder is created
+the first time you use the command), then `/bot build <name> <x y z>` — the name tab-completes
+from the folder, and the coordinates anchor the schematic's corner. The bot builds bottom-up from
+its real inventory, block by block with the exact states from the schematic, and finishes with an
+honest report: what it placed, what it cleared, and anything it could NOT do — unreachable spots,
+protected blocks it refused to break, and a shopping list of missing materials.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `building.clearMismatches` | `true` | Whether the build may break blocks that are in the way (a real timed break with drops — and your `mining.protectedBlocks` list still always wins). Set `false` to make builds strictly additive. |
+
 ## Example configurations
 
 **A pacifist guide** — never digs, never builds, just finds its way through what's already

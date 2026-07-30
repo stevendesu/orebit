@@ -240,6 +240,19 @@ trace`/`rtrace` one-shots. Behavior lives on components it constructs and ticks:
   `MeleeStrategy` (fallback: face, close, full-charge hits only — `getAttackStrengthScale` reads
   the REAL vanilla ticker, no derived clock). Hits ride the inherited `Player#attack` (crit/sweep/
   knockback/enchants all vanilla); `BotInventory.equipBestWeapon` ranks sword>axe by id tier.
+- **`BotBuilder`** — the `/bot build` machine (DESIGN-bot-abilities.md §6): `BuildPhase {SCAN,
+  WORK}` diff-vs-world sweeps over a parsed `building/Schematic` (`.litematic`: the MC-free
+  `NbtReader` + LitematicaBitArray-faithful bit reads — LSB-first, entries SPAN long boundaries,
+  bits = max(2, ceil(log2(palette))); negative-Size min-corner rule; Version<5 rejected).
+  Bottom-up nearest-first ordering, self-healing connection props (fence sides, stair shape)
+  DIFF-IGNORED, door-upper/bed-head partner cells satisfied by their root. Exact-state placement
+  (`WorldEdits.placeBlock` with the `PaletteResolver` state — id via `BlockLookup`, properties
+  applied BY NAME through the stable generic Property API) consuming the matching `BlockItem`;
+  wrong occupants timed-CLEARED (`building.clearMismatches`; `mayBreak` refusals counted, never
+  forced). Convergence = sweep-progress (a sweep with pending work and zero verified progress
+  ends the run with the honest tally: unreachable / protected / unknown-block / missing
+  materials — the future work-tree planner's shopping list). Files from
+  `<server dir>/orebit-schematics/`.
 - **`BotMining`** — the per-tick timed-break actuator: callers `request(pos)` every tick; equips
   fastest/goal tool, accumulates vanilla `getDestroyProgress`, crack overlay, real survival break
   (drops/XP/wear), `Config.mayBreak` backstop (waived only for `requestReclaim` of a bot-placed
@@ -286,10 +299,11 @@ arms it; each writes an `orebit-<x>-result.properties` + traces, then halts the 
 
 ## commands/ — the /bot surface
 `OrebitCommands.register` builds the Brigadier `/bot` root at the `PlatformEvents.onRegisterCommands`
-seam; each subcommand is a stateless `BotCommand` Strategy. Present (**19**): Spawn, Follow, Stay,
+seam; each subcommand is a stateless `BotCommand` Strategy. Present (**20**): Spawn, Follow, Stay,
 Come, Goto, Mine, Find, Gather, **Craft** (`/bot craft <item> [count]` — result names tab-completed
 from `crafting/RecipeIndex`; see `BotCrafter`), **Farm** (`/bot farm` — one tending pass; see
-`BotFarmer`), **Drop** (`/bot drop <all|resources|tools|trash|name>` — tosses
+`BotFarmer`), **Build** (`/bot build <name> <x y z>` — `.litematic`s from
+`<server dir>/orebit-schematics/`; see `BotBuilder`), **Drop** (`/bot drop <all|resources|tools|trash|name>` — tosses
 matching inventory via `BotInventory.dropMatching` + the `ItemClasses` taxonomy), **Report** (`/bot
 report` — the resource-compass abundance table: near/mid/far player-centered box sums + true-global,
 from `ResourcePyramid`), **Stats** (`/bot stats` — the NAVSTATS current + last-journey tables), Here,
@@ -307,8 +321,9 @@ Trace, RegionTrace (`/bot rtrace`), Probe, Config, Debug. The `ChatCommandParser
 `navReadyTimeoutTicks`, `hpaFlushBudgetMs`, `regionShardLoadBudgetMs`), `hpa.*`
 (`persistIntervalTicks`, `persistFlushBudgetMs`, `lazyLoad`, `residentLeafCap`), **`doors.*`**
 (`doors.toggle`, default true → `BotCaps.mayToggleDoors`), **`crafting.*`**
-(`placeTable`/`reclaimTable`/`tableSearchRadius`), **`farming.*`** (`workRadius`/`till`), and
-**`combat.*`** (`defend`/`scanRadius`) — the ability namespaces are executor-read and fully hot.
+(`placeTable`/`reclaimTable`/`tableSearchRadius`), **`farming.*`** (`workRadius`/`till`),
+**`combat.*`** (`defend`/`scanRadius`), and **`building.*`** (`clearMismatches`) — the ability
+namespaces are executor-read and fully hot.
 `toBotCaps()` folds knobs into the
 pathfinder's `BotCaps`; `mayBreak()` = executor-side break-policy backstop; `conjuredBlockState()`.
 `ConfigLoader.load` reads `config/orebit.properties` at SERVER_STARTED (writes commented defaults
