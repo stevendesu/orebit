@@ -43,6 +43,9 @@ import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.BooleanOp;
+import net.minecraft.world.phys.shapes.Shapes;
+import net.minecraft.world.phys.shapes.VoxelShape;
 
 /**
  * The ally bot: a faked {@link net.minecraft.server.level.ServerPlayer} that follows its owner.
@@ -937,6 +940,48 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     @Override
     public boolean airAt(int x, int y, int z) {
         return !solidAt(x, y, z);
+    }
+
+    // The bot's body corridor THROUGH a cell (block-local 0..1 coords), keyed on the step's horizontal movement
+    // direction — the "test the geometry against the movement route" primitive. The corridor spans the FULL cell
+    // ALONG the travel axis (so a panel ACROSS the path is caught) but only the 0.6-wide CENTRED band on the
+    // PERPENDICULAR axis (so a panel running ALONG one side is missed) — and always ABOVE the auto-step in Y (so a
+    // low floor block is missed). That geometry is exactly what distinguishes, with NO per-block-type gate:
+    //   • an OPEN door / open trapdoor — thin panel PARALLEL to travel, against a side → outside corridor → pass;
+    //   • a CLOSED door — thin panel ACROSS the doorway → spans the corridor → mine (an iron door break still works);
+    //   • a carpet / pressure plate / bottom slab / snow layer under the feet — collision below the step → pass;
+    //   • a full block (or fence post / wall reaching the centred column) → mine.
+    // Blocks with EMPTY collision (ladders, signs, buttons, plants, open fence gates) short-circuit before this.
+    private static final double C0 = 0.2, C1 = 0.8;              // the 0.6-wide centred footprint band
+    private static final double STEP_UP = 9.0 / 16.0;           // auto-step height (STEP_ASSIST_MAX_RISE)
+    private static final VoxelShape CORRIDOR_VERT = Shapes.box(C0, STEP_UP, C0, C1, 1.0, C1); // dx==0 && dz==0
+    private static final VoxelShape CORRIDOR_X    = Shapes.box(0.0, STEP_UP, C0, 1.0, 1.0, C1); // along ±X
+    private static final VoxelShape CORRIDOR_Z    = Shapes.box(C0, STEP_UP, 0.0, C1, 1.0, 1.0); // along ±Z
+    private static final VoxelShape CORRIDOR_DIAG = Shapes.box(0.0, STEP_UP, 0.0, 1.0, 1.0, 1.0); // diagonal (both)
+
+    /**
+     * Whether the block at {@code (x,y,z)} genuinely OBSTRUCTS the bot's body moving through the cell along the
+     * step's horizontal direction {@code (dx,dz)} — the general, geometry-based replacement for a blunt {@link
+     * #solidAt} collision test in the {@code Need.AIR} reconcile ({@link
+     * com.orebit.mod.pathfinding.blockpathfinder.PhaseRunner}). Mine a body cell only when the live collision
+     * shape actually intrudes into the direction-keyed body corridor (see the CORRIDOR_* fields), not merely
+     * because it has SOME collision. This lets the bot walk THROUGH an already-open door / open trapdoor and
+     * stand ON a carpet / plate / slab without swinging at them — matching a player — while still clearing a
+     * closed door across the path or a full-block wall. {@code (dx,dz)} need only be non-zero-or-not per axis
+     * (signum or raw delta); {@code (0,0)} is a vertical move (Pillar/MineDown) → the centred footprint column.
+     * Reads the LIVE level (reflects the bot's own just-made breaks/places), like {@link #solidAt}; the local
+     * collision shape and the corridor share the 0..1 frame, so no world offset is needed.
+     */
+    @Override
+    public boolean movementBlockedAt(int x, int y, int z, int dx, int dz) {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        BlockPos p = new BlockPos(x, y, z);
+        VoxelShape shape = level.getBlockState(p).getCollisionShape(level, p);
+        if (shape.isEmpty()) return false;
+        VoxelShape corridor = dx != 0
+                ? (dz != 0 ? CORRIDOR_DIAG : CORRIDOR_X)
+                : (dz != 0 ? CORRIDOR_Z : CORRIDOR_VERT);
+        return Shapes.joinIsNotEmpty(shape, corridor, BooleanOp.AND);
     }
 
     /** Live swim overshoot-hazard test: a bubble column (vertical drag breaches/ejects a prone swimmer) or

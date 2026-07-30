@@ -87,7 +87,7 @@ mining.unbreakableHardness = 3200
 | `mining.ticksByHardness` | `true` | If `true`, harder blocks take realistically longer to mine (and a better tool is faster) — so the bot prefers routes through softer material. If `false`, every block takes the same fixed time (below). |
 | `mining.ticksToMineFlat` | `0` | The fixed time, in game ticks, to mine one block when `ticksByHardness` is `false`. `0` means instant. Ignored when `ticksByHardness` is `true`. |
 | `mining.breakBaseCost` | `0.0` | A flat surcharge (in ticks) added to **every break the planner considers**, on top of the real mining time — the mining-side mirror of `placement.placeBaseCost`. It's a behavioral "reluctance to edit the world": raise it and the bot detours around obstacles (and wades through berry bushes) it would otherwise punch through; at `0` breaks are priced at mining time alone. |
-| `mining.protectedBlocks` | *(a broad "don't wreck the build" set — see below)* | A comma-separated list of block ids and `#`-prefixed block tags the bot must **never break** — nor destroy by placing over — e.g. `minecraft:chest, #minecraft:beds`. Enforced both when planning (routes go *around* protected blocks) and again at the moment of breaking. Malformed entries warn and are skipped. Unlike every other key, this one does **not** default to empty: out of the box it protects a large set of player-placed and decorative blocks so a bot won't tear through someone's build (full list below). To let the bot break anything, set it explicitly empty (`mining.protectedBlocks=`). **Changing this list needs a server restart** to fully apply (the planner caches block classifications); the at-the-moment-of-breaking refusal applies immediately on reload. See [Breaking & Placing](world_edits.md#protected-blocks). |
+| `mining.protectedBlocks` | *(a broad "don't wreck the build" set — see below)* | A comma-separated list of block ids and `#`-prefixed block tags the bot must **never break** *to clear a path* — nor destroy by placing over — e.g. `minecraft:chest, #minecraft:beds`. Enforced both when planning (routes go *around* protected blocks) and again at the moment of a route break. Deliberate commands are exempt: `/bot gather wood` still fells protected logs, farming still harvests mature crops — protection governs pathing, not the job you gave the bot. Malformed entries warn and are skipped. Unlike every other key, this one does **not** default to empty: out of the box it protects a large set of player-placed and decorative blocks so a bot won't tear through someone's build (full list below). To let the bot break anything, set it explicitly empty (`mining.protectedBlocks=`). **Changing this list needs a server restart** to fully apply (the planner caches block classifications); the at-the-moment-of-breaking refusal applies immediately on reload. See [Breaking & Placing](world_edits.md#protected-blocks). |
 | `mining.allowUnbreakable` | `false` | If `true`, the bot may "mine" vanilla-unbreakable blocks (bedrock, barriers, end portal frames — anything with negative destroy time) at the tool-derived cost set by `mining.unbreakableHardness` below: it stands and grinds that long, then the block breaks. Independent of `mining.maxHardness` (unbreakable is its own axis, not "very hard"); `mining.protectedBlocks` always wins. |
 | `mining.unbreakableHardness` | `3200` | The pretend "hardness" of those unbreakable blocks (they have none in vanilla) when `allowUnbreakable` is on. It feeds the normal mining-time formula assuming a pickaxe, so a **better pickaxe digs faster** and bare hands are far slower. Same scale as real blocks (obsidian, the hardest, is ~250) but may go past 255 to make unbreakable mining a stronger deterrent. The default `3200` works out to ~2 minutes per block with a diamond pickaxe. |
 
@@ -224,7 +224,7 @@ does when a big recipe needs a table and there isn't one around.
 | Key | Default | What it does |
 | --- | --- | --- |
 | `crafting.placeTable` | `true` | When no crafting table is nearby, the bot may set down a temporary one from its inventory — and if it only carries planks, it crafts the table first (that's a small recipe). Set `false` to make it refuse instead. |
-| `crafting.reclaimTable` | `true` | After using a temporary table it placed, the bot breaks it and takes it back. This is the one exception to `mining.protectedBlocks` (which normally keeps the bot's hands off crafting tables): it applies only to the exact table the bot just placed. Set `false` to leave placed tables standing (the bot tells you where). |
+| `crafting.reclaimTable` | `true` | After using a temporary table it placed, the bot breaks it and takes it back. Set `false` to leave placed tables standing (the bot tells you where). |
 | `crafting.tableSearchRadius` | `16` | How far (blocks, up to 48) the bot looks for an existing crafting table before considering placing one. `0` skips the search entirely. Only loaded chunks are searched. |
 
 ### Farming — how `/bot farm` tends the fields
@@ -234,20 +234,24 @@ farming.workRadius = 16
 farming.till       = true
 ```
 
-`/bot farm` runs one tending pass around wherever you sent the bot: it harvests every
-fully-grown crop nearby, picks up the drops, replants what it harvested, plants any bare
-farmland it has seeds for, and — with a hoe in its inventory — can till fresh ground next to
-water and plant that too. When nothing is left to do it reports the tally
-("harvested 8, planted 9, tilled 2") and waits.
+`/bot farm` puts the bot into a persistent farming state — like `follow`, it keeps going
+until you give it another command. It harvests every fully-grown crop nearby, picks up the
+drops, replants what it harvested, plants any bare farmland it has seeds for, and — with a hoe
+in its inventory — can till fresh ground next to water and plant that too. When a work round
+finishes it reports the tally ("harvested 8, planted 9, tilled 2 — watching the farm") and then
+stands watch, checking back every few seconds so crops that ripen later get harvested and
+replanted too. Aim it at ground with no farm on it at all and it says "nothing to farm here"
+instead.
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `farming.workRadius` | `16` | How far (blocks, 4–48) around the command spot the pass looks for work. |
-| `farming.till` | `true` | Whether the pass may create NEW farmland (hoe + seeds + water nearby required) — i.e. expand your farm, not just tend it. Set `false` to keep the bot strictly to existing farmland. Tilling only happens where the ground would actually stay hydrated (the same water rule the game uses). |
+| `farming.workRadius` | `16` | How far (blocks, 4–48) around the command spot the bot looks for work. |
+| `farming.till` | `true` | Whether the bot may create NEW farmland (hoe + seeds + water nearby required) — i.e. expand your farm, not just tend it. Set `false` to keep the bot strictly to existing farmland. Tilling only happens where the ground would actually stay hydrated (the same water rule the game uses). |
 
 The bot knows wheat, carrots, potatoes, and beetroots so far. Harvesting only ever touches
-FULLY-GROWN crops (immature plants are left alone — and stay protected by
-`mining.protectedBlocks` like the rest of your farm).
+FULLY-GROWN crops — immature plants are always left alone (that's the farmer's own rule).
+`mining.protectedBlocks` protects your farm from the PATHFINDER (the bot won't chew through
+crops en route), while deliberate commands like farming and `/bot gather` still do their job.
 
 ### Combat — does the bot defend itself?
 

@@ -53,6 +53,9 @@ public final class MovePlan {
     private final List<Phase> phases = new ArrayList<>(4);
     private Predicate<BotSteering> resetWhen = b -> false;
     private Predicate<BotSteering> failWhen = b -> false;
+    /** The step's horizontal movement direction (signum), for the runner's direction-aware body-obstruction test
+     *  ({@link BotSteering#movementBlockedAt}). {@code (0,0)} (the default) = a vertical/undirected move. */
+    private int moveDx, moveDz;
     /** Plan-level door {@link Need#OPEN} reqs (DOORS P3); almost always empty (a door crossing is rare). */
     private final List<Req> doorReqs = new ArrayList<>(0);
 
@@ -91,6 +94,19 @@ public final class MovePlan {
     }
 
     /**
+     * Record the step's horizontal movement direction (any non-zero-per-axis form — signum or raw delta), so the
+     * runner's {@code Need.AIR} reconcile can ask {@link BotSteering#movementBlockedAt} whether a body cell is
+     * obstructed ALONG THE ROUTE (a closed door across the path blocks; an open door along a side does not).
+     * Set by {@link com.orebit.mod.BotNavigator} from the step's from/to cells after the movement builds its
+     * plan (the movement's cell geometry doesn't otherwise need it). Default {@code (0,0)} = vertical/undirected.
+     */
+    public MovePlan moveDir(int dx, int dz) {
+        this.moveDx = dx;
+        this.moveDz = dz;
+        return this;
+    }
+
+    /**
      * Require the door at cell {@code (x,y,z)} reach {@code open} before the crossing drives (DOORS P3) — a
      * plan-level {@link Need#OPEN}. Injected by {@link com.orebit.mod.BotNavigator} from the step's folded
      * door-set ({@link StepEdits}) after the movement builds its geometry plan, since a door-open is a
@@ -109,6 +125,8 @@ public final class MovePlan {
     Phase phaseAt(int i) { return phases.get(i); }
     boolean regressed(BotSteering bot) { return resetWhen.test(bot); }
     boolean failed(BotSteering bot) { return failWhen.test(bot); }
+    int moveDx() { return moveDx; }
+    int moveDz() { return moveDz; }
     List<Req> doorReqs() { return doorReqs; }
 
     /** Whether cell {@code (x,y,z)} is governed by a door {@link Need#OPEN} (so a {@code Need.AIR} must NOT mine

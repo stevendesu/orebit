@@ -55,6 +55,7 @@ public class SteerControlTest {
         // Reconcile seam — unused by the pure-geometry SteerControl tests, stubbed to satisfy the interface.
         @Override public boolean solidAt(int x, int y, int z) { return false; }
         @Override public boolean airAt(int x, int y, int z) { return true; }
+        @Override public boolean movementBlockedAt(int x, int y, int z, int dx, int dz) { return false; }
         @Override public boolean swimHazardAt(int x, int y, int z) { return false; }
         @Override public boolean bubbleUpAt(int x, int y, int z) { return false; }
         @Override public void mine(int x, int y, int z) { }

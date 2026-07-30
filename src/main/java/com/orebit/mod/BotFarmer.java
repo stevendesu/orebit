@@ -23,14 +23,18 @@ import net.minecraft.world.level.block.state.BlockState;
 
 /**
  * The {@code /bot farm} machine, owned by {@link AllyBotEntity} (the {@link BotGatherer} component
- * pattern — DESIGN-bot-abilities.md §2.1/§4): one TENDING PASS over the farm around where the
- * command was issued. It harvests every fully-grown crop (the narrowly-waived
- * {@link BotMining#requestHarvest} break — real drops, auto-picked-up), replants each harvested
+ * pattern — DESIGN-bot-abilities.md §2.1/§4): a PERSISTENT farming state, follow-like — the bot
+ * TENDS the farm around where the command was issued and then KEEPS tending it: when a work cycle
+ * finds nothing left to do it enters WATCH and re-surveys on a debounced cadence, so crops that
+ * mature later get harvested and replanted indefinitely, until any other command switches the
+ * mode (exactly how FOLLOW ends). It harvests every fully-grown crop (a deliberate task break —
+ * real drops, auto-picked-up; maturity is this machine's own contract), replants each harvested
  * cell from carried/collected seeds, plants any bare farmland it can seed, and — when it carries
  * a hoe and {@code farming.till} allows — tills hydrated ground (the exact vanilla water rule:
  * any water fluid in the 9×9×2 box, Chebyshev radius 4 at the cell's Y and Y+1, diagonals
- * included, waterlogged counts) and plants that too. When a full re-survey finds nothing left to
- * do, it reports the tally and STAYs.
+ * included, waterlogged counts) and plants that too. Only genuinely BARREN ground (no farmland,
+ * no crops, no hydrated tillable anywhere in the box, and nothing ever done) ends the run with
+ * "nothing to farm here" — a mis-aimed command, not a farm.
  *
  * <p>Everything is state-verified, never assumed: a till/plant is performed via the REAL vanilla
  * use path ({@link ItemUse#useOnTop} — {@code ItemStack#useOn}, the same code a right-click
@@ -45,10 +49,12 @@ final class BotFarmer {
     private final AllyBotEntity bot;
 
     /** Phases of a {@code /bot farm} run. Stepped one phase per tick by {@link #farmLoopTick}.
-     *  SWEEPUP chases the pass's own drops (yield + seeds, which carry vanilla's pickup delay)
-     *  by ITEM LIFECYCLE — the gather-COLLECT pattern, no timers — before the final re-survey,
-     *  so the pass never ends with its harvest lying on the field or its replant unseeded. */
-    private enum FarmPhase { SURVEY, WORK, SWEEPUP }
+     *  SWEEPUP chases the cycle's own drops (yield + seeds, which carry vanilla's pickup delay)
+     *  by ITEM LIFECYCLE — the gather-COLLECT pattern, no timers — before the cycle ends, so a
+     *  cycle never ends with its harvest lying on the field or its replant unseeded. WATCH is the
+     *  persistent idle: stand at the farm and re-survey on a debounced cadence (crop growth is
+     *  random-tick — multi-minute medians — so the 10s poll granularity loses nothing). */
+    private enum FarmPhase { SURVEY, WORK, SWEEPUP, WATCH }
 
     /** What a queued work cell needs done. */
     private enum TaskKind { HARVEST, PLANT, TILL }
@@ -63,15 +69,27 @@ final class BotFarmer {
     private static final double FARM_ARRIVE_Y = 0.6;
     /** Vertical survey band around the anchor (farms are flat-ish; ±4 covers terraces). */
     private static final int SURVEY_DY = 4;
+    /** WATCH re-survey debounce (ticks) — paces the idempotent world re-poll (the BotNavigator
+     *  TERRAIN_RECHECK pattern; crop growth medians are minutes, so 10s granularity is free).
+     *  NOT a stuck-detector: nothing is inferred from its expiry, it only spaces a re-look. */
+    private static final int WATCH_RECHECK_TICKS = 200;
 
     private FarmPhase farmPhase;        // current phase (null = inactive)
     private BlockPos farmAnchor;        // where /bot farm was issued — the survey centre
     private final ArrayDeque<FarmTask> workQueue = new ArrayDeque<>();
     /** Cells that refused their action this run (planting failed, unreachable, …) — skipped. */
     private final HashSet<Long> refusedCells = new HashSet<>();
-    private int harvested;              // mature crops broken
-    private int planted;                // seeds planted (verified by the crop appearing)
-    private int tilled;                 // blocks turned to farmland (verified)
+    private int harvested;              // mature crops broken (lifetime — the observation seams)
+    private int planted;                // seeds planted, crop verified present (lifetime)
+    private int tilled;                 // blocks turned to farmland, verified (lifetime)
+    private int cycleHarvested;         // per-cycle slices of the above (the WATCH-transition chat)
+    private int cyclePlanted;
+    private int cycleTilled;
+    /** Whether the box ever showed FARM SUBSTRATE (farmland / a known crop / hydrated tillable) —
+     *  distinguishes "watch this farm" from "there is no farm here" when a survey comes up empty. */
+    private boolean sawFarmSubstrate;
+    /** WATCH: ticks since the last re-survey (the debounced poll pacing). */
+    private int watchTicks;
     /** Whether the LAST completed WORK sweep did anything — gates the one follow-up re-survey. */
     private boolean sweepActed;
     /** SWEEPUP: the drop currently being chased (lifecycle-tracked; null = pick the next one). */
@@ -117,6 +135,11 @@ final class BotFarmer {
         this.harvested = 0;
         this.planted = 0;
         this.tilled = 0;
+        this.cycleHarvested = 0;
+        this.cyclePlanted = 0;
+        this.cycleTilled = 0;
+        this.sawFarmSubstrate = false;
+        this.watchTicks = 0;
         this.sweepActed = true; // let the first survey run unconditionally
         this.sweepDrop = null;
         this.refusedDrops.clear();
@@ -132,6 +155,7 @@ final class BotFarmer {
             case SURVEY -> farmSurvey(level);
             case WORK -> farmWork(level);
             case SWEEPUP -> farmSweepUp(level);
+            case WATCH -> farmWatch(level);
         }
     }
 
@@ -143,8 +167,8 @@ final class BotFarmer {
      */
     private void farmSurvey(ServerLevel level) {
         bot.setForward(0.0f);
-        if (!sweepActed) { // the previous sweep did nothing new — the pass is complete
-            finish();
+        if (!sweepActed) { // the previous sweep did nothing new — this CYCLE is complete
+            endCycle(level);
             return;
         }
         sweepActed = false;
@@ -164,6 +188,9 @@ final class BotFarmer {
                     if (refusedCells.contains(scratch.asLong())) continue;
                     final BlockState state = level.getBlockState(scratch);
                     final CropKind kind = CropKinds.byState(state);
+                    if (kind != null || state.is(Blocks.FARMLAND)) {
+                        sawFarmSubstrate = true; // a crop (any age) or farmland = a real farm here
+                    }
                     if (kind != null && kind.isMature(state)) {
                         harvests.add(new FarmTask(TaskKind.HARVEST, scratch.immutable()));
                         continue;
@@ -190,15 +217,15 @@ final class BotFarmer {
         workQueue.addAll(plants);
         workQueue.addAll(tills);
         if (workQueue.isEmpty()) {
-            // Nothing block-actionable — but the pass's own drops may still lie on the field
+            // Nothing block-actionable — but the cycle's own drops may still lie on the field
             // (pickup delay / rolled away). Sweep them up first; SWEEPUP returns here when the
-            // field is clear, and only then does an empty survey end the pass.
+            // field is clear, and only then does an empty survey end the CYCLE.
             if (nextFieldDrop(level) != null) {
                 sweepDrop = null;
                 farmPhase = FarmPhase.SWEEPUP;
                 return;
             }
-            finish();
+            endCycle(level);
             return;
         }
         farmPhase = FarmPhase.WORK;
@@ -332,10 +359,12 @@ final class BotFarmer {
         final BotInventory inv = new BotInventory(bot);
         switch (task.kind()) {
             case HARVEST ->
-                // Timed break through the hands (instant for hardness-0 crops, real drops, the §4
-                // harvest waiver). Completion is observed by the NEXT tick's re-validate above
-                // (mature → air), which counts it and queues the replant.
-                bot.mining().requestHarvest(cell);
+                // Timed break through the hands (instant for hardness-0 crops, real drops). A
+                // deliberate task break — mining.protectedBlocks is a PATHING policy and does not
+                // gate the hands (owner ruling); MATURITY is this machine's own contract (only
+                // fully-grown crops are ever queued). Completion is observed by the NEXT tick's
+                // re-validate above (mature → air), which counts it.
+                bot.mining().request(cell);
             case PLANT -> {
                 final int seedSlot = findAnySeedSlot(inv);
                 if (seedSlot < 0) {
@@ -351,6 +380,7 @@ final class BotFarmer {
                 bot.swing(InteractionHand.MAIN_HAND);
                 if (!level.getBlockState(cell.above()).isAir()) { // the crop appeared — verified
                     planted++;
+                    cyclePlanted++;
                     sweepActed = true;
                 } else {
                     refusedCells.add(cell.asLong()); // vanilla refused (light/soil) — don't loop
@@ -370,6 +400,7 @@ final class BotFarmer {
                 bot.swing(InteractionHand.MAIN_HAND);
                 if (level.getBlockState(cell).is(Blocks.FARMLAND)) { // verified
                     tilled++;
+                    cycleTilled++;
                     sweepActed = true;
                     // Plant it right away next tick, from where we stand.
                     workQueue.pollFirst();
@@ -383,19 +414,53 @@ final class BotFarmer {
     }
 
     /** End the pass: tally chat + STAY. */
-    private void finish() {
-        if (harvested == 0 && planted == 0 && tilled == 0) {
+    /**
+     * End one work CYCLE: report what it did (once, on the transition), then WATCH the farm for
+     * more work — the persistent, follow-like state (the bot stays in FARM until another command
+     * switches the mode). Only genuinely barren ground (no farm substrate ever seen, nothing ever
+     * done) ends the run: that's a mis-aimed command, and watching dirt would never change it.
+     */
+    private void endCycle(ServerLevel level) {
+        if (!sawFarmSubstrate && harvested == 0 && planted == 0 && tilled == 0) {
             bot.chat("nothing to farm here.");
-        } else {
-            bot.chat("farm pass done — harvested " + harvested + ", planted " + planted
-                    + ", tilled " + tilled + ".");
+            bot.setMode(AllyBotEntity.Mode.STAY);
+            return;
         }
-        bot.setMode(AllyBotEntity.Mode.STAY);
+        if (cycleHarvested > 0 || cyclePlanted > 0 || cycleTilled > 0) {
+            bot.chat("farm: harvested " + cycleHarvested + ", planted " + cyclePlanted
+                    + ", tilled " + cycleTilled + " — watching the farm.");
+        }
+        cycleHarvested = 0;
+        cyclePlanted = 0;
+        cycleTilled = 0;
+        watchTicks = 0;
+        bot.navigator().clearPlan();
+        farmPhase = FarmPhase.WATCH;
+    }
+
+    /**
+     * WATCH: the persistent idle — stand at the farm, face the owner, and re-survey every
+     * {@link #WATCH_RECHECK_TICKS} (a debounced idempotent world re-poll; crop growth shows up as
+     * new HARVEST work, a restocked seed pouch as new PLANT work). Per-run blacklists are cleared
+     * before each re-look — a cell that failed before (darkness, missing seeds) gets a fresh,
+     * cheap re-check under current conditions.
+     */
+    private void farmWatch(ServerLevel level) {
+        bot.setForward(0.0f);
+        bot.lookAtPlayer(bot.owner());
+        if (++watchTicks >= WATCH_RECHECK_TICKS) {
+            watchTicks = 0;
+            refusedCells.clear();
+            refusedDrops.clear();
+            sweepActed = true; // grant the re-survey (the fresh look IS the point of WATCH)
+            farmPhase = FarmPhase.SURVEY;
+        }
     }
 
     /** HARVEST completion accounting: called by the re-validate drop path in {@link #farmWork}. */
     private void countHarvest() {
         harvested++;
+        cycleHarvested++;
         sweepActed = true;
     }
 

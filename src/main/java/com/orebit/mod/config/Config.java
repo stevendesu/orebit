@@ -202,10 +202,15 @@ public record Config(
     }
 
     /**
-     * The <b>execution-side</b> break policy gate — the cold backstop every live break site consults
-     * before actually destroying a block ({@code AllyBotEntity.applyEdits}/{@code place}, {@code
-     * BotMining}): may the bot break a block whose live state is {@code state} and whose live destroy
-     * time (vanilla {@code BlockState.getDestroySpeed(level, pos)}) is {@code destroyTime}? Refuses
+     * The <b>execution-side</b> break policy gate for PATHING-MOTIVATED breaks — the cold backstop the
+     * route executors consult before destroying a block en route ({@code AllyBotEntity.applyEdits}/
+     * {@code place}, the gather LOS-occluder dig, builder mismatch clears): may the bot break a block
+     * whose live state is {@code state} and whose live destroy time (vanilla
+     * {@code BlockState.getDestroySpeed(level, pos)}) is {@code destroyTime}? <b>Deliberate task
+     * breaks do NOT consult this</b> (owner ruling, 2026-07-29): {@code BotMining} — the hands behind
+     * an owner-commanded gather target, a mature-crop harvest, a table reclaim, {@code /bot mine} —
+     * only refuses vanilla-unbreakables without the opt-in, so protecting logs never refuses
+     * {@code /bot gather wood}. Refuses
      * <ul>
      *   <li>any {@link #protectedBlocks mining.protectedBlocks} match — protected ALWAYS wins, and</li>
      *   <li>a vanilla-unbreakable block ({@code destroyTime < 0}: bedrock, barriers, portal frames, …)

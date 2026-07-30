@@ -219,9 +219,12 @@ public final class Pillar implements Movement {
      * and the regression guard restarts the climb if a placement never took and the bot fell back.
      */
     @Override
-    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
-        final double startFeetY = fy + 1.0;        // feet world Y standing on the from-floor
-        final int landedFeetBlockY = fy + 2;       // feet BLOCK Y once standing on the placed footing (fy+1)
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
+        // Pillar requires a full-height start floor (candidates gate: floorSurface == 16), so fromFootY == fy+1
+        // always — the fy+1/fy+2/fy+3 literals below are the real foot frame. The landing rides the topY-aware
+        // toFootY (the placed footing is a full cube → toFootY == ty+1 == fy+2 here, but stay principled).
+        final double startFeetY = fromFootY;       // feet world Y standing on the (full) from-floor
+        final int landedFeetBlockY = toFootY;      // feet BLOCK Y once standing on the placed footing
         MovePlan plan = new MovePlan();
         // Fell back to (or below) the start with no height gained → the footing never took; re-attempt.
         plan.resetWhen(b -> b.grounded() && b.y() < startFeetY + 0.5);

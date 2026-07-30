@@ -268,12 +268,12 @@ public final class Fall implements Movement {
      * if the bot came back down onto the exact start cell, which is precisely the balked step-off to re-attempt.
      */
     @Override
-    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz) {
-        final int landFeetY = ty + 1;             // feet BLOCK Y once standing on the landing floor
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
+        final int landFeetY = toFootY;            // feet BLOCK Y once standing on the landing floor (topY-aware)
         MovePlan plan = new MovePlan();
         // Balked walk-off: physically back on the start floor with no drop taken → re-attempt from WALKOFF.
         plan.resetWhen(b -> b.grounded()
-                && b.footX() == fx && b.footY() == fy + 1 && b.footZ() == fz);
+                && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
         // WALKOFF: line-track the takeoff→landing segment and hold forward, striding off the lip (the legacy
         // grounded branch — steerTowards, not the medium-aware drive). Advance the moment the bot is airborne.
         plan.phase("walkoff")
