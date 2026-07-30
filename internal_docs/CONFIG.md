@@ -119,6 +119,13 @@ start. Out-of-range or unparseable individual values are clamped/defaulted with 
 | `crafting.reclaimTable` | boolean | `true` | After crafting on a temporary table the bot itself placed, break it (timed, real drops) and take it back. This reclaim is the ONE narrowly-waived exception to `mining.protectedBlocks` (whose default set shields the OWNER's tables): the waiver applies only to the exact cell the bot placed this run, and only while that cell is still a crafting table (`BotMining.requestReclaim`, §10-D3). `false` → placed tables stay in the world and the bot says where. | `crafting.reclaimTable=false` |
 | `crafting.tableSearchRadius` | int `0..48` | `16` | How far (blocks) `/bot craft` looks for an existing crafting table before considering placing one — the resource layer's live section sweep (`ResourceScan.nearestLoadedCell`; only loaded chunks are seen; the 48 ceiling matches the sweep volume, a wider radius would silently find nothing). `0` disables the search entirely. | `crafting.tableSearchRadius=32` |
 
+### `farming.*` — how does `/bot farm` tend the fields?
+
+| Key | Type / range | Default | Meaning | Example |
+| --- | --- | --- | --- | --- |
+| `farming.workRadius` | int `4..48` | `16` | Horizontal half-extent (blocks) of the box a farm pass surveys around where the command was issued (vertical band fixed ±4). The pass harvests every mature known crop in the box (the crop-side `mining.protectedBlocks` waiver — `BotMining.requestHarvest`, mature crops only), replants/plants bare farmland from carried seeds, sweeps up its own drops (item-lifecycle, no timers), and re-surveys until nothing actionable remains. Executor-read (`BotFarmer`), fully hot. | `farming.workRadius=8` |
+| `farming.till` | boolean | `true` | The pass may TILL new ground (grass/dirt/dirt path, air above, water in the vanilla 9×9×2 hydration box — Chebyshev 4 at the cell's Y and Y+1, waterlogged counts) when the bot carries a hoe AND seeds — i.e. it may EXPAND the farm. `false` = tend existing farmland only. Tilling/planting run the REAL vanilla use path (`ItemStack#useOn` — durability, sounds, its own gates) and are verified by re-reading the block. | `farming.till=false` |
+
 ## Mapping to `BotCaps`
 
 `Config.toBotCaps()` folds the placement / mining / pathing knobs into the capability gate the block-tier A\*
@@ -163,10 +170,11 @@ surcharge), so mortality is a move-generation fact too.
   or resize the pool (the reload does drain the pool before rebaking the shared cost tables — see
   `internal_docs/DESIGN-background-pathfinding.md`). `pathing.asyncSearchBudgetMs` is read per search, so a reload
   does change it live while async is already on — but toggling async itself is restart-only.
-- **`crafting.*` is fully hot:** all three keys are executor-read by `BotCrafter` per run/phase, so a
-  `/bot config reload` applies to the next `/bot craft`. The reload also re-bakes the `/bot craft`
-  RECIPE INDEX (`RecipeIndex.bake`) as a courtesy, so a datapack `/reload`'s recipe changes are picked
-  up without a server restart (the index otherwise bakes once at `SERVER_STARTED`).
+- **`crafting.*` / `farming.*` are fully hot:** the ability keys are executor-read
+  (`BotCrafter`/`BotFarmer`) per run/phase, so a `/bot config reload` applies to the next
+  `/bot craft` / `/bot farm`. The reload also re-bakes the `/bot craft` RECIPE INDEX
+  (`RecipeIndex.bake`) as a courtesy, so a datapack `/reload`'s recipe changes are picked up
+  without a server restart (the index otherwise bakes once at `SERVER_STARTED`).
 - **When it takes effect on the bot:** the follower reads the live `ConfigLoader` cache **per replan**
   (`caps()` → `ConfigLoader.botCaps()`, `placeBlock()` → `ConfigLoader.config().conjuredBlockState()`), so a
   reload applies on the bot's **next plan** — no per-tick or per-A\*-node cost (the parse is paid once; the hot
@@ -200,6 +208,7 @@ fix, and never failing the load:
   version-variant ids in the default set warn+skip (harmless); missing tags are silent.
 - `crafting.tableSearchRadius` clamped to `0..48` (`0` disables the search; the ceiling matches the live-scan
   sweep volume).
+- `farming.workRadius` clamped to `4..48` (a garden to a large field).
 - Booleans default to their `Config.DEFAULT` value on anything that isn't exactly `true`/`false`.
 - `placement.conjuredBlock` falls back to `minecraft:cobblestone` if it doesn't resolve to a real block on the
   running version.
