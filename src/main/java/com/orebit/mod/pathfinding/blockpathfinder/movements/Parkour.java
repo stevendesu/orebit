@@ -237,7 +237,7 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * yet passes the guard. Accepted for now: the guard was designed as a Y-only heuristic and the window is
  * small.
  *
- * <h2>Execution — the phase framework (v1 shape; falling adds a drop-control handoff)</h2>
+ * <h2>Execution — the phase framework (one predictive landing servo for every arc shape)</h2>
  * {@link #plan} is RUNUP → TAKEOFF → AIRBORNE → LAND for every landing class: all predicates are
  * positional and the landing Y is already taken from the plan's to-cell ({@code done} tests {@code footY
  * == ty + 1}), so a RISING arc needs no new phase logic — it simply touches down higher and
@@ -247,12 +247,14 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * time (cold — a MovePlan is built once per waypoint step, the Pillar precedent) keeps every per-tick
  * predicate a multiply-add, and for a cardinal shape the unit vector degenerates to the old signum axes
  * byte-for-byte; {@code resetWhen}/{@code done} are cell-equality predicates (the exact start / landing
- * cell), so they hold unchanged for an offset landing. A FALLING arc gets ONE new piece: the airborne drive holds
- * full forward only until the bot's centre clears the last gap column, then hands off to {@link Fall}'s
- * airborne drop-control (recenter on the landing column) for the remaining descent — a jump landing below
- * takeoff level otherwise carries its sprint momentum to touchdown and past a narrow landing cell (the
- * momentum-overshoot the fall-not-vertical work resolved for {@link Fall}; the follower drives converted
- * moves via the PhaseRunner, so Fall's own {@code steer} never applies here). Derivation on the method.
+ * cell), so they hold unchanged for an offset landing. The AIRBORNE and LAND drives are ONE call for
+ * every landing class — the predictive landing servo ({@code SteerControl.parkourAirborne}): it predicts
+ * the touchdown at the landing surface (falling arcs natively), air-brakes a predicted overshoot,
+ * accelerates a shortfall, and never brakes into the gap (the near-edge invariant). Falling arcs arm the
+ * servo's ice-gated aggressive margin. The old falling-only open-loop handoff to {@link Fall}-style
+ * drop-control was removed: it only arrested the drift when the gap-cleared threshold was met near
+ * touchdown, and a small-gap deep drop (course rows falld2g1/falld3g1 — the flagship-GOTO cliff shape)
+ * grounded one cell past its landing column under it. Derivation on the method.
  * The airborne-ARMED {@code resetWhen} guard (armed by the airborne drive, disarmed by the runup drive)
  * is preserved exactly — see the v1 derivation on the method. Sprint is REACH-AWARE: held for
  * center-to-center displacement ≥ 3.0 (the cardinal {@code g ≥ 2} rule, which the offset shapes
@@ -906,10 +908,10 @@ public final class Parkour implements Movement {
 
     /**
      * The phase-model jump: RUNUP (drive the line, sprint if the displacement wants it or the landing is a block up,
-     * until past the takeoff edge) → TAKEOFF (hold jump until airborne) → AIRBORNE (full forward + sprint;
-     * a FALLING arc hands off to drop-control once its centre clears the gap — see the phase comment for
-     * the threshold derivation; flat/rising hold the arc inputs to touchdown so the eased-forward landing
-     * settle can never bleed the momentum the gap needs) → LAND (re-centre, done once standing on the
+     * until past the takeoff edge) → TAKEOFF (hold jump until airborne) → AIRBORNE (the predictive landing
+     * servo for every arc shape — accelerate a predicted shortfall, air-brake a predicted overshoot, never
+     * into the gap; falling arcs arm the ice-gated aggressive margin) → LAND (the same servo grounded — the
+     * slide arrest, done once standing on the
      * target cell). All predicates positional; the landing Y comes straight from the to-cell, so the SAME
      * four phases execute flat, rising and falling jumps ({@code advanceWhen(grounded)} simply fires at
      * the higher/lower touchdown and
@@ -953,13 +955,6 @@ public final class Parkour implements Movement {
         final int gap = Math.max(Math.abs(ddx), Math.abs(ddz)) - 1;
         final boolean sprint = ty > fy
                 || (falling ? gap >= 3 : ddx * ddx + ddz * ddz >= 9);
-        // Falling arcs only (all cardinal today — offset shapes are flat-only v1): the along-LINE
-        // progress (from the takeoff cell centre) past which the bot's centre is OVER the landing column.
-        // The landing centre sits at `dist` and its column begins ~0.5 before it — for a cardinal g-gap
-        // this is exactly the old g + 0.5 (dist == g+1). From there the airborne drive hands off to
-        // drop-control (see the phase Javadoc) — never earlier, so the full-forward reach that clears
-        // the gap is untouched.
-        final double gapCleared = dist - 0.5;
         // Regression-guard arm: true only while an arc is live (set airborne, cleared on a runup re-attempt).
         // Cold per-step allocation — a MovePlan is built once per waypoint step (the Pillar precedent).
         final boolean[] airborneOnce = new boolean[1];
@@ -1021,67 +1016,32 @@ public final class Parkour implements Movement {
                 })
                 .advanceWhen(b -> !b.grounded());
         plan.phase("airborne")
-                // FLAT/RISING: steerTowards, NOT recenterOnTarget, for the whole arc — the recenter drive
-                // eases forward toward 0 near the target column, which kills the horizontal momentum the
-                // jump lives on (the same-level touchdown arrives with the gap barely cleared, so there is
-                // no momentum to bleed).
-                // FALLING: two-stage. Full forward ONLY until the bot's centre passes the last gap column
-                // (`gapCleared` — the reach that clears the gap is untouched); from there it is airborne
-                // over the landing column with descent still to run, which is exactly Fall's situation, so
-                // the drive hands off to Fall's drop-control (recenterOnTarget: proportional forward that
-                // still pulls TOWARD the column centre but eases near it and pushes BACK past it). Without
-                // the handoff, sprint momentum held to touchdown carries the bot ~0.3-0.5 b past the
-                // landing cell — off a 1-wide ledge with a drop beyond (the momentum-overshoot the
-                // fall-not-vertical work resolved for Fall). The handoff cannot undershoot: at centre
-                // = g+0.5 the feet are still at/above node level for every shipped row (g+0.15 blocks at
-                // ~0.28 b/t ⇒ ~t11.3 for g=3, vs feet crossing 0 at ~t12), and recenter keeps pushing
-                // forward while short of the centre; the falling 4-gap (in the default envelope) meets
-                // the threshold essentially at touchdown, degrading to the v1 drive.
+                // ONE drive for every arc shape: the predictive landing servo (parkourAirborne). It predicts
+                // the touchdown at the landing surface (falling arcs natively — the LOWER ty+1), air-brakes a
+                // predicted overshoot, accelerates a shortfall, and its near-edge invariant only ever
+                // reverse-brakes when a full-reverse touchdown still lands at/beyond the near edge — never
+                // into the gap. The iceFallAggressive flag (armed on falling arcs) is ICE-GATED inside the
+                // servo, so flat/rising and falling-onto-ice behave exactly as before; the change is
+                // FALLING-onto-NON-ICE, which used to keep Fall's open-loop two-stage drive (full forward
+                // until the centre cleared the last gap column, then recenterOnTarget) purely for
+                // byte-identical caution on the then-existing stone trials. That handoff is only sound when
+                // `gapCleared` is met near touchdown (shallow −1 drops; gap-4 deep drops) — a SMALL-gap DEEP
+                // drop clears the gap ~t6 with ~9 ticks of descent left, and open-loop recenter (input-only,
+                // a≈0.02/t against ~0.2 b/t of drift) cannot arrest it: the bot grounds ONE CELL PAST the
+                // landing column and the validity envelope correctly fail→HOLDs. Course-proven: falld2g1 /
+                // falld3g1 (and fall1.walkin, the approach-momentum shallow case) FAIL under the old drive
+                // and PASS under the servo, with the whole prior falling ledger (fall1–4, falld2g4,
+                // falld3g4) staying green — the caution the special case bought is now A/B evidence.
                 .drive((b, v) -> {
                     airborneOnce[0] = true; // arc is live → a grounded return to the start cell is a balk
-                    if (falling && b.slipperinessAt(tx, ty, tz) >= SteerControl.PARKOUR_ICE_SLIP) {
-                        // FALLING onto ICE (Phase 3) → the predictive servo for the WHOLE arc, exactly like
-                        // flat/rising (NO gapCleared gate). The gate opens only ~1 tick before touchdown on the
-                        // steep falling arc (measured: blue.fall.g4 descended at full sprint vx≈0.26 until proj
-                        // 4.5 = one tick from landing, then slid off unbraked), far too late to bleed the
-                        // momentum on a frictionless landing — the owner's #1 pathology. parkourAirborne handles
-                        // the falling arc natively (predicts touchdown at the LOWER surface ty+1) and its own
-                        // near-edge invariant is the gap guard: it only reverse-brakes when a full-reverse
-                        // touchdown still lands at/beyond the near edge, so it accelerates while short (clears
-                        // the gap) and brakes only as early as is safe — never into the gap. The aggressive
-                        // flag tightens the near-edge margin (more runway + earlier brake) for the reach-heavy
-                        // falling arc.
-                        SteerControl.parkourAirborne(b, v, ux, uz, tx, ty, tz, sprint, true);
-                    } else if (falling) {
-                        // FALLING onto NON-ICE → Fall's open-loop recenter drop-control, BYTE-IDENTICAL to
-                        // before (the stone fall trials falld*/fall*/ctl.fall must stay unchanged): full forward
-                        // until the centre clears the last gap column, then recenter onto the landing column.
-                        if (ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5)) >= gapCleared) {
-                            b.setSprinting(false);
-                            SteerControl.recenterOnTarget(b, v);
-                        } else {
-                            SteerControl.steerTowards(b, v);
-                            b.setSprinting(sprint);
-                        }
-                    } else {
-                        // FLAT / RISING: the predictive landing servo (replaces open-loop full-forward) — air-
-                        // brake an overshoot, accelerate a shortfall, never brake short into the gap. Sprint held.
-                        SteerControl.parkourAirborne(b, v, ux, uz, tx, ty, tz, sprint);
-                    }
+                    SteerControl.parkourAirborne(b, v, ux, uz, tx, ty, tz, sprint, falling);
                 })
                 .advanceWhen(b -> b.grounded()); // hold the arc phase until touchdown
         plan.phase("land")
-                // Brake to the desired point on the ground until grounded on the target cell. FLAT/RISING and
-                // FALLING-onto-ICE use the predictive servo (grounded, the predictor returns the live along-
-                // position → a reverse-brake toward the desired point, the ice-slide arrest); FALLING on NON-ICE
-                // keeps Fall's recenter (byte-identical stone behaviour).
-                .drive((b, v) -> {
-                    if (falling && b.slipperinessAt(tx, ty, tz) < SteerControl.PARKOUR_ICE_SLIP) {
-                        SteerControl.recenterOnTarget(b, v);
-                    } else {
-                        SteerControl.parkourAirborne(b, v, ux, uz, tx, ty, tz, sprint, falling);
-                    }
-                })
+                // Brake to the desired point on the ground until grounded on the target cell: the same servo
+                // (grounded, the predictor returns the live along-position → a reverse-brake toward the
+                // desired point — the slide arrest, ice or stone alike).
+                .drive((b, v) -> SteerControl.parkourAirborne(b, v, ux, uz, tx, ty, tz, sprint, falling))
                 .done(b -> b.grounded()
                         && b.footX() == tx && b.footY() == toFootY && b.footZ() == tz);
         return plan;
