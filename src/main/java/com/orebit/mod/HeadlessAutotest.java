@@ -1158,16 +1158,19 @@ public final class HeadlessAutotest {
             if (!"IDLE".equals(phase)) {
                 lastFarmPhase = phase;
             }
+            // /bot farm is now a PERSISTENT state (WATCH re-surveys forever) — the verdict is
+            // COUNTS-based, not a terminal mode flip: PASS the tick the plot's fixed work is all
+            // done. A STAY flip means the barren bail fired ("nothing to farm here") = FAIL.
+            final int h = bot.farmHarvestedCount();
+            final int p = bot.farmPlantedCount();
+            final int t = bot.farmTilledCount();
+            if (h == 8 && t == 2 && p >= 1) {
+                finishFarm("PASS", "harvested " + h + ", planted " + p + ", tilled " + t, "PASS");
+                return;
+            }
             if (bot.mode() == AllyBotEntity.Mode.STAY) {
-                final int h = bot.farmHarvestedCount();
-                final int p = bot.farmPlantedCount();
-                final int t = bot.farmTilledCount();
-                if (h == 8 && t == 2 && p >= 1) {
-                    finishFarm("PASS", "harvested " + h + ", planted " + p + ", tilled " + t, "PASS");
-                } else {
-                    finishFarm("FAIL", "harvested " + h + "/8, planted " + p + " (want >=1), tilled "
-                            + t + "/2 (ended in phase " + lastFarmPhase + ")", "FAIL");
-                }
+                finishFarm("FAIL", "farmer bailed (barren verdict) with harvested " + h + "/8, planted "
+                        + p + ", tilled " + t + "/2 (phase " + lastFarmPhase + ")", "FAIL");
                 return;
             }
             if (ticks >= budgetTicks) {
