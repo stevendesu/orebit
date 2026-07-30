@@ -249,6 +249,24 @@ The bot knows wheat, carrots, potatoes, and beetroots so far. Harvesting only ev
 FULLY-GROWN crops (immature plants are left alone — and stay protected by
 `mining.protectedBlocks` like the rest of your farm).
 
+### Combat — does the bot defend itself?
+
+```properties
+combat.defend     = true
+combat.scanRadius = 16
+```
+
+Whenever a mob decides the bot is its target, the bot pauses whatever it was doing, fights back,
+and then picks its task right back up where it left off. It fights smart per mob: creepers get
+knocked back out of fuse range with sprint hits (never letting them finish their hiss),
+skeletons get rushed down between arrows, and everything else gets timed, full-strength sword
+swings (it picks the best weapon it carries — swords over axes, better tiers first).
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `combat.defend` | `true` | Fight back when targeted. Note: with the default invulnerable bot (`survival.takesDamage=false`) mobs never even target it, so this only matters for mortal bots. Set `false` for a strict pacifist. |
+| `combat.scanRadius` | `16` | How far (blocks, 8–32) the bot checks each tick for mobs that are targeting it. Mobs hunting it from farther away are engaged as they close in. |
+
 ## Example configurations
 
 **A pacifist guide** — never digs, never builds, just finds its way through what's already

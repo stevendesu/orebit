@@ -356,4 +356,21 @@ public final class ConfigKeys {
      * limits the pass to harvesting + replanting + planting existing farmland.
      */
     public static final String FARMING_TILL = "farming.till";
+
+    // ---- combat: self-defense against mobs --------------------------------------------------------
+    /**
+     * {@code boolean} — the bot defends itself: while any mob has DECLARED the bot its target
+     * ({@code Mob#getTarget() == bot}), a pre-dispatch combat interrupt consumes the tick (per-mob
+     * strategies: creeper knockback discipline, skeleton rush, melee default), pausing the current
+     * activity in place and resuming it when the threat is gone. <b>Default {@code true}</b> —
+     * naturally quiescent while {@code survival.takesDamage=false} (mobs never target an
+     * abilities-invulnerable player). {@code false} = never fight back.
+     */
+    public static final String COMBAT_DEFEND = "combat.defend";
+    /**
+     * {@code int} (blocks, {@code 8..32}) — half-extent of the per-tick threat scan box (mobs
+     * targeting the bot beyond it are engaged when they close in — they are pathing to the bot by
+     * definition). <b>Default {@code 16}</b>.
+     */
+    public static final String COMBAT_SCAN_RADIUS = "combat.scanRadius";
 }

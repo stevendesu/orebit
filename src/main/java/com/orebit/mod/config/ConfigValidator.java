@@ -124,7 +124,11 @@ public final class ConfigValidator {
                 // farming: the survey box half-extent (4 = a garden, 48 = a large field); till is a
                 // plain feature switch.
                 intClamped(props, ConfigKeys.FARMING_WORK_RADIUS, d.workRadius(), 4, 48),
-                bool(props, ConfigKeys.FARMING_TILL, d.till()));
+                bool(props, ConfigKeys.FARMING_TILL, d.till()),
+                // combat: the scan box floor covers melee threats; the ceiling bounds the per-tick
+                // entity query (a mob targeting from farther simply engages when it closes in).
+                bool(props, ConfigKeys.COMBAT_DEFEND, d.defend()),
+                intClamped(props, ConfigKeys.COMBAT_SCAN_RADIUS, d.scanRadius(), 8, 32));
     }
 
     // ---- per-type parse + clamp (each warns through the sink and never throws) ----------------------

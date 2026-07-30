@@ -373,6 +373,14 @@ public final class ConfigLoader {
             line(w, "# A pass may TILL new hydrated ground (hoe + seeds required) — i.e. expand the farm, not just");
             line(w, "# tend it. false = harvest/replant/plant existing farmland only.");
             kv(w, ConfigKeys.FARMING_TILL, d.till());
+            line(w, "");
+
+            line(w, "# --- combat: self-defense against mobs ---");
+            line(w, "# Fight back while any mob is targeting the bot (pauses the current activity, resumes after).");
+            line(w, "# Only matters with survival.takesDamage=true — mobs never target an invulnerable bot.");
+            kv(w, ConfigKeys.COMBAT_DEFEND, d.defend());
+            line(w, "# Half-extent (blocks, 8-32) of the per-tick threat scan box.");
+            kv(w, ConfigKeys.COMBAT_SCAN_RADIUS, d.scanRadius());
         } catch (IOException e) {
             OrebitCommon.LOGGER.warn("[Orebit] could not write default config {} — using defaults in memory",
                     file, e);
