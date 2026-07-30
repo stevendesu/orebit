@@ -120,7 +120,11 @@ public final class ConfigValidator {
                 // resource layer's live-scan sweep volume (a wider radius would silently find nothing).
                 bool(props, ConfigKeys.CRAFTING_PLACE_TABLE, d.placeTable()),
                 bool(props, ConfigKeys.CRAFTING_RECLAIM_TABLE, d.reclaimTable()),
-                intClamped(props, ConfigKeys.CRAFTING_TABLE_SEARCH_RADIUS, d.tableSearchRadius(), 0, 48));
+                intClamped(props, ConfigKeys.CRAFTING_TABLE_SEARCH_RADIUS, d.tableSearchRadius(), 0, 48),
+                // farming: the survey box half-extent (4 = a garden, 48 = a large field); till is a
+                // plain feature switch.
+                intClamped(props, ConfigKeys.FARMING_WORK_RADIUS, d.workRadius(), 4, 48),
+                bool(props, ConfigKeys.FARMING_TILL, d.till()));
     }
 
     // ---- per-type parse + clamp (each warns through the sink and never throws) ----------------------

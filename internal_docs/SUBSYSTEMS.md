@@ -215,10 +215,22 @@ trace`/`rtrace` one-shots. Behavior lives on components it constructs and ticks:
   index-order slot assignment, storage slots 0-35 only) + `CraftAssignment.execute` (vanilla
   matches/assemble/remainders through the `platform/CraftingOps` seam — 10 overlay flavors,
   anchored on the byte-stable `MinecraftServer#getRecipeManager`).
+- **`BotFarmer`** — the `/bot farm` machine (DESIGN-bot-abilities.md §4): one tending PASS —
+  `FarmPhase {SURVEY, WORK, SWEEPUP}` over `farming.workRadius` around the issue cell. Harvests
+  mature crops (`BotMining.requestHarvest`, the crop-side protected waiver), replants/plants bare
+  farmland, tills hydrated ground with a carried hoe (`farming.till`; the EXACT vanilla water
+  rule — any water fluid in the 9×9×2 Chebyshev-4 box via the `platform/FluidRead` seam), all
+  through the REAL vanilla use path (`platform/ItemUse.useOnTop` → `ItemStack#useOn`) and
+  VERIFIED by re-reading the world (never the drifting InteractionResult). SWEEPUP collects the
+  pass's own drops by item lifecycle (yield + replant seeds ride vanilla's pickup delay) before
+  the final re-survey ends the pass. Crop facts = `farming/CropKinds` Strategy classes
+  (wheat/carrots/potatoes/beetroots v1; age read generically off the `age` property; kinds baked
+  at SERVER_STARTED). Seeds are EXCLUDED from bridging (`consumeOnePlaceable`/premium skip
+  `CropKinds.isSeedItem`).
 - **`BotMining`** — the per-tick timed-break actuator: callers `request(pos)` every tick; equips
   fastest/goal tool, accumulates vanilla `getDestroyProgress`, crack overlay, real survival break
   (drops/XP/wear), `Config.mayBreak` backstop (waived only for `requestReclaim` of a bot-placed
-  crafting table); `busy()` gates forward motion.
+  crafting table and `requestHarvest` of a known MATURE crop); `busy()` gates forward motion.
 - **`BotManager`** — static owner-UUID→bot registry: production spawn (deterministic UUID,
   `orebit-bots.properties` orphan adoption, `BotSpawn.place`, revive, forced SURVIVAL, cross-dimension
   teleport-back), remove on disconnect. `BotPositioning` = safe-spot/face helpers. `Debug` = the two
@@ -261,9 +273,10 @@ arms it; each writes an `orebit-<x>-result.properties` + traces, then halts the 
 
 ## commands/ — the /bot surface
 `OrebitCommands.register` builds the Brigadier `/bot` root at the `PlatformEvents.onRegisterCommands`
-seam; each subcommand is a stateless `BotCommand` Strategy. Present (**18**): Spawn, Follow, Stay,
+seam; each subcommand is a stateless `BotCommand` Strategy. Present (**19**): Spawn, Follow, Stay,
 Come, Goto, Mine, Find, Gather, **Craft** (`/bot craft <item> [count]` — result names tab-completed
-from `crafting/RecipeIndex`; see `BotCrafter`), **Drop** (`/bot drop <all|resources|tools|trash|name>` — tosses
+from `crafting/RecipeIndex`; see `BotCrafter`), **Farm** (`/bot farm` — one tending pass; see
+`BotFarmer`), **Drop** (`/bot drop <all|resources|tools|trash|name>` — tosses
 matching inventory via `BotInventory.dropMatching` + the `ItemClasses` taxonomy), **Report** (`/bot
 report` — the resource-compass abundance table: near/mid/far player-centered box sums + true-global,
 from `ResourcePyramid`), **Stats** (`/bot stats` — the NAVSTATS current + last-journey tables), Here,
@@ -280,8 +293,9 @@ Trace, RegionTrace (`/bot rtrace`), Probe, Config, Debug. The `ChatCommandParser
 `warmup*`, the async trio, `chunkBuildsPerTick`/`chunkBuildBudgetMs`, `navReadyRadiusChunks`/
 `navReadyTimeoutTicks`, `hpaFlushBudgetMs`, `regionShardLoadBudgetMs`), `hpa.*`
 (`persistIntervalTicks`, `persistFlushBudgetMs`, `lazyLoad`, `residentLeafCap`), **`doors.*`**
-(`doors.toggle`, default true → `BotCaps.mayToggleDoors`), and **`crafting.*`**
-(`placeTable`/`reclaimTable`/`tableSearchRadius` — executor-read by `BotCrafter`, fully hot).
+(`doors.toggle`, default true → `BotCaps.mayToggleDoors`), **`crafting.*`**
+(`placeTable`/`reclaimTable`/`tableSearchRadius`), and **`farming.*`**
+(`workRadius`/`till`) — the ability namespaces are executor-read and fully hot.
 `toBotCaps()` folds knobs into the
 pathfinder's `BotCaps`; `mayBreak()` = executor-side break-policy backstop; `conjuredBlockState()`.
 `ConfigLoader.load` reads `config/orebit.properties` at SERVER_STARTED (writes commented defaults

@@ -365,6 +365,14 @@ public final class ConfigLoader {
             line(w, "# How far (blocks, 0-48) to look for an existing crafting table before placing one. 0 disables");
             line(w, "# the search. Only loaded chunks are seen.");
             kv(w, ConfigKeys.CRAFTING_TABLE_SEARCH_RADIUS, d.tableSearchRadius());
+            line(w, "");
+
+            line(w, "# --- farming: how /bot farm tends the fields ---");
+            line(w, "# Horizontal half-extent (blocks, 4-48) of the box a farm pass surveys around the command spot.");
+            kv(w, ConfigKeys.FARMING_WORK_RADIUS, d.workRadius());
+            line(w, "# A pass may TILL new hydrated ground (hoe + seeds required) — i.e. expand the farm, not just");
+            line(w, "# tend it. false = harvest/replant/plant existing farmland only.");
+            kv(w, ConfigKeys.FARMING_TILL, d.till());
         } catch (IOException e) {
             OrebitCommon.LOGGER.warn("[Orebit] could not write default config {} — using defaults in memory",
                     file, e);

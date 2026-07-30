@@ -227,6 +227,28 @@ does when a big recipe needs a table and there isn't one around.
 | `crafting.reclaimTable` | `true` | After using a temporary table it placed, the bot breaks it and takes it back. This is the one exception to `mining.protectedBlocks` (which normally keeps the bot's hands off crafting tables): it applies only to the exact table the bot just placed. Set `false` to leave placed tables standing (the bot tells you where). |
 | `crafting.tableSearchRadius` | `16` | How far (blocks, up to 48) the bot looks for an existing crafting table before considering placing one. `0` skips the search entirely. Only loaded chunks are searched. |
 
+### Farming — how `/bot farm` tends the fields
+
+```properties
+farming.workRadius = 16
+farming.till       = true
+```
+
+`/bot farm` runs one tending pass around wherever you sent the bot: it harvests every
+fully-grown crop nearby, picks up the drops, replants what it harvested, plants any bare
+farmland it has seeds for, and — with a hoe in its inventory — can till fresh ground next to
+water and plant that too. When nothing is left to do it reports the tally
+("harvested 8, planted 9, tilled 2") and waits.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `farming.workRadius` | `16` | How far (blocks, 4–48) around the command spot the pass looks for work. |
+| `farming.till` | `true` | Whether the pass may create NEW farmland (hoe + seeds + water nearby required) — i.e. expand your farm, not just tend it. Set `false` to keep the bot strictly to existing farmland. Tilling only happens where the ground would actually stay hydrated (the same water rule the game uses). |
+
+The bot knows wheat, carrots, potatoes, and beetroots so far. Harvesting only ever touches
+FULLY-GROWN crops (immature plants are left alone — and stay protected by
+`mining.protectedBlocks` like the rest of your farm).
+
 ## Example configurations
 
 **A pacifist guide** — never digs, never builds, just finds its way through what's already

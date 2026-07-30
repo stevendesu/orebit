@@ -75,6 +75,8 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private final BotGatherer gatherer;
     /** The {@code /bot craft} craft-from-inventory state machine. */
     private final BotCrafter crafter;
+    /** The {@code /bot farm} tend-the-farm state machine. */
+    private final BotFarmer farmer;
     /** The cross-dimension FOLLOW/COME portal-seek/ENTER component. */
     private final BotPortalFollower portalFollower;
 
@@ -147,9 +149,10 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      *       {@link BotGatherer}.
      *   <li>{@link Mode#CRAFT} — the craft-from-inventory loop ({@code /bot craft}); see
      *       {@link BotCrafter}.
+     *   <li>{@link Mode#FARM} — the tend-the-farm pass ({@code /bot farm}); see {@link BotFarmer}.
      * </ul>
      */
-    public enum Mode { FOLLOW, STAY, COME, GATHER, CRAFT }
+    public enum Mode { FOLLOW, STAY, COME, GATHER, CRAFT, FARM }
 
     private Mode mode = Mode.FOLLOW;
     private BlockPos comeTarget;    // fixed summon cell (owner's feet block at /bot come time)
@@ -181,6 +184,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.navigator = new BotNavigator(this);
         this.gatherer = new BotGatherer(this);
         this.crafter = new BotCrafter(this);
+        this.farmer = new BotFarmer(this);
         this.portalFollower = new BotPortalFollower(this);
     }
 
@@ -234,6 +238,26 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     /** Result items produced toward the current craft target. */
     int craftedCount() {
         return crafter.craftedCount();
+    }
+
+    /** Current {@link BotFarmer} phase name for the harness ({@code "IDLE"} when not farming). */
+    String farmPhaseName() {
+        return farmer.phaseName();
+    }
+
+    /** Mature crops harvested this farm pass. */
+    int farmHarvestedCount() {
+        return farmer.harvestedCount();
+    }
+
+    /** Seeds planted (crop verified) this farm pass. */
+    int farmPlantedCount() {
+        return farmer.plantedCount();
+    }
+
+    /** Cells tilled to farmland (verified) this farm pass. */
+    int farmTilledCount() {
+        return farmer.tilledCount();
     }
 
     public void lookAtPlayer(Player player) {
@@ -337,6 +361,16 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         crafter.startCraft(item, count);
     }
 
+    /** {@code /bot farm}: switch to {@link Mode#FARM} and start a {@link BotFarmer} tending pass
+     *  anchored at the bot's current cell. */
+    public void startFarm() {
+        this.mode = Mode.FARM;
+        this.comeTarget = null;
+        navigator.clearPlan();
+        portalFollower.resetPortalSeek();
+        farmer.startFarm();
+    }
+
     @Override
     public void tick() {
         // Tick the bot as a real player: forge its movement inputs, then run the FULL vanilla player tick.
@@ -404,6 +438,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             case STAY -> holdPosition();
             case GATHER -> gatherer.gatherLoopTick();
             case CRAFT -> crafter.craftLoopTick();
+            case FARM -> farmer.farmLoopTick();
             case COME -> {
                 // Summon to a fixed cell; once there, settle into STAY (distinct from FOLLOW, which
                 // would keep chasing). comeTarget can't be null in COME, but guard defensively.

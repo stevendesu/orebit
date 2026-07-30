@@ -533,7 +533,18 @@ final class BotNavigator {
         // route, change its mind, take another, go back"). [Coarse S5 note: a >LEVEL0 skeleton may need region
         // refinement of its FAR, unresolved tail as the bot approaches — never the committed near end.]
         boolean newRegionGoal = pathPlan == null || !pathPlan.sameGoalRegion(goalFloor)
-                || goalTolXZ != planGoalTolXZ || goalTolY != planGoalTolY;
+                || goalTolXZ != planGoalTolXZ || goalTolY != planGoalTolY
+                // EXACT-GOAL MOVED-CELL rebuild (2026-07-29, the farm-sweep freeze): a plan pins its
+                // construction-time goal cell, and at EXACT tolerance a COMPLETE plan has no other
+                // rebuild trigger when the live goal cell moves WITHIN the same region (the s52b
+                // escalation rides a tolerance CHANGE, which an already-exact caller never produces;
+                // refreshWindow's `consumed` requires !isComplete). Live repro: the bot's own
+                // collision nudged a chased item drop one cell over → the stale COMPLETE plan held
+                // the bot one block short forever. A complete exact plan whose stored goal cell
+                // differs from the live goal cell is stale — rebuild for the real cell. Non-exact
+                // callers (follow/come/mine) keep the escalation path byte-identical.
+                || (goalTolXZ == 0 && goalTolY == 0 && pathPlan.isComplete()
+                        && !goalFloor.equals(pathPlan.goalFloor()));
         // A BLOCKED status does NOT force a full rebuild: the cascade (HPA-CASCADE.md §6) repairs a blocked hop
         // in place — escalating up its level stack in repairStep — without discarding the whole nested plan. A
         // full rebuild fires only on no-plan or a new goal region.

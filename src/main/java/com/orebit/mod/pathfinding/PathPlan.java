@@ -1447,6 +1447,13 @@ public final class PathPlan {
                 && RegionAddress.regionZ(goal.getZ(), 0) == goalRZ;
     }
 
+    /** The goal FLOOR cell this plan was built for (fixed at construction — the driver compares it
+     *  against the LIVE goal cell for the exact-tolerance moved-goal rebuild trigger; see
+     *  {@code BotNavigator.driveToward}'s newRegionGoal condition). */
+    public BlockPos goalFloor() {
+        return goalFloor;
+    }
+
     /**
      * Recompute the CURRENT window's block plan from where the bot is now, WITHOUT touching the committed
      * skeleton — the block-level refresh the driver runs when its block path is consumed (advance toward the
