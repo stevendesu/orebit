@@ -163,7 +163,7 @@ public final class DiagonalParkour implements Movement {
         // Takeoff head-clearance (source y+3) — direction-independent, proven once (cardinal Parkour's
         // exact check; no break folding).
         int srcFlags = ctx.flagsAt(x, y, z);
-        if (!ctx.headroomProves(srcFlags, y, MovementContext.HEADROOM_JUMP)) {
+        if (!ctx.headroomProves(srcFlags, x, y, z, MovementContext.HEADROOM_JUMP)) {
             int p3 = ctx.packedAt(x, y + 3, z);
             if (p3 == MovementContext.UNBUILT
                     || !ctx.passable(ctx.descriptorOf(x, y + 3, z, p3))) {
@@ -243,7 +243,7 @@ public final class DiagonalParkour implements Movement {
                 // raised ledge (a standable y+1) or otherwise blocked body is climbed or stops the scan —
                 // never flown over — so a non-clear obstacle keeps the v1 terminate even when triggering.
                 int flags = MovementContext.flagsOf(p);
-                boolean clear = ctx.headroomProves(flags, y, MovementContext.HEADROOM_WALK);
+                boolean clear = ctx.headroomProves(flags, cx, y, cz, MovementContext.HEADROOM_WALK);
                 if (!clear) {
                     int p1 = ctx.packedAt(cx, y + 1, cz);
                     int p2 = ctx.packedAt(cx, y + 2, cz);
