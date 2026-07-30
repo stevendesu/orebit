@@ -33,16 +33,26 @@ Everything is landed and verified on all three branches; the verify worktree/bra
   small-gap deep-drop arc → landed one cell past (course cards falld2g1/falld3g1 added; A/B 45→50
   PASS, falling family now lands dead-centre); (3) `9cc2eb3` DiagonalParkour's envelope
   refused the takeoff face-spill its gate can't actually prevent under axis-dominant approach
-  momentum (the ratified lip-crossing admission, applied). REMAINING (NOT fixed — parked-arc
-  territory): a chained-step MOMENTUM CORNER-SLIP — a −z Descend into a +x Descend step-off
-  carries ~0.2 b/t of cross velocity, the bot grounds on the diagonally adjacent cell
-  ((68,149,245) vs planned column (68,*,246)) and the envelope CORRECTLY fail→HOLDs (a real
-  off-plan settle, not a false positive). Candidate fixes all sit in owner-parked design space:
-  a velocity-alignment gate before orthogonal step-offs (the DiagonalParkour-gate concept
-  generalized), the brake-to-settle arc, momentum-preserving path preference, or off-plan
-  replan (banned by the no-recovery rule). Also observed: ambient plan-impacted refreshes
-  (jungle leaf decay) RESET a held runner, so fail→HOLD leaks into retry in live worlds —
-  worth a ruling on whether that masking is acceptable.
+  momentum (the ratified lip-crossing admission, applied). (4) The chained-step MOMENTUM
+  CORNER-SLIP — a −z Descend into a +x Descend step-off carries ~0.2 b/t of cross velocity and
+  grounds the bot on the diagonally adjacent cell, a REAL off-plan settle the envelope rightly
+  fail→HOLDs — is FIXED by the owner-ratified VELOCITY-ALIGNMENT GATE
+  (`SteerControl.stepOffGate`, wired into Descend's STEP phase): the step-off may drive only
+  when the friction-horizon prediction (|crossOffset + vCross/(1−slip·0.91)| ≤ 0.2, the support
+  block's REAL slipperiness — ×2.2 stone, ×9+ ice) keeps the bot inside the one-wide lane;
+  until then a pure cross servo arrests the carry. Verified: gate unit tests (the repro numbers
+  + the ice horizon), suite green, FARM PASS 74t, ice-course A/B (icedescend PASS both sides;
+  the icediag FAIL is byte-identical WITHOUT the gate — pre-existing diagonal-on-ice arrival,
+  the P5/hug class), and the flagship run cleared the corner-slip zone with ZERO envelope
+  failures, best-distance 203→166.
+  **NEXT BLOCKER (#5, PLANNER side — the region/window seam, owner's call):** at (24,106,167)
+  with window target (24,104,168) the block search returns FOUND-0wp with ZERO nodes expanded,
+  dozens of times per second, forever — the start floor is within the ±2 goal tolerance of the
+  window target, the empty plan is consumed as settled, and the WINDOW NEVER SLIDES forward.
+  An empty-complete-plan × forward-slide livelock at a vertical (dy=2) tolerance edge.
+  Also observed: ambient plan-impacted refreshes RESET a held runner, so fail→HOLD leaks into
+  retry in live worlds (owner 2026-07-30: rare enough to deprioritise; the ambience is VINE
+  GROWTH — vines random-tick spread; leaves only decay after their logs are removed).
 - Observation for the owner: the autotest conjures COBBLESTONE bridges while the default
   protected list contains cobblestone — the planner/route executors can therefore never re-break
   the bot's own placed bridge blocks (pathing-only consequence; deliberate hands unaffected).
