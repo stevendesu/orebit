@@ -1,0 +1,99 @@
+Known Bugs:
+===========
+1.21.11 bot doesn't take fall damage. Expected broken somewhere between 1.21.2 and 1.21.8
+Door hinges confuse the follower - should be a minor polish pass to move around the hinge
+Regions marked dirty DURING persist flush are queued for NEXT TICK instead of next persist - leading slow persists to last forever
+
+
+Movement Pathologies:
+=====================
+Bot sometimes gets stuck. If we find any deterministic way to reproduce, we will resolve.
+
+
+Other ideas:
+============
+Don't emit Parkour if Descend is possible (need to confirm admissibility)
+Add cost to Fall/Descend/drop-Parkour relative to height that has to be recovered (similar to place penalized for mine-out)
+String-pulling algorithm to straighten wiggly paths?
+Prefer momentum-preserving paths? (strings of Traverse over Ascend+Descend)
+
+
+Region Pathology:
+=================
+"collapsed MIXED-compatibility" -- regions with >62 fragments intersecting their faces collapse to "spongey cheese" and you just mine through uniform density. Need to add a bitmap for which faces have a walk-through path (don't need to know the exact path)
+
+
+New moves:
+==========
+3b. Drop into safe passable blocks (water / cobweb / powdered snow) - requires solid further down, just reset fall height
+4b. Trapdoors
+5. Clutch falls (water / snow / boat / etc)
+6. Trapdoor crawl
+7. Wall Clutch
+8. Honey slide
+
+Others (potentially?):
+Parkour into air (to fall -- e.g. to water)
+
+
+General cleanup:
+================
+Any move-related flags (e.g. -Dorebit.ground.drive)
+There's a dead "anyDoor" gate -- Claude keeps trying to add "anyBubble" as well. Need to tell it this is stupid
+The majority of logs / traces
+Brake-to-settle on arrival: once positionally "arrived", zero MOMENTUM (active braking) instead of just dropping inputs -- so a bot arriving on ice/with momentum doesn't coast off a cliff. Deferred from the arrival-check redesign (which now gates arrival on grounded && !damaging && !midCommittedMove). Separate arc: changes arrival behavior for every move, needs tuning + ice-trial verification.
+Precise-goto arrival radius: ARRIVE_DIST=2.5 is fine for "come to me" (follow) but too loose for an exact goto -- the bot "arrives" up to 2.5 short, which across a gap means it stops on the wrong side (e.g. a goto placed exactly at a WalkOff landing: bot arrives during the grounded Traverse-onto-the-slow-block approach, 2.5 short, never crosses). Consider a tighter radius (or exact-cell arrival) for precise gotos vs the loose follow radius. Clusters with brake-to-settle as "arrival semantics" work.
+
+
+Optimization idea:
+==================
+Along with our current depth nibbles ("same" up, "air" down) we could add a second byte of "same +X" and "same +Z". Used for faster cuboid computation
+Full reverse Dijkstra may be overkill... start with forward-A*, then just walk the skeleton backwards taking lowest-cost connection. Then expand orthogonally to the 8-ring around each cell
+
+Faster cuboids + faster Dijkstra = faster flat cost on all searches (currently ~600us, of which only ~6us is forward-A*. Could target 60us or so ideally)
+Need to profile our flat cost to see where else we spend our time. My understanding is it's mostly reverse-Dijkstra + cuboids
+
+Flood fill is faster than A*... can use it to prove no cheap path exists to a goal (flood "cheap" instead of "identical")
+
+At the block level, perhaps a quadratic distance term when you're outside of the skeleton to discourage looking in the wrong direction
+
+At the block level, perhaps a guard at sea level (if the goal is Y > 63, punish exploring Y < 62) to avoid pathological floods into the ocean
+
+
+New features:
+=============
+Crafting (2x2 anywhere, 3x3 near a crafting table... maybe conditionally place-then-break a crafting table if needed) (should have crafting.* config variables similar to mining.* and placement.*)
+Farming
+Fighting
+Work trees (gather wood -> make crafting table -> make pickaxe -> ...)
+Building (Litematica)
+LLM integration
+
+
+Verify:
+=======
+Can we `/bot gather stone`? Or is stone still missing from the columns? (needed to craft stone pickaxe)
+RegionMetadata and fragment map are persisted to disk and loaded when needed (ensure we aren't creating one massive file but instead have chunked files to only load relevant regions... otherwise full-world HPA* could use all of RAM)
+Climb movement can go up ladders/vines... can we go DOWN them? (may be part of Climb, may be part of Fall)
+Does Climb/Fall work on scaffolding? May need a new move for it
+Hazard-aware directional servo should have fixed "lipdown" test latency... verify if it is still regressed
+
+
+Gilded Lily:
+============
+Elytra flight (requires flight control and some way to predict fly-able paths)
+Ender pearls (simpler parabolic arc)
+Vehicles (minecart, boat, horse/donkey/camel, strider)
+Thread-pulling? What's the effort to walk backwards through a finalized path and look for more direct routes than what was found?
+    Should be rare, but I can imagine a few scenarios since we use a non-admissible greedy A*
+
+
+Documentation:
+==============
+Need to ensure we document the servo / auto-pilot mechanism (hazard avoidance, momentum retention when next waypoint is colinear, etc)
+Once crafting/fighting/building are added, need documentation
+Movement docs should describe Parkour jump limits (conservative)
+Once new movements are added, need to ensure movement docs list all movements
+Should do a correctness pass over all docs
+If we add performance optimizations (above) we should include them in optimizations docs
+
