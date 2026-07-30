@@ -73,6 +73,11 @@ final class BotGatherer {
     /** MINE: the ore currently being pursued — chosen from {@link #mineQueue} by the two-A* route-cost compare
      *  ({@link #selectMineTarget}), not simply the nearest. Null → re-select on the next MINE tick. */
     private BlockPos mineTarget;
+    /** MINE: the committed target is ESCALATED to an EXACT (0/0 goal tolerance) approach — set when its
+     *  sight line hit a PROTECTED/unbreakable block (owner 2026-07-29): the planner refuses protected
+     *  breaks, so an exact plan to the ore cell is a legal corridor from ANY other side (digging
+     *  breakable material as needed), and an exact-search give-up is PROOF the ore is sealed. */
+    private boolean mineTargetExact;
     /** COLLECT: the just-mined cell (now air) — kept to pop it from {@link #mineQueue} on finish. */
     private BlockPos collectCell;
     /** COLLECT: the actual dropped {@link ItemEntity} being chased (found by a one-shot scan around the
@@ -166,6 +171,7 @@ final class BotGatherer {
         this.mineQueue.clear();
         this.gatherBlacklist.clear();
         this.unreachableCells.clear();
+        this.mineTargetExact = false;
         this.scanWaitTicks = 0;
         bot.navigator().clearNavGaveUp();
         beginScanSweep();
@@ -371,34 +377,52 @@ final class BotGatherer {
                 // Request WITH the condition so BotMining equips the goal tool (its per-tick fastest-tool
                 // re-select would otherwise override the silk pick with a faster plain one).
                 bot.mining().request(cell, gatherToolCondition);
-            } else {
-                // Dig the eye→ore ray open, first blocking block per tick — each break strictly shortens the
-                // occlusion, so this terminates with a clear line and falls into the branch above.
-                gatherLastInvTotal = new BotInventory(bot).totalItemCount(); // occluder drops never count
-                final BlockState s = level.getBlockState(occluder);
-                if (ConfigLoader.config().mayBreak(s, s.getDestroySpeed(level, occluder))) {
-                    bot.mining().request(occluder);
-                } else { // protected/unbreakable in the sight line → not minable from here; drop the vein
-                    unreachableCells.add(cell.asLong());
-                    mineQueue.remove(cell);
-                    mineTarget = null;
-                    bot.navigator().clearPlan();
-                }
+                return;
             }
-        } else {
-            gatherLastInvTotal = new BotInventory(bot).totalItemCount(); // exclude approach pickups from Δ
-            // Tight MINE arrival so it tunnels ALL the way to a line-of-sight cell, not 3 blocks short.
-            boolean arrived = bot.navigator().driveToward(
-                    cell.getX() + 0.5, cell.getY() + 0.5, cell.getZ() + 0.5, cell,
-                    MINE_ARRIVE_DIST, MINE_ARRIVE_Y);
-            if (!arrived && bot.navigator().navGaveUp()) {
-                // can't reach it — blacklist + drop from the pool, re-select next tick
-                unreachableCells.add(cell.asLong());
-                mineQueue.remove(cell);
-                mineTarget = null;
-                bot.navigator().clearNavGaveUp();
+            // Dig the eye→ore ray open, first blocking block per tick — each break strictly shortens
+            // the occlusion, so this terminates with a clear line and falls into the branch above.
+            // (An occluder dig is a ROUTE break — clearing the way to the target — so it honors
+            // mining.protectedBlocks, unlike the deliberate target break itself.)
+            final BlockState s = level.getBlockState(occluder);
+            if (ConfigLoader.config().mayBreak(s, s.getDestroySpeed(level, occluder))) {
+                gatherLastInvTotal = new BotInventory(bot).totalItemCount(); // occluder drops never count
+                bot.mining().request(occluder);
+                return;
+            }
+            // PROTECTED/unbreakable sight line (owner 2026-07-29): do NOT drop the vein — the ore may
+            // be legally reachable from another side/angle. Escalate this target to an EXACT (0/0)
+            // approach and fall through to the drive below: the planner refuses protected breaks, so
+            // its exact plan — ending with the bot's floor ON the ore cell — is a legal corridor from
+            // whatever direction works (digging breakable material en route); standing on/over the ore
+            // gives a clear own-column sight line and the normal branch above mines it. If even the
+            // exact search gives up, the ore is PROVABLY sealed → the honest give-up below reports it.
+            if (!mineTargetExact) {
+                mineTargetExact = true;
                 bot.navigator().clearPlan();
             }
+        }
+        gatherLastInvTotal = new BotInventory(bot).totalItemCount(); // exclude approach pickups from Δ
+        // Tight MINE arrival so it tunnels ALL the way to a line-of-sight cell, not 3 blocks short;
+        // an ESCALATED target plans at exact goal tolerance (see mineTargetExact above).
+        boolean arrived = mineTargetExact
+                ? bot.navigator().driveToward(
+                        cell.getX() + 0.5, cell.getY() + 0.5, cell.getZ() + 0.5, cell,
+                        MINE_ARRIVE_DIST, MINE_ARRIVE_Y, 0, 0)
+                : bot.navigator().driveToward(
+                        cell.getX() + 0.5, cell.getY() + 0.5, cell.getZ() + 0.5, cell,
+                        MINE_ARRIVE_DIST, MINE_ARRIVE_Y);
+        if (!arrived && bot.navigator().navGaveUp()) {
+            // can't reach it — blacklist + drop from the pool, re-select next tick. An escalated
+            // give-up is the sealed-vein PROOF — say so instead of silently moving on.
+            if (mineTargetExact) {
+                bot.chat("I can't get to that " + gatherOutputName
+                        + " — it's sealed behind protected blocks.");
+            }
+            unreachableCells.add(cell.asLong());
+            mineQueue.remove(cell);
+            mineTarget = null;
+            bot.navigator().clearNavGaveUp();
+            bot.navigator().clearPlan();
         }
     }
 
@@ -411,6 +435,7 @@ final class BotGatherer {
      * Only TWO searches (owner-ratified — one-per-ore is untenable). {@code null} → the pool is worked out.
      */
     private void selectMineTarget(ServerLevel level) {
+        mineTargetExact = false; // a fresh selection starts at the normal approach tolerance
         mineQueue.removeIf(c -> level.getBlockState(c).isAir() || unreachableCells.contains(c.asLong()));
         if (mineQueue.isEmpty()) { mineTarget = null; return; }
         final double bx = bot.getX(), by = bot.getY(), bz = bot.getZ();
@@ -470,7 +495,10 @@ final class BotGatherer {
         // A PARTIAL committed cost is the truncated prefix (near zero) — score it +inf so a genuinely FOUND
         // challenger can rescue a commit whose search floods (same honesty rule as selectMineTarget).
         final float committed = (pt != null && !BlockPathfinder.lastWasPartial()) ? pt.cost() : Float.MAX_VALUE;
-        if (pc.cost() < committed) mineTarget = challenger; // proven cheaper → take it
+        if (pc.cost() < committed) { // proven cheaper → take it (fresh target, fresh tolerance)
+            mineTarget = challenger;
+            mineTargetExact = false;
+        }
     }
 
     /**

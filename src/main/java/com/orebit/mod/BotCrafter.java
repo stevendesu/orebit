@@ -302,7 +302,10 @@ final class BotCrafter {
         if (s.is(Blocks.CRAFTING_TABLE)) {
             if (withinReach(tablePos)) {
                 bot.setForward(0.0f);
-                bot.mining().requestReclaim(tablePos);
+                // A deliberate task break — mining.protectedBlocks is a PATHING policy and does
+                // not gate the hands (owner ruling; reclaiming our own temporary table is the
+                // canonical example).
+                bot.mining().request(tablePos);
             } else {
                 bot.navigator().driveToward(tablePos.getX() + 0.5, tablePos.getY() + 0.5,
                         tablePos.getZ() + 0.5, tablePos, CRAFT_ARRIVE_DIST, CRAFT_ARRIVE_Y);
