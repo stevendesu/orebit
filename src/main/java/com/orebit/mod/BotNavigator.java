@@ -1239,11 +1239,23 @@ final class BotNavigator {
 
         // Build the SEGMENT the move tracks: from the previous waypoint (or the window/plan start for the
         // first step — waypoints are start-exclusive) to the current target, plus a one-step look-ahead so
-        // the controller can ease momentum into a turn. The cursor is reused (no per-tick allocation) and
-        // converts to the feet-target frame the controller expects (block-centre xz, floor-cell-top y).
-        BlockPos segStart = (waypointIndex == 0)
-                ? (planStartFloor != null ? planStartFloor : floorOf(bot.blockPosition()))
-                : path.waypoint(waypointIndex - 1);
+        // the controller can ease momentum into a turn. The cursor is reused (no per-tick allocation).
+        //
+        // FRAME: every cell fed to the cursor is a FEET cell (path waypoints are the reconstruct's
+        // topY-aware feet). Step 0's start is the one cell that doesn't come from the path, so it must be
+        // LIFTED from its floor into the same frame (feetYForFloor — the identical lift plan() frames use).
+        // Feeding the raw start FLOOR here handed Climb.steer's Δy discriminator (ty − sy; the follower's
+        // only sy consumer) a mixed-frame segment whose −1 cancelled: a first-step climb-DOWN read as
+        // LATERAL, the lateral branch sneaks to hold height, and the vanilla sneak edge-guard pinned the
+        // bot on the lip of its own placed block at the head of a vine descent, forever (the flagship-GOTO
+        // freeze). Steps ≥ 1 were already feet-frame on both ends and never saw the bug.
+        final BlockPos segStart;
+        if (waypointIndex == 0) {
+            BlockPos sf = (planStartFloor != null ? planStartFloor : floorOf(bot.blockPosition()));
+            segStart = new BlockPos(sf.getX(), feetYForFloor(sf.getX(), sf.getY(), sf.getZ()), sf.getZ());
+        } else {
+            segStart = path.waypoint(waypointIndex - 1);
+        }
         BlockPos next = (waypointIndex + 1 < path.size()) ? path.waypoint(waypointIndex + 1) : null;
         cursor.set(segStart, wp, next);
         // Diagnostic snapshot of the executing step's segment cells (read by the parkour harness / Debug only).
@@ -1382,10 +1394,15 @@ final class BotNavigator {
 
     /**
      * Reusable {@link SteerView} the follower re-points at the current segment each tick — start → target,
-     * plus a one-step look-ahead. Converts floor-cell {@link BlockPos}es to the controller's feet-target
-     * world frame: block centre horizontally ({@code +0.5}), top face of the floor cell vertically
-     * ({@code +1.0}, the world Y a bot standing on that cell has its feet at). Mutable + reused, so no
-     * per-tick garbage; the MC {@link BlockPos} type stays on this side of the MC-free {@link SteerView} seam.
+     * plus a one-step look-ahead. Converts FEET-cell {@link BlockPos}es (path waypoints; the step-0 start
+     * is lifted into the same frame via {@code feetYForFloor}) to the controller's world frame: block
+     * centre horizontally ({@code +0.5}), plus {@code +1.0} vertically — a UNIFORM feet-cell-plus-one
+     * vertical frame. Controllers consume x/z absolutely but y only as segment DELTAS ({@code ty − sy},
+     * e.g. {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Climb}) or as the tuned absolutes
+     * the swim family's depth control was calibrated against; UNIFORMITY across the three cells is the
+     * contract (a mixed floor/feet feed is exactly the step-0 bug fixed at the call site). Mutable +
+     * reused, so no per-tick garbage; the MC {@link BlockPos} type stays on this side of the MC-free
+     * {@link SteerView} seam.
      */
     private static final class SegmentCursor implements SteerView {
         private double sx, sy, sz, tx, ty, tz, nx, ny, nz;
