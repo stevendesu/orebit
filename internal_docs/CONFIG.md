@@ -126,6 +126,13 @@ start. Out-of-range or unparseable individual values are clamped/defaulted with 
 | `farming.workRadius` | int `4..48` | `16` | Horizontal half-extent (blocks) of the box a farm pass surveys around where the command was issued (vertical band fixed ±4). The pass harvests every mature known crop in the box (the crop-side `mining.protectedBlocks` waiver — `BotMining.requestHarvest`, mature crops only), replants/plants bare farmland from carried seeds, sweeps up its own drops (item-lifecycle, no timers), and re-surveys until nothing actionable remains. Executor-read (`BotFarmer`), fully hot. | `farming.workRadius=8` |
 | `farming.till` | boolean | `true` | The pass may TILL new ground (grass/dirt/dirt path, air above, water in the vanilla 9×9×2 hydration box — Chebyshev 4 at the cell's Y and Y+1, waterlogged counts) when the bot carries a hoe AND seeds — i.e. it may EXPAND the farm. `false` = tend existing farmland only. Tilling/planting run the REAL vanilla use path (`ItemStack#useOn` — durability, sounds, its own gates) and are verified by re-reading the block. | `farming.till=false` |
 
+### `combat.*` — does the bot defend itself?
+
+| Key | Type / range | Default | Meaning | Example |
+| --- | --- | --- | --- | --- |
+| `combat.defend` | boolean | `true` | While any mob has DECLARED the bot its target (`Mob#getTarget() == bot` — the mob's own state, never a proximity heuristic), a pre-dispatch combat interrupt consumes the tick: the current activity pauses in place and resumes when the threat is gone. Per-mob strategies: creeper knockback discipline (standoff ≥4 while recharging, full-charge sprint hits, disengage past the 7-block keep-swelling bound), skeleton rush, melee default — all constants source-verified. Naturally QUIESCENT while `survival.takesDamage=false` (mobs never target an abilities-invulnerable player). | `combat.defend=false` |
+| `combat.scanRadius` | int `8..32` | `16` | Half-extent (blocks) of the per-tick threat scan box. A mob targeting from farther is engaged when it closes in (it is pathing to the bot by definition). | `combat.scanRadius=24` |
+
 ## Mapping to `BotCaps`
 
 `Config.toBotCaps()` folds the placement / mining / pathing knobs into the capability gate the block-tier A\*
@@ -170,9 +177,9 @@ surcharge), so mortality is a move-generation fact too.
   or resize the pool (the reload does drain the pool before rebaking the shared cost tables — see
   `internal_docs/DESIGN-background-pathfinding.md`). `pathing.asyncSearchBudgetMs` is read per search, so a reload
   does change it live while async is already on — but toggling async itself is restart-only.
-- **`crafting.*` / `farming.*` are fully hot:** the ability keys are executor-read
-  (`BotCrafter`/`BotFarmer`) per run/phase, so a `/bot config reload` applies to the next
-  `/bot craft` / `/bot farm`. The reload also re-bakes the `/bot craft` RECIPE INDEX
+- **`crafting.*` / `farming.*` / `combat.*` are fully hot:** the ability keys are executor-read
+  (`BotCrafter`/`BotFarmer`/`BotFighter`) per run/phase/tick, so a `/bot config reload` applies to
+  the next `/bot craft` / `/bot farm` / threat. The reload also re-bakes the `/bot craft` RECIPE INDEX
   (`RecipeIndex.bake`) as a courtesy, so a datapack `/reload`'s recipe changes are picked up
   without a server restart (the index otherwise bakes once at `SERVER_STARTED`).
 - **When it takes effect on the bot:** the follower reads the live `ConfigLoader` cache **per replan**
@@ -209,6 +216,8 @@ fix, and never failing the load:
 - `crafting.tableSearchRadius` clamped to `0..48` (`0` disables the search; the ceiling matches the live-scan
   sweep volume).
 - `farming.workRadius` clamped to `4..48` (a garden to a large field).
+- `combat.scanRadius` clamped to `8..32` (the floor covers melee threats; the ceiling bounds the
+  per-tick entity query).
 - Booleans default to their `Config.DEFAULT` value on anything that isn't exactly `true`/`false`.
 - `placement.conjuredBlock` falls back to `minecraft:cobblestone` if it doesn't resolve to a real block on the
   running version.

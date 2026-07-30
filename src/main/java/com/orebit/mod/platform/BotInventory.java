@@ -481,6 +481,45 @@ public final class BotInventory {
     }
 
     /**
+     * Equip the best carried WEAPON into the main hand (the combat sibling of
+     * {@link #selectBestHotbarTool}, which ranks by DESTROY speed and would happily fight with a
+     * pickaxe): swords beat axes (higher DPS + sweep at equal tier — the 1.9 attack-speed facts),
+     * tier ranked by id prefix (netherite &gt; diamond &gt; iron &gt; copper &gt; stone &gt; golden
+     * &gt; wooden — pure id-string ranking via the {@link ItemLookup} seam, no version-drifting
+     * attribute reads). Returns {@code false} when no weapon is carried (bare fists still fight).
+     */
+    public boolean equipBestWeapon() {
+        int bestSlot = -1;
+        int bestScore = 0;
+        final int n = Math.min(36, inv.getContainerSize());
+        for (int i = 0; i < n; i++) {
+            ItemStack s = inv.getItem(i);
+            if (s.isEmpty()) continue;
+            final int score = weaponScore(ItemLookup.idOf(s.getItem()));
+            if (score > bestScore) { bestScore = score; bestSlot = i; }
+        }
+        if (bestSlot < 0) return false;
+        return equipSlot(bestSlot);
+    }
+
+    /** The weapon ranking (0 = not a weapon). Package-private for the unit test. */
+    static int weaponScore(String id) {
+        final boolean sword = id.endsWith("_sword");
+        final boolean axe = id.endsWith("_axe");
+        if (!sword && !axe) return 0;
+        final int kind = sword ? 100 : 50;
+        final String path = id.substring(id.indexOf(':') + 1);
+        int tier = 1; // unknown/modded material still beats bare hands
+        if (path.startsWith("netherite_")) tier = 7;
+        else if (path.startsWith("diamond_")) tier = 6;
+        else if (path.startsWith("iron_")) tier = 5;
+        else if (path.startsWith("copper_")) tier = 4;
+        else if (path.startsWith("stone_")) tier = 3;
+        else if (path.startsWith("golden_")) tier = 2;
+        return kind + tier;
+    }
+
+    /**
      * The first STORAGE slot (hotbar 0–8 + main 9–35; never worn armor) whose stack the
      * {@code filter} accepts, or {@code -1}. Cold — a per-action scan for the ability components
      * (find the hoe, find a seed), the item-side sibling of the Block-typed queries above.

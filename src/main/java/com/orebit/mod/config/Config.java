@@ -97,7 +97,10 @@ public record Config(
         int tableSearchRadius,
         // ---- farming ----
         int workRadius,
-        boolean till) {
+        boolean till,
+        // ---- combat ----
+        boolean defend,
+        int scanRadius) {
 
     /**
      * The all-defaults configuration — reproduces TODAY's hardcoded follower behaviour (break + place on,
@@ -161,8 +164,10 @@ public record Config(
             /* crafting   */ true, true, 16, // placeTable + reclaimTable ON (the place-then-reclaim
                                      // temporary-table affordance, DESIGN-bot-abilities.md §3.5);
                                      // tableSearchRadius 16 blocks (the proven Mindcraft radius).
-            /* farming    */ 16, true); // workRadius 16 = a comfortable field in one pass; till ON
+            /* farming    */ 16, true, // workRadius 16 = a comfortable field in one pass; till ON
                                      // (the pass may expand the farm onto hydrated ground).
+            /* combat     */ true, 16); // defend ON (quiescent while invulnerable — mobs never
+                                     // target an abilities-invulnerable player); scan box 16.
 
     /**
      * The capability gate the block-tier A* reads, derived from the placement / mining / pathing knobs

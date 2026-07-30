@@ -31,13 +31,40 @@ dirty) → `git merge core` into `mc-1.21` is blocked there. Until that lands:
 - 26-era in-game verify of `/bot craft` (runClient on main) still pending — headless coverage
   is mc-1.21-only (26 era has no harness).
 
-## NEXT — Farming (task in progress), then Fighting, then Building
+## DONE — Farming (SHIPPED)
 
-Farming plan (DESIGN-bot-abilities.md §4): `platform/ItemUse` overlay seam
-(ItemStack#useOn(UseOnContext), UP-face BlockHitResult — the server-guarded vanilla till/plant
-path; ctor drift to javap-pin), BotFarmer (Mode.FARM: harvest mature [age tables: wheat/
-carrot/potato 7, beetroot 3, wart 3, cocoa 2], replant, till near water [Chebyshev-4 box, same
-Y and Y+1], plant), per-crop Strategy classes, farming.* config, seed-exclusion fix in
-consumeOnePlaceable (softest-first would eat seeds), no-jump-on-farmland (trample =
-fallDistance > 0.5). Tests: pure-JVM crop tables + a FARM autotest/course with pre-grown
-crop states (growth is random-tick — never wait on it).
+- core `b9b24f4` feat(farming), merged → main `7baaafa`; verify branch `ae26a17` (FARM harness) +
+  `23a7fb6` (core merge).
+- `/bot farm`: BotFarmer (SURVEY/WORK/SWEEPUP), `farming/CropKinds` Strategy classes
+  (wheat/carrots/potatoes/beetroots), `platform/ItemUse` (version-STABLE src seam —
+  ItemStack#useOn, javap-pinned), `platform/FluidRead` (1.17 + 26 flavors — 26.x removed
+  FluidState#is), `BotMining.requestHarvest` (mature-crop protected waiver), seed exclusion in
+  bridging selection, `farming.*` config, BotInventory findSlotMatching/equipSlot.
+- **NAVIGATOR FIX shipped with it** (owner-review-worthy): `driveToward`'s `newRegionGoal` also
+  fires on (exact tolerance && plan COMPLETE && stored goal cell != live goal cell) — the
+  moved-goal freeze diagnosed live (bot nudges a chased drop one cell → frozen forever); also
+  latent in gather-COLLECT. Non-exact callers byte-identical. PathPlan gains `goalFloor()`.
+- Verified: 28+4 compile matrices green; suite 597 (only the pre-existing NavFlags failure);
+  all farm mechanics observed working in-world (8/8 harvest, 10 plants, 2 tills).
+
+## ⚠ KNOWN-BLOCKED e2e (re-verify after the follower arc lands)
+
+The COMMITTED mc-1.21 state's envelope increment uses a full-block footY test — any converted
+Traverse STARTING FROM a partial floor (farmland 15/16) trips fail→HOLD. A/B-verified
+pre-existing: the flagship GOTO autotest freezes at (55,177,256) wp0/47 on the UNMODIFIED
+committed branch too. The owner's in-flight follower-envelope arc (topY-aware fromFootY/toFootY)
+fixes it. After it lands on mc-1.21: cherry-pick `53fb13e`+`ae26a17`, merge core, then re-run:
+- `powershell scripts/run-autotest.ps1 -MasterWorld ../orebit-autotest-world/scripts/autotest-world-master/world` (GOTO, expect PASS)
+- `... -MasterWorld ../orebit-autotest-world/scripts/gather-issues-repro-master/world -Start 70,63,-68 -Farm -BudgetTicks 6000` (FARM, expect PASS; then re-widen the template's farming.workRadius=5 pin)
+- the two CRAFT scenarios (already PASS on the committed base).
+
+## NEXT — Fighting, then Building
+
+Fighting plan (DESIGN-bot-abilities.md §5 + javap): BotFighter = PRE-DISPATCH consumed-tick
+interrupt (followThroughPortal precedent, NOT a Mode; un-ticked mode components pause/resume
+free). Combat surface javap-pinned BYTE-STABLE 1.17.1→26.2: Player#attack(Entity),
+getAttackStrengthScale(float) (read the REAL charge — no derived clock), Mob#getTarget/setTarget.
+Target rule: nearest Mob whose getTarget()==bot within combat.scanRadius. Strategies by
+instanceof (Creeper / AbstractSkeleton / default melee), one class per archetype. Weapon pick by
+id ranking (sword > axe, tier by prefix). NOTE: mobs only target the bot when
+survival.takesDamage=true (abilities.invulnerable exempts via canBeSeenAsEnemy).

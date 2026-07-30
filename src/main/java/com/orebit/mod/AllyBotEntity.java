@@ -77,6 +77,8 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private final BotCrafter crafter;
     /** The {@code /bot farm} tend-the-farm state machine. */
     private final BotFarmer farmer;
+    /** The cross-cutting self-defense interrupt (NOT a mode — pre-dispatch, consumed-tick). */
+    private final BotFighter fighter;
     /** The cross-dimension FOLLOW/COME portal-seek/ENTER component. */
     private final BotPortalFollower portalFollower;
 
@@ -185,6 +187,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.gatherer = new BotGatherer(this);
         this.crafter = new BotCrafter(this);
         this.farmer = new BotFarmer(this);
+        this.fighter = new BotFighter(this);
         this.portalFollower = new BotPortalFollower(this);
     }
 
@@ -238,6 +241,20 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     /** Result items produced toward the current craft target. */
     int craftedCount() {
         return crafter.craftedCount();
+    }
+
+    /** Landed combat strikes this session (observation only — written by {@link MobStrategy#strike},
+     *  read by the harness; never consulted by behavior). */
+    int combatStrikes;
+
+    /** Whether the self-defense interrupt consumed the last tick (harness observation). */
+    boolean fighterEngaged() {
+        return fighter.engaged();
+    }
+
+    /** Landed combat strikes (harness observation). */
+    int combatStrikes() {
+        return combatStrikes;
     }
 
     /** Current {@link BotFarmer} phase name for the harness ({@code "IDLE"} when not farming). */
@@ -434,27 +451,34 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // is the sync replan/search + steer; diagnosis only, no behaviour change.
         SlowTickMonitor.beginTick(level.getServer());
         final long botTickStart = System.nanoTime();
-        switch (mode) {
-            case STAY -> holdPosition();
-            case GATHER -> gatherer.gatherLoopTick();
-            case CRAFT -> crafter.craftLoopTick();
-            case FARM -> farmer.farmLoopTick();
-            case COME -> {
-                // Summon to a fixed cell; once there, settle into STAY (distinct from FOLLOW, which
-                // would keep chasing). comeTarget can't be null in COME, but guard defensively.
-                if (comeTarget == null) { setMode(Mode.STAY); holdPosition(); break; }
-                // Cross-dimension guard: comeTarget's coordinates were captured in the CALLER's level, so
-                // while the owner is elsewhere the bot follows them through a portal instead of pathing to
-                // a cell that means nothing in this level.
-                if (portalFollower.followThroughPortal()) break;
-                double tx = comeTarget.getX() + 0.5, ty = comeTarget.getY(), tz = comeTarget.getZ() + 0.5;
-                if (navigator.driveToward(tx, ty, tz, comeTarget.below(),
-                        comeArriveDist, comeArriveY, comeGoalTol, comeGoalTol)) setMode(Mode.STAY); // arrived
-            }
-            default -> { // FOLLOW
-                if (!portalFollower.followThroughPortal()) {
-                    navigator.driveToward(owner.getX(), owner.getY(), owner.getZ(),
-                            owner.blockPosition().below());
+        // SELF-DEFENSE INTERRUPT (DESIGN-bot-abilities.md §2.3): checked BEFORE the mode dispatch
+        // each tick — while a threat is engaged, combat CONSUMES the tick and the current mode's
+        // machine is simply not stepped (its state freezes in place and resumes when combat ends;
+        // the followThroughPortal consumed-tick precedent). Quiescent under the invulnerable
+        // default (mobs never target an abilities-invulnerable player).
+        if (!fighter.defendTick()) {
+            switch (mode) {
+                case STAY -> holdPosition();
+                case GATHER -> gatherer.gatherLoopTick();
+                case CRAFT -> crafter.craftLoopTick();
+                case FARM -> farmer.farmLoopTick();
+                case COME -> {
+                    // Summon to a fixed cell; once there, settle into STAY (distinct from FOLLOW, which
+                    // would keep chasing). comeTarget can't be null in COME, but guard defensively.
+                    if (comeTarget == null) { setMode(Mode.STAY); holdPosition(); break; }
+                    // Cross-dimension guard: comeTarget's coordinates were captured in the CALLER's level, so
+                    // while the owner is elsewhere the bot follows them through a portal instead of pathing to
+                    // a cell that means nothing in this level.
+                    if (portalFollower.followThroughPortal()) break;
+                    double tx = comeTarget.getX() + 0.5, ty = comeTarget.getY(), tz = comeTarget.getZ() + 0.5;
+                    if (navigator.driveToward(tx, ty, tz, comeTarget.below(),
+                            comeArriveDist, comeArriveY, comeGoalTol, comeGoalTol)) setMode(Mode.STAY); // arrived
+                }
+                default -> { // FOLLOW
+                    if (!portalFollower.followThroughPortal()) {
+                        navigator.driveToward(owner.getX(), owner.getY(), owner.getZ(),
+                                owner.blockPosition().below());
+                    }
                 }
             }
         }
