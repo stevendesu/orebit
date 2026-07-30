@@ -799,9 +799,25 @@ public final class MovementContext {
      * The per-level guard here is KEPT anyway: single-section producers without column context
      * ({@code classifyInto}, the neighbour-less {@code patchCell}) remain air-optimistic above, and the
      * guard costs one compare. Do not relax it while those paths exist.)
+     *
+     * <p><b>SELF-EDIT COHERENCE (owner-ratified 2026-07-30 — the place-box gate).</b> The resident flags
+     * cannot see the current path's edits. For BREAKS that is fail-safe: the flags read the cell solid,
+     * the proof fails, and the per-cell fallback is edit-aware. For PLACES it wrong-ADMITS: over open
+     * terrain the flags prove clear, the per-cell reads are skipped, and a plank an EARLIER STEP of this
+     * very path placed is invisible — the scaffold-treadmill bug (a support-chained bridge-down ladder
+     * whose Descend zigzag re-entered the just-vacated column THROUGH its own plank, brk=0; pinned by
+     * {@code SelfEditCoherenceTest}). So a proof is refused whenever the clearance COLUMN
+     * {@code (x, y+1..y+need, z)} intersects the path's PLACE-only bounding box
+     * ({@link PathEdits#placesIntersectColumn}) — those columns take the per-cell edit-aware path, which
+     * either folds the honest break of the path's own plank or (a protected placed descriptor) refuses
+     * the candidate. Place-free searches (the overwhelming common case) pay one predicted-false test;
+     * place-carrying searches keep the prefilter everywhere their columns cannot touch the scaffold (the
+     * wholesale any-places form of this gate measured FLOOD +8.8% / BRIDGE +17.6% — the box scoping is
+     * what makes the coherence rule affordable).
      */
-    public boolean headroomProves(int flags, int y, int need) {
-        return headroom(flags) >= need && (y & 15) + need <= 15;
+    public boolean headroomProves(int flags, int x, int y, int z, int need) {
+        return !pathEdits.placesIntersectColumn(x, y + 1, y + need, z)
+                && headroom(flags) >= need && (y & 15) + need <= 15;
     }
 
     /**
@@ -812,7 +828,7 @@ public final class MovementContext {
      * can't/may-not break). {@code flags} is the cell's already-read {@link NavFlags} bitmask.
      */
     public void requireBodyClear(EditScratch e, int fx, int fy, int fz, int flags) {
-        if (headroomProves(flags, fy, HEADROOM_WALK)) return;
+        if (headroomProves(flags, fx, fy, fz, HEADROOM_WALK)) return;
         e.requireAir(fx, fy + 1, fz);
         e.requireAir(fx, fy + 2, fz);
     }
@@ -828,7 +844,7 @@ public final class MovementContext {
      * {@code requireBodyClear} (v1 scope: doors are a hallway-walk concern).
      */
     public void requireBodyClearToward(EditScratch e, int fx, int fy, int fz, int flags, int dx, int dz) {
-        if (headroomProves(flags, fy, HEADROOM_WALK)) return;
+        if (headroomProves(flags, fx, fy, fz, HEADROOM_WALK)) return;
         int entryEdge = ordinalOf(-dx, -dz); // the edge of the destination column the move crosses to enter
         e.requireAirToward(fx, fy + 1, fz, entryEdge);
         e.requireAirToward(fx, fy + 2, fz, entryEdge);

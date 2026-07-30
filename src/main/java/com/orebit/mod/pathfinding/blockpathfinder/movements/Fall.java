@@ -117,7 +117,7 @@ public final class Fall implements Movement {
             // reads; only a claims-clear reading near a section top needs the per-cell verify.
             int flags = ctx.flagsAt(nx, y, nz);
             if (MovementContext.headroom(flags) < MovementContext.HEADROOM_WALK) continue;
-            if (!ctx.headroomProves(flags, y, MovementContext.HEADROOM_WALK)
+            if (!ctx.headroomProves(flags, nx, y, nz, MovementContext.HEADROOM_WALK)
                     && (!ctx.passable(nx, y + 1, nz) || !ctx.passable(nx, y + 2, nz))) {
                 continue;
             }

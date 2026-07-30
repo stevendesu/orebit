@@ -51,7 +51,7 @@ public final class Diagonal implements Movement {
 
             // Destination body (feet + head) clear — fast-path via the resident HEADROOM bit, else read.
             int flags = MovementContext.flagsOf(packed);
-            if (!ctx.headroomProves(flags, y, MovementContext.HEADROOM_WALK)
+            if (!ctx.headroomProves(flags, nx, y, nz, MovementContext.HEADROOM_WALK)
                     && (!ctx.passable(nx, y + 1, nz) || !ctx.passable(nx, y + 2, nz))) {
                 continue;
             }

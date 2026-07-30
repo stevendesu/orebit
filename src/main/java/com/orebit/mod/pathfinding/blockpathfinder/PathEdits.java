@@ -79,6 +79,25 @@ public final class PathEdits {
     private int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
     private int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
 
+    /** Whether any PLACE has been folded in since {@link #reset} (shadowed-by-a-break included —
+     *  conservative). The {@code hasPlaces ⇒ size != 0} invariant holds (folding a place always claims
+     *  or meets a claimed slot), so clearing inside reset()'s {@code size != 0} guard is sound and the
+     *  no-edit fast path stays store-free. Read by {@code MovementContext.headroomProves}'s SELF-EDIT
+     *  COHERENCE gate: the resident HEADROOM/flag prefilter cannot see path edits, and while breaks fail
+     *  SAFE through it (flags read them solid → the prefilter fails → the per-cell edit-aware fallback
+     *  runs), a PLACE over open terrain is wrong-ADMITTED (flags read air → the prefilter proves → the
+     *  per-cell reads are skipped and the path's own plank is invisible — the scaffold-treadmill
+     *  walk-through-own-plank find, 2026-07-30). */
+    private boolean hasPlaces;
+    // The PLACE-only bounding box (a subset of the all-edits box above) — the coherence gate's cheap
+    // reject. A path's places cluster tightly (a bridge is one row, a descent ladder two columns), while
+    // clearance columns are probed all over the search frontier: six compares here keep the HEADROOM
+    // prefilter alive for every column that cannot possibly touch a placed cell. Measured motivation: the
+    // wholesale any-places gate cost FLOOD +8.8% / BRIDGE +17.6% / SPIRAL +8.2% (paired A/B 2026-07-30);
+    // the box-scoped gate confines the slow path to columns actually adjacent to the scaffold.
+    private int pMinX = Integer.MAX_VALUE, pMinY = Integer.MAX_VALUE, pMinZ = Integer.MAX_VALUE;
+    private int pMaxX = Integer.MIN_VALUE, pMaxY = Integer.MIN_VALUE, pMaxZ = Integer.MIN_VALUE;
+
     /** Clear for a fresh node expansion (keeps the table's capacity for reuse). */
     public void reset() {
         if (size != 0) {
@@ -86,12 +105,41 @@ public final class PathEdits {
             size = 0;
             minX = minY = minZ = Integer.MAX_VALUE;
             maxX = maxY = maxZ = Integer.MIN_VALUE;
+            hasPlaces = false;
+            pMinX = pMinY = pMinZ = Integer.MAX_VALUE;
+            pMaxX = pMaxY = pMaxZ = Integer.MIN_VALUE;
         }
     }
 
     /** True when no edits are recorded — the caller skips the diff lookup entirely (the common case). */
     public boolean isEmpty() {
         return size == 0;
+    }
+
+    /** Grow the PLACE-only box by one placed cell (called by the two place folds; packed BlockPos). */
+    private void growPlaceBox(long pos) {
+        hasPlaces = true;
+        int x = BlockPos.getX(pos), y = BlockPos.getY(pos), z = BlockPos.getZ(pos);
+        if (x < pMinX) pMinX = x;
+        if (y < pMinY) pMinY = y;
+        if (z < pMinZ) pMinZ = z;
+        if (x > pMaxX) pMaxX = x;
+        if (y > pMaxY) pMaxY = y;
+        if (z > pMaxZ) pMaxZ = z;
+    }
+
+    /**
+     * Whether the vertical clearance column {@code (x, yLo..yHi, z)} could touch any PLACED cell of the
+     * current diff — the SELF-EDIT COHERENCE gate's box test (see {@link #hasPlaces}): {@code false} lets
+     * the caller trust the resident flag prefilter; {@code true} sends it to the per-cell edit-aware
+     * reads. Conservative by construction (a box hit is not necessarily a cell hit — the per-cell reads
+     * resolve exactly); the common place-free search exits on the first predicted-false test.
+     */
+    public boolean placesIntersectColumn(int x, int yLo, int yHi, int z) {
+        return hasPlaces
+                && x >= pMinX && x <= pMaxX
+                && z >= pMinZ && z <= pMaxZ
+                && yHi >= pMinY && yLo <= pMaxY;
     }
 
     // Inclusive bounding box of every edited cell — exposed so a consumer can scan only the box ∩ edits
@@ -117,7 +165,10 @@ public final class PathEdits {
     /** Fold one edge's edits in (first-seen-wins; call while walking node → start). */
     public void add(StepEdits se) {
         if (se == null) return;
-        for (int i = 0, n = se.placeCount(); i < n; i++) markIfAbsent(se.placeAt(i), (byte) PLACED);
+        for (int i = 0, n = se.placeCount(); i < n; i++) {
+            growPlaceBox(se.placeAt(i));
+            markIfAbsent(se.placeAt(i), (byte) PLACED);
+        }
         for (int i = 0, n = se.breakCount(); i < n; i++) markIfAbsent(se.breakAt(i), (byte) BROKEN);
         for (int i = 0, n = se.doorSetCount(); i < n; i++)
             markIfAbsent(se.doorSetAt(i), (byte) (se.doorSetOpenAt(i) ? SET_OPEN : SET_CLOSED));
@@ -132,7 +183,10 @@ public final class PathEdits {
      */
     public void addSnapshot(EditSnapshot s) {
         if (s == null) return;
-        for (int i = 0, n = s.placeCount(); i < n; i++) markIfAbsent(s.placeAt(i), (byte) PLACED);
+        for (int i = 0, n = s.placeCount(); i < n; i++) {
+            growPlaceBox(s.placeAt(i));
+            markIfAbsent(s.placeAt(i), (byte) PLACED);
+        }
         for (int i = 0, n = s.breakCount(); i < n; i++) markIfAbsent(s.breakAt(i), (byte) BROKEN);
         for (int i = 0, n = s.doorSetCount(); i < n; i++)
             markIfAbsent(s.doorSetAt(i), (byte) (s.doorSetOpenAt(i) ? SET_OPEN : SET_CLOSED));

@@ -72,7 +72,7 @@ public final class Descend implements Movement {
             // The step-off head cell (nx,y+2,nz) sits ABOVE any such doorway (a door never reaches it), so it
             // stays a plain requireAir. A door reads non-passable (SHAPE_OTHER), so HEADROOM never proves clear
             // through one — this cold path always runs when a door is present; a door-free descend is unchanged.
-            if (!ctx.headroomProves(flags, dy, MovementContext.HEADROOM_JUMP)) {
+            if (!ctx.headroomProves(flags, nx, dy, nz, MovementContext.HEADROOM_JUMP)) {
                 int entryEdge = MovementContext.ordinalOf(-d[0], -d[1]); // edge of the dest column the step enters
                 e.requireAir(nx, y + 2, nz);                  // head clearance stepping off (above any doorway)
                 e.requireAirToward(nx, y + 1, nz, entryEdge); // transit feet / new head — dest door upper half
