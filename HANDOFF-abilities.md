@@ -4,6 +4,39 @@ Arc design: `internal_docs/DESIGN-bot-abilities.md` (ratified order: Crafting �
 Fighting → Building; component template + decision log §10). This file tracks arc state only —
 the owner's region-tier arc handoff stays in `HANDOFF.md`.
 
+## ✅ ADOPTION COMPLETE (2026-07-29, evening) — the wrinkle below is HISTORY
+
+Everything is landed and verified on all three branches; the verify worktree/branch are gone.
+
+- **Follower-envelope arc COMMITTED**: core `1c6f539` (topY-aware fromFootY/toFootY on plan();
+  BotSteering.movementBlockedAt direction-keyed body-corridor obstruction) + `2d79ef1`
+  (NavFlagsTest follows the fluid-scatter move — the suite's one standing failure is FIXED).
+- **The interrupted session's owner-ruling increment COMMITTED**: core `64e132c` —
+  mining.protectedBlocks is a PATHING policy (planner + route executors), deliberate hands
+  exempt (D3 waiver machinery removed); gather-MINE protected-sight-line ESCALATES to an exact
+  approach instead of dropping the vein; /bot farm is a PERSISTENT state (WATCH re-surveys).
+- **mc-1.21 adopted everything**: FF onto `mc121-abilities-verify` (exact tested lineage) then
+  `git merge core` (`2a6fefd`); era-owned follow-ups `c6074db` (counts-based FARM verdict),
+  `119e0dc` (.gitignore carpet master), `4522433` (workRadius pin dropped). **main merged core**
+  (`85a3ee6`). `core` also gained `56dfed5` (owner's future-work.txt notepad).
+- **Verified post-adoption (mc-1.21 node, 1.21.11)**: unit suite 115 classes ZERO failures
+  (first fully-green suite); FARM autotest PASS ×2 (pinned 126t; default-radius 106t —
+  harvested 8, tilled 2); CRAFT scenario B PASS 118t (incl. the protected crafting-table
+  reclaim under the NEW policy — the deliberate-hands exemption in action); FIGHT PASS 79t;
+  BUILD PASS 1157t (9 cleared + 9/9 placed). 26-era chiseledCompile green ×4.
+- **⚠ Flagship GOTO still FAILS — and its old attribution was WRONG.** Evidence (BotDebug run +
+  pristine-world probe): the route descends a JUNGLE VINE CURTAIN at (55,173..177,256); the
+  search correctly plans `Climb` down it, but Climb is an UNCONVERTED move and its legacy steer
+  never initiates a grounded climb-DOWN (`exec Climb … targetY == current feetY` → zero drive);
+  the bot perches on its own placed cobble lip forever while jungle-leaf decay keeps bumping
+  plan-impacted re-searches. NOT an envelope failure (zero step-FAILED lines) and NOT a
+  regression (Climb.java untouched by every commit above; the pre-merge A/B froze at the same
+  cell). This is exactly future-work.txt's "can we go DOWN ladders/vines?" item — fixing it (or
+  re-picking the flagship route) is an owner decision.
+- Observation for the owner: the autotest conjures COBBLESTONE bridges while the default
+  protected list contains cobblestone — the planner/route executors can therefore never re-break
+  the bot's own placed bridge blocks (pathing-only consequence; deliberate hands unaffected).
+
 ## DONE — Crafting (SHIPPED)
 
 - core `89e856e` feat(crafting), merged → main `b03b1af`. NOT yet on `mc-1.21` (see below).
