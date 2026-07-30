@@ -100,7 +100,9 @@ public record Config(
         boolean till,
         // ---- combat ----
         boolean defend,
-        int scanRadius) {
+        int scanRadius,
+        // ---- building ----
+        boolean clearMismatches) {
 
     /**
      * The all-defaults configuration — reproduces TODAY's hardcoded follower behaviour (break + place on,
@@ -166,8 +168,10 @@ public record Config(
                                      // tableSearchRadius 16 blocks (the proven Mindcraft radius).
             /* farming    */ 16, true, // workRadius 16 = a comfortable field in one pass; till ON
                                      // (the pass may expand the farm onto hydrated ground).
-            /* combat     */ true, 16); // defend ON (quiescent while invulnerable — mobs never
+            /* combat     */ true, 16, // defend ON (quiescent while invulnerable — mobs never
                                      // target an abilities-invulnerable player); scan box 16.
+            /* building   */ true); // clearMismatches ON — a build may break wrong occupants
+                                     // (protected blocks still refuse; refusals are reported).
 
     /**
      * The capability gate the block-tier A* reads, derived from the placement / mining / pathing knobs

@@ -133,6 +133,12 @@ start. Out-of-range or unparseable individual values are clamped/defaulted with 
 | `combat.defend` | boolean | `true` | While any mob has DECLARED the bot its target (`Mob#getTarget() == bot` — the mob's own state, never a proximity heuristic), a pre-dispatch combat interrupt consumes the tick: the current activity pauses in place and resumes when the threat is gone. Per-mob strategies: creeper knockback discipline (standoff ≥4 while recharging, full-charge sprint hits, disengage past the 7-block keep-swelling bound), skeleton rush, melee default — all constants source-verified. Naturally QUIESCENT while `survival.takesDamage=false` (mobs never target an abilities-invulnerable player). | `combat.defend=false` |
 | `combat.scanRadius` | int `8..32` | `16` | Half-extent (blocks) of the per-tick threat scan box. A mob targeting from farther is engaged when it closes in (it is pathing to the bot by definition). | `combat.scanRadius=24` |
 
+### `building.*` — how does `/bot build` execute schematics?
+
+| Key | Type / range | Default | Meaning | Example |
+| --- | --- | --- | --- | --- |
+| `building.clearMismatches` | boolean | `true` | A build may BREAK blocks occupying a schematic cell with the wrong state (a timed survival break, real drops; `mining.protectedBlocks` STILL refuses — refused cells are counted in the final report, never forced). `false` = the build only places into empty cells and reports the occupied ones. Executor-read (`BotBuilder`), fully hot. | `building.clearMismatches=false` |
+
 ## Mapping to `BotCaps`
 
 `Config.toBotCaps()` folds the placement / mining / pathing knobs into the capability gate the block-tier A\*
@@ -177,9 +183,9 @@ surcharge), so mortality is a move-generation fact too.
   or resize the pool (the reload does drain the pool before rebaking the shared cost tables — see
   `internal_docs/DESIGN-background-pathfinding.md`). `pathing.asyncSearchBudgetMs` is read per search, so a reload
   does change it live while async is already on — but toggling async itself is restart-only.
-- **`crafting.*` / `farming.*` / `combat.*` are fully hot:** the ability keys are executor-read
-  (`BotCrafter`/`BotFarmer`/`BotFighter`) per run/phase/tick, so a `/bot config reload` applies to
-  the next `/bot craft` / `/bot farm` / threat. The reload also re-bakes the `/bot craft` RECIPE INDEX
+- **`crafting.*` / `farming.*` / `combat.*` / `building.*` are fully hot:** the ability keys are
+  executor-read (`BotCrafter`/`BotFarmer`/`BotFighter`/`BotBuilder`) per run/phase/tick, so a
+  `/bot config reload` applies to the next `/bot craft` / `/bot farm` / threat / `/bot build`. The reload also re-bakes the `/bot craft` RECIPE INDEX
   (`RecipeIndex.bake`) as a courtesy, so a datapack `/reload`'s recipe changes are picked up
   without a server restart (the index otherwise bakes once at `SERVER_STARTED`).
 - **When it takes effect on the bot:** the follower reads the live `ConfigLoader` cache **per replan**
