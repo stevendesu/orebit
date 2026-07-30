@@ -166,6 +166,22 @@ class ParkourValidityEnvelopeTest {
         assertFalse(runner.failed(), "the landing stand is the move's own completion cell");
     }
 
+    /** The diagonal LIP-CROSSING transitional cells (the flagship-cliff z-face spill: foot (42,148,221) on a
+     *  (42,147,222)→(45,147,219) jump during the takeoff phase — the gate fires with the centre inside the
+     *  cell, but the 1–2 grounded ticks before the jump registers let an axis-dominant approach momentum
+     *  cross that axis's face). Both face-neighbours of the takeoff stand at takeoff foot height are the
+     *  move's own transient geometry — the Descend-lip / Ascend-face-press / Parkour-lip-crossing pattern. */
+    @Test
+    void diagonalLipCrossingTransitIsInsideTheEnvelope() {
+        MovePlan plan = diagPlan(); // takeoff floor (0,10,0) → landing floor (2,10,2): stand (0,11,0)
+        PoseBot bot = new PoseBot();
+        assertFalse(plan.failed(bot.at(1, 11, 0, true)), "the +x face spill must NOT fail (transient takeoff state)");
+        assertFalse(plan.failed(bot.at(0, 11, 1, true)), "the +z face spill must NOT fail (the cliff z-face repro)");
+        assertTrue(plan.failed(bot.at(1, 11, 1, true)),
+                "the gap CORNER cell is not a face spill — grounded there is a real off-plan landing");
+        assertTrue(plan.failed(bot.at(1, 10, 3, true)), "off-plan cells still fail");
+    }
+
     @Test
     void fallingParkourAdmitsItsDescentColumnButNotTheGap() {
         // A falling cardinal 2-gap: takeoff floor (0,10,0) → landing floor (3,7,0); the descent runs down

@@ -24,15 +24,25 @@ Everything is landed and verified on all three branches; the verify worktree/bra
   harvested 8, tilled 2); CRAFT scenario B PASS 118t (incl. the protected crafting-table
   reclaim under the NEW policy — the deliberate-hands exemption in action); FIGHT PASS 79t;
   BUILD PASS 1157t (9 cleared + 9/9 placed). 26-era chiseledCompile green ×4.
-- **⚠ Flagship GOTO still FAILS — and its old attribution was WRONG.** Evidence (BotDebug run +
-  pristine-world probe): the route descends a JUNGLE VINE CURTAIN at (55,173..177,256); the
-  search correctly plans `Climb` down it, but Climb is an UNCONVERTED move and its legacy steer
-  never initiates a grounded climb-DOWN (`exec Climb … targetY == current feetY` → zero drive);
-  the bot perches on its own placed cobble lip forever while jungle-leaf decay keeps bumping
-  plan-impacted re-searches. NOT an envelope failure (zero step-FAILED lines) and NOT a
-  regression (Climb.java untouched by every commit above; the pre-merge A/B froze at the same
-  cell). This is exactly future-work.txt's "can we go DOWN ladders/vines?" item — fixing it (or
-  re-picking the flagship route) is an owner decision.
+- **⚠ Flagship GOTO: three follower bugs FIXED (2026-07-30), one momentum pathology remains —
+  owner ruling needed.** The route is a jungle-cliff gauntlet; each fix surfaced the next
+  blocker. FIXED (each evidence-first, committed on core with pins): (1) `89a8537` the step-0
+  steer-segment frame fed Climb's Δy a floor/feet mixed frame → a first-step vine climb-DOWN
+  read as lateral → sneak edge-guard pinned the bot on a lip (progress 7.5→41 blocks);
+  (2) `3d8b639` falling parkour onto non-ice kept an open-loop drive that cannot arrest a
+  small-gap deep-drop arc → landed one cell past (course cards falld2g1/falld3g1 added; A/B 45→50
+  PASS, falling family now lands dead-centre); (3) `9cc2eb3` DiagonalParkour's envelope
+  refused the takeoff face-spill its gate can't actually prevent under axis-dominant approach
+  momentum (the ratified lip-crossing admission, applied). REMAINING (NOT fixed — parked-arc
+  territory): a chained-step MOMENTUM CORNER-SLIP — a −z Descend into a +x Descend step-off
+  carries ~0.2 b/t of cross velocity, the bot grounds on the diagonally adjacent cell
+  ((68,149,245) vs planned column (68,*,246)) and the envelope CORRECTLY fail→HOLDs (a real
+  off-plan settle, not a false positive). Candidate fixes all sit in owner-parked design space:
+  a velocity-alignment gate before orthogonal step-offs (the DiagonalParkour-gate concept
+  generalized), the brake-to-settle arc, momentum-preserving path preference, or off-plan
+  replan (banned by the no-recovery rule). Also observed: ambient plan-impacted refreshes
+  (jungle leaf decay) RESET a held runner, so fail→HOLD leaks into retry in live worlds —
+  worth a ruling on whether that masking is acceptable.
 - Observation for the owner: the autotest conjures COBBLESTONE bridges while the default
   protected list contains cobblestone — the planner/route executors can therefore never re-break
   the bot's own placed bridge blocks (pathing-only consequence; deliberate hands unaffected).

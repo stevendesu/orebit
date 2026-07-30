@@ -293,6 +293,15 @@ public final class ParkourCourse {
             card("fall4", 5, -1, 0, Template.REACH);
             card("falld2g4", 5, -2, 0, Template.REACH);
             card("falld3g4", 5, -3, 0, Template.REACH);
+            // Small-gap DEEP-drop family — the coverage hole the flagship-GOTO cliff exposed: a (gap 1, −3)
+            // Parkour ((65,158,261)→(67,155,261)) grounded ONE CELL PAST its landing column (envelope
+            // fail→HOLD). Long airtime + short horizontal need = the overshoot regime, so PRECISION (the
+            // 1-wide ledge; an overshoot falls) — the deep-drop counterpart of fall1/fall2, closing the
+            // hole between them (−1 only) and falld2g4/falld3g4 (gap-4 only, REACH).
+            card("falld2g1", 2, -2, 0, Template.PRECISION);
+            card("falld3g1", 2, -3, 0, Template.PRECISION); // the flagship-GOTO cliff shape
+            card("falld2g2", 3, -2, 0, Template.PRECISION);
+            card("falld3g2", 3, -3, 0, Template.PRECISION);
             // Diagonal (approach == jump == +X+Z). diag3 (a 3-gap, 4-step diagonal) is the ratified-OUT row
             // the design doc derives as unmakeable (DIAG_MAX 3→2) — tested HEAD-ON here to confirm it misses
             // even with a clean aligned approach (it's what the turnflat corner-cut routes).
