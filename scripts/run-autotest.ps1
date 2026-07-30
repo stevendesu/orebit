@@ -82,6 +82,9 @@ param(
     # -Give "item:count,item:count": the inventory injected at spawn for a -Craft run (e.g.
     # "oak_planks:7,stick:2"). Plain names get the minecraft: namespace.
     [string]$Give = "",
+    # -Farm: FARM mode. Build a deterministic wheat plot next to -Start (8 mature wheat, 2 hydrated
+    # grass till candidates, hoe given) and drive /bot farm; PASS = harvested 8, tilled 2, planted >=1.
+    [switch]$Farm,
     # -MasterWorld <path>: FROZEN-WORLD mode. Instead of seed-regenerating the world each run (which is
     # non-deterministic for VEGETATION -- trees generate in parallel-chunk-gen order; proven by the
     # startprobe: same seed -> 3 distinct tree layouts in 5 runs), copy a pristine, pre-generated master
@@ -162,6 +165,7 @@ if ($TraceGoal -ne "") { $gradleArgs += "-Porebit.autotest.traceGoal=$TraceGoal"
 if ($Gather -ne "")   { $gradleArgs += "-Porebit.autotest.gather=$Gather" }
 if ($Craft -ne "")    { $gradleArgs += "-Porebit.autotest.craft=$Craft" }
 if ($Give -ne "")     { $gradleArgs += "-Porebit.autotest.give=$Give" }
+if ($Farm)            { $gradleArgs += "-Porebit.autotest.farm=true" }
 if ($Count -gt 1)     { $gradleArgs += "-Porebit.autotest.count=$Count" }
 if ($Tool -ne "")     { $gradleArgs += "-Porebit.autotest.tool=$Tool" }
 if ($Silk)            { $gradleArgs += "-Porebit.autotest.silk=true" }

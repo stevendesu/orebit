@@ -24,6 +24,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.block.Blocks;
 
 /**
  * Headless end-to-end scenario harness: on a dedicated-server run launched with
@@ -115,10 +116,18 @@ public final class HeadlessAutotest {
                 // goto — <result> ×count from an injected inventory (-Dorebit.autotest.give=
                 // "item:count,item:count", e.g. "oak_planks:7,stick:2"). Null = not a craft run.
                 System.getProperty("orebit.autotest.craft"),
-                System.getProperty("orebit.autotest.give", ""));
+                System.getProperty("orebit.autotest.give", ""),
+                // FARM mode (-Dorebit.autotest.farm=true): build a deterministic wheat plot next to
+                // the start (24 farmland around a water hole, 8 MATURE wheat, 2 hydrated grass till
+                // candidates), give a hoe, and drive /bot farm. Deterministic: crops are placed
+                // pre-grown (growth is random-tick and never waited on).
+                Boolean.getBoolean("orebit.autotest.farm"));
         events.onServerStarted(scenario::start);
         events.onWorldTickEnd(scenario::tick);
-        if (scenario.craftItem != null) {
+        if (scenario.farmMode) {
+            OrebitCommon.LOGGER.info("[Orebit/autotest] armed FARM: start={} budget={}t",
+                    compact(scenario.start), scenario.budgetTicks);
+        } else if (scenario.craftItem != null) {
             OrebitCommon.LOGGER.info("[Orebit/autotest] armed CRAFT: item={} count={} give='{}' start={} budget={}t",
                     scenario.craftItem, scenario.gatherQuota, scenario.giveSpec,
                     compact(scenario.start), scenario.budgetTicks);
@@ -189,6 +198,13 @@ public final class HeadlessAutotest {
         /** Last non-terminal craft phase observed (for the TIMEOUT/FAIL result). */
         String lastCraftPhase = "IDLE";
 
+        // ---- FARM mode (false = not a farm run; the plot is built at spawn, pre-grown) ----
+        final boolean farmMode;
+        /** True once the farm pass has been issued (after the nav-readiness gate). */
+        boolean farmIssued;
+        /** Last non-terminal farm phase observed (for the TIMEOUT/FAIL result). */
+        String lastFarmPhase = "IDLE";
+
         // ---- TRACE mode (-Dorebit.autotest.traceGoal=x,y,z): mirror /bot trace, headlessly ----
         /**
          * The {@code goalFloor} cell for a one-shot {@link AllyBotEntity#traceTo} — the EXACT entry point
@@ -217,7 +233,7 @@ public final class HeadlessAutotest {
 
         Scenario(BlockPos start, BlockPos goal, int budgetTicks, int startDelayTicks,
                  String gatherResource, int gatherQuota, String toolId, boolean silk,
-                 String craftItem, String giveSpec) {
+                 String craftItem, String giveSpec, boolean farmMode) {
             this.start = start;
             this.goal = goal;
             this.budgetTicks = budgetTicks;
@@ -228,6 +244,7 @@ public final class HeadlessAutotest {
             this.silk = silk;
             this.craftItem = craftItem;
             this.giveSpec = giveSpec;
+            this.farmMode = farmMode;
         }
 
         /**
@@ -286,6 +303,63 @@ public final class HeadlessAutotest {
                 // bare-handed pillar-to-the-sky: the empty-air highway out-prices a dig-down descent).
                 bot.getInventory().clearContent();
                 final boolean barehanded = Boolean.getBoolean("orebit.autotest.barehanded");
+
+                // ---- FARM mode (-Dorebit.autotest.farm=true): build the plot, drive /bot farm ----
+                // Deterministic wheat plot EAST of the start on the ground plane (start.y-1):
+                // a 5x5 of farmland around a central water hole, MATURE wheat on the 8 ring cells
+                // around the water (pre-grown — growth is random-tick, never waited on), 2 hydrated
+                // grass_block till candidates nearer the start. Two clear air rows above every cell.
+                // Give: one wooden hoe (seeds come from the harvest itself — exercises SWEEPUP).
+                if (farmMode) {
+                    // The whole plot sits within Chebyshev 5 of the start; the harness config pins
+                    // farming.workRadius=5 so the survey NEVER leaves the plot — the master world's
+                    // wild hydrated grass (e.g. (68,62,-74), Chebyshev 6) would otherwise queue a
+                    // till whose walk starts FROM farmland and trips the committed envelope
+                    // increment's full-block footY test (fixed by the in-flight follower arc's
+                    // topY-aware fromFootY/toFootY; re-widen the radius once that lands).
+                    final int gx = start.getX(), gy = start.getY() - 1, gz = start.getZ();
+                    for (int dx = 1; dx <= 5; dx++) {
+                        for (int dz = -2; dz <= 2; dz++) {
+                            final BlockPos base = new BlockPos(gx + dx, gy, gz + dz);
+                            final boolean water = (dx == 3 && dz == 0);
+                            level.setBlockAndUpdate(base, (water ? Blocks.WATER : Blocks.FARMLAND)
+                                    .defaultBlockState());
+                            level.setBlockAndUpdate(base.above(), Blocks.AIR.defaultBlockState());
+                            level.setBlockAndUpdate(base.above(2), Blocks.AIR.defaultBlockState());
+                        }
+                    }
+                    // Deterministic LIGHT regardless of terrain (the plot may sit against a cliff —
+                    // sky access is not assumed): glowstone on the four crop-layer corners keeps
+                    // rawBrightness >= 8 at every crop (CropBlock.canSurvive pops crops below 8
+                    // without sky). Placed BEFORE the wheat so no crop ever sees the dark.
+                    for (int[] c : new int[][]{{1, -2}, {1, 2}, {5, -2}, {5, 2}}) {
+                        level.setBlockAndUpdate(new BlockPos(gx + c[0], gy + 1, gz + c[1]),
+                                Blocks.GLOWSTONE.defaultBlockState());
+                    }
+                    // Flag 18 = UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE (the litematica-paste precedent):
+                    // NO neighbor-shape updates during the build — a plain setBlockAndUpdate here
+                    // cascade-POPS the already-placed wheat (each placement re-runs its neighbors'
+                    // canSurvive while the glowstone light hasn't propagated yet; diagnosed live).
+                    final var wheat = com.orebit.mod.farming.CropKinds.all().get(0).matureState();
+                    for (int dx = 2; dx <= 4; dx++) {
+                        for (int dz = -1; dz <= 1; dz++) {
+                            if (dx == 3 && dz == 0) continue; // the water hole
+                            level.setBlock(new BlockPos(gx + dx, gy + 1, gz + dz), wheat, 18);
+                        }
+                    }
+                    for (int dz : new int[]{-3, 3}) { // till candidates, Chebyshev ≤4 from the water
+                        final BlockPos g = new BlockPos(gx + 2, gy, gz + dz);
+                        level.setBlockAndUpdate(g, Blocks.GRASS_BLOCK.defaultBlockState());
+                        level.setBlockAndUpdate(g.above(), Blocks.AIR.defaultBlockState());
+                        level.setBlockAndUpdate(g.above(2), Blocks.AIR.defaultBlockState());
+                    }
+                    bot.getInventory().setItem(0, new ItemStack(ItemLookup.byId("minecraft:wooden_hoe")));
+                    bot.setMode(AllyBotEntity.Mode.STAY);
+                    OrebitCommon.LOGGER.info("[Orebit/autotest] bot spawned at {}; farm plot built east; "
+                            + "pass pending (startDelay {}t + nav readiness)",
+                            compact(bot.blockPosition()), startDelayTicks);
+                    return;
+                }
 
                 // ---- CRAFT mode (-Dorebit.autotest.craft=<result name>): drive /bot craft ----
                 // Inject the -give inventory into the bot's REAL ServerPlayer inventory, then defer the
@@ -486,7 +560,11 @@ public final class HeadlessAutotest {
                 return;
             }
 
-            // CRAFT / GATHER modes have their own polls; GOTO's arrival/give-up poll is below.
+            // FARM / CRAFT / GATHER modes have their own polls; GOTO's arrival/give-up poll is below.
+            if (farmMode) {
+                farmTick(level);
+                return;
+            }
             if (craftItem != null) {
                 craftTick(level);
                 return;
@@ -766,6 +844,109 @@ public final class HeadlessAutotest {
                 OrebitCommon.LOGGER.info("[Orebit/autotest] t={} pos={} phase={} crafted={}/{}",
                         ticks, compact(bot.blockPosition()), phase, crafted, gatherQuota);
             }
+        }
+
+        /**
+         * FARM-mode poll: defer {@code startFarm} behind the shared nav-readiness gate, then read
+         * only the bot's own signals — the {@link AllyBotEntity#farmPhaseName}/harvest/plant/till
+         * observation seams and the terminal STAY flip. The plot is deterministic (8 mature wheat,
+         * 2 hydrated grass), so PASS = harvested 8, tilled 2, planted ≥ 1 (replant is funded by
+         * the harvest's own seed drops — binomial, ≥1 across 8 crops with p≈1).
+         */
+        void farmTick(ServerLevel level) {
+            if (!bot.isAlive()) {
+                finishFarm("FAIL", "bot died", "FAIL");
+                return;
+            }
+            if (!farmIssued) {
+                if (ticks < startDelayTicks) {
+                    return;
+                }
+                if (!navReadyAround(level, start)) {
+                    if (ticks >= budgetTicks) {
+                        finishFarm("FAIL", "nav grid never built around start (waited " + ticks + "t)", "TIMEOUT");
+                    } else if (ticks % PROGRESS_LOG_TICKS == 0) {
+                        OrebitCommon.LOGGER.info("[Orebit/autotest] t={} waiting for nav readiness around start {}",
+                                ticks, compact(start));
+                    }
+                    return;
+                }
+                bot.startFarm();
+                farmIssued = true;
+                OrebitCommon.LOGGER.info("[Orebit/autotest] farm pass issued at tick {} (startDelay {}t + nav ready)",
+                        ticks, startDelayTicks);
+                return;
+            }
+            final String phase = bot.farmPhaseName();
+            if (!"IDLE".equals(phase)) {
+                lastFarmPhase = phase;
+            }
+            if (bot.mode() == AllyBotEntity.Mode.STAY) {
+                final int h = bot.farmHarvestedCount();
+                final int p = bot.farmPlantedCount();
+                final int t = bot.farmTilledCount();
+                if (h == 8 && t == 2 && p >= 1) {
+                    finishFarm("PASS", "harvested " + h + ", planted " + p + ", tilled " + t, "PASS");
+                } else {
+                    finishFarm("FAIL", "harvested " + h + "/8, planted " + p + " (want >=1), tilled "
+                            + t + "/2 (ended in phase " + lastFarmPhase + ")", "FAIL");
+                }
+                return;
+            }
+            if (ticks >= budgetTicks) {
+                finishFarm("FAIL", "tick budget exhausted (phase " + lastFarmPhase
+                        + ", harvested " + bot.farmHarvestedCount() + ")", "TIMEOUT");
+                return;
+            }
+            if (ticks % PROGRESS_LOG_TICKS == 0) {
+                OrebitCommon.LOGGER.info(
+                        "[Orebit/autotest] t={} pos={} phase={} harvested={} planted={} tilled={}",
+                        ticks, compact(bot.blockPosition()), phase, bot.farmHarvestedCount(),
+                        bot.farmPlantedCount(), bot.farmTilledCount());
+            }
+        }
+
+        /** Write the FARM result file (granular: phase / harvested / planted / tilled / yield), halt. */
+        void finishFarm(String result, String reason, String outcome) {
+            done = true;
+            Path file = ConfigDir.serverDir(server).resolve(RESULT_FILE);
+            try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
+                kv(w, "result", result);
+                kv(w, "outcome", outcome);
+                kv(w, "reason", reason);
+                kv(w, "mode", "farm");
+                kv(w, "ticks", ticks);
+                kv(w, "budgetTicks", budgetTicks);
+                kv(w, "start", start.getX() + "," + start.getY() + "," + start.getZ());
+                if (bot != null) {
+                    kv(w, "phaseReached", "PASS".equals(result) ? "DONE" : lastFarmPhase);
+                    kv(w, "harvested", bot.farmHarvestedCount());
+                    kv(w, "planted", bot.farmPlantedCount());
+                    kv(w, "tilled", bot.farmTilledCount());
+                    kv(w, "wheatInInventory", countItemsById("minecraft:wheat"));
+                    kv(w, "seedsInInventory", countItemsById("minecraft:wheat_seeds"));
+                    kv(w, "mode_bot", bot.mode());
+                    kv(w, "navGaveUp", bot.navigator().navGaveUp());
+                    kv(w, "alive", bot.isAlive());
+                }
+            } catch (IOException e) {
+                OrebitCommon.LOGGER.error("[Orebit/autotest] could not write {}", file, e);
+            }
+            endRun(result, reason);
+        }
+
+        /** Physical count of item {@code id} in the bot's real inventory (result-file forensics). */
+        int countItemsById(String id) {
+            if (bot == null) return 0;
+            var inv = bot.getInventory();
+            int total = 0;
+            for (int i = 0, n = inv.getContainerSize(); i < n; i++) {
+                ItemStack s = inv.getItem(i);
+                if (!s.isEmpty() && id.equals(ItemLookup.idOf(s.getItem()))) {
+                    total += s.getCount();
+                }
+            }
+            return total;
         }
 
         /** Write the CRAFT result file (granular: phase / crafted / target / physical inventory), halt. */
