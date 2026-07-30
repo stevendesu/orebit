@@ -144,7 +144,7 @@ public final class WalkOff implements Movement {
             // near a section top needs the per-cell verify.
             int gapFlags = MovementContext.flagsOf(gp);
             if (MovementContext.headroom(gapFlags) < MovementContext.HEADROOM_WALK) continue;
-            if (!ctx.headroomProves(gapFlags, y, MovementContext.HEADROOM_WALK)
+            if (!ctx.headroomProves(gapFlags, gx, y, gz, MovementContext.HEADROOM_WALK)
                     && (!ctx.passable(gx, y + 1, gz) || !ctx.passable(gx, y + 2, gz))) {
                 continue;
             }

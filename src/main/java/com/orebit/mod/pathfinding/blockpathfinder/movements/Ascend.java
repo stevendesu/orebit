@@ -63,7 +63,7 @@ public final class Ascend implements Movement {
         // Source facts are the same for all four directions — read once. The bot stands on (x,y,z) so its
         // feet/head are clear; HEADROOM == JUMP iff the takeoff head-clearance (y+3) is also clear.
         int srcFlags = ctx.flagsAt(x, y, z);
-        boolean srcClear = ctx.headroomProves(srcFlags, y, MovementContext.HEADROOM_JUMP);
+        boolean srcClear = ctx.headroomProves(srcFlags, x, y, z, MovementContext.HEADROOM_JUMP);
         boolean srcRisky = MovementContext.risksEdit(srcFlags);
         // The START surface height (sixteenths) — a partial start (slab, top 8) eats into the jump
         // budget: every rise below is measured from THIS surface (MovementContext.rise). Read the start

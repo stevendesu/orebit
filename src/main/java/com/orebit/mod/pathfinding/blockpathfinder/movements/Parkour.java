@@ -433,7 +433,7 @@ public final class Parkour implements Movement {
         // its feet/head are clear; HEADROOM == JUMP iff y+3 is also clear. No break folding (you cannot
         // mine mid-jump): an unproven bit falls back to reading the real cell, and a blocked cell rejects.
         int srcFlags = ctx.flagsAt(x, y, z);
-        if (!ctx.headroomProves(srcFlags, y, MovementContext.HEADROOM_JUMP)) {
+        if (!ctx.headroomProves(srcFlags, x, y, z, MovementContext.HEADROOM_JUMP)) {
             int p3 = ctx.packedAt(x, y + 3, z);
             if (p3 == MovementContext.UNBUILT
                     || !ctx.passable(ctx.descriptorOf(x, y + 3, z, p3))) {
@@ -561,7 +561,7 @@ public final class Parkour implements Movement {
                 boolean overfly = false;
                 if (g >= 1) {
                     int flags = MovementContext.flagsOf(p);
-                    if (ctx.headroomProves(flags, y, MovementContext.HEADROOM_WALK)) {
+                    if (ctx.headroomProves(flags, cx, y, cz, MovementContext.HEADROOM_WALK)) {
                         // Body proven clear in one bit test — a flat landing (rising is impossible: a
                         // standable y+1 would have zeroed the HEADROOM bits). Arc verified lazily here.
                         overfly = trigger; // clear body ⇒ a triggering obstacle can be flown over
@@ -643,7 +643,7 @@ public final class Parkour implements Movement {
             // common case pays zero extra reads). A consulted y+1 that is blocked/unbuilt ends the
             // direction exactly as the eager prism did (nothing behind it could ever verify).
             if (g >= 1 && g <= riseMax
-                    && !ctx.headroomProves(MovementContext.flagsOf(p), y,
+                    && !ctx.headroomProves(MovementContext.flagsOf(p), cx, y, cz,
                             MovementContext.HEADROOM_CRAWL)) {
                 int p1 = ctx.packedAt(cx, y + 1, cz);
                 if (p1 == MovementContext.UNBUILT) return found;
@@ -868,7 +868,7 @@ public final class Parkour implements Movement {
     private static void emitOffset(MovementContext ctx, CandidateSink out, int x, int y, int z,
             int dx, int dz, int lx, int lz, int c, int tx, int tz, int flags, long floorDesc) {
         // Landing body (feet y+1, head y+2) — flags fast path, then the real cells.
-        if (!ctx.headroomProves(flags, y, MovementContext.HEADROOM_WALK)) {
+        if (!ctx.headroomProves(flags, tx, y, tz, MovementContext.HEADROOM_WALK)) {
             int p1 = ctx.packedAt(tx, y + 1, tz);
             if (p1 == MovementContext.UNBUILT
                     || !ctx.passable(ctx.descriptorOf(tx, y + 1, tz, p1))) {
