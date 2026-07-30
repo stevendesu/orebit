@@ -20,6 +20,9 @@ simple goal, not from an elaborate command grammar.
 | `/bot find <resource>` | Report the nearest known concentration of a resource — see [Finding & Gathering](gathering.md). |
 | `/bot gather <resource> [count]` | Go get it: find, path, mine, and come back with the goods. |
 | `/bot drop <what>` | Toss items on the ground for you to pick up. `<what>` tab-completes: `all`, `resources` (ores/ingots/gems/logs), `tools`, `trash` (everything that isn't a resource, tool, or armor), or a specific resource name (`iron`, `diamond`, `gold`, `wood`, …). Dropped items get a short pickup delay so the bot doesn't vacuum them back. |
+| `/bot craft <item> [count]` | Craft from what the bot is carrying. `<item>` tab-completes to everything it knows how to make (the game's own recipe book); `[count]` is the number of *result* items you want — a single plank craft yields four toward it. Small (2×2) recipes happen on the spot; a big (3×3) recipe sends the bot to a nearby crafting table — or it places one of its own and reclaims it afterward. See [Crafting configuration](configuration.md#crafting--how-bot-craft-handles-recipes-that-need-a-crafting-table). |
+| `/bot farm` | Tend the farm around where the bot stands: harvest every fully-grown crop, sweep up the drops, replant, seed bare farmland, and — carrying a hoe — till fresh ground by water. Like `follow`, it's a standing job: the bot reports its tally ("harvested 8, planted 9, tilled 2 — watching the farm"), then stays and watches the fields, harvesting crops as they ripen until you give it another order. Immature crops are never touched. See [Farming configuration](configuration.md#farming--how-bot-farm-tends-the-fields). |
+| `/bot build <name> <x> <y> <z>` | Build a Litematica schematic anchored at the given corner. Drop `.litematic` files into `orebit-schematics/` in the server folder (created on first use) — `<name>` tab-completes from there. The bot builds bottom-up from its real inventory with the schematic's exact block states, clears what's in the way (honest timed digs — your protected-blocks list always wins), and finishes with a report of anything it couldn't do, including a shopping list of missing materials. See [Building configuration](configuration.md#building--how-bot-build-executes-schematics). |
 | `/bot report` | Dump the bot's resource knowledge (the "compass") as a table: each resource it has mapped, with approximate counts at a few scales — `near`/`mid`/`far` (within ~64 / ~512 / ~8192 blocks of you, full depth) out to `global` (everything it has **ever explored, anywhere** — even resources it walked past thousands of blocks away). The near/mid/far windows are centered on you, so the numbers stay steady as you move a few blocks (no jump at the world origin). Big numbers show as `~2^n`. The whole census is [saved with the world](persistence.md), so it survives a server restart. See [Finding & Gathering](gathering.md). |
 | `/bot config <…>` | Read or reload the bot's [configuration](configuration.md) without a server restart. |
 
@@ -27,6 +30,18 @@ The bot is a real server-side player, so `follow` / `come` / `goto` are not tele
 the bot walks, jumps, swims, climbs, bridges, and (if you let it) digs its way there,
 paying honest survival costs the whole way. If it can't reach a goal it says so rather
 than cheating its way over.
+
+## No verb for fighting
+
+There is deliberately no `/bot fight`. Combat is a reflex, not a job: the moment a
+hostile mob takes aim at the bot, it pauses whatever it was doing, draws the best weapon
+it carries, and deals with the threat — then picks its task back up exactly where it left
+off. It fights per-mob: creepers are knocked back out of fuse range before the hiss
+finishes, skeletons are rushed down between arrows, and everything else gets timed,
+full-strength swings. An invulnerable bot (the default) is never targeted by mobs in the
+first place, so this mostly matters once you make the bot mortal — and
+`combat.defend=false` turns it into a strict pacifist. See
+[Combat configuration](configuration.md#combat--does-the-bot-defend-itself).
 
 ## Diagnostics
 
