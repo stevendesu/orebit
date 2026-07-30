@@ -128,7 +128,9 @@ public final class ConfigValidator {
                 // combat: the scan box floor covers melee threats; the ceiling bounds the per-tick
                 // entity query (a mob targeting from farther simply engages when it closes in).
                 bool(props, ConfigKeys.COMBAT_DEFEND, d.defend()),
-                intClamped(props, ConfigKeys.COMBAT_SCAN_RADIUS, d.scanRadius(), 8, 32));
+                intClamped(props, ConfigKeys.COMBAT_SCAN_RADIUS, d.scanRadius(), 8, 32),
+                // building
+                bool(props, ConfigKeys.BUILDING_CLEAR_MISMATCHES, d.clearMismatches()));
     }
 
     // ---- per-type parse + clamp (each warns through the sink and never throws) ----------------------

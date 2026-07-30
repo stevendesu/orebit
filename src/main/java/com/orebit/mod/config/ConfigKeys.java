@@ -373,4 +373,13 @@ public final class ConfigKeys {
      * definition). <b>Default {@code 16}</b>.
      */
     public static final String COMBAT_SCAN_RADIUS = "combat.scanRadius";
+
+    // ---- building: how /bot build executes schematics -----------------------------------------------
+    /**
+     * {@code boolean} — a build may CLEAR blocks that occupy a schematic cell with the wrong state
+     * (a timed survival break, real drops; {@code mining.protectedBlocks} still refuses — refused
+     * cells are counted and reported, never forced). <b>Default {@code true}</b>. {@code false} =
+     * the build only places into air/empty cells and reports the occupied ones.
+     */
+    public static final String BUILDING_CLEAR_MISMATCHES = "building.clearMismatches";
 }

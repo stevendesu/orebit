@@ -79,6 +79,8 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private final BotFarmer farmer;
     /** The cross-cutting self-defense interrupt (NOT a mode — pre-dispatch, consumed-tick). */
     private final BotFighter fighter;
+    /** The {@code /bot build} schematic-execution state machine. */
+    private final BotBuilder builder;
     /** The cross-dimension FOLLOW/COME portal-seek/ENTER component. */
     private final BotPortalFollower portalFollower;
 
@@ -152,9 +154,10 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      *   <li>{@link Mode#CRAFT} — the craft-from-inventory loop ({@code /bot craft}); see
      *       {@link BotCrafter}.
      *   <li>{@link Mode#FARM} — the tend-the-farm pass ({@code /bot farm}); see {@link BotFarmer}.
+     *   <li>{@link Mode#BUILD} — the schematic build ({@code /bot build}); see {@link BotBuilder}.
      * </ul>
      */
-    public enum Mode { FOLLOW, STAY, COME, GATHER, CRAFT, FARM }
+    public enum Mode { FOLLOW, STAY, COME, GATHER, CRAFT, FARM, BUILD }
 
     private Mode mode = Mode.FOLLOW;
     private BlockPos comeTarget;    // fixed summon cell (owner's feet block at /bot come time)
@@ -188,6 +191,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.crafter = new BotCrafter(this);
         this.farmer = new BotFarmer(this);
         this.fighter = new BotFighter(this);
+        this.builder = new BotBuilder(this);
         this.portalFollower = new BotPortalFollower(this);
     }
 
@@ -255,6 +259,21 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     /** Landed combat strikes (harness observation). */
     int combatStrikes() {
         return combatStrikes;
+    }
+
+    /** Current {@link BotBuilder} phase name for the harness ({@code "IDLE"} when not building). */
+    String buildPhaseName() {
+        return builder.phaseName();
+    }
+
+    /** Blocks placed this build run (harness observation). */
+    int buildPlacedCount() {
+        return builder.placedCount();
+    }
+
+    /** Blocks cleared this build run (harness observation). */
+    int buildClearedCount() {
+        return builder.clearedCount();
     }
 
     /** Current {@link BotFarmer} phase name for the harness ({@code "IDLE"} when not farming). */
@@ -388,6 +407,16 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         farmer.startFarm();
     }
 
+    /** {@code /bot build <name> <x y z>}: switch to {@link Mode#BUILD} and start a
+     *  {@link BotBuilder} run of {@code schematic} anchored at {@code origin}. */
+    public void startBuild(com.orebit.mod.building.Schematic schematic, BlockPos origin) {
+        this.mode = Mode.BUILD;
+        this.comeTarget = null;
+        navigator.clearPlan();
+        portalFollower.resetPortalSeek();
+        builder.startBuild(schematic, origin);
+    }
+
     @Override
     public void tick() {
         // Tick the bot as a real player: forge its movement inputs, then run the FULL vanilla player tick.
@@ -462,6 +491,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                 case GATHER -> gatherer.gatherLoopTick();
                 case CRAFT -> crafter.craftLoopTick();
                 case FARM -> farmer.farmLoopTick();
+                case BUILD -> builder.buildLoopTick();
                 case COME -> {
                     // Summon to a fixed cell; once there, settle into STAY (distinct from FOLLOW, which
                     // would keep chasing). comeTarget can't be null in COME, but guard defensively.
