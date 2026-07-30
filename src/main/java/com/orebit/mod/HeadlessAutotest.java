@@ -127,10 +127,17 @@ public final class HeadlessAutotest {
                 // and let the self-defense interrupt do the rest (no command issued — the bot sits
                 // in STAY and the ZOMBIE closes the distance, so the scenario is independent of
                 // the committed follower increment's partial-floor walking gap).
-                Boolean.getBoolean("orebit.autotest.fight"));
+                Boolean.getBoolean("orebit.autotest.fight"),
+                // BUILD mode (-Dorebit.autotest.build=true): write a deterministic 3x3 cobblestone
+                // platform .litematic fixture, give 9 cobblestone, and drive /bot build with the
+                // origin right next to the start — every cell within reach (movement-light).
+                Boolean.getBoolean("orebit.autotest.build"));
         events.onServerStarted(scenario::start);
         events.onWorldTickEnd(scenario::tick);
-        if (scenario.fightMode) {
+        if (scenario.buildMode) {
+            OrebitCommon.LOGGER.info("[Orebit/autotest] armed BUILD: start={} budget={}t",
+                    compact(scenario.start), scenario.budgetTicks);
+        } else if (scenario.fightMode) {
             OrebitCommon.LOGGER.info("[Orebit/autotest] armed FIGHT: start={} budget={}t",
                     compact(scenario.start), scenario.budgetTicks);
         } else if (scenario.farmMode) {
@@ -221,6 +228,15 @@ public final class HeadlessAutotest {
         /** Whether the self-defense interrupt was ever observed engaged. */
         boolean fighterEverEngaged;
 
+        // ---- BUILD mode (false = not a build run) ----
+        final boolean buildMode;
+        /** True once the build has been issued (after the nav-readiness gate). */
+        boolean buildIssued;
+        /** The platform's origin (min corner) — the 9 asserted cells. */
+        BlockPos buildOrigin;
+        /** Last non-terminal build phase observed. */
+        String lastBuildPhase = "IDLE";
+
         // ---- TRACE mode (-Dorebit.autotest.traceGoal=x,y,z): mirror /bot trace, headlessly ----
         /**
          * The {@code goalFloor} cell for a one-shot {@link AllyBotEntity#traceTo} — the EXACT entry point
@@ -249,7 +265,8 @@ public final class HeadlessAutotest {
 
         Scenario(BlockPos start, BlockPos goal, int budgetTicks, int startDelayTicks,
                  String gatherResource, int gatherQuota, String toolId, boolean silk,
-                 String craftItem, String giveSpec, boolean farmMode, boolean fightMode) {
+                 String craftItem, String giveSpec, boolean farmMode, boolean fightMode,
+                 boolean buildMode) {
             this.start = start;
             this.goal = goal;
             this.budgetTicks = budgetTicks;
@@ -262,6 +279,7 @@ public final class HeadlessAutotest {
             this.giveSpec = giveSpec;
             this.farmMode = farmMode;
             this.fightMode = fightMode;
+            this.buildMode = buildMode;
         }
 
         /**
@@ -320,6 +338,24 @@ public final class HeadlessAutotest {
                 // bare-handed pillar-to-the-sky: the empty-air highway out-prices a dig-down descent).
                 bot.getInventory().clearContent();
                 final boolean barehanded = Boolean.getBoolean("orebit.autotest.barehanded");
+
+                // ---- BUILD mode (-Dorebit.autotest.build=true): fixture platform build ----
+                // Writes the deterministic 3x3x1 cobblestone-platform .litematic (the same byte
+                // format the SchematicParseTest round-trips), gives exactly 9 cobblestone, and
+                // defers the build issue behind the shared readiness gate. Origin = one block
+                // east of the start at feet level — all 9 cells within reach, zero walking.
+                if (buildMode) {
+                    bot.getInventory().setItem(0,
+                            new ItemStack(ItemLookup.byId("minecraft:cobblestone"), 9));
+                    bot.setMode(AllyBotEntity.Mode.STAY);
+                    buildOrigin = new BlockPos(start.getX() + 1, start.getY(), start.getZ() - 1);
+                    final Path dir = ConfigDir.serverDir(server).resolve("orebit-schematics");
+                    Files.createDirectories(dir);
+                    writePlatformFixture(dir.resolve("autotest-platform.litematic"));
+                    OrebitCommon.LOGGER.info("[Orebit/autotest] bot spawned at {}; platform fixture written; "
+                            + "build pending (origin {})", compact(bot.blockPosition()), compact(buildOrigin));
+                    return;
+                }
 
                 // ---- FIGHT mode (-Dorebit.autotest.fight=true): spawn a sparring zombie ----
                 // Difficulty NORMAL (the template pins peaceful, which would insta-despawn it);
@@ -599,7 +635,11 @@ public final class HeadlessAutotest {
                 return;
             }
 
-            // FIGHT / FARM / CRAFT / GATHER modes have their own polls; GOTO's poll is below.
+            // BUILD / FIGHT / FARM / CRAFT / GATHER modes have their own polls; GOTO's is below.
+            if (buildMode) {
+                buildTick(level);
+                return;
+            }
             if (fightMode) {
                 fightTick(level);
                 return;
@@ -886,6 +926,138 @@ public final class HeadlessAutotest {
             if (ticks % PROGRESS_LOG_TICKS == 0) {
                 OrebitCommon.LOGGER.info("[Orebit/autotest] t={} pos={} phase={} crafted={}/{}",
                         ticks, compact(bot.blockPosition()), phase, crafted, gatherQuota);
+            }
+        }
+
+        /**
+         * BUILD-mode poll: defer {@code startBuild} behind the shared readiness gate (loading the
+         * fixture through the REAL parser), then read the bot's own signals. PASS = the machine
+         * reports 9 placed AND all 9 world cells physically read cobblestone.
+         */
+        void buildTick(ServerLevel level) {
+            if (!bot.isAlive()) {
+                finishBuild("FAIL", "bot died", "FAIL", level);
+                return;
+            }
+            if (!buildIssued) {
+                if (ticks < startDelayTicks) {
+                    return;
+                }
+                if (!navReadyAround(level, start)) {
+                    if (ticks >= budgetTicks) {
+                        finishBuild("FAIL", "nav grid never built around start", "TIMEOUT", level);
+                    }
+                    return;
+                }
+                try {
+                    final com.orebit.mod.building.Schematic schematic = com.orebit.mod.building.Schematic.load(
+                            ConfigDir.serverDir(server).resolve("orebit-schematics")
+                                    .resolve("autotest-platform.litematic"));
+                    bot.startBuild(schematic, buildOrigin);
+                } catch (IOException e) {
+                    finishBuild("FAIL", "fixture unreadable: " + e.getMessage(), "FAIL", level);
+                    return;
+                }
+                buildIssued = true;
+                OrebitCommon.LOGGER.info("[Orebit/autotest] build issued at tick {} origin {}",
+                        ticks, compact(buildOrigin));
+                return;
+            }
+            final String phase = bot.buildPhaseName();
+            if (!"IDLE".equals(phase)) {
+                lastBuildPhase = phase;
+            }
+            if (bot.mode() == AllyBotEntity.Mode.STAY) {
+                final int placedCells = countPlatformCells(level);
+                final int reported = bot.buildPlacedCount();
+                if (placedCells == 9 && reported == 9) {
+                    finishBuild("PASS", "platform complete (9/9 placed)", "PASS", level);
+                } else {
+                    finishBuild("FAIL", "platform incomplete: world " + placedCells
+                            + "/9, machine " + reported + "/9 (phase " + lastBuildPhase + ")", "FAIL", level);
+                }
+                return;
+            }
+            if (ticks >= budgetTicks) {
+                finishBuild("FAIL", "tick budget exhausted (phase " + lastBuildPhase + ", placed "
+                        + bot.buildPlacedCount() + ")", "TIMEOUT", level);
+            }
+        }
+
+        /** Write the BUILD result file, halt. */
+        void finishBuild(String result, String reason, String outcome, ServerLevel level) {
+            done = true;
+            Path file = ConfigDir.serverDir(server).resolve(RESULT_FILE);
+            try (BufferedWriter w = Files.newBufferedWriter(file, StandardCharsets.UTF_8)) {
+                kv(w, "result", result);
+                kv(w, "outcome", outcome);
+                kv(w, "reason", reason);
+                kv(w, "mode", "build");
+                kv(w, "ticks", ticks);
+                kv(w, "budgetTicks", budgetTicks);
+                kv(w, "start", start.getX() + "," + start.getY() + "," + start.getZ());
+                if (bot != null) {
+                    kv(w, "phaseReached", "PASS".equals(result) ? "DONE" : lastBuildPhase);
+                    kv(w, "placed", bot.buildPlacedCount());
+                    kv(w, "cleared", bot.buildClearedCount());
+                    kv(w, "worldCells", countPlatformCells(level));
+                    kv(w, "alive", bot.isAlive());
+                }
+            } catch (IOException e) {
+                OrebitCommon.LOGGER.error("[Orebit/autotest] could not write {}", file, e);
+            }
+            endRun(result, reason);
+        }
+
+        /** Physical count of platform cells that read cobblestone (the world-truth cross-check). */
+        int countPlatformCells(ServerLevel level) {
+            if (buildOrigin == null) return 0;
+            int n = 0;
+            for (int dx = 0; dx < 3; dx++) {
+                for (int dz = 0; dz < 3; dz++) {
+                    if (level.getBlockState(buildOrigin.offset(dx, 0, dz)).is(Blocks.COBBLESTONE)) n++;
+                }
+            }
+            return n;
+        }
+
+        /**
+         * Write the deterministic 3x3x1 cobblestone-platform {@code .litematic}: Version 6, one
+         * region "main" at Position(0,0,0)/Size(3,1,3), palette [air, cobblestone], 9 cells all
+         * palette-1 → 2 bits/entry LSB-first = the single long {@code 0x15555}.
+         */
+        static void writePlatformFixture(Path file) throws IOException {
+            try (var fs = Files.newOutputStream(file);
+                 var gz = new java.util.zip.GZIPOutputStream(fs);
+                 var out = new java.io.DataOutputStream(gz)) {
+                out.writeByte(10); out.writeUTF("");                    // root compound
+                out.writeByte(3); out.writeUTF("Version"); out.writeInt(6);
+                out.writeByte(10); out.writeUTF("Metadata");
+                out.writeByte(8); out.writeUTF("Name"); out.writeUTF("autotest-platform");
+                out.writeByte(0);                                        // end Metadata
+                out.writeByte(10); out.writeUTF("Regions");
+                out.writeByte(10); out.writeUTF("main");
+                out.writeByte(10); out.writeUTF("Position");
+                out.writeByte(3); out.writeUTF("x"); out.writeInt(0);
+                out.writeByte(3); out.writeUTF("y"); out.writeInt(0);
+                out.writeByte(3); out.writeUTF("z"); out.writeInt(0);
+                out.writeByte(0);
+                out.writeByte(10); out.writeUTF("Size");
+                out.writeByte(3); out.writeUTF("x"); out.writeInt(3);
+                out.writeByte(3); out.writeUTF("y"); out.writeInt(1);
+                out.writeByte(3); out.writeUTF("z"); out.writeInt(3);
+                out.writeByte(0);
+                out.writeByte(9); out.writeUTF("BlockStatePalette");     // list of compounds
+                out.writeByte(10); out.writeInt(2);
+                out.writeByte(8); out.writeUTF("Name"); out.writeUTF("minecraft:air");
+                out.writeByte(0);
+                out.writeByte(8); out.writeUTF("Name"); out.writeUTF("minecraft:cobblestone");
+                out.writeByte(0);
+                out.writeByte(12); out.writeUTF("BlockStates");          // long[]
+                out.writeInt(1); out.writeLong(0x15555L);
+                out.writeByte(0);                                        // end region "main"
+                out.writeByte(0);                                        // end Regions
+                out.writeByte(0);                                        // end root
             }
         }
 

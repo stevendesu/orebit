@@ -88,6 +88,9 @@ param(
     # -Fight: FIGHT mode. Difficulty NORMAL, iron sword given, one zombie spawned targeting the bot;
     # PASS = zombie killed with the self-defense interrupt engaged and >=1 landed strike, bot alive.
     [switch]$Fight,
+    # -BuildTest: BUILD mode. Write the deterministic 3x3 cobblestone-platform .litematic fixture,
+    # give 9 cobblestone, drive /bot build next to -Start; PASS = 9/9 cells placed and verified.
+    [switch]$BuildTest,
     # -MasterWorld <path>: FROZEN-WORLD mode. Instead of seed-regenerating the world each run (which is
     # non-deterministic for VEGETATION -- trees generate in parallel-chunk-gen order; proven by the
     # startprobe: same seed -> 3 distinct tree layouts in 5 runs), copy a pristine, pre-generated master
@@ -170,6 +173,7 @@ if ($Craft -ne "")    { $gradleArgs += "-Porebit.autotest.craft=$Craft" }
 if ($Give -ne "")     { $gradleArgs += "-Porebit.autotest.give=$Give" }
 if ($Farm)            { $gradleArgs += "-Porebit.autotest.farm=true" }
 if ($Fight)           { $gradleArgs += "-Porebit.autotest.fight=true" }
+if ($BuildTest)       { $gradleArgs += "-Porebit.autotest.build=true" }
 if ($Count -gt 1)     { $gradleArgs += "-Porebit.autotest.count=$Count" }
 if ($Tool -ne "")     { $gradleArgs += "-Porebit.autotest.tool=$Tool" }
 if ($Silk)            { $gradleArgs += "-Porebit.autotest.silk=true" }
