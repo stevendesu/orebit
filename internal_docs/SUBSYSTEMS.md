@@ -227,6 +227,19 @@ trace`/`rtrace` one-shots. Behavior lives on components it constructs and ticks:
   (wheat/carrots/potatoes/beetroots v1; age read generically off the `age` property; kinds baked
   at SERVER_STARTED). Seeds are EXCLUDED from bridging (`consumeOnePlaceable`/premium skip
   `CropKinds.isSeedItem`).
+- **`BotFighter`** — the SELF-DEFENSE INTERRUPT (DESIGN-bot-abilities.md §2.3/§5; NOT a Mode):
+  checked BEFORE the mode dispatch each tick, and while a threat is engaged it CONSUMES the tick —
+  the current mode's machine freezes in place and resumes when combat ends (the
+  `followThroughPortal` consumed-tick precedent; the live analogue of the Phase-7 StateStack).
+  Threat = the nearest live `Mob` whose `getTarget() == bot` within `combat.scanRadius` (the mob's
+  own declared state, never proximity heuristics; quiescent under the invulnerable default).
+  Per-archetype `MobStrategy` classes (first-match order): `CreeperStrategy` (standoff ≥4.0 while
+  recharging, full-charge SPRINT knockback hits at ≤2.9, disengage past the 7-block keep-swelling
+  bound — all constants source-verified, none tuned), `SkeletonStrategy` (sprint in — arrows lead
+  nothing; family classed via the `platform/MobKinds` seam, the class moved packages at 1.21.11),
+  `MeleeStrategy` (fallback: face, close, full-charge hits only — `getAttackStrengthScale` reads
+  the REAL vanilla ticker, no derived clock). Hits ride the inherited `Player#attack` (crit/sweep/
+  knockback/enchants all vanilla); `BotInventory.equipBestWeapon` ranks sword>axe by id tier.
 - **`BotMining`** — the per-tick timed-break actuator: callers `request(pos)` every tick; equips
   fastest/goal tool, accumulates vanilla `getDestroyProgress`, crack overlay, real survival break
   (drops/XP/wear), `Config.mayBreak` backstop (waived only for `requestReclaim` of a bot-placed
@@ -294,8 +307,8 @@ Trace, RegionTrace (`/bot rtrace`), Probe, Config, Debug. The `ChatCommandParser
 `navReadyTimeoutTicks`, `hpaFlushBudgetMs`, `regionShardLoadBudgetMs`), `hpa.*`
 (`persistIntervalTicks`, `persistFlushBudgetMs`, `lazyLoad`, `residentLeafCap`), **`doors.*`**
 (`doors.toggle`, default true → `BotCaps.mayToggleDoors`), **`crafting.*`**
-(`placeTable`/`reclaimTable`/`tableSearchRadius`), and **`farming.*`**
-(`workRadius`/`till`) — the ability namespaces are executor-read and fully hot.
+(`placeTable`/`reclaimTable`/`tableSearchRadius`), **`farming.*`** (`workRadius`/`till`), and
+**`combat.*`** (`defend`/`scanRadius`) — the ability namespaces are executor-read and fully hot.
 `toBotCaps()` folds knobs into the
 pathfinder's `BotCaps`; `mayBreak()` = executor-side break-policy backstop; `conjuredBlockState()`.
 `ConfigLoader.load` reads `config/orebit.properties` at SERVER_STARTED (writes commented defaults
