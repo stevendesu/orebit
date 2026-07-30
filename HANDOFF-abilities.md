@@ -73,7 +73,33 @@ fixes it. After it lands on mc-1.21: cherry-pick `53fb13e`+`ae26a17`, merge core
   strikes → dead in 79t, bot 20hp — the zombie WALKS to the bot, so the scenario dodges the
   committed follower gap entirely).
 
-## NEXT — Building (task #5), then the arc close-out (task #6)
+## DONE — Building (SHIPPED) — THE ARC'S FOUR FEATURES ARE COMPLETE
+
+- core `b3c8b29` feat(building), merged → main `70c0da9`; verify branch `7607841` (BUILD harness)
+  + `c56ad87` (core merge).
+- `building/NbtReader` (dependency-free NBT wire reader) + `building/Schematic` (.litematic,
+  byte-faithful: negative-Size corners, LSB-first SPANNING bit reads, Version<5 rejected) +
+  `building/PaletteResolver` (exact BlockState via BlockLookup + generic Property-by-name — NO
+  version flavors needed) + `BotBuilder` (SCAN/WORK diff sweeps, bottom-up, self-healing props
+  diff-ignored, partner cells deduped, exact-state place + timed clears, sweep-progress
+  convergence, honest missing-materials report) + `/bot build` (files from
+  `<server dir>/orebit-schematics/`) + `building.clearMismatches`.
+- Verified: 28+4 matrices green; suite 604; BUILD autotest PASS (9 cleared + 9/9 placed, 1155t).
+- FINAL integrated regression sweep on the verify branch head `c56ad87`: CRAFT scenario B PASS,
+  FIGHT PASS, BUILD PASS (FARM + flagship GOTO remain known-blocked on the committed follower
+  gap — see the ⚠ section; re-verify commands there).
+
+## NEXT (future arcs, in the owner's order)
+
+1. **Work trees** — the requirements/planner layer composing gather/craft/farm/build (the stub
+   `requirements/` spec's hand-authored recipes govern THIS layer; `RecipeIndex` stays the
+   execution truth). Components already expose the seams: `startX()` entries, observation
+   getters, BotBuilder's missing-materials map = the shopping list.
+2. Skeleton-strategy refinement (strafe/LOS-break needs a driver strafe primitive), shield/bow
+   use, eating (mandatory before `survival.hunger` defaults on).
+3. TileEntities/Entities in schematics; Sponge `.schem` fallback; farmland-landing avoidance in
+   the planner (a jump onto farmland tramples — plan-cost work, owner-gated).
+4. LLM integration (intent only, per the PRD).
 
 Building plan (DESIGN-bot-abilities.md §6 + the building-formats recon): (1) `.litematic` parser
 in core — gzip NBT (consider a dependency-free mini-NBT reader for full version independence);
