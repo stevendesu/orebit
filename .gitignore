@@ -60,3 +60,5 @@ scripts/autotest-cliff/world-master/
 # Lateral-climb repro master world — untracked like the cliff master above; rebuildable via
 # scripts/repro-climb/ (gen_fills.py + rcon.py); owner decides whether it lands on the orphan branch.
 scripts/autotest-climb/world-master/
+# Carpet-parkour repro master world (New World 1) — untracked like the other repro masters
+scripts/autotest-carpet/world-master/
