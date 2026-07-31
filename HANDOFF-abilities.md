@@ -7,20 +7,29 @@ pushed. SPIRAL +8.4% from the self-edit coherence gate (core `7e850fb`) is OWNER
 revert or "optimize" it without a new ruling; the escalation (exact per-column membership probe) is
 only if the owner reopens it.
 
-1. **Break policy (the reconcile hole).** Owner ruling: a `Need.AIR` cell should ALREADY be air if the
-   plan was followed properly — the reconcile exists to repair missed edits, NOT to force the plan true
-   by breaking protected blocks. So the PhaseRunner mine path must stop riding hands-exempt BotMining
-   unchecked: restore `mayBreak` on the reconcile, with plan-authored placements as the one exemption
-   (the plan knows its own scaffolding — the isDoorCell precedent). Also fix the LYING Debug pre-flight
-   in `AllyBotEntity.mine()` (predicts a refusal BotMining no longer applies). Evidence: the six
-   place→REFUSED→dug-anyway pairs at 11:39:4x in the 2026-07-30 debug log.
-2. **Mid-air adoption gate.** Owner ruling (refined): never plan while the bot is IN MOTION, unless the
-   motion is along a known-good route from a previous plan AND there is a clear post-plan reconcile for
-   not standing on the expected start block. Pure window slides stay exempt (they preserve the executing
-   segment). Evidence: the Fall adopted at `grounded=false` whose skipped walk-off stride made the
-   landing physically unreachable (~0.8 blocks needed, ~0.55 available). Related deferred: the Fall
-   wrong-landing envelope (owner expects a wrong-cell touchdown to FAIL; the done-comment still cites
-   the s52-deleted grounded-stall recovery).
+1. ✅ **DONE 2026-07-31 (core `367aa2f`) — Break policy (the reconcile hole).** `AllyBotEntity.mine()`
+   (sole caller = the PhaseRunner `Need.AIR` reconcile) now applies `Config.mayBreak` for real — the
+   lying pre-flight became the gate — with the ruled plan-authored-placement exemption
+   (`BotNavigator.planPlacedAt`, prefix `0..waypointIndex` over the path's own StepEdits places; the
+   isDoorCell shape). BotMining stays hands-exempt (64e132c); stale backstop/waiver docs swept. Known
+   accepted residuals (javadoc'd): the prefix vouches skipped/pending place CELLS (closing it needs an
+   executed-place record — new state, owner sign-off); the refusal log stays `Debug.VERBOSE` (the
+   place-refusal idiom), so a production protected-hold is silent; prior-window own-placements are not
+   vouched (planner routes around them — stale-grid only).
+2. ✅ **DONE 2026-07-31 (core `367aa2f`) — Mid-motion plan gate + post-plan reconcile.** All four
+   driver launch/adopt points (fresh replan, settled boundary, planless adoption, repairStep) gate on
+   PLAN-ANCHOR stability = `grounded || inWater || inLava || onClimbable` (adversarial review: the
+   narrow arrival pair slid a hanging bot down its ladder in a climb/slide livelock and made a
+   lava-borne bot sink before planning; only BALLISTIC states defer). Async adoption = seam accept +
+   ON-PLAN membership (`AsyncWindowSearch.onStartOrPlan`, ±1 Y in fluid; follower's reached-scan does
+   the mid-plan entry) else RETRY-from-actual-floor; `refreshWindow` drops a parked P4 precompute (the
+   parked-veto wedge). Slides untouched. Verified: suite green, 28× common compile, FARM PASS, flagship
+   GOTO best-ever 251.8 blocks / zero wedges → ended at item 4 below at (73,107,154). **Evidence for
+   the deferred Fall wrong-landing envelope:** that run built SEVEN `PLAN Fall … grounded=false` — all
+   mid-plan Climb-chain step transitions (adoption is settled-gated now), all survived on this roll;
+   run 1 of the session wedged terminally on the same class at (55,152,258) (target feet cell also
+   read solid). The envelope (+ the walk-off phase's advanceWhen(!grounded) instant-skip at airborne
+   build) is where the remaining Fall risk lives.
 3. **Window-slide livelock (#5, planner).** Mechanism fully characterized (empty-plan-consumed × tail
    re-derive from identical inputs × ±2 tolerance satisfied THROUGH STONE); full repro log =
    `run/autotest/logs/2026-07-30-4.log.gz` (11,209 FOUND-0wp at (24,106,167)). Flagship reproduction is
