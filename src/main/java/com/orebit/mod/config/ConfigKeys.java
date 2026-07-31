@@ -91,7 +91,8 @@ public final class ConfigKeys {
      * minecraft:diamond_ore}). Default empty (nothing protected). Enforced BOTH planner-side (folded into
      * the NavBlock classification fingerprint as the
      * PROTECTED descriptor bit, so routes are planned around protected blocks) and execution-side (every
-     * live break re-checks the list — the stale-grid backstop). Malformed entries warn and are skipped.
+     * PATHING-MOTIVATED live break re-checks the list — the stale-grid backstop; deliberate task hands
+     * are exempt, owner ruling 2026-07-29). Malformed entries warn and are skipped.
      * <b>Changing this list requires a server restart</b> (or waiting for chunks to rebuild) to fully
      * apply: nav-grid data classified before the change still carries the old fingerprints; the
      * execution-side refusal applies immediately.

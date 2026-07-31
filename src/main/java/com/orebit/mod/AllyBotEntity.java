@@ -1038,20 +1038,35 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         return s.getBlock().getJumpFactor() < 1.0f;                      // honey — jump-suppressing launch pad
     }
 
-    /** Route a break request to the timed {@link BotMining} actuator (equip/face/swing/real-time/drops). */
+    /**
+     * Route a break request to the timed {@link BotMining} actuator (equip/face/swing/real-time/drops).
+     *
+     * <p><b>The reconcile's break-policy gate (owner ruling 2026-07-30).</b> The sole caller is the
+     * {@code PhaseRunner} {@code Need.AIR} reconcile, which exists to repair MISSED EDITS — a cell the
+     * plan needs clear should ALREADY be air when the plan was followed properly — never to force the
+     * plan true by chewing through someone's build. {@link BotMining} itself is the DELIBERATE-action
+     * hands and stays {@code mayBreak}-exempt (owner ruling 2026-07-29), so this PATHING-motivated seam
+     * applies {@link Config#mayBreak} itself, like every other route executor (applyEdits/place, the
+     * gather LOS-occluder dig, builder clears) — with ONE exemption: a cell the current path's own
+     * executed prefix PLACED ({@link BotNavigator#planPlacedAt}). The plan knows its own scaffolding
+     * (the {@code isDoorCell} precedent): the default {@code mining.protectedBlocks} list contains the
+     * conjured bridge block, so without the vouch the plan's own later step would be refused its own
+     * cobble (the six place→refuse pairs in the 2026-07-30 log). A refusal holds the phase; the refusal
+     * log names it once per cell (the place-refusal idiom — {@code Debug.VERBOSE}-gated, so a production
+     * hold is silent; promote if that ever bites), since a refused cell is re-requested every tick and
+     * the hold would otherwise be indistinguishable from a legitimately slow dig.
+     */
     @Override
     public void mine(int x, int y, int z) {
-        if (Debug.VERBOSE) {
-            // Pre-flight the exact refusal BotMining applies SILENTLY (its mayBreak backstop stop()s the
-            // break with no signal) — a phase re-requesting a refused cell every tick holds forever, and
-            // without this line the hold is indistinguishable from a legitimately slow dig.
-            ServerLevel level = (ServerLevel) Worlds.of(this);
-            scratchPos.set(x, y, z);
-            BlockState s = level.getBlockState(scratchPos);
-            if (!s.isAir() && !ConfigLoader.config().mayBreak(s, s.getDestroySpeed(level, scratchPos))) {
-                refusalLog("mine|" + x + "," + y + "," + z, "mine REFUSED at (" + x + "," + y + "," + z + "): "
-                        + s.getBlock() + " protected/unbreakable — BotMining will release it every tick");
-            }
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        scratchPos.set(x, y, z);
+        BlockState s = level.getBlockState(scratchPos);
+        if (!s.isAir() && !ConfigLoader.config().mayBreak(s, s.getDestroySpeed(level, scratchPos))
+                && !navigator.planPlacedAt(x, y, z)) {
+            refusalLog("mine|" + x + "," + y + "," + z, "mine REFUSED at (" + x + "," + y + "," + z + "): "
+                    + s.getBlock() + " protected/unbreakable — the reconcile repairs missed edits, it never "
+                    + "breaks protected blocks; holding");
+            return;
         }
         mining.request(new BlockPos(x, y, z));
     }

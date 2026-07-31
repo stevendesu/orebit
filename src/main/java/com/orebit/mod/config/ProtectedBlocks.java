@@ -27,9 +27,12 @@ import net.minecraft.world.level.block.state.BlockState;
  *       PROTECTED bit ({@code NavBlock.applyProtected}), splitting matching states into protected
  *       navtypes. The A* hot path then sees protected-ness as a single already-loaded descriptor bit —
  *       this object (a set lookup + tag tests) is never touched per node.</li>
- *   <li><b>Executor (this object, cold):</b> every live break site ({@code AllyBotEntity.applyEdits}/
- *       {@code place}, {@code BotMining}) re-checks the LIVE block state against {@link #matches} via
- *       {@link Config#mayBreak} — the hard backstop that also covers stale nav grids.</li>
+ *   <li><b>Executor (this object, cold):</b> every PATHING-MOTIVATED live break site
+ *       ({@code AllyBotEntity.applyEdits}/{@code place}/{@code mine}, the gather LOS-occluder dig,
+ *       builder clears) re-checks the LIVE block state against {@link #matches} via
+ *       {@link Config#mayBreak} — the hard backstop that also covers stale nav grids. The DELIBERATE
+ *       task hands ({@code BotMining} — a gather target, a harvest, {@code /bot mine}) are exempt
+ *       (owner ruling 2026-07-29: protecting logs must not refuse {@code /bot gather wood}).</li>
  * </ul>
  *
  * <p><b>Restart caveat:</b> because protected-ness lives in the navtype fingerprint, nav-grid data built

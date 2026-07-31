@@ -247,9 +247,10 @@ final class BotBuilder {
         bot.setForward(0.0f);
         switch (action.kind()) {
             case CLEAR -> {
-                // The executor-side policy gate: a protected/unbreakable occupant is REFUSED here
-                // (BotMining's backstop would release silently every tick = a stall) — count once
-                // and move on; the final report names the count.
+                // The executor-side policy gate: a protected/unbreakable occupant is REFUSED here —
+                // a build clear is PATHING-class, and the deliberate BotMining hands below would dig
+                // it unchecked (they are mayBreak-exempt by owner ruling) — count once and move on;
+                // the final report names the count.
                 final float destroy = world.getDestroySpeed(level, cell);
                 if (!ConfigLoader.config().clearMismatches()
                         || !ConfigLoader.config().mayBreak(world, destroy)) {

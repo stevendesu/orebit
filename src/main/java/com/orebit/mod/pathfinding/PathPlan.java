@@ -574,7 +574,7 @@ public final class PathPlan {
      * {@link PathStatus#COMPLETE} when the real goal tolerance is met. A transient dip back to an earlier
      * region neither retreats {@code committedIndex} nor replans.
      */
-    public void onBotMoved(BlockPos botFloor, int startMode) {
+    public void onBotMoved(BlockPos botFloor, int startMode, boolean fluidAnchor) {
         this.botFloor = botFloor;
         this.startMode = startMode; // the bot's live pose, used by the next windowed search (keeps PRONE while swimming)
 
@@ -586,7 +586,7 @@ public final class PathPlan {
         // a settled boundary, so adopting here IS the boundary-gated adoption the design requires. No-op
         // when sync or nothing is in flight (one null compare).
         if (executor != null) {
-            pollPending(botFloor);
+            pollPending(botFloor, fluidAnchor);
         }
 
         // Goal tolerance check (the block tier reaches the goal within 1 horizontally, 2 vertically —
@@ -1127,17 +1127,20 @@ public final class PathPlan {
      * {@link #blockPlan}/{@link #lastPlanPartial}/{@link #status}:
      * <ul>
      *   <li><b>Boundary replan</b> result: adopt if the bot is still within seam tolerance of the cell the
-     *       search started from AND the window target hasn't moved; otherwise resubmit from the actual
-     *       floor (the same recovery the escape hatches use). A {@code null} result = BLOCKED, exactly the
-     *       sync path's semantics. An executor-rejected handle also retries — NOT a search verdict, never
-     *       BLOCKED (that blacklists a real skeleton hop — review finding).</li>
+     *       search started from AND the window target hasn't moved AND the bot's floor is the searched
+     *       start or ON the result plan (the post-plan reconcile, owner ruling 2026-07-30 — the follower's
+     *       reached-scan then enters the plan mid-way when the bot walked ahead during the search);
+     *       otherwise resubmit from the actual floor (the same recovery the escape hatches use). A
+     *       {@code null} result = BLOCKED, exactly the sync path's semantics. An executor-rejected handle
+     *       also retries — NOT a search verdict, never BLOCKED (that blacklists a real skeleton hop —
+     *       review finding).</li>
      *   <li><b>Pre-plan</b> result (P4): PARK it — the bot hasn't reached the predicted start yet. Each
      *       boundary visit re-tests the parked seam; on accept it's adopted with no search pause at all,
      *       on target-change it's dropped (the window moved on).</li>
      * </ul>
      */
-    private void pollPending(BlockPos actualFloor) {
-        switch (async.drainPending(actualFloor, windowTargetPos, startMode)) {
+    private void pollPending(BlockPos actualFloor, boolean fluidAnchor) {
+        switch (async.drainPending(actualFloor, windowTargetPos, startMode, fluidAnchor)) {
             case RETRY:
                 // Executor hiccup / drifted past seam tolerance / window moved — plan from where we
                 // really are (the mailbox never decides; see AsyncWindowSearch.Drain).
@@ -1157,7 +1160,7 @@ public final class PathPlan {
         }
         // Parked pre-plan adoption: the no-pause splice. Adopt only when the bot has actually arrived at
         // the predicted start (seam accept) and the window target is still the parked one.
-        if (async.pollParked(actualFloor, windowTargetPos, startMode)) {
+        if (async.pollParked(actualFloor, windowTargetPos, startMode, fluidAnchor)) {
             this.blockPlan = async.resultPlan();
             this.lastPlanPartial = async.resultPartial();
             this.status = resultStatus(blockPlan, async.resultExpansions(),
@@ -1200,19 +1203,24 @@ public final class PathPlan {
      * Tick-rate poll for the PLANLESS case (review finding): adoption of a plan when {@link #blockPlan}
      * is null needs NO settled boundary — there is nothing to un-adopt mid-move, and the sync path built
      * its first plan from a floating/swimming bot too. Without this, a bot that never settles (treading
-     * water, long fall) could wait forever on its FIRST plan, because {@link #onBotMoved} — the only
-     * other drain — is boundary-gated by the caller. Also refreshes {@link #botFloor} so a
+     * water) could wait forever on its FIRST plan, because {@link #onBotMoved} — the only other drain —
+     * is boundary-gated by the caller. The caller additionally gates this poll on PLAN-ANCHOR stability
+     * (owner ruling 2026-07-30: {@code grounded || inWater || inLava || onClimbable} — any CONTROLLED
+     * medium; deliberately WIDER than the arrival test's grounded/in-water pair): a treading-water,
+     * lava-borne, or climbable-hanging bot still adopts at tick rate, but a mid-fall (ballistic) bot
+     * defers the few ticks to touchdown — an airborne adoption would anchor the follower and frame the
+     * plan's first step from a cell the bot is falling past. Also refreshes {@link #botFloor} so a
      * rejected-seam resubmit searches from the bot's LIVE cell, not the stale ctor cell.
      *
      * <p>(A CONSUMED follower plan needs no special case here — s52: plan consumption is a first-class
      * settle event in the driver, so a consumed plan drains through the normal boundary-gated
      * {@link #onBotMoved} the same tick it settles.)
      */
-    public void pollWhenPlanless(BlockPos liveFloor) {
+    public void pollWhenPlanless(BlockPos liveFloor, boolean fluidAnchor) {
         if (executor == null || blockPlan != null) return;
         if (status == PathStatus.COMPLETE || status == PathStatus.FAILED || skeleton == null) return;
         this.botFloor = liveFloor;
-        pollPending(liveFloor);
+        pollPending(liveFloor, fluidAnchor);
     }
 
     /** Stop caring about any in-flight search (the owner cleared/replaced this plan). */
@@ -1460,9 +1468,23 @@ public final class PathPlan {
      * same window target) or periodically (terrain changed under the window). This is the "shift the window,
      * don't replan everything" half: the skeleton is a committed S1→…→Sn route; only the local block path
      * between committed waypoints is re-searched. No-op once COMPLETE/FAILED or when no skeleton was produced.
+     *
+     * <p>Drops any parked P4 precompute first (owner ruling 2026-07-30, review finding): a refresh fires
+     * only on a CONSUMED or terrain-impacted plan, and this same tick's {@code onBotMoved} already gave the
+     * parked plan its adoption test — so a still-parked plan here is one the settled bot can never adopt
+     * (it settled off the predicted start and off the parked route) or one computed against stale terrain.
+     * Without the drop, {@code replanBlock}'s parked-for-target early-return vetoes every resubmit while
+     * the park slot vetoes adoption — a permanent silent WAIT. Dropping restores the seam contract's
+     * recovery (never repair a rejected plan; search again from the actual floor). NOTE the drop is
+     * deliberately CONSERVATIVE on the approach path: a MID-WALK refresh can fire too (the 40-tick
+     * recheck + {@code planImpacted} — which the bot's OWN executed edits bump), and it discards a
+     * still-healthy precompute there; the cost is one boundary re-search (the attempt guard means no
+     * re-preplan for that target), never a wrong path — adopting a pre-terrain-change precompute is
+     * exactly the staleness the refresh exists to eliminate.
      */
     public void refreshWindow() {
         if (skeleton == null || status == PathStatus.COMPLETE || status == PathStatus.FAILED) return;
+        async.dropParked();
         replanBlock();
     }
 

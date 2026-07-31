@@ -31,6 +31,24 @@ verified: complex-path tick time ~8–16 ms → ~3 ms; a 13.6k-node search FOUND
   **§4.6** warm-up amendment — `NavWarmup` stays on the tick thread, JIT warmth is JVM-global.
 - §5 async `PathPlan` — the one seam that changes (submit at the settled boundary; `pollWhenPlanless`
   tick-rate first-plan adoption).
+  **Mid-motion amendment (owner ruling 2026-07-30):** never plan while the bot is in motion. The driver
+  gates every plan-LAUNCH/adopt decision point (fresh replan, the settled-boundary bundle, the planless
+  poll, the repair step) on PLAN-ANCHOR stability — `grounded() || isInWater() || inLava() ||
+  onClimbable()`, i.e. any CONTROLLED medium — because floor-cell equality alone passed while airborne
+  (the mid-air Fall adoption incident). Only BALLISTIC states (jump/fall arcs) defer, to the touchdown a
+  few ticks away. The anchor predicate is deliberately WIDER than the arrival test's "safe to drop all
+  inputs" pair (`grounded||isInWater`): a climbable hang and lava suspension are valid anchors (review
+  findings — a gate on the narrow pair slid a hanging bot to the ladder base in a climb/slide livelock,
+  and made a lava-borne bot sink to the pool floor before planning its escape), but neither is a place to
+  drop inputs. Pure window slides are untouched (they never create a new `BlockPathPlan` reference). And
+  adoption gains a POST-PLAN RECONCILE: a seam-accepted result is adopted only when the bot's floor is
+  the searched start or ON the result plan (`AsyncWindowSearch.onStartOrPlan`; the follower's
+  reached-scan then enters mid-plan — the existing "advance SKIPPED" mechanism); otherwise RETRY from the
+  actual floor (`drainPending`), and a parked P4 precompute that fails the test stays parked for the
+  approach case but is DROPPED by `refreshWindow` (a consumed/terrain-impacted plan's parked result
+  already failed this tick's adoption — keeping it would veto every resubmit: the parked-wedge review
+  finding). Seam tolerance (Chebyshev 3) is unchanged — the membership test is strictly tighter, never
+  wider.
 - §6 time-based cap — wall clock is the binding limit (`pathing.asyncSearchBudgetMs`, **def 250**,
   checked every 256 pops); the node cap becomes the 262k `TIME_MODE_NODE_BACKSTOP` (memory-only).
 - §7 pre-plan + splice — eager next-window plan from the predicted end cell at half-consumed, parked
