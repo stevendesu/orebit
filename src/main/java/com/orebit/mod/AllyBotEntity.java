@@ -926,6 +926,19 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      *  Held true, vanilla {@code aiStep} jumps on land and swims up in water — the one climb mechanism. */
     @Override public void setJumping(boolean jumping) { super.setJumping(jumping); }
 
+    // onClimbable() on the BotSteering seam is satisfied by the inherited public vanilla
+    // LivingEntity.onClimbable() (the feet block vs #climbable) — a class method wins over the interface
+    // default, so the bot reports its REAL arrest state while headless test doubles default false.
+
+    /** The sink-through-a-scaffold-deck discriminator ({@link BotSteering#scaffoldingBelow}): sneak sinks
+     *  through scaffolding's stand-on-top shape but would edge-guard-pin the bot on a ladder plate — see
+     *  Climb's Δy&lt;0 grounded steer branch (DESIGN-climb-vocabulary.md §4). Live read, solidAt pattern. */
+    @Override
+    public boolean scaffoldingBelow() {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        return level.getBlockState(this.blockPosition().below()).is(Blocks.SCAFFOLDING);
+    }
+
     // ---- Live-world geometry + block actions (the reconcile seam a MovePlan drives through) -----------
 
     /** Live movement-blocking test: the cell has a non-empty collision shape (air/water/plants read clear).

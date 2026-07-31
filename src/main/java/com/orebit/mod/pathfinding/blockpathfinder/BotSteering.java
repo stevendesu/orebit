@@ -62,6 +62,26 @@ public interface BotSteering {
      *  Gates the {@link SteerControl#holdDepth} fluid autopilot for lava swimming (s52b hazard-media). */
     boolean inLava();
 
+    /**
+     * Whether the bot's FEET block is a climbable — vanilla {@code LivingEntity.onClimbable()} (the
+     * feet-cell {@code #climbable} test, incl. the open-trapdoor-above-same-facing-ladder special case).
+     * This is the arrest state a hang landing completes in ({@code Fall}'s done predicate) and the
+     * climb-steer branches key on (DESIGN-climb-vocabulary.md §4). Default {@code false} so the headless
+     * test doubles need not implement it; the entity impl needs NO override — the inherited public
+     * vanilla method satisfies the seam (a class method wins over an interface default).
+     */
+    default boolean onClimbable() { return false; }
+
+    /**
+     * Whether the block directly UNDER the bot's feet is scaffolding — the one climbable whose top a held
+     * SNEAK sinks through (scaffolding is exempt from the climbable sneak-hold), which is exactly how the
+     * sink-in step descends a scaffold deck (DESIGN-climb-vocabulary.md §3.5/§4). A ladder plate must NOT
+     * sneak there (the vanilla sneak edge-guard would pin the bot ON the plate), so the climb steer needs
+     * this one-block discrimination. Live level read (the {@link #solidAt} pattern). Default {@code false}
+     * for the test doubles.
+     */
+    default boolean scaffoldingBelow() { return false; }
+
     /** Aim the body + head yaw along a horizontal delta (folds the {@code atan2} the follower used to repeat). */
     void faceHorizontally(double dx, double dz);
 
