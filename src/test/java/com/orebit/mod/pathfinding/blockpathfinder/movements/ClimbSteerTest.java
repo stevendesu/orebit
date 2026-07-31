@@ -26,8 +26,12 @@ class ClimbSteerTest {
         final double x, y, z;
         float forward = Float.NaN;
         boolean jumping, sneaking;
+        boolean onClimbable, scaffoldBelow; // seam-read states the sink-in branch discriminates on
 
         FakeBot(double x, double y, double z) { this.x = x; this.y = y; this.z = z; }
+
+        @Override public boolean onClimbable() { return onClimbable; }
+        @Override public boolean scaffoldingBelow() { return scaffoldBelow; }
 
         @Override public double x() { return x; }
         @Override public double y() { return y; }
@@ -108,5 +112,42 @@ class ClimbSteerTest {
         MovementRegistry.CLIMB.steer(bot, seg);
         assertTrue(bot.jumping, "an ascent holds jump — vanilla climbs at +0.2/t while jumping");
         assertFalse(bot.sneaking, "an ascent must not sneak (sneak zeroes the climb)");
+    }
+
+    /** §3.5 sink-in through a scaffold DECK: grounded atop scaffolding, descending — sneak drops the
+     *  stand-on-top shape. (DESIGN-climb-vocabulary.md §4.) */
+    @Test
+    void sinkThroughScaffoldDeckSneaks() {
+        View seg = new View(55.5, 178.0, 256.5, 55.5, 177.0, 256.5); // Δy = −1
+        FakeBot bot = new FakeBot(55.5, 177.0, 256.5);
+        bot.scaffoldBelow = true; // grounded on the deck, feet cell open
+        MovementRegistry.CLIMB.steer(bot, seg);
+        assertTrue(bot.sneaking, "the scaffold sink-in must sneak — sneak removes the deck's top shape");
+        assertFalse(bot.jumping, "the sink must not jump");
+    }
+
+    /** §3.5 sink-in off a LADDER plate: grounded, descending, NOT scaffolding — sneak would
+     *  edge-guard-pin the bot ON the 3/16 plate; the recenter + gravity perform the sink instead. */
+    @Test
+    void ladderPlateSinkDoesNotSneak() {
+        View seg = new View(55.5, 178.0, 256.5, 55.5, 177.0, 256.5); // Δy = −1
+        FakeBot bot = new FakeBot(55.5, 177.0, 256.4); // atop the plate, slightly off the cell centre
+        MovementRegistry.CLIMB.steer(bot, seg);
+        assertFalse(bot.sneaking, "a ladder-plate sink must NOT sneak — the edge-guard would pin the bot");
+        assertFalse(bot.jumping, "the sink must not jump");
+        assertTrue(bot.forward > 0.0f, "the re-centre must walk the bot off the plate strip");
+    }
+
+    /** A mid-column hang descending (onClimbable): the sink-in branch must not fire — no inputs, the
+     *  −0.15 clamp carries the descent (the pre-arc regime, unchanged). */
+    @Test
+    void hangDescendStaysInputFree() {
+        View seg = new View(55.5, 178.0, 256.5, 55.5, 177.0, 256.5); // Δy = −1
+        FakeBot bot = new FakeBot(55.5, 177.5, 256.5);
+        bot.onClimbable = true;
+        bot.scaffoldBelow = true; // even with scaffolding below: in-column descent needs NO sneak
+        MovementRegistry.CLIMB.steer(bot, seg);
+        assertFalse(bot.sneaking, "an in-column descent must not sneak (it would stop a ladder/vine)");
+        assertFalse(bot.jumping, "an in-column descent must not jump (it would climb)");
     }
 }

@@ -36,6 +36,10 @@ which is what lets hazards be *costs* instead of walls.
 | MineDown | 4.633 + mining time | one-block drop + the real dig |
 | Climb (up) | 8.51 / block | 20 ÷ 2.35 (ladder ascent speed) |
 | Climb (down) | 6.67 / block | 20 ÷ 3.0 (ladder descent clamp) |
+| Climb (jump-grab) | 8 | 3 rise ticks to +1.0 + 2 arrest + 3 jump commit |
+| Climb (exit-top) | 10.51 | one climbed cell + 2 to settle on the deck |
+| Climb (sink-in) | 8.67 | one descended cell + 2 to enter/arrest |
+| Fall (hang) | 4.633 + 2.5 / block + 2 | walk-off + drop to the vine + arrest settle — **no damage term** |
 | Parkour | 15.6 / 18.6 / 21.6 | run-up + airtime + commit penalty |
 | DiagonalParkour | ≈ 20.1 / 24.1 | the Parkour table at diagonal reach (base cap 2) |
 | Swim (surface) | 9.09 / block | 20 ÷ 2.2 (surface paddle speed) |
@@ -99,6 +103,25 @@ stores a per-cell
 ["distance to the floor below" nibble](Optimizations/09_depth_nibbles.md) that answers it
 in one read.
 
+**Falls arrest in vines.** Minecraft stops a faller the moment their feet occupy a
+climbable cell (velocity clamped to −0.15, fall distance reset) — so a fall never
+passes *through* a vine, and the planner doesn't pretend it does. A vine (or any
+no-collision climbable) in the drop column becomes the landing itself: a **hang**, feet
+in the vine, taken at the bottom cell of the vine run — completely **damage-free**,
+because the arrest resets fall distance before anything hits. From a hang the bot can
+climb, or let go and drop the next stretch — which is how an alternating vine/air/vine
+column descends *any* total depth, one arrested hop at a time. One physical honesty
+bound applies: feet are sampled once per game tick, so a fast-enough fall can skip a
+vine without arresting. A hang is only offered within **7 blocks** of prior fall — the
+regime where fall speed provably stays under one block per tick and the catch is
+guaranteed. Deeper falls onto climbables are deliberately not planned (they're rare,
+and honestly detecting them taxes every deep-drop scan); past the bound the column is
+refused outright — whether the bot would catch or tunnel is a coin flip, and the
+planner doesn't plan coin flips. Ladders and scaffolding never become
+hang landings — falling onto scaffolding lands *on top* (its stand-on shape catches
+you), and dropping into a ladder cell from above is a knife-edge between hanging inside
+and catching the 3/16 plate, so those columns are descended by climbing instead.
+
 **WalkOff** — the no-jump gap cross: walk straight over a one-block gap and land one
 level down on the far side, letting momentum carry the bot across the lip. Two walk
 steps (**9.27 ticks** — the drop itself is the free one-block drop). It exists for
@@ -118,6 +141,31 @@ design: Climb never places ladders, and mining one *out of the way* belongs to t
 break-folding moves. Execution is pure vanilla physics — on a climbable, holding jump
 climbs and doing nothing slides down, so the steering just re-centres on the column
 and holds jump when the target is above.
+
+Three more edges connect what a player does around climbables without thinking:
+
+- **Jump-grab** — standing on real ground with a vine or ladder bottom one air cell
+  overhead, jump and grab it (feet cross +1.0 during the jump's third tick and vanilla
+  arrests them in the cell). Two cells overhead is genuinely out of reach — the jump
+  apex is 1.25 blocks — and the launch must come from *solid, non-climbable* footing:
+  a jump started with feet inside a climbable gets truncated to the slow climb, so
+  there is no jumping off ladders, plates, or decks. That's also why a gapped column
+  never connects **upward** — vines give you nothing to stand on, and a ladder's
+  plate stance can be blocked outright by a same-side ladder above it.
+- **Sink-in** — standing *on top of* a ladder plate or scaffold deck, enter the column
+  below (the classic climb-down-into-the-underground-base move). On scaffolding the
+  bot sneaks — sneaking removes the deck's stand-on shape and it descends inside; on a
+  ladder it walks off the 3/16 plate toward the cell centre and the climbable arrest
+  catches it.
+- **Exit-top** — from inside a scaffold column, climb out the top and stand on the
+  deck (the climb-out pop clears the top face by ~0.15 and the deck catches the
+  landing). Ladder plates are deliberately excluded — a 3/16 strip is not a landing
+  the planner can promise.
+
+One scaffolding footnote: the *sideways* grab into a scaffold column is refused. The
+lateral hold is a sneak, and scaffolding is the one climbable vanilla exempts from the
+sneak-hold — a sneaking bot sinks while crossing. Scaffold columns are entered from
+above (sink-in) or below (climb up inside), which is how they're built to be used.
 
 ## Gap jumps
 
@@ -156,7 +204,11 @@ an effective Δy that shrinks every reach; a slow floor or a slow body cell only
 | sweet-berry body cell | 2 | 0 | 2 / 3 / 3 | 1 |
 
 Honey floors (reduced jump) and cobweb body cells (killed take-off velocity) never reach
-the table — they are refused before the scan.
+the table — they are refused before the scan. So is anything climbable, on both ends of
+the arc: a takeoff from a climbable floor **or with feet inside a climbable cell** is
+impossible (vanilla truncates the jump to the 0.2 climb), and an arc whose flight path
+crosses a vine or ladder cell is arrested mid-air by the ±0.15 climbable clamp — the
+jump the planner drew would end dangling in the vine, so it is never offered.
 
 Cost = one run-up step (4.633) + airtime (8 / 11 / 14 / 16 ticks for gaps 1/2/3/4) + a
 3-tick commit penalty — flat totals **15.6 / 18.6 / 21.6** — always at least the

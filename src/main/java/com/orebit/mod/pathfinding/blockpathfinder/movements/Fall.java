@@ -32,11 +32,15 @@ import com.orebit.mod.worldmodel.pathing.TraversalGrid;
  *       For {@code m = 0} that is always true (uncapped — a mortal bot may drop from world height onto slime);
  *       for {@code m = 1.0} it is exactly the old {@code depth ≤ maxFall} cap (ordinary falls are unchanged).</li>
  * </ul>
- * <b>V1 scope:</b> {@code Fall} still only lands on a {@link MovementContext#standable} cell, so only the
- * STANDABLE soft-landers — slime, hay, honey, bed — benefit today (a pure cost/height-math change, no landing
- * mechanism change). The fall-distance-RESET media (water, powder snow, sweet berry bush, cobweb, bubble
- * columns) are classified {@code fallSoftness = 0.0} for correctness but are NOT yet landing targets; the
- * non-standable landing predicate + the Fall→swim mode coupling are deferred to v1.1.
+ * <b>Landing kinds:</b> a {@link MovementContext#standable} floor (the classic landing, soft-landers —
+ * slime, hay, honey, bed — scaling as above), or a <b>HANG</b> in a passable-climbable run (the vine
+ * family): vanilla arrests a faller whose feet begin a tick inside a climbable cell (−0.15 clamp +
+ * fallDistance reset), so the fall stops IN the column, damage-free, at the run's bottom cell — but
+ * only within {@link #HANG_MAX_DROP} blocks of prior fall (deeper arrests are deliberately unsupported,
+ * owner ruling) — see {@link #tryHang} and DESIGN-climb-vocabulary.md §3.1/§3.2. The other fall-distance-RESET media (water,
+ * powder snow, sweet berry bush, cobweb, bubble columns) are classified {@code fallSoftness = 0.0} for
+ * correctness but are NOT yet landing targets; the non-standable water landing + the Fall→swim mode
+ * coupling stay deferred to v1.1.
  *
  * <p><b>Behaviour change (damage-pricing unification):</b> the penalty was a hardcoded {@code
  * DAMAGE_PER_BLOCK = 10} ticks per excess block; it is now the caps value, default {@code 100}. A MORTAL
@@ -96,6 +100,26 @@ public final class Fall implements Movement {
      */
     private static final int SOFT_SCAN_LIMIT = 384;
 
+    /**
+     * Ticks to settle an arrested fall into a hang (one arrest tick + one stabilise tick at the −0.15
+     * clamp) — the small fixed tail a hang landing pays instead of any fall-damage term (the arrest
+     * resets fallDistance BEFORE impact; DESIGN-climb-vocabulary.md §3.1).
+     */
+    private static final float ARREST_SETTLE = 2f;
+
+    /**
+     * Max prior free-fall (blocks) for a hang landing — the guaranteed-arrest regime. Vanilla samples
+     * feet once per tick, so a fall step of {@code dy} b/t can skip a 1-cell climbable once {@code dy}
+     * exceeds 1.0 — which happens after ≈7.5 blocks of fall from rest (the exact recurrence
+     * {@code v' = (v+0.08)×0.98}; {@code HangBoundTest} re-derives the crossing and asserts this floor
+     * sits safely inside it). Deeper falls onto climbables are deliberately UNSUPPORTED (owner ruling
+     * 2026-07-31): longer-run relaxations (a 2-run arrests to ≈40, ≥4-run from any height) would need
+     * deep-column hangable sweeps whose measured per-node cost (TOWER +8-13%, FLOOD +14-18%) buys a
+     * case too rare to matter — the column is refused instead (arrest-vs-tunnel past the bound is
+     * nondeterministic anyway; DESIGN-climb-vocabulary.md §5).
+     */
+    static final int HANG_MAX_DROP = 7;
+
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
     @Override
@@ -107,6 +131,29 @@ public final class Fall implements Movement {
         final int safeFall = ctx.caps().safeFallDistance();
         final int maxFall = Math.max(ctx.caps().maxFallDistance(), safeFall);
         final float hpCost = ctx.caps().costPerHitpoint(); // ticks per HP — read once, a local in the loop
+
+        // §3.2 (DESIGN-climb-vocabulary.md) — the in-column release-drop from a HANG node: when this
+        // node's own feet cell is hangable (feet in a vine — one extra cache-hot read per standing node;
+        // non-hang nodes, the overwhelming case, pay one read + one AND and skip) and the cell below the
+        // node floor is passable NON-climbable (a climbable below is the contiguous column — Climb-down
+        // owns it; a standable below is Climb's dismount), let go and drop straight down the column.
+        // Landing rules identical to a cardinal fall (the same tryLanding/tryHang authorities, column top
+        // = the node floor cell): the next hang under the tunneling bound, or a standable floor with fall
+        // damage measured FROM the hang (fallDistance restarts at the arrest). No walk-off base
+        // (base = 0) and no step-off body (flags = 0 → bodyTransitCost's zero-read prefilter) — the body
+        // cells ARE the hang column, already priced as transit.
+        int pSelf = ctx.packedAt(x, y + 1, z);
+        if (pSelf != MovementContext.UNBUILT
+                && ctx.hangable(ctx.descriptorOf(x, y + 1, z, pSelf))) {
+            int pFloor = ctx.packedAt(x, y, z);
+            if (pFloor != MovementContext.UNBUILT) {
+                long dFloor = ctx.descriptorOf(x, y, z, pFloor);
+                if (ctx.passable(dFloor) && !ctx.isClimbable(dFloor)) {
+                    releaseDrop(ctx, out, x, y, z, safeFall, maxFall, hpCost);
+                }
+            }
+        }
+
         for (int[] d : CARDINALS) {
             int nx = x + d[0];
             int nz = z + d[1];
@@ -138,11 +185,18 @@ public final class Fall implements Movement {
                 if (fg < TraversalGrid.DEPTH_SAT) {
                     // The exact first landing within the resident window (≤ 14 blocks down, always ≤ maxFall
                     // for the default caps). tryLanding is the sole acceptance authority — a within-window
-                    // hard landing is priced exactly as before; a soft one gets its reduced cost.
-                    tryLanding(ctx, out, nx, y, nz, y - 1 - fg, flags, safeFall, maxFall, hpCost);
+                    // hard landing is priced exactly as before; a soft one gets its reduced cost (and its
+                    // transit verify diverts to the hang when a vine hides in the nibble-invisible column).
+                    tryLanding(ctx, out, nx, y, nz, y - 1 - fg, flags, safeFall, maxFall, hpCost, BASE_COST);
                     continue;              // highest landing decided — zero scan reads, no deeper phase
                 }
-                // Proven no landing in y-1..y-14: resume the legacy scan below the window.
+                // Proven no landing in y-1..y-14: resume the legacy scan below the window. (The nibble is
+                // standable-blind to vines, so a vine hiding in this window over a >14-deep column goes
+                // unseen — deliberate: any hang here would need a prior drop ≤ HANG_MAX_DROP anyway, and
+                // the per-cardinal window sweep that would catch the residue cost TOWER +8-13% / FLOOD
+                // +14-18% in the A/B — the owner-ruled trade is to refuse deep-column arrests, not to
+                // scan for them. A landing found below still walks the whole column in tryLanding, whose
+                // verify diverts to the hang exactly when one is really there.)
                 scanFrom = y - (TraversalGrid.DEPTH_SAT + 1);
             }
 
@@ -151,14 +205,27 @@ public final class Fall implements Movement {
             // byte-identical to the pre-softness scan (tryLanding prices an m = 1.0 landing exactly as before).
             int landingY = Integer.MIN_VALUE;
             boolean hitUnbuilt = false;
+            boolean hungOut = false;
             int fy = scanFrom;
             for (; fy >= y - maxFall; fy--) {
                 int packed = ctx.packedAt(nx, fy, nz);
                 if (packed == MovementContext.UNBUILT) { hitUnbuilt = true; break; } // unknown below
-                if (ctx.standable(ctx.descriptorOf(nx, fy, nz, packed))) { landingY = fy; break; }
+                long sd = ctx.descriptorOf(nx, fy, nz, packed);
+                if (ctx.standable(sd)) { landingY = fy; break; }
+                // Arrest above any floor (§3.1): the highest hangable IS this cardinal's landing. One
+                // extra AND on the already-loaded long for every non-standable scanned cell. (This scan
+                // starts at y-2, so a vine at y/y-1 is only caught by the nibble paths' verify — the
+                // UNKNOWN/edit-overlap fallback conservatively misses those two cells: fewer edges, never
+                // wrong ones.)
+                if (ctx.hangable(sd)) {
+                    tryHang(ctx, out, nx, y, nz, fy, flags, BASE_COST);
+                    hungOut = true;
+                    break;
+                }
             }
+            if (hungOut) continue;
             if (landingY != Integer.MIN_VALUE) {
-                tryLanding(ctx, out, nx, y, nz, landingY, flags, safeFall, maxFall, hpCost);
+                tryLanding(ctx, out, nx, y, nz, landingY, flags, safeFall, maxFall, hpCost, BASE_COST);
                 continue;
             }
             if (hitUnbuilt) continue; // unknown within the normal window — don't path into it (as before)
@@ -173,8 +240,11 @@ public final class Fall implements Movement {
             for (fy = y - maxFall - 1; fy >= y - SOFT_SCAN_LIMIT; fy--) {
                 int packed = ctx.packedAt(nx, fy, nz);
                 if (packed == MovementContext.UNBUILT) break;
+                // No hangable check here: at the default caps this scan starts below maxFall (16) which
+                // is past HANG_MAX_DROP (7), and deep-curtain arrests are deliberately unsupported
+                // (owner ruling; see HANG_MAX_DROP). A custom maxFall < 7 forgoes the tiny residue.
                 if (ctx.standable(ctx.descriptorOf(nx, fy, nz, packed))) {
-                    tryLanding(ctx, out, nx, y, nz, fy, flags, safeFall, maxFall, hpCost);
+                    tryLanding(ctx, out, nx, y, nz, fy, flags, safeFall, maxFall, hpCost, BASE_COST);
                     break;
                 }
             }
@@ -190,7 +260,7 @@ public final class Fall implements Movement {
      * {@code depth ≤ maxFall} cap exactly.
      */
     private static void tryLanding(MovementContext ctx, CandidateSink out, int nx, int y, int nz,
-                                   int fy, int flags, int safeFall, int maxFall, float hpCost) {
+                                   int fy, int flags, int safeFall, int maxFall, float hpCost, float base) {
         int depth = y - fy;
         // Softness gate — consulted ONLY when the drop is beyond the free window (depth > safeFall), so a
         // short drop, an immune bot (safeFall == maxFall), and the whole common case read no extra descriptor
@@ -200,7 +270,11 @@ public final class Fall implements Movement {
         float m = 1.0f;
         if (depth > safeFall) {
             m = FALL_MULT[NavBlock.fallSoftness(ctx.descriptorAt(nx, fy, nz))];
-            if ((depth - safeFall) * m > (maxFall - safeFall)) return; // too deep for this landing's softness
+            // Too deep for this landing's softness — reject with zero further reads, exactly as pre-arc.
+            // (No hang-rescue sweep here: a vine above an UNSURVIVABLE landing sits > HANG_MAX_DROP in
+            // every default-caps path that reaches this reject, and the sweep's cost on the flood-heavy
+            // scenarios was the measured regression — owner ruling, see HANG_MAX_DROP.)
+            if ((depth - safeFall) * m > (maxFall - safeFall)) return;
         }
         // Landing accepted: confirm the drop column (down to the new feet) is clear, pricing each
         // transited cell as it is read (read-once: the same descriptor answers passable AND the
@@ -208,17 +282,28 @@ public final class Fall implements Movement {
         // is a per-cell cost, not a blocker; the loop spans the landing body too, so a hazardous
         // landing pocket is charged). The column cells fy+1..y sit BELOW the step-off body
         // (nx, y+1..y+2), which is priced separately off the flags already read — no double count.
+        // The same pass records the TOPMOST climbable seen (one extra AND on the already-loaded long;
+        // ascending loop ⇒ the last hit is the highest; a passable climbable here is hangable by
+        // definition, and a solid one already returned via !passable) — when one exists the fall
+        // physically arrests there and never reaches this landing, so the emission diverts to the hang
+        // (§3.1). A clean column pays only the AND and emits bit-identically to the pre-arc code.
         float transit = 0f;
+        int climbTop = Integer.MIN_VALUE;
         for (int k = fy + 1; k <= y; k++) {
             long cd = ctx.descriptorAt(nx, k, nz);
             if (!ctx.passable(cd)) return;
+            if (ctx.isClimbable(cd)) climbTop = k;
             transit += ctx.cellTransitCost(cd);
+        }
+        if (climbTop != Integer.MIN_VALUE) {
+            tryHang(ctx, out, nx, y, nz, climbTop, flags, base);
+            return;
         }
         // Base walk-off + per-block fall time, plus a damage penalty for every block past the safe
         // window (depth > safeFall) SCALED by the landing softness m — the cost-not-blocker model —
         // plus the per-cell pass-through surcharges: the drop column (above) and the step-off body
         // cells (nx, y+1..y+2, the two cells the flags at (nx,y,nz) describe; zero-read when clear).
-        float cost = BASE_COST + depth * PER_BLOCK
+        float cost = base + depth * PER_BLOCK
                 + transit + ctx.bodyTransitCost(flags, nx, y, nz)
                 // Landing-floor contact damage (magma — standable since s52b): coordinate form reads the
                 // floor descriptor ONLY for a mortal bot; an immune bot pays zero reads here.
@@ -227,6 +312,70 @@ public final class Fall implements Movement {
             cost += (depth - safeFall) * hpCost * m; // ≈1 HP per excess block × ticks-per-HP × softness
         }
         out.accept(nx, fy, nz, cost);
+    }
+
+    /**
+     * §3.1 (DESIGN-climb-vocabulary.md) — price + emit a fall arrested in the passable-climbable
+     * ({@link MovementContext#hangable}) run whose TOP cell is {@code climbTop}: walk the run to its
+     * bottom, apply the flat tunneling bound ({@link #HANG_MAX_DROP} — feet are sampled once per tick,
+     * so a too-fast entry can skip the cell), and emit the HANG node at the run's BOTTOM cell
+     * (post-arrest the −0.15 clamp slides the bot down the run, so every catch point converges there —
+     * a deterministic landing). NO fall-damage term ever: the arrest resets fallDistance before any
+     * impact. The transit loop verifies AND prices the whole descended span {@code runBot..y} ascending
+     * — the verify is load-bearing: the phase scans skip solid non-climbable cells (a fence post above
+     * the vine) without checking them, exactly as they do before a standable landing, and rely on the
+     * landing authority's column walk to reject (the {@code tryLanding} pattern). The rare diverted
+     * branch pays the extra loop — clean columns never reach this method.
+     */
+    private static void tryHang(MovementContext ctx, CandidateSink out, int nx, int y, int nz,
+                                int climbTop, int flags, float base) {
+        int runBot = climbTop;
+        while (true) {
+            int packed = ctx.packedAt(nx, runBot - 1, nz);
+            if (packed == MovementContext.UNBUILT) break;
+            if (!ctx.hangable(ctx.descriptorOf(nx, runBot - 1, nz, packed))) break;
+            runBot--;
+        }
+        int runLen = climbTop - runBot + 1;
+        int priorDrop = y - climbTop; // free-fall blocks before the feet reach the run's entry plane
+        if (priorDrop > HANG_MAX_DROP) return; // the flat guaranteed-arrest bound (§1; owner ruling)
+        float transit = 0f;
+        for (int k = runBot; k <= y; k++) {
+            long cd = ctx.descriptorAt(nx, k, nz);
+            if (!ctx.passable(cd)) return; // ballistic stretch blocked (fence/wall above the run)
+            transit += ctx.cellTransitCost(cd);
+        }
+        float cost = base + priorDrop * PER_BLOCK
+                + (runLen - 1) * Climb.CLIMB_DOWN_COST // the in-run slide down to the bottom cell
+                + ARREST_SETTLE
+                + transit + ctx.bodyTransitCost(flags, nx, y, nz);
+        out.accept(nx, runBot - 1, nz, cost);
+    }
+
+    /**
+     * §3.2 — the release-drop scan straight down from a hang node's floor cell: the first standable
+     * floor (→ {@link #tryLanding}, fall damage measured FROM the hang — fallDistance restarted at the
+     * arrest) or hangable run (→ {@link #tryHang}) wins; a solid cell, an unbuilt cell, or nothing
+     * within {@link #SOFT_SCAN_LIMIT} ends the scan with no emit. Starts at y−1, so the 1-deep
+     * standable duplicates Climb's dismount edge with the honest faster release cost (A* keeps the
+     * cheaper edge). No nibble fast path — hang nodes are rare and the loop terminates at the first hit.
+     */
+    private static void releaseDrop(MovementContext ctx, CandidateSink out, int x, int y, int z,
+                                    int safeFall, int maxFall, float hpCost) {
+        for (int k = y - 1; k >= y - SOFT_SCAN_LIMIT; k--) {
+            int packed = ctx.packedAt(x, k, z);
+            if (packed == MovementContext.UNBUILT) return; // don't drop into unknown
+            long d = ctx.descriptorOf(x, k, z, packed);
+            if (ctx.standable(d)) {
+                tryLanding(ctx, out, x, y, z, k, 0, safeFall, maxFall, hpCost, 0f);
+                return;
+            }
+            if (ctx.hangable(d)) {
+                tryHang(ctx, out, x, y, z, k, 0, 0f);
+                return;
+            }
+            if (!ctx.passable(d)) return; // a solid (climbable or not) — no deterministic entry from above
+        }
     }
 
     /**
@@ -281,11 +430,14 @@ public final class Fall implements Movement {
                 .advanceWhen(b -> !b.grounded());
         // FALL: airborne drop-control — recenterOnTarget pulls toward the landing column centre, eases near
         // it and pushes BACK past it, so held step-off momentum can't carry the bot off a 1-wide landing.
-        // Complete only once actually STANDING on the landing cell (a touchdown on a wrong cell simply never
-        // fires done — the follower's grounded-stall recovery re-anchors and replans).
+        // Complete only once actually SETTLED on the landing cell: grounded (a standable floor) OR arrested
+        // on a climbable (a HANG landing — feet in the vine cell, never grounded; the one predicate covers
+        // both kinds, since a standing landing reads onClimbable false; DESIGN-climb-vocabulary.md §4).
+        // A touchdown on a wrong cell simply never fires done — the follower's grounded-stall recovery
+        // re-anchors and replans.
         plan.phase("fall")
                 .drive(SteerControl::recenterOnTarget)
-                .done(b -> b.grounded()
+                .done(b -> (b.grounded() || b.onClimbable())
                         && b.footX() == tx && b.footY() == landFeetY && b.footZ() == tz);
         return plan;
     }
