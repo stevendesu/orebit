@@ -143,6 +143,8 @@ public final class ParkourCourse {
         int stairSteps;                 // number of stair blocks in the run
         BlockState gapFloor;            // magma/honey placed in the FIRST gap cell (null = normal void gap)
         boolean fastEntry;              // owner-gate: force a full-SPRINT approach (real 3-stone run) into the jump
+        boolean descendRunway;          // raised (Y0+1) approach stepping DOWN onto the takeoff cell — the
+                                        //   HOT-ENTRY chained-momentum condition (owner ruling 2026-07-31)
         boolean assertNoDamage;         // magma-overhang: PASS requires the bot took ZERO damage
         boolean expectRefusal;          // beyond-envelope geometry the planner rightly declines -> PASS = clean refusal
         String refuseNote;              // optional note appended to an expectRefusal PASS reason (e.g. "conservative")
@@ -400,6 +402,27 @@ public final class ParkourCourse {
             // ==== OWNER'S EXACT IN-GAME REPRODUCTION (NeoForge 1.21.11, 100% consistent void-fall) ============
             // The permanent gate for the honey-flyover-without-runup void-fall. See ownerRepro() for the geometry.
             ownerRepro();
+
+            // HOT-ENTRY chained hand-offs (owner ruling 2026-07-31; see descendCard): a Descend lands the
+            // bot on the takeoff already past the trigger with carried momentum. hotoffset3 is the literal
+            // 2026-07-30 flagship wedge shape (Descend → offset (3,+1)); hotdiag1 is a CARDINAL +X descend
+            // into the NE diagonal jump (the soulDiag approach shape — Descend is cardinal-only vocabulary,
+            // so the raised runway must be cardinal). Both at natural walk/descend carry (a fastEntry pin
+            // runs along the JUMP axis and would drift the bot off the 1-wide raised runway).
+            //
+            // EXPLICIT BASES, one stride WEST of column 0, beside the owner's permanent position — NOT
+            // nextBase(). The snake's tail is NAV-DEAD (discovered 2026-07-31): every tile beyond the boot
+            // view-distance bubble (snake distance ≳200 from spawn, position ≥48 / z ≥ 216) fails
+            // "nav gave up (no route offered)" with ZERO searches — buildTile's sync-load on entry does not
+            // route through the nav chunk-load path, so the grid never builds and the readiness gate times
+            // out. That single artifact accounts for the suite's standing tail failures AND makes the
+            // expect-refusal PASSes out there vacuous (they would "pass" dead or alive). Appending these
+            // cards put them on dead cells; a mid-list insertion instead shifted turnrise2/turnflat2w onto
+            // dead cells. West-of-column-0 cells sit inside the boot bubble and stay loaded all run via the
+            // owner's chunk ticket (the owner idles at trial 0's start), and the STRIDE guarantee keeps the
+            // tiles disjoint from column 0. Root-causing the dead zone is separate harness work.
+            descendCard("hotoffset3", 1, 0, 3, 0, 1, Template.OFFSET, false, BASE_X - STRIDE, BASE_Z);
+            descendCard("hotdiag1", 1, 0, 2, 0, 2, Template.REACH, false, BASE_X - STRIDE, BASE_Z + STRIDE);
         }
 
         /** Permanent regression gate: the owner's EXACT in-game honey-flyover failure, faithfully reproduced.
@@ -647,6 +670,23 @@ public final class ParkourCourse {
             addTrial(name + ".turn", Approach.WALKIN, 0, 1, jdx, jdy, jdz, Template.REACH, walled);
         }
 
+        /** HOT-ENTRY chained hand-off (owner ruling 2026-07-31): a RAISED (Y0+1) runway steps DOWN onto
+         *  the takeoff cell immediately before the jump, so the bot grounds on the takeoff already past
+         *  the takeoff trigger with descend-carried momentum. Pre-fix, the runner's drive-then-advance
+         *  gap never pressed jump — the bot walked straight off the platform (the 2026-07-30 23:48:47
+         *  flagship wedge, a Descend chained into an offset (3,+1) Parkour). WALKIN-only — the chained
+         *  momentum IS the condition. The offset/diagonal shapes are deliberate: no DIRECT falling jump
+         *  from the raised runway exists in the movement vocabulary (falling is aligned-only,
+         *  offset/diagonal are flat-only), so the planner MUST chain Descend → Parkour. */
+        void descendCard(String name, int rdx, int rdz, int jdx, int jdy, int jdz, Template t,
+                boolean fast, int baseX, int baseZ) {
+            Trial tr = new Trial(name + ".walkin", Approach.WALKIN, rdx, rdz, jdx, jdy, jdz, t,
+                    false, baseX, baseZ);
+            tr.descendRunway = true;
+            tr.fastEntry = fast;
+            trials.add(tr);
+        }
+
         void start(MinecraftServer server) {
             this.server = server;
             if (Boolean.getBoolean("orebit.parkour.debug")) {
@@ -685,7 +725,7 @@ public final class ParkourCourse {
             bot.reviveIfDead();
             bot.setHealth(bot.getMaxHealth());
             bot.setMode(AllyBotEntity.Mode.STAY);
-            bot.setPos(tr.startX, Y0 + 1, tr.startZ);
+            bot.setPos(tr.startX, Y0 + 1 + (tr.descendRunway ? 1 : 0), tr.startZ); // raised-runway spawn +1
             bot.setDeltaMovement(Vec3.ZERO);
             bot.setYRot(tr.startYaw);
             bot.setYHeadRot(tr.startYaw);
@@ -986,6 +1026,10 @@ public final class ParkourCourse {
                 // soulTakeoff: 1-wide STONE runway with soul sand ONLY on the last (takeoff) cell. Placed BEFORE
                 // the wideRunway branch so no stone side-cell exists to corner-cut the diagonal from.
                 else if (tr.soulTakeoff) placeState(cx, Y0, cz, k == RUN - 1 ? SOUL : FLOOR);
+                // descendRunway (owner ruling 2026-07-31): RAISED approach stepping DOWN onto the takeoff
+                // cell right before the jump — the planner must chain Descend into the Parkour, grounding
+                // the bot on the takeoff with carried momentum (the hot-entry condition).
+                else if (tr.descendRunway) place(cx, k == RUN - 1 ? Y0 : Y0 + 1, cz);
                 else if (tr.wideRunway) placeWide(cx, Y0, cz, tr.rdx, tr.rdz);
                 else place(cx, Y0, cz);
             }

@@ -138,7 +138,18 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           test needs no version gate — pre-1.21 the non-iron door set is simply the wood
  *                           species). Meaningful only when {@link #isDoor}. Consumed by the planner's
  *                           prefer-open-over-smash SET fold (an iron door has no SET option → break/route as
- *                           in P1). Bits 51–63 remain wholly unused.
+ *                           in P1).
+ *   51      1   narrowTop   the collision footprint is a NARROW POST — either XZ extent of the shape's
+ *                           bounding box under the bot's own 0.6-block body width (bamboo ~3px with a
+ *                           position-hash offset, chain 3px, end/lightning rod 4px, pointed dripstone,
+ *                           narrow décor). Derived from collision GEOMETRY at classification (no block
+ *                           lists), except the force-solid pair (bamboo/dripstone), whose null-context
+ *                           shape query NPEs and which the same identity knowledge marks narrow. Such a
+ *                           cell stays STANDABLE (a real floor for walking/grid/region purposes) but
+ *                           precision-LANDING moves (Parkour/DiagonalParkour) refuse it as a target —
+ *                           landing square on a post the bot's whole body overhangs is shaolin parkour a
+ *                           human can't reasonably follow (owner ruling 2026-07-31). A base identity
+ *                           field. Bits 52–63 remain wholly unused.
  * </pre>
  */
 public final class NavBlock {
@@ -238,6 +249,7 @@ public final class NavBlock {
     private static final int BUBBLE_SHIFT = 46, BUBBLE_MASK = 0x03;   // bubble column + drag dir (base field)
     private static final int FALLSOFT_SHIFT = 48, FALLSOFT_MASK = 0x03; // landing fall-damage class (base field)
     private static final long DOOR_TOGGLEABLE_BIT = 1L << 50;           // hand-openable door (wood/copper), not iron
+    private static final long NARROW_TOP_BIT = 1L << 51;                // narrow-post collision top (base field)
 
     // ---- Precomputed predicate bits (37+) ----------------------------------------------------
     // Each is a PURE function of the fields above, so it adds ZERO navtypes (a function of existing bits
@@ -328,6 +340,7 @@ public final class NavBlock {
         // keep their prior full-cube fingerprint). A block entity whose query THROWS (shulker box, moving
         // piston) is caught by the static-init loop and falls back to SOLID_FALLBACK, exactly as before.
         boolean forceSolid = BlockKinds.isBambooStalk(block) || block instanceof PointedDripstoneBlock;
+        // (forceSolid is also the narrow-top identity mark — see the bit-51 fold below.)
         VoxelShape shape;
         if (forceSolid) {
             shape = null;
@@ -404,6 +417,19 @@ public final class NavBlock {
             d |= (long) (state.getValue(BubbleColumnBlock.DRAG_DOWN) ? BUBBLE_DOWN : BUBBLE_UP) << BUBBLE_SHIFT;
         // Fall-softness (bits 48–49): the block's fall-damage class, for a bot LANDING on / falling into it.
         d |= (long) (fallSoftness(block) & FALLSOFT_MASK) << FALLSOFT_SHIFT;
+        // NARROW-TOP (bit 51): the collision footprint is too narrow to stand square on — either XZ extent
+        // of the shape's bounding box under the bot's own 0.6-block body width (Parkour's documented
+        // 0.6×0.6 square). Geometry-derived like topY, no block lists; the force-solid pair (bamboo stalk
+        // — a real ~3px column with a position-hash offset — and pointed dripstone) can't be shape-queried
+        // (the null-context read NPEs, see above) and is marked by the same identity knowledge that forces
+        // it solid. A conservative-full-cube block entity (chest/furnace) is NOT narrow; an empty shape
+        // needs no mark (nothing to land on — keeps every passable's descriptor unsplit).
+        if (forceSolid) {
+            d |= NARROW_TOP_BIT;
+        } else if (shape != null && !shape.isEmpty()) {
+            AABB nb = shape.bounds();
+            if ((nb.maxX - nb.minX) < 0.6 || (nb.maxZ - nb.minZ) < 0.6) d |= NARROW_TOP_BIT;
+        }
         // Stair facing/half — the directional standing-surface facts (bits 8–10), populated ONLY for stairs so
         // only stair states split navtypes. A north/east/south/west stair now dedups per FACING (as the old
         // per-Block sturdy-faces mask did), but bounded: stairs conflate across material, so this adds at most
@@ -793,6 +819,16 @@ public final class NavBlock {
      * floor. A base identity field (packed in {@link #fingerprint}), read as one mask-and-test.
      */
     public static boolean reducesJump(long d)   { return (d & REDUCED_JUMP_BIT) != 0; }
+
+    /**
+     * Whether the cell's collision top is a NARROW POST — either XZ extent of the collision bounding box
+     * under the bot's 0.6-block body width (bamboo with its position-hash offset, chain, end/lightning
+     * rod, pointed dripstone, narrow décor; bit 51). Still {@link #isStandable standable} — a real floor
+     * for walking, the grid's depth sweep, and the region tier — but the precision-LANDING moves
+     * (Parkour/DiagonalParkour) refuse it as a jump target: the bot's whole body overhangs the support,
+     * so the landing demands shaolin precision a human can't reasonably follow (owner ruling 2026-07-31).
+     */
+    public static boolean isNarrowTop(long d) { return (d & NARROW_TOP_BIT) != 0; }
     /** Quantized hardness: 255 = unbreakable, else round(destroyTime*5). */
     public static int hardness(long d)     { return (int) (d >>> HARD_SHIFT) & HARD_MASK; }
     /** Best-tool ordinal ({@link Tool}). */
