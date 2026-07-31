@@ -979,6 +979,18 @@ public final class MovementContext {
         return NavBlock.isStandable(d); // precomputed: solid-topped, no fluid, not damaging
     }
 
+    /**
+     * Can a precision-landing move (Parkour/DiagonalParkour) TARGET this cell as its landing floor?
+     * {@link #standable(long)} minus {@link NavBlock#isNarrowTop narrow posts} (bamboo/chain/rod/
+     * dripstone — either XZ support extent under the bot's 0.6 body width): a narrow top is a real floor
+     * for every walking/grid purpose, but landing a jump square on a post the whole body overhangs is
+     * shaolin parkour a human can't reasonably follow (owner ruling 2026-07-31). One extra mask on the
+     * already-loaded long — never a new grid read.
+     */
+    public boolean parkourLandable(long d) {
+        return NavBlock.isStandable(d) && !NavBlock.isNarrowTop(d);
+    }
+
     /** The collision top of the cell in sixteenths (0..31); 16 = full block, 8 = slab. */
     public int topYOf(int x, int y, int z) {
         return NavBlock.topY(descriptorAt(x, y, z));

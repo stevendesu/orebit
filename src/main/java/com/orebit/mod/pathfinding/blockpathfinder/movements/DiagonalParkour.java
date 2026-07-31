@@ -1,5 +1,8 @@
 package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
+import java.util.function.Predicate;
+
+import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
@@ -251,7 +254,10 @@ public final class DiagonalParkour implements Movement {
                             && ctx.passable(ctx.descriptorOf(cx, y + 1, cz, p1))
                             && ctx.passable(ctx.descriptorOf(cx, y + 2, cz, p2));
                 }
-                if (g <= maxGap && clear) {
+                // NARROW-TOP landing gate (owner ruling 2026-07-31, mirrors Parkour): never TARGET a
+                // narrow post (bamboo/chain/rod) as the diagonal landing; the column still terminates
+                // the direction below (v1) exactly as any standable ledge does.
+                if (g <= maxGap && clear && !NavBlock.isNarrowTop(fd)) {
                     // The walk-ONTO landing (c >= 2): emit whether or not we also overfly, so A* weighs
                     // landing-on vs flying-past and picks the cheaper. Backwards arc verification (the lazy
                     // inversion): the gap prisms + the corner pair of each crossed transition, in column
@@ -426,6 +432,27 @@ public final class DiagonalParkour implements Movement {
                         && ((b.footX() == fx + ux && b.footZ() == fz)
                                 || (b.footX() == fx && b.footZ() == fz + uz)))
                 && !(b.footX() == tx && b.footY() == toFootY && b.footZ() == tz));
+        // Fix 3: hazardous diagonal gap-floor → predictive early takeoff (raw √2 units), else the
+        // corner-gate trigger: jump EARLY, on the along-line crossing of the gate — the centre is
+        // still ≥ BODY_RADIUS inside the takeoff cell, so support is guaranteed and the foot cell
+        // cannot have spilled. ONE predicate shared by the runup's advance AND its hot-entry press,
+        // so the two can never disagree (Parkour's shared-trigger shape).
+        final Predicate<BotSteering> takeoffTrigger = b -> {
+            if (!b.grounded()) return false;
+            if (b.gapFloorHazardAt(gapX, fy, gapZ)) {
+                double projRaw = ux * (b.x() - startX) + uz * (b.z() - startZ);
+                double vRaw = ux * b.velX() + uz * b.velZ();
+                return projRaw + Parkour.HAZARD_TAKEOFF_TICKS * vRaw >= hazardRaw;
+            }
+            return SteerControl.pastGate(b, startX, startZ, landX, landZ, gateX, gateZ);
+        };
+        // HOT-ENTRY latch (owner ruling 2026-07-31, mirrors Parkour): a chained hand-off can ground the
+        // bot already past the gate on its FIRST grounded runup tick; the drive-then-advance ordering
+        // then presses jump only next tick and the coast exits the envelope. On exactly that hot entry
+        // the runup presses jump SAME-TICK — including the takeoff drive's first-grounded-tick work
+        // (the sprint-injection predict, specified to run on the grounded jump tick so the arc
+        // predictor sees the real accel). Entries with a normal runup tick stay byte-identical.
+        boolean[] hadNormalRunupTick = {false};
         plan.phase("runup")
                 .drive((b, v) -> {
                     airborneOnce[0] = false; // re-attempt begins → disarm until the next arc is live
@@ -438,20 +465,20 @@ public final class DiagonalParkour implements Movement {
                     // parkourRunupAlign (desired velocity = the diagonal at cruise).
                     SteerControl.steerViaGate(b, startX, startZ, landX, landZ, gateX, gateZ);
                     b.setSprinting(sprint);
-                })
-                // Fix 3: hazardous diagonal gap-floor → predictive early takeoff (raw √2 units), else the
-                // corner-gate trigger: jump EARLY, on the along-line crossing of the gate — the centre is
-                // still ≥ BODY_RADIUS inside the takeoff cell, so support is guaranteed and the foot cell
-                // cannot have spilled.
-                .advanceWhen(b -> {
-                    if (!b.grounded()) return false;
-                    if (b.gapFloorHazardAt(gapX, fy, gapZ)) {
-                        double projRaw = ux * (b.x() - startX) + uz * (b.z() - startZ);
-                        double vRaw = ux * b.velX() + uz * b.velZ();
-                        return projRaw + Parkour.HAZARD_TAKEOFF_TICKS * vRaw >= hazardRaw;
+                    if (takeoffTrigger.test(b)) {
+                        if (!hadNormalRunupTick[0]) {
+                            // Hot entry — launch this tick, with the takeoff drive's grounded-tick work.
+                            sprintInject[1] = true;
+                            sprintInject[0] = !sprint
+                                    && SteerControl.parkourLaunchShort(b, uxn, uzn, tx, ty, tz);
+                            b.setSprinting(sprint || sprintInject[0]);
+                            b.setJumping(true);
+                        }
+                    } else if (b.grounded()) {
+                        hadNormalRunupTick[0] = true; // a normal runup tick — legacy timing from here on
                     }
-                    return SteerControl.pastGate(b, startX, startZ, landX, landZ, gateX, gateZ);
-                });
+                })
+                .advanceWhen(takeoffTrigger);
         plan.phase("takeoff")
                 .drive((b, v) -> {
                     // First grounded takeoff tick: decide the sprint injection from the (now on-axis) launch
