@@ -1,5 +1,37 @@
 # HANDOFF — bot-abilities arc (crafting/farming/fighting/building), 2026-07-29
 
+## ⏭ NEXT SESSION (owner rulings, 2026-07-30 close-out — work in THIS order)
+
+Everything below is committed + merged (core/mc-1.21/main), suites + 28+4 matrices green, NOTHING
+pushed. SPIRAL +8.4% from the self-edit coherence gate (core `7e850fb`) is OWNER-ACCEPTED — do not
+revert or "optimize" it without a new ruling; the escalation (exact per-column membership probe) is
+only if the owner reopens it.
+
+1. **Break policy (the reconcile hole).** Owner ruling: a `Need.AIR` cell should ALREADY be air if the
+   plan was followed properly — the reconcile exists to repair missed edits, NOT to force the plan true
+   by breaking protected blocks. So the PhaseRunner mine path must stop riding hands-exempt BotMining
+   unchecked: restore `mayBreak` on the reconcile, with plan-authored placements as the one exemption
+   (the plan knows its own scaffolding — the isDoorCell precedent). Also fix the LYING Debug pre-flight
+   in `AllyBotEntity.mine()` (predicts a refusal BotMining no longer applies). Evidence: the six
+   place→REFUSED→dug-anyway pairs at 11:39:4x in the 2026-07-30 debug log.
+2. **Mid-air adoption gate.** Owner ruling (refined): never plan while the bot is IN MOTION, unless the
+   motion is along a known-good route from a previous plan AND there is a clear post-plan reconcile for
+   not standing on the expected start block. Pure window slides stay exempt (they preserve the executing
+   segment). Evidence: the Fall adopted at `grounded=false` whose skipped walk-off stride made the
+   landing physically unreachable (~0.8 blocks needed, ~0.55 available). Related deferred: the Fall
+   wrong-landing envelope (owner expects a wrong-cell touchdown to FAIL; the done-comment still cites
+   the s52-deleted grounded-stall recovery).
+3. **Window-slide livelock (#5, planner).** Mechanism fully characterized (empty-plan-consumed × tail
+   re-derive from identical inputs × ±2 tolerance satisfied THROUGH STONE); full repro log =
+   `run/autotest/logs/2026-07-30-4.log.gz` (11,209 FOUND-0wp at (24,106,167)). Flagship reproduction is
+   UNRELIABLE (vine-growth ambience reroutes every run) — build a deterministic repro world first: uniform
+   stone slab, goal 40+ straight down, canMine (dig-frontier-following is that world's only dynamic),
+   then capture `-Rtrace` at the livelock to answer WHY the L0 re-derive dead-ends in the bot's region
+   (budget partial vs fragment frontier vs blacklists).
+4. **New Parkour landing miss** — AFTER the above. Envelope failure at (24,119,161) (step 1, phase 2/4)
+   ended the best flagship run yet (206.5 blocks executed, route efficiency 0.96); its `envelope:`
+   forensic line is in that run's log. Undiagnosed — evidence-first before touching the servo.
+
 Arc design: `internal_docs/DESIGN-bot-abilities.md` (ratified order: Crafting → Farming →
 Fighting → Building; component template + decision log §10). This file tracks arc state only —
 the owner's region-tier arc handoff stays in `HANDOFF.md`.
