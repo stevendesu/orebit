@@ -133,8 +133,10 @@ public final class ProtectedBlocks {
             // redstone components
             "#minecraft:buttons", "#minecraft:pressure_plates", "#minecraft:rails",
             "minecraft:redstone_wire", "minecraft:repeater", "minecraft:comparator", "minecraft:redstone_torch",
-            "minecraft:redstone_wall_torch", "minecraft:redstone_block", "minecraft:lever", "minecraft:piston",
-            "minecraft:sticky_piston", "minecraft:dispenser", "minecraft:dropper", "minecraft:hopper",
+            "minecraft:redstone_wall_torch", "minecraft:redstone_block", "minecraft:lever",
+            // pistons incl. the technical blocks (breaking an extended head or the mid-motion block destroys the base)
+            "minecraft:piston", "minecraft:sticky_piston", "minecraft:piston_head", "minecraft:moving_piston",
+            "minecraft:dispenser", "minecraft:dropper", "minecraft:hopper",
             "minecraft:observer", "minecraft:daylight_detector", "minecraft:note_block", "minecraft:tripwire",
             "minecraft:tripwire_hook", "minecraft:target", "minecraft:lightning_rod", "minecraft:sculk_sensor",
             "minecraft:calibrated_sculk_sensor", "minecraft:copper_bulb", "minecraft:exposed_copper_bulb",
