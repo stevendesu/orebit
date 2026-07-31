@@ -162,7 +162,16 @@ public final class MovementContext {
      */
     public boolean solidFooting(int x, int y, int z) {
         long d = descriptorAt(x, y, z);
-        return NavBlock.isStandable(d) && !NavBlock.isClimbable(d);
+        if (!NavBlock.isStandable(d) || NavBlock.isClimbable(d)) return false;
+        // THIRD conjunct (the climb-vocabulary arc): the FEET cell (x,y+1,z) must be non-climbable too.
+        // Vanilla truncates a grounded jump whose feet START inside a climbable back to the 0.2 climb
+        // (the post-move overwrite re-tests onClimbable) — the 0.42 launch never happens, so a takeoff
+        // with feet in a floor vine (walk-in stance, reachable since forever) or in a ladder cell above
+        // a solid floor (the sink-in hang stance) is physically impossible exactly like a climbable
+        // floor (DESIGN-climb-vocabulary.md §1/§4). One extra descriptor read per takeoff gate; the
+        // launch-refusal semantics extend to WalkOff honestly (the ±0.15 climbable clamp kills its
+        // momentum-preserving crossing).
+        return !NavBlock.isClimbable(descriptorAt(x, y + 1, z));
     }
 
     /**
@@ -942,10 +951,12 @@ public final class MovementContext {
     /**
      * Whether {@code d} is a climbable block (ladder / scaffolding / the vine family — the {@link
      * NavBlock#isClimbable CLIMB} fingerprint bit) on an already-read descriptor (read-once form; the
-     * climb move reads every cell exactly once via {@link #packedAt}/{@link #descriptorOf}). Note the two
-     * climbable shapes diverge: ladder/scaffolding classify {@code SHAPE_OTHER} (tall non-empty collision)
-     * — NOT {@link #passable}, NOT {@link #standable}, and read as <i>blocked</i> by the resident HEADROOM
-     * bit — while vines are empty-shape and passable. Climb predicates must therefore never go through
+     * climb move reads every cell exactly once via {@link #packedAt}/{@link #descriptorOf}). Note the
+     * climbable shapes diverge (bytecode-adjudicated 2026-07-31, DESIGN-climb-vocabulary.md §1): ladder
+     * classifies {@code SHAPE_OTHER} and scaffolding {@code SHAPE_FULL} (the empty-context query returns
+     * its stand-on-top stable shape) — both NOT {@link #passable} but genuinely {@link #standable}
+     * (full-height collision tops), and both read as <i>blocked</i> by the resident HEADROOM bit — while
+     * vines are empty-shape and passable. Climb predicates must therefore never go through
      * {@link #requireBodyClear} (it would fold a break of the ladder itself); they read cells directly
      * against {@link #passableOrClimbable}.
      */
@@ -1006,6 +1017,18 @@ public final class MovementContext {
      */
     public boolean arcPassable(long d) {
         return passable(d) && !NavBlock.isClimbable(d);
+    }
+
+    /**
+     * Can a FALL be arrested IN this cell — {@link #passable(long)} AND climbable (the vine family:
+     * empty collision, so the arrest position within the cell is exact)? The solid climbables are
+     * deliberately excluded: scaffolding's top catches a faller ON TOP (never inside), and a ladder cell
+     * entered from above is a 0.0125-block knife-edge between hanging inside and standing on the 3/16
+     * plate — a nondeterministic landing the planner must not emit (DESIGN-climb-vocabulary.md §1/§2).
+     * One extra mask on the already-loaded long — never a new grid read.
+     */
+    public boolean hangable(long d) {
+        return passable(d) && NavBlock.isClimbable(d);
     }
 
     /** The collision top of the cell in sixteenths (0..31); 16 = full block, 8 = slab. */

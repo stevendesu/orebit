@@ -6,11 +6,12 @@ import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 /**
  * Traverse existing ladders / vines / scaffolding (MOVEMENT-DESIGN Tier 1 climb — the first consumer of
- * the {@link com.orebit.mod.worldmodel.navblock.NavBlock#isClimbable CLIMB} descriptor bit). Three rules,
- * all edit-free:
+ * the {@link com.orebit.mod.worldmodel.navblock.NavBlock#isClimbable CLIMB} descriptor bit; the gap
+ * edges are DESIGN-climb-vocabulary.md §3.3–§3.6). Six rules, all edit-free:
  *
  * <ul>
  *   <li><b>Climb up</b> — one cell up the climb column while the surface continues (the cell the feet move
@@ -20,9 +21,20 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  *   <li><b>Climb down</b> — one cell down while the surface continues, or the final dismount step onto
  *       standable ground at the column's base.
  *   <li><b>Grab (entry)</b> — a sideways step into an adjacent climb column at feet level. This is the only
- *       way <i>into</i> a ladder column: ladder/scaffolding classify {@code SHAPE_OTHER} (non-empty,
- *       tall collision), so they are walls to {@link MovementContext#passable}/{@code standable} and every
- *       existing movement. (Vines are empty-shape and passable — the same grab rule covers both.)
+ *       way <i>into</i> a ladder column sideways: ladder ({@code SHAPE_OTHER}) and scaffolding
+ *       ({@code SHAPE_FULL}) are non-passable to every walking movement — though their full-height
+ *       collision tops ARE standable (the classifier truth; DESIGN-climb-vocabulary.md §1). Vines are
+ *       empty-shape and passable — the same grab rule covers both. Scaffolding is refused (§3.6): the
+ *       lateral hold is a SNEAK, and scaffolding is sneak-exempt (the bot would sink while crossing).
+ *   <li><b>Jump-grab (§3.3)</b> — from SOLID FOOTING (standable, non-climbable — owner ruling: no jump
+ *       launches from climbable stances), a grounded jump lifts the feet across ONE air cell into a
+ *       climbable overhead ("jump to reach the bottom of a vine or ladder"). Feet+2 is never reachable
+ *       (jump apex 1.25).
+ *   <li><b>Exit-top (§3.4)</b> — from a hang whose own feet cell is a FULL-faced standable climbable (the
+ *       scaffold deck; a ladder's NARROW_TOP plate is excluded — the 3/16 stance is unplannable), climb
+ *       out of the column's top and stand on it.
+ *   <li><b>Sink-in (§3.5)</b> — from standing ATOP a solid climbable (ladder plate / scaffold deck),
+ *       enter the column below. The reverse of exit-top; kills the atop-ladder-plate dead end.
  * </ul>
  *
  * <h2>Node semantics — no new mode</h2>
@@ -111,6 +123,26 @@ public final class Climb implements Movement {
      */
     public static final float GRAB_LATERAL_COST = Traverse.FLAT_COST / SNEAK_SPEED_FACTOR;
 
+    /**
+     * §3.3 jump-grab, ticks: 3 (rise — a grounded 0.42 jump's feet cross +1.0 during tick 3:
+     * 0.42 + 0.3332 + 0.2481 ≈ 1.0013) + 2 (arrest settle at the −0.15 clamp) + 3 (the established
+     * jump-commit surcharge the parkour family pays) ≈ 8. Physically derived per the ruler
+     * (DESIGN-climb-vocabulary.md §3.3).
+     */
+    public static final float JUMP_GRAB_COST = 3f + 2f + 3f;
+
+    /**
+     * §3.4 exit-top, ticks: one climbed cell ({@link #CLIMB_UP_COST}) + 2 to settle grounded on the deck
+     * (the climb-out pop peaks only ≈ +0.154 above the cell top, then drops onto the full top face).
+     */
+    public static final float EXIT_TOP_COST = CLIMB_UP_COST + 2f;
+
+    /**
+     * §3.5 sink-in, ticks: one descended cell ({@link #CLIMB_DOWN_COST}) + 2 to enter/arrest (sneak
+     * through a scaffold deck's vanishing top, or the recenter-off-the-plate drop on a ladder).
+     */
+    public static final float SINK_IN_COST = CLIMB_DOWN_COST + 2f;
+
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
     @Override
@@ -120,19 +152,34 @@ public final class Climb implements Movement {
         // The node's feet cell (x,y+1,z): climbable ⇒ the bot is ON the climb surface, and the two vertical
         // rules below apply. Read-once; UNBUILT reads as "not on a climb."
         int pf = ctx.packedAt(x, y + 1, z);
-        boolean onClimb = pf != MovementContext.UNBUILT
-                && ctx.isClimbable(ctx.descriptorOf(x, y + 1, z, pf));
+        long selfFeetD = pf == MovementContext.UNBUILT ? 0L : ctx.descriptorOf(x, y + 1, z, pf);
+        boolean onClimb = pf != MovementContext.UNBUILT && ctx.isClimbable(selfFeetD);
 
         if (onClimb) {
             // Climb up: stay on the surface — the NEW feet cell (y+2) must itself be climbable (a top-out
             // onto adjacent ground is Ascend's job), and the new head (y+3) must admit the body.
             int p2 = ctx.packedAt(x, y + 2, z);
-            if (p2 != MovementContext.UNBUILT
-                    && ctx.isClimbable(ctx.descriptorOf(x, y + 2, z, p2))) {
-                int p3 = ctx.packedAt(x, y + 3, z);
-                if (p3 != MovementContext.UNBUILT
-                        && ctx.passableOrClimbable(ctx.descriptorOf(x, y + 3, z, p3))) {
-                    out.accept(x, y + 1, z, CLIMB_UP_COST);
+            if (p2 != MovementContext.UNBUILT) {
+                long d2 = ctx.descriptorOf(x, y + 2, z, p2);
+                if (ctx.isClimbable(d2)) {
+                    int p3 = ctx.packedAt(x, y + 3, z);
+                    if (p3 != MovementContext.UNBUILT
+                            && ctx.passableOrClimbable(ctx.descriptorOf(x, y + 3, z, p3))) {
+                        out.accept(x, y + 1, z, CLIMB_UP_COST);
+                    }
+                } else if (ctx.passable(d2)
+                        && ctx.standable(selfFeetD) && !NavBlock.isNarrowTop(selfFeetD)) {
+                    // §3.4 exit-top (DESIGN-climb-vocabulary.md): climb out of the column's top cell and
+                    // stand ON it — only for a FULL-faced standable climbable top (the scaffold deck; the
+                    // +0.154 climb-out pop lands the feet on the full top face). A ladder plate is
+                    // excluded by NARROW_TOP: the 3/16 strip stance is unplannable (a same-side ladder
+                    // above makes it geometrically impossible and FACING isn't packed in the descriptor —
+                    // owner ruling 2026-07-31), and vines are excluded by !standable (nothing to stand on).
+                    int p3 = ctx.packedAt(x, y + 3, z);
+                    if (p3 != MovementContext.UNBUILT
+                            && ctx.passableOrClimbable(ctx.descriptorOf(x, y + 3, z, p3))) {
+                        out.accept(x, y + 1, z, EXIT_TOP_COST);
+                    }
                 }
             }
 
@@ -151,6 +198,40 @@ public final class Climb implements Movement {
                     }
                 }
             }
+        } else if (pf != MovementContext.UNBUILT && ctx.passable(selfFeetD)) {
+            // Grounded-stance vertical edges (the feet cell is OPEN, not climbable): §3.3 + §3.5.
+            int p0 = ctx.packedAt(x, y, z);
+            if (p0 != MovementContext.UNBUILT) {
+                long d0 = ctx.descriptorOf(x, y, z, p0);
+                if (ctx.standable(d0) && !ctx.isClimbable(d0)) {
+                    // §3.3 jump-grab: from SOLID FOOTING only (the solidFooting form — owner ruling: no
+                    // jump launches from climbable stances, so plate/deck floors are excluded by the
+                    // !isClimbable term), a grounded 0.42 jump lifts the feet across ONE air cell into a
+                    // climbable at (y+2); feet cross +1.0 on rise tick 3 and vanilla arrests them there.
+                    // Entering a ladder cell from BELOW is robust — the plate can push rising feet
+                    // sideways but never catch them (unlike from-above entry, which is the refused
+                    // 0.0125-block knife-edge). The passable-non-climb feet cell is load-bearing too: a
+                    // grounded jump STARTED inside a climbable is truncated to the 0.2 climb by vanilla.
+                    // (y+3) is jump clearance — a ceiling at y+4 still leaves the feet reaching ~+1.2.
+                    int p2 = ctx.packedAt(x, y + 2, z);
+                    if (p2 != MovementContext.UNBUILT
+                            && ctx.isClimbable(ctx.descriptorOf(x, y + 2, z, p2))) {
+                        int p3 = ctx.packedAt(x, y + 3, z);
+                        if (p3 != MovementContext.UNBUILT
+                                && ctx.passableOrClimbable(ctx.descriptorOf(x, y + 3, z, p3))) {
+                            out.accept(x, y + 1, z, JUMP_GRAB_COST);
+                        }
+                    }
+                } else if (ctx.isClimbable(d0) && ctx.standable(d0)) {
+                    // §3.5 sink-in: standing ON a solid climbable's top (ladder plate / scaffold deck) —
+                    // enter the column below; the new feet cell is the climbable itself, a hang. The
+                    // single-cell drop is deterministic: the plate the bot just stood on cannot re-catch
+                    // feet already below its top face. Execution: sneak through a scaffold deck (its top
+                    // shape vanishes for a descending entity); recenter off a ladder's 3/16 plate +
+                    // gravity + the −0.15 arrest (see steer's Δy<0 grounded branch).
+                    out.accept(x, y - 1, z, SINK_IN_COST);
+                }
+            }
         }
 
         // Grab (entry): step sideways into an adjacent climb column at feet level. The destination floor
@@ -163,6 +244,12 @@ public final class Climb implements Movement {
             if (pn == MovementContext.UNBUILT) continue;
             long feetD = ctx.descriptorOf(nx, y + 1, nz, pn);
             if (!ctx.isClimbable(feetD)) continue;
+            // §3.6 scaffold guard: the lateral hold is a SNEAK, and scaffolding is exempt from the
+            // climbable sneak-hold (a sneaking bot SINKS through it — the block-exact reached would never
+            // fire). Allow only climbables the hold works on: passable (vine — sneak holds) or NARROW_TOP
+            // (the ladder plate — sneak holds); the full solid climbable (scaffolding) is refused. One
+            // extra AND on the already-loaded long.
+            if (!ctx.passable(feetD) && !NavBlock.isNarrowTop(feetD)) continue;
             int ph = ctx.packedAt(nx, y + 2, nz);
             if (ph == MovementContext.UNBUILT
                     || !ctx.passableOrClimbable(ctx.descriptorOf(nx, y + 2, nz, ph))) {
@@ -218,10 +305,19 @@ public final class Climb implements Movement {
         SteerControl.recenterOnTarget(b, path);
         double ddy = path.ty() - path.sy(); // the MOVE's planned Δy (feet targets), not the sagging pose
         if (ddy > 0.1) {
-            b.setJumping(true);  // climb up
+            // Climb up — and, unchanged, the §3.3/§3.4 ascents: a GROUNDED bot holding jump fires the
+            // real 0.42 jump (the jump-grab), an on-climbable bot gets the 0.2 climb (the exit-top run);
+            // vanilla picks the right physics off the same held input.
+            b.setJumping(true);
         } else if (ddy >= -0.1) {
             b.setSneak(true);    // lateral: hold height (suppress the ladder/vine slide) and ease across
+        } else if (b.grounded() && !b.onClimbable() && b.scaffoldingBelow()) {
+            // §3.5 sink-in through a scaffold DECK: a held sneak removes its stand-on-top shape and the
+            // bot descends at the −0.15 clamp. Deliberately scaffolding-ONLY: on a ladder plate a sneak
+            // would edge-guard-pin the bot ON the plate — there the recenter above walks the bot off the
+            // 3/16 strip toward the cell centre and gravity + the climbable arrest do the rest.
+            b.setSneak(true);
         }
-        // else (climb down): no jump, no sneak — vanilla slow-fall carries the descent
+        // else (climb down / ladder sink-in): no jump, no sneak — vanilla slow-fall carries the descent
     }
 }

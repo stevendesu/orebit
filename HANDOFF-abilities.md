@@ -59,15 +59,31 @@ only if the owner reopens it.
      check the old no-capa repro pin in that copy's orebit.properties. De-greed: built, measured,
      REVERTED (cannot satisfy the pinned jump-preference suites and the walk-over-jump case on the
      same numbers — the goal-tolerance box makes the first in-box pop terminal); owner: leave greedy.
-   - **NEXT (owner-delegated 2026-07-31): the climb/vine VOCABULARY arc.** Fall's column must reject
-     climbables in transit but LAND ON them as hang nodes (feet-in-climbable — physically exact, fall
-     distance resets; eliminates the atop-ladder-plate dead end/sink trap by construction: falls stop
-     IN the top climbable cell, never on the plate); plus the one-air-cell up-grab on Climb (jump
-     reach) so ladder/air/ladder and vine/air/vine columns connect both ways (down = fall-into-hang
-     chains, any gap depth). Judgment delegated; bar = suite green + new tests reasonable. Facts on
-     file (Fall/Climb connectivity verdict): ladders standable+NARROW_TOP, vines not standable; no
-     in-column edge from plate-top; climb-up dies at one air cell; scaffolding likely misclassified
-     solid (shape query needs context — the forceSolid pattern is the fix, future-work.txt item).
+   - **✅ DONE 2026-07-31 — the climb/vine VOCABULARY arc** (design card =
+     `internal_docs/DESIGN-climb-vocabulary.md`, §-cited from code; 8-reader recon + decompiled-
+     1.21.11 physics first). Shipped: Fall arrests in PASSABLE climbables only (vine family) as hang
+     nodes at the run's bottom cell, damage-free, under the FLAT guaranteed-arrest bound (prior drop
+     ≤ 7 — `HangBoundTest` re-derives it from the recurrence; run-length relaxations + deep-window
+     sweeps DROPPED per owner ruling after the paired A/B measured TOWER +8-13% / FLOOD +14-18% on
+     them; an `anyClimbable` grid prefilter was built then REVERTED on the owner's standing no-anyX
+     rule — coverage was shrunk instead); the
+     in-column release-drop from hangs (vine/air/vine descends any depth); Climb gains jump-grab
+     (solidFooting only), scaffold exit-top (NARROW_TOP excludes ladder plates), sink-in from the
+     plate/deck (the trap fix), and a scaffold lateral-grab refusal (sneak-exempt); seam reads
+     onClimbable()/scaffoldingBelow(); Fall done = footMatch && (grounded || onClimbable). TWO
+     handoff assumptions REFUTED by physics + owner rulings: no gap ASCENT of any kind (a hanging
+     entity can never jump — 0.42 needs onGround; a same-side upper ladder makes the plate stance
+     geometrically impossible and FACING isn't packed), and ladder cells are NEVER fall/drop landings
+     (from-above entry is a 0.0125-block hang-vs-plate knife-edge; powered sink-in + climb-down own
+     ladder descent). Scaffolding needed NO reclassification (bytecode-adjudicated: the empty-context
+     query returns SHAPE_STABLE → SHAPE_FULL with CLIMB set — standable deck, interior via climb
+     edges). BONUS BUG FIX the suite caught: `solidFooting` gained a third conjunct (feet cell
+     non-climbable) — vanilla truncates a grounded jump with feet inside a climbable to the 0.2
+     climb, so the sink-in hang stance AND the pre-existing walk-into-a-floor-vine stance were being
+     offered impossible parkour launches. Suite fully green (12 new tests); JMH A/B + in-world course
+     cards (west cells) + the flagship rerun are the verification tail. Scaffold-top fall landings
+     price NORMAL damage (vanilla may forgive them via #fall_damage_resetting — empirical follow-up;
+     overpricing is the safe error).
    - **HARNESS DEBT (found while pinning): the parkour snake's tail is NAV-DEAD.** Every tile beyond
      the boot view-distance bubble (~position ≥48, z ≥ 216) fails "nav gave up" with ZERO searches —
      buildTile's sync-load on entry never reaches the nav chunk-load path, so the grid never builds
