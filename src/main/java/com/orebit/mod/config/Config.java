@@ -204,7 +204,9 @@ public record Config(
     /**
      * The <b>execution-side</b> break policy gate for PATHING-MOTIVATED breaks — the cold backstop the
      * route executors consult before destroying a block en route ({@code AllyBotEntity.applyEdits}/
-     * {@code place}, the gather LOS-occluder dig, builder mismatch clears): may the bot break a block
+     * {@code place}, the gather LOS-occluder dig, builder mismatch clears, and the PhaseRunner
+     * reconcile's mine seam — {@code AllyBotEntity.mine}, whose one exemption is a cell the plan's own
+     * executed prefix placed, {@code BotNavigator.planPlacedAt}): may the bot break a block
      * whose live state is {@code state} and whose live destroy time (vanilla
      * {@code BlockState.getDestroySpeed(level, pos)}) is {@code destroyTime}? <b>Deliberate task
      * breaks do NOT consult this</b> (owner ruling, 2026-07-29): {@code BotMining} — the hands behind

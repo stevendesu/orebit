@@ -111,9 +111,10 @@ public final class BotMining {
         // These hands are the DELIBERATE-action path (an owner-commanded gather target, a harvest,
         // a table reclaim, /bot mine) — mining.protectedBlocks is a PATHING policy (owner ruling,
         // 2026-07-29): it stops the PLANNER and the path executor (applyEdits/place, the gather
-        // LOS-occluder dig, builder clears — each of those call sites checks Config.mayBreak
-        // itself) from chewing through builds en route, and deliberately does NOT gate a task
-        // that exists to break the block (protecting logs must not refuse `/bot gather wood`).
+        // LOS-occluder dig, builder clears, the PhaseRunner reconcile's mine seam in
+        // AllyBotEntity.mine — each of those call sites checks Config.mayBreak itself) from
+        // chewing through builds en route, and deliberately does NOT gate a task that exists to
+        // break the block (protecting logs must not refuse `/bot gather wood`).
         // The one physics gate that DOES belong here: a vanilla-unbreakable block (negative
         // destroy time — bedrock, barriers, …) still refuses without the mining.allowUnbreakable
         // opt-in; the opted-in grind below handles the rest.

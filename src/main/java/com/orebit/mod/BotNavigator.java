@@ -371,6 +371,42 @@ final class BotNavigator {
     int segToZ() { return segToZ; }
 
     /**
+     * Whether cell {@code (x,y,z)} is one the CURRENT path's own steps up to the executing one PLACED —
+     * the "plan knows its own scaffolding" membership test behind the reconcile's break-policy exemption
+     * (owner ruling 2026-07-30; the {@code MovePlan.isDoorCell} precedent of plan-carried cell knowledge
+     * queried before acting). The default {@code mining.protectedBlocks} list contains the conjured
+     * bridge block (cobblestone), so the moment the plan places a scaffold cell, its OWN later step's
+     * {@code Need.AIR} on that cell would be refused by {@code Config.mayBreak} without this vouch (the
+     * six place→refuse pairs in the 2026-07-30 log: place by Traverse/Ascend, dig by a later Descend of
+     * the same plan). Scans the prefix {@code 0..waypointIndex} — a cell a FUTURE step intends to place
+     * still holds a foreign block and stays protected. The vouch is planned-prefix MEMBERSHIP, not an
+     * executed-place record (none exists): a step the reached-scan SKIPPED, or the current step's
+     * not-yet-run place, is inside the prefix even though its place never executed — a protected block
+     * deposited by someone else into exactly such a cell mid-window would be wrongly vouched. Accepted:
+     * closing it needs new executor-side state (owner sign-off). Cold: a tiny per-step array walk, paid
+     * only when {@code mayBreak} already refused the cell.
+     */
+    boolean planPlacedAt(int x, int y, int z) {
+        if (path == null) {
+            return false;
+        }
+        final long key = BlockPos.asLong(x, y, z);
+        final int last = Math.min(waypointIndex, path.size() - 1);
+        for (int i = 0; i <= last; i++) {
+            StepEdits e = path.edits(i);
+            if (e == null) {
+                continue;
+            }
+            for (int k = 0; k < e.placeCount(); k++) {
+                if (e.placeAt(k) == key) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * Drop the active two-tier driver and its exposed block plan (HPA-IMPLEMENTATION.md §10): a mode change
      * or a STAY hold invalidates the current goal, so the {@link PathPlan} built for it must not be ticked
      * again. The next {@link #driveToward} sees a null {@link #pathPlan} and rebuilds for the new goal.
@@ -500,7 +536,26 @@ final class BotNavigator {
         //     undershoot; the WalkOff close-goal step-off). State-based: the moment the move's `done` fires,
         //     steerAlongPath advances the cursor past the step, so COMPLETE may fire the next tick.
         boolean withinRange = distXZ <= arriveDist && Math.abs(dy) <= arriveY;
-        if (withinRange && (bot.grounded() || bot.isInWater()) && !onDamagingFloor() && !midCommittedMove()) {
+        // The ratified stable-media/settled pair (grounded, or buoyant in water — DESIGN-validity-envelopes
+        // §2): the arrival test's "safe to drop ALL inputs" and the consumption-settle write keep exactly
+        // this pair — on a climbable or in lava, dropping inputs slides/sinks the bot, so neither arrives.
+        final boolean stableMedium = bot.grounded() || bot.isInWater();
+        // PLAN-ANCHOR stability (owner ruling 2026-07-30: never plan while the bot is in motion): the
+        // launch/adoption gates below ask a DIFFERENT question — "is the bot's floor cell a valid,
+        // persistent search/adoption anchor?" — and the answer is yes in any CONTROLLED medium: grounded,
+        // buoyant in a swimmable fluid (water AND lava — the swim tier plans lava columns, and a lava-borne
+        // bot must plan its escape immediately, not after sinking to the pool floor), or holding a
+        // climbable (a hang has always serviced window handoffs; deferring one WAITs the inputs away and
+        // slides the bot to the ladder base — the climb/slide-down/re-climb livelock, review finding).
+        // Only BALLISTIC states — jump/fall arcs — defer, to the touchdown a few ticks away (the mid-air
+        // Fall adoption class the ruling closes).
+        final boolean planAnchor = stableMedium || bot.inLava() || bot.onClimbable();
+        // Fluid anchors are BOB-QUANTIZED: the buoyancy bob flips a floating bot's floor cell between
+        // adjacent Ys at steady state (the swim follower's reached abandoned exact block-Y for exactly
+        // this — Swim's continuous REACHED_Y window), so the adoption membership test downstream widens
+        // its Y match by ±1 in fluid, mirroring that precedent. Ground anchors stay exact.
+        final boolean fluidAnchor = bot.isInWater() || bot.inLava();
+        if (withinRange && stableMedium && !onDamagingFloor() && !midCommittedMove()) {
             driveState = "COMPLETE";
             finalizeJourney("reached"); // NAVSTATS: the continuous arrival test is the definition of done
             bot.setForward(0.0f);
@@ -558,24 +613,34 @@ final class BotNavigator {
         // in place — escalating up its level stack in repairStep — without discarding the whole nested plan. A
         // full rebuild fires only on no-plan or a new goal region.
         if (pathPlan == null || newRegionGoal) {
-            // NAVGRID READINESS GATE (STEP 2): the block/region tiers read an UNBUILT nav cell as AIR (the
-            // background NavGridView has no live-getBlockState fallback), so planning before the bot's
-            // surrounding grid has built picks a truncated-world target (the cold-start canopy bug). NavGrids
-            // build async over a few ticks after chunks load, so before the FIRST plan / a new-region replan,
-            // require the navReadyRadiusChunks ring resident. Not ready → HOLD this tick (don't plan), the same
-            // held state a planless drive already uses; after navReadyTimeoutTicks consecutive unready ticks,
-            // give up cleanly. State-based (polls real NavStore residency); the counter is a backstop only.
-            if (!navVicinityReady()) {
-                return holdForNavReady();
+            // MID-MOTION PLAN GATE (owner ruling 2026-07-30): never LAUNCH a fresh two-tier plan while the
+            // bot is ballistic (mid-jump/-fall) — the search would anchor at a floor cell the bot is not
+            // actually standing on, and the step-0 phase plan would be built from a frame reality has
+            // already left (the mid-air Fall adoption: its instantly-skipped walk-off stride made the
+            // landing physically unreachable). Deferral is state-based, not a timer: the trigger (no plan /
+            // moved goal) persists, so the replan fires on the first plan-anchor-stable tick; meanwhile any
+            // current plan keeps executing (the known-good route from the previous plan) and a planless
+            // airborne bot simply WAITs the few ticks to touchdown below.
+            if (planAnchor) {
+                // NAVGRID READINESS GATE (STEP 2): the block/region tiers read an UNBUILT nav cell as AIR (the
+                // background NavGridView has no live-getBlockState fallback), so planning before the bot's
+                // surrounding grid has built picks a truncated-world target (the cold-start canopy bug). NavGrids
+                // build async over a few ticks after chunks load, so before the FIRST plan / a new-region replan,
+                // require the navReadyRadiusChunks ring resident. Not ready → HOLD this tick (don't plan), the same
+                // held state a planless drive already uses; after navReadyTimeoutTicks consecutive unready ticks,
+                // give up cleanly. State-based (polls real NavStore residency); the counter is a backstop only.
+                if (!navVicinityReady()) {
+                    return holdForNavReady();
+                }
+                navReadyWaitTicks = 0;
+                navReadyWaitAnnounced = false;
+                if (newRegionGoal) {
+                    // New destination region → the learned dead-ends no longer apply; start the repair fresh.
+                    navGaveUp = false;
+                }
+                replan(goalFloor);
+                blockRefreshTicks = TERRAIN_RECHECK_TICKS;
             }
-            navReadyWaitTicks = 0;
-            navReadyWaitAnnounced = false;
-            if (newRegionGoal) {
-                // New destination region → the learned dead-ends no longer apply; start the repair fresh.
-                navGaveUp = false;
-            }
-            replan(goalFloor);
-            blockRefreshTicks = TERRAIN_RECHECK_TICKS;
         } else {
             // FORWARD-LOOKING / boundary-gated replan (the synchronous form of the background-planner model):
             // only commit / refresh / swap the block plan when the bot is physically SETTLED at its last
@@ -599,11 +664,19 @@ final class BotNavigator {
             // bot is still moving and lands (grounded) within ticks, and planning from an airborne floor
             // cell would anchor the next search in the air.
             BlockPos currentFloor = floorOf(bot.blockPosition()); // topY-aware, computed once per drain tick
-            if (path != null && waypointIndex >= path.size() && (bot.grounded() || bot.isInWater())) {
+            if (path != null && waypointIndex >= path.size() && stableMedium) {
                 this.settledFloor = currentFloor;
             }
-            if (settledFloor != null && currentFloor.equals(settledFloor)) {
-                pathPlan.onBotMoved(settledFloor, bot.currentStartMode());
+            // Floor-cell EQUALITY alone is not "settled": an airborne bot whose feet have not yet left the
+            // settled column passes it (the 2026-07-30 11:40:19 mid-air refreshWindow that adopted a plan
+            // at grounded=false), and an uncommitted move chain (Climb/Descend) can write the anchor itself
+            // while airborne between rungs. So the boundary additionally requires plan-anchor stability
+            // (owner ruling 2026-07-30: never plan while the bot is ballistic; a climbable hang or fluid
+            // suspension is a controlled anchor and keeps servicing window handoffs — deferring a mid-hang
+            // handoff would WAIT the inputs away and slide the bot down the ladder). Deferral costs the few
+            // ticks to touchdown; every commit/refresh/adopt below re-fires from persisting state.
+            if (settledFloor != null && currentFloor.equals(settledFloor) && planAnchor) {
+                pathPlan.onBotMoved(settledFloor, bot.currentStartMode(), fluidAnchor);
                 boolean consumed = path != null && waypointIndex >= path.size() && !pathPlan.isComplete();
                 if (consumed || blockRefreshTicks <= 0) {
                     // Terrain-recheck debounce (s52): the periodic re-search fires ONLY when the level's
@@ -653,16 +726,21 @@ final class BotNavigator {
             }
         }
         // Planless async adoption: a bot with NO walkable plan can't wait for the settled boundary the
-        // normal drain rides — it may never settle (treading water, mid-fall), and there is nothing to
+        // normal drain rides — a treading-water bot never establishes one — and there is nothing to
         // un-adopt. Poll at tick rate and, on adoption, run the same swap/anchor mechanics the boundary
         // block runs — anchored at the bot's LIVE floor, exactly how replan() seeds a fresh plan.
+        // Plan-anchor gated (owner ruling 2026-07-30): treading water, lava suspension, and a climbable
+        // hang are controlled anchors and adopt at tick rate as before, but a MID-FALL first adoption now
+        // defers to touchdown — it would anchor planStartFloor/settledFloor and frame step 0 from an
+        // airborne cell (the mid-air Fall class), and every fall terminates in an anchor medium within
+        // ticks, so nothing waits forever.
         // (A consumed plan needs no special case here — consumption is a settle event above, so it
         // drains through the boundary-gated onBotMoved the tick it settles. s52.)
         // Double adoption with the boundary block is impossible: both compare against lastBlockPlanRef,
         // so whichever runs first swaps and the other no-ops on the same reference.
-        if (pathPlan != null && path == null) {
+        if (pathPlan != null && path == null && planAnchor) {
             BlockPos liveFloor = floorOf(bot.blockPosition());
-            pathPlan.pollWhenPlanless(liveFloor);
+            pathPlan.pollWhenPlanless(liveFloor, fluidAnchor);
             BlockPathPlan adopted = pathPlan.currentBlockPlan();
             if (adopted != lastBlockPlanRef) {
                 this.path = adopted;
@@ -677,10 +755,15 @@ final class BotNavigator {
             }
         }
 
-        // Region repair, every tick (cheap status check): a BLOCKED window — wherever it surfaced — gets its
-        // dead skeleton hop blacklisted now, so the NEXT tick's `skeletonInvalid` reroute already avoids it
-        // (one useful region replan, not a wasted same-skeleton rebuild first). Give-up lives here too.
-        repairStep();
+        // Region repair (cheap status check): a BLOCKED window — wherever it surfaced — gets its dead
+        // skeleton hop blacklisted, so the NEXT tick's `skeletonInvalid` reroute already avoids it (one
+        // useful region replan, not a wasted same-skeleton rebuild first). Give-up lives here too.
+        // Plan-anchor gated (owner ruling 2026-07-30): the repair's replanBlock launches/installs a
+        // search exactly like the boundary branch, so it defers mid-flight too; the BLOCKED generation
+        // persists, so exactly-one-repair-per-result is preserved, just delayed to touchdown.
+        if (planAnchor) {
+            repairStep();
+        }
 
         if (path != null && waypointIndex < path.size()) {
             driveState = "STEER";

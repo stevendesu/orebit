@@ -57,8 +57,9 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  * nothing descends. No new {@link BotSteering} input and no {@code MovePlan} (nothing to break/place; the
  * motion is monotone): {@link #steer} re-centres on the column and holds jump only when the target is
  * above. The default block-exact {@link #reached} stands — at 0.117 b/t the feet occupy each waypoint cell
- * for ~8 ticks. A stalled climb (slide-back at −0.15/t while off the ground) trips the follower's
- * airborne-stall recovery, which is the intended self-heal.
+ * for ~8 ticks. A stalled climb (slide-back at −0.15/t while off the ground) has NO recovery machinery
+ * (s52 deleted the airborne-stall recovery; the no-recovery rule): it surfaces as a visible stall, and a
+ * climbable hang counts as a plan-anchor-stable state so window handoffs keep servicing mid-climb.
  */
 public final class Climb implements Movement {
 

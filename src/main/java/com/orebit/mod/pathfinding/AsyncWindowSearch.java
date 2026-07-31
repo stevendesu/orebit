@@ -97,9 +97,10 @@ final class AsyncWindowSearch {
      * splice contract's accept step (DESIGN-background-pathfinding.md §5/§7):
      * <ul>
      *   <li><b>Boundary replan</b> result: {@link Drain#RESULT} if the bot is still within seam tolerance
-     *       of the cell the search started from AND the window target hasn't moved; otherwise
-     *       {@link Drain#RETRY} (the driver resubmits from the actual floor — the same recovery the
-     *       escape hatches use).</li>
+     *       of the cell the search started from AND the window target hasn't moved AND the bot's floor is
+     *       the searched start or on the result plan ({@link #onStartOrPlan} — the post-plan reconcile,
+     *       owner ruling 2026-07-30); otherwise {@link Drain#RETRY} (the driver resubmits from the actual
+     *       floor — the same recovery the escape hatches use).</li>
      *   <li><b>Pre-plan</b> result (P4): PARK it — the bot hasn't reached the predicted start yet. A
      *       failed ({@code null}) pre-plan is dropped — and {@code preplanAttemptedTarget} stays set, so
      *       we don't re-attempt the same doomed precompute every boundary tick; the boundary replan
@@ -108,7 +109,7 @@ final class AsyncWindowSearch {
      *       pre-plan the attempt flag is cleared (the attempt didn't run; allow another) → NONE.</li>
      * </ul>
      */
-    Drain drainPending(BlockPos actualFloor, BlockPos currentTarget, int startMode) {
+    Drain drainPending(BlockPos actualFloor, BlockPos currentTarget, int startMode, boolean fluidAnchor) {
         if (pending == null || !pending.isDone()) {
             return Drain.NONE;
         }
@@ -137,6 +138,17 @@ final class AsyncWindowSearch {
         if (!seam.accepts(actualFloor) || !toward.equals(currentTarget)) {
             return Drain.RETRY; // drifted past tolerance / window moved — plan from where we really are
         }
+        // POST-PLAN RECONCILE (owner ruling 2026-07-30): being within seam tolerance is not standing on
+        // the plan. Adopt only when the bot's floor IS the searched start (the step-0 frame is exact) or
+        // lies ON the result plan (the follower's reached-scan then enters mid-plan on its first steer
+        // tick — the existing "advance SKIPPED n steps" mechanism, which covers a bot that walked ahead
+        // along the old route while the search ran). Anything else would frame step 0 from a cell the
+        // search never planned from (the silent ≤3-cell mismatch the ruling closes) → RETRY from the
+        // actual floor, the same recovery a seam reject uses. A null plan (BLOCKED) carries no frame to
+        // mismatch and must pass through — the repair owns it.
+        if (done.plan() != null && !onStartOrPlan(done.plan(), from, actualFloor, fluidAnchor ? 1 : 0)) {
+            return Drain.RETRY;
+        }
         resultPlan = done.plan();
         resultPartial = done.wasPartial();
         resultExpansions = done.expansions();
@@ -152,7 +164,7 @@ final class AsyncWindowSearch {
      * the predicted start (seam accept) and the window target is still the parked one; a moved window
      * target drops the stale precompute (the window moved on while we walked).
      */
-    boolean pollParked(BlockPos actualFloor, BlockPos currentTarget, int startMode) {
+    boolean pollParked(BlockPos actualFloor, BlockPos currentTarget, int startMode, boolean fluidAnchor) {
         if (parkedPlan == null) {
             return false;
         }
@@ -163,6 +175,12 @@ final class AsyncWindowSearch {
         if (!new SpliceSeam(parkedStart, startMode, EditSnapshot.EMPTY).accepts(actualFloor)) {
             return false;
         }
+        // POST-PLAN RECONCILE (owner ruling 2026-07-30, same test as drainPending): within tolerance but
+        // not standing on the parked plan's start or route → keep it parked; a later boundary tick may
+        // still arrive properly (the target-moved drop above owns staleness).
+        if (!onStartOrPlan(parkedPlan, parkedStart, actualFloor, fluidAnchor ? 1 : 0)) {
+            return false;
+        }
         resultPlan = parkedPlan;
         resultPartial = parkedPartial;
         resultExpansions = Integer.MAX_VALUE; // a parked plan is never null — expansions are irrelevant
@@ -171,6 +189,37 @@ final class AsyncWindowSearch {
         resultStart = parkedStart;
         parkedPlan = null;
         return true;
+    }
+
+    /**
+     * The adoption-membership half of the post-plan reconcile (owner ruling 2026-07-30): {@code true}
+     * when {@code floor} is the cell the search ran FROM (so the adopted plan's step-0 frame is exactly
+     * the bot's stand cell) or matches some step's search-native floor cell (so the follower's
+     * reached-scan self-advances the cursor there on its first steer tick — the existing mid-plan
+     * entry). Floor-frame equality is the same idiom the settle anchor uses ({@code BotNavigator}:
+     * {@code settledFloor = path.floor(j)} compared against {@code floorOf(blockPosition)}); a
+     * waypoint's X/Z equal its floor's X/Z, so only the carried {@code floorY} differs.
+     *
+     * <p>{@code yTol} is 0 on a ground anchor (exact), 1 when the bot is bodily in fluid: a floating
+     * bot's floor cell is BOB-QUANTIZED — the buoyancy bob flips {@code floorOf(blockPosition)} between
+     * adjacent Ys at steady state, so exact-Y membership would RETRY a perfectly adoptable swim plan
+     * every drain (the same reason the swim follower's {@code reached} uses a continuous vertical
+     * window rather than exact block-Y).
+     */
+    private static boolean onStartOrPlan(BlockPathPlan plan, BlockPos searchStart, BlockPos floor, int yTol) {
+        if (searchStart.getX() == floor.getX() && searchStart.getZ() == floor.getZ()
+                && Math.abs(searchStart.getY() - floor.getY()) <= yTol) {
+            return true;
+        }
+        final int n = plan.size();
+        for (int i = 0; i < n; i++) {
+            final BlockPos wp = plan.waypoint(i);
+            if (wp.getX() == floor.getX() && wp.getZ() == floor.getZ()
+                    && Math.abs(plan.floorY(i) - floor.getY()) <= yTol) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** The plan of the last {@link Drain#RESULT} / accepted {@link #pollParked} ({@code null} ⇒ BLOCKED). */
@@ -236,6 +285,13 @@ final class AsyncWindowSearch {
     /** Record the one pre-plan attempt for {@code target} (before submitting it). */
     void markPreplanAttempt(BlockPos target) {
         preplanAttemptedTarget = target;
+    }
+
+    /** Drop the parked P4 precompute (window refresh — a consumed/terrain-impacted plan whose parked
+     *  result already failed this tick's adoption test can never be adopted by the settled bot; keeping
+     *  it would veto every {@code replanBlock} resubmit toward its target — review finding 2026-07-30). */
+    void dropParked() {
+        parkedPlan = null;
     }
 
     /** Stop caring about any in-flight search and drop the parked pre-plan (the owner cleared/replaced

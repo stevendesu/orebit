@@ -28,14 +28,14 @@ import net.minecraft.world.phys.AABB;
  * bot's REAL inventory. A 2x2 recipe crafts anywhere; a 3x3 recipe needs the bot within reach of a
  * crafting table — it seeks the nearest one ({@code crafting.tableSearchRadius}), and failing
  * that may place a temporary table from inventory (crafting itself one, 2x2, when it only carries
- * planks — {@code crafting.placeTable}) and take it back afterwards
- * ({@code crafting.reclaimTable}, the §10-D3 narrowly-waived reclaim break).
+ * planks — {@code crafting.placeTable}) and take it back afterwards ({@code crafting.reclaimTable}).
  *
  * <p>Crafting is headless and server-side (the vanilla-Crafter/Carpet precedent, via the
  * {@code platform/CraftingOps} seam): no menus, no recipe book, no packets — one craft operation
  * per tick (a cadence, not a timer), each op re-planned against the LIVE inventory so every
  * transition is state-driven. Movement rides {@link BotNavigator#driveToward} + the
- * {@code navGaveUp} protocol; the reclaim break rides {@link BotMining#requestReclaim}.
+ * {@code navGaveUp} protocol; the reclaim break rides the deliberate {@link BotMining} hands
+ * (mayBreak-exempt — owner ruling 2026-07-29, which removed the old §10-D3 waiver machinery).
  */
 final class BotCrafter {
 
