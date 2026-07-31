@@ -1,5 +1,8 @@
 package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
+import java.util.function.Predicate;
+
+import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
@@ -565,7 +568,10 @@ public final class Parkour implements Movement {
                         // Body proven clear in one bit test — a flat landing (rising is impossible: a
                         // standable y+1 would have zeroed the HEADROOM bits). Arc verified lazily here.
                         overfly = trigger; // clear body ⇒ a triggering obstacle can be flown over
-                        if (g <= flatMax) {
+                        // NARROW-TOP landing gate (owner ruling 2026-07-31): never TARGET a narrow post
+                        // (bamboo/chain/rod) as a jump landing — a human can't reasonably follow it. The
+                        // column still terminates the direction below exactly as any standable ledge does.
+                        if (g <= flatMax && !NavBlock.isNarrowTop(fd)) {
                             long vs = verifyPrisms(ctx, x, y, z, dx, dz, verified, verifiedTransit, g);
                             if (vs != PRISM_BLOCKED) {
                                 out.accept(cx, y, cz, COST[g] + Float.intBitsToFloat((int) vs)
@@ -581,7 +587,8 @@ public final class Parkour implements Movement {
                         long d1 = ctx.descriptorOf(cx, y + 1, cz, p1);
                         if (ctx.passable(d1)) {
                             overfly = trigger; // feet cell clear ⇒ a triggering obstacle can be flown over
-                            if (g <= flatMax) {
+                            // Same narrow-top landing gate as the flags-proven flat branch above.
+                            if (g <= flatMax && !NavBlock.isNarrowTop(fd)) {
                                 int p2 = ctx.packedAt(cx, y + 2, cz);
                                 if (p2 != MovementContext.UNBUILT
                                         && ctx.passable(ctx.descriptorOf(cx, y + 2, cz, p2))) {
@@ -681,8 +688,10 @@ public final class Parkour implements Movement {
                     if (ctx.standable(fdd)) {
                         // Landing body (fy+1, fy+2) is proven passable by the arc verification below for
                         // dr == 1 (node-level cell + prism) and by the descended cells just walked for
-                        // deeper drops.
-                        if (g <= env[ParkourEnvelope.FALL1 + dr - 1]) {
+                        // deeper drops. A NARROW-TOP floor (bamboo/chain — owner ruling 2026-07-31) is
+                        // never emitted as the landing, but still stops the down-scan (never through a
+                        // floor).
+                        if (!NavBlock.isNarrowTop(fdd) && g <= env[ParkourEnvelope.FALL1 + dr - 1]) {
                             long vs = verifyPrisms(ctx, x, y, z, dx, dz, verified, verifiedTransit, c);
                             if (vs == PRISM_BLOCKED) return found; // nothing farther can verify either
                             verified = (int) (vs >>> 32);
@@ -761,6 +770,11 @@ public final class Parkour implements Movement {
      */
     private static boolean emitRising(MovementContext ctx, CandidateSink out, int x, int y, int z,
             int dx, int dz, int c, int g, float transit, long landDesc) {
+        // NARROW-TOP landing gate (owner ruling 2026-07-31), covering both rising forms (raised ledge +
+        // floating ledge) at their shared emit: never target a narrow post as the +1 landing.
+        if (NavBlock.isNarrowTop(landDesc)) {
+            return false;
+        }
         // Rise gate (start-surface-aware — the Ascend rule applied to the arc): the +1 landing is gained
         // only when the surface-to-surface rise fits one jump's budget, rise = 16 + landTopY − startSurf
         // sixteenths ≤ JUMP_RISE (20) (MovementContext.rise). A partial-height TAKEOFF floor eats the
@@ -867,6 +881,12 @@ public final class Parkour implements Movement {
      */
     private static void emitOffset(MovementContext ctx, CandidateSink out, int x, int y, int z,
             int dx, int dz, int lx, int lz, int c, int tx, int tz, int flags, long floorDesc) {
+        // NARROW-TOP landing gate (owner ruling 2026-07-31; the 2026-07-30 flagship wedge was exactly an
+        // offset (3,+1) jump targeting a bamboo top): never emit a narrow post as the offset landing. The
+        // probe's nearest-first side-termination is the caller's — this cell still ends its side.
+        if (NavBlock.isNarrowTop(floorDesc)) {
+            return;
+        }
         // Landing body (feet y+1, head y+2) — flags fast path, then the real cells.
         if (!ctx.headroomProves(flags, tx, y, tz, MovementContext.HEADROOM_WALK)) {
             int p1 = ctx.packedAt(tx, y + 1, tz);
@@ -989,25 +1009,42 @@ public final class Parkour implements Movement {
                 && !(b.footX() == gapX && b.footY() == fromFootY && b.footZ() == gapZ)
                 && !(b.footX() == tx && b.footZ() == tz
                         && b.footY() >= landLoY && b.footY() <= landHiY));
+        // Takeoff trigger: grounded AND the bot's along-axis progress past the start-cell centre
+        // reaches TAKEOFF_EDGE — jump as late as possible without stepping off the lip. Fix 3: when
+        // the first gap-floor cell is a takeoff hazard (magma/lava/honey), switch to the PREDICTIVE
+        // early trigger so the center never crosses the lip onto it on a grounded tick. ONE predicate
+        // shared by the runup's advance AND its hot-entry press below, so the two can never disagree.
+        final Predicate<BotSteering> takeoffTrigger = b -> {
+            if (!b.grounded()) return false;
+            double proj = ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5));
+            if (b.gapFloorHazardAt(gapX, fy, gapZ)) {
+                double vAlong = ux * b.velX() + uz * b.velZ();
+                return proj + HAZARD_TAKEOFF_TICKS * vAlong >= HAZARD_TAKEOFF_LOOKAHEAD;
+            }
+            return proj >= TAKEOFF_EDGE;
+        };
+        // HOT-ENTRY latch (owner ruling 2026-07-31): true once the runup has had a normal grounded tick
+        // (trigger not yet met). A chained hand-off (a Descend's inbound sprint momentum) can ground the
+        // bot ALREADY past the trigger on its very first grounded runup tick; the runner's drive-then-
+        // advance ordering then presses jump only on the NEXT tick, and the coasting bot exits the
+        // envelope's admitted cells in that one-tick gap — the 2026-07-30 23:48:47 "walked straight off
+        // the platform" wedge (step FAILED phase 1/4, no jump ever pressed). On exactly that hot entry
+        // the runup drive presses jump SAME-TICK (inputs precede this tick's physics, so the launch
+        // beats the next failWhen); every entry that got a normal runup tick keeps the late takeoff
+        // byte-identical — the Phase-4 sweep ruled a UNIFORM earlier takeoff out (see TAKEOFF_EDGE).
+        boolean[] hadNormalRunupTick = {false};
         plan.phase("runup")
                 .drive((b, v) -> {
                     airborneOnce[0] = false; // re-attempt begins → disarm until the next arc is live
                     SteerControl.steerTowards(b, v);
                     b.setSprinting(sprint);
-                })
-                // Takeoff trigger: grounded AND the bot's along-axis progress past the start-cell centre
-                // reaches TAKEOFF_EDGE — jump as late as possible without stepping off the lip. Fix 3: when
-                // the first gap-floor cell is a takeoff hazard (magma/lava/honey), switch to the PREDICTIVE
-                // early trigger so the center never crosses the lip onto it on a grounded tick.
-                .advanceWhen(b -> {
-                    if (!b.grounded()) return false;
-                    double proj = ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5));
-                    if (b.gapFloorHazardAt(gapX, fy, gapZ)) {
-                        double vAlong = ux * b.velX() + uz * b.velZ();
-                        return proj + HAZARD_TAKEOFF_TICKS * vAlong >= HAZARD_TAKEOFF_LOOKAHEAD;
+                    if (takeoffTrigger.test(b)) {
+                        if (!hadNormalRunupTick[0]) b.setJumping(true); // hot entry — launch this tick
+                    } else if (b.grounded()) {
+                        hadNormalRunupTick[0] = true; // a normal runup tick — legacy timing from here on
                     }
-                    return proj >= TAKEOFF_EDGE;
-                });
+                })
+                .advanceWhen(takeoffTrigger);
         plan.phase("takeoff")
                 .drive((b, v) -> {
                     SteerControl.steerTowards(b, v);
