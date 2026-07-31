@@ -37,9 +37,29 @@ only if the owner reopens it.
    stone slab, goal 40+ straight down, canMine (dig-frontier-following is that world's only dynamic),
    then capture `-Rtrace` at the livelock to answer WHY the L0 re-derive dead-ends in the bot's region
    (budget partial vs fragment frontier vs blacklists).
-4. **New Parkour landing miss** — AFTER the above. Envelope failure at (24,119,161) (step 1, phase 2/4)
-   ended the best flagship run yet (206.5 blocks executed, route efficiency 0.96); its `envelope:`
-   forensic line is in that run's log. Undiagnosed — evidence-first before touching the servo.
+4. **Parkour landing misses — CASE 1 ✅ DONE 2026-07-31 (core `ecb357c`), CASE 2 open.** The forensic
+   split the item into two distinct sub-classes:
+   - **CASE 1 (the (73,107,154) phase-1/4 fail, owner-diagnosed in-game): FIXED, two bugs.** The
+     landings were BAMBOO tops (force-solid classification hid the ~3px offset stalk) → new NARROW_TOP
+     descriptor bit 51 (XZ-extent < 0.6 bot width, geometry-derived) gates Parkour/DiagonalParkour
+     LANDING emits; STANDABLE untouched. And the bot never jumped: PhaseRunner's drive-then-advance
+     gap loses the trigger tick on a hot entry (Descend-chained momentum grounds past TAKEOFF_EDGE) →
+     runup now presses jump SAME-TICK on pure hot entries only (normal timing byte-identical; the
+     Phase-4 uniform-earlier-takeoff rejection honored). Pins: descendRunway course cards hotoffset3
+     (the wedge shape) + hotdiag1, both PASS; suite 53 = baseline 51 byte-identical + the 2 pins;
+     JMH A/B all-noise, SETUP guards flat; navtypes 408→433.
+   - **CASE 2 (the (24,119,161) phase-2/4 fail): OPEN — "even weirder behavior", owner will revisit.**
+     A launched falling gap-4 drop-2 sprint jump that touched down 2 cells in / 1 down on an in-gap
+     cliff ledge (mid-arc undershoot onto terrain jutting into the flight path). Repro:
+     `/tp Dev_bot 24.5 120 163.5` → `/bot goto 24 118 158` on the flagship master world.
+   - **HARNESS DEBT (found while pinning): the parkour snake's tail is NAV-DEAD.** Every tile beyond
+     the boot view-distance bubble (~position ≥48, z ≥ 216) fails "nav gave up" with ZERO searches —
+     buildTile's sync-load on entry never reaches the nav chunk-load path, so the grid never builds
+     and the readiness gate times out. This one artifact accounts for the suite's standing ~24 tail
+     failures AND makes the tail's expect-refusal PASSes vacuous (they pass dead or alive). Also:
+     trial world-cells are registration-ordered — inserting a card mid-catalogue shifts every later
+     card's world position (turnrise2/turnflat2w died this way during development). Root-cause fix =
+     fire the nav build for tile chunks explicitly on entry; then triage the newly-alive tail verdicts.
 
 Arc design: `internal_docs/DESIGN-bot-abilities.md` (ratified order: Crafting → Farming →
 Fighting → Building; component template + decision log §10). This file tracks arc state only —
