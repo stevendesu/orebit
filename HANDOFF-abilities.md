@@ -48,10 +48,26 @@ only if the owner reopens it.
      Phase-4 uniform-earlier-takeoff rejection honored). Pins: descendRunway course cards hotoffset3
      (the wedge shape) + hotdiag1, both PASS; suite 53 = baseline 51 byte-identical + the 2 pins;
      JMH A/B all-noise, SETUP guards flat; navtypes 408→433.
-   - **CASE 2 (the (24,119,161) phase-2/4 fail): OPEN — "even weirder behavior", owner will revisit.**
-     A launched falling gap-4 drop-2 sprint jump that touched down 2 cells in / 1 down on an in-gap
-     cliff ledge (mid-arc undershoot onto terrain jutting into the flight path). Repro:
-     `/tp Dev_bot 24.5 120 163.5` → `/bot goto 24 118 158` on the flagship master world.
+   - **CASE 2 ✅ CLOSED 2026-07-31 (core `b25a23b`): VINE ARREST.** The arc flew through climbable
+     cells (vanilla clamps to ±0.15 b/t while the feet block is climbable) — confirmed empirically:
+     the arcPassable gate (passable && !climbable on all transit prisms/descent columns, both parkour
+     moves) removes those Parkour candidates from the trace, the search takes the trivial walk, and
+     the repro autotest PASSES (arrived, 59t). Same commit: the "walled off" false positive fixed —
+     the seal probe's goal seed now resolves by CONTAINMENT (anchorFragment; the faceless-pocket
+     region-center centroid mis-seed closed, + regression fixture + the sealed branch's first log
+     line). NOTE for the owner's drifted world: a sealed verdict requires canBreak=false at all —
+     check the old no-capa repro pin in that copy's orebit.properties. De-greed: built, measured,
+     REVERTED (cannot satisfy the pinned jump-preference suites and the walk-over-jump case on the
+     same numbers — the goal-tolerance box makes the first in-box pop terminal); owner: leave greedy.
+   - **NEXT (owner-delegated 2026-07-31): the climb/vine VOCABULARY arc.** Fall's column must reject
+     climbables in transit but LAND ON them as hang nodes (feet-in-climbable — physically exact, fall
+     distance resets; eliminates the atop-ladder-plate dead end/sink trap by construction: falls stop
+     IN the top climbable cell, never on the plate); plus the one-air-cell up-grab on Climb (jump
+     reach) so ladder/air/ladder and vine/air/vine columns connect both ways (down = fall-into-hang
+     chains, any gap depth). Judgment delegated; bar = suite green + new tests reasonable. Facts on
+     file (Fall/Climb connectivity verdict): ladders standable+NARROW_TOP, vines not standable; no
+     in-column edge from plate-top; climb-up dies at one air cell; scaffolding likely misclassified
+     solid (shape query needs context — the forceSolid pattern is the fix, future-work.txt item).
    - **HARNESS DEBT (found while pinning): the parkour snake's tail is NAV-DEAD.** Every tile beyond
      the boot view-distance bubble (~position ≥48, z ≥ 216) fails "nav gave up" with ZERO searches —
      buildTile's sync-load on entry never reaches the nav chunk-load path, so the grid never builds
