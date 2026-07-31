@@ -991,6 +991,23 @@ public final class MovementContext {
         return NavBlock.isStandable(d) && !NavBlock.isNarrowTop(d);
     }
 
+    /**
+     * Is this cell safe for a jump ARC to fly through — {@link #passable(long)} AND not climbable?
+     * Vanilla clamps motion to ±0.15 b/t while the FEET block is climbable (the {@code Climb} model's
+     * documented physics), so a sprint arc whose flight path enters a vine/ladder cell is ARRESTED
+     * mid-air and drops into the gap — while the planner sees the cell as free passable air, folds no
+     * break for it (break-folding clears solid OBSTRUCTIONS; a passable cell never needs clearing —
+     * the vine itself is perfectly vanilla-breakable, hardness 1 in the packed field, and merely
+     * protected-by-default in the owner config), and prices no transit for it. Owner ruling
+     * 2026-07-31: reject ANY climb block in the prism — the simple uniform rule, falling descent
+     * columns included ({@code Climb}-down owns descending a vine; an arc must not fly through one).
+     * The {@link #solidFooting} takeoff gate is the same bit for the same physics. One extra mask on
+     * the already-loaded long — never a new grid read.
+     */
+    public boolean arcPassable(long d) {
+        return passable(d) && !NavBlock.isClimbable(d);
+    }
+
     /** The collision top of the cell in sixteenths (0..31); 16 = full block, 8 = slab. */
     public int topYOf(int x, int y, int z) {
         return NavBlock.topY(descriptorAt(x, y, z));

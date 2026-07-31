@@ -1137,8 +1137,16 @@ public final class RegionPathfinder {
         }
         if (nodes.heapSize == 0) {
             // No dig-reachable pocket (no-break bot, unresident goal section, or deep-buried past the budget):
-            // fall back to the single nearest-centroid goal fragment at zero cost (the pre-dig-flood behaviour).
-            int goalFrag = nearestFragment(grid, level, grx, gry, grz, goalFloor);
+            // seed the single goal fragment by CONTAINMENT (owner ruling 2026-07-31) — anchorFragment, the
+            // same containment-first/faced-only resolution the start anchor uses, seeded at the goal's feet
+            // cell via containedFragment's floor convention. The raw nearest-centroid this replaces could
+            // seed a FACELESS sealed-pocket fragment (its centroid defaults to the region center,
+            // out-attracting the real surface fragment for a mid-region goal): with no break edges that
+            // seed emits nothing, the flood closes after ONE expansion, and the boxed-in prover reports a
+            // false "walled off" on trivially walkable terrain (the vine-jungle drifted-world incident) —
+            // the goal-side twin of the t=35 cliff start-anchor bug. A goal genuinely inside a sealed
+            // pocket still resolves BY containment to that pocket, so true seals keep proving.
+            int goalFrag = anchorFragment(grid, level, grx, gry, grz, goalFloor);
             seedField(nodes, grx, gry, grz, goalFrag, 0f);
         }
 

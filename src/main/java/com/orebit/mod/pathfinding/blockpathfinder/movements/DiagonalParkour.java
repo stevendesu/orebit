@@ -248,11 +248,13 @@ public final class DiagonalParkour implements Movement {
                 int flags = MovementContext.flagsOf(p);
                 boolean clear = ctx.headroomProves(flags, cx, y, cz, MovementContext.HEADROOM_WALK);
                 if (!clear) {
+                    // arcPassable (owner ruling 2026-07-31): a vine in the landing body arrests the arc;
+                    // the flags fast path above stays climb-blind (accepted — Parkour's emitOffset note).
                     int p1 = ctx.packedAt(cx, y + 1, cz);
                     int p2 = ctx.packedAt(cx, y + 2, cz);
                     clear = p1 != MovementContext.UNBUILT && p2 != MovementContext.UNBUILT
-                            && ctx.passable(ctx.descriptorOf(cx, y + 1, cz, p1))
-                            && ctx.passable(ctx.descriptorOf(cx, y + 2, cz, p2));
+                            && ctx.arcPassable(ctx.descriptorOf(cx, y + 1, cz, p1))
+                            && ctx.arcPassable(ctx.descriptorOf(cx, y + 2, cz, p2));
                 }
                 // NARROW-TOP landing gate (owner ruling 2026-07-31, mirrors Parkour): never TARGET a
                 // narrow post (bamboo/chain/rod) as the diagonal landing; the column still terminates
@@ -311,18 +313,19 @@ public final class DiagonalParkour implements Movement {
             int kx = x + dx * k;
             int kz = z + dz * k;
             // Transit prism (y+1..y+3) of the gap cell — read once, priced off the same descriptors.
+            // arcPassable (owner ruling 2026-07-31): no vine/ladder anywhere the arc flies through.
             int p1 = ctx.packedAt(kx, y + 1, kz);
             if (p1 == MovementContext.UNBUILT) return Float.NaN;
             long d1 = ctx.descriptorOf(kx, y + 1, kz, p1);
-            if (!ctx.passable(d1)) return Float.NaN;
+            if (!ctx.arcPassable(d1)) return Float.NaN;
             int p2 = ctx.packedAt(kx, y + 2, kz);
             if (p2 == MovementContext.UNBUILT) return Float.NaN;
             long d2 = ctx.descriptorOf(kx, y + 2, kz, p2);
-            if (!ctx.passable(d2)) return Float.NaN;
+            if (!ctx.arcPassable(d2)) return Float.NaN;
             int p3 = ctx.packedAt(kx, y + 3, kz);
             if (p3 == MovementContext.UNBUILT) return Float.NaN;
             long d3 = ctx.descriptorOf(kx, y + 3, kz, p3);
-            if (!ctx.passable(d3)) return Float.NaN;
+            if (!ctx.arcPassable(d3)) return Float.NaN;
 
             // The corner pair of the transition just crossed (cell k-1 → k).
             float corner = cornerPairCost(ctx, x + dx * k, z + dz * (k - 1),
@@ -362,7 +365,7 @@ public final class DiagonalParkour implements Movement {
             int pk = ctx.packedAt(x, y + k, z);
             if (pk == MovementContext.UNBUILT) return -1f;
             long dk = ctx.descriptorOf(x, y + k, z, pk);
-            if (!ctx.passable(dk)) return -1f;
+            if (!ctx.arcPassable(dk)) return -1f; // arc rule: swept corner columns are feet-path too
             t += ctx.cellTransitCost(dk); // the hitbox brushes the corner — full per-cell rate (Diagonal)
         }
         return t;

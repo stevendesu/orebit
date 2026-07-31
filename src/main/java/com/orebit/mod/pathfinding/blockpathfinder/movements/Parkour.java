@@ -585,13 +585,13 @@ public final class Parkour implements Movement {
                         int p1 = ctx.packedAt(cx, y + 1, cz);
                         if (p1 == MovementContext.UNBUILT) return found;
                         long d1 = ctx.descriptorOf(cx, y + 1, cz, p1);
-                        if (ctx.passable(d1)) {
+                        if (ctx.arcPassable(d1)) { // landing feet: no vine (arrest at touchdown — arc rule)
                             overfly = trigger; // feet cell clear ⇒ a triggering obstacle can be flown over
                             // Same narrow-top landing gate as the flags-proven flat branch above.
                             if (g <= flatMax && !NavBlock.isNarrowTop(fd)) {
                                 int p2 = ctx.packedAt(cx, y + 2, cz);
                                 if (p2 != MovementContext.UNBUILT
-                                        && ctx.passable(ctx.descriptorOf(cx, y + 2, cz, p2))) {
+                                        && ctx.arcPassable(ctx.descriptorOf(cx, y + 2, cz, p2))) {
                                     long vs = verifyPrisms(ctx, x, y, z, dx, dz,
                                             verified, verifiedTransit, g);
                                     if (vs != PRISM_BLOCKED) {
@@ -655,7 +655,7 @@ public final class Parkour implements Movement {
                 int p1 = ctx.packedAt(cx, y + 1, cz);
                 if (p1 == MovementContext.UNBUILT) return found;
                 long d1 = ctx.descriptorOf(cx, y + 1, cz, p1);
-                if (!ctx.passable(d1)) {
+                if (!ctx.arcPassable(d1)) { // a vine here is in the feet path — treated as blocking (arc rule)
                     // A standable floor at y+1 over an OPEN node-level cell is the floating-ledge form of
                     // the RISING landing; either way the flat/falling transit is blocked here, so the
                     // direction ends after it (v1 rule, preserved).
@@ -708,7 +708,8 @@ public final class Parkour implements Movement {
                         }
                         break; // only the highest landing in this column (never through a floor)
                     }
-                    if (!ctx.passable(fdd)) break; // lava/partial below — no landing, still overflyable
+                    if (!ctx.arcPassable(fdd)) break; // lava/partial/climbable below — the descent's feet
+                                                     // pass through here; a vine arrests it (Climb owns that)
                     descTransit += ctx.cellTransitCost(fdd); // a descended cell — Fall's column pricing
                 }
             }
@@ -737,18 +738,20 @@ public final class Parkour implements Movement {
         while (verified < n) {
             int kx = x + dx * (verified + 1);
             int kz = z + dz * (verified + 1);
+            // Prism cells use arcPassable (owner ruling 2026-07-31): a vine/ladder in the flight path
+            // arrests the arc mid-air (vanilla's ±0.15 climbable clamp) — reject, don't fly through.
             int p1 = ctx.packedAt(kx, y + 1, kz);
             if (p1 == MovementContext.UNBUILT) return PRISM_BLOCKED;
             long d1 = ctx.descriptorOf(kx, y + 1, kz, p1);
-            if (!ctx.passable(d1)) return PRISM_BLOCKED;
+            if (!ctx.arcPassable(d1)) return PRISM_BLOCKED;
             int p2 = ctx.packedAt(kx, y + 2, kz);
             if (p2 == MovementContext.UNBUILT) return PRISM_BLOCKED;
             long d2 = ctx.descriptorOf(kx, y + 2, kz, p2);
-            if (!ctx.passable(d2)) return PRISM_BLOCKED;
+            if (!ctx.arcPassable(d2)) return PRISM_BLOCKED;
             int p3 = ctx.packedAt(kx, y + 3, kz);
             if (p3 == MovementContext.UNBUILT) return PRISM_BLOCKED;
             long d3 = ctx.descriptorOf(kx, y + 3, kz, p3);
-            if (!ctx.passable(d3)) return PRISM_BLOCKED;
+            if (!ctx.arcPassable(d3)) return PRISM_BLOCKED;
             // The column's body-prism surcharge, priced ONCE off the descriptors in hand (pure bit tests).
             transit += ctx.cellTransitCost(d1) + ctx.cellTransitCost(d2) + ctx.cellTransitCost(d3);
             verified++;
@@ -789,15 +792,15 @@ public final class Parkour implements Movement {
         }
         int cx = x + dx * c;
         int cz = z + dz * c;
-        // Landing body: feet y+2, head y+3.
+        // Landing body: feet y+2, head y+3 (arcPassable — no vine anywhere the arc's body passes).
         int p2 = ctx.packedAt(cx, y + 2, cz);
         if (p2 == MovementContext.UNBUILT) return false;
         long d2 = ctx.descriptorOf(cx, y + 2, cz, p2);
-        if (!ctx.passable(d2)) return false;
+        if (!ctx.arcPassable(d2)) return false;
         int p3 = ctx.packedAt(cx, y + 3, cz);
         if (p3 == MovementContext.UNBUILT) return false;
         long d3 = ctx.descriptorOf(cx, y + 3, cz, p3);
-        if (!ctx.passable(d3)) return false;
+        if (!ctx.arcPassable(d3)) return false;
         // The raised arc's extra row: y+4 clear over takeoff (k=0) through landing (k=c).
         float riseTransit = 0f;
         for (int k = 0; k <= c; k++) {
@@ -806,7 +809,7 @@ public final class Parkour implements Movement {
             int p4 = ctx.packedAt(kx, y + 4, kz);
             if (p4 == MovementContext.UNBUILT) return false;
             long d4 = ctx.descriptorOf(kx, y + 4, kz, p4);
-            if (!ctx.passable(d4)) return false;
+            if (!ctx.arcPassable(d4)) return false;
             if (k >= 1 && k < c) riseTransit += ctx.cellTransitCost(d4); // gap columns only
         }
         // Cost: the flat arc credited RISE_EARLY_TICKS (the +1 floor intercepts the arc early), plus the
@@ -887,16 +890,19 @@ public final class Parkour implements Movement {
         if (NavBlock.isNarrowTop(floorDesc)) {
             return;
         }
-        // Landing body (feet y+1, head y+2) — flags fast path, then the real cells.
+        // Landing body (feet y+1, head y+2) — flags fast path, then the real cells (arcPassable on the
+        // slow path; the flags-proven case can admit a climbable landing body — flags are passability-
+        // aligned and climb-blind — accepted: transit prisms below are always per-cell arc-gated, and a
+        // landing-cell vine arrests AT touchdown, not mid-gap).
         if (!ctx.headroomProves(flags, tx, y, tz, MovementContext.HEADROOM_WALK)) {
             int p1 = ctx.packedAt(tx, y + 1, tz);
             if (p1 == MovementContext.UNBUILT
-                    || !ctx.passable(ctx.descriptorOf(tx, y + 1, tz, p1))) {
+                    || !ctx.arcPassable(ctx.descriptorOf(tx, y + 1, tz, p1))) {
                 return;
             }
             int p2 = ctx.packedAt(tx, y + 2, tz);
             if (p2 == MovementContext.UNBUILT
-                    || !ctx.passable(ctx.descriptorOf(tx, y + 2, tz, p2))) {
+                    || !ctx.arcPassable(ctx.descriptorOf(tx, y + 2, tz, p2))) {
                 return;
             }
         }
@@ -918,7 +924,7 @@ public final class Parkour implements Movement {
                 int pk = ctx.packedAt(kx, y + k, kz);
                 if (pk == MovementContext.UNBUILT) return;
                 long dk = ctx.descriptorOf(kx, y + k, kz, pk);
-                if (!ctx.passable(dk)) return;
+                if (!ctx.arcPassable(dk)) return; // arc rule: no vine in the swept prism
                 transit += ctx.cellTransitCost(dk); // priced off the descriptor in hand (aligned rule)
             }
         }

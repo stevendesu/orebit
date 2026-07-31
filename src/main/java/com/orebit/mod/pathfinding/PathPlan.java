@@ -1658,6 +1658,13 @@ public final class PathPlan {
                 sealed = false; // a sealed-probe backs a give-up, never gates it: inconclusive ⇒ descend/proceed
             }
             if (sealed) {
+                // A proof-of-sealing is a rare, journey-terminal verdict — name it in the server log with
+                // enough to audit it in one glance (the drifted-world vine-jungle false positive was
+                // invisible precisely because this branch FAILed silently; owner ruling 2026-07-31).
+                OrebitCommon.LOGGER.info(
+                        "[Orebit] boxed-in PROVEN: goal={} sealed at level {} (radius {}, canBreak={} "
+                                + "canPlace={}) — giving up honestly",
+                        goalFloor, lvl, caps.boxedInScanRadius(), caps.canBreak(), caps.canPlace());
                 this.boxedInProven = true;
                 this.skeleton = null;
                 this.blockPlan = null;
