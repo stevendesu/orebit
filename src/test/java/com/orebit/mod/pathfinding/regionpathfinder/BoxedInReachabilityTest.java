@@ -269,6 +269,44 @@ public class BoxedInReachabilityTest {
                 "interior pocket rolls up sealed ⇒ sealed at the coarse L1 too");
     }
 
+    // ---- GOAL-SEED regression (owner ruling 2026-07-31): containment/faced-only, never a centroid pocket --
+
+    /**
+     * The vine-jungle drifted-world false positive (2026-07-31): ONE region holding BOTH an open surface
+     * fragment (a corridor whose only face openings sit on the -X face) AND a faceless interior pocket
+     * whose default centroid — the REGION CENTER — out-attracts the corridor's face-averaged centroid for
+     * a mid-region goal (pocket Manhattan ≈10 vs corridor ≈12 from the goal cell). The old
+     * nearest-centroid goal seed anchored the seal flood in the pocket: a faceless no-break seed emits
+     * ZERO edges, the flood closes after one expansion, and the prover reported "walled off" on trivially
+     * walkable terrain. The {@code anchorFragment} seed (containment-first; faced-only centroid fallback —
+     * the same resolution the start anchor got for the t=35 cliff drain) resolves the corridor fragment
+     * the goal actually stands in; the flood then escapes -X through the neighbour floor into unbuilt
+     * terrain and out of the box ⇒ NOT sealed.
+     */
+    @Test
+    void isSealedWithin_goalSeedResolvesContainingFragment_notCentroidPocket() {
+        boolean[] passable = new boolean[CELLS];
+        boolean[] standable = new boolean[CELLS];
+        for (int x = 0; x <= 14; x++) {            // corridor: floor y0 + air y1..3 at z=8; x15 solid ⇒ -X-only faces
+            standable[idx(x, 0, 8)] = true;
+            for (int y = 1; y <= 3; y++) passable[idx(x, y, 8)] = true;
+        }
+        for (int x = 4; x <= 11; x++) {            // faceless interior pocket above the corridor: floor y4, air y5..10
+            for (int z = 4; z <= 11; z++) {
+                standable[idx(x, 4, z)] = true;
+                for (int y = 5; y <= 10; y++) passable[idx(x, y, z)] = true;
+            }
+        }
+        seed(0, 1, 0, passable, standable, STONE);
+        seedFloor(-1, 1, 0);                       // the corridor's -X escape into open (then unbuilt) terrain
+        BlockPos goal = new BlockPos(11, MINY + 16 + 1, 8); // feet ON the corridor floor, mid-region
+        assertFalse(RegionPathfinder.isSealedWithin(grid, MINY, goal, 0, 3,
+                        /*canBreak*/ false, /*canPlace*/ false, /*safeFall*/ 3,
+                        RegionMineModel.DEFAULT, RegionPlaceModel.DEFAULT),
+                "the goal's CONTAINING corridor fragment must seed the flood (containment/faced-only beats "
+                        + "the faceless pocket's region-center centroid) ⇒ escapes ⇒ not sealed");
+    }
+
     // ---- seed helpers (real FragmentBuilder flood; the RegionFloodGuardTest idiom) ----------------------
 
     private void seed(int rx, int ry, int rz, boolean[] passable, boolean[] standable, int cellHardness) {
