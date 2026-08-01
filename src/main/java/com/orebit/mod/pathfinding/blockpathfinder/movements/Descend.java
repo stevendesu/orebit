@@ -175,12 +175,10 @@ public final class Descend implements Movement {
         // keeps the bot inside the lane, then the normal drive commits. Once the bot has left the from
         // column (foot moved or airborne) the gate never re-engages — the drop is gravity's.
         plan.phase("step")
+                .arrestCarryFrom(fx, fz)   // the gate, now declarative (MovePlan.Phase.arrestCarryFrom):
+                                           // the runner arrests BEFORE this drive, same tick, same predicate
                 .drive((b, v) -> {
                     if (!b.grounded() || b.footX() != fx || b.footZ() != fz) left[0] = true; // left start → arm
-                    if (b.grounded() && b.footX() == fx && b.footZ() == fz
-                            && SteerControl.stepOffGate(b, v)) {
-                        return;                                // carry uncontained — arrest this tick, commit later
-                    }
                     // COLUMN DEADBAND (owner ruling 2026-07-31, the vine-bounce fix): once over the target
                     // column, stop shoving — zero forward lets gravity (or the −0.15 climbable clamp beside
                     // a trunk vine) settle the bot straight down onto the floor, where done fires. Within

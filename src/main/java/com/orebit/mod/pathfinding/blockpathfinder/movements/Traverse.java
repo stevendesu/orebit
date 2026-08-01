@@ -400,6 +400,7 @@ public final class Traverse implements Movement {
                     && !(b.footX() == tx && b.footZ() == tz
                             && b.footY() >= bandLo && b.footY() <= bandHi));
             plan.phase("stepup")
+                    .arrestCarryFrom(fx, fz)                                // align before the lip (90°-turn carry)
                     .need(MovePlan.Need.AIR, tx, toFootY, tz)               // landing feet (above the raised floor)
                     .need(MovePlan.Need.AIR, tx, toFootY + 1, tz)           // landing head
                     .drive(SteerControl::drive)                             // hold forward + face; vanilla auto-steps the lip
@@ -445,6 +446,13 @@ public final class Traverse implements Movement {
                     .need(MovePlan.Need.AIR, cx, toFootY, cz)              // feet-body cell clear (topY-aware; mine a solid, leave slow-passable)
                     .need(MovePlan.Need.AIR, cx, toFootY + 1, cz)          // head-body cell clear
                     .drive(SteerControl::drive);                           // medium-aware line-track walk (Traverse's default)
+            if (k == 1) {
+                // Only the FIRST run cell commits out of the start column, so only it can be entered with a
+                // cross-axis carry from the previous step (the chained 90° turn). Cells k>=2 are already
+                // travelling along this line — their cross velocity is the servo's own residual, and gating
+                // them would stutter every cell crossing.
+                ph.arrestCarryFrom(fx, fz);
+            }
             if (k < n) {
                 // Non-terminal: advance once grounded AT OR PAST cell k. Progress is monotone along the cardinal
                 // line (one of sx/sz is 0), so >= is skip-proof against a lag tick — at walk speed a cell is
