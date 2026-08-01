@@ -125,7 +125,49 @@ only if the owner reopens it.
      fails fast into a replan-from-the-hang instead of hovering invisible to every envelope.
      Cross-move blast radius — waits for the owner. AFTER: rerun the flagship with raised
      -BudgetTicks (this class was the prime suspect for the residual 0.51 b/s pace).
-   - **✅ RESOLVED (same pass) — the parkour snake's NAV-DEAD tail.** Root cause held: tiles beyond
+   - **🔴 OPEN (owner-witnessed 2026-07-31 23:36, notes-only — battery cut the session) — THE
+     POST-REPLAN ASCEND HOLD.** Repro recipe (owner says headless-reproducible): a FRESH copy of
+     "Autotest Master" with the world's `orebit/` subdirectory DELETED (cold HPA/persistence — the
+     deletion may be load-bearing: the region layer rebuilds from live, so early planning runs many
+     more / slower region+window searches), the owner's client config
+     (`run/config/orebit.properties`: placeBaseCost=600, breakBaseCost=60, protectedBlocks empty),
+     full flagship (60,180,253)→(201,-28,90). SYMPTOM: the bot walks to (46,147,215), is about to
+     Parkour −Z, a replan reroutes it to an Ascend −X — solid ground, nothing in the way — and it
+     HOLDS POSITION indefinitely, no motion at all. Screenshot run/screenshots/2026-07-31_23.36.41.png:
+     bot standing ON canopy, RED intended trail runs NE, NO blue deviation trail → an ON-PLAN
+     executor HOLD (inputs withheld), not an off-course wedge. CANDIDATE MECHANISMS (unverified —
+     evidence first, in suspicion order): (1) the NEW pending-search caution gate (d1bb065,
+     BotNavigator): `searchPending() && stepCommitsRisk(waypointIndex) && grounded → setForward(0)`
+     — if the replan/window-slide left a search PENDING that never completes/clears (cold region
+     layer grinding, P4 pre-plan parked, or a suspect-flag lifecycle hole), the hold is indefinite
+     and looks exactly like this; FIRST PROBE: does Ascend read as stepCommitsRisk
+     (commitsAcrossArrival?), and grep the -BotDebug log for the CAUTION vlog line + the async
+     pool's submitted/finished counters. (2) an adopted plan whose PhaseRunner "build" phase waits
+     on a Need it can't establish under this config. (3) the window-slide livelock (#5, FOUND-0wp ×
+     tail re-derive) resurfacing under the cold-cache condition (the owner notes it "doesn't repro
+     at the moment" otherwise). NEXT SESSION: reproduce headlessly per the undershoot-forensic
+     pattern (owner-config overlay + master copy WITH `orebit/` deleted — keep the deletion, it is
+     part of the recipe) with -BotDebug, convict from the log, THEN fix.
+   - **🟡 IN FLIGHT (2026-07-31 midnight) — THE LATERAL-CLING ENTRY (run-autotest-climb regression,
+     found by finally re-running the queued regression check; predates tonight — HEAD-without-tonight
+     fails identically).** Two mechanisms LOG-CONVICTED via the new `latvine` course card (the
+     autotest miniaturized: feet-level vine row on a 2-HIGH wall face across a floorless gap; note
+     the card's first geometry LEAKED — a 1-high support wall + the wide REACH runway made a walkable
+     bridge, fixed 2-high): (a) SNEAK EDGE-GUARD LATCH — the lateral Climb's held sneak while still
+     GROUNDED at the lip forbids the walk-off the ledge→vine transfer IS (measured: frozen forever at
+     box-edge 0.001 past the ledge, input pressing, spd 0.0000); (b) BOTTOM-EXIT FALL — an un-sneaked
+     walk-off enters the one-cell vine row at its exact lower edge and drops out the bottom on the
+     first airborne tick (feet-cell sampling; measured: fell). FIX IMPLEMENTED (Climb.steer lateral
+     branch, three regimes off existing reads): hanging → sneak (suppress the slide); grounded on a
+     ledge (feet not climbable) → JUMP-grab (the arc's falling re-entry crosses the vine cell with
+     sneak already engaged → arrests in-cell — the vanilla player idiom); grounded ON the climbable
+     (ladder plate) → plain walk. ClimbSteerTest updated (FakeBot.grounded configurable; entry
+     jump-grab + plate-walk pins). STATE: UNCOMMITTED in BOTH worktrees (core-wt + mc121-wt copies);
+     the verification chain (unit suite → climb cards → run-autotest-climb) was IN FLIGHT when the
+     session ended — if its result isn't recorded below, RE-RUN IT before touching anything:
+     suite green + latvine PASS + autotest PASS = commit on core + merge; any red = read the latvine
+     trace's j/s/c/h columns first. Prior chain evidence: edge-guard fix alone → latvine FAIL(fell)
+     (mechanism b) — the jump-grab entry is the untested increment. Root cause held: tiles beyond
      the boot view-distance bubble never fire a durable CHUNK_LOAD, so the nav pipeline never built
      them. Fix: `ChunkNavLoader.buildNow(level,cx,cz)` (public synchronous per-chunk build, skip-if-
      built, same riders as the tick drain) called from `ParkourCourse.enter` over each tile's padded
