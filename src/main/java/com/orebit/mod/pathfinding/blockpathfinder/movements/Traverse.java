@@ -401,8 +401,10 @@ public final class Traverse implements Movement {
                             && b.footY() >= bandLo && b.footY() <= bandHi));
             plan.phase("stepup")
                     .arrestCarryFrom(fx, fz)                                // align before the lip (90°-turn carry)
-                    .need(MovePlan.Need.AIR, tx, toFootY, tz)               // landing feet (above the raised floor)
-                    .need(MovePlan.Need.AIR, tx, toFootY + 1, tz)           // landing head
+                    // FLOOR-frame body clearance — the same correction as the run branch below: candidates()
+                    // folded requireBodyClearToward(e, nx, uy, nz, …) with uy = y+1, i.e. (ty+1, ty+2).
+                    .need(MovePlan.Need.AIR, tx, ty + 1, tz)                // landing feet (above the raised floor)
+                    .need(MovePlan.Need.AIR, tx, ty + 2, tz)                // landing head
                     .drive(SteerControl::drive)                             // hold forward + face; vanilla auto-steps the lip
                     .done(b -> b.grounded()
                             && b.footX() == tx && b.footY() == toFootY && b.footZ() == tz);
@@ -443,8 +445,21 @@ public final class Traverse implements Movement {
             final int cz = fz + sz * k;
             MovePlan.Phase ph = plan.phase("walk" + k)
                     .need(MovePlan.Need.FOOTING, cx, fy, cz)               // plank under the cell (bridge places; flat/macro noop) — FLOOR-relative
-                    .need(MovePlan.Need.AIR, cx, toFootY, cz)              // feet-body cell clear (topY-aware; mine a solid, leave slow-passable)
-                    .need(MovePlan.Need.AIR, cx, toFootY + 1, cz)          // head-body cell clear
+                    // BODY CLEARANCE IS FLOOR-FRAME (corrected 2026-08-01), mirroring exactly what the
+                    // search folded — MovementContext.requireBodyClearToward(e, nx, y, nz, …) over (y+1,
+                    // y+2). Asking in the FEET frame collided with the FOOTING cell above whenever the
+                    // destination floor is a standable PARTIAL: feetYOf returns fy for topY<16, so
+                    // toFootY == fy and the plan demanded FOOTING and AIR at the SAME cell. On honey
+                    // (topY 15) that made the executor place the floor and then mine it right back —
+                    // convicted as the whole cause of owner.honeyflyover / .runup, where the bot teetered
+                    // at maxProj 0.96 of 3.00 and never crossed. Restores this plan's own documented
+                    // invariant ("re-establishes exactly the cells candidates folded ... without ever
+                    // mining a cell the search priced as intact transit"). No block-type special case:
+                    // the collision is removed by construction for every partial floor. topY<=9 (carpet /
+                    // plate / bottom slab / snow) is behaviour-neutral — those needs were already no-ops
+                    // under movementBlockedAt's 9/16 corridor floor.
+                    .need(MovePlan.Need.AIR, cx, fy + 1, cz)               // feet-body cell clear (FLOOR-frame)
+                    .need(MovePlan.Need.AIR, cx, fy + 2, cz)               // head-body cell clear (FLOOR-frame)
                     .drive(SteerControl::drive);                           // medium-aware line-track walk (Traverse's default)
             if (k == 1) {
                 // Only the FIRST run cell commits out of the start column, so only it can be entered with a

@@ -429,11 +429,18 @@ public final class DiagonalParkour implements Movement {
         // move's model: the terminal LAND phase demands the exact landing stand and never jumps, so
         // re-attempting in place is a permanent latch. Purely positional over the plan's own cells.
         // resetWhen — checked first by the runner, its cell inside the allowed set — keeps the balk-retry.
+        // CORRECTED 2026-08-01 — the two FACE cells alone are the wrong admitted set for THIS move. Its arc
+        // is exactly 45°, so the centre crosses the CORNER, not a face. The gate's setback (0.35 along-line
+        // = 0.247 per axis, less GATE_PASS_DEADBAND) is smaller than one sprinted tick (~0.196 per axis), so
+        // on the drive-then-advance tick the centre crosses BOTH faces at once and the bot grounds at
+        // (fx+ux, fz+uz) — unadmitted, so diag2.walkin fail→HELD before ever pressing jump (trace: pure
+        // ×0.546 friction coast after the envelope fires, then a walk-off at vy=−0.155). Admit the whole
+        // takeoff quadrant {fx, fx+ux} × {fz, fz+uz} at takeoff foot height — exactly the cells this arc can
+        // teeter through on its way off its own takeoff block. Anything beyond the lip still fails.
         plan.failWhen(b -> b.grounded()
-                && !(b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz)
                 && !(b.footY() == fromFootY
-                        && ((b.footX() == fx + ux && b.footZ() == fz)
-                                || (b.footX() == fx && b.footZ() == fz + uz)))
+                        && (b.footX() == fx || b.footX() == fx + ux)
+                        && (b.footZ() == fz || b.footZ() == fz + uz))
                 && !(b.footX() == tx && b.footY() == toFootY && b.footZ() == tz));
         // Fix 3: hazardous diagonal gap-floor → predictive early takeoff (raw √2 units), else the
         // corner-gate trigger: jump EARLY, on the along-line crossing of the gate — the centre is

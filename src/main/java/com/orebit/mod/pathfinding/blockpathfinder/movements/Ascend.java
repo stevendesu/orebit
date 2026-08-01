@@ -58,6 +58,27 @@ public final class Ascend implements Movement {
         if (ctx.caps().jumpHeight() < 1) return;
         if (ctx.reducesJump(x, y, z)) return; // honey-block floor: the jump apex clears nothing — can't take off
         if (ctx.noJumpFromBody(x, y, z)) return; // cobweb body cell: the stuck multiplier kills take-off velocity
+        // R1 (DESIGN-climb-vocabulary.md §2: "no jump launches from climbable stances — solidFooting floors
+        // only"). Every other jump-takeoff move (Parkour / DiagonalParkour / WalkOff / Climb's own jump-grab)
+        // tests solidFooting; Ascend was the sole exemption, because Climb delegates the curtain TOP-OUT to it
+        // (Climb's class doc: "from the topmost climb node, Ascend emits onto the adjacent floor one up (it
+        // never checks the source floor)"). That delegation is only sound when the ratchet can actually
+        // deliver: a hanging entity CANNOT jump (the 0.42 impulse fires only under onGround), and holding
+        // jump on a climbable gives the +0.2/t climb branch whose feet peak is ≤ +0.154 above the cell top —
+        // it can never gain a whole block. It gains height ONLY by ratcheting into cells that are themselves
+        // climbable.
+        //
+        // So from a non-solidFooting stance, admit the top-out only when the SOURCE column is still climbable
+        // at the landing feet height (y+2 — the feet the bot must reach to stand on the floor one up). A
+        // curtain that stops short cannot lift the bot there, and the emitted edge is unexecutable: convicted
+        // 2026-08-01 on the flagship at (55,*,207), where the bot burned ~12000 ticks ejecting off the vine
+        // top, free-falling ~6 blocks, re-grabbing and climbing back — a limit cycle no envelope can see
+        // because it is never settled. Refusing the edge lets the search route some other way (or give up
+        // honestly) instead of looping forever.
+        //
+        // Ordinary terrain pays one predictable branch: solidFooting is true for every solid takeoff, so the
+        // climbable probe is never reached on the common path.
+        if (!ctx.solidFooting(x, y, z) && !ctx.isClimbable(ctx.descriptorAt(x, y + 2, z))) return;
         int uy = y + 1;
 
         // Source facts are the same for all four directions — read once. The bot stands on (x,y,z) so its
@@ -292,6 +313,29 @@ public final class Ascend implements Movement {
                 .drive((b, v) -> {
                     if (!b.grounded()) launched[0] = true;      // arm the reset only once off the ground
                     SteerControl.steerTowards(b, v);
+                    // CLIMB FIRST, TRANSLATE AFTER — the vanilla ladder top-out this phase's Javadoc already
+                    // claims to reproduce. On a climbable, horizontal input does not carry the bot toward the
+                    // ledge: MovementContext.solidFooting's derivation states it outright — "the jump key only
+                    // climbs UP faster and horizontal input merely EJECTS the bot from the climbable". Driving
+                    // full-forward through the hang therefore ejects the bot off the curtain BEFORE it has the
+                    // height to clear the landing, and it free-falls back down the column.
+                    //
+                    // Convicted 2026-08-01 on the flagship at (55,*,207): a Climb GRAB left the bot hanging on
+                    // a node whose floor is provably non-standable (Climb refuses the grab unless the floor is
+                    // NOT standable), Ascend was emitted for the top-out (its documented job — it never checks
+                    // source-floor standability), and its horizontal drive ejected the bot at botY 139.162 →
+                    // climbable=false at 138.933 → free fall to 133.5 → re-grab → climb → repeat. A limit cycle
+                    // that burned ~12000 ticks and is invisible to every envelope, because the bot is never
+                    // grounded and the failWhen medium-set excludes onClimbable.
+                    //
+                    // So while the hang still NEEDS height, keep the FACING (for the exit) but withhold the
+                    // horizontal drive and let the held jump's +0.2/t ratchet do the climbing. At/above the
+                    // landing feet the jump releases (below) and the ordinary drive carries the bot across.
+                    // Not a vine special case: it keys on onClimbable, the same predicate the whole climb
+                    // vocabulary uses, and on the plan's own landFootY.
+                    if (b.onClimbable() && b.footY() < landFootY) {
+                        b.setForward(0.0f);
+                    }
                     // Hold the jump only while the climb still NEEDS height. The height test alone is the
                     // whole rule; the earlier form additionally required onClimbable, which silently made it
                     // a vine-only release and left a bot that had climbed OUT of the curtain still jumping.

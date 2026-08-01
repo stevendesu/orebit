@@ -1003,16 +1003,32 @@ public final class Parkour implements Movement {
         // block these are (fy+1, ty+1) — unchanged; a partial takeoff/landing floor shifts its own foot down.
         final int landLoY = Math.min(fromFootY, toFootY);
         final int landHiY = Math.max(fromFootY, toFootY);
-        // The LIP-CROSSING transitional cell (the battA-cliff third fail->hold false positive, the
+        // The LIP-CROSSING transitional band (the battA-cliff third fail->hold false positive, the
         // along-axis sibling of Descend's lip / Ascend's face-press): the runup's TAKEOFF_EDGE trigger
-        // lets the centre cross the takeoff cell's boundary a tick before the jump registers, so the bot
-        // is grounded on the lip with its foot cell one PAST the takeoff — (gapX, fy+1, gapZ), the first
-        // gap column at takeoff feet height. Transient by construction (the takeoff phase is pressing
-        // jump); admitting it keeps the envelope exact without the gate-early trigger straight Parkour
-        // does not yet have (DiagonalParkour's gate makes its equivalent state unreachable).
+        // lets the centre cross the takeoff cell's boundary a tick before the jump registers (the runner
+        // drives, THEN tests advanceWhen, so the jump input is written one tick AFTER the trigger first
+        // reads true), so the bot is grounded on the lip with its foot cell one PAST the takeoff.
+        //
+        // WHICH cell it spills into is set by the jump's SLOPE, not by its quadrant diagonal — the
+        // 2026-08-01 conviction of the offset tier. TAKEOFF_EDGE is measured ALONG the jump line, so on a
+        // skewed (c,±1) shape 0.35 along-line is only 0.35·c/|d| of X and 0.35/|d| of Z: the centre reaches
+        // the CARDINAL face while its cross coordinate is still mid-cell, and the bot grounds at
+        // (fx+sx, fz) — NOT the diagonal (gapX,gapZ) the old single-cell term admitted. Five offset cards
+        // fail→HELD on exactly that, never jumping at all (the trace shows pure ×0.546 friction coast after
+        // the envelope fires, then a walk-off at vy=−0.155 instead of a +0.42 launch).
+        //
+        // So admit the takeoff stand's neighbours IN THE JUMP'S OWN QUADRANT at takeoff foot height —
+        // {fx, fx+sx} × {fz, fz+sz} — which covers whichever face the real line crosses first. For a
+        // CARDINAL jump sz == 0 and the set collapses to today's {(fx+sx, fz)}, so every flat/rise/fall
+        // card stays byte-identical. Still purely positional over cells the plan already carries: no
+        // timers, no new state. The gap columns beyond the lip stay OUT, so a genuine short landing (the
+        // bot settled in the gap rather than teetering on its own takeoff block) still fails.
+        final int lipSx = Integer.signum(ddx);
+        final int lipSz = Integer.signum(ddz);
         plan.failWhen(b -> b.grounded()
-                && !(b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz)
-                && !(b.footX() == gapX && b.footY() == fromFootY && b.footZ() == gapZ)
+                && !(b.footY() == fromFootY
+                        && (b.footX() == fx || b.footX() == fx + lipSx)
+                        && (b.footZ() == fz || b.footZ() == fz + lipSz))
                 && !(b.footX() == tx && b.footZ() == tz
                         && b.footY() >= landLoY && b.footY() <= landHiY));
         // Takeoff trigger: grounded AND the bot's along-axis progress past the start-cell centre
