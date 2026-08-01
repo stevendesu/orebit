@@ -192,6 +192,16 @@ public final class PhaseRunner {
             return false;
         }
 
+        // CROSS-AXIS CARRY ARREST (owner ruling 2026-08-01) — see MovePlan.Phase.arrestCarryFrom. A phase
+        // that commits into a NEW column must not drive while the bot's perpendicular momentum would coast
+        // it out of the one-wide lane: the gate WRITES the arrest inputs for this tick and we skip the
+        // drive, bleeding the carry first and committing after. Deliberately AFTER the needs block (geometry
+        // prep proceeds while the carry bleeds) and BEFORE the drive. Inert on phases that did not declare
+        // it; a no-op on the common straight-line step, which has no cross velocity to bleed.
+        if (phase.carryUncontained(bot, view)) {
+            return false;
+        }
+
         // Geometry holds — drive the phase, then advance or finish.
         phase.drive(bot, view);
         if (cursor == plan.size() - 1) {

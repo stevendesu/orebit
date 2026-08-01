@@ -151,8 +151,40 @@ public final class MovePlan {
         private BiConsumer<BotSteering, SteerView> drive = SteerControl::drive;
         private Predicate<BotSteering> advance = b -> true;
         private Predicate<BotSteering> done = b -> false;
+        private boolean arrestCarry;
+        private int carryFromX, carryFromZ;
 
         private Phase(String name) { this.name = name; }
+
+        /**
+         * Gate this phase's drive on <b>cross-axis velocity alignment</b> while the bot is still grounded on
+         * the from-column {@code (fx,fz)} — the declarative form of the owner-ratified step-off gate
+         * ({@link SteerControl#stepOffGate}), generalized off {@link
+         * com.orebit.mod.pathfinding.blockpathfinder.movements.Descend} to every grounded move that commits
+         * into a NEW column (owner ruling 2026-08-01).
+         *
+         * <p><b>Why any move, not just a step-off.</b> A step entered with momentum ROUGHLY PERPENDICULAR to
+         * its own line — the chained 90° turn: a −z move handing off to a +x one — drifts across the one-wide
+         * lane during the 2–3 ticks ground friction needs to bleed the carry, and grounds on the diagonally
+         * adjacent cell. That is a real off-plan settle, which the validity envelope rightly fail→HOLDs, so
+         * the bot freezes on a move it never had the alignment to make. Both witnessed specimens are this
+         * shape: the flagship-cliff {@code (68,149,245)}-vs-column-{@code (68,*,246)} Descend freeze, and the
+         * 2026-07-31 post-replan {@code Ascend −X} entered carrying an abandoned Parkour's sprint carry −Z
+         * (the runup had parked the centre ~0.15 from the lip by design, {@code TAKEOFF_EDGE}).
+         *
+         * <p>Cost is zero on the common case: a step continuing in the SAME direction has ~no cross velocity,
+         * so the prediction is contained on the first tick and the phase drives unchanged. Only a genuine
+         * turn-under-carry pays, and it pays in the 1–3 ticks the arrest needs — never in a permanent hold.
+         * The runner checks this AFTER the phase's needs (geometry prep proceeds while the carry bleeds) and
+         * BEFORE the drive, and it self-limits: once the bot is airborne or its foot has left the from
+         * column, the gate can never re-engage.
+         */
+        public Phase arrestCarryFrom(int fx, int fz) {
+            this.arrestCarry = true;
+            this.carryFromX = fx;
+            this.carryFromZ = fz;
+            return this;
+        }
 
         /** Require {@code kind} geometry at cell {@code (x,y,z)}; the runner mines (AIR) or places (FOOTING)
          *  to establish it before this phase drives. */
@@ -184,6 +216,16 @@ public final class MovePlan {
         void drive(BotSteering bot, SteerView view) { drive.accept(bot, view); }
         boolean shouldAdvance(BotSteering bot) { return advance.test(bot); }
         boolean isDone(BotSteering bot) { return done.test(bot); }
+
+        /** Whether the cross-axis carry is still uncontained for this phase — {@code true} means the arrest
+         *  inputs have been WRITTEN for this tick and the caller must not drive. Inert unless the phase
+         *  declared {@link #arrestCarryFrom}; never fires once airborne or off the from column. */
+        boolean carryUncontained(BotSteering bot, SteerView view) {
+            return arrestCarry
+                    && bot.grounded()
+                    && bot.footX() == carryFromX && bot.footZ() == carryFromZ
+                    && SteerControl.stepOffGate(bot, view);
+        }
     }
 
     /** One geometry requirement: a {@link Need} at a world cell. {@code open} is the target door state, used

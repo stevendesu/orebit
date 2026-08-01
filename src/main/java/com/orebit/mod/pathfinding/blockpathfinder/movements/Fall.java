@@ -426,6 +426,10 @@ public final class Fall implements Movement {
         // WALKOFF: line-track the takeoff→landing segment and hold forward, striding off the lip (the legacy
         // grounded branch — steerTowards, not the medium-aware drive). Advance the moment the bot is airborne.
         plan.phase("walkoff")
+                // Align before striding off the lip: a Fall entered with cross-axis carry leaves the edge
+                // off-line and drops down the wrong column, where the airborne drop-control can no longer
+                // recover it. The most consequential of the family — a mis-aimed step-off is irreversible.
+                .arrestCarryFrom(fx, fz)
                 .drive(SteerControl::steerTowards)
                 .advanceWhen(b -> !b.grounded());
         // FALL: airborne drop-control — recenterOnTarget pulls toward the landing column centre, eases near

@@ -237,6 +237,9 @@ public final class WalkOff implements Movement {
         // WALKOFF: sprint off the lip toward the landing, NO jump. steerTowards (not the medium-aware drive) —
         // the honey/reach race needs full sprint at the lip.
         plan.phase("walkoff")
+                // Align before the lip — same irreversibility as Fall, and here the bot leaves it SPRINTING,
+                // so an unbled cross carry is at its largest exactly where it matters most.
+                .arrestCarryFrom(fx, fz)
                 .drive((b, v) -> {
                     SteerControl.steerTowards(b, v);
                     b.setSprinting(true);
