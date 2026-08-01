@@ -164,6 +164,17 @@ public final class PathPlan {
      *  compare in {@link #regionFieldFor} gates the rebuild — an unchanged window target reuses the cached
      *  field across every replan/pre-plan toward it, never rebuilding per tick. */
     private BlockPos fieldRoot;
+    /** The floor cell the CURRENT {@link #blockPlan} was searched FROM — the plan's implicit step "−1".
+     *  Only meaningful while {@code blockPlan != null} (every reader gates on that first), so the null
+     *  sites deliberately leave it stale rather than clearing it at seven places.
+     *
+     *  <p>Load-bearing for {@link #botOnBlockPlan}: {@code BlockPathfinder}'s reconstruct is
+     *  START-EXCLUSIVE ("the start cell itself is not a waypoint — the bot is already there"), so a plan
+     *  whose FIRST move is a long-range jump (Parkour/DiagonalParkour gaps 1–3, Fall) has NO waypoint
+     *  within the ±1 membership box of the very cell it was planned from. Without this the cascade reads a
+     *  freshly-installed plan as "bot is off-route" on the very next tick — a matcher artifact, exactly what
+     *  {@code HierarchicalRegionPlan}'s exhausted/deviated invariant forbids. */
+    private BlockPos blockPlanStart;
     /** #4 Increment 1 (DESIGN-boxed-in-reachability §4.2): whether the last region-tier give-up
      *  ({@link #repairBlocked}) harvested a CLOSED-flood proof that the bot's own region is provably
      *  goal-disconnected (boxed-in) under these caps — the honest discriminator between a STRUCTURAL BLOCKED
@@ -806,19 +817,42 @@ public final class PathPlan {
     }
 
     private boolean botOnBlockPlan(BlockPos floor) {
-        if (blockPlan == null || blockPlan.isEmpty()) {
+        return onBlockPlan(blockPlan, blockPlanStart, floor);
+    }
+
+    /**
+     * Whether {@code floor} is a cell the given plan vouches for — the {@code onRoute} half of the
+     * cascade's deviation test ("the plan vouches for intentional off-window steps like a cliff-edge
+     * fall-lineup"). Package-private + pure so the start-cell rule below can be pinned headlessly.
+     *
+     * <p>Membership is the plan's START cell (its implicit step −1) plus every waypoint, each in a ±1
+     * box. The start term is NOT redundant: reconstruct is start-exclusive, so a plan whose first move
+     * is a Parkour/DiagonalParkour/Fall puts waypoint 0 two-to-five cells away and leaves the bot's own
+     * planned-from cell unmatched. Reading that as a DEVIATION discards the whole region skeleton and
+     * re-derives a fresh route while the bot is still standing exactly where it was planned to stand —
+     * a matcher artifact, and the trigger behind the 2026-07-31 post-replan Ascend hold.
+     */
+    static boolean onBlockPlan(BlockPathPlan plan, BlockPos planStart, BlockPos floor) {
+        if (plan == null || plan.isEmpty()) {
             return false;
         }
-        final int n = blockPlan.size();
+        if (planStart != null && within1(planStart, floor)) {
+            return true; // standing at the cell this plan was searched FROM — maximally on-route
+        }
+        final int n = plan.size();
         for (int i = 0; i < n; i++) {
-            final BlockPos wp = blockPlan.waypoint(i); // the stand cell; its floor is one below
-            if (Math.abs(wp.getX() - floor.getX()) <= 1
-                    && Math.abs(wp.getY() - 1 - floor.getY()) <= 1
-                    && Math.abs(wp.getZ() - floor.getZ()) <= 1) {
+            final BlockPos wp = plan.waypoint(i); // the stand cell; its floor is one below
+            if (within1(wp.below(), floor)) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static boolean within1(BlockPos planFloor, BlockPos floor) {
+        return Math.abs(planFloor.getX() - floor.getX()) <= 1
+                && Math.abs(planFloor.getY() - floor.getY()) <= 1
+                && Math.abs(planFloor.getZ() - floor.getZ()) <= 1;
     }
 
     /** Reset the sliding window to the head of a freshly-swapped skeleton (cascade L0 change). */
@@ -983,6 +1017,7 @@ public final class PathPlan {
         final NavGridView grid = new NavGridView(level);
         this.blockPlan = BlockPathfinder.findPath(grid, botFloor, target, caps, null, cuboidCap, inventory,
                 startMode, baseline, 0L, regionFieldFor(target), tolXZFor(target), tolYFor(target));
+        this.blockPlanStart = botFloor; // this plan's implicit step −1 (see the field's javadoc)
         this.lastPlanPartial = blockPlan != null && BlockPathfinder.lastWasPartial();
         this.status = resultStatus(blockPlan, BlockPathfinder.lastExpansions(),
                 BlockPathfinder.lastWasPartial(), BlockPathfinder.lastWasBudgetHit(),
@@ -1182,6 +1217,7 @@ public final class PathPlan {
                 break;
             case RESULT:
                 this.blockPlan = async.resultPlan();
+                this.blockPlanStart = async.resultStart(); // see blockPlanStart's javadoc
                 this.lastPlanPartial = blockPlan != null && async.resultPartial();
                 this.status = resultStatus(blockPlan, async.resultExpansions(),
                         async.resultPartial(), async.resultBudgetHit(), async.resultRealized(),
@@ -1196,6 +1232,7 @@ public final class PathPlan {
         // the predicted start (seam accept) and the window target is still the parked one.
         if (async.pollParked(actualFloor, windowTargetPos, startMode, fluidAnchor)) {
             this.blockPlan = async.resultPlan();
+            this.blockPlanStart = async.resultStart(); // see blockPlanStart's javadoc
             this.lastPlanPartial = async.resultPartial();
             this.status = resultStatus(blockPlan, async.resultExpansions(),
                     async.resultPartial(), async.resultBudgetHit(), null, // parked plans are never null
