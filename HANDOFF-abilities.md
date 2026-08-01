@@ -167,7 +167,16 @@ only if the owner reopens it.
      session ended — if its result isn't recorded below, RE-RUN IT before touching anything:
      suite green + latvine PASS + autotest PASS = commit on core + merge; any red = read the latvine
      trace's j/s/c/h columns first. Prior chain evidence: edge-guard fix alone → latvine FAIL(fell)
-     (mechanism b) — the jump-grab entry is the untested increment. Root cause held: tiles beyond
+     (mechanism b). CHAIN RESULT (killed at owner request, outcome already legible): the autotest was
+     going to FAIL again — but with dy=−0.12 at (8,1,0) vs the original dy=0.00: the JUMP-GRAB ENTRY
+     WORKS (the bot is off the ledge, hanging in the first vine cell, sagging 0.12 below feet target)
+     and now STALLS THERE with zero lateral progress — a THIRD layer: the HANGING-lateral drive
+     itself (suspects: recenterOnTarget's COLUMN_DEADBAND zeroing forward against the NEXT-column
+     target frame, sneak's 0.3 input factor × the ±0.15 climbable clamp interacting, or the reached
+     scan never advancing wp5 so the drive recenters on the CURRENT column). The latvine card's
+     j/s/c/h per-tick trace is the conviction vehicle — run `run-parkour.ps1 -ClimbOnly`, read the
+     hanging-lateral window, THEN fix. latvine's own verdict from this chain was not read — check
+     run/parkour/orebit-parkour-result.properties before re-running. Root cause held: tiles beyond
      the boot view-distance bubble never fire a durable CHUNK_LOAD, so the nav pipeline never built
      them. Fix: `ChunkNavLoader.buildNow(level,cx,cz)` (public synchronous per-chunk build, skip-if-
      built, same riders as the tick drain) called from `ParkourCourse.enter` over each tile's padded
