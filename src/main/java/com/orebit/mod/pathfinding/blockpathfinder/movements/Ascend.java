@@ -59,26 +59,27 @@ public final class Ascend implements Movement {
         if (ctx.reducesJump(x, y, z)) return; // honey-block floor: the jump apex clears nothing — can't take off
         if (ctx.noJumpFromBody(x, y, z)) return; // cobweb body cell: the stuck multiplier kills take-off velocity
         // R1 (DESIGN-climb-vocabulary.md §2: "no jump launches from climbable stances — solidFooting floors
-        // only"). Every other jump-takeoff move (Parkour / DiagonalParkour / WalkOff / Climb's own jump-grab)
-        // tests solidFooting; Ascend was the sole exemption, because Climb delegates the curtain TOP-OUT to it
-        // (Climb's class doc: "from the topmost climb node, Ascend emits onto the adjacent floor one up (it
-        // never checks the source floor)"). That delegation is only sound when the ratchet can actually
-        // deliver: a hanging entity CANNOT jump (the 0.42 impulse fires only under onGround), and holding
-        // jump on a climbable gives the +0.2/t climb branch whose feet peak is ≤ +0.154 above the cell top —
-        // it can never gain a whole block. It gains height ONLY by ratcheting into cells that are themselves
-        // climbable.
+        // only"). An Ascend is jump-based, and a jump is physically impossible with the feet INSIDE a
+        // climbable: vanilla truncates a grounded jump whose feet start in one back to the 0.2 climb branch,
+        // so the 0.42 launch never happens. solidFooting already encodes exactly that — its third conjunct
+        // tests the FEET cell (x,y+1,z), not just the floor — and every other jump-takeoff move (Parkour /
+        // DiagonalParkour / WalkOff / Climb's own jump-grab) already gates on it. Ascend was the sole
+        // exemption, because Climb's class doc delegates the curtain TOP-OUT to it ("from the topmost climb
+        // node, Ascend emits onto the adjacent floor one up (it never checks the source floor)").
         //
-        // So from a non-solidFooting stance, admit the top-out only when the SOURCE column is still climbable
-        // at the landing feet height (y+2 — the feet the bot must reach to stand on the floor one up). A
-        // curtain that stops short cannot lift the bot there, and the emitted edge is unexecutable: convicted
-        // 2026-08-01 on the flagship at (55,*,207), where the bot burned ~12000 ticks ejecting off the vine
-        // top, free-falling ~6 blocks, re-grabbing and climbing back — a limit cycle no envelope can see
-        // because it is never settled. Refusing the edge lets the search route some other way (or give up
-        // honestly) instead of looping forever.
+        // NO EXEMPTION (owner ruling 2026-08-01, from manual in-game proof). The delegation is wrong and the
+        // capability does not need it: from a hang you climb to JUST above the curtain's top and step off
+        // LATERALLY, so an up-and-over is Climb-UP then a lateral step — never a jump. Both edges already
+        // exist (Climb's up and its lateral GRAB). The search only ever preferred Ascend here because it is
+        // priced at Traverse.FLAT_COST and was wrongly legal; making it illegal leaves the physically correct
+        // route as the cheapest one.
         //
-        // Ordinary terrain pays one predictable branch: solidFooting is true for every solid takeoff, so the
-        // climbable probe is never reached on the common path.
-        if (!ctx.solidFooting(x, y, z) && !ctx.isClimbable(ctx.descriptorAt(x, y + 2, z))) return;
+        // Convicted 2026-08-01 on the flagship at (58,*,189) and (55,*,207): an Ascend emitted from a hang
+        // burned ~12000 ticks in an eject/fall/re-grab limit cycle no envelope can see (the bot is never
+        // settled). A first attempt to keep the edge alive when the source column continues overhead was ALSO
+        // wrong — it exempted Ascend from the very rule above, and the staggered-curtain geometry the owner
+        // demonstrated shows the transfer is a climb, not a launch. Reverted to the plain gate.
+        if (!ctx.solidFooting(x, y, z)) return;
         int uy = y + 1;
 
         // Source facts are the same for all four directions — read once. The bot stands on (x,y,z) so its
