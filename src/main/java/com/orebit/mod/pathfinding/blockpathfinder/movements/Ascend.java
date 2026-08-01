@@ -157,6 +157,24 @@ public final class Ascend implements Movement {
     }
 
     /**
+     * Grounded-gated exact match — the committed-move idiom ({@link Movement#reached}'s gate), adopted
+     * because Ascend's steering is a HELD JUMP: the ungated default fires on the very tick the feet
+     * block first matches, while that held input has just launched a fresh hop off the target cell — the
+     * follower then abandons this plan mid-launch and builds the NEXT step's plan airborne (the
+     * log-convicted vine-topout → gap-4 Parkour undershoot: "ABANDONED Ascend … (reached fired before
+     * done)" then "PLAN Parkour … grounded=false"; DESIGN-async-step-safety.md §2). Completing a jump-up
+     * is inherently a grounded event; the gate costs at most the ballistic ticks, and the transition then
+     * fires on the first grounded steer tick BEFORE that tick's drive can re-press jump — an anchored
+     * handoff. (Water top-outs stay covered: a bot that ends the step swimming never grounds, but the
+     * reached-scan catching a LATER waypoint supersedes this step entirely, and the plan's own
+     * fluid-extended done/failWhen governs the step itself.)
+     */
+    @Override
+    public boolean reached(BotSteering b, int wx, int wy, int wz) {
+        return b.grounded() && b.footX() == wx && b.footY() == wy && b.footZ() == wz;
+    }
+
+    /**
      * The phase-model execution plan (the reactive counterpart to {@link #candidates}'s edit-fold — the same
      * conversion {@link Pillar} and {@link Parkour} made from the {@code steer} + one-shot-edit path to a
      * live-geometry reconcile). An Ascend is <b>BUILD &rarr; CLIMB</b>: mine any solid takeoff/landing body

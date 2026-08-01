@@ -52,6 +52,16 @@ final class AsyncWindowSearch {
      *  from the bot's actual floor). A pre-plan result PARKS until the bot arrives; a replan result whose
      *  seam rejects resubmits immediately. */
     private boolean pendingPreplan;
+    /** Whether {@link #pending} was launched from a plan-SUSPECT site — a terrain-impacted refresh,
+     *  a repair, a blocked-null resubmit, or a retry inheriting one of those — i.e. its very existence
+     *  implies the CURRENT plan may be invalid. Read (with {@link #pending} != null, which also covers a
+     *  finished-but-undrained handle) by the follower's caution gate via
+     *  {@code PathPlan.suspectSearchPending()} (DESIGN-async-step-safety.md §3). Routine searches
+     *  (fresh plan, forward-slide, cascade re-derive, P4 pre-plan) submit {@code false}. */
+    private boolean pendingSuspect;
+    /** The suspect flag of the last handle {@link #drainPending} popped — a RETRY resubmit inherits it
+     *  (a retried suspect search stays suspect; a retried routine one stays routine). */
+    private boolean lastDrainSuspect;
     // Parked pre-plan result: computed-but-not-yet-adopted (the bot hasn't reached the predicted start).
     private BlockPathPlan parkedPlan;
     private boolean parkedPartial;
@@ -83,13 +93,36 @@ final class AsyncWindowSearch {
      * new search replaces that plan. Without this, a stale parked plan could later overwrite the fresh
      * adoption (review finding).
      */
-    void submit(SearchRequest request, BlockPos fromFloor, BlockPos target, boolean preplan) {
+    void submit(SearchRequest request, BlockPos fromFloor, BlockPos target, boolean preplan,
+                boolean suspect) {
         if (pending != null) pending.cancel();
         if (!preplan) parkedPlan = null;
         pending = executor.submit(request);
         pendingStart = fromFloor;
         pendingTarget = target;
         pendingPreplan = preplan;
+        pendingSuspect = suspect;
+    }
+
+    /** Whether the outstanding search (in flight OR finished-but-undrained — {@link #pending} lives
+     *  until the drain classifies it, which deliberately covers the touchdown tick before a boundary
+     *  drain runs) was launched from a plan-suspect site. See {@link #pendingSuspect}. */
+    boolean suspectPending() {
+        return pending != null && pendingSuspect;
+    }
+
+    /** Whether ANY search is outstanding (in flight or finished-but-undrained), routine or suspect,
+     *  boundary or P4 pre-plan. The follower's caution gate keys the committed-move deferral on this
+     *  (owner 2026-07-31: even a routine window slide may change the route's direction — a committed
+     *  jump launched into that unresolved future can land the bot off the adopted plan mid-air).
+     *  A PARKED pre-plan result does not count: its plan is finished and waiting at a known seam. */
+    boolean searchPending() {
+        return pending != null;
+    }
+
+    /** See {@link #lastDrainSuspect}. */
+    boolean lastDrainSuspect() {
+        return lastDrainSuspect;
     }
 
     /**
@@ -118,6 +151,7 @@ final class AsyncWindowSearch {
         final boolean preplan = pendingPreplan;
         final BlockPos from = pendingStart;
         final BlockPos toward = pendingTarget;
+        lastDrainSuspect = pendingSuspect; // a RETRY resubmit inherits the drained search's suspicion
         if (done.wasRejected()) {
             if (preplan) {
                 preplanAttemptedTarget = null; // the attempt didn't run; allow another
@@ -134,7 +168,16 @@ final class AsyncWindowSearch {
             }
             return Drain.NONE;
         }
-        final SpliceSeam seam = new SpliceSeam(from, startMode, EditSnapshot.EMPTY);
+        // Adoption-seam OUTER box scaled to the configured search budget (owner 2026-07-31): a bot that
+        // keeps walking the old route during a long search legitimately covers ~sprint-speed × budget
+        // blocks, and the fixed Chebyshev-3 box would RETRY every such finished plan (the walk-outruns-
+        // the-seam storm — each retry pays a full budget and the next result is outrun again). The box is
+        // only the sanity bound; ADOPTION still requires the exact on-plan membership below, so widening
+        // it merely lets the mid-plan-entry mechanism consider plans the bot has walked along.
+        final long budgetNanos = executor == null ? 0L : executor.budgetNanos();
+        final int adoptTol = Math.max(SpliceSeam.DEFAULT_TOLERANCE_CHEB,
+                (int) Math.ceil(budgetNanos * 1e-9 * 6.0)); // ~6 b/s: sprint 5.6 + margin
+        final SpliceSeam seam = new SpliceSeam(from, startMode, EditSnapshot.EMPTY, adoptTol);
         if (!seam.accepts(actualFloor) || !toward.equals(currentTarget)) {
             return Drain.RETRY; // drifted past tolerance / window moved — plan from where we really are
         }

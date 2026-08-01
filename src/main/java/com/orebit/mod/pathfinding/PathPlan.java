@@ -683,7 +683,7 @@ public final class PathPlan {
                 OrebitCommon.LOGGER.info("[Orebit] block re-search: site=blocked-null bot=({},{},{})",
                         botFloor.getX(), botFloor.getY(), botFloor.getZ());
             }
-            replanBlock();
+            replanBlock(true); // blocked-null: the live plan is gone — plan-invalid evidence
         }
     }
 
@@ -896,7 +896,16 @@ public final class PathPlan {
      * far region center projected to a standable floor column — and run {@link BlockPathfinder#findPath}
      * over a fresh full {@link NavGridView}. Sets {@link #status} to RUNNING (found) or BLOCKED (null).
      */
+    /** Routine-launch overload — the search does not impugn the current plan (fresh plan,
+     *  forward-slide commit, cascade re-derive). */
     private void replanBlock() {
+        replanBlock(false);
+    }
+
+    /** @param suspect whether this launch site implies the CURRENT plan may be invalid
+     *  (terrain-impacted refresh / repair / blocked-null, retries inheriting) — carried onto the
+     *  mailbox for the follower's caution gate (DESIGN-async-step-safety.md §3). */
+    private void replanBlock(boolean suspect) {
         WindowTargeting.Result choice = targeting.target(skeleton, windowStart, windowLast(), botFloor);
         // FORWARD-SLIDE (s52 — replaces both slideWindowOnEmptyPlan and the REPLAN_NEAR_TARGET
         // commit-on-approach): never aim a search at a target the bot ALREADY satisfies within the block
@@ -961,7 +970,7 @@ public final class PathPlan {
             if (blockPlan != null && async.parkedFor(target)) {
                 return; // the precomputed result is already parked for this target — arrival adopts it
             }
-            submit(botFloor, target, cuboidCap, baseline, false);
+            submit(botFloor, target, cuboidCap, baseline, false, suspect);
             if (status != PathStatus.RUNNING) status = PathStatus.RUNNING;
             return;
         }
@@ -1084,6 +1093,31 @@ public final class PathPlan {
         return blockedRealized == null ? -1 : blockedRealized.length / 2;
     }
 
+    /**
+     * Whether an async window search is outstanding (in flight or finished-but-undrained) that was
+     * launched from a site implying the CURRENT plan may be invalid — a terrain-impacted refresh, a
+     * repair, a blocked-null resubmit, or a retry inheriting one of those. The follower's caution gate
+     * (DESIGN-async-step-safety.md §3): while true, step transitions into committed moves and
+     * deeper-than-safe Falls defer (stand at the settled anchor) until the drain resolves the doubt.
+     * Routine searches (fresh plan, forward-slide, cascade re-derive, P4 pre-plan) never set it.
+     * Always false in sync mode — a synchronous search resolves within its own tick, so no doubt
+     * window exists.
+     */
+    public boolean suspectSearchPending() {
+        return executor != null && async.suspectPending();
+    }
+
+    /**
+     * Whether ANY async search is outstanding (in flight or finished-but-undrained), routine or
+     * suspect, window slide or P4 pre-plan — the follower's committed-move caution keys on this
+     * (owner 2026-07-31): even a routine slide may change the route's direction, and a committed jump
+     * launched into that unresolved future can land the bot mid-air off whatever plan gets adopted.
+     * A PARKED pre-plan does not count (finished, waiting at a known seam). Always false in sync mode.
+     */
+    public boolean searchPending() {
+        return executor != null && async.searchPending();
+    }
+
     /** The failing search's start region as {@code (rx,ry,rz)} (minY-rebased level-0 region coords, the
      *  skeleton convention), or {@code "?"} when unknown — diagnostic read for the repair log line. */
     public String blockedStartRegionDesc() {
@@ -1096,13 +1130,13 @@ public final class PathPlan {
     /** Build this submission's {@link SearchRequest} and hand it to the {@link AsyncWindowSearch mailbox}
      *  (which supersedes any in-flight search and, for a boundary replan, drops the parked pre-plan). */
     private void submit(BlockPos fromFloor, BlockPos target, RegionBound cuboidCap,
-                        EditSnapshot seed, boolean preplan) {
+                        EditSnapshot seed, boolean preplan, boolean suspect) {
         // regionFieldFor(target): the snapshot must carry the field rooted at THIS submission's target —
         // covers both the boundary replan and the P4 pre-plan (which targets windowTargetPos, so the root
         // matches the cached field from the last replanBlock and this is a cheap equals hit).
         async.submit(new SearchRequest(level, fromFloor, target, caps, inventory, startMode,
                 cuboidCap, seed, executor.budgetNanos(), regionFieldFor(target),
-                tolXZFor(target), tolYFor(target)), fromFloor, target, preplan);
+                tolXZFor(target), tolYFor(target)), fromFloor, target, preplan, suspect);
     }
 
     /** The goal-arrival tolerance for a search toward {@code target}: the caller's {@link #goalTolXZ} when
@@ -1144,7 +1178,7 @@ public final class PathPlan {
             case RETRY:
                 // Executor hiccup / drifted past seam tolerance / window moved — plan from where we
                 // really are (the mailbox never decides; see AsyncWindowSearch.Drain).
-                replanBlock();
+                replanBlock(async.lastDrainSuspect()); // a retried suspect search stays suspect
                 break;
             case RESULT:
                 this.blockPlan = async.resultPlan();
@@ -1196,7 +1230,7 @@ public final class PathPlan {
         if (predictedFloor.equals(botFloor)) return;
         this.startMode = liveMode; // same per-tick pose refresh onBotMoved does; the search seeds from it
         async.markPreplanAttempt(windowTargetPos);
-        submit(predictedFloor, windowTargetPos, cuboidCapBox(windowTargetPos), remainingEdits, true);
+        submit(predictedFloor, windowTargetPos, cuboidCapBox(windowTargetPos), remainingEdits, true, false);
     }
 
     /**
@@ -1437,7 +1471,7 @@ public final class PathPlan {
             return false;
         }
         resetWindow();
-        replanBlock();
+        replanBlock(true); // post-repair resubmit: the plan just proved wrong somewhere
         return true;
     }
 
@@ -1483,9 +1517,15 @@ public final class PathPlan {
      * exactly the staleness the refresh exists to eliminate.
      */
     public void refreshWindow() {
+        refreshWindow(false);
+    }
+
+    /** @param suspect whether the refresh was terrain-impacted (vs a consumed-plan advance) —
+     *  see {@link #replanBlock(boolean)}. */
+    public void refreshWindow(boolean suspect) {
         if (skeleton == null || status == PathStatus.COMPLETE || status == PathStatus.FAILED) return;
         async.dropParked();
-        replanBlock();
+        replanBlock(suspect);
     }
 
     /**

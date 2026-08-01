@@ -84,6 +84,23 @@ only if the owner reopens it.
      cards (west cells) + the flagship rerun are the verification tail. Scaffold-top fall landings
      price NORMAL damage (vanilla may forgive them via #fall_damage_resetting — empirical follow-up;
      overpricing is the safe error).
+   - **✅ DONE 2026-07-31 — ASYNC STEP-TRANSITION SAFETY (the "mid-air adoption" pending ruling,
+     resolved; design card = `internal_docs/DESIGN-async-step-safety.md`).** Deterministic owner-world
+     repro (vine-topout Ascend → gap-4 Parkour undershoot → fail→HOLD on the forest floor) convicted
+     the step-transition seam: Ascend's HELD-JUMP steer was preempted by the ungated reached the tick
+     its feet touched the takeoff, and the Parkour plan was built AIRBORNE on the parasitic hop. Fixes
+     (adversarially reviewed — 8 breakage scenarios in the card): (1) `Ascend.reached` grounded-gated
+     (the committed-move idiom; NOT a global anchor gate — E1/E2 break it); (2) PENDING-SEARCH CAUTION:
+     step transitions into committed moves / deeper-than-safeFall Falls defer (stand at the settled
+     anchor, never on damaging floors) while ANY async search is outstanding — suspect origins
+     (terrain-impacted evaluated independently of consumed now / repair / blocked-null, retries
+     inheriting) recorded via `PathPlan.suspectSearchPending()` for the log + future stronger handling;
+     (3) the adoption seam's outer box scales with the search budget (max(3, ceil(budgetSec×6)) — the
+     walk-outruns-the-seam storm fix; membership still exact). Oracles: repro FAIL→PASS (123t, zero
+     ABANDONED), control PASS unchanged, suite green. OPEN (deliberate): the general
+     uncommitted-airborne-transition class (per-move physics work); the Descend vine-bounce servo fix
+     (owner-sketched: zero horizontal input once XZ-aligned — no wall-press → no auto-climb) is the
+     next follower increment.
    - **HARNESS DEBT (found while pinning): the parkour snake's tail is NAV-DEAD.** Every tile beyond
      the boot view-distance bubble (~position ≥48, z ≥ 216) fails "nav gave up" with ZERO searches —
      buildTile's sync-load on entry never reaches the nav chunk-load path, so the grid never builds
