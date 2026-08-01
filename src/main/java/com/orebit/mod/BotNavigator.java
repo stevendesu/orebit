@@ -9,6 +9,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
+import com.orebit.mod.pathfinding.blockpathfinder.MovementRegistry;
 import com.orebit.mod.pathfinding.blockpathfinder.PhaseRunner;
 import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
@@ -135,6 +136,7 @@ final class BotNavigator {
     private int stuckTicks;         // consecutive ticks grinding in place; drives the stuck diagnostic
     private int lastEditedIndex = -1; // last step whose break/place edits were applied (apply once per step)
     private int lastFailLoggedStep = -1; // last step whose validity-envelope FAILURE was logged (log once per step)
+    private int lastCautionLoggedStep = -1; // last step whose suspect/pending-search CAUTION hold was logged
     private boolean loggedHasPath;  // dedupe the path/no-path diagnostic so it logs only on change
     private boolean loggedPlanError; // log a two-tier replan exception only once (then degrade silently)
     /** COMPLETE-but-not-arrived ratchet (s52b): once the plan declared done short of the caller's
@@ -466,6 +468,24 @@ final class BotNavigator {
     }
 
     /**
+     * Whether BEGINNING step {@code i} commits the bot to risk an unresolved re-search shouldn't carry:
+     * a committed move (the parkour family — mid-air on a possibly-stale premise) or a Fall deeper than
+     * the bot's safe-fall window (its landing was verified against the possibly-stale grid; Fall carries
+     * no commitsAcrossArrival by design — its reached must stay ungated for buoyant landings — so depth
+     * rides the waypoint frames). Constant move-nature reads + waypoint math only; no phase plan is
+     * built (DESIGN-async-step-safety.md §3).
+     */
+    private boolean stepCommitsRisk(int i) {
+        Movement m = path.movement(i);
+        if (m.commitsAcrossArrival()) return true;
+        if (m == MovementRegistry.FALL && i > 0) {
+            int drop = path.waypoint(i - 1).getY() - path.waypoint(i).getY();
+            return drop > bot.caps().safeFallDistance();
+        }
+        return false;
+    }
+
+    /**
      * Whether the bot is standing IN or ON a damaging block (lava, fire, magma, campfire, cactus, wither rose,
      * berry bush, powder snow) — read from the SAME background nav descriptor {@link #isStandableFloor} already
      * uses (no new live/reflective read), checking both the feet cell (a damaging block the bot stands inside —
@@ -688,15 +708,20 @@ final class BotNavigator {
                     // mutation. A travelling bot's own frontier chunk builds/drops (and a house built 50k
                     // blocks away) formerly re-armed this every window forever (the open-ocean flap). A
                     // CONSUMED plan always refreshes (forward progress, not a poll).
-                    if (consumed || pathPlan.planImpacted()) {
+                    // impacted is evaluated INDEPENDENTLY of consumed (not short-circuited behind it):
+                    // a window both consumed AND terrain-impacted must launch a SUSPECT search, not hide
+                    // under the routine consumed-plan label (the caution gate keys on it —
+                    // DESIGN-async-step-safety.md §3).
+                    boolean impacted = pathPlan.planImpacted();
+                    if (consumed || impacted) {
                         if (Debug.ENABLED) {
                             OrebitCommon.LOGGER.info(
                                     "[Orebit] block re-search: site=refreshWindow reason={} wpIdx={}/{} bot={}",
-                                    consumed ? "consumed-plan" : "plan-impacted",
+                                    impacted ? (consumed ? "consumed+impacted" : "plan-impacted") : "consumed-plan",
                                     waypointIndex, path == null ? -1 : path.size(),
                                     AllyBotEntity.compact(bot.blockPosition()));
                         }
-                        pathPlan.refreshWindow();
+                        pathPlan.refreshWindow(impacted);
                     }
                     blockRefreshTicks = TERRAIN_RECHECK_TICKS;
                 }
@@ -1235,6 +1260,29 @@ final class BotNavigator {
         // a window swap that reset the cursor) rebuilds it and resets the runner. The plan is written in the
         // search-native FLOOR cells, carried per-waypoint through reconstruct (BlockPathPlan.floorY).
         if (waypointIndex != activePlanStep) {
+            // PENDING-SEARCH CAUTION (owner 2026-07-31, DESIGN-async-step-safety.md §3): an async search
+            // is outstanding — suspect (terrain-impacted/repair: this plan may be INVALID) or routine (a
+            // window slide / P4 pre-plan whose result may change the route's direction). Entering a
+            // COMMITTED move or a deep Fall now would launch the bot into that unresolved future, so the
+            // transition defers: stand at the just-settled anchor. The wait is bounded by the search
+            // budget (the drain runs at this very anchor on the next boundary tick), and a standing bot
+            // always seam-accepts — which also breaks the walk-outruns-the-seam retry storm. Safe steps
+            // are NOT deferred (the async pipeline keeps walking through routine searches). Never holds
+            // on a damaging floor (the arrival gate's own keep-moving rule), and only from a stable
+            // medium (a ballistic bot cannot stand safe — it proceeds as before).
+            if (pathPlan != null && pathPlan.searchPending()
+                    && stepCommitsRisk(waypointIndex)
+                    && (bot.grounded() || bot.isInWater())
+                    && !onDamagingFloor()) {
+                if (Debug.VERBOSE && lastCautionLoggedStep != waypointIndex) {
+                    lastCautionLoggedStep = waypointIndex;
+                    bot.vlog("CAUTION hold before " + movement.getClass().getSimpleName() + " step "
+                            + waypointIndex + " — " + (pathPlan.suspectSearchPending() ? "SUSPECT" : "routine")
+                            + " re-search in flight");
+                }
+                bot.setForward(0.0f);
+                return;
+            }
             if (Debug.VERBOSE && phaseRunner.active() && !lastPhaseDone && activePlanStep >= 0
                     && !phaseRunner.doneNow(bot)) {
                 // The reached-before-done seam: the cursor moved on while the old step's phase plan was still
