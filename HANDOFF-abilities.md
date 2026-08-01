@@ -101,6 +101,42 @@ only if the owner reopens it.
      uncommitted-airborne-transition class (per-move physics work); the Descend vine-bounce servo fix
      (owner-sketched: zero horizontal input once XZ-aligned — no wall-press → no auto-climb) is the
      next follower increment.
+   - **🔴 OPEN — THE HELD-JUMP × VINE-TRANSIT ELEVATOR (the remaining vine-servo class; witnessed
+     owner 2026-07-31 22:12, flagship (60,180,253)→(201,-28,90) on "Autotest Master - Copy";
+     screenshot run/screenshots/2026-07-31_22.12.24.png — blue = deviation, red = intended; NOTE the
+     particle convention: waypoint-start→current AND waypoint-start→next are BOTH always drawn).**
+     Route was Ascend → Ascend → Descend threading a 2-tall air gap between leaf layers; vine curtains
+     hung over BOTH Ascends (one dropping from the leaf above the gap onto the target block's front
+     face). The bot rode a near-vertical deviation far above the intended peak and wall-pressed into
+     the leaf underside. MECHANISM HYPOTHESIS (consistent with the source-verified physics, NOT yet
+     log-confirmed — evidence-first before any fix): Ascend HOLDS setJumping(true) for the whole step
+     (legacy steer AND the plan's climb phase); the moment the bot's feet enter any vine cell,
+     vanilla's (horizontalCollision || jumping) && onClimbable → vy=+0.2 turns the held jump into a
+     continuous climb — an ELEVATOR up the curtain past the +1 target — while steerTowards presses
+     full-forward into the leaf/trunk (its own horizontalCollision ratchet term; the COLUMN_DEADBAND
+     fix does NOT apply — Ascend's drive is steerTowards, deliberately out of the deadband's scope).
+     NOTHING STOPS IT: done needs feet AT the target; resetWhen needs grounded on the START; the
+     failWhen envelope keys on SETTLED = grounded||inWater||inLava — a vine-hung bot is never
+     "settled", so the envelope structurally CANNOT fire (the same hang-isn't-settled asymmetry the
+     arrival machinery has). DISTINCT from the two FIXED classes: the Descend eased-forward bounce
+     (COLUMN_DEADBAND, 57c4a1f) and the Ascend handoff preemption (grounded-gated reached, d1bb065).
+     TREAT AS A CLASS, not a per-move patch: enumerate every HELD-INPUT move (Ascend, Pillar,
+     RideBubbleColumn's rise, the water-rise cross-rule, Climb-up itself) × climbable-transit
+     exposure, and design ONE rule. Candidate directions (unranked, each needs the repro first):
+     (a) execution: Ascend's climb press becomes conditional — e.g. release jump when onClimbable &&
+     footY >= target (the BotSteering.onClimbable() seam read exists since d1bb065); "don't hold
+     space inside a vine above your target"; (b) envelope: widen the settled-set for the off-plan
+     failWhen to include climbable hangs (a vine-hung bot N cells off-plan should fail→HOLD loudly —
+     consistent with hang-is-a-plan-anchor); (c) planner: ground moves price/refuse climbable
+     TRANSIT cells (the big hammer — deferred twice already; the ratchet needs ADJACENT COLLISION,
+     so blanket refusal over-refuses open-air jungle vines — the precise condition is
+     climbable-cell-beside-solid); (d) REPRO FIRST: cheapest = a synthetic ClimbTest/course-card
+     shape (Ascend chain under a vine curtain touching the target's face, leaf ceiling 2 above) OR
+     find the incident coords on the owner's world (run the flagship headless with -BotDebug, watch
+     for Ascend PLAN lines in canopy, or owner supplies /tp) and pin it with the
+     owner-config+owner-world headless harness exactly like the undershoot forensic
+     (scratchpad/undershoot/ has the command shapes). The vine-servo debt is likely the flagship's
+     residual 0.51 b/s pace too — after the fix, rerun the flagship with raised -BudgetTicks.
    - **HARNESS DEBT (found while pinning): the parkour snake's tail is NAV-DEAD.** Every tile beyond
      the boot view-distance bubble (~position ≥48, z ≥ 216) fails "nav gave up" with ZERO searches —
      buildTile's sync-load on entry never reaches the nav chunk-load path, so the grid never builds
