@@ -269,20 +269,37 @@ public final class SteerControl {
     }
 
     /**
+     * The column-aligned input DEADBAND (owner ruling 2026-07-31, the Descend vine-bounce fix): once the
+     * bot's centre is within this radius of the target column's centre, terminal column-targeting drives
+     * output EXACTLY zero forward instead of an eased small push. Physics: the 0.6-wide bot in a 1.0
+     * cell keeps its whole box inside the cell while its centre is within 0.2 of the cell centre — no
+     * box contact with any NEIGHBOURING block means {@code horizontalCollision} is impossible, and
+     * vanilla's involuntary climb ({@code (horizontalCollision || jumping) && onClimbable → vy=+0.2})
+     * can never fire — so a bot settling beside a trunk-hugging vine descends on the −0.15 clamp instead
+     * of ratcheting up and bouncing ("no horizontal movement → no wall-pressing → no automatic climb
+     * ascent"). 0.15 leaves margin under the 0.2 geometric bound. Deliberately NOT applied to the
+     * general locomotion drives (a deadband there would stutter every cell crossing) — only to
+     * {@link #recenterOnTarget} and terminal step phases whose target IS the column (Descend's STEP).
+     */
+    public static final double COLUMN_DEADBAND = 0.15;
+
+    /**
      * Re-centre on the target column: face the target's x,z and apply forward input proportional to the
      * horizontal offset, so a bot dead-on the column doesn't shove itself off while a drifted bot walks back.
      * Used by the vertical-in-place moves (Pillar, MineDown) and by an airborne Fall homing onto its landing
      * column. Input-based, so the (weak) air control is honest rather than a teleported velocity.
+     * Within {@link #COLUMN_DEADBAND} the output is EXACTLY zero (not eased-toward-zero) — the
+     * vine-bounce fix's load-bearing detail.
      */
     public static void recenterOnTarget(BotSteering b, SteerView p) {
         double cx = p.tx() - b.x();
         double cz = p.tz() - b.z();
         double d = Math.sqrt(cx * cx + cz * cz);
-        if (d > EPS) {
+        if (d > COLUMN_DEADBAND) {
             b.faceHorizontally(cx, cz);
-            b.setForward((float) Math.min(1.0, d)); // ~0 when already centred on the column
+            b.setForward((float) Math.min(1.0, d));
         } else {
-            b.setForward(0.0f);
+            b.setForward(0.0f); // aligned — exact zero input; see COLUMN_DEADBAND
         }
     }
 
