@@ -38,10 +38,22 @@ class ParkourValidityEnvelopeTest {
     private static final class PoseBot implements BotSteering {
         int footX, footY, footZ;
         boolean grounded;
+        boolean water, climbable;
 
         PoseBot at(int fx, int fy, int fz, boolean onGround) {
             this.footX = fx; this.footY = fy; this.footZ = fz; this.grounded = onGround;
+            this.water = false; this.climbable = false;
             return this;
+        }
+
+        /** Afloat at the given cell (never grounded) — Fall's buoyant-water landing. */
+        PoseBot afloat(int fx, int fy, int fz) {
+            at(fx, fy, fz, false); this.water = true; return this;
+        }
+
+        /** Arrested on a climbable at the given cell (never grounded) — Fall's HANG landing. */
+        PoseBot hanging(int fx, int fy, int fz) {
+            at(fx, fy, fz, false); this.climbable = true; return this;
         }
 
         @Override public double x() { return footX + 0.5; }
@@ -54,8 +66,9 @@ class ParkourValidityEnvelopeTest {
         @Override public int footY() { return footY; }
         @Override public int footZ() { return footZ; }
         @Override public boolean grounded() { return grounded; }
-        @Override public boolean inWater() { return false; }
+        @Override public boolean inWater() { return water; }
         @Override public boolean inLava() { return false; }
+        @Override public boolean onClimbable() { return climbable; }
         @Override public boolean prone() { return false; }
         @Override public void faceHorizontally(double dx, double dz) { }
         @Override public void faceTowards(double dx, double dy, double dz) { }
@@ -113,16 +126,36 @@ class ParkourValidityEnvelopeTest {
                 "a grounded exact match still advances (touchdown tick)");
     }
 
+    /**
+     * The arrival gate is SETTLED, not merely grounded, and it applies to EVERY move — not just the
+     * committed family (superseding the original committed-only rule, 2026-08-01).
+     *
+     * <p>Convicted on the flagship: a {@code Fall} down column (44,*,243) transited the stand cells of the
+     * two {@code Descend} steps below it. Descend is reversible, so its match was ungated, fired mid-arc,
+     * and the cursor jumped 5→7 ("advance SKIPPED 1 step(s)" — step 6's edits never ran). The step-7
+     * Descend was then framed from a cell the bot had only fallen PAST, and it fail→HELD forever at
+     * (44,149,244). A waypoint is a stand cell: reaching it means being SUPPORTED there.
+     */
     @Test
-    void uncommittedMovesKeepTheUngatedBlockExactMatch() {
-        PoseBot bot = new PoseBot();
-        bot.at(5, 81, 5, /*grounded=*/false);
-        // Traverse (and the rest of the reversible family) is byte-identical: the gate rides
-        // commitsAcrossArrival, which is false here — no behavior change outside the committed moves.
-        assertTrue(MovementRegistry.TRAVERSE.reached(bot, 5, 81, 5),
-                "an uncommitted move's reached is unchanged (no grounded gate)");
-        assertTrue(MovementRegistry.FALL.reached(bot, 5, 81, 5),
-                "Fall stays ungated (its landing may be buoyant water, never grounded)");
+    void ballisticFlyThroughNeverMatches_forReversibleMovesToo() {
+        PoseBot bot = new PoseBot().at(5, 81, 5, /*grounded=*/false); // airborne, no medium — pure transit
+        assertFalse(MovementRegistry.TRAVERSE.reached(bot, 5, 81, 5),
+                "a reversible move must not match a cell the bot is merely falling through");
+        assertFalse(MovementRegistry.DESCEND.reached(bot, 5, 81, 5),
+                "the flagship specimen: a Descend stand cell transited mid-fall is NOT reached");
+        assertFalse(MovementRegistry.FALL.reached(bot, 5, 81, 5),
+                "even Fall must not match while still ballistic — it has not landed yet");
+    }
+
+    @Test
+    void everyLegitimateArrivalMediumStillMatches() {
+        // The gate must not cost a real arrival a single tick, in ANY medium a step can end in.
+        assertTrue(MovementRegistry.TRAVERSE.reached(new PoseBot().at(5, 81, 5, true), 5, 81, 5),
+                "grounded arrival — the ordinary case");
+        assertTrue(MovementRegistry.FALL.reached(new PoseBot().afloat(5, 81, 5), 5, 81, 5),
+                "Fall's buoyant-water landing is never grounded but IS settled");
+        assertTrue(MovementRegistry.FALL.reached(new PoseBot().hanging(5, 81, 5), 5, 81, 5),
+                "Fall's arrested climbable HANG landing is settled too");
     }
 
     // ---- Fix A: the validity envelope → PhaseRunner.failed ---------------------------------------------
@@ -177,8 +210,17 @@ class ParkourValidityEnvelopeTest {
         PoseBot bot = new PoseBot();
         assertFalse(plan.failed(bot.at(1, 11, 0, true)), "the +x face spill must NOT fail (transient takeoff state)");
         assertFalse(plan.failed(bot.at(0, 11, 1, true)), "the +z face spill must NOT fail (the cliff z-face repro)");
-        assertTrue(plan.failed(bot.at(1, 11, 1, true)),
-                "the gap CORNER cell is not a face spill — grounded there is a real off-plan landing");
+        // CORRECTED 2026-08-01. This previously asserted the CORNER is off-plan. It is not: a
+        // DiagonalParkour's arc is exactly 45°, so its centre crosses the corner, not a face — and the
+        // takeoff gate's per-axis setback (~0.247) is smaller than one sprinted tick (~0.196/axis), so the
+        // drive-then-advance tick lands the foot cell on the corner every time. Holding the old assertion
+        // was what fail→HELD diag2.walkin before it ever pressed jump. The takeoff quadrant is admitted;
+        // the bot is teetering on its own takeoff block (the gap columns are non-standable by construction,
+        // so "grounded at the corner" can only mean hitbox-overlapping the takeoff cell).
+        assertFalse(plan.failed(bot.at(1, 11, 1, true)),
+                "the takeoff-quadrant CORNER is the cell a 45° arc actually crosses — transient, not off-plan");
+        assertTrue(plan.failed(bot.at(2, 11, 1, true)),
+                "past the takeoff quadrant but not the landing stand — a genuine off-plan settle");
         assertTrue(plan.failed(bot.at(1, 10, 3, true)), "off-plan cells still fail");
     }
 

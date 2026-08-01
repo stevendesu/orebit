@@ -42,19 +42,31 @@ public interface Movement {
     /**
      * Whether the bot's feet block {@code (b.footX,footY,footZ)} has reached waypoint {@code (wx,wy,wz)} —
      * the follower's cursor-advance test. Default is an exact block match (waypoints and feet are both
-     * blocks, so this is block-exact, no distance epsilon), GROUNDED-gated for a {@link
-     * #commitsAcrossArrival committed} move: a committed arc's arrival IS grounded contact (its plan's
-     * {@code done} demands standing on the landing cell), so requiring {@code grounded()} delays a
-     * legitimate advance by zero ticks — it kills only the airborne fly-through match, where a falling
-     * bot's feet block transits a waypoint stand cell mid-arc, the cursor silently advances onto a step
-     * the bot never stood at, and the settle anchor is poisoned to a cell it flew past (the
-     * DiagonalParkour off-plan wedge). Uncommitted moves keep the ungated match — in particular {@link
-     * com.orebit.mod.pathfinding.blockpathfinder.movements.Fall Fall}, whose landing may be buoyant water
-     * (never grounded). Swim overrides it with a vertical tolerance because a floating bot's Y bobs with
-     * buoyancy.
+     * blocks, so this is block-exact, no distance epsilon), gated on the bot being {@link
+     * BotSteering#settled settled}: a waypoint is a STAND cell, so reaching it means being SUPPORTED there
+     * — grounded, afloat, lava-suspended, or hanging on a climbable — never merely transiting it while
+     * ballistic.
+     *
+     * <p><b>Why settled and not grounded.</b> The gate must admit every medium a step legitimately ends in:
+     * {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Fall Fall}'s landing may be buoyant water
+     * (never grounded) or an arrested climbable hang, and the swim family arrives afloat. {@code settled}
+     * is the same predicate the follower already uses to decide it may plan at all (BotNavigator's
+     * {@code planAnchor}), so arrival and planning agree on what "not ballistic" means.
+     *
+     * <p><b>What it kills</b> — the airborne FLY-THROUGH match: a falling bot's feet block transits a
+     * waypoint stand cell mid-arc, the cursor silently advances onto a step the bot never stood at, and the
+     * settle anchor is poisoned to a cell it flew past. This was originally gated for {@link
+     * #commitsAcrossArrival committed} moves only (the DiagonalParkour off-plan wedge), which left the
+     * REVERSIBLE moves exposed: convicted 2026-08-01 on the flagship, where a {@code Fall} down column
+     * (44,*,243) transited the stand cells of the two {@code Descend} steps below it, the cursor jumped
+     * 5→7 ("advance SKIPPED 1 step(s)" — step 6's edits never ran), and the step-7 Descend was framed from
+     * a cell the bot had only fallen past, ending in a permanent fail→HOLD at (44,149,244). The gate delays
+     * a legitimate advance by zero ticks in every medium, because arrival IS support.
+     *
+     * <p>Swim overrides it with a vertical tolerance because a floating bot's Y bobs with buoyancy.
      */
     default boolean reached(BotSteering b, int wx, int wy, int wz) {
-        return (!commitsAcrossArrival() || b.grounded())
+        return b.settled()
                 && b.footX() == wx && b.footY() == wy && b.footZ() == wz;
     }
 
