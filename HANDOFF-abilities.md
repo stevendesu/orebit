@@ -101,50 +101,45 @@ only if the owner reopens it.
      uncommitted-airborne-transition class (per-move physics work); the Descend vine-bounce servo fix
      (owner-sketched: zero horizontal input once XZ-aligned — no wall-press → no auto-climb) is the
      next follower increment.
-   - **🔴 OPEN — THE HELD-JUMP × VINE-TRANSIT ELEVATOR (the remaining vine-servo class; witnessed
-     owner 2026-07-31 22:12, flagship (60,180,253)→(201,-28,90) on "Autotest Master - Copy";
-     screenshot run/screenshots/2026-07-31_22.12.24.png — blue = deviation, red = intended; NOTE the
-     particle convention: waypoint-start→current AND waypoint-start→next are BOTH always drawn).**
-     Route was Ascend → Ascend → Descend threading a 2-tall air gap between leaf layers; vine curtains
-     hung over BOTH Ascends (one dropping from the leaf above the gap onto the target block's front
-     face). The bot rode a near-vertical deviation far above the intended peak and wall-pressed into
-     the leaf underside. MECHANISM HYPOTHESIS (consistent with the source-verified physics, NOT yet
-     log-confirmed — evidence-first before any fix): Ascend HOLDS setJumping(true) for the whole step
-     (legacy steer AND the plan's climb phase); the moment the bot's feet enter any vine cell,
-     vanilla's (horizontalCollision || jumping) && onClimbable → vy=+0.2 turns the held jump into a
-     continuous climb — an ELEVATOR up the curtain past the +1 target — while steerTowards presses
-     full-forward into the leaf/trunk (its own horizontalCollision ratchet term; the COLUMN_DEADBAND
-     fix does NOT apply — Ascend's drive is steerTowards, deliberately out of the deadband's scope).
-     NOTHING STOPS IT: done needs feet AT the target; resetWhen needs grounded on the START; the
-     failWhen envelope keys on SETTLED = grounded||inWater||inLava — a vine-hung bot is never
-     "settled", so the envelope structurally CANNOT fire (the same hang-isn't-settled asymmetry the
-     arrival machinery has). DISTINCT from the two FIXED classes: the Descend eased-forward bounce
-     (COLUMN_DEADBAND, 57c4a1f) and the Ascend handoff preemption (grounded-gated reached, d1bb065).
-     TREAT AS A CLASS, not a per-move patch: enumerate every HELD-INPUT move (Ascend, Pillar,
-     RideBubbleColumn's rise, the water-rise cross-rule, Climb-up itself) × climbable-transit
-     exposure, and design ONE rule. Candidate directions (unranked, each needs the repro first):
-     (a) execution: Ascend's climb press becomes conditional — e.g. release jump when onClimbable &&
-     footY >= target (the BotSteering.onClimbable() seam read exists since d1bb065); "don't hold
-     space inside a vine above your target"; (b) envelope: widen the settled-set for the off-plan
-     failWhen to include climbable hangs (a vine-hung bot N cells off-plan should fail→HOLD loudly —
-     consistent with hang-is-a-plan-anchor); (c) planner: ground moves price/refuse climbable
-     TRANSIT cells (the big hammer — deferred twice already; the ratchet needs ADJACENT COLLISION,
-     so blanket refusal over-refuses open-air jungle vines — the precise condition is
-     climbable-cell-beside-solid); (d) REPRO FIRST: cheapest = a synthetic ClimbTest/course-card
-     shape (Ascend chain under a vine curtain touching the target's face, leaf ceiling 2 above) OR
-     find the incident coords on the owner's world (run the flagship headless with -BotDebug, watch
-     for Ascend PLAN lines in canopy, or owner supplies /tp) and pin it with the
-     owner-config+owner-world headless harness exactly like the undershoot forensic
-     (scratchpad/undershoot/ has the command shapes). The vine-servo debt is likely the flagship's
-     residual 0.51 b/s pace too — after the fix, rerun the flagship with raised -BudgetTicks.
-   - **HARNESS DEBT (found while pinning): the parkour snake's tail is NAV-DEAD.** Every tile beyond
-     the boot view-distance bubble (~position ≥48, z ≥ 216) fails "nav gave up" with ZERO searches —
-     buildTile's sync-load on entry never reaches the nav chunk-load path, so the grid never builds
-     and the readiness gate times out. This one artifact accounts for the suite's standing ~24 tail
-     failures AND makes the tail's expect-refusal PASSes vacuous (they pass dead or alive). Also:
-     trial world-cells are registration-ordered — inserting a card mid-catalogue shifts every later
-     card's world position (turnrise2/turnflat2w died this way during development). Root-cause fix =
-     fire the nav build for tile chunks explicitly on entry; then triage the newly-alive tail verdicts.
+   - **✅ RESOLVED (2026-07-31 late) — THE HELD-JUMP × VINE-TRANSIT ELEVATOR.** Log-convicted and
+     fixed the same night (full record: DESIGN-climb-vocabulary.md §9). Repro'd deterministically by
+     the new ParkourCourse `ascvine.*` cards with per-tick `j/c/h` trace columns (jump input held /
+     onClimbable / horizontalCollision — `AllyBotEntity.jumpHeld()` diagnostic seam). CONVICTED
+     MECHANISM (pre-fix `ascvine.face`): Ascend's climb-phase held jump + a climbable in the landing
+     stance → vanilla's `jumping && onClimbable → +0.2/t` climbs the bot THROUGH its own target into
+     a 4-tick hover limit cycle at the curtain top (one c=1 tick re-launches every falling re-entry —
+     with jump held the bot can NEVER descend through a vine cell), never grounded → the settled-gated
+     done/resetWhen/failWhen structurally cannot fire; 370 ticks dead-centred one block above the
+     stance. `h=0` throughout — the held jump ALONE sustains the class; the hcol arm was innocent
+     here. Two hypothesis corrections the cards forced: walk momentum defeats takeoff-column capture
+     (WALKIN pin passes even pre-fix; the dangerous entry is MOMENTUM-LESS — the flagship's chained
+     second Ascend, pinned by `ascvine.pin.rest`), and Pillar is structurally SAFE (its held jump is
+     phase-bounded below the capture heights; place/land drives never press jump). THE FIX: Ascend's
+     climb drive holds jump only while the climb still needs height —
+     `setJumping(!(onClimbable() && footY() >= landFootY))` — release lets the −0.15/t clamp settle
+     the bot onto the floor where done fires (capture→done in 5–7 ticks in the post-fix traces; water
+     untouched — a water cell is never a climbable cell). All 4 climb cards PASS; unit suite green.
+     🟡 OWNER RULING WANTED (the generic net, deliberately NOT implemented): widen the failWhen
+     envelopes' settled-set to include onClimbable (a hang is a stable stance → "settled"), so any
+     residual capture shape (e.g. transient hcol ratchets beside curtains on forward-driving moves)
+     fails fast into a replan-from-the-hang instead of hovering invisible to every envelope.
+     Cross-move blast radius — waits for the owner. AFTER: rerun the flagship with raised
+     -BudgetTicks (this class was the prime suspect for the residual 0.51 b/s pace).
+   - **✅ RESOLVED (same pass) — the parkour snake's NAV-DEAD tail.** Root cause held: tiles beyond
+     the boot view-distance bubble never fire a durable CHUNK_LOAD, so the nav pipeline never built
+     them. Fix: `ChunkNavLoader.buildNow(level,cx,cz)` (public synchronous per-chunk build, skip-if-
+     built, same riders as the tick drain) called from `ParkourCourse.enter` over each tile's padded
+     chunk footprint, PLUS the BoxedInCourse-style `navReadyAround` residency gate in the settle
+     branch (an unbuilt tile is now an explicit `HARNESS:` verdict, never a silent bot-FAIL or a
+     vacuous refusal-PASS). VALIDATED: full suite 2026-07-31 ran 82/82 trials ALIVE — zero
+     "nav gave up", zero HARNESS verdicts; the formerly-dead ~28-tile tail is green except the
+     honestly-measured pre-existing shortfalls. Post-triage true suite state: 72 PASS / 9 real FAIL /
+     1 intended planner-gap. The 9: `owner.honeyflyover` + `.runup` (newly-alive honestCross twins,
+     genuinely short at maxProj 0.96/1.16 of 3.0 — the standing honey walk-off shortfall, now
+     measured instead of masked) + the offset family (`offset2p/3p/2n` walkin=fell at ~0 takeoff
+     speed, rest=timeout) + `diag2.walkin` (fell, takeoffSpd 0.013) — the known offset-probe /
+     chained-momentum servo debt, climb-free tiles, untouched by this arc. A `-ClimbOnly` fast gate
+     (script switch + `orebit.parkour.climbonly`) runs just the climb cards in ~1 min.
 
 Arc design: `internal_docs/DESIGN-bot-abilities.md` (ratified order: Crafting → Farming →
 Fighting → Building; component template + decision log §10). This file tracks arc state only —

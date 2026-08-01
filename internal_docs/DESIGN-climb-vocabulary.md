@@ -296,3 +296,47 @@ boot bubble, NEVER appended into the nav-dead tail; sanity-check non-zero search
 - MOVEMENT-DESIGN.md §2 gains one pointer line to this card. CLAUDE.md's "Pillar and Parkour
   execute via plan()" note is stale (14 moves convert) — correct in the same pass.
 - HANDOFF-abilities.md item 4: record the vine-up refutation + both owner rulings + this card.
+
+## §9 The held-jump × climbable-transit elevator (2026-07-31, log-convicted + fixed)
+
+The flagship class witnessed 2026-07-31 22:12 (near-vertical deviation up a vine curtain into
+the leaf underside during an Ascend chain), reproduced deterministically by the ParkourCourse
+`ascvine.*` cards and convicted from the per-tick `j/c/h` trace columns.
+
+**Convicted mechanism** (`ascvine.face`, pre-fix): Ascend's climb-phase drive held
+`setJumping(true)` unconditionally. The tick the bot's FEET cell samples a climbable in the
+landing stance, vanilla's `jumping && onClimbable → +0.2/t` (§1) converts the held jump into a
+climb: the bot rises THROUGH its own landing stance, and at the curtain top enters a 4-tick
+hover limit cycle — one `c=1` tick re-launches it off every falling re-entry, so with jump held
+it can never descend through a vine cell and never grounds. `done`/`resetWhen`/`failWhen` are
+all settled-gated (grounded/inWater/inLava) and a hover is none of those — structurally
+un-terminable. Measured: 370 ticks dead-centred on the target column, feet one block above the
+stance, `h=0` throughout (the horizontalCollision arm was NOT involved; the held jump alone
+sustains the class).
+
+**Two refinements the cards forced on the hypothesis**: (1) walk momentum defeats
+takeoff-column capture (`ascvine.pin` WALKIN passes even pre-fix — the centre crosses the
+column boundary before the feet sample the curtain); the dangerous entry is the MOMENTUM-LESS
+one (`ascvine.pin.rest`, the flagship's chained-second-Ascend condition). (2) Pillar is
+structurally SAFE: its held jump is phase-bounded BELOW the capture heights (the `jump` phase
+advances at `y ≥ fy+2` into `place`/`land` drives that never press jump — a feet-cell vine
+gives a slow +0.2 rise to the advance threshold, then a clamped settle onto the placed
+footing). No other converted move holds jump across its landing stance.
+
+**The fix (execution, Ascend climb drive)**: hold jump only while the climb still NEEDS
+height — `setJumping(!(onClimbable() && footY() >= landFootY))`. Below the target the held
+press is right in every medium (ballistic launch on land, +0.2/t ratchet up a curtain, swim-up
+in water — a water cell is never a climbable cell, so the swim-out behaviour cannot overlap);
+at/above it in a climbable, release and let the −0.15/t descent clamp settle the bot onto the
+floor where `done` fires. Post-fix traces: capture→done in 7 ticks (`ascvine.face`), and the
+REST entry's eastward steer during the clamped descent carries it across the column boundary
+onto the landing with no bounce loop (`ascvine.pin.rest`, capture→done in 5 ticks).
+
+**Open (owner ruling required — the generic net, NOT implemented)**: widen the failWhen
+envelopes' settled-set to include `onClimbable()` (a hang is a stable stance — the bot can
+stay indefinitely, so it IS "settled" for off-plan purposes). That would make ANY residual
+capture shape (e.g. transient hcol ratchets beside curtains on forward-driving moves) fail
+fast into a replan-from-the-hang instead of hovering invisible to every envelope. Blast
+radius: every converted move's failWhen; the fixed Ascend transit stays in-band (verified
+against the post-fix traces), but this is a cross-move behaviour change and waits for the
+owner.
