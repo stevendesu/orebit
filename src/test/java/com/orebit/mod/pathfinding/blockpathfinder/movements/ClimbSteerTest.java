@@ -131,11 +131,26 @@ class ClimbSteerTest {
     @Test
     void ladderPlateSinkDoesNotSneak() {
         View seg = new View(55.5, 178.0, 256.5, 55.5, 177.0, 256.5); // Δy = −1
-        FakeBot bot = new FakeBot(55.5, 177.0, 256.4); // atop the plate, slightly off the cell centre
+        // Standing ON the 3/16 plate strip means the bot's centre sits near the cell edge — well outside
+        // the column deadband — so the re-centre must still push it off the strip toward the centre.
+        FakeBot bot = new FakeBot(55.5, 177.0, 256.2);
         MovementRegistry.CLIMB.steer(bot, seg);
         assertFalse(bot.sneaking, "a ladder-plate sink must NOT sneak — the edge-guard would pin the bot");
         assertFalse(bot.jumping, "the sink must not jump");
         assertTrue(bot.forward > 0.0f, "the re-centre must walk the bot off the plate strip");
+    }
+
+    /** The vine-bounce fix's load-bearing detail (owner ruling 2026-07-31): within the column deadband
+     *  the re-centre outputs EXACTLY zero forward — no input → no wall-press → no involuntary +0.2
+     *  climb ratchet beside a trunk vine. */
+    @Test
+    void alignedDescendGivesExactZeroForward() {
+        View seg = new View(55.5, 178.0, 256.5, 55.5, 177.0, 256.5); // Δy = −1
+        FakeBot bot = new FakeBot(55.5, 177.5, 256.4); // 0.1 off centre — inside the 0.15 deadband
+        MovementRegistry.CLIMB.steer(bot, seg);
+        assertTrue(bot.forward == 0.0f, "aligned: exact zero forward, not an eased push; was " + bot.forward);
+        assertFalse(bot.sneaking, "descending: no sneak");
+        assertFalse(bot.jumping, "descending: no jump");
     }
 
     /** A mid-column hang descending (onClimbable): the sink-in branch must not fire — no inputs, the

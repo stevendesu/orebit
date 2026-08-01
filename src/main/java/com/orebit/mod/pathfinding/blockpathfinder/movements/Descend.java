@@ -181,6 +181,18 @@ public final class Descend implements Movement {
                             && SteerControl.stepOffGate(b, v)) {
                         return;                                // carry uncontained — arrest this tick, commit later
                     }
+                    // COLUMN DEADBAND (owner ruling 2026-07-31, the vine-bounce fix): once over the target
+                    // column, stop shoving — zero forward lets gravity (or the −0.15 climbable clamp beside
+                    // a trunk vine) settle the bot straight down onto the floor, where done fires. Within
+                    // the deadband the bot's box is fully inside the target cell, so it CANNOT still be
+                    // standing on the from cell — this can never stall the step-off itself; and no box
+                    // contact with a neighbour means no horizontalCollision → no involuntary +0.2 climb
+                    // ratchet → no bounce (SteerControl.COLUMN_DEADBAND's derivation).
+                    double ox = v.tx() - b.x(), oz = v.tz() - b.z();
+                    if (Math.sqrt(ox * ox + oz * oz) <= SteerControl.COLUMN_DEADBAND) {
+                        b.setForward(0.0f);
+                        return;
+                    }
                     SteerControl.drive(b, v);                  // medium-aware (walk on land, swim if submerged)
                 })
                 .done(b -> b.grounded()
