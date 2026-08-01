@@ -175,8 +175,11 @@ only if the owner reopens it.
      target frame, sneak's 0.3 input factor × the ±0.15 climbable clamp interacting, or the reached
      scan never advancing wp5 so the drive recenters on the CURRENT column). The latvine card's
      j/s/c/h per-tick trace is the conviction vehicle — run `run-parkour.ps1 -ClimbOnly`, read the
-     hanging-lateral window, THEN fix. latvine's own verdict from this chain was not read — check
-     run/parkour/orebit-parkour-result.properties before re-running. Root cause held: tiles beyond
+     hanging-lateral window, THEN fix. latvine's verdict from the same chain: FAIL(fell) at maxProj 4.20 of 5.35 (was 1.48) — on the
+     CARD the hanging lateral DOES creep (crossed 4 of 5 cells) and fell at the FAR edge (the exit /
+     last-cell transfer), while the AUTOTEST stalls at the FIRST cell — the two scenarios now fail
+     DIFFERENTLY, so diff their geometries (wall height / vine support arrangement) before assuming
+     one mechanism. Root cause held: tiles beyond
      the boot view-distance bubble never fire a durable CHUNK_LOAD, so the nav pipeline never built
      them. Fix: `ChunkNavLoader.buildNow(level,cx,cz)` (public synchronous per-chunk build, skip-if-
      built, same riders as the tick drain) called from `ParkourCourse.enter` over each tile's padded
