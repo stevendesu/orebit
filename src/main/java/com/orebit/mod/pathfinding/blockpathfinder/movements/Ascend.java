@@ -283,10 +283,28 @@ public final class Ascend implements Movement {
         // land, +0.2/t ratchet up a curtain toward the step); water is untouched (a water cell is never a
         // climbable cell, so onClimbable() and the swim-out behaviour can't overlap).
         plan.phase("climb")
+                // Align before jumping (MovePlan.Phase.arrestCarryFrom): an Ascend entered carrying momentum
+                // perpendicular to its own step — the 2026-07-31 post-replan specimen, where an abandoned
+                // sprinting Parkour runup had parked the centre ~0.15 from the −z lip and the adopted Ascend
+                // drove −x — launches off-lane and grounds off both of the envelope's admitted columns, a
+                // permanent fail→HOLD. A straight approach carries no cross velocity and is unaffected.
+                .arrestCarryFrom(fx, fz)
                 .drive((b, v) -> {
                     if (!b.grounded()) launched[0] = true;      // arm the reset only once off the ground
                     SteerControl.steerTowards(b, v);
-                    b.setJumping(!(b.onClimbable() && b.footY() >= landFootY));
+                    // Hold the jump only while the climb still NEEDS height. The height test alone is the
+                    // whole rule; the earlier form additionally required onClimbable, which silently made it
+                    // a vine-only release and left a bot that had climbed OUT of the curtain still jumping.
+                    // Log-convicted 2026-08-01 (headless flagship, (47,*,220) vine → Ascend to (47,146,219)):
+                    // the bot rode the vine to foot 147 == landFootY, left the climbable (climbable=false),
+                    // grounded in the FROM column, and the still-held jump launched it from one block too
+                    // high — apex foot 148, outside the target column's admitted [landFootY-1, landFootY]
+                    // band, a permanent fail->HOLD. At or above the landing feet there is no height left to
+                    // gain in EITHER medium: on a curtain the -0.15/t clamp settles the bot onto the floor,
+                    // on solid ground it simply walks across at the right level, and both reach the landing
+                    // stand where done fires. This also stops the mirror case — re-jumping off the landing
+                    // itself on the arrival tick, which is the same predicate (footY == landFootY).
+                    b.setJumping(b.footY() < landFootY);
                 })
                 .done(b -> b.grounded()
                         && b.footX() == tx && b.footY() == landFootY && b.footZ() == tz);

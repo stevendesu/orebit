@@ -1647,12 +1647,24 @@ final class BotNavigator {
     private void logVerbose(Movement movement, BlockPos wp) {
         String move = movement.getClass().getSimpleName();
         String medium = bot.isInWater() ? "water" : (EntityState.onGround(bot) ? "ground" : "air");
-        String key = waypointIndex + "|" + move + "|" + medium;
+        // The line prints the WAYPOINT it is driving toward; without the bot's own cell you cannot tell a
+        // step that arrived from one still short of its target (the 2026-08-01 vine-Ascend re-jump: the
+        // grounded tick was ambiguous between "on the landing stand" and "still in the from column"). So the
+        // dedup key carries the bot's foot cell + grounded + phase too — still one line per STATE CHANGE,
+        // never per tick, but now every cell/phase transition of a step is on the record.
+        String key = waypointIndex + "|" + move + "|" + medium + "|" + phaseRunner.phase()
+                + "|" + bot.footX() + "," + bot.footY() + "," + bot.footZ() + "|" + bot.grounded();
         if (key.equals(lastVerbose)) return;
         lastVerbose = key;
         bot.chat("[bot] " + move + " → " + AllyBotEntity.compact(wp) + " (" + medium + ")");
-        OrebitCommon.LOGGER.info("[Orebit] exec {} -> {} ({}) feetY={} targetY={}",
-                move, AllyBotEntity.compact(wp), medium, String.format("%.2f", bot.getY()),
+        OrebitCommon.LOGGER.info(
+                "[Orebit] exec {} wp{} -> {} ({}) phase={}/{} botFoot=({},{},{}) botY={} grounded={}"
+                        + " climbable={} reached={} targetY={}",
+                move, waypointIndex, AllyBotEntity.compact(wp), medium,
+                phaseRunner.phase(), phaseRunner.phases(),
+                bot.footX(), bot.footY(), bot.footZ(), String.format("%.3f", bot.getY()),
+                bot.grounded(), bot.onClimbable(),
+                movement.reached(bot, wp.getX(), wp.getY(), wp.getZ()),
                 String.format("%.2f", wp.getY() + 1.0));
     }
 
