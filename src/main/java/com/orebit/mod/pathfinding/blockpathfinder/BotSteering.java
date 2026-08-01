@@ -73,6 +73,21 @@ public interface BotSteering {
     default boolean onClimbable() { return false; }
 
     /**
+     * Whether the bot is <b>settled</b> — supported by SOME medium rather than ballistic: standing, afloat,
+     * suspended in lava, or hanging on a climbable. This is the movement-layer spelling of the follower's
+     * own plan-anchor rule ({@code BotNavigator}'s {@code planAnchor}, owner ruling 2026-07-30: "never plan
+     * while the bot is ballistic; a climbable hang or fluid suspension is a controlled anchor"), kept as one
+     * predicate so the two can never drift apart.
+     *
+     * <p>A waypoint is a STAND cell, so "reached" means <i>supported there</i> — see {@link
+     * Movement#reached}. The ballistic case is the one that must never match: a falling bot's feet block
+     * transits cells it is merely passing THROUGH.
+     */
+    default boolean settled() {
+        return grounded() || inWater() || inLava() || onClimbable();
+    }
+
+    /**
      * Whether the block directly UNDER the bot's feet is scaffolding — the one climbable whose top a held
      * SNEAK sinks through (scaffolding is exempt from the climbable sneak-hold), which is exactly how the
      * sink-in step descends a scaffold deck (DESIGN-climb-vocabulary.md §3.5/§4). A ladder plate must NOT
