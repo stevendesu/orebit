@@ -11,9 +11,12 @@ import java.util.Locale;
 import java.util.UUID;
 
 import com.mojang.authlib.GameProfile;
+import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.platform.ConfigDir;
 import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.PlatformEvents;
+import com.orebit.mod.worldmodel.pathing.ChunkNavLoader;
+import com.orebit.mod.worldmodel.pathing.NavStore;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -99,6 +102,9 @@ public final class ParkourCourse {
     private static final int MAX_NAV_RETRY = 5;
     /** Per-trial attempt budget (ticks). */
     private static final int ATTEMPT_BUDGET = 400;
+    /** Grace window (ticks past the settle target) for the nav-residency gate before the harness declares
+     *  ITSELF broken — enter()'s explicit footprint build normally satisfies the gate on the first check. */
+    private static final int NAV_BUILD_WAIT = 200;
 
     private static final BlockState FLOOR = Blocks.STONE.defaultBlockState();
     private static final BlockState SLAB = Blocks.SMOOTH_STONE_SLAB.defaultBlockState();
@@ -117,6 +123,17 @@ public final class ParkourCourse {
             .setValue(BlockStateProperties.HORIZONTAL_FACING, Direction.EAST)
             .setValue(BlockStateProperties.HALF, Half.BOTTOM)
             .setValue(BlockStateProperties.STAIRS_SHAPE, StairsShape.STRAIGHT);
+    /** Climbable-transit palette (the 2026-07-31 held-jump × vine-transit elevator repro family).
+     *  VINE_SOUTH clings to the wall block at z+1 (its SOUTH face); VINE_WEST to the block at x−1 —
+     *  always place the supporting solid FIRST so no neighbour update pops an unsupported vine. */
+    private static final BlockState VINE_SOUTH = Blocks.VINE.defaultBlockState()
+            .setValue(BlockStateProperties.SOUTH, true);
+    private static final BlockState VINE_WEST = Blocks.VINE.defaultBlockState()
+            .setValue(BlockStateProperties.WEST, true);
+    /** Persistent leaves (no decay): the incident's canopy — the cap the elevator pins under and the
+     *  blocked forward face it presses into. Full-cube collision, but the REAL block for fidelity. */
+    private static final BlockState LEAF = Blocks.OAK_LEAVES.defaultBlockState()
+            .setValue(BlockStateProperties.PERSISTENT, true);
 
     public static void register(PlatformEvents events) {
         if (System.getProperty("orebit.parkour") == null) {
@@ -130,6 +147,13 @@ public final class ParkourCourse {
 
     private enum Template { REACH, PRECISION, OFFSET }
     private enum Approach { WALKIN, REST }
+
+    /** Climbable-transit card shapes (see {@code buildClimb}): the held-jump × vine-transit elevator
+     *  repro family. ASC_PIN = the faithful flagship pin (curtain over the takeoff column + blocked
+     *  forward face + canopy cap); ASC_FACE = curtain IN the landing stance cells with an open escape
+     *  (does done/failWhen ever recover?); CLIFF = vine-curtain climb-down a 4-block face (the
+     *  fall-arrest + descend-beside-wall regression pin for the vine-bounce fix). */
+    private enum ClimbKind { ASC_PIN, ASC_FACE, CLIFF }
 
     /** One jump challenge: an approach direction + a jump vector + a landing template + a precursor condition,
      *  with all world geometry precomputed from its base X band. */
@@ -145,6 +169,8 @@ public final class ParkourCourse {
         boolean fastEntry;              // owner-gate: force a full-SPRINT approach (real 3-stone run) into the jump
         boolean descendRunway;          // raised (Y0+1) approach stepping DOWN onto the takeoff cell — the
                                         //   HOT-ENTRY chained-momentum condition (owner ruling 2026-07-31)
+        ClimbKind climb;                // != null: a climbable-transit card — buildClimb adds the vine/leaf
+                                        //   structure onto the standard runway/landing geometry
         boolean assertNoDamage;         // magma-overhang: PASS requires the bot took ZERO damage
         boolean expectRefusal;          // beyond-envelope geometry the planner rightly declines -> PASS = clean refusal
         String refuseNote;              // optional note appended to an expectRefusal PASS reason (e.g. "conservative")
@@ -280,6 +306,12 @@ public final class ParkourCourse {
             // (stone +X runway, soul-sand takeoff cell, gap-1 NE diagonal jump over a void) so a run is ~1 min.
             if (System.getProperty("orebit.parkour.souldiag") != null) {
                 soulDiag("souldiag");
+                return;
+            }
+            // Fast-iteration gate: -Dorebit.parkour.climbonly builds ONLY the climbable-transit cards (the
+            // vine-elevator repro family) so a run is ~1 min. Explicit bases — identical either way.
+            if (System.getProperty("orebit.parkour.climbonly") != null) {
+                climbCards();
                 return;
             }
             // Cardinal head-on (approach == jump == +X). name, jump(dx,dy,dz), template.
@@ -423,6 +455,35 @@ public final class ParkourCourse {
             // tiles disjoint from column 0. Root-causing the dead zone is separate harness work.
             descendCard("hotoffset3", 1, 0, 3, 0, 1, Template.OFFSET, false, BASE_X - STRIDE, BASE_Z);
             descendCard("hotdiag1", 1, 0, 2, 0, 2, Template.REACH, false, BASE_X - STRIDE, BASE_Z + STRIDE);
+
+            // ==== CLIMBABLE-TRANSIT cards (the 2026-07-31 flagship vine-elevator class) =====================
+            // Vanilla reinterprets held inputs when the FEET cell is #climbable: (jumping ||
+            // horizontalCollision) && onClimbable → +0.2/t climb, regardless of what the move intended.
+            // ascvine.pin is the faithful flagship shape — an Ascend whose jump transits a vine curtain
+            // hung over its own takeoff column, with the forward face blocked ABOVE the landing head (the
+            // leaf underside) and a canopy cap: the held jump turns into a runaway climb past the target,
+            // and no settled state exists for done/resetWhen/failWhen to fire on. ascvine.face puts the
+            // curtain IN the landing stance cells with an open escape (contrast: does the envelope ever
+            // recover?). desvine.cliff climbs DOWN a vine curtain beside a 4-block face — the fall-arrest
+            // vocabulary + the descend vine-bounce regression pin (COLUMN_DEADBAND, owner ruling
+            // 2026-07-31). Explicit west bases, continuing the descendCard column (nav-dead-tail rule).
+            climbCards();
+        }
+
+        /** The climbable-transit card set — also the {@code climbonly} fast gate's whole course.
+         *  pin runs under BOTH precursors: WALKIN passes even pre-fix (walk momentum carries the feet
+         *  across the column boundary before they ever sample the takeoff curtain — measured 2026-07-31),
+         *  while REST is the flagship's chained-Ascend condition (zero momentum at the face, the feet DO
+         *  sample the takeoff-column vine mid-jump — the faithful elevator entry). */
+        void climbCards() {
+            climbCard("ascvine.pin", Approach.WALKIN, ClimbKind.ASC_PIN, 1,
+                    BASE_X - STRIDE, BASE_Z + 2 * STRIDE);
+            climbCard("ascvine.face", Approach.WALKIN, ClimbKind.ASC_FACE, 1,
+                    BASE_X - STRIDE, BASE_Z + 3 * STRIDE);
+            climbCard("desvine.cliff", Approach.WALKIN, ClimbKind.CLIFF, -4,
+                    BASE_X - STRIDE, BASE_Z + 4 * STRIDE);
+            climbCard("ascvine.pin.rest", Approach.REST, ClimbKind.ASC_PIN, 1,
+                    BASE_X - STRIDE, BASE_Z + 5 * STRIDE);
         }
 
         /** Permanent regression gate: the owner's EXACT in-game honey-flyover failure, faithfully reproduced.
@@ -687,6 +748,17 @@ public final class ParkourCourse {
             trials.add(tr);
         }
 
+        /** One climbable-transit card: the standard +X runway/REACH geometry (a unit "jump" of
+         *  {@code (1, jdy, 0)} — for CLIFF the drop, for the ascvine family the one-up step), plus the
+         *  vine/leaf structure {@code buildClimb} lays for its {@link ClimbKind}. Explicit base — these
+         *  live in the west column, never on the snake (the nav-dead-tail rule, see descendCard). */
+        void climbCard(String name, Approach a, ClimbKind kind, int jdy, int baseX, int baseZ) {
+            Trial tr = new Trial(name, a, 1, 0, 1, jdy, 0, Template.REACH, false,
+                    baseX, baseZ);
+            tr.climb = kind;
+            trials.add(tr);
+        }
+
         void start(MinecraftServer server) {
             this.server = server;
             if (Boolean.getBoolean("orebit.parkour.debug")) {
@@ -708,8 +780,11 @@ public final class ParkourCourse {
                 }
                 trace = Files.newBufferedWriter(ConfigDir.serverDir(server).resolve(TRACE_FILE),
                         StandardCharsets.UTF_8);
-                trace.write("Orebit parkour course trace  (T <trial> <tick> x y z | spd vy | onGround | move)\n");
-                trace.write("legend: spd = position-delta horizontal speed (b/t); TAKEOFF marks the onGround->air flip\n\n");
+                trace.write("Orebit parkour course trace  (T <trial> <tick> x y z | spd vy | vx vz | onGround"
+                        + " | j c h | move)\n");
+                trace.write("legend: spd = position-delta horizontal speed (b/t); TAKEOFF marks the onGround->air"
+                        + " flip; j = jump input held, c = onClimbable (feet cell), h = horizontalCollision —"
+                        + " j/h with c=1 is the vanilla +0.2/t climb capture\n\n");
                 OrebitCommon.LOGGER.info("[Orebit/parkour] course ready; {} trials", trials.size());
                 enter(0);
             } catch (Throwable t) {
@@ -722,6 +797,12 @@ public final class ParkourCourse {
             index = i;
             Trial tr = trials.get(i);
             buildTile(tr); // each trial owns a distinct grid cell — build it once on entry
+            // NAV-DEAD-TAIL FIX (2026-07-31): a tile beyond the boot view-distance bubble writes its
+            // blocks fine (transient sync chunk fetch) but never fires a durable CHUNK_LOAD, so the nav
+            // pipeline never builds it — every search there reads AIR, the readiness gate times out, and
+            // the verdict is a silent "nav gave up" (or a VACUOUS expectRefusal PASS: refusal-by-dead-
+            // grid). Build the tile's chunk footprint NOW, synchronously, over the just-written blocks.
+            navBuildFootprint(tr);
             bot.reviveIfDead();
             bot.setHealth(bot.getMaxHealth());
             bot.setMode(AllyBotEntity.Mode.STAY);
@@ -764,6 +845,18 @@ public final class ParkourCourse {
                 // the short local settle (snake ordering keeps each teleport inside the already-built bubble).
                 int target = index == 0 ? WARMUP_TICKS : SETTLE_TICKS;
                 if (++settleTicks < target) return;
+                // Nav-residency gate (the BoxedInCourse pattern): never issue the goto until the grid around
+                // BOTH endpoints is built — a tick-counted settle alone converts an unbuilt tile into a silent
+                // "nav gave up" FAIL or a vacuous refusal PASS. enter()'s explicit footprint build makes this
+                // pass immediately; if it still holds past the grace window the HARNESS is broken, and that is
+                // its own explicit verdict, never a bot verdict.
+                if (!navReadyAround(tr)) {
+                    if (settleTicks >= target + NAV_BUILD_WAIT) {
+                        record(tr, "FAIL", "HARNESS: nav never built around the tile (waited "
+                                + settleTicks + "t)");
+                    }
+                    return;
+                }
                 settling = false;
                 bot.comeTo(tr.goal);
                 return;
@@ -976,8 +1069,10 @@ public final class ParkourCourse {
                             spd, x, z, tr.proj(x, z), v.x, v.z));
                 }
                 trace.write(String.format(Locale.ROOT,
-                        "T %-16s %3d  %.3f %.3f %.3f | %.4f %.4f | vx=%.4f vz=%.4f | %d | %s\n",
-                        tr.name, attemptTicks, x, bot.getY(), z, spd, v.y, v.x, v.z, onGround ? 1 : 0, move));
+                        "T %-16s %3d  %.3f %.3f %.3f | %.4f %.4f | vx=%.4f vz=%.4f | %d | j=%d c=%d h=%d | %s\n",
+                        tr.name, attemptTicks, x, bot.getY(), z, spd, v.y, v.x, v.z, onGround ? 1 : 0,
+                        bot.jumpHeld() ? 1 : 0, bot.onClimbable() ? 1 : 0,
+                        bot.horizontalCollision ? 1 : 0, move));
             } catch (IOException ignored) { }
             wasGrounded = onGround;
             prevX = x;
@@ -1012,6 +1107,31 @@ public final class ParkourCourse {
             } else {
                 finish("all trials complete");
             }
+        }
+
+        /** Synchronously nav-build every chunk a trial can touch: the bounding box over its base, takeoff,
+         *  landing and goal cells, padded by the readiness ring — so the settle gate's {@code ringBuilt}
+         *  passes on its first check for BOTH endpoints. Already-built chunks are skipped (the near-spawn
+         *  common case); an unbuilt one runs the exact per-chunk path the tick drain runs. */
+        void navBuildFootprint(Trial tr) {
+            int pad = ConfigLoader.config().navReadyRadiusChunks() + 1;
+            int minX = Math.min(Math.min(tr.baseX, tr.takeoffX), Math.min(tr.landX, tr.goal.getX()));
+            int maxX = Math.max(Math.max(tr.baseX, tr.takeoffX), Math.max(tr.landX, tr.goal.getX()));
+            int minZ = Math.min(Math.min(tr.baseZ, tr.takeoffZ), Math.min(tr.landZ, tr.goal.getZ()));
+            int maxZ = Math.max(Math.max(tr.baseZ, tr.takeoffZ), Math.max(tr.landZ, tr.goal.getZ()));
+            for (int cx = (minX >> 4) - pad; cx <= (maxX >> 4) + pad; cx++) {
+                for (int cz = (minZ >> 4) - pad; cz <= (maxZ >> 4) + pad; cz++) {
+                    ChunkNavLoader.buildNow(level, cx, cz);
+                }
+            }
+        }
+
+        /** The settle gate's residency test: the readiness ring around the bot's start AND the goal. */
+        boolean navReadyAround(Trial tr) {
+            int r = ConfigLoader.config().navReadyRadiusChunks();
+            return NavStore.ringBuilt(level, ((int) Math.floor(tr.startX)) >> 4,
+                            ((int) Math.floor(tr.startZ)) >> 4, r)
+                    && NavStore.ringBuilt(level, tr.goal.getX() >> 4, tr.goal.getZ() >> 4, r);
         }
 
         /** Place a trial's blocks: runway + landing/goal geometry, one solid layer. Chunks sync-load on write. */
@@ -1068,6 +1188,51 @@ public final class ParkourCourse {
                 for (int k = 1; k <= WALK; k++) place(tr.landX + k * px, tr.landY, tr.landZ + k * pz);
             }
             if (tr.stairRun) buildStairs(tr); // fill the diagonal staircase + its ceiling between the platforms
+            if (tr.climb != null) buildClimb(tr); // vine/leaf structure over the standard geometry
+        }
+
+        /** Lay a climbable-transit card's vine/leaf structure onto the standard runway/landing geometry.
+         *  Supports are always placed BEFORE their vines (an unsupported vine pops on its own neighbour
+         *  update). All cells are in the z = baseZ travel row; support walls sit at z+1 (lateral, outside
+         *  the corridor) or inside the cliff face.
+         *
+         *  <p><b>ASC_PIN — the faithful flagship elevator.</b> The Ascend {@code (takeoff,Y0) →
+         *  (land,Y0+1)} is offered legitimately: its checked cells (landing feet/head at Y0+2/Y0+3, takeoff
+         *  head-clearance at Y0+3 — a PASSABLE vine) are all clear. But the jump's feet transit
+         *  {@code (takeoffX, Y0+2)} — a vine — and vanilla's {@code (jumping || horizontalCollision) &&
+         *  onClimbable → +0.2/t} converts the held jump into a climb. The forward face is leaf-blocked at
+         *  Y0+4/Y0+5 (the incident's canopy underside): by the time the ±0.15/t clamped horizontal drift
+         *  reaches the cell boundary the bot's head is already in the blocked band, so it cannot squeeze
+         *  out through the open landing corridor — it presses the leaf face (hcol arm), rides the curtain
+         *  to the cap and pins, with no grounded/fluid state for done/resetWhen/failWhen to fire on.
+         *
+         *  <p><b>ASC_FACE — capture with an open escape.</b> The curtain occupies the landing STANCE cells
+         *  themselves (feet Y0+2, head Y0+3), nothing blocks forward or above: does the follower's
+         *  done/failWhen machinery ever recover the step once the arrival cell is a climbable?
+         *
+         *  <p><b>CLIFF — climb-down regression pin.</b> A 4-block face under the takeoff lip with the
+         *  curtain down it: the route falls off the lip into the curtain (hang-arrest), then climbs down
+         *  beside the wall — the geometry the descend vine-bounce fix (COLUMN_DEADBAND exact-zero input)
+         *  must keep clean: any wall-press would +0.2-ratchet the bot back up the vine. */
+        void buildClimb(Trial tr) {
+            int z = tr.baseZ;
+            switch (tr.climb) {
+                case ASC_PIN:
+                    for (int y = Y0 + 2; y <= Y0 + 5; y++) place(tr.takeoffX, y, z + 1);    // curtain support
+                    for (int y = Y0 + 2; y <= Y0 + 5; y++) placeState(tr.takeoffX, y, z, VINE_SOUTH);
+                    placeState(tr.landX, Y0 + 4, z, LEAF);   // the blocked forward face (canopy underside)…
+                    placeState(tr.landX, Y0 + 5, z, LEAF);   // …landing corridor Y0+2..Y0+3 stays OPEN
+                    placeState(tr.takeoffX, Y0 + 6, z, LEAF); // the canopy cap the elevator pins under
+                    break;
+                case ASC_FACE:
+                    for (int y = Y0 + 2; y <= Y0 + 3; y++) place(tr.landX, y, z + 1);       // curtain support
+                    for (int y = Y0 + 2; y <= Y0 + 3; y++) placeState(tr.landX, y, z, VINE_SOUTH);
+                    break;
+                case CLIFF:
+                    for (int y = Y0 - 4; y <= Y0 - 1; y++) place(tr.takeoffX, y, z);        // the cliff face
+                    for (int y = Y0 - 3; y <= Y0; y++) placeState(tr.landX, y, z, VINE_WEST); // the curtain
+                    break;
+            }
         }
 
         /** Fill the diagonal staircase (BOTTOM stairs FACING=EAST) between the takeoff cell and the landing,

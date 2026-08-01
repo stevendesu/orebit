@@ -923,8 +923,18 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     // setSprinting(boolean) is satisfied by the inherited public LivingEntity method.
     /** Widen the inherited protected {@code setJumping} to public so it satisfies the {@link BotSteering} seam.
-     *  Held true, vanilla {@code aiStep} jumps on land and swims up in water — the one climb mechanism. */
-    @Override public void setJumping(boolean jumping) { super.setJumping(jumping); }
+     *  Held true, vanilla {@code aiStep} jumps on land and swims up in water — the one climb mechanism.
+     *  Shadowed into {@link #jumpHeld()} for the diagnostic harnesses (no reflection into the protected
+     *  vanilla field). */
+    @Override public void setJumping(boolean jumping) { this.jumpInputHeld = jumping; super.setJumping(jumping); }
+
+    /** Shadow of the jump INPUT forged this tick (reset false with the other inputs at the top of each
+     *  tick, re-held by whichever steer/drive wants it — so true means "held RIGHT NOW"). */
+    private boolean jumpInputHeld;
+
+    /** Diagnostic read of the live jump input — the course harnesses' trace column, so a held-jump ×
+     *  climbable capture is convicted from data instead of supposition. */
+    public boolean jumpHeld() { return jumpInputHeld; }
 
     // onClimbable() on the BotSteering seam is satisfied by the inherited public vanilla
     // LivingEntity.onClimbable() (the feet block vs #climbable) — a class method wins over the interface

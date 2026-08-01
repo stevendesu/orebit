@@ -271,11 +271,22 @@ public final class Ascend implements Movement {
         // CLIMB: walk-forward-while-jumping onto the step (the legacy steer()). The held jump input also swims
         // the bot up-and-out when this Ascend leaves water. Arm the reset only once actually airborne. Complete
         // only when standing ON the destination floor (grounded at the landing feet cell).
+        //
+        // CLIMBABLE-TRANSIT DISCRIMINATOR (the 2026-07-31 vine-elevator, log-convicted by the ascvine.face
+        // course card): when the bot's FEET cell is a climbable, vanilla reinterprets the held jump as its
+        // +0.2/t climb — with a vine in the landing stance the bot climbs THROUGH its own target, and at the
+        // curtain top a held jump re-launches it off every falling re-entry (a 4-tick hover limit cycle, feet
+        // one block above the stance, never grounded — so done/resetWhen/failWhen, all settled-gated, can
+        // never fire). So the jump is held only while the climb still NEEDS height: at/above the landing feet
+        // in a climbable, release it and let the climbable's -0.15/t descent clamp settle the bot onto the
+        // floor, where done fires. Below the target the held jump is right in BOTH media (ballistic launch on
+        // land, +0.2/t ratchet up a curtain toward the step); water is untouched (a water cell is never a
+        // climbable cell, so onClimbable() and the swim-out behaviour can't overlap).
         plan.phase("climb")
                 .drive((b, v) -> {
                     if (!b.grounded()) launched[0] = true;      // arm the reset only once off the ground
                     SteerControl.steerTowards(b, v);
-                    b.setJumping(true);
+                    b.setJumping(!(b.onClimbable() && b.footY() >= landFootY));
                 })
                 .done(b -> b.grounded()
                         && b.footX() == tx && b.footY() == landFootY && b.footZ() == tz);

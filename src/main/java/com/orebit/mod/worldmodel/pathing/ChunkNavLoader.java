@@ -123,6 +123,22 @@ public final class ChunkNavLoader {
     }
 
     /**
+     * Build chunk {@code (cx, cz)}'s nav data NOW, synchronously, with every per-chunk rider — the same
+     * path the tick drain runs ({@link #buildChunk}), exposed for the HEADLESS DIAGNOSTIC HARNESSES
+     * (ParkourCourse and siblings). Their synthetic tiles are written with {@code setBlockAndUpdate} into
+     * chunks that can sit OUTSIDE the boot view-distance bubble; such a chunk never fires a durable
+     * CHUNK_LOAD, so the queue-and-drain pipeline never sees it and the tile is nav-dead — every search
+     * out there reads AIR and the readiness gate times out ("nav gave up", zero searches — the 2026-07-31
+     * snake-tail artifact). Skips a chunk that is already built: a resident grid is kept in sync
+     * incrementally by the edit path as the tile's blocks are written, so a wholesale rebuild would be
+     * redundant work. Call AFTER the tile's blocks are placed. Server-tick thread only.
+     */
+    public static void buildNow(ServerLevel level, int cx, int cz) {
+        if (NavStore.isBuilt(level, cx, cz)) return;
+        buildChunk(level, NavStore.key(cx, cz));
+    }
+
+    /**
      * Build ONE queued chunk's nav data + all its riders (portal index, edit-epoch bump, HPA leaf) — the
      * per-chunk work factored out of the tick drain so the FIFO and the vicinity-priority paths run it
      * identically. Server-tick thread only.
