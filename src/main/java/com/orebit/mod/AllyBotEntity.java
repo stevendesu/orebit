@@ -35,6 +35,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -919,7 +920,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     /** Sneak input for the {@link BotSteering} seam: vanilla {@code Entity.setShiftKeyDown}. Held true on a
      *  climbable, {@code isSuppressingSlidingDownLadder()} zeroes the {@code −0.15}/t slide so the bot holds
      *  its height (Climb's lateral grab). Reset false at the top of each tick alongside jump/sprint. */
-    @Override public void setSneak(boolean sneaking) { this.setShiftKeyDown(sneaking); }
+    @Override public void setSneak(boolean sneaking) { this.sneakInputHeld = sneaking; this.setShiftKeyDown(sneaking); }
 
     // setSprinting(boolean) is satisfied by the inherited public LivingEntity method.
     /** Widen the inherited protected {@code setJumping} to public so it satisfies the {@link BotSteering} seam.
@@ -936,6 +937,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      *  climbable capture is convicted from data instead of supposition. */
     public boolean jumpHeld() { return jumpInputHeld; }
 
+    /** Shadow + diagnostic read of the sneak input, same pattern as {@link #jumpHeld()} — sneak is the
+     *  load-bearing input in the climbable lateral-cling and edge-guard mechanisms. */
+    private boolean sneakInputHeld;
+
+    public boolean sneakHeld() { return sneakInputHeld; }
+
     // onClimbable() on the BotSteering seam is satisfied by the inherited public vanilla
     // LivingEntity.onClimbable() (the feet block vs #climbable) — a class method wins over the interface
     // default, so the bot reports its REAL arrest state while headless test doubles default false.
@@ -947,6 +954,15 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     public boolean scaffoldingBelow() {
         ServerLevel level = (ServerLevel) Worlds.of(this);
         return level.getBlockState(this.blockPosition().below()).is(Blocks.SCAFFOLDING);
+    }
+
+    /** The topped-out-on-a-curtain discriminator ({@link BotSteering#climbableBelow}). Same live read as
+     *  {@link #scaffoldingBelow}, against the same {@code #climbable} tag vanilla's own {@code onClimbable}
+     *  uses — so the two stances (feet IN vs feet ABOVE) are classified by one consistent rule. */
+    @Override
+    public boolean climbableBelow() {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        return level.getBlockState(this.blockPosition().below()).is(BlockTags.CLIMBABLE);
     }
 
     // ---- Live-world geometry + block actions (the reconcile seam a MovePlan drives through) -----------

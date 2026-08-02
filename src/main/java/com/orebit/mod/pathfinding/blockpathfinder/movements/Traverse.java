@@ -99,6 +99,21 @@ public final class Traverse implements Movement {
         final long startDesc = ctx.descriptorAt(x, y, z);
         final int startTopY = ctx.standable(startDesc) ? ctx.topYOf(startDesc) : 16; // == floorSurface
         final boolean startStair = ctx.isStair(startDesc); // a stair start's surface is DIRECTIONAL per move
+        // NO AUTO-STEP FROM A PRECARIOUS CLIMB STANCE (owner physics, 2026-08-01). Vanilla's auto-step needs
+        // the bot to be standing on a real, FULL-FACED floor, which two climb stances are not:
+        //   CURTAIN (vine — climbable, non-standable): hanging inside it, or hovering on its top, there is
+        //       no ground contact at all. "You may only traverse onto a block whose top equals your feet
+        //       height — never UP onto a slab / stair / snow layer."
+        //   LADDER TOP (climbable, NARROW_TOP): the 3/16 plate does support a step, but only toward the
+        //       face the ladder is mounted on — stepping the other way just walks off the ledge. FACING is
+        //       not packed in the descriptor, so the direction that works is unknowable here and the whole
+        //       case is refused rather than guessed.
+        // Scoped to CLIMBABLE stances on purpose: a scaffold DECK is full-faced real footing and keeps its
+        // auto-step, and water is not climbable, so the surface-swim / walk-out-onto-a-bank geometry above
+        // is untouched. Only the step-ASSIST branch consults this — the FLAT walk stays legal (it IS the
+        // lateral cling and the step off a curtain top onto a level block), as does the BRIDGE (place a full
+        // block beside you and walk on level).
+        final boolean noAutoStepFromStance = ctx.isClimbable(startDesc) && !ctx.parkourLandable(startDesc);
         for (int[] d : CARDINALS) {
             // §2b door EXIT: when the bot STANDS in an intact door (open OR closed) whose swung panel blocks THIS
             // travel edge, a plain walk can't leave that way. The shared exitDoorDecision (also used by Ascend /
@@ -176,7 +191,7 @@ public final class Traverse implements Movement {
             int pu = ctx.packedAt(nx, uy, nz);
             if (pu != MovementContext.UNBUILT) {
                 long pud = ctx.descriptorOf(nx, uy, nz, pu);
-                if (ctx.standable(pud)
+                if (!noAutoStepFromStance && ctx.standable(pud)
                         && MovementContext.rise(1, ctx.directionalTopY(pud, -d[0], -d[1]), sTop)
                                 <= MovementContext.STEP_ASSIST_MAX_RISE) {
                     int flags = MovementContext.flagsOf(pu);

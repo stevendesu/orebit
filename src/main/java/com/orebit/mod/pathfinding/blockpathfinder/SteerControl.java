@@ -292,8 +292,13 @@ public final class SteerControl {
      * vine-bounce fix's load-bearing detail.
      */
     public static void recenterOnTarget(BotSteering b, SteerView p) {
-        double cx = p.tx() - b.x();
-        double cz = p.tz() - b.z();
+        recenterOn(b, p.tx(), p.tz());
+    }
+
+    /** Shared column servo: proportional walk toward {@code (cx0,cz0)}, exact zero inside {@link #COLUMN_DEADBAND}. */
+    private static void recenterOn(BotSteering b, double cx0, double cz0) {
+        double cx = cx0 - b.x();
+        double cz = cz0 - b.z();
         double d = Math.sqrt(cx * cx + cz * cz);
         if (d > COLUMN_DEADBAND) {
             b.faceHorizontally(cx, cz);
@@ -301,6 +306,35 @@ public final class SteerControl {
         } else {
             b.setForward(0.0f); // aligned — exact zero input; see COLUMN_DEADBAND
         }
+    }
+
+    /**
+     * <b>Station-keep</b>: hold the stance the bot is already in WITHOUT travelling — the input set for
+     * {@link PhaseRunner}'s "stop and fix the geometry" hold (mine an obstruction / place a footing before
+     * the phase drives). Re-centres on the bot's OWN column rather than the step's target, and applies
+     * {@link #holdClimbableStance}.
+     *
+     * <p><b>Why the own column and not the target</b> (convicted 2026-08-01 on the flagship wedge at
+     * {@code (58,133,189)}). The runner's hold is documented as "the bot holds on the column rather than
+     * driving", but it called {@link #recenterOnTarget} — and a LATERAL move's target is the NEXT column, so
+     * the hold walked the bot at full forward straight into the very block it was mining. On flat ground
+     * that is a harmless wall-press. With the bot's feet inside a curtain it is fatal: vanilla's involuntary
+     * climb ({@code (horizontalCollision || jumping) && onClimbable → vy=+0.2}) ratchets the bot up
+     * 0.2/tick — a full block every 5 ticks — while no block is mined in fewer than that. The press
+     * therefore ALWAYS lifts the bot out of its own stance before the obstruction clears; it tops out above
+     * the curtain and grounds one cell above the frame its plan was built from, a permanent fail→HOLD.
+     * Witnessed exactly: a Climb to feet 132 up the vine at {@code (58,129..132,189)}, then a {@code
+     * Traverse +x} needing the jungle leaves at {@code (59,132,189)} mined — the bot ratcheted 132.007 →
+     * 133.026 and settled ON the leaves it was supposed to break. Station-keeping removes the press, so the
+     * ratchet cannot fire (the same physics {@link #COLUMN_DEADBAND} already exploits for the in-place case)
+     * and the mine completes from a stable stance.
+     *
+     * <p>The facing is not lost by dropping the target-ward push: {@link BotSteering#mine} aims at the cell
+     * it breaks (BotMining's look-at-centre), so the hold never needs to face its own obstruction.
+     */
+    public static void stationKeep(BotSteering b, SteerView p) {
+        recenterOn(b, Math.floor(b.x()) + 0.5, Math.floor(b.z()) + 0.5);
+        holdClimbableStance(b, p);
     }
 
     /**
@@ -1290,7 +1324,51 @@ public final class SteerControl {
      * (leaving water onto a bank, clipping a stream, knocked into a pool mid-segment) is steered toward the
      * exit AND lifted/sunk toward its planned cell instead of stalling at buoyancy equilibrium.
      */
+    /**
+     * CLIMBABLE-STANCE HOLD (owner physics, manual proof 2026-08-01). A curtain is not a floor, so a move
+     * executing at one needs the vertical input that HOLDS its stance, or the bot sinks and the move can
+     * never complete. Two stances, two different inputs:
+     *
+     * <ul>
+     *   <li>feet ABOVE a climbable (topped out) &rarr; hold JUMP. It does not cancel the sink; it out-runs
+     *       it by instantly re-climbing at the surface. Sneak would hold too, but sneak's ledge edge-guard
+     *       forbids stepping OFF the curtain top and would trap the bot on the cell it came from.</li>
+     *   <li>feet INSIDE a climbable (lateral cling) &rarr; hold SNEAK. Here jump CLIMBS rather than holds,
+     *       so sneak is the only stance-hold. Sneak does NOT block a simultaneous climb and does not change
+     *       climb speed, so it is safe to hold whenever we are not deliberately descending.</li>
+     * </ul>
+     *
+     * <p>Released when the segment actually wants to go DOWN (the move is a descent through/off the
+     * curtain), the one case where sinking is the intent. Convicted by the 2026-08-01 flagship stall at
+     * {@code (129,~115.5,132)}: a Descend atop a curtain bounced 115&harr;116 for ~12000 ticks, sinking in
+     * and being re-lifted, invisible to every envelope because it is never settled.
+     *
+     * <p>Note the ratchet asymmetry: the wall-press climb can only fire with feet INSIDE the cell, so the
+     * topped-out hold cannot lift the bot away from its own lane.
+     *
+     * <p>BOTH stances require {@code !grounded()}: the hold applies only to a bot actually SUSPENDED on the
+     * curtain, never to one standing on a real block that merely happens to have vines in its feet or under
+     * it. Ground-level vine is everywhere in jungle, and holding sneak there is actively harmful — sneak's
+     * ledge edge-guard forbids stepping off a lip, trapping the bot on the block it was leaving (owner's
+     * warning; measured: flagship best regressed 58.43 &rarr; 212.55 without this guard).
+     *
+     * <p>Applied by BOTH the locomotion {@link #drive} and the runner's {@link #stationKeep} hold — a stance
+     * the bot must keep while WALKING it must equally keep while standing still to mine or place, or the
+     * "stop and fix the geometry" hold quietly slides it off the frame its plan was built from.
+     */
+    public static void holdClimbableStance(BotSteering b, SteerView p) {
+        final boolean descending = p.ty() < b.y() - 0.05;
+        if (!b.grounded() && !descending) {
+            if (b.onClimbable()) {
+                b.setSneak(true);       // feet INSIDE: jump climbs, only sneak holds height
+            } else if (b.climbableBelow()) {
+                b.setJumping(true);     // feet ABOVE: jump out-runs the sink by re-climbing at the surface
+            }
+        }
+    }
+
     public static void drive(BotSteering b, SteerView p) {
+        holdClimbableStance(b, p);
         if (b.inWater()) {
             swimTowards(b, p);
             holdDepth(b, p, 0.0);

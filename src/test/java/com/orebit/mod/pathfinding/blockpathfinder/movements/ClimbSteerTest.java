@@ -27,6 +27,7 @@ class ClimbSteerTest {
         float forward = Float.NaN;
         boolean jumping, sneaking;
         boolean onClimbable, scaffoldBelow; // seam-read states the sink-in branch discriminates on
+        boolean grounded = true;            // lateral branch discriminates hang vs ledge (the edge-guard)
 
         FakeBot(double x, double y, double z) { this.x = x; this.y = y; this.z = z; }
 
@@ -42,7 +43,7 @@ class ClimbSteerTest {
         @Override public int footX() { return (int) Math.floor(x); }
         @Override public int footY() { return (int) Math.floor(y); }
         @Override public int footZ() { return (int) Math.floor(z); }
-        @Override public boolean grounded() { return true; }
+        @Override public boolean grounded() { return grounded; }
         @Override public boolean inWater() { return false; }
         @Override public boolean inLava() { return false; }
         @Override public boolean prone() { return false; }
@@ -96,13 +97,45 @@ class ClimbSteerTest {
         assertTrue(bot.forward > 0.0f, "off-centre re-centre must keep driving the bot into the column");
     }
 
+    /** The HANGING lateral cling — the stance the sneak exists for (it suppresses the −0.15/t slide). */
     @Test
     void lateralClingHoldsSneak() {
         View seg = new View(55.5, 178.0, 256.5, 56.5, 178.0, 256.5); // Δy == 0: ease across the surface
         FakeBot bot = new FakeBot(55.5, 177.2, 256.5); // sagging below the feet target (the vine sag)
+        bot.grounded = false;   // mid-gap hang — nothing under the box
+        bot.onClimbable = true;
         MovementRegistry.CLIMB.steer(bot, seg);
-        assertTrue(bot.sneaking, "a lateral cling must sneak — it suppresses the −0.15/t slide");
+        assertTrue(bot.sneaking, "a hanging lateral cling must sneak — it suppresses the −0.15/t slide");
         assertFalse(bot.jumping, "a lateral cling must not jump (jumping ratchets UP the vine)");
+    }
+
+    /** The ledge→vine ENTRY lateral (the latvine-card convictions, 2026-07-31): a GROUNDED bot at the
+     *  lip must JUMP-grab, never sneak. Sneak arms the vanilla edge-guard, which forbids the walk-off
+     *  the transfer needs (measured: frozen at the lip forever, box edge 0.001 past the ledge, input
+     *  pressing, spd 0.0000) — and a plain walk-off exits a feet-level vine row out its BOTTOM on the
+     *  first airborne tick (measured: fell). The jump arc's falling re-entry passes the vine cell with
+     *  sneak already engaged (airborne), so the slide suppression arrests in-cell. */
+    @Test
+    void lateralEntryFromLedgeJumpGrabs() {
+        View seg = new View(55.5, 178.0, 256.5, 56.5, 178.0, 256.5); // Δy == 0: the entry grab
+        FakeBot bot = new FakeBot(55.5, 177.0, 256.5); // standing on the takeoff ledge at the lip
+        MovementRegistry.CLIMB.steer(bot, seg);        // grounded (default), feet cell not climbable
+        assertFalse(bot.sneaking, "a grounded entry lateral must NOT sneak — the edge-guard pins the lip");
+        assertTrue(bot.jumping, "the entry must JUMP — the arc is the only grab that arrests in the row");
+        assertTrue(bot.forward > 0.0f, "the entry must keep driving off the lip toward the vine column");
+    }
+
+    /** A grounded lateral ON the climbable itself (the ladder-plate crossing): plain walk — no sneak
+     *  (the same edge-guard), no jump (an in-climbable grounded jump is a truncated 0.2 hop). */
+    @Test
+    void lateralOnLadderPlateWalksPlain() {
+        View seg = new View(55.5, 178.0, 256.5, 56.5, 178.0, 256.5); // Δy == 0: plate to plate
+        FakeBot bot = new FakeBot(55.5, 177.0, 256.5); // standing ON the 3/16 plate
+        bot.onClimbable = true;                        // feet cell IS the ladder
+        MovementRegistry.CLIMB.steer(bot, seg);
+        assertFalse(bot.sneaking, "a plate lateral must not sneak — the edge-guard would pin the plate");
+        assertFalse(bot.jumping, "a plate lateral must not jump — collision carries the crossing");
+        assertTrue(bot.forward > 0.0f, "the plate lateral keeps walking toward the next column");
     }
 
     @Test
