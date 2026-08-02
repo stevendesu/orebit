@@ -188,7 +188,17 @@ public final class PhaseRunner {
             }
         }
         if (holding) {
-            SteerControl.recenterOnTarget(bot, view);
+            // "Stop and fix, like a player" — and STOP means stop. A SETTLED bot station-keeps on its OWN
+            // column (SteerControl.stationKeep): re-centring on the step TARGET instead drove it at full
+            // forward into the very block it was mining, which on a curtain ratchets it out of its stance
+            // faster than any block can be broken (the (58,133,189) wedge; full mechanism on stationKeep).
+            // An AIRBORNE bot cannot stop, so it keeps homing on the landing column as before — killing its
+            // input mid-flight would drop it short of a gap it is already committed across.
+            if (bot.settled()) {
+                SteerControl.stationKeep(bot, view);
+            } else {
+                SteerControl.recenterOnTarget(bot, view);
+            }
             return false;
         }
 

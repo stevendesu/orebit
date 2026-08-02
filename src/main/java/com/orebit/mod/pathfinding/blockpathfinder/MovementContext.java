@@ -145,10 +145,11 @@ public final class MovementContext {
      * jump whose takeoff cell is a climbable is physically impossible. This is the single "you can only
      * initiate a jump from solid ground" gate the jump-takeoff movements ({@link
      * com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour}/{@code DiagonalParkour}) test at the
-     * top of {@code candidates}. Both conjuncts are load-bearing: a VINE (empty shape) is caught by
-     * {@code standable} (it is not solid-topped); a LADDER / SCAFFOLDING is a {@link NavBlock#SHAPE_OTHER}
-     * with a full-block collision top, so it reads {@code standable == true} and is caught ONLY by the
-     * {@code !climbable} term. Without this gate a mid-vine/-ladder node — which {@link
+     * top of {@code candidates}. A VINE (empty shape) is caught by {@code standable} (it is not
+     * solid-topped); a LADDER is a {@link NavBlock#SHAPE_OTHER} with a full-block collision top, so it
+     * reads {@code standable == true} and is caught by the {@link NavBlock#isNarrowTop} term. SCAFFOLDING
+     * deliberately PASSES — standing on the deck is standing on solid ground, and the climbable is below
+     * the feet rather than in them. Without this gate a mid-vine/-ladder node — which {@link
      * com.orebit.mod.pathfinding.blockpathfinder.movements.Climb} keeps at {@link #MODE_STANDING} — is
      * silently offered a jump ({@link #floorSurface} even reports the {@code 16} full-block sentinel for a
      * non-standable floor, so the envelope treats a vine takeoff as a full block).
@@ -162,13 +163,26 @@ public final class MovementContext {
      */
     public boolean solidFooting(int x, int y, int z) {
         long d = descriptorAt(x, y, z);
-        if (!NavBlock.isStandable(d) || NavBlock.isClimbable(d)) return false;
-        // THIRD conjunct (the climb-vocabulary arc): the FEET cell (x,y+1,z) must be non-climbable too.
-        // Vanilla truncates a grounded jump whose feet START inside a climbable back to the 0.2 climb
-        // (the post-move overwrite re-tests onClimbable) — the 0.42 launch never happens, so a takeoff
-        // with feet in a floor vine (walk-in stance, reachable since forever) or in a ladder cell above
-        // a solid floor (the sink-in hang stance) is physically impossible exactly like a climbable
-        // floor (DESIGN-climb-vocabulary.md §1/§4). One extra descriptor read per takeoff gate; the
+        // FLOOR: a real, FULL-FACED support. There are exactly two physical reasons a jump can't launch
+        // (owner ruling 2026-08-01) — no solid ground under you, or a climbable occupying your FEET cell
+        // (which truncates the 0.42 impulse to the 0.2 climb). Being *above* a climbable is neither, so
+        // the old "floor must not be climbable" term was too strong: it refused the SCAFFOLD DECK, where
+        // the deck IS solid ground and the climbable is below the feet, not in them — a perfectly legal
+        // vanilla jump. Corrected to standable-minus-NARROW_TOP (== parkourLandable):
+        //   vine        — not standable (empty shape)                      -> refused, no support at all
+        //   ladder      — standable but NARROW_TOP (3/16 plate)            -> refused, see below
+        //   scaffolding — standable, full-faced                            -> ALLOWED (the fix)
+        // The ladder refusal is now carried by the term that actually means it. Vanilla WOULD let you
+        // jump off a ladder's plate, but planning it opens the alternating ladder/air/ladder ascent, which
+        // is only geometrically real when the ladders swap sides for headroom — and FACING is not packed
+        // in the descriptor. Refusing narrow posts as a TAKEOFF is the same ruling that already refuses
+        // them as a precision LANDING (parkourLandable), for the same body-overhang reason.
+        if (!parkourLandable(d)) return false;
+        // FEET: the cell (x,y+1,z) must be non-climbable. Vanilla truncates a grounded jump whose feet
+        // START inside a climbable back to the 0.2 climb (the post-move overwrite re-tests onClimbable) —
+        // the 0.42 launch never happens, so a takeoff with feet in a floor vine (walk-in stance, reachable
+        // since forever) or in a ladder cell above a solid floor (the sink-in hang stance) is physically
+        // impossible (DESIGN-climb-vocabulary.md §1/§4). One extra descriptor read per takeoff gate; the
         // launch-refusal semantics extend to WalkOff honestly (the ±0.15 climbable clamp kills its
         // momentum-preserving crossing).
         return !NavBlock.isClimbable(descriptorAt(x, y + 1, z));

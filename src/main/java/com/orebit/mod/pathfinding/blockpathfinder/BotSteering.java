@@ -82,9 +82,19 @@ public interface BotSteering {
      * <p>A waypoint is a STAND cell, so "reached" means <i>supported there</i> — see {@link
      * Movement#reached}. The ballistic case is the one that must never match: a falling bot's feet block
      * transits cells it is merely passing THROUGH.
+     *
+     * <p>{@link #climbableBelow} is the CURTAIN TOP-OUT stance and belongs here for the same reason the
+     * others do — the bot is supported, not ballistic. It is a bounce rather than a stand (the feet dip
+     * into the top cell and vanilla re-lifts them at the surface), but it is held, not falling. Without
+     * it the stance is unreachable BY CONSTRUCTION: feet above a curtain are not grounded, not in fluid,
+     * and {@code onClimbable()} is false because the climbable is under the feet rather than in them — so
+     * {@link Movement#reached} could never fire on a top-out waypoint and the climb livelocked, bouncing
+     * across the cell boundary forever (measured 2026-08-01 on the flagship at {@code (55,~140,207)}:
+     * 20+ consecutive ticks alternating {@code footY} 139/140, {@code botY} drifting 139.961 → 139.892,
+     * no envelope failure because nothing was failing — the step simply never completed).
      */
     default boolean settled() {
-        return grounded() || inWater() || inLava() || onClimbable();
+        return grounded() || inWater() || inLava() || onClimbable() || climbableBelow();
     }
 
     /**
@@ -96,6 +106,20 @@ public interface BotSteering {
      * for the test doubles.
      */
     default boolean scaffoldingBelow() { return false; }
+
+    /**
+     * Whether the cell directly BELOW the bot's feet is a climbable — the "topped out on a curtain" stance,
+     * the complement of {@link #onClimbable} (feet INSIDE one). Owner physics (manual proof, 2026-08-01):
+     * this stance is not a stand at all. A vine has no collision, so the bot sinks into the cell, vanilla's
+     * climb branch instantly re-lifts it at the surface, and it sinks again — a bounce across the boundary.
+     * Holding JUMP is what makes it stable: it does not cancel the sink, it out-runs it by climbing at the
+     * surface. Sneak also holds the stance, but sneak's ledge edge-guard would forbid stepping OFF the
+     * curtain top, trapping the bot — so the top-out servo uses jump.
+     *
+     * <p>Distinct from the feet-inside case, where jump CLIMBS and only sneak holds position. See
+     * {@link SteerControl#drive}.
+     */
+    default boolean climbableBelow() { return false; }
 
     /** Aim the body + head yaw along a horizontal delta (folds the {@code atan2} the follower used to repeat). */
     void faceHorizontally(double dx, double dz);

@@ -152,8 +152,11 @@ public final class ParkourCourse {
      *  repro family. ASC_PIN = the faithful flagship pin (curtain over the takeoff column + blocked
      *  forward face + canopy cap); ASC_FACE = curtain IN the landing stance cells with an open escape
      *  (does done/failWhen ever recover?); CLIFF = vine-curtain climb-down a 4-block face (the
-     *  fall-arrest + descend-beside-wall regression pin for the vine-bounce fix). */
-    private enum ClimbKind { ASC_PIN, ASC_FACE, CLIFF }
+     *  fall-arrest + descend-beside-wall regression pin for the vine-bounce fix); LATERAL = the
+     *  run-autotest-climb scenario miniaturized — a feet-level vine row on a wall face across a
+     *  floorless gap, the ONLY crossing a no-capability bot has (grab + sideways ease + step-off);
+     *  repro for the 2026-07-31 lateral-cling latch found when that autotest was finally re-run. */
+    private enum ClimbKind { ASC_PIN, ASC_FACE, CLIFF, LATERAL }
 
     /** One jump challenge: an approach direction + a jump vector + a landing template + a precursor condition,
      *  with all world geometry precomputed from its base X band. */
@@ -476,14 +479,19 @@ public final class ParkourCourse {
          *  while REST is the flagship's chained-Ascend condition (zero momentum at the face, the feet DO
          *  sample the takeoff-column vine mid-jump — the faithful elevator entry). */
         void climbCards() {
-            climbCard("ascvine.pin", Approach.WALKIN, ClimbKind.ASC_PIN, 1,
+            climbCard("ascvine.pin", Approach.WALKIN, ClimbKind.ASC_PIN, 1, 1,
                     BASE_X - STRIDE, BASE_Z + 2 * STRIDE);
-            climbCard("ascvine.face", Approach.WALKIN, ClimbKind.ASC_FACE, 1,
+            climbCard("ascvine.face", Approach.WALKIN, ClimbKind.ASC_FACE, 1, 1,
                     BASE_X - STRIDE, BASE_Z + 3 * STRIDE);
-            climbCard("desvine.cliff", Approach.WALKIN, ClimbKind.CLIFF, -4,
+            climbCard("desvine.cliff", Approach.WALKIN, ClimbKind.CLIFF, 1, -4,
                     BASE_X - STRIDE, BASE_Z + 4 * STRIDE);
-            climbCard("ascvine.pin.rest", Approach.REST, ClimbKind.ASC_PIN, 1,
+            climbCard("ascvine.pin.rest", Approach.REST, ClimbKind.ASC_PIN, 1, 1,
                     BASE_X - STRIDE, BASE_Z + 5 * STRIDE);
+            // jdx=5 puts the REACH landing platform (and goal) PAST a 4-cell floorless gap; buildClimb
+            // hangs the feet-level vine row across it. The no-capability config makes the lateral cling
+            // the only realizable crossing — the run-autotest-climb scenario, miniaturized + per-tick.
+            climbCard("latvine", Approach.WALKIN, ClimbKind.LATERAL, 5, 0,
+                    BASE_X - STRIDE, BASE_Z + 6 * STRIDE);
         }
 
         /** Permanent regression gate: the owner's EXACT in-game honey-flyover failure, faithfully reproduced.
@@ -752,8 +760,8 @@ public final class ParkourCourse {
          *  {@code (1, jdy, 0)} — for CLIFF the drop, for the ascvine family the one-up step), plus the
          *  vine/leaf structure {@code buildClimb} lays for its {@link ClimbKind}. Explicit base — these
          *  live in the west column, never on the snake (the nav-dead-tail rule, see descendCard). */
-        void climbCard(String name, Approach a, ClimbKind kind, int jdy, int baseX, int baseZ) {
-            Trial tr = new Trial(name, a, 1, 0, 1, jdy, 0, Template.REACH, false,
+        void climbCard(String name, Approach a, ClimbKind kind, int jdx, int jdy, int baseX, int baseZ) {
+            Trial tr = new Trial(name, a, 1, 0, jdx, jdy, 0, Template.REACH, false,
                     baseX, baseZ);
             tr.climb = kind;
             trials.add(tr);
@@ -1069,9 +1077,9 @@ public final class ParkourCourse {
                             spd, x, z, tr.proj(x, z), v.x, v.z));
                 }
                 trace.write(String.format(Locale.ROOT,
-                        "T %-16s %3d  %.3f %.3f %.3f | %.4f %.4f | vx=%.4f vz=%.4f | %d | j=%d c=%d h=%d | %s\n",
+                        "T %-16s %3d  %.3f %.3f %.3f | %.4f %.4f | vx=%.4f vz=%.4f | %d | j=%d s=%d c=%d h=%d | %s\n",
                         tr.name, attemptTicks, x, bot.getY(), z, spd, v.y, v.x, v.z, onGround ? 1 : 0,
-                        bot.jumpHeld() ? 1 : 0, bot.onClimbable() ? 1 : 0,
+                        bot.jumpHeld() ? 1 : 0, bot.sneakHeld() ? 1 : 0, bot.onClimbable() ? 1 : 0,
                         bot.horizontalCollision ? 1 : 0, move));
             } catch (IOException ignored) { }
             wasGrounded = onGround;
@@ -1231,6 +1239,19 @@ public final class ParkourCourse {
                 case CLIFF:
                     for (int y = Y0 - 4; y <= Y0 - 1; y++) place(tr.takeoffX, y, z);        // the cliff face
                     for (int y = Y0 - 3; y <= Y0; y++) placeState(tr.landX, y, z, VINE_WEST); // the curtain
+                    break;
+                case LATERAL:
+                    // A feet-level vine row across the floorless gap (takeoffX+1 .. landX-1), backed by
+                    // a TWO-high wall face at z+1 (supports placed first). Two-high is load-bearing: a
+                    // 1-high wall's top was a standable bridge one up — the wide REACH runway's z+1 row
+                    // let the bot Ascend onto it and WALK the gap, never touching a vine (measured
+                    // 2026-07-31). With the face 151..152 no move gains its top (rise 2) and its body
+                    // blocks the Ascend landing, so the vine cling is the only realizable crossing.
+                    for (int x = tr.takeoffX + 1; x < tr.landX; x++) {
+                        place(x, Y0 + 1, z + 1);
+                        place(x, Y0 + 2, z + 1);
+                    }
+                    for (int x = tr.takeoffX + 1; x < tr.landX; x++) placeState(x, Y0 + 1, z, VINE_SOUTH);
                     break;
             }
         }

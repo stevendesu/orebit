@@ -32,6 +32,7 @@ class CarryArrestGateTest {
     private static final class CarryBot implements BotSteering {
         double x, y, z, vx, vz;
         boolean grounded = true;
+        boolean climbable, climbBelow;
         boolean jumping, sprinting, sneaking;
         float forward;
 
@@ -51,7 +52,8 @@ class CarryArrestGateTest {
         @Override public boolean inWater() { return false; }
         @Override public boolean inLava() { return false; }
         @Override public boolean prone() { return false; }
-        @Override public boolean onClimbable() { return false; }
+        @Override public boolean onClimbable() { return climbable; }
+        @Override public boolean climbableBelow() { return climbBelow; }
         @Override public void faceHorizontally(double dx, double dz) { }
         @Override public void faceTowards(double dx, double dy, double dz) { }
         @Override public void setForward(float zza) { forward = zza; }
@@ -207,5 +209,106 @@ class CarryArrestGateTest {
 
         runner.run(bot, new Seg());
         assertFalse(bot.sprinting, "must not sprint off the lip while the cross carry is uncontained");
+    }
+
+    // ---- climbable-stance hold (SteerControl.drive) -----------------------------------------------
+    // Owner physics, manual proof 2026-08-01. A curtain is not a floor: a ground move executing at one
+    // must press the input that HOLDS its stance or the bot sinks and the move can never complete.
+    // Convicted by the flagship stall at (129,~115.5,132) - a Descend atop a curtain bounced 115<->116
+    // for ~12000 ticks, invisible to every envelope because it is never settled.
+
+    /** A level segment (no descent) for the stance tests. */
+    private static final class Level implements SteerView {
+        @Override public double sx() { return 0.5; }
+        @Override public double sy() { return 10.0; }
+        @Override public double sz() { return 0.5; }
+        @Override public double tx() { return 3.5; }
+        @Override public double ty() { return 10.0; }
+        @Override public double tz() { return 0.5; }
+        @Override public boolean hasNext() { return false; }
+        @Override public double nx() { return 0; }
+        @Override public double ny() { return 0; }
+        @Override public double nz() { return 0; }
+    }
+
+    /** A descending segment - the one case where sinking IS the intent. */
+    private static final class Down implements SteerView {
+        @Override public double sx() { return 0.5; }
+        @Override public double sy() { return 10.0; }
+        @Override public double sz() { return 0.5; }
+        @Override public double tx() { return 1.5; }
+        @Override public double ty() { return 6.0; }
+        @Override public double tz() { return 0.5; }
+        @Override public boolean hasNext() { return false; }
+        @Override public double nx() { return 0; }
+        @Override public double ny() { return 0; }
+        @Override public double nz() { return 0; }
+    }
+
+    @Test
+    void toppedOutOnACurtainHoldsJumpNotSneak() {
+        // Feet ABOVE the climbable: jump out-runs the sink by re-climbing at the surface. Sneak would hold
+        // too, but its ledge edge-guard would forbid stepping OFF the top and trap the bot.
+        CarryBot b = new CarryBot().at(0.5, 10, 0.5);
+        b.grounded = false; b.climbBelow = true;
+        SteerControl.drive(b, new Level());
+        assertTrue(b.jumping, "topped out on a curtain must hold jump to keep the stance");
+        assertFalse(b.sneaking, "sneak would edge-guard the step off the curtain top");
+    }
+
+    @Test
+    void feetInsideACurtainHoldSneakNotJump() {
+        // Feet INSIDE: jump CLIMBS rather than holds, so sneak is the only stance-hold.
+        CarryBot b = new CarryBot().at(0.5, 10, 0.5);
+        b.grounded = false; b.climbable = true;
+        SteerControl.drive(b, new Level());
+        assertTrue(b.sneaking, "lateral cling inside a curtain must hold sneak to hold height");
+        assertFalse(b.jumping, "holding jump inside a curtain climbs, it does not hold position");
+    }
+
+    @Test
+    void aDeliberateDescentReleasesBothHolds() {
+        // The one case where sinking is the intent - the move is descending through/off the curtain.
+        CarryBot inside = new CarryBot().at(0.5, 10, 0.5);
+        inside.grounded = false; inside.climbable = true;
+        SteerControl.drive(inside, new Down());
+        assertFalse(inside.sneaking, "a descending segment must not hold the stance");
+
+        CarryBot above = new CarryBot().at(0.5, 10, 0.5);
+        above.grounded = false; above.climbBelow = true;
+        SteerControl.drive(above, new Down());
+        assertFalse(above.jumping, "a descending segment must not hold the stance");
+    }
+
+    @Test
+    void ordinaryGroundWalkPressesNeither() {
+        // The overwhelmingly common case must be untouched: no curtain anywhere near the feet.
+        CarryBot b = new CarryBot().at(0.5, 10, 0.5);
+        b.grounded = true;
+        SteerControl.drive(b, new Level());
+        assertFalse(b.jumping, "an ordinary ground walk must not press jump");
+        assertFalse(b.sneaking, "an ordinary ground walk must not press sneak");
+    }
+
+    @Test
+    void groundedInAVineWalksNormally() {
+        // The jungle case, and the reason the !grounded() guard is load-bearing: standing on a real block
+        // with vines in the FEET cell is an ordinary walk, not a cling. Holding sneak here would edge-guard
+        // every ledge and trap the bot (measured: flagship best regressed 58.43 -> 212.55 without this).
+        CarryBot b = new CarryBot().at(0.5, 10, 0.5);
+        b.grounded = true; b.climbable = true;
+        SteerControl.drive(b, new Level());
+        assertFalse(b.sneaking, "grounded in a vine is a walk - sneak would trap the bot on ledges");
+        assertFalse(b.jumping, "and it certainly must not climb");
+    }
+
+    @Test
+    void aVineHangingBelowSolidGroundIsNotATopOut() {
+        // climbableBelow() alone is not the stance: a bot standing on real ground with a curtain one cell
+        // under it (a vine under an overhang) must not hop. The !grounded() conjunct is load-bearing.
+        CarryBot b = new CarryBot().at(0.5, 10, 0.5);
+        b.grounded = true; b.climbBelow = true;
+        SteerControl.drive(b, new Level());
+        assertFalse(b.jumping, "grounded on solid footing is not a curtain top-out");
     }
 }
