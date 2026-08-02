@@ -156,25 +156,57 @@ public final class Climb implements Movement {
         boolean onClimb = pf != MovementContext.UNBUILT && ctx.isClimbable(selfFeetD);
 
         if (onClimb) {
-            // Climb up: stay on the surface — the NEW feet cell (y+2) must itself be climbable (a top-out
-            // onto adjacent ground is Ascend's job), and the new head (y+3) must admit the body.
+            // Climb up: the climb rule is a precondition on the cell the FEET ARE IN, never on the cell they
+            // ENTER (owner ruling 2026-08-01, manual proof). While onClimbable, jump drives vy=+0.2 and keeps
+            // driving it every tick the feet are still inside — so the bot rises out of the column's top cell
+            // into whatever passable cell sits above it. Two distinct emissions, one node:
             int p2 = ctx.packedAt(x, y + 2, z);
             if (p2 != MovementContext.UNBUILT) {
                 long d2 = ctx.descriptorOf(x, y + 2, z, p2);
                 if (ctx.isClimbable(d2)) {
+                    // (1) CONTINUE the surface — the new feet cell is climbable too, so the stance is
+                    // self-sustaining and the column simply carries on upward.
                     int p3 = ctx.packedAt(x, y + 3, z);
                     if (p3 != MovementContext.UNBUILT
                             && ctx.passableOrClimbable(ctx.descriptorOf(x, y + 3, z, p3))) {
                         out.accept(x, y + 1, z, CLIMB_UP_COST);
                     }
-                } else if (ctx.passable(d2)
-                        && ctx.standable(selfFeetD) && !NavBlock.isNarrowTop(selfFeetD)) {
-                    // §3.4 exit-top (DESIGN-climb-vocabulary.md): climb out of the column's top cell and
-                    // stand ON it — only for a FULL-faced standable climbable top (the scaffold deck; the
-                    // +0.154 climb-out pop lands the feet on the full top face). A ladder plate is
-                    // excluded by NARROW_TOP: the 3/16 strip stance is unplannable (a same-side ladder
-                    // above makes it geometrically impossible and FACING isn't packed in the descriptor —
-                    // owner ruling 2026-07-31), and vines are excluded by !standable (nothing to stand on).
+                } else if (ctx.passable(d2)) {
+                    // (2) §3.4 TOP-OUT: rise out of the column's top cell. The resulting node's floor is the
+                    // climbable itself, and its stance depends on what that climbable is:
+                    //
+                    //   STANDABLE top (scaffold deck) — the +0.154 climb-out pop lands the feet on the full
+                    //       top face and the bot genuinely stands there, needing no held input.
+                    //   NON-STANDABLE top (a vine curtain) — nothing to stand on, so the stance is the
+                    //       curtain top-out: the feet settle at the boundary and vanilla re-lifts them
+                    //       whenever they dip back in. HELD BY JUMP, which is exactly what
+                    //       SteerControl.holdClimbableStance presses on climbableBelow(). From there an
+                    //       ordinary Traverse steps onto any adjacent full-topped block at the same height —
+                    //       no jump impulse anywhere in the sequence, so R1 is never violated.
+                    //
+                    //   NARROW standable top (a ladder's 3/16 plate) — a real, if awkward, stance. Also
+                    //       admitted: NARROW_TOP is a TAKEOFF and precision-LANDING restriction, never a
+                    //       standing one (owner ruling 2026-08-01).
+                    //
+                    // All are the SAME emission; only the follower's stance-hold differs, so this stays one
+                    // branch. Both former gates were wrong:
+                    //
+                    //   standable — silently deleted the ONLY route off a vine curtain top once Ascend was
+                    //       (correctly) gated on solidFooting in c84c4b9. That is what forced the flagship's
+                    //       absurd (58,131,189) exit — place a floor at (59,131,189) and mine the leaves at
+                    //       (59,132,189) — when the free move was to top out one higher and walk straight
+                    //       onto those same leaves, whose top face IS the top-out feet height.
+                    //   !isNarrowTop — aimed at the wrong hazard. What must never be planned is a JUMP off a
+                    //       ladder plate (the alternating ladder/air/ladder ascent, geometrically valid only
+                    //       when the ladders swap sides for headroom, and FACING isn't packed in the
+                    //       descriptor). But that is already refused twice over and by the right test:
+                    //       MovementContext.solidFooting rejects any climbable floor cell, killing Ascend /
+                    //       Parkour / DiagonalParkour / WalkOff takeoffs, and §3.3's jump-grab below excludes
+                    //       it again with its own !isClimbable(d0). Blocking the climb-OUT bought no safety
+                    //       and cost the whole ladder-top vocabulary. NARROW_TOP keeps its real jobs — the
+                    //       jump-TAKEOFF refusal inside solidFooting, the precision-LANDING refusal in
+                    //       Parkour/DiagonalParkour, and Traverse's step-assist gate — all of which are
+                    //       restrictions on LEAVING the stance, never on being in it.
                     int p3 = ctx.packedAt(x, y + 3, z);
                     if (p3 != MovementContext.UNBUILT
                             && ctx.passableOrClimbable(ctx.descriptorOf(x, y + 3, z, p3))) {
@@ -203,11 +235,16 @@ public final class Climb implements Movement {
             int p0 = ctx.packedAt(x, y, z);
             if (p0 != MovementContext.UNBUILT) {
                 long d0 = ctx.descriptorOf(x, y, z, p0);
-                if (ctx.standable(d0) && !ctx.isClimbable(d0)) {
-                    // §3.3 jump-grab: from SOLID FOOTING only (the solidFooting form — owner ruling: no
-                    // jump launches from climbable stances, so plate/deck floors are excluded by the
-                    // !isClimbable term), a grounded 0.42 jump lifts the feet across ONE air cell into a
-                    // climbable at (y+2); feet cross +1.0 on rise tick 3 and vanilla arrests them there.
+                if (ctx.parkourLandable(d0)) {
+                    // §3.3 jump-grab: from real FULL-FACED footing, a grounded 0.42 jump lifts the feet
+                    // across ONE air cell into a climbable at (y+2); feet cross +1.0 on rise tick 3 and
+                    // vanilla arrests them there. The gate matches solidFooting exactly (owner ruling
+                    // 2026-08-01) — standable minus NARROW_TOP. It formerly read !isClimbable(d0), which
+                    // also excluded the SCAFFOLD DECK; that was wrong for the same reason it was wrong in
+                    // solidFooting (the deck is solid ground, the climbable is below the feet, not in them),
+                    // and it left the ladder-plate refusal resting on the wrong term. Note this is now a
+                    // sibling `if`, NOT an `else if`: a scaffold deck satisfies BOTH this and §3.5 below,
+                    // and must be offered both the jump-grab above and the sink-in below.
                     // Entering a ladder cell from BELOW is robust — the plate can push rising feet
                     // sideways but never catch them (unlike from-above entry, which is the refused
                     // 0.0125-block knife-edge). The passable-non-climb feet cell is load-bearing too: a
@@ -222,7 +259,8 @@ public final class Climb implements Movement {
                             out.accept(x, y + 1, z, JUMP_GRAB_COST);
                         }
                     }
-                } else if (ctx.isClimbable(d0) && ctx.standable(d0)) {
+                }
+                if (ctx.isClimbable(d0) && ctx.standable(d0)) {
                     // §3.5 sink-in: standing ON a solid climbable's top (ladder plate / scaffold deck) —
                     // enter the column below; the new feet cell is the climbable itself, a hang. The
                     // single-cell drop is deterministic: the plate the bot just stood on cannot re-catch
@@ -310,7 +348,31 @@ public final class Climb implements Movement {
             // vanilla picks the right physics off the same held input.
             b.setJumping(true);
         } else if (ddy >= -0.1) {
-            b.setSneak(true);    // lateral: hold height (suppress the ladder/vine slide) and ease across
+            // Lateral — three regimes, all keyed on state the steer already reads (latvine card
+            // convictions, 2026-07-31):
+            //  - HANGING: sneak. It suppresses the −0.15/t slide; recenter eases the bot across.
+            //  - GROUNDED on a ledge (feet cell NOT climbable): JUMP-grab entry. Sneak here arms the
+            //    vanilla edge-guard, which forbids exactly the walk-off the transfer needs (measured:
+            //    frozen at the lip forever, box edge 0.001 past the ledge, input pressing, spd 0.0000) —
+            //    and a plain un-sneaked walk-off exits a feet-level vine row out its BOTTOM on the first
+            //    airborne tick (feet enter the cell at its exact lower edge; measured: fell). The jump
+            //    arc is the one entry that works: the apex clears the row, the falling re-entry passes
+            //    the vine cell at |vy| ≲ 0.3 with sneak already engaged (airborne → the branch above),
+            //    so the slide suppression arrests on the first in-cell tick — the vanilla player idiom.
+            //  - GROUNDED on/in the climbable itself (a ladder-plate lateral): plain walk. No sneak (the
+            //    same edge-guard), no jump (an in-climbable jump is a pointless truncated 0.2 hop);
+            //    the plates are contiguous and collision carries the crossing.
+            if (!b.grounded()) {
+                // HANGING or TOPPED OUT — the shared stance hold picks the right input off the live pose:
+                // feet INSIDE the climbable -> sneak (jump would climb, not hold); feet ABOVE its top cell
+                // -> jump (sneak holds too, but its ledge edge-guard would forbid the very step-off this
+                // lateral move is making). The unconditional sneak this replaced was correct only for the
+                // first case: on a curtain TOP it suppressed nothing (there is no -0.15 climbable clamp
+                // once the feet have left the cell) and armed the edge-guard against the transfer.
+                SteerControl.holdClimbableStance(b, path);
+            } else if (!b.onClimbable()) {
+                b.setJumping(true);
+            }
         } else if (b.grounded() && !b.onClimbable() && b.scaffoldingBelow()) {
             // §3.5 sink-in through a scaffold DECK: a held sneak removes its stand-on-top shape and the
             // bot descends at the −0.15 clamp. Deliberately scaffolding-ONLY: on a ladder plate a sneak
