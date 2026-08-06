@@ -17,6 +17,7 @@ import com.orebit.mod.pathfinding.regionpathfinder.RegionMineModel;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPlaceModel;
+import com.orebit.mod.platform.LevelBounds;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
@@ -803,6 +804,7 @@ public final class PathPlan {
      */
     public boolean planImpacted() {
         if (blockPlan == null) {
+            impactChunk = Long.MIN_VALUE;
             return true;
         }
         if (NavGridUpdater.editEpoch(level) == planSnapshotEpoch) {
@@ -810,10 +812,78 @@ public final class PathPlan {
         }
         for (int i = 0; i < planChunkCount; i++) {
             if (NavGridUpdater.chunkVersion(level, planChunks[i]) != planChunkVers[i]) {
+                impactChunk = planChunks[i];   // diagnostic: WHICH chunk, for impactForensic()
                 return true; // a chunk the path traverses changed → the plan may be stale, re-search
             }
         }
         return false; // changes happened, but not in a chunk this plan traverses — keep following
+    }
+
+    /** Diagnostic only: the chunk key whose version last tripped {@link #planImpacted}. */
+    private long impactChunk = Long.MIN_VALUE;
+
+    /**
+     * DIAGNOSTIC: describe the change that just tripped {@link #planImpacted} and how relevant it actually
+     * was to this plan (owner request 2026-08-06). Called only on the re-search log line, never by logic.
+     *
+     * <p>A {@code plan-impacted} re-search rebuilds the plan and resets the waypoint cursor <b>mid-move</b>,
+     * so the standing question is whether the trigger deserved it. The gate is supposed to make a distant
+     * redstone clock impossible — it compares only the chunks this path traverses — but that is an assertion
+     * about the chunk list, and nothing has ever checked it against a real trigger. This prints the parts
+     * needed to check it: the block and its before/after state, its distance from the bot, and the NEAREST
+     * PLAN WAYPOINT to it. A change 3 blocks off the route is a legitimate impact; one 200 blocks away that
+     * still matched a plan chunk means the chunk list is over-broad and the gate is being defeated.
+     *
+     * <p>Region addresses at level 0 (the leaf tier the region skeleton is built from) come along for the
+     * ride so "same region as the bot" is answerable without arithmetic; the adjacent {@code HPA window}
+     * line carries the skeleton those regions sit in.
+     */
+    public String impactForensic(BlockPos botPos) {
+        if (impactChunk == Long.MIN_VALUE) {
+            return "no plan (nothing to keep following)";
+        }
+        final int cx = NavStore.keyX(impactChunk), cz = NavStore.keyZ(impactChunk);
+        final NavGridUpdater.ChunkChange c = NavGridUpdater.lastChange(level, impactChunk);
+        final int minY = LevelBounds.minY(level);
+        final StringBuilder sb = new StringBuilder(224);
+        sb.append("chunk=(").append(cx).append(',').append(cz).append(')');
+        if (c == null) {
+            // Bumped by a nav build/drop or the fluid-edge fold — no block change is on record for it.
+            sb.append(" change=<none recorded: nav build/drop or fluid-edge fold>");
+        } else {
+            final BlockPos p = BlockPos.of(c.pos);
+            sb.append(" block=(").append(p.getX()).append(',').append(p.getY()).append(',').append(p.getZ())
+                    .append(") old=").append(c.oldState).append(" new=").append(c.newState)
+                    .append(" v=").append(c.version)
+                    .append(" distFromBot=").append(String.format("%.1f", Math.sqrt(p.distSqr(botPos))))
+                    .append(" blockRegion=(")
+                    .append(RegionAddress.regionX(p.getX(), 0)).append(',')
+                    .append(RegionAddress.regionY(p.getY(), 0, minY)).append(',')
+                    .append(RegionAddress.regionZ(p.getZ(), 0)).append(')');
+            // The load-bearing number: how near the change is to the route we are about to throw away.
+            final BlockPathPlan bp = blockPlan;
+            int bestI = -1;
+            double bestD = Double.MAX_VALUE;
+            if (bp != null) {
+                for (int i = 0; i < bp.size(); i++) {
+                    final double d = bp.waypoint(i).distSqr(p);
+                    if (d < bestD) { bestD = d; bestI = i; }
+                }
+            }
+            if (bestI >= 0) {
+                final BlockPos w = bp.waypoint(bestI);
+                sb.append(" nearestWp=#").append(bestI)
+                        .append(" (").append(w.getX()).append(',').append(w.getY()).append(',')
+                        .append(w.getZ()).append(')')
+                        .append(" dist=").append(String.format("%.1f", Math.sqrt(bestD)));
+            }
+        }
+        sb.append(" botRegion=(")
+                .append(RegionAddress.regionX(botPos.getX(), 0)).append(',')
+                .append(RegionAddress.regionY(botPos.getY(), 0, minY)).append(',')
+                .append(RegionAddress.regionZ(botPos.getZ(), 0)).append(')')
+                .append(" planChunks=").append(planChunkCount);
+        return sb.toString();
     }
 
     private boolean botOnBlockPlan(BlockPos floor) {

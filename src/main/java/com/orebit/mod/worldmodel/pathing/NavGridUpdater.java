@@ -119,6 +119,52 @@ public final class NavGridUpdater {
                 .computeIfAbsent(NavStore.key(chunkX, chunkZ), k -> new int[1])[0]++;
     }
 
+    /**
+     * DIAGNOSTIC: the most recent grid-visible block change in a chunk column — what actually moved the
+     * version {@link #chunkVersion} reports.
+     *
+     * <p><b>Why record it</b> (owner request 2026-08-06). A {@code plan-impacted} re-search says only "some
+     * chunk this path traverses changed"; it never says WHICH block, so "a vine grew beside the bot" and "a
+     * redstone clock is running far away" produce the identical log line. Without the change itself there is
+     * no way to confirm the plan-relevance gate is doing its job rather than being defeated by an
+     * over-broad chunk list — and a re-search rebuilds the plan mid-move, so the difference matters.
+     *
+     * <p>Zero steady-state allocation: one mutable record per chunk column, overwritten in place. Old/new
+     * {@code BlockState}s are the registry's interned singletons, so holding them is two reference writes
+     * with no retention beyond what the registry already keeps alive; they are stringified only when a
+     * forensic line is actually emitted. Keyed by the same chunk-key set {@link #CHUNK_VERSION} already
+     * retains, so this adds no new growth class. Server thread only, like the version map.
+     */
+    public static final class ChunkChange {
+        public long pos;
+        public BlockState oldState;
+        public BlockState newState;
+        /** The {@link #chunkVersion} value this change produced — proves the record IS the impacting change
+         *  and not an older one in the same column that a later bump already superseded. */
+        public int version;
+    }
+
+    private static final java.util.WeakHashMap<ServerLevel, java.util.HashMap<Long, ChunkChange>> LAST_CHANGE =
+            new java.util.WeakHashMap<>();
+
+    /** Record (diagnostic only) the block change that just bumped this position's chunk column. */
+    private static void recordChange(ServerLevel level, BlockPos pos, BlockState oldState, BlockState newState) {
+        final long key = NavStore.key(pos.getX() >> 4, pos.getZ() >> 4);
+        final ChunkChange c = LAST_CHANGE.computeIfAbsent(level, l -> new java.util.HashMap<>())
+                .computeIfAbsent(key, k -> new ChunkChange());
+        c.pos = pos.asLong();
+        c.oldState = oldState;
+        c.newState = newState;
+        c.version = chunkVersion(level, key);
+    }
+
+    /** The last recorded grid-visible change in {@code chunkKey}, or {@code null} if none is on record — the
+     *  column was bumped by a nav build/drop or the fluid-edge fold rather than by a block change. */
+    public static ChunkChange lastChange(ServerLevel level, long chunkKey) {
+        final java.util.HashMap<Long, ChunkChange> m = LAST_CHANGE.get(level);
+        return m == null ? null : m.get(chunkKey);
+    }
+
     /** Register the nav-grid patcher against the block-change seam (once, at init). */
     public static void register() {
         BlockChangeEvents.register(NavGridUpdater::onBlockChanged);
@@ -158,6 +204,9 @@ public final class NavGridUpdater {
         // (owner 2026-07-24): a change bumps only its own column's version, so a plan that doesn't traverse
         // this chunk is not re-searched (the redstone-clock / far-house false re-arm named above).
         NavGridUpdater.bumpChunk(server, pos.getX() >> 4, pos.getZ() >> 4);
+        // …and remember WHICH block did it, so a plan-impacted re-search can name its cause instead of
+        // leaving "a vine grew" and "a redstone clock is running" indistinguishable (see ChunkChange).
+        recordChange(server, pos, oldState, newState);
 
         // Nether-portal index maintenance (NetherPortalIndex incremental feed), from the EVENT params:
         // under deferral the resident grid can be stale-by-one-pending-write, but the event's old/new
