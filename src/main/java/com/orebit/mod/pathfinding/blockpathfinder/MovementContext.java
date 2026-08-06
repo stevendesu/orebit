@@ -675,6 +675,16 @@ public final class MovementContext {
      * mode (headless / trace / tests). The live follower's plan path supplies one built from the bot's REAL
      * inventory via {@link com.orebit.mod.platform.BotInventory#feasibility}.
      */
+    /**
+     * This search's mining snapshot — the bot's best carried tier per tool category — or {@code null} for the
+     * headless / benchmark / caps-only searches that supplied no {@link InventoryView}. Read ONCE per search
+     * by {@link com.orebit.mod.pathfinding.blockpathfinder.cuboid.GoalForcedCost#probe}, never per node.
+     */
+    public MiningModel.Snapshot miningSnapshot() {
+        InventoryView inv = inventory;
+        return inv != null ? inv.mining() : null;
+    }
+
     public void setInventory(InventoryView inventory) {
         this.inventory = inventory;
     }
