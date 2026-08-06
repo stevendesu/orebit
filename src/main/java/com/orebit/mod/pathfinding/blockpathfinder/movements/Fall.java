@@ -385,25 +385,22 @@ public final class Fall implements Movement {
     }
 
     /**
-     * Walk off the lip, then steer onto the landing column while airborne. On the ground this is the generic
-     * line-tracking walk toward the landing; once airborne it ARRIVES on the landing column via the forward
-     * input — braking with reverse thrust when its projected stopping point overshoots ({@link
-     * SteerControl#arriveOnTarget}), since Minecraft's aerial control is weak enough that a correction begun
-     * at the moment of overshoot is already too late. {@link #candidates} models a fall as a straight vertical
-     * drop, and this keeps the real drop near that column.
+     * Walk off the lip and ARRIVE on the landing column — one servo for both media ({@link
+     * SteerControl#arriveOnTarget}): aim the bot's projected stopping point at the landing centre, braking with
+     * reverse thrust and correcting sideways with strafe. The grounded half passes {@code steppingOff}, so it
+     * projects with the AIR coast it is about to inherit rather than the ground coast it still has — otherwise
+     * the walk-off spends its whole overshoot budget before the drop even starts, and Minecraft's aerial
+     * control is far too weak to win it back. {@link #candidates} models a fall as a straight vertical drop,
+     * and this keeps the real drop near that column.
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
-        if (b.grounded()) {
-            SteerControl.steerTowards(b, path);
-        } else {
-            SteerControl.arriveOnTarget(b, path);
-        }
+        SteerControl.arriveOnTarget(b, path, b.grounded());
     }
 
     /**
      * The phase-model execution plan — the reactive counterpart of {@link #steer}, mapping its two branches
-     * (grounded → {@code steerTowards}, airborne → {@code arriveOnTarget}) 1:1 onto phase order so the two
+     * (grounded → {@code arriveOnTarget(steppingOff)}, airborne → {@code arriveOnTarget}) 1:1 onto phase so the two
      * drive paths cannot drift apart. Fall is <b>WALKOFF &rarr; FALL</b>: stride off the
      * lip toward the landing column {@code (tx,tz)} (which {@link #candidates} makes identical to the step-off
      * neighbour column — the bot walks off into it and drops straight down), then, once airborne, home onto
@@ -437,7 +434,13 @@ public final class Fall implements Movement {
                 // off-line and drops down the wrong column, where the airborne drop-control can no longer
                 // recover it. The most consequential of the family — a mis-aimed step-off is irreversible.
                 .arrestCarryFrom(fx, fz)
-                .drive(SteerControl::steerTowards)
+                // arriveOnTarget(steppingOff=true), NOT steerTowards (measured 2026-08-06). steerTowards has no
+                // velocity term at all, so it held FULL forward right through the support-loss point (c > 218.7)
+                // at -0.103 b/t and spent 0.36 blocks of overshoot before the airborne phase could take over.
+                // Projecting with the AIR coast while still grounded brakes it there instead, where ground
+                // authority is ~5x the airborne value. Not a slower walk-off: full throttle stands until the
+                // projection says it cannot afford it (see SteerControl.arriveOnTarget(b,p,steppingOff)).
+                .drive((b, v) -> SteerControl.arriveOnTarget(b, v, true))
                 .advanceWhen(b -> !b.grounded());
         // FALL: airborne drop-control — arriveOnTarget aims the bot's PROJECTED stopping point at the landing
         // column centre, braking with reverse input the moment that projection overshoots, so held step-off

@@ -376,11 +376,14 @@ public final class SteerControl {
      * symmetrically, so reverse thrust has the same authority as forward ({@code 0.0255} b/t² airborne while
      * sprinting) — the bot simply moon-walks the last few centimetres instead of turning around.
      *
-     * <p><b>Cross-axis error is deliberately not corrected here.</b> {@link BotSteering} has no strafe input,
-     * so the only way to push sideways is to yaw — the pirouette this method exists to remove. A cardinal
-     * step's cross-axis drift is tiny (measured {@code |velX| ≈ 0.0003} on the convicted fall) and the
-     * walk-off phase's {@link MovePlan.Phase#arrestCarryFrom} already refuses to leave the lip with cross
-     * carry, so the along-heading axis is the one that decides where the bot lands.
+     * <p><b>Cross-axis error is corrected by STRAFE, not by yawing</b> ({@link BotSteering#setStrafe}). The
+     * first cut of this method dropped cross correction entirely, on the reasoning that a cardinal step's
+     * lateral drift is negligible ({@code |velX| ≈ 0.0003} per tick on the convicted fall). Re-measured
+     * 2026-08-06 and REFUTED: it is negligible per tick and decisive per MOVE, because nothing bleeds it — a
+     * pinned heading gives the lateral axis no thrust at all, so {@code 0.026} b/t of carry decayed only by air
+     * drag across a 3-block drop and integrated into {@code +0.344} blocks of displacement. The X miss went
+     * from {@code 0.001} to {@code 0.199} and swallowed most of the along-axis win. So the projected miss is
+     * resolved in the heading frame and BOTH channels are driven; the facing still never turns.
      *
      * <p><b>Climbables keep the old servo.</b> {@link #COLUMN_DEADBAND} exists because horizontal input near a
      * vine trips vanilla's involuntary climb ({@code (horizontalCollision || jumping) && onClimbable → vy =
@@ -390,6 +393,30 @@ public final class SteerControl {
      * {@code 0.15} still commands exactly zero.
      */
     public static void arriveOnTarget(BotSteering b, SteerView p) {
+        arriveOnTarget(b, p, false);
+    }
+
+    /**
+     * {@link #arriveOnTarget} with the coast constant forced to {@link #AIR_COAST} ({@code steppingOff}) even
+     * while the bot is still grounded — <b>project with the drag you are ABOUT to have</b>.
+     *
+     * <p>This is the walk-off half of the fix (measured 2026-08-06). A bot striding off a lip is grounded right
+     * up to the tick it isn't, so a grounded projection reads the harmless {@code 1.20 × v} ground coast and
+     * sees no overshoot at all — the servo happily holds full forward while the REAL, about-to-apply coast is
+     * {@code 10.11 × v}. Measured: the bot crossed its support-loss point ({@code c > 218.7}) at {@code −0.103}
+     * b/t still commanding {@code +1.00}, and burned {@code 0.36} blocks of overshoot before the airborne phase
+     * ever got control. Forcing the air constant makes it brake while it still has GROUND authority
+     * ({@code 0.127} b/t², ~5× the {@code 0.0255} available once airborne).
+     *
+     * <p><b>The correct exit speed falls out; it is not imposed.</b> The servo's equilibrium is where the
+     * projection lands on the target, {@code v = (position − target)/coast} — at the lip that is {@code 0.2/10.11
+     * ≈ 0.02} b/t, exactly the hand-derived exit speed, without a tuned constant or a "creep to the edge" rule.
+     * The bot still drives full throttle while the projection says it can afford to (owner ruling: don't slow
+     * the walk-off for its own sake), and eases only once it says otherwise. Progress toward the lip is
+     * guaranteed: the equilibrium speed stays positive for as long as the bot is short of the target, and the
+     * target always lies BEYOND the support-loss point for a walk-off.
+     */
+    public static void arriveOnTarget(BotSteering b, SteerView p, boolean steppingOff) {
         if (b.onClimbable()) {          // vine-bounce ruling owns this case — unchanged servo
             recenterOn(b, p.tx(), p.tz());
             return;
@@ -407,17 +434,30 @@ public final class SteerControl {
         hz /= hlen;
 
         // Where the bot ENDS UP if it stops thrusting now, and how far that misses the target column.
-        double coast = b.grounded() ? GROUND_COAST : AIR_COAST;
+        double coast = (steppingOff || !b.grounded()) ? AIR_COAST : GROUND_COAST;
         double ex = p.tx() - (b.x() + coast * b.velX());
         double ez = p.tz() - (b.z() + coast * b.velZ());
 
         b.faceHorizontally(hx, hz);
         if (Math.sqrt(ex * ex + ez * ez) <= COLUMN_DEADBAND) {
             b.setForward(0.0f);         // projected arrival is on the column — no input; see COLUMN_DEADBAND
+            b.setStrafe(0.0f);
             return;
         }
+        // Decompose the projected miss into the heading frame and drive BOTH channels, so cross-track error is
+        // corrected without yawing (BotSteering.setStrafe): along = forward/brake, cross = strafe. Positive
+        // strafe is the mover's LEFT, which for unit heading (hx,hz) is the direction (hz,−hx).
         double along = ex * hx + ez * hz;   // signed: negative == projected to overshoot == brake
-        b.setForward((float) Math.max(-1.0, Math.min(1.0, along)));
+        double cross = ex * hz - ez * hx;   // signed: positive == target lies to the LEFT of the heading
+        // Saturate as a VECTOR, never per-component: vanilla normalizes an over-unit input anyway, and clamping
+        // the two independently would tilt the commanded direction exactly when the correction matters most.
+        double mag = Math.sqrt(along * along + cross * cross);
+        if (mag > 1.0) {
+            along /= mag;
+            cross /= mag;
+        }
+        b.setForward((float) along);
+        b.setStrafe((float) cross);
     }
 
     /**
