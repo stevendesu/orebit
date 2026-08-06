@@ -395,31 +395,25 @@ public final class SteerControl {
      * to the PROJECTED point — a bot with no velocity projects onto itself, so a settled bot inside
      * {@code 0.15} still commands exactly zero.
      */
-    public static void arriveOnTarget(BotSteering b, SteerView p) {
-        arriveOnTarget(b, p, false);
-    }
-
     /**
-     * {@link #arriveOnTarget} with the coast constant forced to {@link #AIR_COAST} ({@code steppingOff}) even
-     * while the bot is still grounded — <b>project with the drag you are ABOUT to have</b>.
+     * <b>REJECTED: pre-braking the walk-off</b> (built and reverted 2026-08-06 — do not reintroduce). A
+     * {@code steppingOff} flag forced {@link #AIR_COAST} while the bot was still grounded, reasoning that a bot
+     * striding off a lip is about to inherit the {@code 10.11 × v} coast and should brake while it still has
+     * ground authority ({@code 0.127} b/t², ~5× the airborne {@code 0.0255}).
      *
-     * <p>This is the walk-off half of the fix (measured 2026-08-06). A bot striding off a lip is grounded right
-     * up to the tick it isn't, so a grounded projection reads the harmless {@code 1.20 × v} ground coast and
-     * sees no overshoot at all — the servo happily holds full forward while the REAL, about-to-apply coast is
-     * {@code 10.11 × v}. Measured: the bot crossed its support-loss point ({@code c > 218.7}) at {@code −0.103}
-     * b/t still commanding {@code +1.00}, and burned {@code 0.36} blocks of overshoot before the airborne phase
-     * ever got control. Forcing the air constant makes it brake while it still has GROUND authority
-     * ({@code 0.127} b/t², ~5× the {@code 0.0255} available once airborne).
+     * <p>It centred the landing and was still wrong. Measured on a 2-block Fall: <b>20 of 26 ticks</b> went to
+     * creeping at 0.02–0.10 b/t (the servo chattering {@code arrive:off} against {@code arrive:off:dead} as the
+     * projection crossed the deadband), and the airborne phase then read {@code arrive:dead} for every tick of
+     * the drop — no momentum was left to brake. The centring was bought entirely with ground time, and the
+     * air-brake it existed to assist never ran once.
      *
-     * <p><b>The correct exit speed falls out; it is not imposed.</b> The servo's equilibrium is where the
-     * projection lands on the target, {@code v = (position − target)/coast} — at the lip that is {@code 0.2/10.11
-     * ≈ 0.02} b/t, exactly the hand-derived exit speed, without a tuned constant or a "creep to the edge" rule.
-     * The bot still drives full throttle while the projection says it can afford to (owner ruling: don't slow
-     * the walk-off for its own sake), and eases only once it says otherwise. Progress toward the lip is
-     * guaranteed: the equilibrium speed stays positive for as long as the bot is short of the target, and the
-     * target always lies BEYOND the support-loss point for a walk-off.
+     * <p>The reasoning was wrong in one specific place: while grounded the bot CAN still stop within
+     * {@code 1.20 × v}, so there is no overshoot to prevent yet. The overshoot becomes real only at the lip —
+     * and at the lip the bot goes airborne and this method switches to {@link #AIR_COAST} by itself, on that
+     * same tick. Braking after the transition is both sufficient and free (owner ruling: "it can absolutely
+     * air-brake a fall — we don't need to crawl over the edge").
      */
-    public static void arriveOnTarget(BotSteering b, SteerView p, boolean steppingOff) {
+    public static void arriveOnTarget(BotSteering b, SteerView p) {
         if (b.onClimbable()) {          // vine-bounce ruling owns this case — unchanged servo
             recenterOn(b, p.tx(), p.tz());
             return;
@@ -437,18 +431,18 @@ public final class SteerControl {
         hz /= hlen;
 
         // Where the bot ENDS UP if it stops thrusting now, and how far that misses the target column.
-        double coast = (steppingOff || !b.grounded()) ? AIR_COAST : GROUND_COAST;
+        double coast = b.grounded() ? GROUND_COAST : AIR_COAST;
         double ex = p.tx() - (b.x() + coast * b.velX());
         double ez = p.tz() - (b.z() + coast * b.velZ());
 
         b.faceHorizontally(hx, hz);
         if (Math.sqrt(ex * ex + ez * ez) <= COLUMN_DEADBAND) {
-            tag(steppingOff ? "arrive:off:dead" : "arrive:dead");
+            tag("arrive:dead");
             b.setForward(0.0f);         // projected arrival is on the column — no input; see COLUMN_DEADBAND
             b.setStrafe(0.0f);
             return;
         }
-        tag(steppingOff ? "arrive:off" : "arrive");
+        tag("arrive");
         // Decompose the projected miss into the heading frame and drive BOTH channels, so cross-track error is
         // corrected without yawing (BotSteering.setStrafe): along = forward/brake, cross = strafe. Positive
         // strafe is the mover's LEFT, which for unit heading (hx,hz) is the direction (hz,−hx).
