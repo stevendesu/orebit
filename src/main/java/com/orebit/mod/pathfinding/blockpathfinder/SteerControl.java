@@ -333,6 +333,94 @@ public final class SteerControl {
     }
 
     /**
+     * <b>Coast distance</b> (blocks per block/tick of speed) an un-thrusted body still travels before drag
+     * stops it, {@code q/(1−q)} for the medium's horizontal drag {@code q} — the closed form that makes
+     * {@link #arriveOnTarget} velocity-aware without a tuned gain.
+     *
+     * <p><b>Airborne</b> ({@code q = 0.91}): {@code 10.11 × v}. <b>Grounded</b> ({@code q = 0.6 × 0.91 =
+     * 0.546}): {@code 1.20 × v}. That ~8× step at the lip is the whole reason a walk-off overshoots: a
+     * {@code 0.105} b/t exit speed is a harmless {@code 0.13}-block coast while the feet are still supported
+     * and becomes a {@code 1.06}-block coast the instant they are not.
+     */
+    private static final double AIR_COAST = 0.91 / (1.0 - 0.91);
+    private static final double GROUND_COAST = 0.546 / (1.0 - 0.546);
+
+    /**
+     * <b>Arrive</b> on the target column: aim the bot's <i>predicted stopping point</i> at the target rather
+     * than its current position, holding the step's heading and braking with REVERSE input. The velocity-aware
+     * counterpart of {@link #recenterOnTarget}, used by an airborne {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Fall} homing onto its landing column.
+     *
+     * <p><b>Why position-only steering cannot land centred</b> (measured 2026-08-06, the flagship parkour
+     * failure). {@link #recenterOn} drives {@code forward = min(1, distanceToTarget)} with no velocity term,
+     * so against carried momentum it is a pure P-controller and always settles with standing overshoot. Worse,
+     * its {@link #COLUMN_DEADBAND} zeroes the output for the first {@code 0.15} of error — which is exactly
+     * where the bot is when it goes airborne still carrying its walk-off speed. Convicted on a Fall into
+     * {@code (82,115,218)}: the bot left the lip {@code 0.063} past the target centre at {@code −0.105} b/t,
+     * the servo commanded {@code 0.00} while the momentum was largest, then ramped {@code 0.23 → 0.35 → 0.42}
+     * as the error grew — reproducing {@code min(1, d)} to the digit — and settled {@code 0.45} past centre.
+     * The Parkour that followed took off from a standstill at the far cell edge and fell {@code 0.31} short.
+     *
+     * <p><b>The fix is the projection, not a gain.</b> With no input a body travels a further
+     * {@code coast × v} (see {@link #AIR_COAST}), so {@code stop = position + coast × velocity} is where it
+     * WILL end up. Servoing on {@code target − stop} makes the controller brake the moment the projection
+     * overshoots — from the first airborne tick, while there is still airtime to spend — and self-corrects in
+     * both directions: undershooting projects short and drives forward, overshooting projects long and drives
+     * back. No timers, no tuned damping constant, no per-case branches.
+     *
+     * <p><b>Heading is held; braking is REVERSE input</b> (owner ruling 2026-08-06). The old servo faced
+     * whatever direction reduced the error, so an overshoot span it {@code 180°} — visually a bot pirouetting
+     * off every ledge. Instead the facing is pinned to the SEGMENT heading (previous waypoint → target, i.e.
+     * the direction the step actually travels) and the along-heading component of the error becomes a SIGNED
+     * forward input, so {@link BotSteering#setForward} goes negative to brake. Vanilla scales {@code zza}
+     * symmetrically, so reverse thrust has the same authority as forward ({@code 0.0255} b/t² airborne while
+     * sprinting) — the bot simply moon-walks the last few centimetres instead of turning around.
+     *
+     * <p><b>Cross-axis error is deliberately not corrected here.</b> {@link BotSteering} has no strafe input,
+     * so the only way to push sideways is to yaw — the pirouette this method exists to remove. A cardinal
+     * step's cross-axis drift is tiny (measured {@code |velX| ≈ 0.0003} on the convicted fall) and the
+     * walk-off phase's {@link MovePlan.Phase#arrestCarryFrom} already refuses to leave the lip with cross
+     * carry, so the along-heading axis is the one that decides where the bot lands.
+     *
+     * <p><b>Climbables keep the old servo.</b> {@link #COLUMN_DEADBAND} exists because horizontal input near a
+     * vine trips vanilla's involuntary climb ({@code (horizontalCollision || jumping) && onClimbable → vy =
+     * +0.2}); that hazard is specific to climbables, so a bot on one falls through to {@link #recenterOn} and
+     * the 2026-07-31 vine-bounce ruling is preserved untouched. Everywhere else the deadband still applies, but
+     * to the PROJECTED point — a bot with no velocity projects onto itself, so a settled bot inside
+     * {@code 0.15} still commands exactly zero.
+     */
+    public static void arriveOnTarget(BotSteering b, SteerView p) {
+        if (b.onClimbable()) {          // vine-bounce ruling owns this case — unchanged servo
+            recenterOn(b, p.tx(), p.tz());
+            return;
+        }
+        // Heading: the step's own segment (previous waypoint → target). Stable for the whole move, so the
+        // facing never flips; degenerate (vertical) segments fall back to the target bearing.
+        double hx = p.tx() - p.sx();
+        double hz = p.tz() - p.sz();
+        double hlen = Math.sqrt(hx * hx + hz * hz);
+        if (hlen < EPS) {
+            recenterOn(b, p.tx(), p.tz());
+            return;
+        }
+        hx /= hlen;
+        hz /= hlen;
+
+        // Where the bot ENDS UP if it stops thrusting now, and how far that misses the target column.
+        double coast = b.grounded() ? GROUND_COAST : AIR_COAST;
+        double ex = p.tx() - (b.x() + coast * b.velX());
+        double ez = p.tz() - (b.z() + coast * b.velZ());
+
+        b.faceHorizontally(hx, hz);
+        if (Math.sqrt(ex * ex + ez * ez) <= COLUMN_DEADBAND) {
+            b.setForward(0.0f);         // projected arrival is on the column — no input; see COLUMN_DEADBAND
+            return;
+        }
+        double along = ex * hx + ez * hz;   // signed: negative == projected to overshoot == brake
+        b.setForward((float) Math.max(-1.0, Math.min(1.0, along)));
+    }
+
+    /**
      * <b>Station-keep</b>: hold the stance the bot is already in WITHOUT travelling — the input set for
      * {@link PhaseRunner}'s "stop and fix the geometry" hold (mine an obstruction / place a footing before
      * the phase drives). Re-centres on the bot's OWN column rather than the step's target, and applies
