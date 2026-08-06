@@ -155,6 +155,13 @@ public final class BotMining {
         progress += per;
         if (progress >= 1.0f) {
             level.destroyBlockProgress(bot.getId(), target, -1); // clear cracks
+            // Announce the mutation BEFORE it lands, so the plan's own prescribed break is not read back as
+            // the world diverging from it (PathPlan.expectOwnEdit). This is the completion point — mine() is
+            // re-issued every tick while the break runs, and only the next line changes the world — and the
+            // announcement is a one-shot slot consumed by the change it predicts, so it must precede it.
+            if (bot instanceof AllyBotEntity pre) {
+                pre.navigator().expectOwnEdit(target.getX(), target.getY(), target.getZ(), true);
+            }
             bot.gameMode.destroyBlock(target);                    // real survival break: drops, XP, tool wear
             if (grind && !level.getBlockState(target).isAir()) {
                 // The survival break path itself refuses vanilla-unbreakable blocks (that's what makes them
