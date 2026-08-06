@@ -728,6 +728,19 @@ final class BotNavigator {
                                     AllyBotEntity.compact(bot.blockPosition()),
                                     AllyBotEntity.compact(pathPlan.goalFloor()),
                                     pathPlan.baselineSummary());
+                            // WHAT changed, when terrain is the reason (owner request 2026-08-06). The
+                            // trigger line above names the reason but never its cause, so "a vine grew
+                            // beside the bot" and "something changed 200 blocks away that happens to share a
+                            // plan chunk" read identically — and this re-search rebuilds the plan mid-move,
+                            // resetting the waypoint cursor under a step that is already executing. The
+                            // forensic carries the block, its before/after state, its distance from the bot
+                            // AND from the nearest plan waypoint, plus both level-0 region addresses, so
+                            // whether the plan-relevance gate earned this re-search is checkable rather
+                            // than asserted.
+                            if (impacted) {
+                                OrebitCommon.LOGGER.info("[Orebit]   impact: {}",
+                                        pathPlan.impactForensic(bot.blockPosition()));
+                            }
                         }
                         pathPlan.refreshWindow(impacted);
                     }
