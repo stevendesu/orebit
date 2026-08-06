@@ -205,15 +205,22 @@ class StationKeepHoldTest {
      * (20+ ticks alternating {@code footY} 139/140, no envelope failure because nothing failed).
      */
     @Test
-    void toppedOutOnACurtainCountsAsSettled() {
+    void toppedOutOnACurtainIsReachableByAClimbOnly() {
         HoldBot b = new HoldBot();
         b.grounded = false;
         b.climbable = false;   // feet are ABOVE the curtain, not inside it
         b.climbBelow = true;
-        assertTrue(b.settled(), "the top-out is held, not ballistic — otherwise it can never be reached");
+        b.x = 3.5; b.y = 10; b.z = 4.5;
 
-        b.climbBelow = false;  // control: the same pose with nothing underneath IS ballistic
-        assertFalse(b.settled(), "a genuinely falling bot must never read as settled");
+        assertTrue(MovementRegistry.CLIMB.reached(b, 3, 10, 4),
+                "a top-out waypoint must be reachable, or the climb livelocks bouncing on the boundary");
+
+        assertFalse(b.settled(),
+                "but settled() must STAY strict: it is shared with the plan-anchor rule, and climbableBelow "
+                        + "is also true for a bot in ballistic flight OVER a vine — widening it fired reached "
+                        + "mid-parkour-arc at botY=113.905 and advanced the waypoint in mid-air");
+        assertFalse(MovementRegistry.TRAVERSE.reached(b, 3, 10, 4),
+                "every other movement keeps the strict ballistic test");
     }
 
     @Test

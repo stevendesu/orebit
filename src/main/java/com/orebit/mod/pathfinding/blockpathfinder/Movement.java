@@ -66,8 +66,66 @@ public interface Movement {
      * <p>Swim overrides it with a vertical tolerance because a floating bot's Y bobs with buoyancy.
      */
     default boolean reached(BotSteering b, int wx, int wy, int wz) {
-        return b.settled()
-                && b.footX() == wx && b.footY() == wy && b.footZ() == wz;
+        return b.settled() && atWaypoint(b, wx, wy, wz);
+    }
+
+    /**
+     * Whether the bot OCCUPIES waypoint cell {@code (wx,wy,wz)} — the position half of {@link #reached},
+     * shared by every override so the partial-top rule can never drift between them. It says nothing about
+     * whether the bot is SETTLED there; each caller adds its own medium test.
+     *
+     * <p>Block-exact by design: a waypoint is a FEET cell and the bot's feet are {@code blockPosition()}.
+     *
+     *
+     * <p><b>DO NOT add a partial-top tolerance here.</b> It looks necessary and is not: {@code
+     * BlockPathfinder.feetYOf} already builds every waypoint topY-aware —
+     * {@code fy + (topY == 16 ? 1 : 0)} — so a slab / snow / carpet / pressure-plate waypoint ALREADY names
+     * the lower cell the bot really stands in. Planner and follower have never disagreed. Tried and
+     * reverted 2026-08-01: a second clause accepting {@code footY == wy - 1} on a solid floor cell instead
+     * accepts the bot ONE CELL TOO LOW on every already-correct waypoint, and timed out the {@code stairup}
+     * course card (bot parked at {@code finalY=151.50}, a stair half-height).
+     *
+     * <p>The dripstone livelock that motivated the attempt was never a partial-top case: {@code
+     * pointed_dripstone} is FORCE-CLASSIFIED {@code SHAPE_FULL} in {@code NavBlock.fingerprint} (its
+     * null-world collision query misleads), so {@code topY == 16}, {@code feetYOf} names the upper cell, and
+     * vanilla seats the bot 5/16 lower. That is a classification quirk of the force-solid blocks, and it is
+     * fixed where it belongs — narrow tops are no longer {@code STANDABLE}, so nothing routes onto one.
+     */
+    default boolean atWaypoint(BotSteering b, int wx, int wy, int wz) {
+        return b.footX() == wx && b.footY() == wy && b.footZ() == wz
+                // THE SETTLE BAND, not merely the cell (owner ruling 2026-08-05). A move's arrival pose is
+                // the PRECONDITION of the next move: every plan is framed from "feet resting at wy", i.e.
+                // [wy.00, wy.20], and its body-clearance cells are derived from that. Testing only the cell
+                // let a move declare success anywhere in a 1.0-block span, handing the next move a frame up
+                // to a full block off — at which point the bot's 1.8-tall box spans THREE cells instead of
+                // two and collides with geometry the plan never checked.
+                //
+                // Convicted repeatedly on the canopy vine: Fall completed at botY=173.872 (cell 173, band
+                // [173.00,173.20]); Descend then completed at 172.965 while hanging on the vine instead of
+                // resting on the cobble at 172.0; the following Diagonal was framed for feet at 172 but
+                // executed with its body reaching into cell 174, hit geometry nobody had cleared, and the
+                // blocked press ratcheted it to the ceiling. Five separate patches at five arrival sites all
+                // chased that one root cause.
+                //
+                // GROUNDED and FLUID are exempt, and must be: a grounded bot is physically resting on
+                // whatever surface it found, so its y is correct by construction even on a partial floor
+                // (bottom slab / snow / carpet seat the feet mid-cell, well above .20 — the topY-aware
+                // feetYOf convention); and a floating bot bobs with buoyancy, which is why Swim overrides
+                // reached with its own vertical tolerance. The band therefore binds exactly the case that
+                // produced every failure above: a CLIMBABLE HANG, where nothing but the servo decides the
+                // height the bot stops at.
+                // The BAND only — deliberately NOT SteerControl.inRestingPose, which additionally requires
+                // settled(). This method's contract is positional ("each caller adds its own medium test"),
+                // and Climb depends on it: a CURTAIN TOP-OUT is a legitimate arrival that settled() does not
+                // cover by design, so folding settled() in here broke it (StationKeepHoldTest's
+                // toppedOutOnACurtainIsReachableByAClimbOnly, real geometry).
+                //
+                // Entry and arrival therefore differ, and coherently: a move may FINISH in a pose that is
+                // positionally correct but not yet at rest, and the NEXT move's implicit settle gate simply
+                // waits for it to come to rest before executing. The invariant that matters — no plan is
+                // ever EXECUTED from outside its frame — is enforced once, at the gate.
+                && (b.grounded() || b.inWater() || b.inLava()
+                        || b.y() <= wy + SteerControl.SETTLE_BAND);
     }
 
     /**

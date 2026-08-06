@@ -1534,6 +1534,26 @@ public final class PathPlan {
     }
 
     /**
+     * A one-line description of the SPLICE BASELINE this plan seeds every windowed search with — diagnostic
+     * only ({@code Debug} paths; never drives behavior).
+     *
+     * <p><b>Why it is worth printing (2026-08-04).</b> The baseline is {@code final}, set at construction and
+     * documented "null for every non-spliced plan", so a {@code refreshWindow} re-search does NOT rebuild
+     * it. That makes "the re-search inherited the previous plan's promised edits" a structurally impossible
+     * explanation for a route change — but only if you have read this field's lifecycle, which is exactly
+     * the kind of assumption that ought to be an observation instead. Printing {@code none} on every
+     * ordinary plan is the point: it closes off a whole family of wrong theories at a glance, and makes the
+     * rare genuinely-spliced search (the portal arc) visible when it does occur.
+     */
+    public String baselineSummary() {
+        if (baseline == null) return "none";
+        if (baseline.isEmpty()) return "empty";
+        return "breaks=" + baseline.breakCount()
+                + " places=" + baseline.placeCount()
+                + " doors=" + baseline.doorSetCount();
+    }
+
+    /**
      * Recompute the CURRENT window's block plan from where the bot is now, WITHOUT touching the committed
      * skeleton — the block-level refresh the driver runs when its block path is consumed (advance toward the
      * same window target) or periodically (terrain changed under the window). This is the "shift the window,
