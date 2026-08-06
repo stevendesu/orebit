@@ -264,6 +264,7 @@ public final class SteerControl {
             recenterOnTarget(b, p);
             return;
         }
+        tag("steer");
         b.faceHorizontally(G.qx - b.x(), G.qz - b.z());
         b.setForward(1.0f);
     }
@@ -325,9 +326,11 @@ public final class SteerControl {
         double cz = cz0 - b.z();
         double d = Math.sqrt(cx * cx + cz * cz);
         if (d > COLUMN_DEADBAND) {
+            tag("recenter");
             b.faceHorizontally(cx, cz);
             b.setForward((float) Math.min(1.0, d));
         } else {
+            tag("recenter:dead");
             b.setForward(0.0f); // aligned — exact zero input; see COLUMN_DEADBAND
         }
     }
@@ -440,10 +443,12 @@ public final class SteerControl {
 
         b.faceHorizontally(hx, hz);
         if (Math.sqrt(ex * ex + ez * ez) <= COLUMN_DEADBAND) {
+            tag(steppingOff ? "arrive:off:dead" : "arrive:dead");
             b.setForward(0.0f);         // projected arrival is on the column — no input; see COLUMN_DEADBAND
             b.setStrafe(0.0f);
             return;
         }
+        tag(steppingOff ? "arrive:off" : "arrive");
         // Decompose the projected miss into the heading frame and drive BOTH channels, so cross-track error is
         // corrected without yawing (BotSteering.setStrafe): along = forward/brake, cross = strafe. Positive
         // strafe is the mover's LEFT, which for unit heading (hx,hz) is the direction (hz,−hx).
@@ -486,6 +491,7 @@ public final class SteerControl {
      */
     public static void stationKeep(BotSteering b, SteerView p) {
         recenterOn(b, Math.floor(b.x()) + 0.5, Math.floor(b.z()) + 0.5);
+        tag("hold");   // after recenterOn, so the log names the CALLER's intent, not the shared column servo
         // A HOLD IS A HOLD — including vertically (2026-08-05, the third (55,173,256) miss). This is the
         // runner's stop-and-fix path: the bot is mining or placing and must not move AT ALL until the
         // geometry is established. Delegating to holdClimbableStance broke that on a hang, because its
@@ -679,9 +685,11 @@ public final class SteerControl {
         final double errz = crossUz * desiredCross - b.velZ();
         final double emag = Math.sqrt(errx * errx + errz * errz);
         if (emag < EPS) {
+            tag("arrest:hold");
             b.faceHorizontally(ux, uz);
             b.setForward(0.0f);
         } else {
+            tag("arrest");
             b.faceHorizontally(errx, errz);
             b.setForward((float) Math.min(1.0, SERVO_GAIN * emag));
         }
@@ -1069,9 +1077,11 @@ public final class SteerControl {
         double errz = dvz - b.velZ();
         double emag = Math.sqrt(errx * errx + errz * errz);
         if (emag < SERVO_DEADBAND) {
+            tag("servo:coast");
             b.faceHorizontally(dirx, dirz);                // at speed: hold heading, coast
             b.setForward(0.0f);
         } else {
+            tag(hazardCorner ? "servo:hazard" : "servo:thrust");
             b.faceHorizontally(errx, errz);                // face the velocity error (forward thrust or reverse brake)
             b.setForward((float) Math.min(1.0, SERVO_GAIN * emag));
         }
@@ -1724,6 +1734,24 @@ public final class SteerControl {
      */
     public static volatile String lastStance = "-";
 
+    /**
+     * Diagnostic ONLY: WHICH servo branch actually wrote this tick's movement inputs. Written by every drive
+     * entry point, read by the follower's {@code exec} log. Never read by logic.
+     *
+     * <p><b>Why it exists</b> (2026-08-06). {@code fwd} and {@code yaw} alone cannot identify the author of an
+     * input, and the branches mean completely different things by the same numbers: {@link #groundServo} faces
+     * the VELOCITY ERROR (so its yaw is a thrust direction, not a heading), {@link #arriveOnTarget} faces the
+     * SEGMENT, {@link #stepOffGate}'s arrest faces the cross-axis correction, and a movement's own deadband
+     * writes {@code 0} while facing nothing at all. Two mechanism claims were derived from that ambiguity and
+     * both were wrong — the log said "the follower steered down the old segment" when the real answer was
+     * "the velocity servo was thrusting to kill a diagonal carry". One token removes the whole class of error.
+     */
+    public static volatile String lastDrive = "-";
+
+    /** Record the drive branch for {@link #lastDrive}; diagnostic-only, so it can be called freely. Public so a
+     *  movement that writes inputs directly (e.g. {@code Descend}'s column deadband) can name itself too. */
+    public static void tag(String branch) { lastDrive = branch; }
+
     /** Diagnostic ONLY: call counter, so a log line can prove {@link #lastStance} is THIS tick's decision and
      *  not a stale one left by an earlier call (the difference between "the branch didn't press" and "the
      *  branch never ran"). */
@@ -1850,6 +1878,7 @@ public final class SteerControl {
         // but "is the involuntary climb available in this column", and a vine one cell down answers yes:
         // the bot is one tick of gravity away from being in it.
         if ((b.onClimbable() || b.climbableBelow()) && b.horizontalCollision()) {
+            tag("release:blocked");
             holdClimbableStance(b, p, true);
             b.setForward(0.0f);
             return;
