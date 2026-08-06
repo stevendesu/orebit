@@ -12,7 +12,7 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
 /**
  * Traverse existing ladders / vines / scaffolding (MOVEMENT-DESIGN Tier 1 climb — the first consumer of
  * the {@link com.orebit.mod.worldmodel.navblock.NavBlock#isClimbable CLIMB} descriptor bit; the gap
- * edges are DESIGN-climb-vocabulary.md §3.3–§3.6). Six rules, all edit-free:
+ * edges are DESIGN-climb-vocabulary.md §3.3–§3.7). Seven rules, all edit-free:
  *
  * <ul>
  *   <li><b>Climb up</b> — one cell up the climb column while the surface continues (the cell the feet move
@@ -36,6 +36,10 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *       out of the column's top and stand on it.
  *   <li><b>Sink-in (§3.5)</b> — from standing ATOP a solid climbable (ladder plate / scaffold deck),
  *       enter the column below. The reverse of exit-top; kills the atop-ladder-plate dead end.
+ *   <li><b>Dismount (§3.7)</b> — the mirror of grab: from a HANG, ease sideways OUT of the column onto
+ *       adjacent standable ground at the same feet height. Emitted only from a genuine hang (feet cell
+ *       climbable AND the node's own floor not standable), because that is exactly the stance with no walk
+ *       alternative — a grounded bot beside a vine reaches the same cell with a plain {@link Traverse}.
  * </ul>
  *
  * <h2>Node semantics — no new mode</h2>
@@ -145,6 +149,23 @@ public final class Climb implements Movement {
     public static final float SINK_IN_COST = CLIMB_DOWN_COST + 2f;
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
+    /**
+     * Does this lateral step END on solid ground — i.e. is it a §3.7 DISMOUNT rather than a §3.3 jump-grab
+     * entry? Read off the waypoint's own floor cell, which is the honest discriminator: a grab entry targets
+     * a climbable hanging in open air (no floor to catch it, which is precisely why it needs the jump arc),
+     * while a dismount targets a ledge the planner already proved standable.
+     *
+     * <p>Without this the two regimes collide on the dismount's ARRIVAL tick. {@code PhaseRunner.run} drives
+     * BEFORE it tests {@code isDone}, so the tick the bot lands on the ledge it is grounded, no longer
+     * {@code onClimbable()}, and still inside the lateral branch — it would press jump and hop straight back
+     * off the ledge it just reached, one tick before the move reported success.
+     */
+    private static boolean landsOnGround(BotSteering b, SteerView path) {
+        return b.solidAt((int) Math.floor(path.tx()),
+                (int) Math.floor(path.ty()) - 1,
+                (int) Math.floor(path.tz()));
+    }
 
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
@@ -280,6 +301,13 @@ public final class Climb implements Movement {
             }
         }
 
+        // A genuine HANG: the feet are on the climb surface AND the node's own floor is not something the bot
+        // could stand on. This is the exact stance with no walk alternative, and it is what gates §3.7 below.
+        // Resolved once per node, and only for climb nodes (the && short-circuits) — a vine's own cell is not
+        // standable (empty shape) and neither is a ladder's plate (NARROW_TOP), so both read as hangs; a
+        // SCAFFOLD deck does not, correctly, because standing on it a plain Traverse already walks off.
+        boolean hanging = onClimb && !ctx.standable(ctx.descriptorAt(x, y, z));
+
         // Grab (entry): step sideways into an adjacent climb column at feet level. The destination floor
         // (nx,y,nz) may be air — vanilla climbing holds the bot (the Swim non-solid-floor precedent) — so
         // only the column's feet + head cells are read. No caps gate: climbing is universal.
@@ -289,7 +317,50 @@ public final class Climb implements Movement {
             int pn = ctx.packedAt(nx, y + 1, nz);
             if (pn == MovementContext.UNBUILT) continue;
             long feetD = ctx.descriptorOf(nx, y + 1, nz, pn);
-            if (!ctx.isClimbable(feetD)) continue;
+            if (!ctx.isClimbable(feetD)) {
+                // §3.7 DISMOUNT — the mirror of the grab below: ease sideways off the column onto the ledge.
+                //
+                // STATUS (2026-08-05, measured): this edge is currently DOMINATED and therefore inert. The
+                // jump moves do refuse a hang (Ascend/Parkour/WalkOff gate on solidFooting, which a climbable
+                // feet cell fails by R1) — but TRAVERSE DOES NOT. Traverse never gates on its SOURCE floor;
+                // its startTopY falls back to 16 when the floor is not standable, so it emits the identical
+                // hang -> ledge step at FLAT_COST (4.633) and A* always takes that over this cling (15.44).
+                //
+                // Which makes the open question a costing one, not a missing-edge one: crossing OFF a
+                // climbable is not a walk. Vanilla clamps on-climbable horizontal motion to 0.15 b/t (6.7
+                // t/blk floor) and, without a sneak held, sinks the bot at 0.15/t the whole way across — so
+                // Traverse's grounded-walk model both under-prices the step and mis-executes it. If Traverse
+                // is gated to a standable source floor, this arm becomes the honest owner of the move at the
+                // real sneak cost. Kept as-is meanwhile: it is emitted, it is correct, and nothing routes
+                // through it. NOTE the TOP-OUT is a different stance and must keep its Traverse — there the
+                // feet are ABOVE the climbable (feet cell air, so onClimb is false) and a flat walk across at
+                // that height is the ratified behaviour (CurtainTopOutTest).
+                //
+                // Gated hard, because this is the arm that could re-open the cling flood the guard below
+                // exists to stop:
+                //   hanging          — from a grounded stance the same cell is a plain Traverse. Refusing here
+                //                      keeps that arbitration where it already is instead of duplicating it.
+                //   passable(feetD)  — the bot's body has to fit in the cell it eases into.
+                //   standable floor  — the ledge must actually catch the feet at THIS height. Deliberately not
+                //                      the guard's `belowStandable`: ground one cell lower is a DROP, which is
+                //                      Fall's job and not a lateral cling's, and emitting it here would land
+                //                      the bot at a node whose floor is air.
+                // Costed as the cling it is (GRAB_LATERAL_COST): the crossing is the same sneak-speed ease,
+                // the destination just happens to hold the bot up when it arrives.
+                if (!hanging || !ctx.passable(feetD)) continue;
+                int pdf = ctx.packedAt(nx, y, nz);
+                if (pdf == MovementContext.UNBUILT
+                        || !ctx.standable(ctx.descriptorOf(nx, y, nz, pdf))) {
+                    continue;
+                }
+                int pdh = ctx.packedAt(nx, y + 2, nz);
+                if (pdh == MovementContext.UNBUILT
+                        || !ctx.passableOrClimbable(ctx.descriptorOf(nx, y + 2, nz, pdh))) {
+                    continue;
+                }
+                out.accept(nx, y, nz, GRAB_LATERAL_COST);
+                continue;
+            }
             // §3.6 scaffold guard: the lateral hold is a SNEAK, and scaffolding is exempt from the
             // climbable sneak-hold (a sneaking bot SINKS through it — the block-exact reached would never
             // fire). Allow only climbables the hold works on: passable (vine — sneak holds) or NARROW_TOP
@@ -463,7 +534,7 @@ public final class Climb implements Movement {
             //    the plates are contiguous and collision carries the crossing.
             // (The HANGING / TOPPED-OUT case is handled by the airborne branch at the top, which routes every
             // vertical intent through the stance servo.) Only the two GROUNDED regimes remain here.
-            if (!b.onClimbable()) {
+            if (!b.onClimbable() && !landsOnGround(b, path)) {
                 b.setJumping(true);
             }
         } else if (b.grounded() && !b.onClimbable() && b.scaffoldingBelow()) {

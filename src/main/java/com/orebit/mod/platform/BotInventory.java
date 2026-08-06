@@ -350,7 +350,7 @@ public final class BotInventory {
 
         MiningModel.Snapshot mining = MiningModel.snapshot(
                 bestTierPerCategory, caps.maxBreakHardness(), caps.canBreak());
-        float premium = placeRemovalPremium(consumesBlocks, conjured, removalWeight);
+        float premium = placeRemovalPremium(mining, consumesBlocks, conjured, removalWeight);
         return new MovementContext.InventoryView(
                 mining, consumesBlocks, placeableBlockCount(), premium, placeBaseCost, breakBaseCost);
     }
@@ -364,17 +364,29 @@ public final class BotInventory {
      * time with the best tool — same tick units as every other cost, tracking hardness) × {@code weight}, with
      * a safety clamp to 0 for a degenerate (non-positive / unmineable) table read. Cold — once per pathfind.
      */
-    private float placeRemovalPremium(boolean consumesBlocks, BlockState conjured, float weight) {
+    private float placeRemovalPremium(MiningModel.Snapshot mining, boolean consumesBlocks,
+            BlockState conjured, float weight) {
         if (weight <= 0f) return 0f;
         long desc;
         if (consumesBlocks) {
-            long softest = softestPlaceableDescriptor();
+            long softest = softestPlaceableDescriptor(mining);
             if (softest == NO_PLACEABLE) return 0f; // carries nothing to place → can't place → no premium
             desc = softest;
         } else {
             desc = NavBlock.descriptorFor(conjured);
         }
-        int t = MiningModel.fastestTicks(desc);
+        // THIS BOT'S OWN TOOLS, not the game's best (owner ruling 2026-08-06). This premium is a real g-cost
+        // term, so it must be what the bot would actually pay to mine the block back out — and the bot's
+        // inventory is immutable for the life of a search, so the snapshot's tier IS that answer.
+        // MiningModel.fastestTicks (the previous call) is the minimum over EVERY tier — the GOLD pickaxe's
+        // time — and it exists to be an admissible lower bound for the GoalForcedCost HEURISTIC, where
+        // under-estimating is a correctness requirement. Reusing it here under-charged the block tier by the
+        // full tool gap: with the shipped defaults (conjured cobblestone, weight 1.0, base 6.0) a bot holding
+        // a STONE pickaxe was charged 6 + 5 = 11 to place a block it would need 15 ticks to remove, so
+        // place-then-walk came to 15.633 against a 15.443 lateral climb — a 0.19-tick coin flip that the
+        // greedy weight could settle either way. On the bot's own tier it is 6 + 15 = 21, and the walk-around
+        // wins by ten ticks, which is the ordering the cost model was always meant to express.
+        int t = mining.ticksFor(desc);
         if (t <= 0 || t >= MiningModel.UNMINEABLE) return 0f; // safety clamp (placeable blocks are breakable)
         return weight * t;
     }
@@ -383,11 +395,16 @@ public final class BotInventory {
     private static final long NO_PLACEABLE = Long.MIN_VALUE;
 
     /**
-     * The descriptor of the SOFTEST (lowest {@link MiningModel#fastestTicks}) placeable block the bot carries
-     * — the one the removal premium assumes and {@link #consumeOnePlaceable} places — or {@link #NO_PLACEABLE}
-     * when it carries none. Cold (called once per pathfind by {@link #placeRemovalPremium}).
+     * The descriptor of the SOFTEST placeable block the bot carries — the one the removal premium assumes and
+     * {@link #consumeOnePlaceable} places — or {@link #NO_PLACEABLE} when it carries none. Cold (called once
+     * per pathfind by {@link #placeRemovalPremium}).
+     *
+     * <p>Ranked by {@code mining.ticksFor} — THIS BOT'S tools — for the same reason the premium is (owner
+     * ruling 2026-08-06), and additionally so the two agree: ranking by the game's best tool could name a
+     * different block than the one the bot would actually find cheapest to remove, and the premium would then
+     * be quoted for a block the search never assumed.
      */
-    private long softestPlaceableDescriptor() {
+    private long softestPlaceableDescriptor(MiningModel.Snapshot mining) {
         long bestDesc = NO_PLACEABLE;
         int bestTicks = Integer.MAX_VALUE;
         for (int i = 0, n = inv.getContainerSize(); i < n; i++) {
@@ -397,7 +414,7 @@ public final class BotInventory {
             // as prime bridging material. They are farming stock, never footing (§4).
             if (com.orebit.mod.farming.CropKinds.isSeedItem(s.getItem())) continue;
             long desc = NavBlock.descriptorFor(bi.getBlock().defaultBlockState());
-            int t = MiningModel.fastestTicks(desc);
+            int t = mining.ticksFor(desc);
             if (t < bestTicks) { bestTicks = t; bestDesc = desc; }
         }
         return bestDesc;

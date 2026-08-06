@@ -808,7 +808,7 @@ public final class BlockPathfinder {
         // argmax + X>Z>Y tie-break as primaryAxis above) rather than taking macroAxis, keeping the two
         // consumers' semantics independent.
         GoalForcedCost.probe(cuboids, sx, sy, sz, gx, gy, gz, caps, ctx.pillarPlaceCost(),
-                ctx.breakBaseCost(), forced);
+                ctx.breakBaseCost(), ctx.miningSnapshot(), forced);
 
         // Reuse this thread's search state (sized to its high-water mark), wiped to empty — so a steady
         // stream of replans allocates nothing here. First call on a thread pays the initial 512/1024 sizing.
