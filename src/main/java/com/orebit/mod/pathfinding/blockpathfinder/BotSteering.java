@@ -244,6 +244,37 @@ public interface BotSteering {
     /** Set the forward movement input ({@code zza}); {@code 1} = full ahead, {@code 0} = none. */
     void setForward(float zza);
 
+    /**
+     * Set the LATERAL movement input ({@code xxa}); {@code +1} = full strafe LEFT of the current facing,
+     * {@code −1} = full right, {@code 0} = none. The sideways counterpart of {@link #setForward}, so a servo
+     * can correct cross-track error <b>without yawing</b>.
+     *
+     * <p><b>Why it exists</b> (owner ruling 2026-08-06). Every movement steers by facing where it wants to go
+     * and holding forward, so lateral error could only ever be corrected by turning — which spins the bot
+     * whenever the target ends up behind it, and, worse, cannot be done at all by a servo that must hold a
+     * fixed heading. Measured consequence: {@link SteerControl#arriveOnTarget} pinned its heading to the step
+     * segment to stop the pirouette, and the uncorrected cross-axis velocity then integrated over a whole
+     * 3-block fall into {@code +0.344} of drift — turning a {@code 0.001} X error into {@code 0.199} and
+     * eating most of the along-axis win.
+     *
+     * <p><b>Sign convention</b> is vanilla's: {@code getInputVector} maps {@code (xxa, _, zza)} through the
+     * yaw, so pure {@code zza} follows the look vector {@code (−sin θ, cos θ)} and pure {@code xxa} follows
+     * {@code (cos θ, sin θ)} — the look vector rotated −90°, i.e. the mover's LEFT. For a unit heading
+     * {@code h = (hx, hz)} the positive-strafe direction is therefore {@code (hz, −hx)}.
+     *
+     * <p><b>Thrust is shared, not added.</b> {@code getInputVector} normalizes the input when its length
+     * exceeds 1, so {@code (forward 1, strafe 1)} is a unit diagonal, not √2 of thrust — a lateral correction
+     * necessarily spends some of the forward budget. Callers should therefore scale the {@code (forward,
+     * strafe)} pair as a VECTOR rather than clamping each component independently, or the commanded direction
+     * is silently distorted at saturation.
+     *
+     * <p>Reset to {@code 0} each tick by the entity layer alongside {@link #setForward}/{@link #setJumping}
+     * (see {@code AllyBotEntity.tick}), so a move must re-assert it; sneak scaling already applies to it. A
+     * {@code default} no-op so the headless test doubles need not implement it — a double that ignores strafe
+     * simply behaves as it did before.
+     */
+    default void setStrafe(float xxa) { }
+
     void setSprinting(boolean sprinting);
 
     /**

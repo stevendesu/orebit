@@ -956,6 +956,11 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     @Override public void setForward(float zza) { this.zza = zza; }
 
+    /** Lateral input for the {@link BotSteering} seam: vanilla's {@code xxa} (positive = strafe LEFT). Already
+     *  zeroed each tick beside {@code yya}/jump and already scaled by {@code Climb.SNEAK_SPEED_FACTOR} under
+     *  sneak, so this write is the whole plumbing — the field was reset-and-scaled long before anything set it. */
+    @Override public void setStrafe(float xxa) { this.xxa = xxa; }
+
     /** Sneak input for the {@link BotSteering} seam: vanilla {@code Entity.setShiftKeyDown}. Held true on a
      *  climbable, {@code isSuppressingSlidingDownLadder()} zeroes the {@code −0.15}/t slide so the bot holds
      *  its height (Climb's lateral grab). Reset false at the top of each tick alongside jump/sprint. */
