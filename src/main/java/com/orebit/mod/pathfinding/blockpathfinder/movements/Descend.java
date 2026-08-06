@@ -213,6 +213,7 @@ public final class Descend implements Movement {
                     // ratchet → no bounce (SteerControl.COLUMN_DEADBAND's derivation).
                     double ox = v.tx() - b.x(), oz = v.tz() - b.z();
                     if (Math.sqrt(ox * ox + oz * oz) <= SteerControl.COLUMN_DEADBAND) {
+                        SteerControl.tag("descend:dead");
                         b.setForward(0.0f);
                         return;
                     }
