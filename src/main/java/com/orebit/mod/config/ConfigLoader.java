@@ -111,6 +111,13 @@ public final class ConfigLoader {
             OrebitCommon.LOGGER.info("[Orebit] protected blocks ({}): {} block states re-fingerprinted",
                     c.protectedBlocks().spec(), remapped);
         }
+        // Region-tier FORWARD place model: unlike the mining table this already holds a valid literal-default
+        // value from static init, so baking on EVERY install (first load included) is both safe and correct —
+        // no ready() guard needed. Cheap (two floats folded into one scalar). It lives beside the mining bake
+        // because it is the same kind of push-config-IN seam: the pathfinder must never read ConfigLoader
+        // itself, or Config.DEFAULT's Block drags the registry into its static init.
+        com.orebit.mod.pathfinding.regionpathfinder.RegionPlaceModel.bakeForward(
+                c.placeBaseCost(), c.removalCostWeight());
         // Re-bake the mining-tick tables if they've already been built (a /bot config reload after server
         // start) so a changed mining-time model (ticksByHardness / ticksToMineFlat) takes effect immediately
         // — and so the navtype-keyed table covers any navtypes the protected split above just added (the

@@ -135,7 +135,7 @@ public final class Descend implements Movement {
         // Physically back on the START floor AFTER having left it → re-establish geometry. Armed by STEP and
         // disarmed on (re)entry to CLEAR, so it can't alias the first STEP tick (bot still grounded at start).
         plan.resetWhen(b -> left[0]
-                && b.grounded() && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
+                && b.grounded() && atWaypoint(b, fx, fromFootY, fz));
         // Validity envelope (PATHOLOGY P1 family — the Parkour/Ascend failWhen precedent): settled
         // (grounded, or bodily in fluid) at a foot cell outside the step's own cells is off-plan —
         // done/resetWhen can never fire there and re-attempting latches. Allowed: the from stand
@@ -150,7 +150,7 @@ public final class Descend implements Movement {
         final int bandLo = Math.min(fromFootY, toFootY);
         final int bandHi = Math.max(fromFootY, toFootY);
         plan.failWhen(b -> (b.grounded() || b.inWater() || b.inLava())
-                && !(b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz)
+                && !(atWaypoint(b, fx, fromFootY, fz))
                 && !(b.footX() == tx && b.footZ() == tz
                         && b.footY() >= bandLo && b.footY() <= bandHi));
         // CLEAR: break the step-off transit column and build the step-down floor. The runner mines one AIR cell
@@ -158,12 +158,37 @@ public final class Descend implements Movement {
         // is still solid the bot is walled in, so it cannot walk off before the floor exists. The transit column
         // spans the bot's body from the new feet (toFootY) up through the step-off head (fromFootY+1) — a
         // topY-aware span (a partial destination makes a deeper foot-drop than the full-block fy..fy+2 run).
+        // NO explicit SETTLE phase: the runner enforces the start band implicitly for EVERY move
+        // (PhaseRunner.settling / SteerControl.inRestingPose). A per-move copy existed here first and was
+        // removed the same day it was written — two gates with slightly different predicates is precisely
+        // the "one rule applied inconsistently" that cost five debugging rounds on the canopy vine, and
+        // this one already disagreed with the shared definition on fluid (a bobbing bot passes
+        // inRestingPose but would have failed this phase's settled()-and-in-band test, deadlocking a
+        // water descend).
         MovePlan.Phase clear = plan.phase("clear");
         for (int cy = toFootY; cy <= fromFootY + 1; cy++) {
             clear.need(MovePlan.Need.AIR, tx, cy, tz);         // break: step-off transit column (new feet … step-off head)
         }
         clear.need(MovePlan.Need.FOOTING, tx, ty, tz)          // place: step-down floor (no-op on real terrain)
-                .drive((b, v) -> left[0] = false)              // disarm on (re)entry; advances same tick
+                .drive((b, v) -> {
+                    left[0] = false;                           // disarm on (re)entry; advances same tick
+                    // HOLD THE STANCE on the hand-off tick (owner ruling 2026-08-04, the (55,173,256) vine
+                    // drop-off). While a need is unmet the RUNNER holds the bot (stationKeep -> sneak on a
+                    // climbable). The tick the geometry finally holds, the runner stops holding and calls
+                    // THIS drive instead — and a drive that only clears a boolean presses nothing at all.
+                    // On solid ground that tick is invisible. On a hang it is fatal: one un-sneaked tick is
+                    // a 0.15 slide, enough to carry the feet out of the single vine cell supporting them,
+                    // and once off the climbable nothing can arrest the fall. Measured exactly — sneak held
+                    // at botY=173.043 while the cobble was placed, released on the hand-off tick, feet left
+                    // cell 173 at 172.965, and the bot free-fell 173 -> 171.4 into the two-tall gap it had
+                    // just walled off with its own placed block.
+                    //
+                    // The hold is column-gated (holdUntilOverTargetColumn): from a hang, letting go before
+                    // the bot is over the DESTINATION drops it down its current column, which on a curtain
+                    // is often one cell tall — it exits the climbable and free-falls. Once over the target
+                    // this is a no-op and gravity does the one-block drop as always.
+                    SteerControl.holdUntilOverTargetColumn(b, v);
+                })
                 .advanceWhen(b -> true);                       // geometry held (runner drives only when met) → STEP
         // STEP: walk off the edge toward the dest column; gravity does the one-block drop. Complete once
         // standing on the new floor (feet block == (tx, ty+1, tz) == (tx, fy, tz)). While still standing on
@@ -191,10 +216,24 @@ public final class Descend implements Movement {
                         b.setForward(0.0f);
                         return;
                     }
+                    // Still short of the target column. From a HANG that means the drop must wait: releasing
+                    // here falls down the CURRENT column, not the destination (the (55,173,256) two-block
+                    // drop into the bot's own placed cobble). No-op off a climbable, so the ordinary
+                    // ground step-off is unchanged.
+                    SteerControl.holdUntilOverTargetColumn(b, v);
                     SteerControl.drive(b, v);                  // medium-aware (walk on land, swim if submerged)
                 })
-                .done(b -> b.grounded()
-                        && b.footX() == tx && b.footY() == toFootY && b.footZ() == tz);
+                // SETTLED, not grounded (owner ruling 2026-08-03, the (58,171,254) vine wedge). A waypoint is
+                // a STAND cell and reaching it means being SUPPORTED there — which on a climbable means
+                // HANGING, never grounded. Gating on grounded() made this predicate UNSATISFIABLE for any
+                // descend whose destination cell holds a vine: the bot arrived dead-centre in the settle band
+                // (measured botY=171.022, reached=true, footY==toFootY) and the move still never completed, so
+                // STEP kept driving full-forward, vanilla's (horizontalCollision && onClimbable -> vy=+0.2)
+                // ratcheted the bot back UP out of the cell one block, and it wedged against the leaf ceiling
+                // at 172.200. settled() is the exact predicate for "supported in this medium" and is what
+                // Movement.reached and Fall's terminal guard already use; grounded() was the narrower test.
+                .done(b -> b.settled()
+                        && atWaypoint(b, tx, toFootY, tz));
         return plan;
     }
 }

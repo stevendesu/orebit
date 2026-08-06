@@ -284,6 +284,30 @@ public final class SteerControl {
     public static final double COLUMN_DEADBAND = 0.15;
 
     /**
+     * Dead-zone (blocks) on the signed Δy that classifies a step's VERTICAL INTENT into the three cases the
+     * stance servo drives — rise / hold / descend ({@link #holdClimbableStance}). Below it the step is treated
+     * as "hold this height", so sub-block settling jitter cannot flap the stance between climbing and falling.
+     * Kept at the {@code 0.05} the old single {@code descending} flag used, so the hold/descend boundary is
+     * bit-identical to before; the change is that RISING is now its own case instead of being folded in with
+     * holding (which pressed sneak at a bot that was trying to climb — the measured 2026-08-02 Climb wedge).
+     */
+    private static final double RISE_EPS = 0.05;
+
+    /**
+     * Height of the <b>settled band</b> above a cell's floor (owner ruling, 2026-08-03): a bot is "settled on
+     * the floor of cell X" anywhere in {@code [X.00, X.20]} inclusive, not at {@code X.00} exactly.
+     *
+     * <p><b>Derivation:</b> the bot is 1.8 blocks tall, so at {@code X.20} its head still tops out inside the
+     * same headroom cells the planner assumed when it emitted the step ({@code X.20 + 1.8 = X+2.00}). Any pose
+     * in that interval is therefore a legitimate resting height that satisfies the plan's geometry.
+     *
+     * <p>Why a band and not a point: a descent moves up to {@code ~0.45} blocks/tick, so a point test is a
+     * knife-edge nothing can land on. Measured 2026-08-03 — {@code 173.875 -> 173.425 -> 172.975} stepped
+     * clean over a 0.1-wide window, never satisfied the hold, and left the vine before the servo noticed.
+     */
+    public static final double SETTLE_BAND = 0.20;
+
+    /**
      * Re-centre on the target column: face the target's x,z and apply forward input proportional to the
      * horizontal offset, so a bot dead-on the column doesn't shove itself off while a drifted bot walks back.
      * Used by the vertical-in-place moves (Pillar, MineDown) and by an airborne Fall homing onto its landing
@@ -334,7 +358,148 @@ public final class SteerControl {
      */
     public static void stationKeep(BotSteering b, SteerView p) {
         recenterOn(b, Math.floor(b.x()) + 0.5, Math.floor(b.z()) + 0.5);
+        // A HOLD IS A HOLD — including vertically (2026-08-05, the third (55,173,256) miss). This is the
+        // runner's stop-and-fix path: the bot is mining or placing and must not move AT ALL until the
+        // geometry is established. Delegating to holdClimbableStance broke that on a hang, because its
+        // descend branch consults the MOVE's vertical intent — and every Descend's intent is "go down", so
+        // the servo dutifully released the stance while the runner was still placing the block. Measured:
+        // sneak held at botY=173.043 for one tick, released the next while the cobble was still being
+        // placed, feet out of the vine cell at 172.965, free-fall to 170.5. The move's intent is simply not
+        // relevant while the runner has stopped it; only holding is.
+        //
+        // Deliberately NOT applied to drive()'s stance call, where the descend intent IS the point.
+        if (!b.grounded() && b.onClimbable()) {
+            b.setSneak(true);
+            return;
+        }
         holdClimbableStance(b, p);
+    }
+
+    /**
+     * {@link #stationKeep} MINUS the vertical hold — hold the bot's own column while letting it SINK. The
+     * settle gate a step opens with (Descend's SETTLE phase): the bot is above its own start block and must
+     * come to rest ON it before the step commits, so the one thing this must NOT do is hold height.
+     *
+     * <p><b>Why not stationKeep</b> (the distinction is the whole point). stationKeep calls {@link
+     * #holdClimbableStance} with {@code translating == false}, which on a climbable presses SNEAK to pin the
+     * bot where it is — correct while mining (the bot must not slide off the frame its plan was built from),
+     * and exactly wrong here, where descending onto the start block is the goal. A settle gate that sneaked
+     * would hang forever at the height it was trying to leave.
+     *
+     * <p>The column re-centre is kept: it costs nothing when the bot is already centred (exact zero inside
+     * {@link #COLUMN_DEADBAND}), bleeds lateral drift while the bot sinks, and — unlike a target-ward push —
+     * aims INWARD, so it can never press the box into a neighbouring block and trip the involuntary-climb
+     * ratchet that this gate exists to starve of input.
+     */
+    public static void settleOnOwnColumn(BotSteering b) {
+        recenterOn(b, Math.floor(b.x()) + 0.5, Math.floor(b.z()) + 0.5);
+    }
+
+    /**
+     * On a climbable, HOLD HEIGHT until the bot is over its target column — the lateral half of a step that
+     * begins from a hang. Returns {@code true} when the hold was applied.
+     *
+     * <p><b>Why this is the MOVE's job and not {@link #holdClimbableStance}'s</b> (2026-08-04). A descending
+     * bot on a climbable faces two physically opposite situations that the servo cannot tell apart, because
+     * the difference is the move's INTENT, not the geometry:
+     * <ul>
+     *   <li>A multi-block drop ({@code Fall}'s §3.2 release-drop, or any descent whose plan already accounts
+     *       for the fall) must LET GO. Arresting it strands the bot on the vine it was told to leave.</li>
+     *   <li>A one-block {@code Descend} into an ADJACENT column must NOT let go yet. Releasing while still
+     *       over the old column drops the bot down THAT column — and on a curtain the supporting cell is
+     *       often a single block, so it exits the climbable entirely and free-falls.</li>
+     * </ul>
+     * Measured on the second at {@code (55,173,256)}: the bot released at {@code botY=173.043} while still
+     * at {@code x=55.5}, its feet left cell 173 at {@code 172.965}, and it fell two blocks into the gap its
+     * own placed cobble had just walled off — unable to jump back out.
+     *
+     * <p>The gate is the same {@link #COLUMN_DEADBAND} the step-off drive uses, so "close enough to stop
+     * pressing" and "close enough to let go" are one threshold rather than two that can disagree. Sneak is
+     * safe to hold here: vanilla's ledge edge-guard needs {@code onGround}, and a bot hanging on a climbable
+     * is airborne, so the guard cannot eat the lateral motion this is easing across.
+     */
+    /**
+     * Whether the bot is in a RESTING POSE for feet cell {@code footY} — the single definition of "standing
+     * where a plan assumes you are" (owner ruling 2026-08-05). Shared by {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.Movement#atWaypoint} (may a move FINISH here?) and by
+     * {@link PhaseRunner}'s implicit settle gate (may a move START here?), because those must be the same
+     * question: every move's arrival pose is the next move's precondition, so a pose good enough to end on
+     * is exactly a pose good enough to begin from. Two definitions would silently disagree at the seam.
+     *
+     * <p>Grounded and fluid are exempt for physical reasons, not convenience: a grounded bot rests on
+     * whatever surface it found (a bottom slab / snow / carpet seats the feet mid-cell, and {@code feetYOf}
+     * is topY-aware, so its y is correct by construction), and a floating bot bobs with buoyancy. The band
+     * therefore binds exactly the CLIMBABLE HANG, where nothing but the servo decides the stopping height.
+     */
+    public static boolean inRestingPose(BotSteering b, int footY) {
+        // SETTLED is the first conjunct, not an afterthought: position says where the bot IS, never that
+        // anything is HOLDING it there. Measured at (55,173,256) — the bot sat at botY=173.122, inside the
+        // [173.00, 173.20] band, while in free fall at dm.y=-0.0784; a position-only test opened the gate
+        // and it fell straight through. settled() is exactly "supported in this medium", and on a climbable
+        // that means HELD (sneak, or velocity above the arrest threshold), not merely intersecting.
+        // climbableBelow() is admitted alongside settled(), mirroring Climb.reached's
+        // `(settled() || climbableBelow())` — and for the same reason. A bot TOPPED OUT on a curtain is
+        // supported by it, but is not grounded, not in fluid, and not onClimbable() (the climbable is UNDER
+        // the feet, not in them), so settled() cannot see it. Without this arm the gate blocks every move
+        // that begins from a top-out and settleIntoBand cannot rescue it — it returns immediately off a
+        // climbable — so the bot would hang forever at a pose it had legitimately reached.
+        //
+        // Safe here even though folding climbableBelow into settled() ITSELF was tried and reverted (it
+        // fires for a Parkour arc merely passing over a vine, which then advanced its waypoint mid-flight).
+        // This gate only PERMITS a plan to execute; it never advances one. The band test still applies, so
+        // the worst case is a ballistic bot at exactly the right height starting its next move one tick
+        // early — whereas reached/done, which do advance, keep their own stricter guards.
+        if (!b.settled() && !b.climbableBelow()) {
+            return false;
+        }
+        return b.grounded() || b.inWater() || b.inLava()
+                || (b.y() >= footY && b.y() <= footY + SETTLE_BAND);
+    }
+
+    /**
+     * Drive the bot INTO the resting band for feet cell {@code footY} — the implicit settle every move opens
+     * with (owner ruling 2026-08-05: "every move is built under the assumption the bot is standing in the
+     * band at the start; if we're NOT there, we need to settle into that position").
+     *
+     * <p>Three cases, all state-based (no timers):
+     * <ul>
+     *   <li><b>Above the band</b> — press nothing vertical and let gravity, or the {@code -0.15} climbable
+     *       clamp, bring the bot down. Holding here would pin it at the height it needs to leave.</li>
+     *   <li><b>About to overshoot</b> — on a climbable, tap sneak the tick before the feet would drop below
+     *       {@code footY}. A descent moves up to ~0.45 b/t, so reacting only once inside a 0.20 band is a
+     *       knife-edge nothing can land on; anticipating is what makes the band reachable at all.</li>
+     *   <li><b>In the band</b> — on a climbable, hold sneak, or the slide simply continues through it.</li>
+     * </ul>
+     *
+     * <p>Off a climbable there is no input that arrests a fall, so this only re-centres and waits — which is
+     * correct: a bot falling through open air is either going to land (and be grounded, hence resting) or is
+     * off-plan, and that is the validity envelope's verdict to make, not this servo's.
+     */
+    public static void settleIntoBand(BotSteering b, SteerView p, int footY) {
+        recenterOn(b, Math.floor(b.x()) + 0.5, Math.floor(b.z()) + 0.5); // hold the column, never press on
+        if (!b.onClimbable() || b.y() < footY) {
+            return;                                    // nothing to hold with, or already below — let it be
+        }
+        if (b.y() <= footY + SETTLE_BAND || b.y() + b.velY() < footY) {
+            b.setSneak(true);                          // in the band, or one tick from falling out of it
+        }
+    }
+
+    public static boolean holdUntilOverTargetColumn(BotSteering b, SteerView p) {
+        if (!b.onClimbable()) return false;
+        // SUPPORT UNDERNEATH ⇒ no hold (the already-ratified lateral rule, re-derived here 2026-08-05).
+        // This hold exists to stop the bot sliding down the WRONG column while it is still off-target. A bot
+        // standing on a block is not sliding anywhere, so the hold buys nothing — and sneak arms vanilla's
+        // maybeBackOffFromEdge, which deletes precisely the horizontal motion a step-off needs to leave the
+        // ledge. Measured at (58,171,254): grounded on a block whose cell ALSO holds a vine, so onClimbable
+        // was true; sneak engaged the moment the bot entered that cell and its dm.x decayed 0.078 -> 0.036
+        // as the edge guard ate the walk-off. A vine sharing a cell with solid footing is common on a trunk,
+        // so testing onClimbable alone is not enough — the question is whether anything is holding the bot up.
+        if (b.grounded() || b.standableBelow()) return false;
+        double ox = p.tx() - b.x(), oz = p.tz() - b.z();
+        if (Math.sqrt(ox * ox + oz * oz) <= COLUMN_DEADBAND) return false; // over it — let go, gravity drops
+        b.setSneak(true);
+        return true;
     }
 
     /**
@@ -611,7 +776,9 @@ public final class SteerControl {
                     double bx = (1.0 - w) * dirx + w * ndx + CORNER_RACING_BIAS * w * outx;
                     double bz = (1.0 - w) * dirz + w * ndz + CORNER_RACING_BIAS * w * outz;
                     double bl = Math.sqrt(bx * bx + bz * bz);
-                    if (bl > EPS) { dirx = bx / bl; dirz = bz / bl; }
+                    if (bl > EPS && !blendLeavesLane(b, p, bx / bl, bz / bl)) {
+                        dirx = bx / bl; dirz = bz / bl;
+                    }
                 }
             }
         }
@@ -758,7 +925,9 @@ public final class SteerControl {
                         double bx = (1.0 - w) * dirx + w * ndx + CORNER_RACING_BIAS * w * outx;
                         double bz = (1.0 - w) * dirz + w * ndz + CORNER_RACING_BIAS * w * outz;
                         double bl = Math.sqrt(bx * bx + bz * bz);
-                        if (bl > EPS) { dirx = bx / bl; dirz = bz / bl; }
+                        if (bl > EPS && !blendLeavesLane(b, p, bx / bl, bz / bl)) {
+                            dirx = bx / bl; dirz = bz / bl;
+                        }
                     }
                 }
             }
@@ -1333,9 +1502,11 @@ public final class SteerControl {
      *   <li>feet ABOVE a climbable (topped out) &rarr; hold JUMP. It does not cancel the sink; it out-runs
      *       it by instantly re-climbing at the surface. Sneak would hold too, but sneak's ledge edge-guard
      *       forbids stepping OFF the curtain top and would trap the bot on the cell it came from.</li>
-     *   <li>feet INSIDE a climbable (lateral cling) &rarr; hold SNEAK. Here jump CLIMBS rather than holds,
-     *       so sneak is the only stance-hold. Sneak does NOT block a simultaneous climb and does not change
-     *       climb speed, so it is safe to hold whenever we are not deliberately descending.</li>
+     *   <li>feet INSIDE a climbable (lateral cling) <b>with nothing standable underneath</b> &rarr; hold
+     *       SNEAK. Here jump CLIMBS rather than holds, so sneak is the only stance-hold. Sneak does NOT
+     *       block a simultaneous climb and does not change climb speed, so it is safe to hold whenever we
+     *       are not deliberately descending — <i>provided</i> there is genuinely nothing below to stand on
+     *       (see the {@link BotSteering#standableBelow} gate below).</li>
      * </ul>
      *
      * <p>Released when the segment actually wants to go DOWN (the move is a descent through/off the
@@ -1352,23 +1523,210 @@ public final class SteerControl {
      * ledge edge-guard forbids stepping off a lip, trapping the bot on the block it was leaving (owner's
      * warning; measured: flagship best regressed 58.43 &rarr; 212.55 without this guard).
      *
+     * <p><b>The feet-INSIDE sneak additionally requires {@link BotSteering#standableBelow} to be FALSE</b>
+     * (owner ruling 2026-08-02). Sneak is not one effect but two: it zeroes the {@code −0.15}/t climbable
+     * slide (the stance-hold we want) AND it arms vanilla's ledge edge-guard ({@code
+     * Entity/Player.maybeBackOffFromEdge}), which deletes horizontal motion that would carry the box past
+     * an unsupported lip. So the question the gate must ask is not "am I in a climbable and not
+     * descending" but WHAT IS UNDERNEATH:
+     * <ul>
+     *   <li>no standable underneath &rarr; the fall is ours to arrest, and the climbable is the only thing
+     *       that can arrest it &rarr; SNEAK (unchanged behaviour).</li>
+     *   <li>a standable underneath &rarr; there is nothing to arrest; a step-off simply lands. Sneaking
+     *       here buys no height we need and costs us the ability to move &rarr; do NOT sneak, just walk
+     *       off.</li>
+     * </ul>
+     *
+     * <p>Convicted 2026-08-02, jungle-vine descent. Per-tick at the stall: {@code botY=171.172 sneak=false
+     * hcol=false dm=(0.0747,-0.2254,0.0120)} (free climbable slide), then {@code botY=171.022 sneak=TRUE
+     * hcol=false} and thereafter {@code x=60.289 sneak=true hcol=false dm=(0.0568,-0.0784,0.0000)} —
+     * FROZEN. {@code hcol=false} on every tick means there was no horizontal collision anywhere: nothing
+     * was being pressed against, yet a non-zero {@code deltaMovement} was commanded every tick and yielded
+     * ZERO displacement. That signature is the sneak edge-guard, not a wall. The bot sat at
+     * {@code (60.289, 171.022, 255.500)}, {@code 0.011} short of the {@code x >= 60.300} it needed to stop
+     * overhanging {@code x=59} and reach its target column centre {@code 60.5}. It entered the state
+     * because it was {@code 0.022} above its target feet height {@code 171.00} — INSIDE the {@code 0.05}
+     * {@code descending} margin — so {@code descending} read false and sneak engaged, while the leaves at
+     * {@code (60,169,255)} were holding a perfectly good floor {@code 1.02} blocks under its feet.
+     *
+     * <p><b>Why this cannot reintroduce the 58.43 &rarr; 212.55 regression.</b> That regression is the
+     * OPPOSITE error — sneaking where sneak is harmful — and the fix moves strictly in the safe direction:
+     * it only ever REMOVES a sneak press, never adds one. The {@code !grounded()} guard above is untouched
+     * and still does its job. Ground-level jungle vine, the case that produced those numbers, is vine
+     * growing over solid ground: it now has a standable below and so is refused sneak by a SECOND
+     * independent test as well, which can only reinforce the guard. A genuine hang — a bot suspended on a
+     * curtain with nothing but air under it — has no standable below, reads {@code false}, and keeps
+     * sneaking exactly as before. The {@code climbableBelow} top-out branch is untouched, and the branches
+     * stay mutually exclusive: a bot with its feet INSIDE a climbable must never fall through to the JUMP
+     * branch (in the convicted geometry {@code climbableBelow} was also true — the cell below was a second
+     * vine — and jumping there would climb the bot back UP its curtain).
+     *
      * <p>Applied by BOTH the locomotion {@link #drive} and the runner's {@link #stationKeep} hold — a stance
      * the bot must keep while WALKING it must equally keep while standing still to mine or place, or the
      * "stop and fix the geometry" hold quietly slides it off the frame its plan was built from.
      */
     public static void holdClimbableStance(BotSteering b, SteerView p) {
-        final boolean descending = p.ty() < b.y() - 0.05;
-        if (!b.grounded() && !descending) {
-            if (b.onClimbable()) {
-                b.setSneak(true);       // feet INSIDE: jump climbs, only sneak holds height
-            } else if (b.climbableBelow()) {
-                b.setJumping(true);     // feet ABOVE: jump out-runs the sink by re-climbing at the surface
+        holdClimbableStance(b, p, false);
+    }
+
+    /**
+     * As {@link #holdClimbableStance(BotSteering, SteerView)}, with the <b>translating</b> discriminator.
+     *
+     * <p><b>Why the CALLER must supply it (owner ruling 2026-08-02, scope correction).</b> The ruling reads
+     * "<i>moving laterally</i>, on a climbable, with a standable underneath ⇒ don't sneak, just walk off".
+     * That qualifier is load-bearing, and this method cannot see it: it is called from BOTH the locomotion
+     * {@link #drive} — where the bot IS being translated and sneak's ledge edge-guard is exactly what pins it
+     * (measured 2026-08-02 at {@code x=60.289}: {@code hcol=false}, non-zero deltaMovement, ZERO displacement,
+     * forever) — and the runner's {@link #stationKeep} hold, where the bot is deliberately NOT translating
+     * (it re-centres on its OWN column, and {@link #recenterOn} emits exact zero forward inside
+     * {@link #COLUMN_DEADBAND}).
+     *
+     * <p>On the station-keeping path the edge-guard costs nothing — any residual recentre is INWARD, toward
+     * support, which the guard permits — while the slide-suppression is the whole value. Relaxing there would
+     * resurrect the already-convicted {@code (58,133,189)} bug from the opposite direction: a bot hanging in a
+     * curtain above jungle leaves would drop the hold for the entire mine (≥5 ticks at −0.15/t ≈ a full block)
+     * and ground one cell BELOW the frame its plan was built from — precisely what the closing paragraph of
+     * {@link #holdClimbableStance(BotSteering, SteerView)} exists to forbid. So {@code false} is the default
+     * and the relaxation is opt-in, applied only where the bot is genuinely being driven.
+     */
+    /**
+     * Diagnostic ONLY: the stance servo's decision on its last call — {@code intent}, the live {@code err},
+     * and the branch taken. Written every call, read by the follower's {@code exec} log so a wedge shows WHY
+     * the servo chose what it chose instead of leaving it to be inferred. Never read by logic.
+     */
+    public static volatile String lastStance = "-";
+
+    /** Diagnostic ONLY: call counter, so a log line can prove {@link #lastStance} is THIS tick's decision and
+     *  not a stale one left by an earlier call (the difference between "the branch didn't press" and "the
+     *  branch never ran"). */
+    private static int stanceCalls;
+
+    public static void holdClimbableStance(BotSteering b, SteerView p, boolean translating) {
+        if (b.grounded()) { lastStance = "grounded"; return; } // a real floor holds the stance; no input needed
+        // The step's OWN vertical intent (-1 / 0 / +1), taken from the segment's start->target feet heights —
+        // NOT from the bot's live position error. Those differ, and the difference matters: a bot sagging
+        // below its target INSIDE a lateral cling (the vine sag) has a position error but its step is still a
+        // Δy==0 hold, and must sneak to arrest the sag rather than jump and ratchet up the curtain. Reading
+        // the error instead misclassified exactly that case (ClimbSteerTest.lateralClingHoldsSneak). The
+        // environment tests below stay live and per-tick; it is only the INTENT that is fixed by the plan.
+        final double intent = p.ty() - p.sy();   // which way the STEP wants to go: -1 / 0 / +1
+        // The live error, IN THE BOT'S FRAME. SteerView's y is the "feet-cell-plus-one" frame (SegmentCursor
+        // adds +1.0 to a feet cell) and its javadoc is explicit that y may be consumed only as a segment
+        // DELTA — `intent` above is such a delta and is frame-free. An ABSOLUTE comparison must first drop
+        // back into the bot's own frame, or it is off by exactly one block: measured 2026-08-02 as
+        // `err=0.95` on a bot that was sitting exactly on its target (ty=170.0 for feet cell 169,
+        // botY=169.055), which read as "still a block short" forever and never let the stance arrest.
+        final double floorY = p.ty() - 1.0;      // the target FEET CELL's floor, in the bot's own frame
+        final double err = floorY - b.y();
+        // SETTLED IS A BAND, NOT A POINT (owner ruling, 2026-08-03). "Settled on the floor of a cell" is
+        // [X.00, X.20] inclusive: the bot is 1.8 tall, so at X.20 its head still occupies exactly the headroom
+        // cells the planner assumed, and anything lower is a legitimate resting pose.
+        //
+        // Treating it as a POINT (|err| < 0.05) was a knife-edge no descent could hit. Measured 2026-08-03: a
+        // Fall descending at 0.45 blocks/tick stepped 173.875 -> 173.425 -> 172.975 straight OVER the 0.1-wide
+        // window, never once satisfied the hold, and by the time the error went positive it had left the vine
+        // (climbable=false) and had nothing to arrest against — it rode down to 170.5, ~2.5 blocks past its
+        // landing. The bot was IN its target cell at 173.425 and the servo still called it "descending",
+        // because it measured against the cell FLOOR rather than asking whether the feet were in the cell.
+        final boolean aboveBand = b.y() > floorY + SETTLE_BAND;
+        final boolean belowFloor = b.y() < floorY;
+        final double dy = (intent > RISE_EPS && belowFloor) ? err
+                : (intent < -RISE_EPS && aboveBand) ? err
+                : 0.0;
+        lastStance = String.format("#%d int=%.2f err=%.2f dy=%.2f clb=%b stb=%b tr=%b grd=%b",
+                ++stanceCalls, intent, err, dy, b.onClimbable(), b.standableBelow(), translating, b.grounded());
+        if (dy > RISE_EPS) {
+            // +1 — RISE. In a climbable, jump is the climb input; out of one it is the jump. Same press either
+            // way, so no medium test is needed. This is the case a single `descending` flag used to swallow:
+            // it lumped "rising" in with "holding height" and pressed SNEAK, which pins the bot at its current
+            // height forever AND arms the ledge edge-guard that kills the lateral half of the step. Measured
+            // 2026-08-02 on the flagship: a Climb to (61,169,252) with ty=170.00 against botY=169.055 — Δy of
+            // +0.945, unambiguously a rise — sat frozen at z=253.700 with sneak held, dm commanded every tick
+            // and zero displacement, until the tick budget ran out.
+            b.setJumping(true);
+        } else if (dy < -RISE_EPS) {
+            // -1 — DESCEND. Hold NOTHING and let the drop run… UNLESS this tick would carry the feet BELOW
+            // the target cell's floor. Then tap sneak to arrest NOW (owner ruling, 2026-08-03: "tap sneak for
+            // one tick when we enter the block to slow our fall, then monitor momentum and aim for X.20 or
+            // less"). Reacting only once the band is entered is too late at speed — a 0.45 b/t descent
+            // crosses the whole 0.20 band inside a single tick — and overshooting is not a cosmetic error:
+            // dropping to 172.999 puts the feet BELOW the vine cell with nothing left to grab, which is how
+            // the measured run ended up 2.5 blocks low.
+            //
+            // Anticipation only helps where an input can actually arrest, i.e. on a climbable; in free air
+            // sneak does nothing and the drop is the plan's own business. One tap is enough: the clamp takes
+            // the slide to 0, and releasing next tick resumes at the -0.15 climbable rate, which eases the
+            // bot down into the band a sixth of a block at a time instead of flying past it.
+            // A "nothing beneath us ⇒ hold" term was tried here on 2026-08-04 and REVERTED the same day.
+            // It is wrong as a general rule, and CarryArrestGateTest.aDeliberateDescentReleasesBothHolds
+            // already said so: that fixture is a bot inside a curtain 1.0 off its target column with a
+            // 4-block drop ahead, and a deliberate descent must RELEASE there, void beneath or not. Fall's
+            // §3.2 release-drop is the same shape — letting go IS the plan, and arresting it would strand
+            // the bot on the vine it was told to leave. Holding height until the bot is over its target
+            // column is a MOVE's concern (see Descend's CLEAR/STEP), not this servo's: only the move knows
+            // whether letting go lands it where it meant to go.
+            if (b.onClimbable() && b.y() + b.velY() < floorY) {
+                b.setSneak(true);
             }
+            return;
+        } else if (b.onClimbable()) {
+            // 0 — HOLD HEIGHT with the feet INSIDE a climbable. Jump would climb and gravity would slide, so
+            // sneak is the only input that holds — but sneak also arms vanilla's ledge edge-guard, which
+            // deletes horizontal motion that would carry the box off its supporting column. So press it only
+            // when there is genuinely nothing below to catch us.
+            //
+            // Re-read EVERY tick, which is the whole point: standableBelow() asks about the columns the bot's
+            // bounding box currently overlaps, so as the box crosses a lip the answer flips by itself. A step
+            // that starts overhanging a floor gets NO sneak (it is free to cross) and, the moment the box
+            // clears into the unsupported column, standableBelow() goes false and the hold engages before the
+            // bot can fall. Half the movement unsneaked and half sneaked, with no state and no timers.
+            //
+            // `translating == false` is the runner's stationKeep hold — the bot is deliberately NOT moving
+            // (it re-centres on its OWN column at exact zero forward inside COLUMN_DEADBAND). No lip is being
+            // crossed, so the edge-guard costs nothing and the hold is pure gain; relaxing there would slide
+            // the bot off the frame its plan was built from during a mine (>=5 ticks at -0.15/t ~ a full
+            // block) — the already-convicted (58,133,189) failure, re-entered from the other side.
+            if (!translating || !b.standableBelow()) b.setSneak(true);
+        } else if (b.climbableBelow()) {
+            // 0 — HOLD HEIGHT with the feet ABOVE a curtain (the top-out). Nothing to stand on, so the bot
+            // sinks in and vanilla re-lifts it; jump out-runs the sink by re-climbing at the surface. Sneak
+            // would hold it too, but its edge-guard would forbid ever stepping OFF the curtain top.
+            b.setJumping(true);
         }
     }
 
     public static void drive(BotSteering b, SteerView p) {
-        holdClimbableStance(b, p);
+        // BLOCKED PRESS ON A CLIMBABLE — release (owner rule, finally implemented 2026-08-05 after it was
+        // the answer at three separate sites). Vanilla turns (horizontalCollision || jumping) && onClimbable
+        // into vy = +0.2, so a press that cannot move the bot HORIZONTALLY is converted entirely into
+        // ALTITUDE. Continuing to hold it is not merely useless, it actively climbs the bot out of the frame
+        // its plan was built from, and the higher it goes the more geometry it fouls — the (57,172,255)
+        // ratchet to a leaf ceiling, and the (58,170,253) limit cycle where the bot was ALREADY in its
+        // target column and only needed to drop.
+        //
+        // Releasing is the whole fix: with no input, the climbable's own physics take over (the -0.15 slide,
+        // or a rest if something supports it), the bot returns to its band, and the settle gate re-admits it.
+        // "How long" needs no timer — the condition is re-read every tick, so the press resumes the moment it
+        // can actually produce displacement.
+        //
+        // Gated on onClimbable() so ordinary walking into a wall is untouched: there a blocked press is
+        // harmless, and releasing it would break every move that leans on collision to slide along geometry.
+        // If the obstruction is real and permanent the move now STALLS visibly instead of climbing — which is
+        // the correct outcome under the no-recovery rule, and legible in a way the ratchet never was.
+        // climbableBelow() is included, not just onClimbable() (narrowed-then-widened 2026-08-05). A bot
+        // oscillating across a cell boundary is IN the climbable only on the ticks it dips below it —
+        // measured at (58,170,253), roughly one tick in four — and on the other three an onClimbable-only
+        // gate let the full drive press straight back into the wall, which is what re-armed the collision
+        // that the next dip converted to +0.2. Releasing only on the dip tick cannot break a cycle whose
+        // energy is supplied by the ticks in between. The question is not "am I in a climbable right now"
+        // but "is the involuntary climb available in this column", and a vine one cell down answers yes:
+        // the bot is one tick of gravity away from being in it.
+        if ((b.onClimbable() || b.climbableBelow()) && b.horizontalCollision()) {
+            holdClimbableStance(b, p, true);
+            b.setForward(0.0f);
+            return;
+        }
+        holdClimbableStance(b, p, true);   // the locomotion path: the bot IS translating
         if (b.inWater()) {
             swimTowards(b, p);
             holdDepth(b, p, 0.0);
@@ -1377,6 +1735,44 @@ public final class SteerControl {
         } else {
             steerTowards(b, p);           // legacy open-loop walk (default)
         }
+    }
+
+    /**
+     * LANE CONTAINMENT for the corner blend (owner ruling 2026-08-01). The blend may round toward the next
+     * leg only while doing so keeps the bot inside the CURRENT step's lane; once the bot is at the lane
+     * bound the blend is dropped for any tick whose cross component points further OUT.
+     *
+     * <p><b>Why.</b> The blend rotates up to {@link #CORNER_BLEND_MAX} of the heading toward the next leg and
+     * adds a {@link #CORNER_RACING_BIAS} OUTWARD push, starting {@link #CORNER_BLEND_DIST} = 1.3 blocks out —
+     * i.e. more than a full cell before arrival. Every converted movement's {@code failWhen} envelope admits
+     * only that step's own columns, so on any corner where the next leg turns, the steer deliberately drives
+     * the bot out of the lane and the envelope fail&rarr;HOLDs it for obeying the steer. Three instances in
+     * one 2026-08-01 flagship pair — {@code (58,113,160)}, {@code (62,135,189)}, {@code (143,113,13)} — and
+     * the instrumented capture at the last shows it plainly: the bot starts the step AT REST and centred
+     * ({@code vel=(0,0)}, {@code z=14.419} on a constant-z step) and the cross velocity is MANUFACTURED,
+     * growing monotonically with {@code w} as {@code dCorner} shrinks (−0.009 → −0.019 → −0.037 → −0.052)
+     * until {@code z} crosses the cell boundary. Not momentum, not terrain: the steering law and the
+     * validity envelope simply disagreed about where the bot is allowed to be.
+     *
+     * <p>Positional, not predictive — no horizon and no new constant. It reuses the same lane half-width the
+     * step-off gate uses ({@code 0.5 −} {@link #PARKOUR_CELL_MARGIN} {@code = 0.2}), so the bot may still
+     * round a corner up to the lane bound and only then holds the line. Where there IS room the blend
+     * survives untouched, which is what keeps its original purpose (an orthogonal run-up into a parkour,
+     * rounding wide to keep the hitbox off the inside flank column — the clip IS the ejection) alive.
+     *
+     * @return {@code true} when the blended heading would push the bot further outside its lane.
+     */
+    private static boolean blendLeavesLane(BotSteering b, SteerView p, double bx, double bz) {
+        double segx = p.tx() - p.sx(), segz = p.tz() - p.sz();
+        double sl = Math.sqrt(segx * segx + segz * segz);
+        if (sl < EPS) return false;                     // degenerate (vertical) segment — no lane to leave
+        segx /= sl; segz /= sl;
+        // Signed offset of the bot from the segment LINE, and the blend's cross component in the same sense
+        // (right-hand perpendicular of the segment is (segz, -segx)).
+        double cte = (b.x() - p.sx()) * segz - (b.z() - p.sz()) * segx;
+        if (Math.abs(cte) <= 0.5 - PARKOUR_CELL_MARGIN) return false;   // still inside the lane — blend freely
+        double bcross = bx * segz - bz * segx;
+        return cte > 0 ? bcross > 0 : bcross < 0;       // at the bound and still heading out
     }
 
     /**

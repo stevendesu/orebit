@@ -233,7 +233,7 @@ public final class WalkOff implements Movement {
         MovePlan plan = new MovePlan();
         // Balked step-off: physically back on the start floor with no drop taken → re-attempt from WALKOFF.
         plan.resetWhen(b -> b.grounded()
-                && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
+                && atWaypoint(b, fx, fromFootY, fz));
         // WALKOFF: sprint off the lip toward the landing, NO jump. steerTowards (not the medium-aware drive) —
         // the honey/reach race needs full sprint at the lip.
         plan.phase("walkoff")
@@ -254,7 +254,7 @@ public final class WalkOff implements Movement {
                     b.setJumping(false);
                 })
                 .done(b -> b.grounded()
-                        && b.footX() == tx && b.footY() == landFeetY && b.footZ() == tz);
+                        && atWaypoint(b, tx, landFeetY, tz));
         return plan;
     }
 

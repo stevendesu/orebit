@@ -181,7 +181,7 @@ public final class MineDown implements Movement {
                 .drive(SteerControl::recenterOnTarget) // hold the column; gravity does the descent, no jump
                 // Complete only once actually STANDING on the destination floor. PhaseRunner short-circuits
                 // while any AIR need is still solid, so this is evaluated only after the whole shaft is air.
-                .done(b -> b.grounded() && b.footX() == fx && b.footY() == landedFeetBlockY && b.footZ() == fz);
+                .done(b -> b.grounded() && atWaypoint(b, fx, landedFeetBlockY, fz));
 
         return plan;
     }

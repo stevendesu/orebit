@@ -517,7 +517,7 @@ public final class DiagonalParkour implements Movement {
                 // cell centre, the ice-slide arrest).
                 .drive((b, v) -> SteerControl.parkourAirborne(b, v, uxn, uzn, tx, ty, tz, sprint || sprintInject[0]))
                 .done(b -> b.grounded()
-                        && b.footX() == tx && b.footY() == toFootY && b.footZ() == tz);
+                        && atWaypoint(b, tx, toFootY, tz));
         return plan;
     }
 

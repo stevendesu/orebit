@@ -128,7 +128,14 @@ public class RegionTubeEscalationTest {
     @Test
     void realizedBlame_landsOnUnrealizedHop_notJustCommitted() {
         buildWallFixture(W, false);
-        BlockPos start = feet(-12, 1, 0);
+        // Start well west of the wall's midpoint (2026-08-02): the cost-model corrections stopped the L1 search
+        // FLOODING on the old -12 start, so rebuild() no longer escalated its top from 1 to 2 and the cascade
+        // collapsed to a single coarse level — leaving realized blame nothing to reach BEYOND and degenerating
+        // it to the committed hop. Not eliminating a flood to keep a test honest: widening the span makes
+        // chooseCapSafeLevel pick the deeper top OUTRIGHT (it is purely geometric), so the multi-level shape
+        // this test exists to exercise is restored WITHOUT depending on a flood to produce it. Strictly more
+        // rigorous — the assertions below are unchanged. -28 stays inside the seeded corridor (rx ∈ [-31,31]).
+        BlockPos start = feet(-28, 1, 0);
         BlockPos goal = feet(0, 1, 2);
 
         HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, MINY, start, goal, CAPS,

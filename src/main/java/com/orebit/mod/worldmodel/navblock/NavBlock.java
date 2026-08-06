@@ -478,7 +478,24 @@ public final class NavBlock {
         // net exists for fences/walls (topY 24), which the topY test still catches. Without this,
         // getSpeedFactor-classified slow floors (soul sand/honey, both OTHER) could never be stood on
         // and SURFACE_SLOW would be dead code.
-        if (solid && noFluid && (shape != SHAPE_OTHER || topY(d) <= 16))     d |= STANDABLE_BIT;
+        // NARROW TOPS ARE NOT FLOORS (owner ruling 2026-08-01). Technically you CAN stand on a ladder's 3px
+        // plate or a dripstone tip when your box overlaps it — but the servo, the momentum-conservation
+        // logic and the ballistics all assume a full-width, full-depth block, and we already refuse to walk,
+        // run, jump off or land on narrow tops everywhere it matters. Modelling them as floors bought
+        // nothing and cost a livelock: the flagship wedged at (148,30,7) hopping on a pointed_dripstone tip
+        // (botY 29.688 == 29 + 11/16) that an Ascend had planned to stand ON at feet 30.0.
+        //
+        // A SUBTRACTION ONLY — it does NOT make the cell passable (isPassable is shape == SHAPE_EMPTY,
+        // independent of this bit), so these cells were already walls for transit and are no more walkable
+        // through than before. BREAKABLE / COLLISION derive from `solid` below and are untouched: still
+        // mineable, still a face to build against. Same technique as the topY<=16 net beside it, which
+        // already excludes fences/walls (topY 24) for the same "not really a floor" reason.
+        //
+        // KNOWN COST: STANDABLE feeds the depth nibble (floorGap = distance-to-first-standable-below), so a
+        // bamboo/dripstone column no longer terminates that downward scan and a Fall over one predicts a
+        // longer drop than it takes — conservative (over-estimates damage), and accepted.
+        if (solid && noFluid && !isNarrowTop(d)
+                && (shape != SHAPE_OTHER || topY(d) <= 16))                  d |= STANDABLE_BIT;
         if (solid && noFluid && hardness(d) != 255 && !isProtected(d))       d |= BREAKABLE_BIT;
         // OPEN_PLACE also excludes protected: filling the cell would REPLACE (destroy) its occupant — a
         // protected bush/grass must not be cleared by a placement any more than by a punch. (Protected
@@ -502,7 +519,8 @@ public final class NavBlock {
             long d = descriptors[i];
             int shape = shape(d);
             boolean solid = shape != SHAPE_EMPTY, noFluid = fluid(d) == 0;
-            boolean standable = solid && noFluid && (shape != SHAPE_OTHER || topY(d) <= 16);
+            boolean standable = solid && noFluid && !isNarrowTop(d)
+                    && (shape != SHAPE_OTHER || topY(d) <= 16);
             boolean breakable = solid && noFluid && hardness(d) != 255 && !isProtected(d);
             boolean openPlace = (isReplaceable(d) || shape == SHAPE_EMPTY) && !isProtected(d);
             boolean collision = solid && noFluid;

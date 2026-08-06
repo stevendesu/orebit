@@ -1,169 +1,204 @@
-# HANDOFF — the climbable arc (landed) → dripstone next
+# HANDOFF — corner-blend conflict fixed; the problem is now ROUTING, not movement
 
-Written 2026-08-01. Supersedes the previous handoff, whose diagnosis (a "curtain-top equilibrium
-height" in the stance servo) was **wrong** — see §2.
+Written 2026-08-02. Supersedes the previous handoff (the climbable arc, committed as `b7eeecc`).
 
 **Goal:** the bot completes the autotest flagship `(60,180,253) → (201,-28,90)` end-to-end.
-**Status:** not yet, but the failure moved ~150 blocks deeper. See §4 for the honest numbers.
+**Status:** not yet — but it now *moves* well and *routes* badly, which is a different problem than the
+one this arc started on. See §4.
 
 ---
 
-## 1. What landed in this commit
+## 0. READ FIRST — the harness is not reproducing run-to-run
 
-All owner-ruled, all unit-green. Two independent stacks were committed together because the servo
-retires the other's open `latvine` item.
+Adding **one log statement** moved a flagship run from `bestDistXZ` 171.04 to 65.84, with a completely
+different route. Frozen-world mode guarantees identical TERRAIN, not identical SCHEDULING.
 
-**The climbable arc (this session):**
+Suspected mechanism, from `scripts/autotest/orebit.properties`' own comments: the deterministic drain
+relies on `pathing.chunkBuildBudgetMs=100` / `hpaFlushBudgetMs=100` **never binding**, so the fixed
+count backstops. Heavy `-BotDebug` logging on the tick thread can push a tick past 100 ms — at which
+point the ms budget DOES bind and the drain becomes wall-clock dependent.
 
-| change | what |
-|---|---|
-| `SteerControl.stationKeep` | `PhaseRunner`'s needs-hold re-centres on the bot's OWN column, not the step target. It was driving full-forward into the block it was mining. |
-| `SteerControl.holdClimbableStance` | extracted from `drive`, now also used by the hold and by `Climb.steer`'s lateral regime |
-| `Climb` exit-top | dropped BOTH the `standable` and `!isNarrowTop` gates — vines and ladders top out |
-| `MovementContext.solidFooting` | `parkourLandable && !climbableFeet`. A scaffold DECK is now a legal jump takeoff. |
-| `Climb` §3.3 jump-grab | same predicate; now a sibling `if` so a deck gets grab AND sink-in |
-| `Traverse` | no step-assist from a climbable stance (`noAutoStepFromStance`) |
-| `BotSteering.settled()` | `\|\| climbableBelow()` — the top-out is held, not ballistic |
-
-**The owner's lateral-cling work** (predates the session): `Climb` three-regime steer,
-`AllyBotEntity.sneakHeld()`, the `ParkourCourse` `latvine` card, `ClimbSteerTest`.
+**Consequence: single-run A/B comparisons on this harness are not trustworthy**, including several drawn
+on 2026-08-01. Before believing any flagship delta, either (a) run both arms with identical logging
+flags, or (b) fix the determinism first. This is the highest-value open item — everything else is being
+measured through it.
 
 ---
 
-## 2. The physics — owner-verified by manual in-game testing. Ground truth.
+## 1. Uncommitted in all three worktrees
 
-Do not re-derive from code or docs; `DESIGN-climb-vocabulary.md` §2's `Vine/air/vine upward → REFUSED`
-row is **wrong**.
+Unit **673/0**, parkour **82/0/1** (best ever), `chiseledCompileCommon` (28 versions) and 26-era
+`chiseledCompile` both green. Worktrees verified byte-identical.
 
-- The climb precondition is on the cell the feet **ARE IN**, never on the cell they ENTER. While
-  `onClimbable`, jump drives `vy=+0.2` every tick the feet remain inside, so the bot rises out of the
-  column's top cell into whatever passable cell is above it.
-- You can climb to **JUST ABOVE** the top and traverse onto a lateral block. Staggered columns chain.
-- **Standing on top of a climbable is a real stance**, held by **sneak** (feet inside) or **jump**
-  (feet above). Jump does not cancel the sink — it out-runs it by re-climbing at the surface.
-- Sneak also holds the top-out, but its ledge edge-guard forbids stepping OFF a lip. Use jump there.
-- Sneak does not block a simultaneous climb, and climb speed is identical either way.
-- **You cannot jump unless BOTH:** there is solid ground below you, AND no climbable in your FEET
-  cell (which truncates the 0.42 impulse to the 0.2 climb). *Standing on a scaffold deck satisfies
-  both* — the deck is solid and the climbable is below the feet, not in them. That is a legal jump.
-- **`NARROW_TOP` is a TAKEOFF and precision-LANDING restriction, never a standing one.** Vanilla WOULD
-  let you jump off a ladder's 3/16 plate; we refuse it only because planning it opens the alternating
-  ladder/air/ladder ascent, which needs the ladders to swap sides for headroom — and FACING is not
-  packed in the descriptor.
-- **Step assist needs ground contact.** Never from a curtain. From a ladder top it works only toward
-  the mounted face; the other way walks off the ledge — unknowable without FACING, so refused.
-- **Hanging vines (cave vines)** anchor to the block BOTTOM — no "above the top".
+| change | file | what |
+|---|---|---|
+| **lane containment** | `SteerControl` | THE BIG ONE — see §2 |
+| narrow tops not standable | `NavBlock` (+ its `verifyDerivedBits` twin) | kills the dripstone stance at the source |
+| sink-in gate | `Climb` | `isClimbable && !passable` instead of `&& standable` |
+| `Diagonal` → `plan()` | `Diagonal` | envelope + carry arrest; last unconverted ground mover |
+| `settled()` revert + `Climb.reached` | `BotSteering`, `Climb` | top-out scoped to the one move that emits it |
+| `atWaypoint` | `Movement` | block-exact, with a DO-NOT-RE-ADD note (§3) |
+| exec-line instrumentation | `BotNavigator` | `x/z/velX/velZ` + sub-cell tenths in the dedup key |
+
+Also uncommitted, harness only: `pathing.syncSearchBudgetNodes=40000` in
+`scripts/autotest/orebit.properties`.
 
 ---
 
-## 3. NEXT: dripstone — convicted, fix already chosen
+## 2. The corner-blend conflict (fixed) — the session's main finding
 
-The flagship's final wedge is at **`(148,30,7)`**, and it is the pathology the owner watched manually.
+`SteerControl.steerTowards` (and its `groundServo` twin) has a **racing-line corner blend**: as the bot
+nears its waypoint it rotates the desired heading toward the NEXT leg — up to `CORNER_BLEND_MAX` = 55%
+— plus a `CORNER_RACING_BIAS` = 0.5 OUTWARD push, starting `CORNER_BLEND_DIST` = **1.3 blocks** out,
+i.e. more than a full cell before arrival.
 
-Master world: `(148,29,7) = pointed_dripstone` on `dripstone_block`. The bot rests at
-**`botY=29.688`** = `29 + 0.6875`, the exact 11/16 tip height. The `Ascend` targets feet cell 30
-(it believes standing on `(148,29,7)` puts the feet at 30.0), so `reached` — which needs
-`footY == 30` — can never fire. A clean 3-tick limit cycle: jump, peak, fall back onto the tip.
+Every converted movement's `failWhen` envelope admits only **that step's own columns**. So on any corner
+where the next leg turns, the steer deliberately drove the bot out of its lane and the envelope
+fail→HOLDed it for obeying the steer. **Three sites in one day** — `(58,113,160)`, `(62,135,189)`,
+`(143,113,13)` — in unrelated terrain, which is why it kept looking like a new bug each time.
 
-**The ruled fix (owner, 2026-08-01): `STANDABLE &= !narrowTop` at descriptor classification.**
-Not teaching `Ascend` about `topY` — just stop treating narrow tops as floors at all. Rationale: the
-servo, momentum conservation and ballistics all assume full-width blocks, and we already refuse to
-walk/run/jump/land on narrow tops, so the honest model is "not a floor."
+**The instrumented capture that settled it** (`(143,113,13)`, a constant-z `−x` Descend):
 
-- One conjunct at `NavBlock` line ~481, beside the existing `topY <= 16` net that already excludes
-  fences/walls (topY 24) — extending a technique that is already there.
-- **Does NOT affect passability.** `isPassable` is `shape == SHAPE_EMPTY`, independent of `STANDABLE`.
-  These cells already have collision, so they were already walls for transit. Only "can I stand on
-  top" changes. `BREAKABLE`/`COLLISION` derive from `solid` and are untouched — still mineable, still
-  buildable-against.
-- **Known cost:** `STANDABLE` feeds the depth nibble (`floorGap` = distance-to-first-standable-below,
-  consumed by `Fall`), so a bamboo/dripstone column stops terminating that scan and a `Fall` over one
-  predicts a longer drop than it takes. Conservative (over-estimates damage), but real, and it is why
-  `isNarrowTop`'s javadoc currently says "still standable — a real floor for the grid's depth sweep."
-- Cautionary precedent in the same comment block: excluding *damaging* floors from `STANDABLE` made
-  magma "caps-blind walls" and had to be reverted. Doesn't apply here (already walls), but be careful.
-- It also makes several just-added gates redundant: `parkourLandable` collapses to `standable`,
-  `solidFooting`'s `!narrowTop` term, and `noAutoStepFromStance`'s ladder half.
+```
+x=144.498 z=14.419  vel=( 0.0000, 0.0000)   <- starts AT REST, near-centred
+x=144.250 z=14.395  vel=(-0.0822,-0.0092)
+x=144.074 z=14.360  vel=(-0.0964,-0.0193)
+x=143.892 z=14.292  vel=(-0.0991,-0.0371)
+x=143.701 z=14.222  vel=(-0.1046,-0.0380)
+x=143.516 z=14.127  vel=(-0.1005,-0.0520)
+x=143.606 z=14.002  vel=( 0.0510,-0.0322)   <- z crosses 14.0 -> FAILED
+```
 
----
+Cross velocity **manufactured from zero**, growing monotonically with `w` as `dCorner` shrinks. Not
+momentum, not terrain, not landing accuracy.
 
-## 4. The measurement — read this before claiming anything
+**The fix** (`SteerControl.blendLeavesLane`, owner ruling): the blend may round toward the next leg only
+while that keeps the bot inside the current step's lane. Positional, not predictive — no horizon, no new
+constant; reuses the step-off gate's own bound (`0.5 − PARKOUR_CELL_MARGIN` = 0.2). Once the bot is at
+the bound AND the blended heading still points outward, the blend is dropped for that tick.
 
-| | committed `c84c4b9` | stance servo only | + top-out, no exec fix | **this commit** |
-|---|---|---|---|---|
-| `bestDistXZ` | **58.43** | 173.57 | 185.14 | 66.17 |
-| `distY` at end | — | 161 | 168 | **58.71** |
-| `distanceTraveled` | — | 205.74 | 123.44 | **1014.84** |
-| `routeEfficiency` | 0.95 | 0.95 | 0.57 | 4.71 |
-| end state | stops | stops | livelock | still moving, wp 25/49 |
-| `capHit` / `partial` | — | 0/0 | 0/0 | **50 / 47** |
-
-**`bestDistXZ` is WORSE than the committed baseline.** The run is much deeper (150 blocks) and still
-travelling at budget exhaustion, but do not report this as a pass. The committed run's `distY` was
-never captured, so there is no honest 3D comparison — **re-run `c84c4b9` and record its full end
-state** if you need a real baseline.
-
-The 50 cap hits are against the SYNC 10k node cap (`pathing.syncSearchBudgetNodes`). Owner recalls
-earlier runs at **40k**, which would explain both the partials and the different wedge site — so the
-next run should set that key before drawing conclusions about route efficiency.
+**It cost nothing.** All five turn cards — which exist *because* the blend was added for an orthogonal
+run-up into a parkour — pass with **byte-identical takeoff speeds** (0.4659 / 0.4672 / 0.4672 / 0.4558 /
+0.4558). On a run-up the bot never reaches the lane bound, so the gate never fires.
 
 ---
 
-## 5. Open, designed but not built
+## 3. Two wrong turns this session — recorded so they aren't repeated
 
-**The thin-panel directional bit** (owner-ratified direction). Ladders, open trapdoors and doors share
-a shape: *large enough to stand on, but pressed against the edge of its cell so a body walks past.*
-Today the planner calls a ladder non-passable and folds a BREAK to walk past it in a 1-wide hallway
-(`EditScratch.requireAirToward` → `foldBreakOrFail`); its `entryEdge` logic is **door-specific**. The
-executor disagrees — `movementBlockedAt` is a real direction-aware VoxelShape test — so the bot walks
-past a ladder while its plan paid for a break, and a `canBreak=false` bot refuses the corridor.
+**Blaming `settled()`.** I attributed a wedge to `settled() |= climbableBelow()` firing mid-parkour-arc.
+The block below was `jungle_leaves`, not climbable, so it could not have fired; the logged line even said
+`reached=false`; and `ABANDONED ... (reached fired before done)` is a **documented false positive** for a
+grounded-gated parkour landing (`PhaseRunner`'s own javadoc). The `settled()` revert was kept anyway, on
+principle — `settled()` is shared with the plan-anchor rule — but NOT on evidence.
 
-Design: a directional bit mirroring `DOOR_FACING` (bits 8–9) so all three cases share the
-"blocked edge = this one, pass in the other three" logic. For ladders the blocked edge always holds
-its support block, so it is never a direction the bot could have travelled anyway. **Bits 20–23 and
-52–63 are free.** Do NOT do this by flipping `SHAPE` to `EMPTY` — `BREAKABLE` and `COLLISION` both
-derive from `solid`, so a "passable" ladder becomes unmineable and unbuildable-against.
+**Inventing a partial-top `reached` bug.** I produced a table showing slabs/snow/soul sand livelocking on
+arrival. It was wrong: `BlockPathfinder.feetYOf` already builds waypoints topY-aware, so planner and
+follower never disagreed. The "fix" accepted the bot one cell too low on every correct waypoint and timed
+out the `stairup` card. Reverted; `Movement.atWaypoint` now carries a **DO NOT add a partial-top
+tolerance here** note explaining why it looks necessary and which card it breaks.
 
-**Keep `arrestIn` excluding solid climbables regardless.** Owner: catching a ladder's *side* mid-fall
-is normal play, but landing on its *top* is real fall damage — so passability and fall-arrest must
-stay separate questions.
+Dripstone was never a partial-top case: `pointed_dripstone` is **force-classified `SHAPE_FULL`** in
+`NavBlock.fingerprint` (its null-world collision query misleads), so `topY` reads 16 while vanilla seats
+the bot at `+11/16`. Fixed where it belongs — narrow tops are no longer `STANDABLE`.
 
-**`Ascend` into its own landing column.** At `(148,·,7)` the bot had already walked into the landing
-column at the lower level, so the floor it wanted to land on was the cell its feet occupied. The
-envelope does not catch it (the bot IS on the destination column, just one level low). Same family as
-the post-replan `Ascend` hold that opened this session. May be subsumed by the dripstone fix here, but
-the class is real.
+Both errors share a shape: a plausible mechanism accepted without checking the one cheap fact that would
+have refuted it (a block lookup, a grep for `feetYOf`). The region-file dump in §6 is that cheap fact.
 
 ---
 
-## 6. Verification protocol
+## 4. Where the flagship actually is
 
-The mistake that cost this session most: claiming "7 cards fixed" off a **single** run. It did not
-reproduce under a paired A/B and had to be retracted. Always baseline first, always A/B.
+Latest run (40k, instrumented, lane containment):
 
-**GOTCHA — quote the coords AND invoke with `&`.** `$Start` is `[string]`, so PowerShell coerces a
-bare `60,180,253` to the array `"60 180 253"` and the mod dies at init with
-`orebit.autotest.start must be 'x,y,z'`. A nested `powershell script.ps1 -Start "60,180,253"` does
-NOT survive either — the quotes are stripped before the child parses. Call it in-session:
+| | prev (same flags) | now |
+|---|---|---|
+| `step FAILED` | 3 | **1** |
+| `distY` at end | 141 | **85** |
+| `bestDistXZ` | 65.84 | 65.84 |
+| end state | — | alive, pillaring, **not wedged** |
+
+The bot is no longer failing to *execute*. It ends the budget at `(146,57,-56)` — goal is `z=90` — having
+worked its way to `z=-56` and turned around. `routeEfficiency` 3.34, 244 searches, 17 cap hits at 40k.
+
+**So the next arc is the region tier / heuristic, not movement.** Why does the route go to `z=-56`?
+Nothing in this session touched that, and it is now the dominant cost.
+
+`bestDistXZ` has still never beaten the `c84c4b9` baseline's **58.43**, and that baseline's `distY` was
+never captured, so there is no honest 3D comparison. If a real baseline matters, re-run `c84c4b9` with
+today's flags and record its full end state.
+
+---
+
+## 4b. THE ACTIVE ARC — region-tier cost & targeting
+
+Four convicted issues with full evidence, a live `/bot rtrace`, and the owner's rulings are written up
+in **`internal_docs/FINDINGS-region-cost-audit.md`**. Read that before touching the region tier. In
+short:
+
+1. `UNSAFE_VERTICAL_PENALTY` hits every DRY fragment, not just `KIND_AIR` — a cave descent is charged
+   291 vs 35 honest, losing to a 99 dig. Owner ruling: restrict it to `KIND_AIR`. Flips cave-vs-dig on
+   its own.
+2. L2 flooded at `MAX_REGION_EXPANSIONS = 20000`; owner expects a flood at the top to escalate a level.
+   It currently classifies as no-route instead.
+3. `mineSpans` floors intra-region digs at half a region AND zeroes the vertical span — over-estimating
+   (inadmissible) and converting the cheap axis into the expensive one.
+4. Only 2 of 15 skeleton portals are `[stand]`; the rest are `[air-no-floor]`/`[buried]`, which is what
+   drives `WindowTargeting` into its snap/CENTER fallbacks. Prime suspect: `portalCell` is a bbox
+   CENTROID, and a bbox centroid need not be a member of the set it bounds.
+
+The window-slide behaviour (§5 there) is DEFERRED and is **not** a regression — both gating conjuncts
+are deliberate; see that doc before proposing to remove either.
+
+## 5. Next, in the order I'd take them
+
+1. **Harness determinism** (§0) — everything else is measured through it.
+2. **Routing**: the `z=-56` excursion. Region tier / heuristic, untouched today.
+3. **The wall-hug diagonal** — structural. `Diagonal.candidates` requires BOTH corner columns clear;
+   the owner's ruling is that only ONE need be, because MC resolves collision per-axis: the wall clamps
+   the blocked axis while the free axis keeps resolving, so the box slides along the wall face and never
+   spends a tick squarely over the hole. Convicted at `(60,133,189)→(61,133,188)`: corner `(61,134,189)`
+   is leaves (the **wall**), corner `(60,133,188)` is vine (the **hole**, which would arrest a slip
+   rather than drop the bot). Refusing it forces an `Ascend` onto the very blocking block and a `Descend`
+   back down — the detour that produced the `(62,135,189)` wedge. A one-side variant was built and
+   REVERTED once ("servo fights the hug slide"); the owner's quantization argument says why — a servo
+   steering at the destination CENTRE fights a wall standing between it and that centre. Steering along
+   the FREE axis and letting the wall clamp the other is a different control law, not a tuning change.
+4. `magmaov.rest` — the one remaining course gap (hazard-overfly from a standstill).
+
+---
+
+## 6. Tools that earned their keep
+
+**Read the frozen master's region files directly.** `internal_docs` has no tool for this; two throwaway
+scripts in the session scratchpad did the work — a minimal Anvil reader plus a per-X slice renderer
+(`.`=air `L`=leaves `V`=vine `W`=log). Both vine and dripstone geometries were pinned this way in
+seconds, and it refuted two of my own hypotheses. Worth promoting into `internal_docs/`.
+
+**The exec-line instrumentation** (`x`, `z`, `velX`, `velZ`, sub-cell tenths in the dedup key) is what
+cracked the corner blend. Foot-cell granularity structurally cannot show a sub-cell drift. Keep it.
+
+---
+
+## 7. Verification protocol
+
+**GOTCHA — quote the coords AND invoke with `&`.** `$Start` is `[string]`, so a bare `60,180,253` is
+array-coerced to `"60 180 253"` and the mod dies at init. A nested `powershell script.ps1 -Start "..."`
+does not survive either — the quotes are stripped before the child parses. Call it in-session:
 
 ```powershell
 $env:JAVA_HOME = "C:\Program Files\Eclipse Adoptium\jdk-21.0.11.10-hotspot"   # JDK 21, mc-1.21 era
 cd C:\Users\steve\Repos\personal\orebit-mc121-wt
 
 .\gradlew.bat :1.21.11:test                     # expect 673 / 0
-powershell scripts\run-parkour.ps1              # → run\parkour\orebit-parkour-result.properties
+powershell scripts\run-parkour.ps1              # expect 82 / 0 / 1
 & .\scripts\run-autotest.ps1 `
   -MasterWorld '..\orebit-autotest-world\scripts\autotest-world-master\world' `
   -Start '60,180,253' -Goal '201,-28,90' -BudgetTicks 24000 -BotDebug
 ```
 
-Grep the log for `step FAILED`, `advance SKIPPED`, `region re-derive`. **A livelock produces NONE of
-those** — both wedges this session were steps that never *completed* rather than failed, so also
-check whether the tail of the log is one `exec` line repeating on a short period.
-
-`internal_docs/trace_analysis.py` reads `-Trace` dumps. For raw geometry, read the frozen master's
-region files directly — that is how both the vine and dripstone geometries were pinned, and it beats
-inferring from envelope lines.
+Grep for `step FAILED`, `advance SKIPPED`, `region re-derive` — **but a LIVELOCK emits none of them.**
+Two wedges this session were steps that never *completed* rather than failed. Also check whether the log
+tail is one `exec` line repeating on a short period.
 
 **Do not flip `fail→hold` to auto-replan** to make the flagship pass. It manufactures a green run by
 hiding exactly the pathologies this arc exists to fix.
