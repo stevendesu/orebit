@@ -386,24 +386,25 @@ public final class Fall implements Movement {
 
     /**
      * Walk off the lip, then steer onto the landing column while airborne. On the ground this is the generic
-     * line-tracking walk toward the landing; once airborne it re-centres on the landing column via the
-     * forward input (Minecraft's aerial control is weak, so this is a gentle correction, not a teleported
-     * velocity — a player drop-controls off a ledge the same way). {@link #candidates} models a fall as a
-     * straight vertical drop, and this keeps the real drop near that column.
+     * line-tracking walk toward the landing; once airborne it ARRIVES on the landing column via the forward
+     * input — braking with reverse thrust when its projected stopping point overshoots ({@link
+     * SteerControl#arriveOnTarget}), since Minecraft's aerial control is weak enough that a correction begun
+     * at the moment of overshoot is already too late. {@link #candidates} models a fall as a straight vertical
+     * drop, and this keeps the real drop near that column.
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
         if (b.grounded()) {
             SteerControl.steerTowards(b, path);
         } else {
-            SteerControl.recenterOnTarget(b, path);
+            SteerControl.arriveOnTarget(b, path);
         }
     }
 
     /**
      * The phase-model execution plan — the reactive counterpart of {@link #steer}, mapping its two branches
-     * (grounded → {@code steerTowards}, airborne → {@code recenterOnTarget}) 1:1 onto phase order so the
-     * driven behaviour is byte-for-byte the legacy drive. Fall is <b>WALKOFF &rarr; FALL</b>: stride off the
+     * (grounded → {@code steerTowards}, airborne → {@code arriveOnTarget}) 1:1 onto phase order so the two
+     * drive paths cannot drift apart. Fall is <b>WALKOFF &rarr; FALL</b>: stride off the
      * lip toward the landing column {@code (tx,tz)} (which {@link #candidates} makes identical to the step-off
      * neighbour column — the bot walks off into it and drops straight down), then, once airborne, home onto
      * that column while the drop runs, completing only when actually standing on the landing cell.
@@ -438,8 +439,10 @@ public final class Fall implements Movement {
                 .arrestCarryFrom(fx, fz)
                 .drive(SteerControl::steerTowards)
                 .advanceWhen(b -> !b.grounded());
-        // FALL: airborne drop-control — recenterOnTarget pulls toward the landing column centre, eases near
-        // it and pushes BACK past it, so held step-off momentum can't carry the bot off a 1-wide landing.
+        // FALL: airborne drop-control — arriveOnTarget aims the bot's PROJECTED stopping point at the landing
+        // column centre, braking with reverse input the moment that projection overshoots, so held step-off
+        // momentum can't carry the bot off a 1-wide landing (or, as measured 2026-08-06, park it at the far
+        // cell edge with no runup left for the step that follows).
         // Complete only once actually SETTLED on the landing cell: grounded (a standable floor) OR arrested
         // on a climbable (a HANG landing — feet in the vine cell, never grounded; the one predicate covers
         // both kinds, since a standing landing reads onClimbable false; DESIGN-climb-vocabulary.md §4).
@@ -463,7 +466,7 @@ public final class Fall implements Movement {
                 //
                 // translating=false: a landing is not a lip crossing, so the hold is never relaxed away.
                 .drive((b, v) -> {
-                    SteerControl.recenterOnTarget(b, v);
+                    SteerControl.arriveOnTarget(b, v);
                     SteerControl.holdClimbableStance(b, v, false);
                 })
                 // SETTLED, not the loose onClimbable(): being INSIDE a vine is true on every tick of a fall
