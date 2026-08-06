@@ -7,6 +7,7 @@ import com.orebit.mod.commands.OrebitCommands;
 import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.pathfinding.async.PlanExecutor;
 import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
+import com.orebit.mod.pathfinding.regionpathfinder.RegionPlaceModel;
 import com.orebit.mod.platform.PlatformEvents;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.HpaMaintenance;
@@ -50,6 +51,15 @@ public final class OrebitCommon {
         events.onServerStarted(server -> MiningModel.buildTable(
                 ConfigLoader.config().ticksByHardness(), ConfigLoader.config().ticksToMineFlat(),
                 ConfigLoader.config().unbreakableHardness()));
+
+        // Region-tier FORWARD place model (owner ruling 2026-08-02) — the place-side sibling of the bake above,
+        // and baked here for exactly the same reason: the pathfinder must NOT touch ConfigLoader itself, because
+        // Config.DEFAULT holds a Block and reading it from a search initializes the Blocks registry (measured:
+        // it broke 368 headless tests with ExceptionInInitializerError). Inventory-blind by design so the region
+        // skeleton's shape is stable as the bot's gear changes, but config-aware via these two knobs. Re-baked on
+        // /bot config reload (ConfigLoader.reload) like the mining table.
+        events.onServerStarted(server -> RegionPlaceModel.bakeForward(
+                ConfigLoader.config().placeBaseCost(), ConfigLoader.config().removalCostWeight()));
 
         // Craftable-recipe index (DESIGN-bot-abilities.md §3.3): enumerate the server's shaped +
         // shapeless crafting recipes into the version-free RecipeIndex behind /bot craft. Recipes

@@ -198,11 +198,20 @@ public final class RegionPathfinder {
     /** √2, the octile diagonal factor (a diagonal walk step costs {@code √2 × WALK}). */
     private static final float SQRT2 = 1.4142135f;
 
+    /** √3, the 3-D octile corner factor (all three axes at once — {@link #octile3}, the swim metric). */
+    private static final float SQRT3 = 1.7320508f;
+
     /** Per-block horizontal WALK ticks: an all-air leaf transit (16) over its side ⇒ 1 tick/block. */
     public static final float WALK_PER_BLOCK = LeafCostComputer.AIR_TRANSIT_TICKS / LEAF;          // 1.0
 
-    /** Per-block upward PILLAR ticks (dear): the leaf air-climb cost over its side ⇒ ~place base cost/block. */
-    public static final float PILLAR_PER_BLOCK = LeafCostComputer.AIR_CLIMB_TICKS / LEAF;          // 6.0
+    // NOTE (unit audit, 2026-08-02): there is deliberately NO PILLAR_PER_BLOCK constant. It was
+    // LeafCostComputer.AIR_CLIMB_TICKS / LEAF = 6.0, a "behavioral" rate 2.6× the honest conversion the cost-to-goal
+    // field was already using for the same motion — so the forward A* and its own heuristic disagreed on the price of
+    // building up. The rate is now COMPUTED per search by RegionPlaceModel (Pillar.COST + placeBaseCost + the
+    // hardness-scaled removal premium, ÷ RegionMineModel.WALK_REAL_TICKS) and threaded in as pillarField, so it
+    // tracks the server's placement config and the bot's actual inventory instead of a compile-time guess. Its one
+    // remaining consumer is uniformTransitCost's KIND_AIR chute — a provably floorless box, where BUILDING your way
+    // up really is the only way to rise. A KIND_MIXED ascent is stairs-optimistic (see dyCost).
 
     /** Per-block downward FALL ticks (cheap): falling is near-free; charged ~one walk-tick/block of descent. */
     public static final float FALL_PER_BLOCK = WALK_PER_BLOCK;                                     // 1.0
@@ -220,19 +229,15 @@ public final class RegionPathfinder {
      */
     public static final float SWIM_PER_BLOCK = 0.77f * WALK_PER_BLOCK;                             // 0.77
 
-    /**
-     * Per-block <b>vertical</b> SWIM ticks (DESIGN-typed-fragments.md §3, pricing amendment 2026-07-23),
-     * charged for the {@code |dy|} component only through a <b>fully-submerged</b> fragment
-     * ({@code ¬S·W} — no surfaceable cell, so every vertical block of the leg is provably swum) and for
-     * vertical crossings of uniform {@link RegionFragments#KIND_WATER} records (truly fully submerged by
-     * construction — the §5.5 narrowed fast-path). Derivation: vanilla vertical swimming ascends/descends
-     * at ~2 b/s vs the 4.32 b/s walk ⇒ {@code 4.32/2 ≈ 2.16 ≈ 2.2} relative units — SLOWER than lateral
-     * walking, far cheaper than pillaring (6.0), honest for water that is genuinely climbable in place.
-     * Direction-symmetric (swimming up ≈ down; water absorbs falls ⇒ no cliff penalty). Any W fragment
-     * that is NOT fully submerged (S·W — surface water, or a wet cave with dry floors) keeps walkCost's
-     * full dy shaping ({@link #PILLAR_PER_BLOCK} + the no-place {@link #UNSAFE_VERTICAL_PENALTY}) instead.
-     */
-    public static final float SWIM_VERTICAL_PER_BLOCK = 2.2f * WALK_PER_BLOCK;                     // 2.2
+    // NOTE (unit audit, 2026-08-02): there is deliberately NO separate vertical-swim rate. There used to be a
+    // SWIM_VERTICAL_PER_BLOCK = 2.2, derived from "vanilla vertical swimming ascends/descends at ~2 b/s" — but
+    // ~2 b/s is the NON-SPRINT paddle rate (Swim.COST's 2.2 b/s surface / 1.97 submerged), while the block tier
+    // realizes every submerged vertical step with the SPRINT-swim family: SprintSwim emits its up (y+1) and down
+    // (y-1) candidates at the SAME SprintSwim.COST as lateral, and says so ("horizontal and vertical alike in v1
+    // — a single measured rate until per-axis water speeds warrant more"). Converted, that is 3.564 t/blk ÷ the
+    // 4.633-tick walk ruler = 0.77 — exactly SWIM_PER_BLOCK. Charging 2.2 over-estimated the block tier's own
+    // price for the same motion by 2.86×, which §0 forbids. If per-axis water speeds are ever measured apart,
+    // reintroduce the constant HERE and mirror it in SprintSwim, not in one tier alone.
 
     // Block-honest PILLAR/FALL ratios for the cost-to-goal FIELD only (the heuristic must be commensurate with
     // block ticks). The region A* keeps its behavioral compressed costs above (PILLAR 6 / FALL 1 — self-consistent
@@ -301,11 +306,15 @@ public final class RegionPathfinder {
     private static final int WALL_MINE_BLOCKS = 4;
 
     /**
-     * Per-excess-block penalty for a vertical region transit a {@code !canPlace} bot cannot realize — a drop
-     * deeper than {@code safeFall} (a cliff it would take fall damage on) or a rise it cannot pillar. Dear
-     * enough (≈ a place/mine per block) that the region A* prefers a <b>gradual</b> route — one that spreads its
-     * climb/descent horizontally into small per-transit {@code |dy|} — over a single big-{@code |dy|} cliff/wall
-     * the block tier would dead-end on. Ordinal, S5-tunable.
+     * Per-excess-block penalty for a drop deeper than {@code safeFall} through a <b>provably floorless</b>
+     * uniform {@link RegionFragments#KIND_AIR} region — the one vertical transit this tier can prove is a real
+     * free fall. Dear enough (≈ a place/mine per block) that the region A* prefers a <b>gradual</b> descent
+     * through MIXED regions with real floors over a free-fall shaft. Ordinal, S5-tunable.
+     *
+     * <p><b>Scope (owner ruling, 2026-08-02):</b> {@link #uniformTransitCost}'s AIR chute ONLY. It used to be
+     * charged on every MIXED fragment transit too (via {@link #dyCost}), which over-estimated the one region
+     * class whose interior we cannot see — see the stairs-optimism note on {@link #walkCost} and
+     * FINDINGS-region-cost-audit §1.
      */
     private static final float UNSAFE_VERTICAL_PENALTY = 16f;
 
@@ -678,6 +687,10 @@ public final class RegionPathfinder {
         // §3a: the cap-safe flood radius is constant for this search's level — hoist it out of the per-pop loop
         // (maxChebAtLevel does a sqrt; computing it per expansion regressed the region bench ~20-30%).
         final int floodRadius = maxChebAtLevel(level);
+        // The forward pass's pillar rate: inventory-blind but config-aware (RegionPlaceModel.forward, the
+        // place-side sibling of RegionMineModel.WOODEN — baked from config at server start). Hoisted to a local
+        // so the per-pop loop reads a stack slot, not a volatile.
+        final float pillarFwd = RegionPlaceModel.forward().pillarPerBlock();
 
         while (nodes.heapSize > 0) {
             int current = nodes.pop();
@@ -710,11 +723,11 @@ public final class RegionPathfinder {
                 return null;
             }
 
-            // Forward A* (dijkstra=false) keeps its behavioral PILLAR_PER_BLOCK; the pillarField arg is read only
-            // on the reverse field edges, so the constant here is an inert placeholder.
+            // The pillarField arg is no longer inert on the forward pass: since the AIR chute stopped using a
+            // hardcoded behavioral rate (2026-08-02), forward reads it too — hence the real pillarFwd model.
             expandNode(nodes, current, expansions, grid, level, minY, grx, gry, grz,
                     startWx, startWy, startWz, canBreak, canPlace, safeFall, blacklist, mine,
-                    PILLAR_PER_BLOCK_FIELD, hScale, null, tube, false);
+                    pillarFwd, hScale, null, tube, false);
 
             // Skeleton-side virtual goal: if this popped node is one of the goal's APPROACHES (its own fragment, a
             // walkable face-neighbor, or a dig-reachable pocket), offer a virtual edge into V at that approach's
@@ -740,7 +753,7 @@ public final class RegionPathfinder {
                         final int py = nodes.portalX[current] == NO_PORTAL ? startWy : nodes.portalY[current];
                         final int pz = nodes.portalX[current] == NO_PORTAL ? startWz : nodes.portalZ[current];
                         approachCost = walkCost(digSeeds.goalWx - px, digSeeds.goalWy - py, digSeeds.goalWz - pz,
-                                canPlace, safeFall, false, PILLAR_PER_BLOCK_FIELD);
+                                canPlace, safeFall, false, pillarFwd);
                     }
                     relaxVirtualGoal(nodes, current, approachCost, digSeeds.dig[idx], grx, gry, grz,
                             digSeeds.goalWx, digSeeds.goalWy, digSeeds.goalWz, blacklist);
@@ -1740,15 +1753,14 @@ public final class RegionPathfinder {
     private static String dyBreakdown(int dy, boolean canPlace, int safeFall) {
         final StringBuilder sb = new StringBuilder();
         if (dy > 0) {
-            sb.append("up=").append(dy * PILLAR_PER_BLOCK)
-                    .append(" (").append(dy).append("×PILLAR ").append(PILLAR_PER_BLOCK).append("/blk)");
-            if (!canPlace && dy > safeFall) sb.append(" +cliff=").append((dy - safeFall) * UNSAFE_VERTICAL_PENALTY);
+            sb.append("up=").append(dy * WALK_PER_BLOCK)
+                    .append(" (").append(dy).append("×STAIRS ").append(WALK_PER_BLOCK).append("/blk)");
         } else if (dy < 0) {
             final int drop = -dy;
             sb.append("down=").append(drop * FALL_PER_BLOCK)
                     .append(" (").append(drop).append("×FALL ").append(FALL_PER_BLOCK).append("/blk)");
-            if (drop > safeFall) sb.append(" +cliff=").append((drop - safeFall) * UNSAFE_VERTICAL_PENALTY);
         }
+        // No +cliff term: MIXED transits are stairs-optimistic in both directions (see dyCost).
         return sb.toString();
     }
 
@@ -1765,8 +1777,8 @@ public final class RegionPathfinder {
             if (dy != 0) {
                 if ((typeBits & RegionFragments.TYPE_S) == 0) {
                     final int ady = Math.abs(dy);
-                    sb.append(" + swimV=").append(ady * SWIM_VERTICAL_PER_BLOCK)
-                            .append(" (").append(ady).append("×SWIMV ").append(SWIM_VERTICAL_PER_BLOCK)
+                    sb.append(" + swimV=").append(ady * SWIM_PER_BLOCK)
+                            .append(" (").append(ady).append("×SWIM ").append(SWIM_PER_BLOCK)
                             .append("/blk)");
                 } else {
                     sb.append(" + ").append(dyBreakdown(dy, canPlace, safeFall)); // S·W: walk-shaped |dy|
@@ -1935,57 +1947,93 @@ public final class RegionPathfinder {
     }
 
     /**
-     * The §2.2 walk cost between two openings: octile over the horizontal offset × {@link #WALK_PER_BLOCK},
-     * plus the directional Δy term — dear {@link #PILLAR_PER_BLOCK} going up, cheap {@link #FALL_PER_BLOCK}
-     * going down (the air-chute asymmetry, recovered from geometry rather than stored buckets).
+     * <b>3-D</b> octile distance ({@code (hi−mid) + √2·(mid−lo) + √3·lo}) — the 26-connected metric, the same
+     * shape the block tier's own heuristic uses ({@code H_STRAIGHT} / {@code H_FACE} / {@code H_CORNER}).
      *
-     * <p><b>Caps-honest:</b> {@code |dy|} is the footprint Y-gap across this transit. A bot that {@code
-     * !canPlace} cannot pillar up a wall, and can only safely drop {@code safeFall} blocks; a gap beyond that
-     * is a cliff/wall it cannot realize, so it gets {@link #UNSAFE_VERTICAL_PENALTY} per excess block. A
-     * gradual route spreads its rise/drop horizontally (small {@code |dy|} per transit, no penalty) and so is
-     * preferred over a single big-{@code |dy|} cliff the block tier would dead-end on.
+     * <p>Used for <b>swimming</b> only (owner ruling, 2026-08-02). Water is a normalized <i>sphere</i> of
+     * motion: a swimmer travels at one speed in ANY direction, so no axis rides along free and all three
+     * combine like the two horizontal axes of a walk do. That is the opposite of walking, which is a
+     * normalized CIRCLE plus free vertical mobility (a jump/fall costs no horizontal momentum) and therefore
+     * combines by {@code max} — see {@link #walkCost}.
      */
-    private static float walkCost(int dx, int dy, int dz, boolean canPlace, int safeFall, boolean reverse,
-                                  float pillarField) {
-        return octile(dx, dz) * WALK_PER_BLOCK + dyCost(dy, canPlace, safeFall, reverse, pillarField);
+    private static float octile3(int dx, int dy, int dz) {
+        int a = Math.abs(dx), b = Math.abs(dy), c = Math.abs(dz), t;
+        if (a > b) { t = a; a = b; b = t; }   // sort ascending: a <= b <= c
+        if (b > c) { t = b; b = c; c = t; }
+        if (a > b) { t = a; a = b; b = t; }
+        return (c - b) + SQRT2 * (b - a) + SQRT3 * a;
     }
 
     /**
-     * The directional Δy term of {@link #walkCost}, factored out so {@link #transitCost} can reuse the
-     * EXACT capability shaping (pillar/fall asymmetry + cliff penalties) for the vertical component of a
-     * not-fully-submerged W leg without duplicating the constants (DESIGN-typed-fragments.md §3 pricing
-     * amendment).
+     * The §2.2 walk cost between two openings: the <b>greater</b> of the horizontal octile ×
+     * {@link #WALK_PER_BLOCK} and the {@link #dyCost} Δy term — not their sum.
+     *
+     * <p><b>Why max, not a sum, and not a 3-D octile (unit audit, 2026-08-02).</b> Minecraft normalizes
+     * horizontal momentum, so a diagonal walk is no faster than an axis-aligned one and costs {@code √2}
+     * ({@link com.orebit.mod.pathfinding.blockpathfinder.movements.Diagonal#COST}); but jumping and falling do
+     * NOT consume horizontal momentum, so a block of RISE rides along free with a block of horizontal travel —
+     * {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Ascend#COST} is exactly {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse#FLAT_COST}, one walk step for one forward
+     * AND one up. So a 3-D octile would be wrong in the other direction (it would bill a stair step {@code √2}),
+     * and the old additive form billed it {@code 2×}: a {@code dx=9, dy=9} staircase read 18 units where the
+     * block tier walks it in 9. {@code max} reproduces the block tier exactly, and still charges a pure vertical
+     * (no horizontal progress to hide the climb behind) its full {@code |dy|} — a spiral staircase costs its
+     * rise in steps.
+     *
+     * <p><b>Stairs-optimism (owner ruling, 2026-08-02).</b> Every caller of this method prices a transit
+     * through a {@link RegionFragments#KIND_MIXED MIXED} region — the only kind that carries fragments — and
+     * from the region tier we cannot see the interior's SHAPE. Admissibility (FINDINGS-region-cost-audit §0:
+     * "under-estimating is admissible, over-estimating is not") therefore forces the best case: assume
+     * pre-existing stairs/bridges make the transit realizable. A region-transit {@code dy} is a NET elevation
+     * change spread across a whole region side of horizontal travel — neither a wall to pillar nor a fall
+     * height. Only a uniform {@link RegionFragments#KIND_AIR} record PROVES a box is floorless, and that is the
+     * one place the pillar rate and {@link #UNSAFE_VERTICAL_PENALTY} still apply (see
+     * {@link #uniformTransitCost}). See {@link #dyCost} for the per-direction consequences.
+     */
+    private static float walkCost(int dx, int dy, int dz, boolean canPlace, int safeFall, boolean reverse,
+                                  float pillarField) {
+        return Math.max(octile(dx, dz) * WALK_PER_BLOCK,
+                dyCost(dy, canPlace, safeFall, reverse, pillarField));
+    }
+
+    /**
+     * The directional Δy term of {@link #walkCost}, factored out so {@link #transitCost} can reuse the EXACT
+     * vertical shaping for the vertical component of a not-fully-submerged W leg without duplicating the
+     * constants (DESIGN-typed-fragments.md §3 pricing amendment).
+     *
+     * <p><b>Stairs-optimism (owner ruling, 2026-08-02).</b> Every caller prices a transit through a
+     * {@link RegionFragments#KIND_MIXED MIXED} region, whose interior shape this tier cannot see, so BOTH
+     * vertical terms take the best case:
+     * <ul>
+     *   <li><b>Up = {@link #WALK_PER_BLOCK}, not {@link #PILLAR_PER_BLOCK}.</b> Pillaring is the price of
+     *       BUILDING your way up, which is only provably necessary in a floorless {@link
+     *       RegionFragments#KIND_AIR} box. In a MIXED region an optimistic staircase may already exist, and
+     *       walking up stairs is as easy as walking flat — the same reason the region heuristic treats {@code
+     *       dy} exactly like {@code dx}/{@code dz}. Charging 6×/block here over-estimated by 6× the one region
+     *       class whose route we can never disprove.</li>
+     *   <li><b>No cliff term in either direction.</b> A net rise is a staircase and a net drop a ramp — not a
+     *       wall to pillar, not a plunge to survive. The old {@code (excess × UNSAFE_VERTICAL_PENALTY)}
+     *       measurably deleted cave descents in favour of surface-walk-then-dig-straight-down
+     *       (FINDINGS-region-cost-audit §1: a 19-block cave descent priced 291.2 against an honest 35.2 — the
+     *       penalty was 88% of the edge).</li>
+     * </ul>
+     * Both are UNDER-estimates, which §0 admits ("under-estimating is admissible, over-estimating is not") and
+     * which the block tier corrects on contact via realization blame. {@link #UNSAFE_VERTICAL_PENALTY} and the
+     * pillar rate now live only in {@link #uniformTransitCost}'s AIR chute, where floorlessness is PROVEN.
+     *
+     * <p>The descent keeps its cheaper FIELD rate ({@link #FALL_PER_BLOCK_FIELD} 0.54 under {@code reverse})
+     * so the cost-to-goal heuristic does not re-inflate fall-heavy routes — a strictly deeper under-estimate,
+     * so still admissible. {@code canPlace}/{@code safeFall}/{@code pillarField} are retained on the signature
+     * but no longer read: the caps still thread through unchanged for a future honest damage term, and this
+     * reverts cleanly.
      */
     private static float dyCost(int dy, boolean canPlace, int safeFall, boolean reverse, float pillarField) {
-        // Field mode (reverse): use the block-honest FALL ratio and the CAPABILITY-AWARE pillar cost
-        // (pillarField, from RegionPlaceModel — the bot's place base + removal premium) so the cost-to-goal
-        // heuristic matches the block tier's real build economy; the forward A* keeps its compressed behavioral
-        // costs. pillarField defaults to the PILLAR_PER_BLOCK_FIELD stand-in for a block-less/headless bot.
-        final float pillar = reverse ? pillarField : PILLAR_PER_BLOCK;
-        final float fall = reverse ? FALL_PER_BLOCK_FIELD : FALL_PER_BLOCK;
-        // Reverse edge (goal-rooted cost-TO-goal Dijkstra): the ONLY asymmetry is vertical — traversing this edge
-        // in the opposite direction swaps up (dear PILLAR) and down (cheap FALL). Negating dy yields the reverse
-        // cost (octile horizontal is symmetric). Forward A* passes reverse=false → identical.
+        // Reverse edge (goal-rooted cost-TO-goal Dijkstra): the ONLY asymmetry left is the descent rate, so
+        // negating dy yields the reverse cost (octile horizontal is symmetric). Forward A* passes reverse=false.
         if (reverse) dy = -dy;
-        float c = 0f;
-        if (dy > 0) {
-            c = dy * pillar;
-            // No-place bot can't pillar a wall taller than a step — a big net rise must be existing terrain
-            // (gradual stairs ⇒ small dy); penalize the excess so the search prefers the gradual route.
-            if (!canPlace && dy > safeFall) {
-                c += (dy - safeFall) * UNSAFE_VERTICAL_PENALTY;
-            }
-        } else if (dy < 0) {
-            final int drop = -dy;
-            c = drop * fall;
-            // Damage cost for a fall past the safe window — applies to EVERY bot (falling needs no placing,
-            // unlike a wall-climb), so it biases the region A* toward gradual descents (small per-transit drop)
-            // over cliffs, matching the block tier's Fall cost-not-blocker model. Not gated on canPlace.
-            if (drop > safeFall) {
-                c += (drop - safeFall) * UNSAFE_VERTICAL_PENALTY;
-            }
-        }
-        return c;
+        if (dy > 0) return dy * WALK_PER_BLOCK;                                   // assumed staircase
+        if (dy < 0) return -dy * (reverse ? FALL_PER_BLOCK_FIELD : FALL_PER_BLOCK); // assumed ramp
+        return 0f;
     }
 
     /**
@@ -1994,28 +2042,33 @@ public final class RegionPathfinder {
      * <ul>
      *   <li><b>Horizontal</b> (octile) — {@link #SWIM_PER_BLOCK} (0.77): sprint-swim beats walking
      *       LATERALLY, and W guarantees water exists along the lateral corridor the gate admitted.</li>
-     *   <li><b>Vertical</b> ({@code |dy|}) — capability-shaped: only a <b>fully-submerged</b> fragment
-     *       ({@code ¬S·W} — no surfaceable cell anywhere, so the vertical leg is provably swum) prices at
-     *       {@link #SWIM_VERTICAL_PER_BLOCK} (2.2, direction-symmetric — no reverse swap needed). Every
-     *       OTHER W fragment (S·W: surface water, wet caves with dry floors) keeps {@link #dyCost
-     *       walkCost's exact dy shaping} — dear {@link #PILLAR_PER_BLOCK} up + the no-place
-     *       {@link #UNSAFE_VERTICAL_PENALTY} — because W is an EXISTENCE bit: a fragment that merely
-     *       CONTAINS water offers no proof its vertical extent is climbable-by-swimming, and discounting
-     *       it manufactured ~8×-cheap phantom ascents through wet caves (the cliff-repro regression).</li>
+     *   <li><b>Vertical</b> ({@code |dy|}) — a <b>fully-submerged</b> fragment ({@code ¬S·W} — no surfaceable
+     *       cell anywhere, so the vertical leg is provably swum) prices at {@link #SWIM_PER_BLOCK} too:
+     *       SprintSwim charges its up/down candidates the SAME rate as lateral, direction-symmetric, so no
+     *       reverse swap is needed (see the vertical-swim note by {@link #SWIM_PER_BLOCK}). Every OTHER W
+     *       fragment (S·W: surface water, wet caves with dry floors) keeps {@link #dyCost walkCost's exact dy
+     *       shaping} — because W is an EXISTENCE bit: a fragment that merely CONTAINS water offers no proof
+     *       its vertical extent is swum rather than walked.</li>
      * </ul>
-     * Everything else falls through to {@link #walkCost}: S-only = plain walk (1.0, unchanged), and
-     * ¬S·¬W = the existing air/place pricing relocated per-fragment (walkCost's dear pillar-up term IS
-     * the place pricing; its fall/cliff terms the drop). HOT PATH: two mask tests on one hoisted read —
-     * no allocation, no dispatch. Package-private for the pricing unit tests.
+     * Each is combined with its horizontal by {@code max}, not a sum — the vertical rides along free with the
+     * horizontal (see {@link #walkCost}). Everything else falls through to {@link #walkCost}: S-only = plain
+     * walk (1.0, unchanged), and ¬S·¬W the same. No pillar rate and no cliff/realizability penalty rides on
+     * ANY of these — every fragment here belongs to a MIXED region (see {@link #dyCost}). HOT PATH: two mask
+     * tests on one hoisted read — no allocation, no dispatch. Package-private for the pricing unit tests.
      */
     static float transitCost(int dx, int dy, int dz, int typeBits, boolean canPlace, int safeFall,
                              boolean reverse, float pillarField) {
         if ((typeBits & RegionFragments.TYPE_W) != 0) {
-            final float horiz = octile(dx, dz) * SWIM_PER_BLOCK;
             if ((typeBits & RegionFragments.TYPE_S) == 0) {
-                return horiz + Math.abs(dy) * SWIM_VERTICAL_PER_BLOCK; // ¬S·W: provably-swum vertical
+                // ¬S·W: provably fully submerged, so the WHOLE leg is a swim — one speed in any direction,
+                // all three axes combining by the 3-D octile (no free vertical: water is a sphere of motion).
+                return octile3(dx, dy, dz) * SWIM_PER_BLOCK;
             }
-            return horiz + dyCost(dy, canPlace, safeFall, reverse, pillarField); // S·W: walk-shaped |dy|
+            // S·W: W is an existence bit, so the vertical is NOT provably swum — it keeps walkCost's
+            // stairs-optimistic shaping and the walk model's free-vertical max, while the horizontal keeps the
+            // sprint-swim discount the lateral corridor justifies.
+            return Math.max(octile(dx, dz) * SWIM_PER_BLOCK,
+                    dyCost(dy, canPlace, safeFall, reverse, pillarField));
         }
         return walkCost(dx, dy, dz, canPlace, safeFall, reverse, pillarField);
     }
@@ -2099,31 +2152,39 @@ public final class RegionPathfinder {
             case RegionFragments.KIND_WATER:
                 // §3 pricing amendment: a truly-uniform water cube is FULLY SUBMERGED by construction
                 // (the §5.5 narrowed fast-path — waterCount == passCount, no floor, no solid), i.e. the
-                // ¬S·W class, so its vertical crossings honestly price at the vertical swim rate
-                // (SWIM_VERTICAL_PER_BLOCK, 2.2 — slower than lateral walk, far cheaper than pillar) and
-                // its lateral crossings keep the sprint-swim discount (SWIM_PER_BLOCK, 0.77 — swimming
-                // BEATS walking laterally; replaces the old flat WATER_TRANSIT_TICKS 3.6/block that made
-                // the region A* dodge open water). Swim is direction-symmetric, so no reverse face remap
-                // is needed (opposite(2) = 3 — both vertical).
-                if (f == 2 || f == 3) return vExtent * SWIM_VERTICAL_PER_BLOCK;
+                // ¬S·W class. Vertical and lateral crossings alike price at the ONE sprint-swim rate
+                // (SWIM_PER_BLOCK, 0.77 — swimming BEATS walking; replaces the old flat WATER_TRANSIT_TICKS
+                // 3.6/block that made the region A* dodge open water), because SprintSwim charges its up/down
+                // candidates exactly what it charges lateral (see the vertical-swim note by SWIM_PER_BLOCK).
+                // Swim is direction-symmetric, so no reverse face remap is needed (opposite(2) = 3 — both
+                // vertical). The vertical span is the node's full height, the lateral its side.
+                if (f == 2 || f == 3) return vExtent * SWIM_PER_BLOCK;
                 return sideH * SWIM_PER_BLOCK;
             case RegionFragments.KIND_AIR:
             default:
                 // Face 2 = −Y exit (falling out the bottom) is the only cheap air motion; all else is dear.
-                // A uniform-AIR region is a full vExtent-tall shaft: a no-place bot falling through it drops
-                // vExtent blocks, unsafe past safeFall, so even the down-chute is penalized for it (prefer a
-                // gradual MIXED descent with real floors over a free-fall shaft).
+                // A uniform-AIR region is a full vExtent-tall shaft — a PROVABLY floorless box, the one place
+                // the tier knows a descent is a genuine free fall rather than a walkable ramp, so the down-chute
+                // keeps UNSAFE_VERTICAL_PENALTY past safeFall (prefer a gradual MIXED descent with real floors
+                // over a free-fall shaft). NOT gated on canPlace (owner ruling, 2026-08-02): the gate encoded
+                // "you can build your own staircase", but in a floorless box there is nothing to place a
+                // staircase ON. It stays caps-honest on the damage axis for free — a damage-immune bot has
+                // safeFall == maxFall == BotCaps.IMMUNE_FALL, so the term never fires for it.
                 // Reverse (cost-TO-goal Dijkstra): traversing this transit the other way swaps its vertical sense,
                 // so decide up/down on the OPPOSITE face — reverse of "up into air" (dear) is "fall out" (cheap).
                 final int ef = reverse ? RegionAddress.opposite(f) : f;
                 if (ef == 2) {
                     float fall = vExtent * (reverse ? FALL_PER_BLOCK_FIELD : FALL_PER_BLOCK);
-                    if (!canPlace && vExtent > safeFall) {
+                    if (vExtent > safeFall) {
                         fall += (vExtent - safeFall) * UNSAFE_VERTICAL_PENALTY;
                     }
                     return fall;
                 }
-                return vExtent * (reverse ? pillarField : PILLAR_PER_BLOCK);
+                // ONE pillar rate for both directions (owner ruling, 2026-08-02): pillarField is
+                // RegionPlaceModel's per-search Pillar.COST + placeBaseCost + hardness-scaled removal premium,
+                // ÷ the walk ruler. The forward A* used to charge a hardcoded behavioral 6.0 here — 2.6× the
+                // very number its own cost-to-goal field used, and blind to the bot's real place economy.
+                return vExtent * pillarField;
         }
     }
 

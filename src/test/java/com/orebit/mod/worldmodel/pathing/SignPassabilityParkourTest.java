@@ -172,6 +172,55 @@ class SignPassabilityParkourTest {
         return grid(s);
     }
 
+    /**
+     * The flagship's terminal parkour wedge, 2026-08-02 — a FALLING parkour whose landing column has a
+     * <b>stalagmite in its feet cell</b>. Takeoff floor at {@code y=2} (cols 0..2), a 2-cell gap (cols 3,4),
+     * the landing floor one lower at {@code y=1} (col5), and {@code pointed_dripstone} occupying
+     * {@code (5,2,8)} — the landing column's node-level cell.
+     *
+     * <p>Reproduces, in miniature, takeoff {@code (108,48,158)} → landing floor {@code (111,47,158)} with the
+     * stalagmite at {@code (111,48,158)}.
+     */
+    private static NavGridView stalagmiteOverLandingFloor() {
+        BlockState air = Blocks.AIR.defaultBlockState();
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        PalettedContainer<BlockState> s = solidBlock();
+        for (int x = 0; x <= 5; x++)
+            for (int y = 1; y <= 7; y++)
+                s.set(x, y, 8, air);
+        for (int x = 0; x <= 2; x++) s.set(x, 2, 8, stone);            // takeoff run, floor y=2
+        s.set(5, 1, 8, stone);                                          // landing floor one BELOW -> falling
+        s.set(5, 2, 8, Blocks.POINTED_DRIPSTONE.defaultBlockState());   // …its feet cell, plugged
+        // Void the gap columns all the way down, so dropping in and walking across is NOT an alternative
+        // route — the parkour must be the only way over, or the test proves nothing about parkour.
+        s.set(3, 0, 8, air);
+        s.set(4, 0, 8, air);
+        return grid(s);
+    }
+
+    /**
+     * A narrow top must invalidate the WHOLE landing column, not merely be skipped as a landing surface
+     * (owner ruling 2026-08-02): "nothing below a narrow top can be safely landed on, since the narrow top
+     * will intercept our landing."
+     *
+     * <p>{@code overJumpable} is deliberately weaker than {@code passable} — it admits any occupant whose
+     * collision top is no taller than a full block, so the sprint ARC can clear it. That is correct for
+     * flying OVER a column and wrong for dropping INTO one. Before the fix the stalagmite made the column
+     * read as an open gap and the falling down-scan emitted a landing on the floor UNDERNEATH it; the bot
+     * undershot into the gap and the validity envelope fail→HELD there for 21 600 ticks.
+     */
+    @Test
+    void fallingParkourMustNotLandBeneathAStalagmite() {
+        BlockPathPlan plan = search(stalagmiteOverLandingFloor(), 0, 2, 8, 5, 1, 8);
+
+        if (plan != null) {
+            assertFalse(contains(plan, MovementRegistry.PARKOUR),
+                    "no PARKOUR may be emitted into a column whose feet cell holds a stalagmite — the "
+                            + "landing is physically unreachable, so planning it strands the bot in the gap "
+                            + "(measured: the flagship undershot to (110,48,158) and fail->HELD)");
+        }
+    }
+
     private static PalettedContainer<BlockState> solidBlock() {
         BlockState air = Blocks.AIR.defaultBlockState();
         BlockState stone = Blocks.STONE.defaultBlockState();

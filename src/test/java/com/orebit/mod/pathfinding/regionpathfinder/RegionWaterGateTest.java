@@ -126,65 +126,73 @@ public class RegionWaterGateTest {
     /**
      * S·W (surface water / wet cave with dry-or-surface cells): the vertical component keeps walkCost's
      * EXACT dy shaping — identical to the same leg through a dry S-only fragment — because W is an
-     * existence bit and offers no proof the vertical extent is swimmable. The ~8× swim discount on the
-     * ascent is dead.
+     * existence bit and offers no proof the vertical extent is swum rather than walked. The point of the §3
+     * amendment survives the 2026-08-02 stairs-optimism ruling: what a W bit must NOT do is buy a discount
+     * off the dry price. It buys nothing.
      */
     @Test
     void surfaceWetFragment_verticalKeepsWalkShaping() {
         final int sw = RegionFragments.TYPE_S | RegionFragments.TYPE_W;
-        final int dy = 12; // the regression shape: a big single-leg ascent, well past safeFall
+        final int dy = 12; // the regression shape: a big single-leg ascent
         float wet = RegionPathfinder.transitCost(0, dy, 0, sw, false, SAFE_FALL, false, PF);
         float dry = RegionPathfinder.transitCost(0, dy, 0, RegionFragments.TYPE_S, false, SAFE_FALL, false, PF);
         assertEquals(dry, wet, 1e-4, "a pure-vertical S·W leg must price EXACTLY like the dry walk-shaped leg");
-        assertTrue(wet >= dy * RegionPathfinder.PILLAR_PER_BLOCK,
-                "the ascent is pillar-shaped (dear), incl. the no-place cliff penalty past safeFall");
-        assertTrue(wet > 8f * dy * RegionPathfinder.SWIM_PER_BLOCK,
-                "nowhere near the old flat swim discount — the phantom-ascent pricing is gone");
-        // The descent side keeps walkCost's fall + cliff shaping too (symmetric reuse of dyCost).
+        // Stairs-optimism (2026-08-02): a MIXED ascent assumes a pre-existing staircase, so it is walk-rate
+        // per block of rise — no pillar rate (that is now KIND_AIR-only) and no cliff term.
+        assertEquals(dy * RegionPathfinder.WALK_PER_BLOCK, wet, 1e-4,
+                "the ascent is stairs-shaped: dy × WALK, exactly");
+        // The descent side reuses dyCost identically.
         assertEquals(RegionPathfinder.transitCost(0, -dy, 0, RegionFragments.TYPE_S, false, SAFE_FALL, false, PF),
                 RegionPathfinder.transitCost(0, -dy, 0, sw, false, SAFE_FALL, false, PF), 1e-4,
                 "S·W descent = dry walk-shaped descent");
     }
 
     /**
-     * ¬S·W (fully submerged — no surfaceable cell anywhere): vertical swim is provably honest and prices
-     * at {@link RegionPathfinder#SWIM_VERTICAL_PER_BLOCK} ≈ 2.2 (vertical swim ~2 b/s vs walk 4.32),
-     * direction-symmetric, reverse-invariant.
+     * ¬S·W (fully submerged — no surfaceable cell anywhere): the vertical leg is provably swum, and prices at
+     * the ONE {@link RegionPathfinder#SWIM_PER_BLOCK} sprint-swim rate — because
+     * {@link com.orebit.mod.pathfinding.blockpathfinder.movements.SprintSwim} emits its up/down candidates at
+     * exactly its lateral cost. Direction-symmetric, reverse-invariant.
      */
     @Test
-    void fullySubmergedFragment_verticalPricesAtSwimVerticalRate() {
+    void fullySubmergedFragment_verticalPricesAtSwimRate() {
         final int dy = 10;
         float up = RegionPathfinder.transitCost(0, dy, 0, RegionFragments.TYPE_W, false, SAFE_FALL, false, PF);
-        assertEquals(dy * RegionPathfinder.SWIM_VERTICAL_PER_BLOCK, up, 1e-4,
-                "¬S·W vertical prices at SWIM_VERTICAL_PER_BLOCK (≈2.2/block)");
+        assertEquals(dy * RegionPathfinder.SWIM_PER_BLOCK, up, 1e-4,
+                "¬S·W vertical prices at the sprint-swim rate (0.77/block), not a paddle rate");
         assertEquals(up, RegionPathfinder.transitCost(0, -dy, 0, RegionFragments.TYPE_W, false, SAFE_FALL, false, PF),
                 1e-4, "swim is direction-symmetric (up = down; water absorbs falls)");
         assertEquals(up, RegionPathfinder.transitCost(0, dy, 0, RegionFragments.TYPE_W, false, SAFE_FALL, true, PF),
                 1e-4, "reverse (cost-to-goal field) sense identical — no vertical swap for swum legs");
     }
 
-    /** The horizontal W discount is unchanged, and the full decomposition is exact (horiz swim + shaped dy). */
+    /** The horizontal W discount is unchanged, and a mixed leg combines its axes by max (not a sum). */
     @Test
-    void horizontalSwimDiscount_andExactDecomposition() {
+    void horizontalSwimDiscount_andMaxCombination() {
         final int sw = RegionFragments.TYPE_S | RegionFragments.TYPE_W;
         float wetH = RegionPathfinder.transitCost(10, 0, 5, sw, false, SAFE_FALL, false, PF);
         float dryH = RegionPathfinder.transitCost(10, 0, 5, RegionFragments.TYPE_S, false, SAFE_FALL, false, PF);
         assertEquals(dryH * 0.77f, wetH, 1e-3, "lateral W legs keep the 0.77 sprint-swim discount");
         assertTrue(wetH < dryH, "swimming still BEATS walking laterally");
-        // Decomposition: a mixed leg = swim-discounted horizontal + the S·W walk-shaped vertical, exactly.
+        // A block of rise rides along free with a block of horizontal (Ascend.COST == Traverse.FLAT_COST), so
+        // the two axes combine by max — the old additive form billed a staircase twice.
         float mixed = RegionPathfinder.transitCost(10, 12, 5, sw, false, SAFE_FALL, false, PF);
         float dyOnly = RegionPathfinder.transitCost(0, 12, 0, RegionFragments.TYPE_S, false, SAFE_FALL, false, PF);
-        assertEquals(wetH + dyOnly, mixed, 1e-3, "transitCost(S·W) = octile×SWIM + walk-shaped dy, exactly");
-        // And the ¬S·W mixed leg swaps only the vertical term for the vertical swim rate.
+        assertEquals(Math.max(wetH, dyOnly), mixed, 1e-3, "transitCost(S·W) = max(octile×SWIM, walk-shaped dy)");
+        assertTrue(mixed < wetH + dyOnly, "…strictly cheaper than the old additive form");
+        // A provably-submerged ¬S·W leg is NOT a max: water is a normalized sphere of motion, so all three
+        // axes combine by the 3-D octile — no axis rides along free the way a walk's vertical does.
         float mixedSub = RegionPathfinder.transitCost(10, 12, 5, RegionFragments.TYPE_W, false, SAFE_FALL, false, PF);
-        assertEquals(wetH + 12 * RegionPathfinder.SWIM_VERTICAL_PER_BLOCK, mixedSub, 1e-3,
-                "transitCost(¬S·W) = octile×SWIM + |dy|×SWIM_VERTICAL");
+        final float octile3 = (12 - 10) + 1.4142135f * (10 - 5) + 1.7320508f * 5; // sorted 5,10,12
+        assertEquals(octile3 * RegionPathfinder.SWIM_PER_BLOCK, mixedSub, 1e-3,
+                "transitCost(¬S·W) = octile3(dx,dy,dz) × SWIM");
+        assertTrue(mixedSub > Math.max(wetH, 12 * RegionPathfinder.SWIM_PER_BLOCK),
+                "…and is dearer than a max would be — swimming buys no free axis");
     }
 
     /**
      * Uniform {@link RegionFragments#KIND_WATER} records are the truly-fully-submerged class by
-     * construction (§5.5 narrowed fast-path), so their crossings align with ¬S·W: vertical faces at
-     * {@link RegionPathfinder#SWIM_VERTICAL_PER_BLOCK}, lateral at {@link RegionPathfinder#SWIM_PER_BLOCK}.
+     * construction (§5.5 narrowed fast-path), so their crossings align with ¬S·W: vertical faces and lateral
+     * faces alike at the one {@link RegionPathfinder#SWIM_PER_BLOCK} rate.
      */
     @Test
     void uniformWaterRecord_verticalSwimRate_lateralSwimDiscount() {
@@ -200,129 +208,9 @@ public class RegionWaterGateTest {
                 RegionMineModel.DEFAULT, PF, false, 1, MINY);
         float down = RegionPathfinder.uniformTransitCost(0, rf, 2, false, SAFE_FALL,
                 RegionMineModel.DEFAULT, PF, false, 1, MINY);
-        assertEquals(G * RegionPathfinder.SWIM_VERTICAL_PER_BLOCK, up, 1e-3,
-                "vertical uniform-water crossing prices at the vertical swim rate");
+        assertEquals(G * RegionPathfinder.SWIM_PER_BLOCK, up, 1e-3,
+                "vertical uniform-water crossing prices at the same sprint-swim rate as lateral");
         assertEquals(up, down, 1e-3, "swim is direction-symmetric");
-    }
-
-    // ===================================================================================================
-    // The regression's END-TO-END shape: a no-place, no-break bot offered (a) a wet-cave ascent — an S·W
-    // fragment entered low and exited ~9 blocks higher — versus (b) a longer walkable detour that climbs
-    // the same 9 blocks gradually (≤ safeFall per transit). Under the broken pricing the wet ascent read
-    // ~8× cheaper than ANY dry leg and the skeleton dove into the cave; under the amendment its |dy| is
-    // pillar-shaped (+ cliff penalty), so the gradual dry route must win.
-    // ===================================================================================================
-    @Test
-    void noPlaceBot_prefersGradualDryDetour_overWetCaveAscent() {
-        RegionGrid grid = RegionGrid.headless(MINY);
-        // Seal the whole arena in built solid rock (carved regions overwrite below): rx -1..3, ry 0..2,
-        // rz -1..2 — no unbuilt-optimistic leak can fake a cheaper third route.
-        for (int rx = -1; rx <= 3; rx++)
-            for (int ry = 0; ry <= 2; ry++)
-                for (int rz = -1; rz <= 2; rz++) seedSolid(grid, rx, ry, rz);
-
-        // --- Region A (0,1,0): start. L-shaped 2-tall corridors at feet y=1: along X (to the wet cave
-        // east) and along Z (to the detour south). Touches +X and +Z at y1..2.
-        {
-            boolean[] p = new boolean[CELLS], s = new boolean[CELLS];
-            corridorX(p, s, 0, G - 1, 1);
-            corridorZ(p, s, 0, G - 1, 1);
-            seed(grid, 0, 1, 0, p, s, null);
-        }
-        // --- Region W (1,1,0): the WET CAVE — one S·W fragment entered at -X low (y1..2, a 1-deep pool
-        // under the shaft) whose only exit east is a ledge at +X high (y10..11): the ascent leg dy≈+9.
-        {
-            boolean[] p = new boolean[CELLS], s = new boolean[CELLS];
-            boolean[] w = new boolean[CELLS];
-            for (int x = 0; x <= 7; x++)
-                for (int z = 7; z <= 9; z++) {
-                    p[idx(x, 1, z)] = true; w[idx(x, 1, z)] = true; // the pool (water, air above → S·W)
-                    p[idx(x, 2, z)] = true;
-                }
-            for (int x = 7; x <= 8; x++)                            // the shaft up
-                for (int z = 7; z <= 9; z++)
-                    for (int y = 1; y <= 11; y++) p[idx(x, y, z)] = true;
-            for (int x = 7; x <= G - 1; x++)                        // the high exit ledge
-                for (int z = 7; z <= 9; z++) {
-                    s[idx(x, 9, z)] = true;
-                    p[idx(x, 10, z)] = true; p[idx(x, 11, z)] = true;
-                }
-            seed(grid, 1, 1, 0, p, s, w);
-            RegionFragments rf = grid.fragmentRecord(0, 1, 1, 0);
-            assertEquals(1, rf.fragmentCount(), "the wet cave floods to ONE component");
-            assertTrue(rf.typeW(0) && rf.typeS(0), "…typed S·W (pool surface + dry ledge — NOT fully submerged)");
-        }
-        // --- Region GR (2,1,0): goal. L-shaped corridors at feet y=10: along X (west face aligns with
-        // the wet cave's high ledge) and along Z (south face aligns with the detour's last leg).
-        {
-            boolean[] p = new boolean[CELLS], s = new boolean[CELLS];
-            corridorX(p, s, 0, G - 1, 10);
-            corridorZ(p, s, 0, G - 1, 10);
-            seed(grid, 2, 1, 0, p, s, null);
-        }
-        // --- The dry detour row (rz=1): three ramp regions climbing feet 1 → 4 → 7 → 10, each transit's
-        // dy ≤ safeFall(3) so the climb is pillar-priced but never cliff-penalized (the gradual route).
-        {
-            boolean[] p = new boolean[CELLS], s = new boolean[CELLS]; // D1 (0,1,1): enter -Z low, ramp to +X y4
-            corridorZ(p, s, 0, 8, 1);
-            rampX(p, s, 7, G - 1, 1, 4);
-            seed(grid, 0, 1, 1, p, s, null);
-        }
-        {
-            boolean[] p = new boolean[CELLS], s = new boolean[CELLS]; // D2 (1,1,1): ramp feet 4 → 7 across X
-            rampX(p, s, 0, G - 1, 4, 7);
-            seed(grid, 1, 1, 1, p, s, null);
-        }
-        {
-            boolean[] p = new boolean[CELLS], s = new boolean[CELLS]; // D3 (2,1,1): ramp to feet 10, corridor -Z (north to GR)
-            rampX(p, s, 0, 8, 7, 10);
-            corridorZ(p, s, 0, 9, 10);
-            seed(grid, 2, 1, 1, p, s, null);
-        }
-
-        BlockPos start = new BlockPos(8, MINY + 16 + 1, 8);    // region A, feet y=1 local
-        BlockPos goal = new BlockPos(40, MINY + 16 + 10, 8);   // region GR, feet y=10 local
-        RegionPathPlan plan = RegionPathfinder.plan(null, grid, start, goal, BotCaps.DEFAULT);
-        assertNotNull(plan, "a route exists (at worst the wet ascent — the gate passes it; pricing decides)");
-        assertTrue(plan.reachedGoalRegion());
-        boolean throughWetCave = false, throughDetour = false;
-        for (int i = 0; i < plan.size(); i++) {
-            if (plan.rx(i) == 1 && plan.ry(i) == 1 && plan.rz(i) == 0) throughWetCave = true;
-            if (plan.rz(i) == 1) throughDetour = true;
-        }
-        assertFalse(throughWetCave,
-                "the skeleton must NOT dive into the wet-cave ascent — its |dy| is pillar-shaped + cliff-"
-                        + "penalized under the §3 pricing amendment, dearer than the gradual dry climb");
-        assertTrue(throughDetour, "…and must take the gradual walkable detour (rz=1 row)");
-    }
-
-    /** 2-tall corridor along X at {@code z} 7..9: standable floor at {@code feetY-1}, passable feetY..feetY+1. */
-    private static void corridorX(boolean[] p, boolean[] s, int x0, int x1, int feetY) {
-        for (int x = x0; x <= x1; x++)
-            for (int z = 7; z <= 9; z++) {
-                s[idx(x, feetY - 1, z)] = true;
-                p[idx(x, feetY, z)] = true; p[idx(x, feetY + 1, z)] = true;
-            }
-    }
-
-    /** 2-tall corridor along Z at {@code x} 7..9 (the north-south limb of the L / detour connectors). */
-    private static void corridorZ(boolean[] p, boolean[] s, int z0, int z1, int feetY) {
-        for (int z = z0; z <= z1; z++)
-            for (int x = 7; x <= 9; x++) {
-                s[idx(x, feetY - 1, z)] = true;
-                p[idx(x, feetY, z)] = true; p[idx(x, feetY + 1, z)] = true;
-            }
-    }
-
-    /** 2-tall walkable ramp along X at {@code z} 7..9, feet rising linearly {@code feet0 → feet1} (≤1/step). */
-    private static void rampX(boolean[] p, boolean[] s, int x0, int x1, int feet0, int feet1) {
-        for (int x = x0; x <= x1; x++) {
-            int feet = feet0 + Math.round((feet1 - feet0) * (float) (x - x0) / (x1 - x0));
-            for (int z = 7; z <= 9; z++) {
-                s[idx(x, feet - 1, z)] = true;
-                p[idx(x, feet, z)] = true; p[idx(x, feet + 1, z)] = true;
-            }
-        }
     }
 
     // ---- seed helpers (real FragmentBuilder flood — the RegionFloodGuardTest idiom) -----------------------
