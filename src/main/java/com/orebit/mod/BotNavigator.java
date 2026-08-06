@@ -87,8 +87,6 @@ final class BotNavigator {
     private PathStatus lastChatStatus;
     private boolean lastChatPartial;
     private PathPlan.TargetKind lastChatKind;
-    /** Last (waypoint|movement|medium) announced by {@code /bot debug verbose} — dedups it to one line per change. */
-    private String lastVerbose;
 
     // ---- Debug.VERBOSE execution forensics (cold; only touched while verbose is on) --------------------
     // The stuck-bot discriminators: which of the known edit-execution seams is biting (see logPhaseDiagnostics).
@@ -1746,10 +1744,13 @@ final class BotNavigator {
     }
 
     /**
-     * {@code /bot debug verbose}: announce which {@link Movement} the bot is executing, toward which cell, and
-     * in which medium — one line per change (not per tick), to the owner's chat and the log. This is the
-     * diagnostic for "is the bot actually swimming, or is it trying to Ascend in water?": the medium flips to
-     * {@code water} the moment it submerges, and the move name says exactly which strategy is driving.
+     * {@code /bot debug verbose}: the follower's <b>per-tick execution record</b> — one line EVERY tick, to the
+     * server log only. Position to three decimals, velocity, every movement input actually held, the servo
+     * branch that wrote them, and the live pose/medium: enough to reconstruct a step tick by tick offline
+     * (see {@code internal_docs/follow_analysis.py}) rather than infer it from a summary.
+     *
+     * <p>It was previously deduped to one line per state change and mirrored to the owner's chat; both were
+     * removed 2026-08-06 — see the comment on the emit below for the measurements that forced it.
      */
     private void logVerbose(Movement movement, BlockPos wp) {
         String move = movement.getClass().getSimpleName();
@@ -1782,6 +1783,8 @@ final class BotNavigator {
         // blocked press still trips `(horizontalCollision || jumping) && onClimbable -> vy = +0.2` and climbs
         // the bot up the vine it is trying to descend. zza is the field setForward writes.
         final float fwd = bot.zza;
+        /** The LATERAL input (xxa) the strafe seam writes — see the {@code str=} note on the log call. */
+        final float strafe = bot.xxa;
         // YAW + the unit HEADING it implies (2026-08-03). fwd alone says "how hard", never "which way": the
         // ground steer (SteerControl.steerTowards) clamps its pursuit point to the segment END, so an
         // OVERSHOOT should re-face the target and walk BACK — but at the (58,171,254) wedge the telemetry
@@ -1791,19 +1794,25 @@ final class BotNavigator {
         final float yaw = bot.getYRot();
         final double hx = -Math.sin(Math.toRadians(yaw));
         final double hz = Math.cos(Math.toRadians(yaw));
-        String key = waypointIndex + "|" + move + "|" + medium + "|" + phaseRunner.phase()
-                + "|" + bot.footX() + "," + bot.footY() + "," + bot.footZ() + "|" + bot.grounded()
-                + "|" + (int) Math.floor(bot.getX() * 10) + "," + (int) Math.floor(bot.getZ() * 10)
-                + "|" + sneak + "|" + jump + "|" + bot.horizontalCollision
-                // Coarse (15 deg) so a genuine re-face prints while normal tracking jitter does not spam.
-                + "|" + Math.round(yaw / 15.0f);
-        if (key.equals(lastVerbose)) return;
-        lastVerbose = key;
-        bot.chat("[bot] " + move + " → " + AllyBotEntity.compact(wp) + " (" + medium + ")");
+        // NO DEDUP, NO CHAT (owner ruling 2026-08-06). The line used to collapse on a state key (waypoint, foot
+        // cell, phase, position TENTHS, sneak/jump/hcol, 15-degree yaw) and also mirror a one-line summary to
+        // the owner's chat.
+        //
+        // The dedup had to go: it skips ticks precisely when the bot is moving fastest (a tick that crosses two
+        // tenths prints once), so a per-tick reconstruction is impossible exactly where it matters. Two
+        // mechanism claims were derived from these lines on 2026-08-06 and BOTH were wrong, because consecutive
+        // lines were silently non-consecutive ticks. The failures being chased are decided by margins of
+        // ~0.001 blocks; a log that drops ticks cannot resolve them, and "log only the interesting steps" is
+        // not available either — which step fails is not knowable in advance.
+        //
+        // The chat mirror had to go for the opposite reason: it carried strictly LESS than the log line (no
+        // sub-block position, no inputs, no velocity) while covering the screen during the very runs being
+        // measured. Everything it said is in latest.log, better.
         OrebitCommon.LOGGER.info(
                 "[Orebit] exec {} wp{} -> {} ({}) phase={}/{} botFoot=({},{},{}) botY={} grounded={}"
                         + " climbable={} reached={} targetY={} x={} z={} vel=({},{})"
-                        + " sneak={} jump={} fwd={} yaw={} head=({},{}) hcol={} dm=({},{},{}) stance[{}]",
+                        + " sneak={} jump={} fwd={} str={} src={} yaw={} head=({},{}) hcol={} dm=({},{},{})"
+                        + " stance[{}]",
                 move, waypointIndex, AllyBotEntity.compact(wp), medium,
                 phaseRunner.phase(), phaseRunner.phases(),
                 bot.footX(), bot.footY(), bot.footZ(), String.format("%.3f", bot.getY()),
@@ -1813,6 +1822,14 @@ final class BotNavigator {
                 String.format("%.3f", bot.getX()), String.format("%.3f", bot.getZ()),
                 String.format("%.4f", bot.velX()), String.format("%.4f", bot.velZ()),
                 sneak, jump, String.format("%.2f", fwd),
+                // STRAFE + the authoring BRANCH (2026-08-06). str: the lateral input added with the strafe
+                // seam was invisible, so a cross-axis correction could not be told from no correction at all.
+                // src: which servo wrote these inputs — the branches mean different things by the same yaw
+                // (groundServo faces the velocity ERROR, arriveOnTarget faces the SEGMENT, the arrest faces
+                // the cross correction), and reading a thrust direction as a heading is exactly how two wrong
+                // mechanisms got published on 2026-08-06.
+                String.format("%.2f", strafe),
+                com.orebit.mod.pathfinding.blockpathfinder.SteerControl.lastDrive,
                 String.format("%.1f", yaw), String.format("%.3f", hx), String.format("%.3f", hz),
                 bot.horizontalCollision,
                 String.format("%.4f", bot.getDeltaMovement().x),
