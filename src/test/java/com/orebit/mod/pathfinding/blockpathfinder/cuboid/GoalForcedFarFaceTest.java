@@ -139,7 +139,8 @@ class GoalForcedFarFaceTest {
         NavGridCuboidsView cuboids = new NavGridCuboidsView(grid, new PathEdits(), CORRIDOR);
         GoalForcedCost.Forced forced = new GoalForcedCost.Forced();
         GoalForcedCost.probe(cuboids, sx, sy, sz, GX, GY, GZ,
-                BotCaps.BREAK_PLACE, MovementContext.PLACE_BASE_COST, 0f, forced);
+                // null snapshot == the headless / caps-only path: keeps the global-fastest bound unchanged.
+                BotCaps.BREAK_PLACE, MovementContext.PLACE_BASE_COST, 0f, null, forced);
         return forced;
     }
 

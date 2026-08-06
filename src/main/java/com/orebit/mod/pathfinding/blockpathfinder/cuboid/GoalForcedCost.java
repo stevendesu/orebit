@@ -210,10 +210,12 @@ public final class GoalForcedCost {
      * @param digBreakBase    the per-search flat per-break surcharge ({@code mining.breakBaseCost}) added to
      *                        the dig-face break step, from {@link MovementContext#breakBaseCost()}; {@code 0}
      *                        when the search has no {@code InventoryView}, leaving those searches unchanged
+     * @param mining          this search's tool snapshot (the bot's best tier per category), or {@code null}
+     *                        for the headless / benchmark / caps-only searches — see the dig arm below
      * @param out             filled in place with the cheapest forced approach (or "no correction")
      */
     public static void probe(NavGridCuboidsView cuboids, int sx, int sy, int sz, int gx, int gy, int gz,
-            BotCaps caps, float pillarPlaceCost, float digBreakBase, Forced out) {
+            BotCaps caps, float pillarPlaceCost, float digBreakBase, MiningModel.Snapshot mining, Forced out) {
         out.clear();
         if (cuboids == null) {
             return; // no macro view → no correction (legacy / unbounded search)
@@ -310,15 +312,32 @@ public final class GoalForcedCost {
                     // reach it from this side) — measure from the face cell in the -sign direction.
                     int extent = box.extentToward(ax, ay, az, axis, -sign); // forced rock depth out from the goal
                     if (extent > 0) {
-                        // Real mining time of the BEST possible tool (admissible lower bound — the probe has no
-                        // bot inventory, and over-estimating would refuse the optimal route) plus the search's
-                        // flat per-break surcharge (every real folded break pays the same base, so the bound
-                        // holds). An unbreakable-grind substrate uses the tool-derived stand-in's FASTEST-tier
-                        // time instead (the tables hold only the UNMINEABLE sentinel for it) — the fastest
-                        // pickaxe's cost, so the bound stays admissible whatever the bot actually carries.
+                        // Real mining time, priced with THIS BOT'S OWN TOOLS whenever the search supplied a
+                        // snapshot (owner ruling 2026-08-06), plus the search's flat per-break surcharge
+                        // (every real folded break pays the same base, so the bound holds).
+                        //
+                        // Admissibility is UNHARMED, and the bound gets tighter. The requirement is only that
+                        // this never exceed what the search itself will charge, and the search charges
+                        // inv.mining().ticksFor(d) — literally the same tier read. The bot's inventory is
+                        // immutable for the life of one search (it does not wander into a stray pickaxe while
+                        // pathing), so there is no window in which the two can disagree. Pricing with the
+                        // GAME's best tool instead was a strictly looser bound that under-sold every dig for
+                        // a poorly-equipped bot. This is the BLOCK tier, where carrying a diamond pickaxe
+                        // SHOULD open a route through obsidian; the REGION tier stays deliberately
+                        // inventory-blind (RegionPlaceModel/RegionMineModel) so the broad route does not
+                        // reshuffle as the bot re-equips.
+                        //
+                        // An unbreakable-grind substrate uses the tool-derived stand-in (the tables hold only
+                        // the UNMINEABLE sentinel for it) at the bot's best PICKAXE tier, mirroring the
+                        // executor's own grind cost. Null snapshot (headless / benchmark / caps-only) keeps
+                        // the global-fastest bound, so those searches stay byte-identical.
                         // Resident-table scan, off the per-node hot path (probe runs once per search).
-                        float mineTicks = digGeom ? MiningModel.fastestTicks(desc)
-                                : MiningModel.unbreakableFastestTicks();
+                        float mineTicks = digGeom
+                                ? (mining != null ? mining.ticksFor(desc) : MiningModel.fastestTicks(desc))
+                                : (mining != null
+                                        ? MiningModel.unbreakableTicks(
+                                                mining.bestTierOrdinal(NavBlock.Tool.PICKAXE.ordinal()))
+                                        : MiningModel.unbreakableFastestTicks());
                         float breakStep = MineDown.COST + mineTicks + digBreakBase;
                         float premium = breakStep - OCTILE_FLOOR;
                         if (premium > 0f && (!haveBest || premium < bestPremium)) {
