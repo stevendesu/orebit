@@ -678,7 +678,25 @@ public final class Parkour implements Movement {
             // The down-cells are DETECTION reads (envelope-capped); the arc's prisms — columns 1..c,
             // this column's own prism included (the conservative simplification, class Javadoc) — are
             // verified backwards only when a landing is actually found.
-            if (g >= 1 && g <= fallGapCap) {
+            // A PLUGGED node-level cell forbids every falling landing in this column (owner ruling,
+            // 2026-08-02): "excluding narrow tops shouldn't mean flying right past them — nothing below a
+            // narrow top can be safely landed on, since the narrow top will intercept our landing." The
+            // descent is modeled straight down THIS column, so whatever occupies its node-level cell is in
+            // the way of every landing beneath it.
+            //
+            // overJumpable (line ~644) is deliberately weaker than passable — it admits any occupant whose
+            // collision top is no taller than a full block, so the sprint ARC can clear it. That is right for
+            // flying OVER a column and wrong for dropping INTO one, and the gap between the two is exactly
+            // where the flagship died: a stalagmite at (111,48,158) is overJumpable, so the column read as an
+            // open gap and this scan emitted a landing on the dripstone_block at (111,47,158) UNDERNEATH it.
+            // The bot cannot put its feet in that cell, so it undershot to (110,48,158) and fail->HELD.
+            // (Note isNarrowTop at the landing floor below is a different guard — it stops us landing ON a
+            // tip; this stops us landing THROUGH one.)
+            //
+            // `passable` and not `arcPassable` keeps the documented fluid-gap admission intact: a 1-wide
+            // lava/water pool has an EMPTY collision shape, so it reads passable and a falling landing under
+            // it is still offered, exactly as before.
+            if (g >= 1 && g <= fallGapCap && ctx.passable(fd)) {
                 float descTransit = 0f; // descended-cell surcharges, accumulated during detection
                 for (int dr = 1; dr <= capsDrop; dr++) {
                     int fy = y - dr;
@@ -986,7 +1004,7 @@ public final class Parkour implements Movement {
         final boolean[] airborneOnce = new boolean[1];
         MovePlan plan = new MovePlan();
         plan.resetWhen(b -> airborneOnce[0] && b.grounded()
-                && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
+                && atWaypoint(b, fx, fromFootY, fz));
         // VALIDITY ENVELOPE (the P1 off-plan wedge): a committed jump's world is exactly the grounded cells
         // the plan itself names — the takeoff stand, and the landing COLUMN between the two stand heights
         // (for a flat/rising arc that band IS the landing stand; a falling arc's descent runs down the
@@ -1102,7 +1120,7 @@ public final class Parkour implements Movement {
                 // desired point — the slide arrest, ice or stone alike).
                 .drive((b, v) -> SteerControl.parkourAirborne(b, v, ux, uz, tx, ty, tz, sprint, falling))
                 .done(b -> b.grounded()
-                        && b.footX() == tx && b.footY() == toFootY && b.footZ() == tz);
+                        && atWaypoint(b, tx, toFootY, tz));
         return plan;
     }
 

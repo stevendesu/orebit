@@ -27,6 +27,7 @@ import com.orebit.mod.platform.WorldEdits;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 import net.minecraft.core.BlockPos;
@@ -43,6 +44,8 @@ import net.minecraft.world.level.block.BubbleColumnBlock;
 import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.util.Mth;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.BooleanOp;
 import net.minecraft.world.phys.shapes.Shapes;
@@ -620,9 +623,27 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      * HPA* produces no window (no built ground at the start).
      */
     public String traceTo(BlockPos goalFloor) {
+        return traceTo(this.blockPosition().below(), goalFloor);
+    }
+
+    /**
+     * As {@link #traceTo(BlockPos)} but seeded from an EXPLICIT start floor cell — the
+     * {@code /bot trace <from> <to>} form (owner request 2026-08-04).
+     *
+     * <p><b>Why a synthetic start is needed.</b> The default start is wherever the bot physically is, which
+     * leaves some nodes untraceable: a vine hang cannot be held by hand, because an idle bot has no reason
+     * to press sneak and slides out of the cell the moment it is teleported there — and blocking the cell to
+     * hold it would change the very geometry under test. Seeding the search directly removes the
+     * choreography. The goal, skeleton, corridor and goal-forced-cost premium all still derive exactly as
+     * they do live, so the node's expansion is the real one.
+     *
+     * <p>The start must be a cell the search accepts as a node; a nonsense one simply yields an immediate
+     * failure, which the dump header reports. The resulting plan describes that CELL, not the bot's pose —
+     * it answers "which candidate does the search relax here", not "what would the bot do right now".
+     */
+    public String traceTo(BlockPos startFloor, BlockPos goalFloor) {
         setMode(Mode.STAY); // stop the per-tick replan/flood; the trace is a standalone one-shot search
         ServerLevel level = (ServerLevel) Worlds.of(this);
-        BlockPos startFloor = this.blockPosition().below();
         final BotCaps caps = caps(); // snapshot the configured caps once for this whole trace
         final MovementContext.InventoryView inv = inventoryFeasibility(); // the bot's real-inventory cap
 
@@ -718,6 +739,24 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             int exp = BlockPathfinder.lastExpansions();
             w.write("\nRESULT: " + (plan == null ? "FAIL (null)" : plan.size() + "wp cost=" + plan.cost())
                     + "  expansions=" + exp + "\n");
+            // The WAYPOINT LIST, in the same shape the live "plan: N wp … path=[…]" log line prints
+            // (owner request 2026-08-04). Without it the dump reports only a COUNT and a COST, so a trace
+            // and the live plan it is meant to reproduce can only be compared as two scalars — which is how
+            // a systematic 7-9 waypoint / 5-14 cost skew between them went unexplained across four separate
+            // traces this session. Printing the cells makes the divergence point directly visible: where the
+            // live plan skips cells this one walks is where the two searches stopped agreeing.
+            if (plan != null) {
+                StringBuilder wp = new StringBuilder("PATH: [");
+                for (int i = 0; i < plan.size(); i++) {
+                    if (i > 0) wp.append(' ');
+                    // move NAME per waypoint, not just the cell: the leading hypothesis for the skew is that
+                    // the cuboid MACRO layer collapses runs of steps in the live plan but not here, and a
+                    // macro is only distinguishable from the ordinary move it replaces by its name.
+                    wp.append(plan.movement(i) == null ? "?" : plan.movement(i).getClass().getSimpleName())
+                            .append(compact(plan.waypoint(i)));
+                }
+                w.write(wp.append("]\n").toString());
+            }
             return exp;
         } catch (java.io.IOException e) {
             return -1;
@@ -963,6 +1002,57 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     public boolean climbableBelow() {
         ServerLevel level = (ServerLevel) Worlds.of(this);
         return level.getBlockState(this.blockPosition().below()).is(BlockTags.CLIMBABLE);
+    }
+
+    /**
+     * The floor-under-the-curtain discriminator ({@link BotSteering#standableBelow}) — is the block below the
+     * feet solid, so the climbable sneak-hold (and with it the vanilla ledge edge-guard) must NOT be pressed?
+     * Same live read as {@link #climbableBelow}, but classified through {@link NavBlock#isStandable} — the
+     * SEARCH's own floor bit — rather than raw collision, so a ladder plate / fence / dripstone tip does not
+     * read as a floor (mirrors {@code BotNavigator.isStandableFloor}, which answers the same question off the
+     * same bit on the nav-grid side).
+     *
+     * <p><b>ONE cell down, across the SUPPORTING columns</b> (owner ruling, 2026-08-02). The question is only
+     * ever "would sneaking stop me walking off an edge", so the probe is a single block below the feet — no
+     * fall-distance envelope is involved. But it must be read in <b>the column(s) still supporting the feet</b>,
+     * not merely {@code blockPosition()}: a bot 99% into its new cell with a 1% overhang on the old one reports
+     * the NEW cell as its block position while the edge-guard is still keyed to the old one. Measured on the
+     * convicted wedge — bot box spanning {@code x 59.989…60.589}, one cell down:
+     * <pre>
+     *   (60,170,255) = vine          &lt;- the new cell: NOT standable
+     *   (59,170,255) = jungle_leaves &lt;- still supporting the feet: standable
+     * </pre>
+     * Probing only {@code blockPosition()} answers "no floor" and re-wedges the bot; scanning the columns the
+     * bounding box actually overlaps answers "floor" and lets it step off. (An earlier form compensated for the
+     * wrong column by scanning two cells DOWN — that reached the leaves by accident, and dragged in a
+     * ~3-block fall window nothing had derived.)
+     *
+     * <p>Deliberately <b>hazard-blind</b> (owner ruling): a damaging floor is still a floor. Avoiding hazards
+     * is the PATHFINDER's job; the follower's job is to obey the plan it was given. Better to walk the planned
+     * route and take the magma damage than to get clever, sneak or climb, and break the movement entirely.
+     */
+    @Override
+    public boolean horizontalCollision() {
+        return this.horizontalCollision;   // vanilla's own flag, set from the ATTEMPTED movement
+    }
+
+    @Override
+    public boolean standableBelow() {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        final AABB box = this.getBoundingBox();
+        final int y = this.blockPosition().getY() - 1;
+        // Half-open on the max edge: a box that merely TOUCHES the next column's boundary is not overhanging it.
+        final int x0 = Mth.floor(box.minX), x1 = Mth.floor(box.maxX - 1.0E-7);
+        final int z0 = Mth.floor(box.minZ), z1 = Mth.floor(box.maxZ - 1.0E-7);
+        for (int x = x0; x <= x1; x++) {
+            for (int z = z0; z <= z1; z++) {
+                if (NavBlock.isStandable(NavBlock.descriptorFor(
+                        level.getBlockState(scratchPos.set(x, y, z))))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // ---- Live-world geometry + block actions (the reconcile seam a MovePlan drives through) -----------

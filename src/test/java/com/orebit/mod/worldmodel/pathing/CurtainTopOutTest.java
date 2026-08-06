@@ -100,14 +100,32 @@ class CurtainTopOutTest {
                         + "the ladder exclusion survives dropping the standable term");
     }
 
+    /**
+     * Narrow tops are not floors (owner ruling 2026-08-01). Vanilla would let you stand on a ladder's 3px
+     * plate or a dripstone tip, but the servo, momentum conservation and ballistics all assume a full-width
+     * block, so the model calls them what they are for our purposes: not a floor.
+     */
     @Test
-    void ladderIsNarrowTopButStandable() {
+    void narrowTopsAreNotStandable() {
         long ladder = NavBlock.descriptorFor(Blocks.LADDER.defaultBlockState());
-        assertTrue(NavBlock.isClimbable(ladder), "a ladder is a climb surface");
+        assertTrue(NavBlock.isClimbable(ladder), "a ladder is still a climb surface");
         assertTrue(NavBlock.isNarrowTop(ladder), "the 3/16 plate is under the bot's 0.6 body width");
-        assertTrue(NavBlock.isStandable(ladder),
-                "and it IS a real surface — which is why the restriction it earns is on JUMPING off it, not "
-                        + "on standing there");
+        assertFalse(NavBlock.isStandable(ladder), "...so it is not a floor");
+
+        long tip = NavBlock.descriptorFor(Blocks.POINTED_DRIPSTONE.defaultBlockState());
+        assertTrue(NavBlock.isNarrowTop(tip), "a dripstone tip is a narrow post");
+        assertFalse(NavBlock.isStandable(tip),
+                "THE FLAGSHIP WEDGE: the bot hopped forever on the tip at (148,29,7), resting at "
+                        + "botY 29.688 == 29 + 11/16, while its Ascend expected to stand at feet 30.0");
+
+        // The subtraction must not leak into the other derived bits.
+        assertFalse(NavBlock.isPassable(tip), "still a wall for transit — passability is shape-derived");
+        assertTrue(NavBlock.isBreakable(tip), "still mineable");
+        assertTrue(NavBlock.hasCollision(tip), "still a face to build against");
+
+        // A full-width partial top is untouched: soul sand (14/16) is a real floor.
+        assertTrue(NavBlock.isStandable(NavBlock.descriptorFor(Blocks.SOUL_SAND.defaultBlockState())),
+                "the rule is about NARROWNESS, not about partial height");
     }
 
     // ---- (1) Climb tops out of a vine curtain ---------------------------------------------------

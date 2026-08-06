@@ -83,19 +83,73 @@ public interface BotSteering {
      * Movement#reached}. The ballistic case is the one that must never match: a falling bot's feet block
      * transits cells it is merely passing THROUGH.
      *
-     * <p>{@link #climbableBelow} is the CURTAIN TOP-OUT stance and belongs here for the same reason the
-     * others do — the bot is supported, not ballistic. It is a bounce rather than a stand (the feet dip
-     * into the top cell and vanilla re-lifts them at the surface), but it is held, not falling. Without
-     * it the stance is unreachable BY CONSTRUCTION: feet above a curtain are not grounded, not in fluid,
-     * and {@code onClimbable()} is false because the climbable is under the feet rather than in them — so
-     * {@link Movement#reached} could never fire on a top-out waypoint and the climb livelocked, bouncing
-     * across the cell boundary forever (measured 2026-08-01 on the flagship at {@code (55,~140,207)}:
-     * 20+ consecutive ticks alternating {@code footY} 139/140, {@code botY} drifting 139.961 → 139.892,
-     * no envelope failure because nothing was failing — the step simply never completed).
+     * <p>{@link #climbableBelow} (the curtain TOP-OUT stance) is deliberately <b>NOT</b> here, though it is
+     * genuinely a held stance. Tried and reverted 2026-08-01: {@code climbableBelow} is true for any bot
+     * whose feet cell merely sits above a climbable, which includes a bot in BALLISTIC FLIGHT over a vine.
+     * Measured immediately — a Parkour arc at {@code (57,113,160)}, {@code botY=113.905}, airborne, fired
+     * {@link Movement#reached} mid-arc ("ABANDONED ... reached fired before done"), advanced the waypoint
+     * while still flying, and landed off-plan into a cascade of envelope failures. Widening it here also
+     * widens the plan-anchor rule above, which would let the bot re-plan mid-flight — the exact thing that
+     * rule exists to forbid. The top-out is accepted by {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Climb#reached} instead, scoped to the one
+     * movement that emits such nodes.
      */
     default boolean settled() {
-        return grounded() || inWater() || inLava() || onClimbable() || climbableBelow();
+        return grounded() || inWater() || inLava() || hangingOnClimbable();
     }
+
+    /**
+     * Arrest threshold (blocks/tick) for {@link #hangingOnClimbable}, separating a HELD hang from a SLIDE.
+     *
+     * <p><b>Deliberately CONSERVATIVE, and the looser value is measured-and-refuted</b> (2026-08-02). Vanilla
+     * clamps a climbable slide to {@code -0.15}/t, so {@code -0.12} looks like the natural separator — a held
+     * hang was measured reading {@code -0.0784} (the stored {@code deltaMovement} runs one tick of gravity
+     * ahead of the clamp). It is WRONG: the FIRST tick of a genuine fall reads {@code -0.0784} too (the
+     * measured free-fall ramp is {@code -0.0784 → -0.1552 → -0.2254}), so at {@code -0.12} a bot that has just
+     * started falling counts as settled, {@link Movement#reached} fires mid-fall again, and the flagship bot
+     * fell back out of the vine column to {@code y=152} — the exact regression this predicate exists to stop.
+     * Velocity alone CANNOT separate "held" from "one tick into a fall"; they are the same number.
+     *
+     * <p>So this stays tight. The cost is a held hang reading as un-settled, which delays a cursor advance
+     * rather than corrupting one — the safe direction. A proper fix needs a signal velocity does not carry
+     * (the arrest INPUT actually being held, or a Y-delta across ticks), not a different constant.
+     */
+    double CLIMBABLE_ARREST_VY = -0.05;
+
+    /**
+     * Whether the bot is genuinely <b>HELD</b> by a climbable, as opposed to merely being INSIDE one.
+     *
+     * <p>This distinction is the whole reason vine curtains wedged the follower (convicted 2026-08-02 on the
+     * flagship). {@link #onClimbable} is true for every tick of a FALL through a vine column — vines have no
+     * collision and only arrest you when the slide is suppressed — so folding it straight into
+     * {@link #settled} made a falling bot report itself supported, which defeated
+     * {@link Movement#reached}'s ballistic fly-through guard entirely. Measured cascade: three consecutive
+     * {@code Descend} steps each fired {@code reached} mid-fall at {@code botY} {@code 171.922 → 170.922 →
+     * 169.922} ({@code grounded=false} throughout), the cursor advanced each time
+     * ("{@code ABANDONED … mid-phase 1/2 (reached fired before done)}"), and every step handed the next one an
+     * airborne pose until the bot was three blocks below its plan and stuck in the vines at
+     * {@code (61,169,253)} — where no stance input could recover it, because the step it was executing had
+     * been framed from a cell it only fell past.
+     *
+     * <p>The discriminator is physical, not a timer: a held hang has {@code vy ≈ 0}, a slide has the vanilla
+     * {@code -0.15}/t clamp. Reading velocity keeps this a pure per-tick state question, exactly like the
+     * stance servo's other inputs.
+     */
+    default boolean hangingOnClimbable() {
+        return onClimbable() && (sneakHeld() || velY() > CLIMBABLE_ARREST_VY);
+    }
+
+    /**
+     * Whether the sneak (arrest) input is currently held — the CAUSAL half of {@link #hangingOnClimbable}.
+     *
+     * <p>Velocity alone cannot answer "am I held or falling", because the first tick of a fall and a settled
+     * hang report the same {@code -0.0784} (see {@link #CLIMBABLE_ARREST_VY}). But sneak is not a symptom of
+     * the arrest, it IS the arrest: on a climbable, vanilla's {@code isSuppressingSlidingDownLadder()} zeroes
+     * the {@code -0.15}/t slide precisely when this input is held. Asking the input therefore separates the
+     * two states the velocity number cannot, without loosening the conservative velocity threshold that keeps
+     * a genuine fall from counting as settled. Default {@code false} for the headless test doubles.
+     */
+    default boolean sneakHeld() { return false; }
 
     /**
      * Whether the block directly UNDER the bot's feet is scaffolding — the one climbable whose top a held
@@ -120,6 +174,60 @@ public interface BotSteering {
      * {@link SteerControl#drive}.
      */
     default boolean climbableBelow() { return false; }
+
+    /**
+     * Whether a <b>standable surface</b> sits close enough BELOW the bot's feet to arrest a step-off — the
+     * discriminator between "hanging on a curtain over nothing" and "clinging to a curtain that merely grows
+     * over a floor". Owner ruling 2026-08-02: while moving laterally on a climbable, the sneak stance-hold is
+     * for the FIRST case only (arrest our own fall via the climbable); with a floor underneath there is
+     * nothing to arrest and the bot must simply walk off.
+     *
+     * <p><b>The mechanism this guards.</b> Sneak on a climbable does two things at once: it zeroes the
+     * {@code −0.15}/t climbable slide (the wanted half, see {@link #setSneak}) and it arms vanilla's ledge
+     * edge-guard ({@code Entity/Player.maybeBackOffFromEdge}), which silently DELETES horizontal motion that
+     * would carry the bounding box past an unsupported lip (the unwanted half). Convicted 2026-08-02 in
+     * jungle vines: the bot froze at {@code (60.289, 171.022, 255.500)} with {@code sneak=true} and
+     * {@code hcol=false} on EVERY tick — no horizontal collision at all, so nothing was being pressed
+     * against — while a non-zero {@code deltaMovement} was commanded every tick and produced ZERO
+     * displacement. It needed {@code x >= 60.300} to clear the overhang and sat pinned {@code 0.011} short
+     * of it, forever. One input, both symptoms.
+     *
+     * <p><b>"Standable" is {@link com.orebit.mod.worldmodel.navblock.NavBlock#isStandable}</b> — the same
+     * precomputed floor bit the SEARCH plans its waypoints from (solid-topped, no fluid, and explicitly NOT
+     * a narrow top: a ladder plate, a bamboo stalk, a dripstone tip is not a floor, owner ruling
+     * 2026-08-01). Deliberately NOT {@link #solidAt}, whose "non-empty collision shape" is true for exactly
+     * those non-floors — the class of block that ruling was written against.
+     *
+     * <p><b>The Y window is TWO cells</b> ({@code footY()-1} and {@code footY()-2}), not the single cell the
+     * other {@code *Below()} probes use, and the depth is derived rather than tuned. A bot hanging on a
+     * climbable sits LOW inside its feet cell (measured {@code 171.022} in cell {@code 171}), so the first
+     * standable cell can be two down while its top FACE is barely a block below the feet: in the convicted
+     * stall {@code (60,170,255)} was a second vine and the leaves that actually hold the bot were at
+     * {@code (60,169,255)}, top face {@code y=170.0} — a {@code 1.02} block step-off. A standable at
+     * {@code footY()-1} is a drop of at most {@code 1.0}; one at {@code footY()-2} at most {@code 2.0} —
+     * both inside vanilla's {@code 3.0} damage-free fall, so everything this window sees is a step-off the
+     * bot can take unaided. Anything DEEPER is a genuine hang over a drop, which is precisely what the sneak
+     * arrest exists for, so the window stops there.
+     *
+     * <p>Live level read (the {@link #solidAt} pattern), so it reflects the bot's own just-made breaks and
+     * places. Default {@code false} for the test doubles — the conservative answer, since it leaves the
+     * pre-existing sneak stance-hold untouched for every double that does not opt in.
+     */
+    /**
+     * Whether vanilla registered a HORIZONTAL COLLISION on the last movement attempt — i.e. the bot pressed
+     * into something and was stopped by it.
+     *
+     * <p>This is the one fact that distinguishes "walking" from "grinding against a wall", and on a
+     * climbable it is not cosmetic: vanilla turns {@code (horizontalCollision || jumping) && onClimbable}
+     * into {@code vy = +0.2}, so a blocked press does not merely fail to advance — it converts the whole
+     * input into ALTITUDE. Velocity cannot substitute for it: a bot pressing full-forward into a wall reads
+     * {@code deltaMovement} horizontal ~0, which is indistinguishable from standing still.
+     *
+     * <p>Default {@code false} keeps every headless fake honest (no collisions in a synthetic world).
+     */
+    default boolean horizontalCollision() { return false; }
+
+    default boolean standableBelow() { return false; }
 
     /** Aim the body + head yaw along a horizontal delta (folds the {@code atan2} the follower used to repeat). */
     void faceHorizontally(double dx, double dz);

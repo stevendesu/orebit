@@ -2,6 +2,7 @@ package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
+import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
@@ -260,7 +261,14 @@ public final class Climb implements Movement {
                         }
                     }
                 }
-                if (ctx.isClimbable(d0) && ctx.standable(d0)) {
+                if (ctx.isClimbable(d0) && !ctx.passable(d0)) {
+                    // The gate is "a climbable with COLLISION" (ladder plate / scaffold deck), NOT
+                    // "standable": once narrow tops stopped being standable (owner ruling 2026-08-01) a
+                    // ladder no longer satisfied the old term, which silently deleted the only way DOWN
+                    // into a ladder column from above and turned the new exit-top node into a one-way
+                    // trap. The collision test selects EXACTLY the pair the standable test used to —
+                    // vines and the other empty-shape climbables are excluded because you cannot be atop
+                    // them at all. Preserves the previous behaviour; it just says what it means.
                     // §3.5 sink-in: standing ON a solid climbable's top (ladder plate / scaffold deck) —
                     // enter the column below; the new feet cell is the climbable itself, a hang. The
                     // single-cell drop is deterministic: the plate the bot just stood on cannot re-catch
@@ -318,6 +326,84 @@ public final class Climb implements Movement {
     }
 
     /**
+     * A climb waypoint is reached from a climb stance — including the CURTAIN TOP-OUT, which {@link
+     * BotSteering#settled} deliberately does not cover.
+     *
+     * <p>Feet above a curtain are not grounded, not in fluid, and {@code onClimbable()} is false (the
+     * climbable is UNDER the feet, not in them), so the default {@code settled()} test can never fire on a
+     * top-out waypoint — the climb livelocks, bouncing across the cell boundary forever (measured
+     * 2026-08-01 on the flagship at {@code (55,~140,207)}: 20+ ticks alternating {@code footY} 139/140,
+     * {@code botY} drifting 139.961 → 139.892, with NO envelope failure because nothing was failing — the
+     * step simply never completed).
+     *
+     * <p>Scoped to {@code Climb} on purpose. Putting {@code climbableBelow()} into {@code settled()} itself
+     * was tried and reverted the same day: it is true for any bot whose feet cell sits above a climbable,
+     * including one in BALLISTIC FLIGHT over a vine — a Parkour arc at {@code (57,113,160)},
+     * {@code botY=113.905}, fired {@code reached} mid-arc, advanced the waypoint while still airborne, and
+     * landed off-plan into a cascade of envelope failures. Here the waypoint is a climb cell reached by a
+     * climb, so the stance is the expected outcome of the move rather than an accident of the terrain
+     * beneath an unrelated arc.
+     */
+    /**
+     * The phase-model execution plan — Climb's conversion off the bare {@code steer} path (owner request
+     * 2026-08-05). It was the LAST unconverted movement, and by then that was the single largest structural
+     * gap in the follower: a steer-only move gets no validity envelope, no carry arrest, and — since the gate
+     * lives in {@link com.orebit.mod.pathfinding.blockpathfinder.PhaseRunner} — <b>no implicit settle</b>.
+     * Climb is the move that owns vines, and every follower failure of the 2026-08-03..05 arc lived on a
+     * vine, so the one move most exposed to the problem was the one move opted out of all its protections.
+     *
+     * <p><b>ONE phase, NO needs, and the drive is the existing {@link #steer} verbatim.</b> Climb folds no
+     * edits ({@code candidates} refuses a blocked climb rather than pricing a break), so there is nothing to
+     * reconcile; and its steering is a six-regime servo convicted case by case from in-game geometry (the
+     * jump-grab entry, the airborne stance hand-off, the scaffold sink-in). Re-deriving that here would risk
+     * every one of those cases for no gain, so the phase delegates to it and the conversion changes NO
+     * inputs. What it adds is the envelope, the arrest, and the settle gate.
+     *
+     * <p><b>{@code done} is {@link #reached}, not a fresh predicate.</b> Climb overrides {@code reached} to
+     * admit the CURTAIN TOP-OUT — feet above a curtain are not grounded, not in fluid, and not
+     * {@code onClimbable()}, so {@code settled()} can never fire there and the step would livelock. A
+     * separate {@code done} would have to re-state that exception and could drift from it; calling
+     * {@code reached} makes them the same test by construction.
+     *
+     * <p><b>The envelope is deliberately loose.</b> Climb spends almost its whole duration airborne (a hang
+     * IS airborne), so — as with every other converted move — the verdict is only taken when the bot is
+     * SETTLED in the grounded/fluid sense. Admitted: the from and to columns, within the step's own feet
+     * band. That catches "dismounted onto the wrong cell" and "fell out of the column", which are the real
+     * Climb failures, without second-guessing the mid-climb pose.
+     */
+    @Override
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
+        final int bandLo = Math.min(fromFootY, toFootY);
+        final int bandHi = Math.max(fromFootY, toFootY);
+        MovePlan plan = new MovePlan();
+        // Fell back to the start cell after leaving it. Inert on the common hang-to-hang climb (never
+        // grounded); meaningful for the GROUNDED entries — a jump-grab that drops back onto its ledge.
+        plan.resetWhen(b -> b.grounded()
+                && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
+        plan.failWhen(b -> {
+            if (!(b.grounded() || b.inWater() || b.inLava())) {
+                return false;                                   // a hang is airborne — never a verdict
+            }
+            if (b.footY() < bandLo || b.footY() > bandHi) {
+                return true;                                    // out the top or bottom of the column
+            }
+            final int bx = b.footX();
+            final int bz = b.footZ();
+            return !((bx == fx && bz == fz) || (bx == tx && bz == tz));
+        });
+        plan.phase("climb")
+                .arrestCarryFrom(fx, fz)
+                .drive(this::steer)                             // the convicted six-regime servo, unchanged
+                .done(b -> reached(b, tx, toFootY, tz));        // == reached, incl. the curtain top-out
+        return plan;
+    }
+
+    @Override
+    public boolean reached(BotSteering b, int wx, int wy, int wz) {
+        return (b.settled() || b.climbableBelow()) && atWaypoint(b, wx, wy, wz);
+    }
+
+    /**
      * Hold the column and let the vanilla climbable physics do the vertical work, keyed on the MOVE's
      * intended Δy — {@code path.ty() - path.sy()} in the cursor's UNIFORM feet-cell frame (both cells feet,
      * so the delta is the planned climb direction; the follower guarantees the step-0 start is lifted into
@@ -342,7 +428,20 @@ public final class Climb implements Movement {
     public void steer(BotSteering b, SteerView path) {
         SteerControl.recenterOnTarget(b, path);
         double ddy = path.ty() - path.sy(); // the MOVE's planned Δy (feet targets), not the sagging pose
-        if (ddy > 0.1) {
+        if (!b.grounded()) {
+            // AIRBORNE — hand the whole stance to the per-tick servo, which classifies the step's vertical
+            // intent (rise / hold / descend) and, crucially, TERMINATES each one against the bot's live
+            // height: a descend holds nothing only until the target is reached, then the hold arrests it.
+            //
+            // This branch used to be reachable only for ddy >= -0.1; a climb-DOWN fell through to the final
+            // `else` and pressed NOTHING, on the assumption that "vanilla slow-fall carries the descent". It
+            // does carry it — at the -0.15/t climbable clamp — but nothing ever stops it. Measured 2026-08-02
+            // on the flagship: a Climb down the vine at (61,169,253) rode the clamp past its own target, out
+            // the bottom of the column, and 17 blocks into free fall to y=152. The stance servo was never
+            // even called (its call counter did not advance for the whole descent), so every per-tick rule
+            // built for this case was dead code on the one path that needed it.
+            SteerControl.holdClimbableStance(b, path);
+        } else if (ddy > 0.1) {
             // Climb up — and, unchanged, the §3.3/§3.4 ascents: a GROUNDED bot holding jump fires the
             // real 0.42 jump (the jump-grab), an on-climbable bot gets the 0.2 climb (the exit-top run);
             // vanilla picks the right physics off the same held input.
@@ -362,15 +461,9 @@ public final class Climb implements Movement {
             //  - GROUNDED on/in the climbable itself (a ladder-plate lateral): plain walk. No sneak (the
             //    same edge-guard), no jump (an in-climbable jump is a pointless truncated 0.2 hop);
             //    the plates are contiguous and collision carries the crossing.
-            if (!b.grounded()) {
-                // HANGING or TOPPED OUT — the shared stance hold picks the right input off the live pose:
-                // feet INSIDE the climbable -> sneak (jump would climb, not hold); feet ABOVE its top cell
-                // -> jump (sneak holds too, but its ledge edge-guard would forbid the very step-off this
-                // lateral move is making). The unconditional sneak this replaced was correct only for the
-                // first case: on a curtain TOP it suppressed nothing (there is no -0.15 climbable clamp
-                // once the feet have left the cell) and armed the edge-guard against the transfer.
-                SteerControl.holdClimbableStance(b, path);
-            } else if (!b.onClimbable()) {
+            // (The HANGING / TOPPED-OUT case is handled by the airborne branch at the top, which routes every
+            // vertical intent through the stance servo.) Only the two GROUNDED regimes remain here.
+            if (!b.onClimbable()) {
                 b.setJumping(true);
             }
         } else if (b.grounded() && !b.onClimbable() && b.scaffoldingBelow()) {

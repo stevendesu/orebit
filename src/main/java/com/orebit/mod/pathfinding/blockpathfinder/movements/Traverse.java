@@ -401,7 +401,7 @@ public final class Traverse implements Movement {
         if (ddy == 1) {
             // Inert for a one-phase plan, but set for uniformity: physically regressed to the from-cell.
             plan.resetWhen(b -> b.grounded()
-                    && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
+                    && atWaypoint(b, fx, fromFootY, fz));
             // Validity envelope (PATHOLOGY P1 family — the Parkour/Ascend failWhen precedent): settled
             // (grounded, or bodily in fluid — a displaced executor that fell into water is never grounded)
             // at a foot cell outside the step's two columns is off-plan: done/resetWhen can never fire
@@ -411,7 +411,7 @@ public final class Traverse implements Movement {
             final int bandLo = Math.min(fromFootY, toFootY);
             final int bandHi = Math.max(fromFootY, toFootY);
             plan.failWhen(b -> (b.grounded() || b.inWater() || b.inLava())
-                    && !(b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz)
+                    && !(atWaypoint(b, fx, fromFootY, fz))
                     && !(b.footX() == tx && b.footZ() == tz
                             && b.footY() >= bandLo && b.footY() <= bandHi));
             plan.phase("stepup")
@@ -422,7 +422,7 @@ public final class Traverse implements Movement {
                     .need(MovePlan.Need.AIR, tx, ty + 2, tz)                // landing head
                     .drive(SteerControl::drive)                             // hold forward + face; vanilla auto-steps the lip
                     .done(b -> b.grounded()
-                            && b.footX() == tx && b.footY() == toFootY && b.footZ() == tz);
+                            && atWaypoint(b, tx, toFootY, tz));
             return plan;
         }
 
@@ -434,7 +434,7 @@ public final class Traverse implements Movement {
         // exact for the single-cell case and for the uniform macro run; for full blocks both are floor+1 → the
         // old fy+1 behaviour byte-for-byte.
         plan.resetWhen(b -> b.grounded()
-                && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
+                && atWaypoint(b, fx, fromFootY, fz));
         // Validity envelope (PATHOLOGY P1 family): settled off the run LINE is off-plan — e.g. dropped off
         // a ledge mid-run (the longrun-6 (120,64,18) latch: bot fell 3 below its Traverse and ground-looped
         // forever). Allowed: any foot cell ON the run line at the run's height band [min .. max of the two
@@ -492,7 +492,7 @@ public final class Traverse implements Movement {
             } else {
                 // Terminal: the whole move is done standing on the to-cell.
                 ph.done(b -> b.grounded()
-                        && b.footX() == tx && b.footY() == toFootY && b.footZ() == tz);
+                        && atWaypoint(b, tx, toFootY, tz));
             }
         }
         return plan;

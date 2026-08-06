@@ -193,7 +193,7 @@ public final class Ascend implements Movement {
      */
     @Override
     public boolean reached(BotSteering b, int wx, int wy, int wz) {
-        return b.grounded() && b.footX() == wx && b.footY() == wy && b.footZ() == wz;
+        return b.grounded() && atWaypoint(b, wx, wy, wz);
     }
 
     /**
@@ -253,7 +253,7 @@ public final class Ascend implements Movement {
         // (the launched arm), so it can't alias the still-on-from-cell state the instant phase 0 advances.
         plan.resetWhen(b -> launched[0]
                 && b.grounded()
-                && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
+                && atWaypoint(b, fx, fromFootY, fz));
         // Validity envelope (PATHOLOGY P1 family — the Parkour failWhen precedent, extended to the FLUID
         // medium): a bot SETTLED — grounded, or bodily in fluid (a displaced ground-move executor that fell
         // into water is never "grounded"; the longrun-5 under-wall pocket latch) — at a foot cell outside
@@ -352,7 +352,7 @@ public final class Ascend implements Movement {
                     b.setJumping(b.footY() < landFootY);
                 })
                 .done(b -> b.grounded()
-                        && b.footX() == tx && b.footY() == landFootY && b.footZ() == tz);
+                        && atWaypoint(b, tx, landFootY, tz));
         return plan;
     }
 }

@@ -1,8 +1,10 @@
 package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
+import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
 
 /**
  * Walk to a diagonally-adjacent floor cell on the SAME level (MOVEMENT-DESIGN.md §2, Tier 1) — the move
@@ -77,5 +79,78 @@ public final class Diagonal implements Movement {
                     + ctx.cellTransitCost(c3) + ctx.cellTransitCost(c4);
             out.accept(nx, y, nz, cost);
         }
+    }
+
+    /**
+     * The phase-model execution plan — Diagonal's conversion off the bare {@code steer} path (owner ruling
+     * 2026-08-01). It was one of only three movements left unconverted, and the gap was not cosmetic: a
+     * steer-only move has <b>no validity envelope</b> and <b>no carry arrest</b>, so a diagonal that ends
+     * off-lane reports nothing and the error surfaces one step later on whatever move DOES have an
+     * envelope. Convicted on the flagship at {@code (58,113,160)}: {@code Diagonal wp21} targeted
+     * {@code (58,·,159)}, the bot settled on {@code z=160}, said nothing, and the following
+     * {@code Traverse wp22} — correctly framed from {@code z=159} — took the fail&rarr;HOLD for it.
+     *
+     * <p><b>ONE phase, and deliberately NO needs.</b> {@link #candidates} folds no edits at all: it REFUSES
+     * the edge unless the destination floor is already standable and all six body cells (destination feet /
+     * head plus both corner columns) are already passable — it never prices a break or a place. Declaring
+     * {@code Need.AIR} here would let the executor mine cells the search never paid for, so the geometry
+     * stays a precondition and a changed world is caught by the envelope instead. The value of converting
+     * is the envelope and the arrest, not the reconcile.
+     *
+     * <p><b>The envelope admits four columns, not two.</b> A diagonal's foot cell legitimately transits a
+     * CORNER column mid-step — that is exactly why {@code candidates} demands both corners be clear — so
+     * {@code (fx,tz)} and {@code (tx,fz)} are on-plan. Settled anywhere outside that 2×2, or off the step's
+     * height band, means the bot has left the move's model. The band is {@code [fromFootY..toFootY]}: equal
+     * for a flat diagonal, but written as a band so a partial-top destination (whose feet seat lower than
+     * the floor+1 cell) stays admitted.
+     */
+    @Override
+    public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
+        if (ty != fy) return null;                                  // Diagonal is strictly flat
+        final int ddx = tx - fx;
+        final int ddz = tz - fz;
+        if (Math.abs(ddx) != 1 || Math.abs(ddz) != 1) return null;  // exactly one cell on BOTH axes
+
+        final int bandLo = Math.min(fromFootY, toFootY);
+        final int bandHi = Math.max(fromFootY, toFootY);
+
+        MovePlan plan = new MovePlan();
+        // Physically fell back to the start cell — re-attempt from phase 0. Inert on a one-phase plan; set
+        // for uniformity with the other converted moves.
+        plan.resetWhen(b -> b.grounded()
+                && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
+        plan.failWhen(b -> {
+            if (!(b.grounded() || b.inWater() || b.inLava())) {
+                return false;                                       // mid-step airborne is not a verdict
+            }
+            if (b.footY() < bandLo || b.footY() > bandHi) {
+                return true;                                        // fell off / was lifted off the step
+            }
+            final int bx = b.footX();
+            final int bz = b.footZ();
+            return !((bx == fx || bx == tx) && (bz == fz || bz == tz)); // outside the swept 2x2
+        });
+        plan.phase("cross")
+                // THE FIX: a diagonal entered with cross-axis carry from the previous step slides out of
+                // its 2x2 during the ticks ground friction needs to bleed it. Arrest first, commit after.
+                .arrestCarryFrom(fx, fz)
+                // The default drive is SteerControl::drive — full-throttle locomotion with no stance
+                // awareness. On a climbable that IS the involuntary-climb ratchet: vanilla turns a blocked
+                // press into vy=+0.2, so a diagonal that clips a corner while the feet are in a vine climbs
+                // instead of crossing. Measured 2026-08-05 at (57,172,255): fwd=1.00, jump=false,
+                // hcol=true, horizontal dm EXACTLY 0.0000 and dm.y=+0.1176 — the entire press converted to
+                // altitude — carrying the bot 172.2 -> 175.0 into a leaf ceiling three blocks above its
+                // target. holdUntilOverTargetColumn keeps the stance until the bot is over the destination
+                // and then lets go; it is inert off a climbable, so ordinary ground diagonals are unchanged.
+                .drive((b, v) -> {
+                    SteerControl.holdUntilOverTargetColumn(b, v);
+                    SteerControl.drive(b, v);
+                })
+                // SETTLED, not grounded — the same widening Descend needed (2026-08-03). A diagonal whose
+                // destination cell holds a vine is never grounded there, so a grounded-only guard is
+                // unsatisfiable, the move never completes, and it keeps driving — which is what fed the
+                // ratchet above. settled() still rejects a ballistic transit.
+                .done(b -> b.settled() && atWaypoint(b, tx, toFootY, tz));
+        return plan;
     }
 }

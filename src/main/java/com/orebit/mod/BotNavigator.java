@@ -715,11 +715,21 @@ final class BotNavigator {
                     boolean impacted = pathPlan.planImpacted();
                     if (consumed || impacted) {
                         if (Debug.ENABLED) {
+                            // goal + baseline are logged alongside the trigger (owner request 2026-08-04).
+                            // Comparing a /bot trace against a live search is only meaningful when the
+                            // SEARCH INPUTS provably match, and two of them were invisible: the goal FLOOR
+                            // cell (a one-block difference from the typed coords silently traces a different
+                            // search — it cost a full round-trip on the (56,171,256) cobble investigation),
+                            // and the splice baseline (documented "null for every non-spliced plan", so
+                            // printing it converts an assumption into an observation).
                             OrebitCommon.LOGGER.info(
-                                    "[Orebit] block re-search: site=refreshWindow reason={} wpIdx={}/{} bot={}",
+                                    "[Orebit] block re-search: site=refreshWindow reason={} wpIdx={}/{} bot={}"
+                                            + " goal={} baseline={}",
                                     impacted ? (consumed ? "consumed+impacted" : "plan-impacted") : "consumed-plan",
                                     waypointIndex, path == null ? -1 : path.size(),
-                                    AllyBotEntity.compact(bot.blockPosition()));
+                                    AllyBotEntity.compact(bot.blockPosition()),
+                                    AllyBotEntity.compact(pathPlan.goalFloor()),
+                                    pathPlan.baselineSummary());
                         }
                         pathPlan.refreshWindow(impacted);
                     }
@@ -1224,13 +1234,62 @@ final class BotNavigator {
      * {@link com.orebit.mod.pathfinding.blockpathfinder.SteerControl}, so adding a capability never touches
      * this method.
      */
+    /**
+     * {@code /bot debug verbose}: dump a step's INTENDED break/place cells at plan-begin, so "planned but
+     * never performed" is a direct diff against the executor's {@code break executed} / {@code place executed}
+     * lines rather than something inferred from a phase that failed to appear. Silent when the step carries no
+     * edits (the overwhelmingly common case), so this costs a null check on a cold path.
+     */
+    private void logPlannedEdits(StepEdits edits) {
+        if (edits == null) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder("[Orebit]   planned edits:");
+        for (int i = 0; i < edits.breakCount(); i++) {
+            BlockPos p = edits.breakPos(i);
+            sb.append(" BREAK(").append(p.getX()).append(',').append(p.getY()).append(',').append(p.getZ())
+                    .append(')');
+        }
+        for (int i = 0; i < edits.placeCount(); i++) {
+            BlockPos p = edits.placePos(i);
+            sb.append(" PLACE(").append(p.getX()).append(',').append(p.getY()).append(',').append(p.getZ())
+                    .append(')');
+        }
+        if (edits.breakCount() == 0 && edits.placeCount() == 0) {
+            sb.append(" (none)");
+        }
+        OrebitCommon.LOGGER.info(sb.toString());
+    }
+
     private void steerAlongPath() {
         // Advance to the furthest waypoint the bot has reached. Waypoints ARE blocks and so are the bot's feet
         // ({@code blockPosition()}), so the default test is block-exact (Movement.reached); a swim move
         // loosens it vertically for a buoyancy-bobbing bot. Because the match includes Y, the feet block only
         // equals the next step once the bot has actually climbed onto it (a stacked staircase can't be
         // skipped); scanning from the end absorbs any overshoot.
-        for (int j = path.size() - 1; j >= waypointIndex; j--) {
+        // A move that OWNS A PHASE PLAN is the sole authority on its own completion (owner ruling,
+        // 2026-08-03): "You replan when the current move is FINISHED — which may end with the bot holding
+        // sneak inside a vine." While its plan is active and not done, the cursor may not advance, full stop.
+        //
+        // Two completion authorities used to race here and `reached` always won: PhaseRunner said "phase 1 of
+        // 2, still running" while Movement.reached said "feet are in the cell, close enough". Measured
+        // 2026-08-03 — a Descend mid-fall through a vine (botY 170.922 -> 170.772, airborne, on a climbable)
+        // had `reached` fire at phase 1/2, the cursor jumped, and the NEXT step was framed from that airborne
+        // pose (`PLAN ... expectTakeoffFoot.y=170 botY=170.472 grounded=false`). Every guard downstream then
+        // measured against a takeoff frame that was ~0.9 blocks wrong from birth, and the bot wedged pressing
+        // forward into a leaf it would have cleared had it finished the descent first.
+        //
+        // NOTE this is the SAME predicate the "ABANDONED ... (reached fired before done)" tripwire already
+        // computes to DETECT the illegitimate advance; it only ever logged it. It now refuses it, so that
+        // log becomes what it was written to be — a rare-event tripwire rather than a routine race report.
+        //
+        // `settled()` is deliberately NOT this test. It answers "is the bot supported by some medium right
+        // now" (grounded / afloat / hanging), which is a different question from "is it safe to leave this
+        // move" — a lateral vine cling is supported for its whole duration while its move is very much in
+        // progress. Supported is not interruptible.
+        final boolean phaseOwnsCompletion =
+                phaseRunner.active() && !lastPhaseDone && !phaseRunner.doneNow(bot);
+        for (int j = path.size() - 1; !phaseOwnsCompletion && j >= waypointIndex; j--) {
             BlockPos w = path.waypoint(j);
             if (path.movement(j).reached(bot, w.getX(), w.getY(), w.getZ())) {
                 if (Debug.VERBOSE && j > waypointIndex) {
@@ -1341,6 +1400,14 @@ final class BotNavigator {
                         String.format("%.3f", bot.y()), bot.grounded(),
                         isStandableFloor(new BlockPos(ffx, ffy, ffz)),
                         takeoffTopY(new BlockPos(ffx, ffy, ffz)), takeoffTopY(new BlockPos(wp.getX(), tfy, wp.getZ())));
+                // PLANNED EDITS for this step (owner request, 2026-08-03). Until now the only edit signal was
+                // the aggregate "+edits" flag on the search line and the "break/place executed" lines from the
+                // executor — so a break the plan INTENDED but never performed was invisible, and had to be
+                // inferred from a missing phase. Printing the intended cells makes planned-vs-performed a
+                // direct diff: every cell here should show up as a matching "executed" line, and one that
+                // doesn't is a skipped edit (the 2026-08-03 wedge: a 1-tall gap the bot could not fit through
+                // because the leaves in front of it were never smashed).
+                logPlannedEdits(path.edits(waypointIndex));
             }
             if (mp != null) {
                 // The step's horizontal movement direction (signum) → the runner's direction-aware body-obstruction
@@ -1359,7 +1426,9 @@ final class BotNavigator {
                         mp.requireDoor(BlockPos.getX(c), BlockPos.getY(c), BlockPos.getZ(c), se.doorSetOpenAt(i));
                     }
                 }
-                phaseRunner.begin(mp);
+                // fromFootY arms PhaseRunner's implicit settle gate — the plan is framed from the bot
+                // RESTING at that feet cell, and the runner refuses to execute it until that is true.
+                phaseRunner.begin(mp, fromFootY);
             } else {
                 phaseRunner.clear();
             }
@@ -1652,20 +1721,66 @@ final class BotNavigator {
         // grounded tick was ambiguous between "on the landing stand" and "still in the from column"). So the
         // dedup key carries the bot's foot cell + grounded + phase too — still one line per STATE CHANGE,
         // never per tick, but now every cell/phase transition of a step is on the record.
+        // SUB-CELL position (tenths) rides the key too: foot-cell granularity cannot tell "landed centred"
+        // from "landed 0.4 past centre, hard against the far edge", and that is exactly the difference
+        // between a cross-axis carry arrest that has room to work and one that starts already lost. Bounds
+        // the extra volume at ~10 lines per cell crossed rather than one per tick.
+        // SNEAK rides the key (2026-08-02 vine-Descend measurement): the wedge signature is a bot pinned at a
+        // block boundary with input pressing and zero displacement, and the discriminator between "pressed into
+        // a wall" and "sneak's vanilla ledge edge-guard is refusing the crossing" is exactly this input plus the
+        // realized deltaMovement. Both are otherwise invisible — the commanded velocity is already logged, and
+        // it looks identical in both cases.
+        final boolean sneak = bot.isShiftKeyDown();
+        // JUMP rides the line too (owner question, 2026-08-03). Vanilla's involuntary climb is
+        // `(horizontalCollision || jumping) && onClimbable -> vy = +0.2`, so when a bot rises on a vine the
+        // FIRST question is which of those two disjuncts fired — and only one of them was ever logged. The
+        // measured signature that forced this: dm.y = +0.1176 on the in-vine ticks, which is exactly one tick
+        // of decay off a +0.2 impulse ((0.2 - 0.08) x 0.98), against +0.0368 on the ticks out of the vine
+        // (pure gravity). The climb was provably firing; the input that caused it was invisible.
+        final boolean jump = bot.jumpHeld();
+        // The FORWARD INPUT (owner, 2026-08-03). `vel`/`dm` are the POST-collision deltaMovement, so a bot
+        // holding forward into a wall reads (0,0) and looks idle — which is exactly how this wedge hid. The
+        // input is the load-bearing value: vanilla sets horizontalCollision from the ATTEMPTED movement, so a
+        // blocked press still trips `(horizontalCollision || jumping) && onClimbable -> vy = +0.2` and climbs
+        // the bot up the vine it is trying to descend. zza is the field setForward writes.
+        final float fwd = bot.zza;
+        // YAW + the unit HEADING it implies (2026-08-03). fwd alone says "how hard", never "which way": the
+        // ground steer (SteerControl.steerTowards) clamps its pursuit point to the segment END, so an
+        // OVERSHOOT should re-face the target and walk BACK — but at the (58,171,254) wedge the telemetry
+        // showed zero z displacement and residual +x while the geometry said the press was +z. Without the
+        // facing there is no way to tell "re-faced and was blocked" from "never re-faced", and those two want
+        // opposite fixes. Vanilla's forward vector for a yaw in degrees is (-sin, cos) over (x, z).
+        final float yaw = bot.getYRot();
+        final double hx = -Math.sin(Math.toRadians(yaw));
+        final double hz = Math.cos(Math.toRadians(yaw));
         String key = waypointIndex + "|" + move + "|" + medium + "|" + phaseRunner.phase()
-                + "|" + bot.footX() + "," + bot.footY() + "," + bot.footZ() + "|" + bot.grounded();
+                + "|" + bot.footX() + "," + bot.footY() + "," + bot.footZ() + "|" + bot.grounded()
+                + "|" + (int) Math.floor(bot.getX() * 10) + "," + (int) Math.floor(bot.getZ() * 10)
+                + "|" + sneak + "|" + jump + "|" + bot.horizontalCollision
+                // Coarse (15 deg) so a genuine re-face prints while normal tracking jitter does not spam.
+                + "|" + Math.round(yaw / 15.0f);
         if (key.equals(lastVerbose)) return;
         lastVerbose = key;
         bot.chat("[bot] " + move + " → " + AllyBotEntity.compact(wp) + " (" + medium + ")");
         OrebitCommon.LOGGER.info(
                 "[Orebit] exec {} wp{} -> {} ({}) phase={}/{} botFoot=({},{},{}) botY={} grounded={}"
-                        + " climbable={} reached={} targetY={}",
+                        + " climbable={} reached={} targetY={} x={} z={} vel=({},{})"
+                        + " sneak={} jump={} fwd={} yaw={} head=({},{}) hcol={} dm=({},{},{}) stance[{}]",
                 move, waypointIndex, AllyBotEntity.compact(wp), medium,
                 phaseRunner.phase(), phaseRunner.phases(),
                 bot.footX(), bot.footY(), bot.footZ(), String.format("%.3f", bot.getY()),
                 bot.grounded(), bot.onClimbable(),
                 movement.reached(bot, wp.getX(), wp.getY(), wp.getZ()),
-                String.format("%.2f", wp.getY() + 1.0));
+                String.format("%.2f", wp.getY() + 1.0),
+                String.format("%.3f", bot.getX()), String.format("%.3f", bot.getZ()),
+                String.format("%.4f", bot.velX()), String.format("%.4f", bot.velZ()),
+                sneak, jump, String.format("%.2f", fwd),
+                String.format("%.1f", yaw), String.format("%.3f", hx), String.format("%.3f", hz),
+                bot.horizontalCollision,
+                String.format("%.4f", bot.getDeltaMovement().x),
+                String.format("%.4f", bot.getDeltaMovement().y),
+                String.format("%.4f", bot.getDeltaMovement().z),
+                com.orebit.mod.pathfinding.blockpathfinder.SteerControl.lastStance);
     }
 
     /**
@@ -1744,7 +1859,12 @@ final class BotNavigator {
         StringBuilder sb = new StringBuilder("[");
         for (int i = 0; i < path.size(); i++) {
             if (i > 0) sb.append(' ');
-            sb.append(AllyBotEntity.compact(path.waypoint(i)));
+            // Move NAME before the cell, matching the trace dump's PATH: line verbatim (2026-08-04) so a
+            // live plan and the /bot trace meant to reproduce it can be diffed directly. Cells alone cannot
+            // distinguish a cuboid MACRO from the ordinary move it replaces — the leading explanation for
+            // the live-vs-trace waypoint-count skew — and that is exactly the comparison this line exists for.
+            sb.append(path.movement(i) == null ? "?" : path.movement(i).getClass().getSimpleName())
+                    .append(AllyBotEntity.compact(path.waypoint(i)));
         }
         return sb.append(']').toString();
     }

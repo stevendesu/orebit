@@ -31,6 +31,27 @@ public final class PhaseRunner {
     private MovePlan plan;
     private int cursor;
 
+    /**
+     * The feet cell this plan is FRAMED FROM, and whether the implicit settle gate has been satisfied yet.
+     *
+     * <p><b>The gate (owner ruling 2026-08-05).</b> Every move's geometry — which cells CLEAR breaks, where
+     * the body sits during the step-off, which columns the envelope admits — is derived from "feet resting
+     * at {@code fromFootY}", i.e. inside the {@code [X.00, X.20]} band. {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.Movement#atWaypoint} now enforces that at ARRIVAL, so a
+     * clean chain of moves preserves it for free. But any break in the chain — a replan, a window swap, a
+     * fall, a mid-plan adoption — starts a move from whatever pose the bot happens to hold, and a bot a
+     * full block high has a 1.8-tall box spanning THREE cells instead of two, fouling geometry the plan
+     * never checked. Enforcing it here rather than in fourteen {@code plan()} methods is the whole point:
+     * the canopy-vine failure was chased through five separate arrival/entry sites before it became clear
+     * they were one rule applied inconsistently.
+     *
+     * <p><b>Latched, not re-tested.</b> Once satisfied the gate never re-arms, because a move legitimately
+     * leaves the band the moment it commits — a Descend's whole purpose is to stop resting at
+     * {@code fromFootY}. Re-testing would deadlock every step at its own first drive tick.
+     */
+    private int fromFootY = Integer.MIN_VALUE;
+    private boolean settled;
+
     // ---- Execution diagnostics (read by the follower's Debug.VERBOSE forensics; never drive behavior) ----
     /** Regression snaps since {@link #begin} — a climbing count is the attempt/fall-back/re-attempt livelock. */
     private int regressions;
@@ -42,11 +63,21 @@ public final class PhaseRunner {
 
     /** Begin executing {@code plan} from its first phase (called when a new step's plan is built). */
     public void begin(MovePlan plan) {
+        begin(plan, Integer.MIN_VALUE);
+    }
+
+    /**
+     * Begin {@code plan}, with the feet cell it is FRAMED FROM so the implicit settle gate can enforce it
+     * ({@code Integer.MIN_VALUE} disables the gate). See {@link #settling}.
+     */
+    public void begin(MovePlan plan, int fromFootY) {
         this.plan = plan;
         this.cursor = 0;
         this.regressions = 0;
         this.holdNeed = null;
         this.failed = false;
+        this.fromFootY = fromFootY;
+        this.settled = false;
     }
 
     /** Whether a plan is currently loaded (the follower runs {@link #run} only then; else it uses {@code steer}). */
@@ -137,6 +168,19 @@ public final class PhaseRunner {
             return false;
         }
 
+        // IMPLICIT SETTLE — before any needs, drive or advance. The plan's frame is fiction until the bot is
+        // actually resting where it assumes; establishing that first is cheaper and safer than every move
+        // re-deriving it. Inert in the overwhelming case: a grounded bot satisfies it on the first tick and
+        // pays one predicate. Latched so a committing move is never dragged back.
+        if (!settled && fromFootY != Integer.MIN_VALUE) {
+            if (SteerControl.inRestingPose(bot, fromFootY)) {
+                settled = true;
+            } else {
+                SteerControl.settleIntoBand(bot, view, fromFootY);
+                return false;
+            }
+        }
+
         MovePlan.Phase phase = plan.phaseAt(cursor);
 
         boolean holding = false;
@@ -194,7 +238,14 @@ public final class PhaseRunner {
             // faster than any block can be broken (the (58,133,189) wedge; full mechanism on stationKeep).
             // An AIRBORNE bot cannot stop, so it keeps homing on the landing column as before — killing its
             // input mid-flight would drop it short of a gap it is already committed across.
-            if (bot.settled()) {
+            // onClimbable counts as stoppable even when settled() reads false (2026-08-05). settled()
+            // requires the bot to be HELD by the climbable (sneak held, or velocity above the arrest
+            // threshold), so a bot already SLIDING down a vine falls to the else-branch — and
+            // recenterOnTarget drives it at the NEXT column with no stance hold, the worst possible input
+            // for a bot sliding out of the very cell its plan is framed from. A bot in a climbable is not
+            // ballistic: it can always stop, and stationKeep now holds it unconditionally. Only a genuinely
+            // airborne bot must keep homing.
+            if (bot.settled() || bot.onClimbable()) {
                 SteerControl.stationKeep(bot, view);
             } else {
                 SteerControl.recenterOnTarget(bot, view);
@@ -218,6 +269,18 @@ public final class PhaseRunner {
             return phase.isDone(bot);
         }
         if (phase.shouldAdvance(bot)) {
+            // PHASE ADVANCE is otherwise INVISIBLE (owner request, 2026-08-03). The follower's exec log prints
+            // once per state change AFTER run() has already driven and advanced, so a phase that satisfies its
+            // own shouldAdvance on its first drive tick never appears in the log at all — it is only detectable
+            // as a gap in the phase histogram. That is exactly how the 2026-08-03 wedge hid: every Descend in
+            // the run showed phase=1/2 and never 0/2, so its CLEAR phase (the one that mines the step-off
+            // column and places the footing) was advancing past without performing its edits, and the bot then
+            // tried to descend through a 1-tall gap it had never opened. Logging the transition names the
+            // phase that yielded and the tick it happened on.
+            if (com.orebit.mod.Debug.VERBOSE) {
+                com.orebit.mod.OrebitCommon.LOGGER.info("[Orebit]   phase advance {}/{} -> {}/{} (left '{}')",
+                        cursor, plan.size(), cursor + 1, plan.size(), plan.phaseAt(cursor).name);
+            }
             cursor++;
         }
         return false;

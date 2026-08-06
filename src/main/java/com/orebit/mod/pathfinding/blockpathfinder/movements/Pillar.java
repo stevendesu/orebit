@@ -207,7 +207,7 @@ public final class Pillar implements Movement {
      */
     @Override
     public boolean reached(BotSteering b, int wx, int wy, int wz) {
-        return b.grounded() && b.footX() == wx && b.footY() == wy && b.footZ() == wz;
+        return b.grounded() && atWaypoint(b, wx, wy, wz);
     }
 
     /**

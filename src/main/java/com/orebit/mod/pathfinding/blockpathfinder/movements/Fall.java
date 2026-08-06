@@ -329,6 +329,12 @@ public final class Fall implements Movement {
      */
     private static void tryHang(MovementContext ctx, CandidateSink out, int nx, int y, int nz,
                                 int climbTop, int flags, float base) {
+        // The vine here is a SAFE LANDING TARGET, not something to fall through (owner clarification,
+        // 2026-08-02): landing on it makes an otherwise-lethal drop safe exactly as water or hay does, the
+        // fall still crosses contiguous AIR to reach it, and HANG_MAX_DROP exists because past ~7 blocks the
+        // bot moves >1 block/tick and can MISS the vine between feet samples. So this node is correct and
+        // stays. What failed in the owner's 2026-08-02 run was the COMPLETION: on touching the vine the Fall
+        // should have ended and the cursor moved to the next move, and instead the step never completed.
         int runBot = climbTop;
         while (true) {
             int packed = ctx.packedAt(nx, runBot - 1, nz);
@@ -422,7 +428,7 @@ public final class Fall implements Movement {
         MovePlan plan = new MovePlan();
         // Balked walk-off: physically back on the start floor with no drop taken → re-attempt from WALKOFF.
         plan.resetWhen(b -> b.grounded()
-                && b.footX() == fx && b.footY() == fromFootY && b.footZ() == fz);
+                && atWaypoint(b, fx, fromFootY, fz));
         // WALKOFF: line-track the takeoff→landing segment and hold forward, striding off the lip (the legacy
         // grounded branch — steerTowards, not the medium-aware drive). Advance the moment the bot is airborne.
         plan.phase("walkoff")
@@ -440,9 +446,33 @@ public final class Fall implements Movement {
         // A touchdown on a wrong cell simply never fires done — the follower's grounded-stall recovery
         // re-anchors and replans.
         plan.phase("fall")
-                .drive(SteerControl::recenterOnTarget)
-                .done(b -> (b.grounded() || b.onClimbable())
-                        && b.footX() == tx && b.footY() == landFeetY && b.footZ() == tz);
+                // Airborne drop-control: home onto the landing column (x/z) AND run the universal stance
+                // servo (y). Not vine-specific machinery — it is the same per-tick rule every move runs
+                // (owner, 2026-08-02): "if we're on a climbable and our Y is below the Y we want, hold jump;
+                // if it's above, hold nothing; if it's AT the Y we want, hold sneak."
+                //
+                // That rule is what makes a hang landing work, and it CAUSES the arrest rather than trying to
+                // detect it. Descending, the servo holds nothing and the drop runs. The tick the feet reach
+                // the landing height it presses sneak; vanilla's isSuppressingSlidingDownLadder zeroes the
+                // -0.15 climbable slide, the bot stops IN the vine, sneakHeld makes hangingOnClimbable true,
+                // settled() goes true, and `done` below fires — ending the Fall and advancing the cursor,
+                // which is exactly what failed to happen in the owner's 2026-08-02 run (the fall rode past
+                // its landing to four blocks below, then STUCK). Without this the arrest had to be INFERRED
+                // from velocity, and a clamped slide (-0.15) is indistinguishable from a fall that has just
+                // begun (-0.0784) — a threshold that cannot be made both safe and sufficient.
+                //
+                // translating=false: a landing is not a lip crossing, so the hold is never relaxed away.
+                .drive((b, v) -> {
+                    SteerControl.recenterOnTarget(b, v);
+                    SteerControl.holdClimbableStance(b, v, false);
+                })
+                // SETTLED, not the loose onClimbable(): being INSIDE a vine is true on every tick of a fall
+                // THROUGH one, so the loose test called a still-falling bot landed. It also disagreed with
+                // Movement.reached (which gates the cursor advance on settled()), and THAT disagreement is
+                // what wedged the bot — the phase reported done at the landing cell while the cursor refused
+                // to advance, so the fall just continued. One predicate now answers both questions.
+                .done(b -> b.settled()
+                        && atWaypoint(b, tx, landFeetY, tz));
         return plan;
     }
 }
