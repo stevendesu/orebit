@@ -1394,12 +1394,14 @@ final class BotNavigator {
                 // expectTakeoffFoot.y == botFoot.y (the fix: foot==floor for a partial, not floor+1).
                 OrebitCommon.LOGGER.info(
                         "[Orebit] PLAN {} from-floor=({},{},{}) to-floor=({},{},{}) expectTakeoffFoot.y={} "
-                                + "botFoot=({},{},{}) botY={} grounded={} fromFloorStandable={} takeoffTopY={} toFloorTopY={}",
+                                + "botFoot=({},{},{}) botY={} grounded={} fromFloorStandable={} takeoffTopY={} toFloorTopY={}"
+                                + " | {}",
                         movement.getClass().getSimpleName(), ffx, ffy, ffz, wp.getX(), tfy, wp.getZ(), fromFootY,
                         bot.footX(), bot.footY(), bot.footZ(),
                         String.format("%.3f", bot.y()), bot.grounded(),
                         isStandableFloor(new BlockPos(ffx, ffy, ffz)),
-                        takeoffTopY(new BlockPos(ffx, ffy, ffz)), takeoffTopY(new BlockPos(wp.getX(), tfy, wp.getZ())));
+                        takeoffTopY(new BlockPos(ffx, ffy, ffz)), takeoffTopY(new BlockPos(wp.getX(), tfy, wp.getZ())),
+                        entryState());
                 // PLANNED EDITS for this step (owner request, 2026-08-03). Until now the only edit signal was
                 // the aggregate "+edits" flag on the search line and the "break/place executed" lines from the
                 // executor — so a break the plan INTENDED but never performed was invisible, and had to be
@@ -1491,13 +1493,15 @@ final class BotNavigator {
                     // (foot == floorY for a partial standable); a surviving mismatch here is a genuine off-plan.
                     OrebitCommon.LOGGER.info(
                             "[Orebit]   envelope: from-floor=({},{},{}) to-floor=({},{},{}) expectTakeoffFoot.y={}"
-                                    + " | botFoot=({},{},{}) botY={} grounded={} fromFloorStandable={} takeoffTopY={} toFloorTopY={}",
+                                    + " | botFoot=({},{},{}) botY={} grounded={} fromFloorStandable={} takeoffTopY={} toFloorTopY={}"
+                                    + " | {}",
                             planFromX, planFromY, planFromZ, planToX, planToY, planToZ, planFromFootY,
                             bot.footX(), bot.footY(), bot.footZ(),
                             String.format("%.3f", bot.y()), bot.grounded(),
                             isStandableFloor(new BlockPos(planFromX, planFromY, planFromZ)),
                             takeoffTopY(new BlockPos(planFromX, planFromY, planFromZ)),
-                            takeoffTopY(new BlockPos(planToX, planToY, planToZ)));
+                            takeoffTopY(new BlockPos(planToX, planToY, planToZ)),
+                            entryState());
                 }
                 bot.setForward(0.0f);
                 return;
@@ -1706,6 +1710,40 @@ final class BotNavigator {
     }
 
     // ---- Debug log formatting ----------------------------------------------------------------
+
+    /**
+     * The bot's <b>entry state</b> for a step — the sub-cell position and horizontal velocity the movement
+     * layer's feasibility model ASSUMES but never measures. Emitted on the PLAN line (state at plan build) and
+     * on the validity-envelope failure forensic (state at failure), so a step that "should have been possible"
+     * can be checked against the conditions its admission actually relied on.
+     *
+     * <p><b>Why these four fields</b> (owner question, 2026-08-06 — "our 'started at the center of the block'
+     * invariant may not have been met"). Every waypoint is a STAND cell, and the movement geometry is framed
+     * from its CENTRE; but nothing on the existing PLAN line can distinguish a bot standing centred and up to
+     * speed from one that arrived 0.4 blocks off-centre, or nearly stopped. {@code botFoot} is cell-granular
+     * and {@code botY} is vertical only, so the two quantities that decide whether a jump reaches — where in
+     * the cell the bot is, and how fast it is already moving — were both invisible.
+     *
+     * <p><b>The reference values to compare against</b> ({@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.ParkourEnvelope}, which derives the admitted gap
+     * from a takeoff speed it assumes rather than reads): steady-state ground sprint is
+     * {@code vInf = A_G/(1−QG) ≈ 0.281} blocks/tick on a normal floor, and the envelope prices the jump tick at
+     * {@code vJump ≈ 0.481}. Acceleration from rest is {@code v ← v·0.546 + 0.1274}, i.e.
+     * {@code 0.127 → 0.197 → 0.235 → 0.256 → …} — so a bot taking off after ONE approach step from a standstill
+     * launches at roughly half the assumed speed. {@code speed} well under {@code 0.281} at plan time is
+     * therefore the signature of an admission the entry state never earned; {@code offCentre} well off
+     * {@code (0,0)} is the same story for the geometry.
+     *
+     * <p>Diagnostic only — never drives behavior, and only ever built under {@code Debug.VERBOSE} / a failure
+     * log, so the allocation is off every hot path.
+     */
+    private String entryState() {
+        double vx = bot.velX(), vz = bot.velZ();
+        return String.format("botXZ=(%.3f,%.3f) offCentre=(%.3f,%.3f) vel=(%.3f,%.3f) speed=%.4f",
+                bot.x(), bot.z(),
+                bot.x() - (bot.footX() + 0.5), bot.z() - (bot.footZ() + 0.5),
+                vx, vz, Math.sqrt(vx * vx + vz * vz));
+    }
 
     /**
      * {@code /bot debug verbose}: announce which {@link Movement} the bot is executing, toward which cell, and
