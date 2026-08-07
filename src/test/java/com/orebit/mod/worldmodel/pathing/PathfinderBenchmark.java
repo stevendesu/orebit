@@ -108,7 +108,7 @@ import net.minecraft.world.level.chunk.Strategy;
 public class PathfinderBenchmark {
 
     @Param({"TOWER", "OPEN", "UPOVER_OPEN", "UPOVER_WALL", "SHORT", "MULTI", "FLOOD", "CLIFFS",
-            "BRIDGE", "SPIRAL", "SETUP", "SETUP_MACRO", "SWIMPOOL", "SWIM1X1"})
+            "BRIDGE", "SPIRAL", "SETUP", "SETUP_MACRO", "SWIMPOOL", "SWIM1X1", "SHORELINE"})
     private String scenario;
 
     private NavGridView grid;
@@ -215,6 +215,19 @@ public class PathfinderBenchmark {
                 corridor = null;
                 caps = CLIFFS_CAPS;
                 cliffsSanityDryRun();
+                break;
+            case "SHORELINE":
+                // The WATER-REFUSAL guard: a 1-wide highway floating high over a deep ocean. Every pop
+                // probes four cardinals, each scanning ~197 cells down to a seabed landing that is then
+                // REFUSED (the 100-deep water column is far past any entry momentum). Pure wasted work
+                // per pop -- the shape a real shoreline produces, and the only fixture that reaches the
+                // water logic at all. MORTAL caps are load-bearing here (see SHORELINE_CAPS).
+                grid = buildShorelineWorld();
+                start = SHORELINE_START;
+                goal = SHORELINE_GOAL;
+                corridor = null;
+                caps = SHORELINE_CAPS;
+                shorelineSanityDryRun();
                 break;
             case "BRIDGE":
                 // The EDITS-THEN-WALK-AWAY guard (the realistic mixed shape the pure pillar/flood
@@ -660,6 +673,106 @@ public class PathfinderBenchmark {
             }
         }
         return chunks;
+    }
+
+    // --- SHORELINE geometry: the WATER-REFUSAL guard. A 1-wide stone highway 30 blocks long floating at
+    //     y=200 over a flat ocean: bedrock y=0, stone y=1..3, water y=4..103, air above. Every node on the
+    //     highway has open air on all four cardinals, so Fall probes each one, fails phase 1 (maxFall 16 of
+    //     air), then runs the extended soft-landing scan down through ~96 air + 100 water cells to the
+    //     seabed at y=3 -- and REFUSES it, because the 100-deep water column is far past what any entry
+    //     momentum can cross (Fall.MAX_WATER_PENETRATION ~19). ~197 reads per cardinal, four cardinals per
+    //     pop, producing no candidate at all. No other fixture puts deep water under a MORTAL drop.
+    static final int SHORELINE_Y = 200, SHORELINE_LEN = 30, SHORELINE_Z = 8, SHORELINE_SECTIONS = 14;
+    static final BlockPos SHORELINE_START = new BlockPos(0, SHORELINE_Y, SHORELINE_Z);
+    static final BlockPos SHORELINE_GOAL = new BlockPos(SHORELINE_LEN - 1, SHORELINE_Y, SHORELINE_Z);
+
+    /**
+     * SHORELINE caps: MORTAL, walk-only. Mortality is load-bearing -- Fall consults the softness/water gate
+     * only when {@code depth > safeFall}, so a damage-IMMUNE bot (what CLIFFS uses) never reaches the water
+     * logic this fixture exists to price. Break/place off so the bot cannot restructure the highway.
+     */
+    static final BotCaps SHORELINE_CAPS = new BotCaps(1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL,
+            true, BotCaps.DEFAULT_COST_PER_HITPOINT, false, false, BotCaps.UNBREAKABLE, false,
+            BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT);
+
+    static NavGridView buildShorelineWorld() {
+        return new NavGridView(0, buildShorelineChunks());
+    }
+
+    /**
+     * One shared OCEAN column for every chunk, plus a distinct column per chunk-x that carries the highway
+     * (the highway spans world x 0..29 at z=8, i.e. chunks cx=0 and cx=1 of cz=0). Instances are shared only
+     * between chunks with byte-identical content, so the column-form depth sweep stays valid.
+     */
+    static ConcurrentHashMap<Long, NavSection[]> buildShorelineChunks() {
+        ConcurrentHashMap<Long, NavSection[]> chunks = new ConcurrentHashMap<>();
+        java.util.HashMap<Integer, NavSection[]> byKey = new java.util.HashMap<>();
+        for (int cx = -4; cx <= 4; cx++) {
+            for (int cz = -4; cz <= 4; cz++) {
+                boolean highway = cz == 0 && cx >= 0 && cx * 16 < SHORELINE_LEN;
+                int key = highway ? cx : Integer.MIN_VALUE;
+                chunks.put(NavStore.key(cx, cz),
+                        byKey.computeIfAbsent(key, PathfinderBenchmark::buildShorelineColumn));
+            }
+        }
+        return chunks;
+    }
+
+    /** {@code cx = Integer.MIN_VALUE} builds the plain ocean column; otherwise the highway slice for that cx. */
+    private static NavSection[] buildShorelineColumn(int cx) {
+        BlockState air = Blocks.AIR.defaultBlockState();
+        BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        BlockState water = Blocks.WATER.defaultBlockState();
+        NavSection[] col = new NavSection[SHORELINE_SECTIONS];
+        for (int i = 0; i < SHORELINE_SECTIONS; i++) {
+            int baseY = i * 16;
+            PalettedContainer<BlockState> s = new PalettedContainer<>(
+                    air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
+            boolean any = false;
+            for (int ly = 0; ly < 16; ly++) {
+                int y = baseY + ly;
+                BlockState fill = y == 0 ? bedrock : y <= 3 ? stone : y <= 103 ? water : null;
+                if (fill == null) continue;
+                for (int x = 0; x < 16; x++) {
+                    for (int z = 0; z < 16; z++) {
+                        s.set(x, ly, z, fill);
+                    }
+                }
+                any = true;
+            }
+            if (cx != Integer.MIN_VALUE && baseY <= SHORELINE_Y && SHORELINE_Y < baseY + 16) {
+                for (int lx = 0; lx < 16; lx++) {
+                    if (cx * 16 + lx < SHORELINE_LEN) {
+                        s.set(lx, SHORELINE_Y & 15, SHORELINE_Z, stone);
+                        any = true;
+                    }
+                }
+            }
+            col[i] = NavSection.create(BlockPos.ZERO);
+            NavSectionBuilder.classifyInto(s, !any, col[i].getTraversalGrid());
+        }
+        NavSectionBuilder.computeDepth(col);
+        return col;
+    }
+
+    /**
+     * Setup-time (NOT measured) shape check for SHORELINE: the route must be found and must be a pure WALK
+     * along the highway. If a change ever lets the search take one of the ocean falls, the fixture stops
+     * measuring refusal cost and the guard is void.
+     */
+    private void shorelineSanityDryRun() {
+        var plan = BlockPathfinder.findPath(grid, start, goal, caps, corridor);
+        int falls = 0;
+        if (plan != null) {
+            for (int i = 0; i < plan.size(); i++) {
+                if (plan.movement(i) instanceof Fall) falls++;
+            }
+        }
+        System.out.println("[PathfinderBenchmark] SHORELINE sanity: found=" + (plan != null)
+                + " partial=" + BlockPathfinder.lastWasPartial()
+                + " expansions=" + BlockPathfinder.lastExpansions()
+                + " planSize=" + (plan == null ? -1 : plan.size()) + " fallSteps=" + falls);
     }
 
     // --- BRIDGE geometry: flat stone world (chunks -4..4, ground y=0) with the ground REMOVED for
