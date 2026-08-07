@@ -36,7 +36,7 @@ import net.minecraft.world.level.storage.LevelResource;
 /**
  * Persists the per-dimension HPA region tier — the {@link CostPyramid} routing fragments and the
  * {@link ResourcePyramid} resource tallies — to the world save so the bot's memory of explored terrain survives
- * a server restart (DESIGN-worldmodel-persistence.md). This closes the last deferred remainder of the HPA arc
+ * a server restart (NOTES-perf-and-persistence.md). This closes the last deferred remainder of the HPA arc
  * (§11): without it, after a restart the region A* and {@code /bot report} silently degrade to their optimistic
  * defaults until chunks physically reload.
  *
@@ -151,7 +151,7 @@ public final class RegionPersistence {
     // ---------------------------------------------------------------------------------------------------
 
     /**
-     * The Stage-2 bounded-region-RAM startup (DESIGN-worldmodel-persistence.md — the coarse-only-startup +
+     * The Stage-2 bounded-region-RAM startup (NOTES-perf-and-persistence.md §4 — the coarse-only-startup +
      * on-demand lazy-load increment): for every dimension, decode ONLY the two per-dimension coarse files
      * ({@code hpa.coarse.bin} cost L6, {@code res.coarse.bin} resource L6–21) directly into their levels, and
      * build the {@link RegionShardResidency} <b>persisted-shard index</b> from a directory LISTING of the shard

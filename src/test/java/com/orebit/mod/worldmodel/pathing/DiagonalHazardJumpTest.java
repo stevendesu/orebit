@@ -142,7 +142,7 @@ class DiagonalHazardJumpTest {
      * {@code passable}, so the {@code y+1} lava rejects — the bot must not FLY through a 2-tall lava column.
      * That is this test's subject and it is unchanged.
      *
-     * <p><b>What changed (2026-08-07, DESIGN-submerged-upright-swim.md §3.2/§3.3).</b> This used to assert
+     * <p><b>What changed (2026-08-07 — the fluid-medium change; NOTES-vanilla-fluid-physics.md §2/§5).</b> This used to assert
      * {@code assertNull(plan)} — "no other route → NO PATH". That premise, not the arc gate, is what expired.
      * {@code Swim} used to demand an <i>open-air</i> head at its destination, so only a fluid SURFACE was
      * enterable and a fluid INTERIOR was a wall; the head test is now "not solid", which is the real

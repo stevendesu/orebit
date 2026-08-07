@@ -13,7 +13,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  * <b>5.612 blocks/s</b> it is the quickest water traversal there is — faster than the 4.317 b/s walk, and
  * the same speed as a land sprint (sprint and sprint-swim share the 5.612 b/s figure).
  *
- * <p><b>Lateral travel, and only lateral travel</b> (DESIGN-submerged-upright-swim.md §4). This move used to be
+ * <p><b>Lateral travel, and only lateral travel</b> . This move used to be
  * billed as "the 3-D underwater workhorse"; it is now the fast horizontal one, and the vertical axis belongs
  * entirely to the upright {@link Swim} (see {@code candidates} for why the verticals were never real). A* still
  * prefers it over the slow {@link Swim} for crossing water wherever it is available — that preference is what
@@ -39,7 +39,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  *   <li><b>Reserved NavGrid bit.</b> The TraversalGrid short has a spare flag bit; baking "this water cell
  *       has water above it" (i.e. 2-deep / sprint-initiable) into it at chunk-build time turns the
  *       feet+head probe into a single resident-bit read. (If more bits are ever needed, the navtype index is
- *       only ~250/1024 used, so it can shrink from 10 to 9 bits to free one.)</li>
+ *       the base count is in the 400–600 range against the 1024 cap, so it could shrink from 10 to 9 bits
+ *       only if that headroom is re-verified first — protected-block splits eat into it at runtime.)</li>
  *   <li><b>Node sprint-state.</b> Tracking "already sprint-swimming" in the search node would let the
  *       continuation-in-1-deep case (and the slow submerged {@link Swim} fallback for non-initiated shallow)
  *       be modelled exactly. Heavier (it widens the search space), so it waits until the approximation proves
@@ -107,7 +108,7 @@ public class SprintSwim implements Movement {
             }
         }
 
-        // NO PURE VERTICALS (DESIGN-submerged-upright-swim.md §4, owner ruling 2026-08-07). This move used to
+        // NO PURE VERTICALS (owner ruling 2026-08-07). This move used to
         // emit a rise and a sink, and THEY WERE NEVER REAL: a swimming look clamps around 80°, so the last
         // ~10° of a "straight up" heading is always lateral drift, and the prone pose is only retained while a
         // forward impulse is held — swimServo's degenerate branch therefore forces vfwd ≥ SERVO_FORWARD_MIN

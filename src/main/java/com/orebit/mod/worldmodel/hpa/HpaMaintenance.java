@@ -192,7 +192,7 @@ public final class HpaMaintenance {
         final CostPyramid pyramid = grid.pyramid();
         final ResourcePyramid resources = grid.resourcePyramid();
         // A chunk's leaves (re)built ⇒ this dimension's SHARD (containing chunkX/chunkZ) has unflushed region-tier
-        // changes. Mark it for the next periodic/stop persistence flush (DESIGN-worldmodel-persistence.md §5.2).
+        // changes. Mark it for the next periodic/stop persistence flush (NOTES-perf-and-persistence.md §5).
         // Cold: once per chunk build.
         RegionPersistence.markDirty(level, chunkX, chunkZ);
         for (int ry = 0; ry < column.length; ry++) {

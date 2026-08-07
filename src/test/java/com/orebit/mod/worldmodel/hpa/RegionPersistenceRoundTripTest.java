@@ -22,7 +22,7 @@ import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
 /**
  * Headless round-trip tests for the <b>Stage-1 sharded</b> world-model persistence codecs
- * ({@link CostPyramidCodec} / {@link ResourcePyramidCodec}, DESIGN-worldmodel-persistence.md §7). These need
+ * ({@link CostPyramidCodec} / {@link ResourcePyramidCodec}, NOTES-perf-and-persistence.md §1). These need
  * <b>no Minecraft server</b>: a pyramid is hand-built, the real {@code mergeUp} drivers populate its coarse
  * levels, it is FLUSHED via the new per-shard writer + per-dimension coarse writer, RELOADED via the new
  * reader <b>with no {@code mergeUp} replay</b>, and every row at every level must survive byte-identically —

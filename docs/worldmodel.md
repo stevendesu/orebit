@@ -27,7 +27,8 @@ Key decisions:
 - **The packed `long` is simultaneously the data and the dedup key.** Two block states
   that pack to the same bits behave identically to the pathfinder, so they *are* the
   same **navtype**. That behavioral dedup collapses Minecraft's ~28,000 block states
-  into a few hundred distinct fingerprints (measured: **~590**), so the index fits
+  into a few hundred distinct fingerprints (**roughly 400–600**, and the exact number
+  moves with the Minecraft version and with how many blocks you protect), so the index fits
   comfortably in a `short` and the whole descriptor table is a few kilobytes — small
   enough to live in L1 cache. Every question the planner asks ("is this damaging?",
   "how slow is walking through it?", "is it climbable?", "is it a portal?", "has the
@@ -40,7 +41,8 @@ Key decisions:
   over the measured count), and the high **6 bits** are precomputed
   *neighbour-property flags* — walkable headroom above the floor, "editing here could
   release a fluid or drop gravel on you", "there's a walk-through hazard in the body
-  space", "there's a solid face to place a block against". These are the multi-cell
+  space", "there's something in the body space that slows you as you pass through it",
+  "there's a solid face to place a block against". These are the multi-cell
   facts the movement code would otherwise re-derive on every search expansion;
   computing them once at build time turns them into a single masked array access.
 - **A parallel depth byte per cell** rides beside the `short` grid — two nibbles
@@ -65,7 +67,8 @@ not defaulted to air.
 
 Above the block layer, the world is divided into a **fixed cubic grid** of
 16×16×16-block regions (an implicit octree — parents are simply the 2×2×2 group of
-their children),
+their children, until a cell grows tall enough to span the whole world vertically, at
+which point there is nothing left to halve and the tree flattens into a quadtree),
 not semantic flood-filled regions. A fixed grid makes block→region assignment trivial
 (coordinate math), makes block place/break updates O(1), and gives a clean
 merge-of-children aggregation up the pyramid.

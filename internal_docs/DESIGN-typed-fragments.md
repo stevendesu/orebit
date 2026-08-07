@@ -48,6 +48,15 @@ than walking (5.61 vs 4.32 b/s) ⇒ swim ≈ **0.77**.
 | 1 | 1 | surface water    | pass                                       | 0.77 swim| surfaceable     |
 | 0 | 0 | pure air         | −Y in, −Y out only; place-priced for canPlace (pillar/bridge — today's uniform-AIR gate relocated per-fragment) | fall/place | n/a |
 
+> **SUPERSEDED IN PART (2026-08-02 unit audit — read this before trusting the 2.2 figure below).**
+> `SWIM_VERTICAL_PER_BLOCK = 2.2` is **DELETED** from the code. Vertical swim now prices at
+> `SWIM_PER_BLOCK` (0.77) like lateral: ~2 b/s is the NON-sprint paddle rate, but the block tier
+> realizes every submerged vertical step with `SprintSwim`, which emits its y±1 candidates at the SAME
+> cost as lateral (3.564 t/blk ÷ the 4.633-tick walk ruler = 0.77). Charging 2.2 over-estimated the
+> block tier's own price for the same motion by 2.86×. Everything else in the amendment below — that
+> **W is an existence bit** and that discounting `|dy|` through a merely-water-containing fragment
+> deleted the vertical capability shaping and manufactured phantom ascents — still stands.
+
 - PRICING AMENDMENT (2026-07-23, regression-verified): `hasWater ⇒ swim-price` applies to the
   HORIZONTAL component only (0.77; sprint-swim is faster than walk LATERALLY). VERTICAL (|dy|)
   legs keep walkCost's full dy shaping — PILLAR_PER_BLOCK + the no-place UNSAFE_VERTICAL_PENALTY —

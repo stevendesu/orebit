@@ -21,7 +21,7 @@ import com.orebit.mod.worldmodel.resource.ResourceMerger;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
 /**
- * Headless unit tests for the <b>Stage-2 cold-shard EVICTOR</b> (DESIGN-worldmodel-persistence.md — bounded region
+ * Headless unit tests for the <b>Stage-2 cold-shard EVICTOR</b> (NOTES-perf-and-persistence.md §4 — bounded region
  * RAM, increment 4): the piece that actually BOUNDS live region RAM by paging the coldest resident shards back to
  * disk. Increment 3 built lazy-load (coarse-only startup + on-demand page-in); this proves eviction is (a) a real
  * RAM drop that keeps the coarse tier intact, (b) byte-identical on the evict→reload round-trip, (c) off by default

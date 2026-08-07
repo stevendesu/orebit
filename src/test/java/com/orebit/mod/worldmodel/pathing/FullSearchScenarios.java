@@ -54,7 +54,7 @@ import net.minecraft.world.level.chunk.Strategy;
  *       nearest-centroid membership probe provably MIS-assigns tunnel cells near the region's ±X ends to a
  *       sealed (hence never-reached) pocket — every such {@code RegionCostField.costAt} read pays the
  *       k-fragment centroid loop AND the 63-slot {@code cheapestReachedSlot} fallback scan
- *       (PERF-AUDIT-region-field §3 items 4–5). The ONLY scenario whose reads exercise multi-fragment slot
+ *       (NOTES-region-findings.md §5). The ONLY scenario whose reads exercise multi-fragment slot
  *       resolution; GOAL_IN_WINDOW / GOAL_NOT_IN_WINDOW route through single-fragment regions and never touch
  *       either path (counter-verified, s54).</li>
  * </ul>
@@ -263,7 +263,7 @@ public final class FullSearchScenarios {
      * z 0..2), #1 the tunnel, #2 the interior pocket (x 6..9, z 11..14, touching no face), #3 the −X-face pocket
      * (x 0..2, z 12..14).
      *
-     * <p><b>Why this exercises the §3 read pathology</b> (PERF-AUDIT-region-field): every
+     * <p><b>Why this exercises the §3 read pathology</b> (NOTES-region-findings.md §5): every
      * {@code RegionCostField.costAt} read in the belt runs the 4-fragment nearest-centroid loop
      * ({@code fragmentOf} — 4 × 6-face footprint decodes + divisions). The pocket centroids sit at the face
      * openings — (15,1,1) for #0, (0,1,13) for #3 vs the tunnel's (7,1,7) — so a tunnel cell near a region's
@@ -392,7 +392,7 @@ public final class FullSearchScenarios {
     private static final int FIELD_CENTER = 8 * 16 + 8; // world x/z of the goal column (chunk (8,8))
 
     /**
-     * The {@code RegionFieldBuildBenchmark} world (PERF-AUDIT-region-field.md §6): a flat surface world whose
+     * The {@code RegionFieldBuildBenchmark} world (NOTES-region-findings.md §6): a flat surface world whose
      * columns are {@value #FIELD_SECTIONS} sections tall — sections 0..{@value #FIELD_SOLID_TOP} fully solid
      * stone (the underground), section {@value #FIELD_FLOOR_SECTION} a stone floor plane at world y=80 with air
      * above (the surface), sections 6..10 open air — authored over chunks

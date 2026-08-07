@@ -937,7 +937,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     /**
      * Whether the bot's hitbox is the 0.6-tall prone one — read from the <b>POSE</b>, not the {@code
-     * isSwimming()} flag (DESIGN-submerged-upright-swim.md §5.1). The two diverge in exactly one state and it
+     * isSwimming()} flag (NOTES-vanilla-fluid-physics.md §3.2). The two diverge in exactly one state and it
      * is a state this design creates: dropping sprint clears the flag on the very next tick, but
      * {@code Player.updatePlayerPose} then FIT-TESTS the desired STANDING pose and falls back through
      * CROUCHING to {@code Pose.SWIMMING} when the bot has no headroom (bytecode-verified against 1.21.11) — so
@@ -1010,7 +1010,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     /** The sink-through-a-scaffold-deck discriminator ({@link BotSteering#scaffoldingBelow}): sneak sinks
      *  through scaffolding's stand-on-top shape but would edge-guard-pin the bot on a ladder plate — see
-     *  Climb's Δy&lt;0 grounded steer branch (DESIGN-climb-vocabulary.md §4). Live read, solidAt pattern. */
+     *  Climb's Δy&lt;0 grounded steer branch (NOTES-movement-physics.md §5). Live read, solidAt pattern. */
     @Override
     public boolean scaffoldingBelow() {
         ServerLevel level = (ServerLevel) Worlds.of(this);

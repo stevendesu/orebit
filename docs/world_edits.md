@@ -47,12 +47,16 @@ real inventory and can run out — and every placement then carries an extra fla
 10-tick premium in the planner, so a bot spending real blocks scaffolds noticeably
 less readily than one conjuring them.
 
-One subtlety the executor handles: the planner treats any cell without real collision
-as open for placement — but "no collision" includes grass, snow layers, vines, water.
-A player placing into a grass cell just places (the game clears the soft occupant);
-the bot does the same, clearing a *replaceable* occupant as part of the placement.
-Anything not vanilla-replaceable in the target cell aborts the place instead — the
-plan re-checks and routes around.
+One subtlety the executor handles: the planner's "open to place into" test is broader
+than vanilla's own — a cell counts as open when it is either vanilla-*replaceable*
+(air, water, lava, fire, tall grass) **or** simply has no collision shape (a berry
+bush, a torch, a sapling). A player placing into a grass cell just places, and the
+game clears the soft occupant; where the occupant really is vanilla-replaceable the
+bot does exactly that. Where it isn't — the empty-shape-but-not-replaceable cases — a
+bare placement would silently no-op and leave the bot stepping onto footing that never
+appeared, so the bot clears the soft occupant first, the way a player would, and then
+places. Only an occupant it may not break at all (owner-protected, or unbreakable)
+aborts the place — the plan re-checks and routes around.
 
 ## Punching through hazards
 
@@ -61,9 +65,10 @@ slows movement to ~5% of walk speed, so wading through one webbed cell costs
 4.633 ÷ 0.05 ≈ 93 ticks; a berry bush charges a mortal bot one hitpoint
 (`pathing.costPerHitpoint` — 100 ticks at the default) on top of its slow.
 
-So wherever a movement would carry the bot's body through a hazard or slow cell, the
-planner prices **both options at the same node** — pass through intact, or break the
-cell first — and folds whichever is cheaper:
+So wherever a movement that edits as it goes (the ground moves — Traverse, Ascend,
+Descend) would carry the bot's body through a hazard or slow cell, the planner prices
+**both options at the same node** — pass through intact, or break the cell first — and
+folds whichever is cheaper:
 
 $$ \min(\ \text{transit surcharge},\ \ \text{mining time} + \texttt{breakBaseCost}\ ) $$
 
@@ -71,11 +76,20 @@ The arbitration is exact, not a heuristic: both options land on the identical se
 node, so taking the minimum gives the same answer as searching both. And because the
 mining time is the *real* tool-aware time, the answer changes with the loadout: a
 sword cuts a cobweb in ~20 ticks (clear win over ~93 wading), while bare-handed a web
-takes ~400 ticks — wading wins. A berry bush breaks near-instantly, so a mortal bot
-punches it rather than paying the 100-tick prick — unless the owner raised
-`mining.breakBaseCost` to make world edits expensive, in which case it detours.
-Airborne movements (Parkour, Fall) never fold breaks — you can't mine mid-flight — so
-they always pay the intact-transit price.
+takes ~400 ticks — wading wins. A berry bush breaks near-instantly, so where the bush
+is breakable at all a mortal bot punches it rather than paying the 100-tick prick —
+unless the owner raised `mining.breakBaseCost` to make world edits expensive, in which
+case it detours. (Out of the box the sweet berry bush is in the **default protected
+list** below, and a protected cell is never punched through, so the stock bot wades or
+routes around one; drop it from `mining.protectedBlocks` to get the punch-through.)
+
+Two things are never on the break side of that minimum. **Fluids** aren't "broken" —
+water and lava are swum, routed around, or sealed by a placement, so a body cell
+holding one always pays its intact price (for lava that means its damage charge plus a
+slow-media surcharge; the swim moves price a lava cell on their own terms instead).
+And **movements that fold no edits by design** always pay the intact-transit price too:
+the airborne family (Parkour, Fall — you can't mine mid-flight) and `Diagonal`'s two
+corner columns.
 
 ## Protected blocks
 

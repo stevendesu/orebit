@@ -30,7 +30,7 @@ import net.minecraft.server.Bootstrap;
  * Times ONE region cost-field build — the {@code PathPlan.regionFieldFor} rebuild body, i.e.
  * {@link RegionPathfinder.RegionBox#around} + {@link RegionPathfinder#costToGoalField} — across field box sizes
  * <b>3³ → 10³ regions</b>, over the {@link FullSearchScenarios#fieldWorld() fully-resident flat world}. This is
- * the PERF-AUDIT-region-field.md §6 field-build microbench: the Javadoc's "~6 µs per build" claim
+ * the NOTES-region-findings.md §6 field-build microbench: the Javadoc's "~6 µs per build" claim
  * ({@code PathPlan.regionFieldFor}) predates the box-scaled field-array bill (§2 item 1 — a dense
  * {@code dimX·dimY·dimZ·63}-slot allocation + {@code Arrays.fill}, ~432 KB at 7³, ~1 MB at 10×8×10), so §6 asks
  * for a measured size curve to replace it — the before/after metric for the P4 layout-shrink proposal, and the

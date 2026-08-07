@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * ({@link PyramidMerger} / {@link com.orebit.mod.worldmodel.resource.ResourceMerger}) tell
  * <b>"a child region is absent because it is genuinely unexplored"</b> from
  * <b>"a child region is absent because its shard was persisted to disk but is not currently paged into RAM"</b>
- * (the Stage-2 bounded-region-RAM design, DESIGN-worldmodel-persistence.md — the clobber-guard invariant).
+ * (the Stage-2 bounded-region-RAM design, NOTES-perf-and-persistence.md §4 — the clobber-guard invariant).
  *
  * <h2>Why this exists (the correctness invariant it enables)</h2>
  * The roll-up merge ({@code combineFragments} / {@code recomputeParent}) treats an <b>absent</b> child

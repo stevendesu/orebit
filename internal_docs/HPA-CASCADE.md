@@ -19,8 +19,9 @@ window the bot exited is re-planned; the top level slides/collapses — effectiv
 - Tests: `src/test/java/com/orebit/mod/pathfinding/regionpathfinder/HierarchicalCascadeTest.java`,
   `RegionTubeEscalationTest.java` (§3b escalation), `RegionFloodGuardTest.java` (§3a guard)
 
-> **IN FLIGHT:** `HierarchicalRegionPlan` + `PathPlan` are being reworked by the **rolling skeleton**
-> (increment A per `DESIGN-rolling-skeleton.md`): levels ≤ `ROLLING_MAX_LEVEL` slide their window with the
+> **AMENDED BY THE ROLLING SKELETON (increment A SHIPPED 2026-07-24; B/C/D still deferred —
+> `DESIGN-rolling-skeleton.md` §13/§13-A):** `HierarchicalRegionPlan` + `PathPlan` now roll —
+> levels ≤ `ROLLING_MAX_LEVEL` (= 1) slide their window with the
 > committed cursor (the window base IS the cursor, §3.1/D1) and L0 EXTENDS by suffix-splice from its own
 > tail when the window clamps there (§3.2/§4 — head-drop + tail-append, prefix identical, INV-1; a
 > three-way `onBotMoved` verdict UNCHANGED/EXTENDED/SWAPPED, §4.3). This fixes the measured
@@ -134,9 +135,9 @@ instead of the whole of V collapsing to one entry-stripped row (the old A==G fal
 anchor scan (`PathPlan.blameHop`) now **skips VIRTUAL fragments** (S=62 / V=63) so an unreached V is never
 mistaken for the bot's position when A==G. `from=S` rows name a journey-local sentinel → never persisted
 (structural, no positional carve-out); regular crossing rows stay entry-independent physical pairs. The
-reverse-Dijkstra cost field is gated to `VIRTUAL_START_FRAG` so its nodes stay byte-identical. Full design
-of record: **DESIGN-virtual-start-fragment.md §0.5** (supersedes the increment-1/2 split in that doc's
-§3/§4/§7).
+reverse-Dijkstra cost field is gated to `VIRTUAL_START_FRAG` so its nodes stay byte-identical. Exact bit
+layout, the why-key-not-row argument, the accepted degradations and the latent carry-forwards:
+**NOTES-region-tier.md §1–§2**.
 
 **V-row journey scoping (never persisted):** an (approach → V) blame is condemned WITHOUT realized-crossing
 evidence (reaching V IS reaching the goal — a FOUND), and V's key names only the goal REGION, not the goal

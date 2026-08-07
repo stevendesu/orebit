@@ -71,7 +71,7 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * <h2>The gap envelope — DERIVED, takeoff-condition-parameterized ({@link ParkourEnvelope})</h2>
  * The per-class gap caps are no longer hand-tuned constants; they are computed from closed-form MC
  * ballistics in {@link ParkourEnvelope} (the model validated in {@code parkour_envelope_params.py}, which
- * supersedes the prose {@code DESIGN-parkour-envelope.md} table). Each expansion reads ONE row
+ * supersedes the prose envelope table; derivation in {@code NOTES-movement-physics.md} §1–§2). Each expansion reads ONE row
  * {@code ParkourEnvelope.MAX_GAP[startTopY][gsfBucket][occBucket]} = {@code {flat, rise, fall1, fall2,
  * fall3, diag}}, keyed on the takeoff conditions: the takeoff SURFACE height ({@link
  * MovementContext#floorSurface}, or {@link MovementContext#directionalTopY} toward the jump for a stair),

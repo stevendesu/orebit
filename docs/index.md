@@ -69,8 +69,18 @@ outshine Baritone:
    search as a [topology-aware heuristic](./Optimizations/11_region_heuristic.md), so
    the fine search stops flooding walls it can't see around
 
-The end result is faster and more accurate block search and pathfinding over
-significantly larger distances.
+Orebit also carries a wider movement vocabulary — parkour with a physics-derived
+jump envelope, ladder and vine climbing, six-directional swimming, door operation
+— where Baritone's move set is deliberately smaller.
+
+**No head-to-head speed claim is made here**, and the honest reason is that the
+two don't line up for a fair one. Ask each to reach a distant goal and Baritone
+returns a block-level partial path, while Orebit returns a region skeleton plus a
+committed window of a few dozen blocks and then slides. Timing those against each
+other measures a difference in *what they return*, not in how fast they search. A
+same-scale block-tier comparison would be meaningful, but Baritone doesn't report
+per-search timings, so it would have to be instrumented first. Until somebody does
+that work, everything above is an architectural difference rather than a benchmark.
 
 ### Alto Clef
 

@@ -18,7 +18,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 
 /**
- * The Stage-2 bounded-region-RAM <b>cold-shard evictor</b> (DESIGN-worldmodel-persistence.md — bounded region RAM,
+ * The Stage-2 bounded-region-RAM <b>cold-shard evictor</b> (NOTES-perf-and-persistence.md §4,
  * increment 4). Increment 3 built the lazy-load half (coarse-only startup + on-demand atomic shard page-in); this
  * is the half that actually BOUNDS live region RAM — it pages the coldest resident shards back to disk once the
  * count of resident built level-0 cost leaves (the dominant per-shard RAM, ~1.6–5.8 KB each) exceeds a configured

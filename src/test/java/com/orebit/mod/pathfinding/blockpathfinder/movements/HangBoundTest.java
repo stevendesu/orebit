@@ -6,7 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Re-derives the fall-arrest tunneling bound from the exact vanilla fall recurrence and asserts
- * {@link Fall#HANG_MAX_DROP} sits safely inside it (DESIGN-climb-vocabulary.md §1/§3.1).
+ * {@link Fall#HANG_MAX_DROP} sits safely inside it (NOTES-movement-physics.md §3).
  *
  * <p>Physics being asserted: per airborne tick the stored vertical speed updates {@code v' = (v + 0.08)
  * × 0.98} (gravity then drag — LivingEntity.travelInAir) and the tick's displacement is {@code v'};

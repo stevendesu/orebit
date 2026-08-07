@@ -97,7 +97,7 @@ public final class HeadlessAutotest {
                 // jungle-leaf floor at y=179; the trunk (jungle_log) runs y=177..153 to dirt/stone below —
                 // a real "get down from the tree" descent (fall / parkour to a lower tree / dig the trunk).
                 // NOTE: seed-regen worldgen is non-deterministic for VEGETATION (see
-                // DIAGNOSIS-worldgen-nondeterminism.md) — this cell is only valid against the FROZEN world,
+                // the worldgen-nondeterminism memory / CLAUDE.md autotest §) — this cell is only valid against the FROZEN world,
                 // never a fresh seed-regen (where the tree may not exist and the cell is mid-air).
                 cell("orebit.autotest.start", "60,180,253"),
                 // Inside a trial chamber ~240 blocks off (owner-confirmed in the master world).

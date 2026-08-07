@@ -12,7 +12,7 @@ import com.orebit.mod.worldmodel.hpa.RegionFragments;
 
 /**
  * Key-level correctness fixtures for the <b>from-fragment in the search-node identity</b>
- * (DESIGN-virtual-start-fragment.md §0.5). These are pure static assertions over
+ * (NOTES-region-tier.md §1.1, §2). These are pure static assertions over
  * {@link RegionPathfinder#approachRowKey} and {@link RegionEdgeBlacklist} — no {@code ServerLevel}, no grid,
  * no search — because the load-bearing win is entirely at the node-identity / blacklist-row layer: making
  * {@code (region, current-fragment, entry-face, from-fragment)} the node key lets two approaches that share a

@@ -15,7 +15,7 @@ import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import net.minecraft.core.BlockPos;
 
 /**
- * The contrived <b>built-obstacle flood</b> test (FINDINGS-region-pillar-flood.md §3, verification "New test"):
+ * The contrived <b>built-obstacle flood</b> test (NOTES-region-findings.md §3):
  * a wide UNMINEABLE wall stands between a bot and a nearby goal, so the only route is a long detour around the
  * wall's far end. Even with §1 (forward wooden dig) and §2 (non-free unbuilt), the honest search must spread the
  * open floor sideways to find the wall's end — the same "expensive/blocked move + huge cheap field" shape as the

@@ -114,7 +114,7 @@ public final class PyramidMerger {
      * Generalized upward walk: recompute every ancestor of the node {@code (childLevel, crx, cry, crz)} from its
      * children via {@link #combineFragments}, ascending to {@link RegionAddress#MAX_COARSE_LEVEL}, stopping the
      * moment a parent's recompute leaves its output unchanged (the §6.5 damping). {@link #mergeUpFragments} is the
-     * {@code childLevel == 0} case (a leaf changed); the reconciler (DESIGN-worldmodel-persistence.md §2b) calls it
+     * {@code childLevel == 0} case (a leaf changed); the reconciler (NOTES-perf-and-persistence.md §3) calls it
      * with {@code childLevel == }{@link RegionAddress#SHARD_LEVEL} to propagate a reconciled shard-top cell above
      * the shard. Recomputes only PARENTS ({@code childLevel+1} and up); the node itself is assumed current (a real
      * leaf, or a {@link #reconcileNode} the caller already ran).
@@ -144,7 +144,7 @@ public final class PyramidMerger {
 
     /**
      * Recompute the single node {@code (level, rx, ry, rz)} in place from its children via
-     * {@link #combineFragments} — the per-cell reconcile primitive (DESIGN-worldmodel-persistence.md §2b). Interns
+     * {@link #combineFragments} — the per-cell reconcile primitive (NOTES-perf-and-persistence.md §3). Interns
      * the row if needed, then recombines it; because the combine reads children through {@code rowIfPresent} it
      * now UNIONs the live children with any freshly-interned persisted children, so a straddle coarse cell becomes
      * correct-full. Runs through the guarded {@link #combineFragments}, so it composes with the Stage-2
@@ -216,7 +216,7 @@ public final class PyramidMerger {
         final int childLevel = parentLevel - 1;
         final int children = RegionAddress.childCount(parentLevel);
 
-        // Stage-2 clobber-guard (DESIGN-worldmodel-persistence.md — bounded region RAM): if ANY absent child
+        // Stage-2 clobber-guard (NOTES-perf-and-persistence.md §4): if ANY absent child
         // ({@code rowIfPresent < 0}) belongs to a shard that is persisted-on-disk-but-not-resident, this child set
         // is only PARTIALLY loaded, so an optimistic rollup here would OVERWRITE the correct, fully-explored
         // persisted coarse value with a partial one. DEFER instead: return before touching the parent's fragments
