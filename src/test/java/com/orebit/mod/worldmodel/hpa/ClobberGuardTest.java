@@ -12,7 +12,7 @@ import com.orebit.mod.worldmodel.resource.ResourceMerger;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
 /**
- * Headless unit tests for the <b>Stage-2 clobber-guard</b> (DESIGN-worldmodel-persistence.md — bounded region
+ * Headless unit tests for the <b>Stage-2 clobber-guard</b> (NOTES-perf-and-persistence.md §4 — bounded region
  * RAM): the load-bearing correctness invariant that stops a coarse-only startup's first live chunk build from
  * OVERWRITING a correct, fully-explored persisted coarse value with a partial rollup, when some children are
  * absent-because-persisted-not-yet-resident rather than absent-because-unexplored.

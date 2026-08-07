@@ -1,7 +1,9 @@
 # Supported Versions
 
 Orebit ships as a single drag-and-drop JAR for **every Minecraft version from 1.17.1
-through 26.2**, on **Fabric**, **Forge**, and **NeoForge** — with **zero runtime
+through 26.2** — on **Fabric** across that whole span, and on **Forge** and **NeoForge**
+for the versions where those loaders are available (the table below has the exact
+boundaries) — with **zero runtime
 dependencies**. No API mod to install alongside it, no library-version conflicts with
 your other mods. You download one JAR for your version and loader, drop it in `mods`, and
 it runs. This page explains what that covers and, for the curious, how one codebase spans

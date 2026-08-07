@@ -102,7 +102,7 @@ public final class ReportCommand implements BotCommand {
 
             CommandFeedback.send(src, "Resource knowledge around you — near/mid/far = within ~" + NEAR_RADIUS
                     + "/" + MID_RADIUS + "/" + FAR_RADIUS + " blocks (full depth); global = everything explored "
-                    + "this session anywhere (not saved across restart yet). Counts approximate.");
+                    + "anywhere, and it PERSISTS across restarts. Counts approximate.");
             CommandFeedback.send(src, String.format(ROW_FMT, "resource", HEADS[0], HEADS[1], HEADS[2], HEADS[3]));
             for (int[] e : rows) {
                 CommandFeedback.send(src, String.format(ROW_FMT,

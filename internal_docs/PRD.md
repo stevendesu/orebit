@@ -13,8 +13,9 @@ game (building, fighting, exploring) get help with the rest. Long-term, a **weak
 local LLM** translates a chat sentence into a bounded command set; **the LLM only
 recognizes intent — it never plans.** All planning is deterministic.
 
-**Loader / version are not architectural constraints.** The *current build* Minecraft
-versions 1.17.1 and later, and supports both Forge and Fabric.
+**Loader / version are not architectural constraints.** The *current build* covers Minecraft
+1.17.1 → 26.2: **Fabric** across the whole range, **Forge** 1.17.1→1.21.11, **NeoForge**
+1.21→1.21.11.
 
 The design keeps Minecraft- and loader-specific surface deliberately
 thin so this expansion is a matter of adapters, not rewrites (see §9 Portability).
@@ -30,18 +31,23 @@ world efficiently (the **world model**) and moving through it intelligently (the
 The navigation stack described by this PRD is now **built and runtime-verified**: the
 world-model pipeline is live (`NavSectionBuilder.classifyInto` → `ChunkNavLoader` →
 `NavStore`, patched incrementally by `NavGridUpdater`), the block tier
-(`pathfinding/blockpathfinder/` — 14 movements, folded edits, macro cuboids, the
+(`pathfinding/blockpathfinder/` — **18** movements, folded edits, macro cuboids, the
 goal-forced-cost premium, partial paths with the irreversibility guard) and the region
 tier (`worldmodel/hpa/` fragments + `regionpathfinder/` stateful nested-skeleton
-cascade) both run in-game, and the follower executes plans reactively (MovePlan/
+cascade) both run in-game, window searches run **off-tick** on the `pathfinding/async/`
+planner pool, and the follower executes plans reactively (MovePlan/
 PhaseRunner phases, timed `BotMining`, nether-portal follow, full vanilla player tick
 with config-gated survival). See §10.A for the completed inventory.
 
-What remains **stub-only** is the agent brain above navigation: `ai/`, `tasks/`,
-`integration/` (LLM), `memory/`, `relationships/`, `behavior/`, plus the resource
-octree (§6.4) and persistence (§6.6). The bot today is a capable follower/goto agent
-(`/bot come|follow|goto`, plus the single-block `/bot mine` actuator check), not yet a
-tasked helper.
+The resource layer (§6.4) and persistence (§6.6) are **also built** since this note was
+written: `worldmodel/resource/` (`ResourcePyramid`/`ResourceQuery`/`ResourceScan`, tallied
+during nav-grid classify) and `worldmodel/persistence/` (`RegionPersistence` + the
+`.mca`-style sharded cost/resource files). What remains **stub-only** is the agent brain
+above navigation: `ai/`, `tasks/`, `integration/` (LLM), `memory/`, `relationships/`,
+`behavior/`, `sim/`. The bot today is a capable follower/goto agent that has grown a first
+set of tasked actuators — `/bot come|follow|goto|stay`, `/bot mine|gather|find|drop|report`,
+plus the `craft`/`farm`/`build`/fight actuators — driven imperatively from `AllyBotEntity`,
+not yet by the designed goal/task engine.
 
 ## 3. Scope
 
@@ -68,8 +74,11 @@ From `design-principles.txt` plus decisions made during design review:
 - **Recompute cheap data; persist only expensive/global data.** (See §7.)
 - **Smart objects, pluggable strategies.** Movement types, heuristics, and decay
   strategies are extensible via interfaces, not branched enums.
-- **Note:** some existing code contradicts these (a static `BotManager`, `final`
-  classes, the nav/analyzer drift). Aligning to the principles is part of Phase 0.
+- **Note:** some existing code contradicts these. The nav/analyzer drift is resolved
+  (`TraversalClass`/`TraversalAnalyzer*` deleted), but the static `BotManager` and the
+  `final` classes are still there — and `BotManager` is now load-bearing (world-save bot
+  registry, cross-dimension restore), so this is a standing, accepted deviation rather than
+  a pending cleanup.
 
 ## 5. Architecture overview
 
@@ -101,7 +110,9 @@ affordances.
 
 - **Identity is per-`BlockState`, not per-`Block`.** Orientation changes navigation
   (north-facing stairs are ascendable from the south, not the north); growth stages
-  change passability. The current code keys on `Block`/default state and must change.
+  change passability. **Built as specified:** `NavBlock` walks every block's
+  `getStateDefinition().getPossibleStates()` at static init and interns each state into
+  `STATE_TO_NAVTYPE`, so facing and growth stage fall out of the fingerprint for free.
 - **Index → packed descriptor table (the chosen model).** Each block state maps to a
   **`short`** navtype index; the index resolves to a **single 64-bit packed `long`**
   holding all the fields above (one array read + bit-extract — no objects, no pointer
@@ -122,11 +133,14 @@ affordances.
 
 ### 6.2 Nav grid — recomputed, never persisted
 
-Per-cell traversal data (the `TraversalClass` grid and NavBlock lookups for a loaded
-region) is **recomputed on chunk load**, not saved. Recompute is deterministic and
-sub-millisecond per chunk (measured ~6.7 ns/block read; ~0.66 ms/chunk). The biggest
-win — currently disabled — is the **all-air/uniform-section bypass**: a SingularPalette
-section is classified once and filled, not scanned (≈60% of sections).
+Per-cell traversal data (the `TraversalGrid` — a packed `short` per cell, 6 `NavFlags`
+neighbour bits + a 10-bit navtype index, plus a parallel depth `byte[]`; the old 4-value
+`TraversalClass` was superseded and deleted) is **recomputed on chunk load**, not saved.
+Recompute is deterministic and sub-millisecond per chunk (measured ~6.7 ns/block read;
+~0.66 ms/chunk). The biggest win — **now live** in `NavSectionBuilder.computeFlags` — is
+the **all-air/uniform-section bypass**: a uniform section is classified once and filled,
+not scanned (≈60% of sections; only the top overscan rows are computed individually when
+the section above has content).
 
 ### 6.3 Regions — fixed grid (not semantic)
 
@@ -144,9 +158,11 @@ Rationale:
 
 Because the grid is fixed, **the octree is implicit** — a region's identity is its
 coordinate and parent/child is coordinate math, so there are no explicit tree-node
-objects (this supersedes the old semantic `Region`/`LeafRegion`/`CompositeRegion`
-classes). The two per-region data layers — **HPA\* costs (§6.5)** and the **resource
-histogram (§6.4)** — therefore **share one coordinate key but are stored as separate
+objects (this superseded the old semantic `Region`/`LeafRegion`/`CompositeRegion`/`Portal`/
+`RegionPool`/`RegionBuilder` classes, and the whole `worldmodel/region/` package has since
+been **deleted from disk** — the live region tier is `worldmodel/hpa/` +
+`pathfinding/regionpathfinder/`). The two per-region data layers — **HPA\* costs (§6.5)**
+and the **resource histogram (§6.4)** — therefore **share one coordinate key but are stored as separate
 parallel arrays (struct-of-arrays), not one combined record.** Reason: pathfinding
 streams cost data across a route while resource search streams histograms through a
 subtree — they never run together, so interleaving them would drag each operation's
@@ -178,10 +194,21 @@ unaffected.
 
 ### 6.4 Resource octree — "where is the nearest X"
 
-- **`RegionBlockIndex`**: ~64 tracked resource *classes* (ores, logs, beds, chests,
+> **Built (2026-07/08).** The design below shipped as `worldmodel/resource/`, on the same
+> implicit-grid addressing as the cost layer and as its own struct-of-arrays pyramid — NOT
+> inside the deleted `worldmodel/region/` classes this section originally named. The mapping:
+> `RegionBlockIndex` → `ResourceClasses` (+ `ItemClasses` for the item-side taxonomy),
+> `RegionMetadata` → `ResourcePyramid` + `Log2Codec` (the log₂ bucketing was lifted verbatim),
+> `merge` → `ResourceMerger`, search → `ResourceQuery` (`near`/`mid`/`far` box sums, the 3×3
+> neighbourhood ascend, `RESOURCE_TOP_LEVEL = 21`), tally → `ResourceScan` (folded into the
+> nav-grid classify pass, not a second scan). Persistence is `ResourcePyramidCodec` +
+> `RegionPersistence`'s sharded `res.<X>.<Z>.bin` / `res.coarse.bin`. Surfaced in-game as
+> `/bot find` and `/bot report`. Light min/max was NOT built.
+
+- **Resource classes**: ~64 tracked resource *classes* (ores, logs, beds, chests,
   crops, plus "hint" classes like building-blocks/redstone that imply player
   structures). Grouped (all 16 bed colors → one class). 2 user-defined slots.
-- **`RegionMetadata`**: per region, a sparse histogram where each present class
+- **Per-region histogram**: a sparse histogram where each present class
   stores **log₂(count)**; plus light min/max. `merge(child)` rolls counts up the
   octree (`log₂(x)+log₂(x)=log₂(2x)`). Approximate by design — a "where is it
   densest" signal, not a census.
@@ -205,7 +232,7 @@ The piece Baritone lacks (and the reason Orebit scales to long distances).
 > bot's graph drops every mining edge and can honestly FAIL. The **no-entrances ruling stands** (footprints
 > are per-fragment face *facts* recomputed with the leaf, not crossing points or stored edges).
 > Persistence is the `.mca`-style sharded format (`hpa.<X>.<Z>.bin` L0–5 + `hpa.coarse.bin`, codec v7,
-> incl. the #5 crossing-invalidation section — DESIGN-worldmodel-persistence.md,
+> incl. the #5 crossing-invalidation section — NOTES-perf-and-persistence.md,
 > DESIGN-persisted-invalidation-memory.md). §7.1's evolution note covers the search-side arcs.
 
 - **Cost, not connectivity.** In Minecraft *everything* is traversable — you can
@@ -259,8 +286,15 @@ world: **2,557 B/chunk** compressed block data.
 | HPA\* graph (face-to-center, 16³, 4-bit) | Yes | ~2% |
 | **Total (per dimension)** | | **~6–8%** ✅ |
 
-Comfortably under target, with HPA\* leaf-size/bit-width as the tunable knob. The
-estimate becomes empirical once all persisted structures exist (see §11).
+Comfortably under target, with HPA\* leaf-size/bit-width as the tunable knob.
+
+> **Both layers are now built and persisted, but the numbers above remain an ESTIMATE — no
+> empirical measurement has been taken.** Two things changed under the table: the region row
+> no longer stores face-to-center costs at all (per-region *fragments*, costs derived at
+> query time — §6.5's evolution note), and the on-disk layout is `.mca`-style **sharded**
+> (`hpa.<X>.<Z>.bin` L0–5 + `hpa.coarse.bin`, and the same for `res.*`; codec v7, gzip body,
+> treated as a rebuildable cache). Re-deriving the ~6–8% figure against the real format is
+> the outstanding §11 measurement.
 
 ## 7. The pathfinding engine
 
@@ -293,7 +327,7 @@ Two-tier, lazy, hierarchical A\*.
 > "The containment anchor"), the **virtual goal fragment** (per-approach goal seeding + dig-seed pockets —
 > HPA-CASCADE.md "The virtual goal fragment"), **typed fragments** (DESIGN-typed-fragments.md), the
 > **#5 persisted crossing-invalidation memory** (DESIGN-persisted-invalidation-memory.md), **persistence
-> sharding + lazy load** (DESIGN-worldmodel-persistence.md), and the **rolling skeleton**
+> sharding + lazy load** (NOTES-perf-and-persistence.md), and the **rolling skeleton**
 > (DESIGN-rolling-skeleton.md — increment A in flight).
 
 **The ratified region→block execution model: a sliding window (no portal/entry points).**
@@ -330,15 +364,35 @@ Adopt the proven movement set from **[Baritone](https://github.com/cabaletta/bar
 **extensible** via a `Movement` interface (Strategy pattern) so new types can be
 registered later.
 
-**Built (13, `MovementRegistry.TIER1`):** Traverse, Diagonal, Ascend, Descend, Fall,
-Pillar, MineDown, Climb (ladder/vine/scaffold, both directions), Parkour, Swim,
-SprintSwim, StartSprintSwim, Surface (the last two are the stateful STANDING↔PRONE
-pose transitions — mode is part of the node key). Nether-portal travel is handled
-above the vocabulary today (`NetherPortalIndex` + the follower's portal-seek/ENTER
-states), not as an `EnterPortal` movement; cross-dimension *routing* (region-tier
-portal edges) is still ahead.
+**Built (18, `MovementRegistry.TIER1`, in registry order — order matters on cost ties):**
+Traverse, Diagonal, Ascend, Descend, Fall, Pillar, MineDown, Swim, SprintSwim,
+StartSprintSwim, Surface, Climb (ladder/vine/scaffold, both directions), Parkour,
+DiagonalParkour, WalkOff, DiagonalSprintSwim, RideBubbleColumn, EndSprintSwim.
+
+*The fluid family, as it stands after the "fluid is a MEDIUM, not a pose" ruling
+(2026-08-07; NOTES-movement-physics.md):* **Swim** is the upright
+(`MODE_STANDING`) medium move — six-directional (four cardinals + a straight rise + a
+straight sink), priced per rung from real vanilla rates (surface 9.09 / submerged 10.15
+ticks per block), and it is what un-walls fluid for the whole search. It works in **water
+and lava alike** — there is no lava-only rung; the damage and slow factors carry the cost,
+and `NavBlock` states lava's slowness as data via the `TRANSIT_FLUID` transit class rather
+than a movement-side special case. **SprintSwim** is fast *lateral* prone travel and
+nothing else (3.56 ticks/block) — its pure-up/pure-down rungs were deleted as unreal (a
+swimming look clamps near 80°) — and it is **water-only**, because vanilla's
+`Entity.updateSwimming` gates `Pose.SWIMMING` on `FluidTags.WATER`. The two pose
+transitions are now a symmetric pair: **StartSprintSwim** (STANDING→PRONE in place in
+2-deep water, plus the fused surface dive) and **EndSprintSwim** (PRONE→STANDING in place,
+gated on a pose *fit* test — two non-solid body cells — so a bot can stand up while still
+submerged). **Surface** is no longer a surfacing move at all: it is only the prone
+**crawl-out onto a bank**, the one exit for a bot in a 1-tall submerged tunnel that cannot
+stand up where it is. **RideBubbleColumn** is the UP-only soul-sand conveyor as a single
+macro candidate (bubble cells are walled off from every other move).
+
+Nether-portal travel is handled above the vocabulary today (`NetherPortalIndex` + the
+follower's portal-seek/ENTER states), not as an `EnterPortal` movement; cross-dimension
+*routing* (region-tier portal edges) is still ahead.
 **Planned/extensible:** Crawl (1-tall gaps via trapdoor/sneak), wall-clutch,
-boat/minecart — added later through the same interface.
+boat/minecart, a DOWN bubble column — added later through the same interface.
 
 **Interactions are folded into movements, not separate ops.** Breaking, placing,
 and **toggling doors/gates/trapdoors** don't change position, so they are *part of*
@@ -350,15 +404,20 @@ interactions Baritone ignores.
 
 `Movement` contract (per candidate, given a `MovementContext`): destination,
 `cost()` (ticks, inventory-aware), `isValid()`, an execution state machine, and the
-interactions performed. New movement types subclass this and register; the planner
-filters candidates via `PathFollower.supports(...)`.
+interactions performed. New movement types subclass this and register. **As built** the
+contract is `candidates(ctx, x, y, z, CandidateSink)` (emitting destination + tick cost +
+destination pose mode) plus `plan()` / `steer()` for execution, and there is no external
+capability filter: each movement **self-gates** inside `candidates` on `BotCaps`, on the
+node's pose mode, and on the local descriptor facts. (`PathFollower` remains a spec stub —
+see §7.5.)
 
 ### 7.3 Cost model
 
 Adopt Baritone's **tick-based** model (its strongest part; ours was unspecified).
 
-- **Unit: game ticks, `float`, everywhere** (resolves the existing `int Portal.cost`
-  vs `float` op-cost mismatch — `Portal.cost` becomes `float` ticks).
+- **Unit: game ticks, `float`, everywhere.** (This also resolved the old `int Portal.cost`
+  vs `float` op-cost mismatch — moot now that the semantic `Portal` class is deleted along
+  with the rest of `worldmodel/region/`; every cost in the live search is `float` ticks.)
 - **Base constants** seeded from Baritone's `ActionCosts` (walk ≈ 4.633, sprint ≈
   3.564, water/soul-sand ≈ 9.1 ≈ 2×, ladder ≈ 8.5, a fall-cost table), then tuned
   against our own measurements.
@@ -408,10 +467,22 @@ Adopt Baritone's **tick-based** model (its strongest part; ours was unspecified)
   vertical build face exempt). Partial-path + the irreversibility guard are the
   safety net weighting requires.
 - **Region-level:** Simple (Euclidean centers), PortalCount, VerticalityPenalty,
-  TagAware, ExplorationBias.
+  TagAware, ExplorationBias. *Only `SimpleRegionHeuristic` is built; the other four remain
+  Javadoc-only spec stubs.*
 - **Cross-dimension:** overworld-frame conversion (§6.5).
 
 ### 7.5 Execution & support cast
+
+> **Status (2026-08): every class in this section is still a Javadoc-only spec stub.** The
+> live execution path went a different way and is described in §10.A: `PathPlan` (two-tier
+> driver: skeleton + sliding window + boundary-gated commit/replan) → `BlockPathPlan` →
+> `BotNavigator` (drive/replan/steer/repair/applyEdits) → per-move `MovePlan`/`PhaseRunner`
+> phases + the `BotSteering`/`SteerControl` seam, with `BotMining` as the break actuator.
+> Of the cast below only `PathStatus` exists as code. The budget/replan/cache concerns did
+> get solved, just not here: budgeting is the async wall-clock cap
+> (`pathing.asyncSearchBudgetMs`) + partial paths; replanning is `PathPlan`'s settle-event
+> model plus the `pathfinding/splice/` seam; background execution is `pathfinding/async/`.
+> The entries below are kept as the ratified *design*, not as a status report.
 
 - **`PathFollower`** (interface) — ticked once/tick, applies movements one at a time,
   tracks progress, reports `PathStatus` (IDLE/RUNNING/COMPLETE/BLOCKED/FAILED),
@@ -429,16 +500,20 @@ Adopt Baritone's **tick-based** model (its strongest part; ours was unspecified)
 
 ## 8. Block reading & performance
 
-- **Reading** uses the optimized path (bypass the World API → `ChunkSection` →
-  reflect into `PalettedContainer` internals, scanning sequentially). Per-palette
-  results: Singular ≈ free (and should hit the **uniform-section bypass**), Array/BiMap
-  a few ns/block. Choose the read strategy per palette type.
+- **Reading** uses the optimized path (bypass the World API → `ChunkSection` → read
+  `PalettedContainer` internals, scanning sequentially). Per-palette
+  results: Singular ≈ free (and hits the **uniform-section bypass**), Array/BiMap
+  a few ns/block. Choose the read strategy per palette type. **As built** the internals
+  access lives behind `platform/SectionPalette` (self-degrading, version-stable), not in
+  `NavSectionBuilder` — its reflection fields survive only as inputs to the JMH reference
+  benchmark.
 - **Benchmarking** is via the JMH harness (`./gradlew jmh`), run headless inside the
   Fabric Knot classloader (`fabric-loader-junit`, `forks=0`). Budget perf as a
   **ratio to Minecraft's own chunk-generation cost** on the same machine, not absolute
   ns, so we don't over-fit to fast hardware.
-- The committed `NavSectionBuilder` STEP code is buggy benchmark scaffolding; the JMH
-  benchmark holds the corrected reference implementations.
+- *(Historical: the committed `NavSectionBuilder` STEP code was buggy benchmark
+  scaffolding, with the JMH benchmark holding the corrected reference implementations. The
+  STEP methods are gone; the live path is `classifyInto`/`computeFlags`/`computeDepth`.)*
 
 ## 9. Portability (cross-cutting, plan early)
 
@@ -446,18 +521,27 @@ Supporting multiple **loaders** and **Minecraft versions** is a **shared-core +
 thin-adapter** problem, not separate codebases — and cheapest to set up **now**, while
 most code is still stubs (the coupling surface multiplies as subsystems are written).
 
-**Concrete targets (in priority order):**
+**Concrete targets (in priority order) — Goals 1 and 2 are now SHIPPED:**
 
-| | Loader + version | Purpose | Difficulty |
-|---|---|---|---|
-| **Current build** | Fabric + 1.21.4 | what exists today | — |
-| **Goal 1** | **Forge + 1.20.1** | run alongside a Forge modpack (furniture/biome packs) | medium |
-| **Goal 2** | **Fabric + 26.2** (latest vanilla) | remote server for vanilla clients | medium |
-| **Stretch** | **1.12.2** (any loader) | the "golden-age modding" servers | **hard** |
+| | Loader + version | Purpose | Difficulty | Status |
+|---|---|---|---|---|
+| **Original build** | Fabric + 1.21.4 | what existed when this was written | — | superseded |
+| **Goal 1** | **Forge + 1.20.1** | run alongside a Forge modpack (furniture/biome packs) | medium | ✅ shipped |
+| **Goal 2** | **Fabric + 26.2** (latest vanilla) | remote server for vanilla clients | medium | ✅ shipped |
+| **Stretch** | **1.12.2** (any loader) | the "golden-age modding" servers | **hard** | not attempted |
+
+The built matrix is far wider than the table's two goals: **MC 1.17.1 → 26.2**, with
+**Fabric** across the whole range, **Forge** 1.17.1→1.21.11 and **NeoForge** 1.21→1.21.11.
+The mechanism is branch-per-toolchain-era + Stonecutter + the composing `overlays/` chain
+(`internal_docs/BUILD-STRATEGY.md`).
 
 - **Loaders:** Fabric API is touched in only ~2 files. Extract a small `PlatformEvents`
-  interface; use **Architectury** (Loom + API), which targets **Fabric, Forge, and
-  NeoForge** from one shared core. NeoForge is a 2023 fork of Forge and is *not*
+  interface (**built** — it is the one loader seam, with a thin impl per loader module);
+  build with **Architectury Loom**, which targets **Fabric, Forge, and
+  NeoForge** from one shared core. **The Architectury *API* is deliberately NOT used** —
+  the loader seam is hand-written DI, so the shipped jars carry zero runtime deps, and the
+  26.x era builds on plain Fabric Loom (Architectury Loom cannot yet build unobfuscated
+  26.1+). NeoForge is a 2023 fork of Forge and is *not*
   cross-compatible with it; for **1.20.1 we target Forge specifically** (the son's
   modpack), while newer versions would lean NeoForge.
 - **Versions:** the volatile surface is the fake-player network stack + the
@@ -468,11 +552,16 @@ most code is still stubs (the coupling surface multiplies as subsystems are writ
   version/loader API behind an interface is fine for **cold/setup** code (event
   registration, planning-boundary world access) where dispatch cost is noise. But on the
   **per-block hot path** (e.g. `NavSectionBuilder`'s read+classify loop) a virtual call
-  *per block* reintroduces exactly the dispatch/megamorphism overhead `block_reading.md`
+  *per block* reintroduces exactly the dispatch/megamorphism overhead `docs/Optimizations/01_block_reading.md`
   fought to eliminate. There, **select the concrete version-specific implementation once
-  at load** (e.g. `NavSectionBuilder_1_21` vs `NavSectionBuilder_1_20`) so the inner loop
-  calls the versioned API directly and stays monomorphic / JIT-inlinable. The thin
-  platform interface lives only at the **selection boundary**, never inside a tight loop.
+  at load** so the inner loop calls the versioned API directly and stays monomorphic /
+  JIT-inlinable. The thin platform interface lives only at the **selection boundary**,
+  never inside a tight loop. **As built** the selection is done at *compile* time rather
+  than by suffixed sibling classes: the divergent primitive is a tiny static helper in
+  `platform/` (`BlockLookup`, `ChunkCoords`, `Sections`, `TagLookup`, …) whose body is
+  supplied by the highest applicable `overlays/<era>/` directory — one class name, one
+  implementation per build, so the call site is a static and JIT-inlines to nothing. Core
+  logic (e.g. `ChunkNavLoader`, `NavSectionBuilder`) stays in `src/` and never forks.
 - **The 1.12.2 stretch is genuinely hard** and called out separately: 1.12.2 predates
   "the Flattening" (1.13), so blocks use **numeric IDs + metadata** instead of the
   blockstate/`PalettedContainer` model the whole world model is built on. That is a
@@ -502,7 +591,8 @@ ascends the pathological open-air pillar (incl. the floating-block case). Built:
   + `setBlockState`-mixin freshness, the version-selected `platform/` adapters.
 - **HPA\* region tier** (was Phase 3) — implicit fixed-grid octree→quadtree cost pyramid (face-to-center cost,
   **NO entrances** — §6.5), `RegionPathfinder` + the sliding-window `PathPlan` driver + corridor `RegionBound`.
-  Spec: `internal_docs/HPA-IMPLEMENTATION.md`. Supersedes the semantic `region/` classes.
+  Spec: `internal_docs/HPA-IMPLEMENTATION.md`. Superseded the semantic `region/` classes, which
+  have since been deleted outright.
 - **Block tier + movements + macro-ops + partial-path** (was Phase 4's block half) — alloc-free
   `BlockPathfinder`, the Tier-1 `Movement` set, cuboid macro-collapse + the `GoalForcedCost` premium, and
   `PARTIAL_PATH` (ON) as the structural net for heuristic terrain blind spots. Specs:
@@ -557,8 +647,12 @@ HPA*-tier issues surfaced during the Phase-1 cross-version smoke test (2026-06-2
    (optimistic-default-over-unexplored is the planning side; the driver side is new) — plus graceful degradation
    instead of log spam.
 
-4. **Time-based search cap** (replace the 10k-node cap; more robust as the per-node tick costs shift). Cheap,
+4. ✅ **DONE** (s44, with the async pass). Kept for the record: **Time-based search cap** (replace the 10k-node
+   cap; more robust as the per-node tick costs shift). Cheap,
    independent. Underpins the partial-path safety story (HPA*'s global vision keeps partials off the cave-trap).
+   *As shipped:* in async mode the wall clock is the cap (`pathing.asyncSearchBudgetMs`, default 250, checked
+   every 256 pops) and the node cap degrades to a memory-only backstop (`TIME_MODE_NODE_BACKSTOP` = 262k); the
+   old 10k node cap survives only in the byte-identical sync mode as `pathing.syncSearchBudgetNodes`.
 
 **On growing the sliding `WINDOW` (considered, deprioritized).** Because the regions form an implicit octree and
 a path never doubles back through a visited region, the count of regions spiralled through before the goal comes
@@ -568,17 +662,24 @@ weight on a greedy A* that already shows pathologies past ~3 regions (30–40 bl
 worse search blow-ups. **Prefer fixing the projection (#2) over growing the window**; revisit window size only if
 the projection fix proves insufficient.
 
-**Phase 3 — Pathfinding completeness.** PARTIALLY DONE: Swim (the full sprint-swim mode family), Climb,
-and Parkour are built (§7.2), and **owner-portal following** works (nether portal index + portal-seek/ENTER +
-cross-dimension FOLLOW). Still open: Crawl / DiagonalAscend / wall-clutch; true cross-dimension *routing*
-(cross-dimension skeleton stitching + the §6.5 8:1 Nether frame in the region heuristic);
-**background-threading** the search (removes the ~11 ms tick hitches seen during
-multi-replan climbs; requires making the search thread-safe first). Incremental and independent.
+**Phase 3 — Pathfinding completeness.** PARTIALLY DONE: the full fluid family (upright Swim incl. lava, the
+prone sprint-swim pair, the StartSprintSwim/EndSprintSwim pose transitions, Surface's bank crawl-out,
+RideBubbleColumn), Climb, Parkour/DiagonalParkour, and WalkOff are built — 18 movements (§7.2) — and
+**owner-portal following** works (nether portal index + portal-seek/ENTER +
+cross-dimension FOLLOW). **Background-threading is DONE** (s44: the `pathfinding/async/` planner pool +
+the `pathfinding/splice/` seam, behind `pathing.async`, default ON; complex-path tick time ~8–16 ms → ~3 ms).
+Still open: Crawl / DiagonalAscend / wall-clutch; a DOWN bubble column; true cross-dimension *routing*
+(cross-dimension skeleton stitching + the §6.5 8:1 Nether frame in the region heuristic). Incremental and
+independent.
 
-**Phase 4 — Resource layer + useful commands.** The sparse **resource octree** / `RegionMetadata` counts
-(§6.3, persisted — §6.6) → **search-by-resource-location** (ascend/descend search over the histogram) →
-commands like `mine diamonds` / `cut wood` (+ an **inventory-drop** mechanism). Depends on **Phase 1**
-(inventory). This is the payoff that makes Orebit a genuine in-game helper, not just a follower.
+**Phase 4 — Resource layer + useful commands.** ✅ **LARGELY DONE.** The sparse **resource pyramid**
+(§6.4, persisted — §6.6) shipped as `worldmodel/resource/` (`ResourceScan` tallies during the nav-grid
+classify pass; `ResourcePyramid`/`ResourceMerger` roll up; `ResourceQuery` does the ascend/descend
+**search-by-resource-location**, including the 3×3 neighbourhood ascend across region/quadrant boundaries) →
+commands `/bot find`, `/bot gather`, `/bot report`, and the **inventory-drop** mechanism `/bot drop`. Depended
+on **Phase 1** (inventory). This is the payoff that makes Orebit a genuine in-game helper, not just a follower.
+Still open here: the locate-vs-gather taxonomy split's second half (see the resource-taxonomy notes) and
+persisting the abundance tally across restart at every level.
 
 **Phase 5 — Debug / UX polish.** A debug-view enable/disable command; split debug particles (HPA*-center
 region path vs A*-exact block path, so a region-vs-block disagreement is visible). Small; slot anytime.
@@ -608,12 +709,21 @@ bar HPA\* and the macro-ops were held to.
 
 ## 11. Testing & measurement
 
-- **JMH** for read/classify/cost micro-benchmarks (headless, Claude-runnable).
-- **Fabric GameTest** (`runGametest`, headless) for end-to-end pipeline validation on
-  real generated chunks.
-- **Empirical disk measurement** — deferred until *all* persisted structures (resource
-  octree + HPA\*) exist, then measure true compressed bytes/chunk over the dev world
-  and compare to the ~6–8% estimate.
+- **JMH** for read/classify/cost micro-benchmarks (headless, Claude-runnable). Built:
+  `PathfinderBenchmark` / `BlockReadBenchmark` / `PatchStormBenchmark`, run inside the
+  Fabric Knot classloader (`fabric-loader-junit`, `forks=0`), mc-1.21 era only.
+- **End-to-end pipeline validation on real generated chunks.** Fabric GameTest
+  (`runGametest`) was the original plan and was **never built**. What shipped instead is
+  the headless dedicated-server autotest (`scripts/run-autotest.ps1` → `:fabric:<ver>:runAutotest`
+  → `HeadlessAutotest`), which boots a real server, spawns a bot, drives a `/bot` command
+  and asserts a result file — plus a plain JUnit suite over the pathfinder/movement/region
+  layers. **The autotest must run against a frozen `-MasterWorld`:** MC worldgen is not
+  deterministic for vegetation (trees generate in parallel chunk order), so seed regen is
+  not a stable regression oracle.
+- **Empirical disk measurement** — was deferred until *all* persisted structures (resource
+  pyramid + HPA\*) existed. **They now do, so this is unblocked and still outstanding:**
+  measure true compressed bytes/chunk over the dev world against the sharded
+  `hpa.*.bin`/`res.*.bin` files and compare to the ~6–8% estimate (§6.6).
 - **Determinism tests** — same world + seed → identical nav data, regions, and paths.
 
 ## 12. Decisions log
@@ -638,15 +748,23 @@ Ratified during design review (with rationale recorded in project memory):
    local, and the 8:1-heuristic-only rule all stand.)*
 6. Disk budget ~6–8%/dimension, under the 10–15% target.
 7. Movement vocabulary = **Baritone set + EnterPortal**, **extensible interface**,
-   **break/place/door folded into moves**.
+   **break/place/door folded into moves**. *(As built: 18 movements, §7.2. `EnterPortal` was
+   NOT built — nether-portal travel sits above the vocabulary in `NetherPortalIndex` +
+   `BotPortalFollower`. The extensible interface and the folded interactions both stand.)*
 8. Cost model = **tick-based**, Baritone-seeded; mining = inverse tool strength +
    falling recursion; `COST_INF` cap for the impractical. **Bot ≠ player:** food
    ignored; health, breath, and tool durability are **configurable**; **consumables
    (blocks, durability) tracked along the path** (not snapshotted once) so a route that
    would run out is rejected, not discovered mid-execution.
 9. Block heuristics stay **admissible** (the hierarchy earns optimal local paths).
-10. Portability = **shared core + adapters** (Architectury/NeoForge, Stonecutter),
-    structured early.
+   *(**Reversed** — see §7.4. The bet did not survive contact: even windowed searches drowned
+   in equal-cost route ties, so the shipped block heuristic is symmetric octile ×
+   `greedyWeight` (default 2.0) — deliberately inadmissible — with partial paths + the
+   irreversibility guard as the safety net. The **admissible `GoalForcedCost` premium** and
+   the region-tier heuristic are the parts that stayed admissible.)*
+10. Portability = **shared core + adapters** (Architectury Loom / Stonecutter / composing
+    `overlays/`; Fabric + Forge + NeoForge), structured early. *(The Architectury **API** is
+    deliberately unused — hand-written loader DI, zero runtime deps — §9.)*
 
 ### Open questions
 

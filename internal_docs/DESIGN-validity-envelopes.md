@@ -88,10 +88,18 @@ All predicates are settled-gated per §2 unless noted; cells are the plan's own 
 | **Traverse case B** (step-assist +1) | from stand `(fx,fy+1,fz)`; target column band `(tx, ty..ty+1, tz)` | the auto-step's rise crosses the lower foot cell for a tick — the band admits it. |
 | **Descend** | from stand `(fx,fy+1,fz)`; dest COLUMN feet band `(tx, fy..fy+1, tz)` | `fy` = the destination stand (shallow-water landing is in-fluid there — inside); `fy+1` is the **LIP TRANSIT**: stepping off, the centre crosses into the dest column while the box is still grounded on the from-block's lip — a legitimate mid-step state, NOT displacement. Omitting it produced the longrun-8 first-hold false positive; the general lesson: enumerate the transit states of the move's own physics before declaring the set. |
 
-**Not yet enveloped** (legitimate-state analysis pending, same idiom): the swim family
-(Swim/SprintSwim/StartSprintSwim/Surface/DiagonalSprintSwim), Pillar, WalkOff, Fall, Climb,
-MineDown. Fall's default `reached` is also deliberately ungated (§5) — it is not committed and its
-landing may be buoyant water.
+**Coverage, re-verified 2026-08-07** (`grep -l failWhen movements/`) — `Diagonal` and `Climb` have
+since gained envelopes and are no longer on the open list.
+
+- **HAVE an envelope:** Traverse, Ascend, Descend, Diagonal, Parkour, DiagonalParkour, Climb.
+- **STILL LATCH ON DISPLACEMENT (open work, same idiom, each needs its own legitimate-state
+  analysis):** the whole water family (Swim / SprintSwim / DiagonalSprintSwim / StartSprintSwim /
+  EndSprintSwim / Surface), Pillar, WalkOff, Fall, MineDown, RideBubbleColumn.
+
+Fall's default `reached` is also deliberately ungated (§5) — it is not committed and its landing may
+be buoyant water (or, since the climb arc, an arrested hang: `Fall.plan`'s `done` is
+`footMatch && (grounded() || onClimbable())`). The one open owner ruling that would widen every
+envelope's settled-set to include `onClimbable()` is recorded in `NOTES-movement-physics.md` §6.1.
 
 ## §4 The fail→log→HOLD policy (owner-ratified 2026-07-23)
 
@@ -202,7 +210,7 @@ and act at the gate crossing.
   fires with the centre ≥ body radius inside the cell, so a grounded spill into the fail set is
   impossible in normal execution and a mis-trigger surfaces as a clean envelope FAIL. The old
   `TAKEOFF_EDGE_ALONG`/`TAKEOFF_EDGE_RAW` constants are DELETED (ParkourEnvelope keeps its own
-  private 0.40 derivation copy — see `DESIGN-parkour-envelope.md` status). The hazard-predictive
+  private 0.40 derivation copy — see `NOTES-movement-physics.md` §1.2/§2). The hazard-predictive
   early-takeoff branch is preserved verbatim. Known slack: the jump now launches ~0.05–0.09
   along-line earlier than the envelope derivation's 0.40 assumption — covered by the sprint
   predictor + airborne servo; max-gap diagonal tiers deserve one in-game look.

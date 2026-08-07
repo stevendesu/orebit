@@ -1,9 +1,12 @@
 # Orebit configuration — `config/orebit.properties`
 
 > Phase 1 (Agency Layer) owner-facing config. This is the canonical reference for every key the server owner
-> can set. The subsystem lives in `config/` (`Config`, `ConfigKeys`, `ConfigValidator`, `ConfigLoader`) and is
-> read by the pathfinder (via `BotCaps`), the follower (conjured block + future survival flags), and the
-> mining-tick model (`MiningModel`). Defaults reproduce today's stock follower behaviour **with one deliberate
+> can set. The subsystem lives in `config/` (`Config`, `ConfigKeys`, `ConfigValidator`, `ConfigLoader`,
+> `ProtectedBlocks`) and is read by the pathfinder (via `BotCaps`), the follower (conjured block + the
+> runtime-wired survival flags), the mining-tick model (`MiningModel`), the nav/region maintenance pipeline
+> (`ChunkNavLoader`, `HpaMaintenance`, `RegionPersistence`/`RegionShardLoader`/`RegionEvictor`), and the
+> ability executors (`BotCrafter`/`BotFarmer`/`BotFighter`/`BotBuilder`).
+> Defaults reproduce today's stock follower behaviour **with one deliberate
 > exception** — `mining.protectedBlocks` defaults to a broad "don't wreck the build" set
 > (`ProtectedBlocks.DEFAULT_SPEC`) rather than empty, so a fresh install routes *around* player-placed and
 > decorative blocks instead of mining through them. Every other key still generates a behaviour-neutral file.
@@ -26,8 +29,10 @@ Plain `java.util.Properties` (JDK built-in — **zero new dependencies**):
 
 - `key=value`, one per line.
 - `#` starts a comment line.
-- Flat, dotted, namespaced keys (`survival.*`, `placement.*`, `mining.*`, `pathing.*`) — the namespace is
-  purely lexical (a dotted prefix), `Properties` has no real sections.
+- Flat, dotted, namespaced keys (`survival.*`, `placement.*`, `mining.*`, `pathing.*`, `hpa.*`, `doors.*`,
+  `crafting.*`, `farming.*`, `combat.*`, `building.*`) — the namespace is purely lexical (a dotted prefix),
+  `Properties` has no real sections. `ConfigKeys` lists every key exactly once, in the order
+  `ConfigLoader.writeDefault` emits them; this document follows the same order.
 
 On first run (file missing) Orebit **writes a fully-commented default** documenting every key, then uses
 `Config.DEFAULT`. On a read/parse error it logs a warning and falls back to defaults — it never crashes server
@@ -70,11 +75,15 @@ start. Out-of-range or unparseable individual values are clamped/defaulted with 
 | `mining.ticksByHardness` | boolean | `true` | Mining time scales with block hardness/tool (the physically-derived tick model) vs. a flat per-block time. | `mining.ticksByHardness=false` |
 | `mining.ticksToMineFlat` | int `>=0` | `0` | Ticks to mine one block when `ticksByHardness=false`. Ignored when `ticksByHardness=true`. `0` = insta-mine (matching today's flat behaviour). | `mining.ticksToMineFlat=20` |
 | `mining.breakBaseCost` | float `>=0` | `0.0` | Flat surcharge (ticks) added to **every break the planner folds**, on top of the real mining time — the mining-side mirror of `placement.placeBaseCost`: a behavioral "reluctance to edit the world" penalty. Raise it to discourage gratuitous digging and hazard punch-throughs (breaking through a berry bush/cobweb instead of wading). Rides the per-pathfind inventory snapshot (`MovementContext.InventoryView.breakBaseCost` → `breakCost()`), never `BotCaps`. | `mining.breakBaseCost=12` |
-| `mining.protectedBlocks` | comma list of block ids + `#`tags | *(broad default set — `ProtectedBlocks.DEFAULT_SPEC`, NOT empty)* | Blocks the bot must **NEVER break — nor clear/replace with a placement** (filling a cell destroys its occupant, so the `OPEN_PLACE` bit and both live place paths refuse protected occupants too). **Default (deliberate, the one non-neutral default):** a broad "don't wreck the build" set — logs/planks, cobblestone variants, stairs/slabs/walls, fences/gates, doors+trapdoors, glass, carpets, ladders, cultivated plants (NOT wild grass/fern), work stations + chests, torches/lanterns/campfires, glowing blocks, redstone components, beds/signs/banners. An **ABSENT** key parses `DEFAULT_SPEC` (in `ConfigValidator`, at load — the block registry + datapack tags are bound then, NOT at `Config.DEFAULT` static-init, which is why the `Config` record still holds `ProtectedBlocks.EMPTY` and the validator/loader route the default string); a **PRESENT** key (even empty) is honored verbatim, so an existing config keeps what it set and only new/omitting configs get the set. Doors: protection blocks BREAKING only — the hand door OPEN/CLOSE toggle (separate edit path, `MovementContext.doorSetClears`/executor `setDoorOpen`, no PROTECTED check) still operates wooden/copper doors; iron doors route around. Portability: tags preferred (fail silently when absent) with old+new names composed across renames (`#carpets`+`#wool_carpets`, `#wooden_doors`+`#doors`+`iron_door`, `#small_flowers`+`#tall_flowers`+`#flowers`, `#signs`+`#all_signs`); version-variant ids (froglights 1.19, sculk sensors 1.19/1.20, crafter/copper bulbs 1.21) warn+skip on older versions. Entries are exact block ids (`minecraft:chest`) or block tags (`#minecraft:beds`); malformed/unknown entries warn and are skipped individually. Enforced **both sides** (the planner/executor parity rule): planner-side the list is folded into the `NavBlock` classification fingerprint at config install (`NavBlock.applyProtected` sets the PROTECTED descriptor bit, splitting matching states into their own navtypes — the derived BREAKABLE bit excludes them, so `MovementContext.breakable`/`breakableThrough`/MineDown/the `GoalForcedCost` dig face all refuse in one bit test and routes are planned *around* protected blocks); execution-side every live break (`AllyBotEntity.applyEdits`/`place`, `BotMining`) re-checks the LIVE state via `Config.mayBreak` — the immediate hard backstop that also covers stale grids. **Changing this list requires a server restart** (or waiting for chunks to rebuild) for the *planner* to fully see it: protected-ness is baked into cached nav-grid navtypes at classification time; `/bot config reload` re-derives the table + warns, and the execution-side refusal applies immediately. A `#tag` that doesn't exist on the server parses fine and matches nothing. | `mining.protectedBlocks=minecraft:chest, #minecraft:beds, minecraft:diamond_ore` |
+| `mining.protectedBlocks` | comma list of block ids + `#`tags | *(broad default set — `ProtectedBlocks.DEFAULT_SPEC`, NOT empty)* | Blocks the bot must **NEVER break — nor clear/replace with a placement** (filling a cell destroys its occupant, so the `OPEN_PLACE` bit and both live place paths refuse protected occupants too). **Default (deliberate, the one non-neutral default):** a broad "don't wreck the build" set — logs/planks, cobblestone variants, stairs/slabs/walls, fences/gates, doors+trapdoors, glass, carpets, ladders, cultivated plants (NOT wild grass/fern), work stations + chests, torches/lanterns/campfires, glowing blocks, redstone components, beds/signs/banners. An **ABSENT** key parses `DEFAULT_SPEC` (in `ConfigValidator`, at load — the block registry + datapack tags are bound then, NOT at `Config.DEFAULT` static-init, which is why the `Config` record still holds `ProtectedBlocks.EMPTY` and the validator/loader route the default string); a **PRESENT** key (even empty) is honored verbatim, so an existing config keeps what it set and only new/omitting configs get the set. Doors: protection blocks BREAKING only — the hand door OPEN/CLOSE toggle (separate edit path, `MovementContext.doorSetClears`/executor `setDoorOpen`, no PROTECTED check) still operates wooden/copper doors; iron doors route around. Portability: tags preferred (fail silently when absent) with old+new names composed across renames (`#carpets`+`#wool_carpets`, `#wooden_doors`+`#doors`+`iron_door`, `#small_flowers`+`#tall_flowers`+`#flowers`, `#signs`+`#all_signs`); version-variant ids (froglights 1.19, sculk sensors 1.19/1.20, crafter/copper bulbs 1.21) warn+skip on older versions. Entries are exact block ids (`minecraft:chest`) or block tags (`#minecraft:beds`); malformed/unknown entries warn and are skipped individually. Enforced **both sides** (the planner/executor parity rule): planner-side the list is folded into the `NavBlock` classification fingerprint at config install (`NavBlock.applyProtected` sets the PROTECTED descriptor bit, splitting matching states into their own navtypes — the derived BREAKABLE bit excludes them, so `MovementContext.breakable`/`breakableThrough`/MineDown/the `GoalForcedCost` dig face all refuse in one bit test and routes are planned *around* protected blocks); execution-side every **pathing-motivated** live break re-checks the LIVE state via `Config.mayBreak` — the immediate hard backstop that also covers stale grids. The `mayBreak` call sites are exactly `AllyBotEntity.applyEdits`/`place`, `BotNavigator`'s edit replay + occupant clear, `BotGatherer`'s LOS-occluder dig, and `BotBuilder`'s mismatch clear. **`BotMining` deliberately does NOT consult it** (owner ruling 2026-07-29: the deliberate task hands behind `/bot gather` / a harvest / `/bot mine` / a table reclaim are exempt, so protecting logs never refuses `/bot gather wood`; `BotMining` only refuses vanilla-unbreakables without the opt-in). **Changing this list requires a server restart** (or waiting for chunks to rebuild) for the *planner* to fully see it: protected-ness is baked into cached nav-grid navtypes at classification time; `/bot config reload` re-derives the table + warns, and the execution-side refusal applies immediately. A `#tag` that doesn't exist on the server parses fine and matches nothing. | `mining.protectedBlocks=minecraft:chest, #minecraft:beds, minecraft:diamond_ore` |
 | `mining.allowUnbreakable` | boolean | `false` | Bot may mine **vanilla-unbreakable** blocks (negative destroy time — bedrock, barriers, end portal frame/gateway, command blocks, …; detected by the hardness sign at classification time, never a hardcoded block list) at the **tool-derived** stand-in cost `MiningModel.unbreakableTicks(tier)` (see `mining.unbreakableHardness`). Both sides honor it: planner (`BotCaps.allowUnbreakable` → `MovementContext.breakable`/`breakableThrough`/`breakCost` at the bot's best pickaxe tier, `GoalForcedCost` grind face at the fastest-tier admissible bound) and executor (`BotMining` grinds at the same tick rate — its pickaxe tier from the same canonical-`STONE` probe the planner snapshot uses, so parity holds — then forces the edit past the survival path's own refusal; `Config.mayBreak` gates the legacy `applyEdits` path). **Its own axis**: deliberately *not* subject to `mining.maxHardness` (the 255 sentinel doesn't order against real hardness). `mining.protectedBlocks` **always overrides**. Hot-reloadable (no descriptor bit — rides caps + the re-baked table). | `mining.allowUnbreakable=true` |
 | `mining.unbreakableHardness` | int `>= 1` | `3200` | The **synthetic pseudo-hardness** the `allowUnbreakable` stand-in derives its cost from (vanilla-unbreakable blocks have no real destroy time). Threaded into `MiningModel.buildTable`; `MiningModel.unbreakableTicks` feeds it through the SAME closed-form real blocks use — assuming the **pickaxe** category with a correct tool required (every vanilla-unbreakable block is pickaxe-family) — so a better pickaxe **tier** digs faster (diamond `hardness/5·20·1.5/8`) and bare hands pay the 5× no-harvest penalty. On the same quantized scale as real blocks (obsidian, the hardest, is ~250) but **may exceed 255** (it is NOT stored in the 8-bit descriptor hardness field, which stays pinned to the 255 unbreakable sentinel — the compute is separate). Default `3200` reproduces the old fixed cost for the common case: a diamond pickaxe grinds one block in exactly `3200/5·20·1.5/8 = 2400` ticks (2 min). Both the planner cost and the executor grind rate read it (parity). NOT in `BotCaps` — a `MiningModel` bake-time static, read only on the cold break-cost paths. | `mining.unbreakableHardness=250` |
 
-### `pathing.*` — the A\* search knobs (carried on `BotCaps` into `BlockPathfinder`)
+### `pathing.*` — the A\* search knobs, plus the nav-pipeline scheduling budgets
+
+> Only the first four (`syncSearchBudgetNodes`, `greedyWeight`, `costPerHitpoint`, `boxedInScanRadius`) are
+> carried on `BotCaps` into `BlockPathfinder`. The rest are the boot/warm-up switch, the async-pool trio, and
+> the per-tick pipeline budgets/gates — each row states its consumer.
 
 | Key | Type | Default | Effect | Example |
 |---|---|---|---|---|
@@ -90,26 +99,42 @@ start. Out-of-range or unparseable individual values are clamped/defaulted with 
 | `pathing.chunkBuildBudgetMs` | float `(0, 1000]` | `2.0` | **Primary** per-level per-tick wall-clock budget (ms) for draining the NavGrid chunk-build queue (`ChunkNavLoader`, at `onWorldTickEnd`). Elapsed is checked **after each column**, so worst-case overshoot is one column (both drain paths — FIFO and bot-vicinity-nearest). Per-column build cost swings ~15× with terrain (surface ~1 ms, cave ~5 ms — `ChunkBuildBenchmark`), which the old fixed COUNT couldn't adapt to (8 cave columns = ~41 ms of a 50 ms tick); a time budget drains as many columns as safely fit. Bounded above by the `pathing.chunkBuildsPerTick` count backstop. The ceiling is a generous 1 s (not half-a-tick) so the **headless autotest can pin a high budget that never binds** — see the determinism note below. Not read into `BotCaps`. | `pathing.chunkBuildBudgetMs=4.0` |
 | `pathing.chunkBuildsPerTick` | int `>= 1` | `64` | **COUNT BACKSTOP** on NavGrid chunk builds per level per tick — **no longer the primary gate** (that is `pathing.chunkBuildBudgetMs`). Keeps a burst of cheap all-air columns from draining unbounded inside the time budget. Default `64` is a safety ceiling, not a per-tick target (was `8` when it was the primary count gate). Not read into `BotCaps`. | `pathing.chunkBuildsPerTick=128` |
 | `pathing.hpaFlushBudgetMs` | float `(0, 1000]` | `1.0` | Per-level per-tick wall-clock budget (ms) for the HPA\* region-tier **dirty-leaf flush** (`HpaMaintenance.flush`, at `onWorldTickEnd`) — the region-tier analog of `pathing.chunkBuildBudgetMs`. Elapsed checked after each leaf. A leaf rebuild is ~0.15–1.8 ms, so `1.0` usually drains the (typically small) dirty set fully; a bulk edit (TNT / fill) amortizes over a few ticks. Bounded above by the hardcoded `HpaMaintenance.MAX_LEAVES_PER_TICK` count backstop (`64`). Not read into `BotCaps`. | `pathing.hpaFlushBudgetMs=2.0` |
+| `pathing.regionShardLoadBudgetMs` | float `(0, 1000]` | `2.0` | Per-level per-tick wall-clock budget (ms) for the Stage-2 **region-shard lazy-load** drain (`RegionShardLoader`) — the region-persistence analog of `pathing.chunkBuildBudgetMs`. When `hpa.lazyLoad` is on, a coarse-only startup pages shard leaves in on demand; each whole-shard load is atomic (measured ~11–34 ms, tick-safe now the on-disk format is un-gzipped) and this budget bounds how many shards one tick pages in, with a hardcoded ≥1-per-tick count backstop so progress is always guaranteed. Elapsed is checked after each shard (worst-case overshoot one shard). **Ignored under eager-load-all** (`hpa.lazyLoad=false`, the default — no shard is ever requested). Not read into `BotCaps`. | `pathing.regionShardLoadBudgetMs=4.0` |
+| `pathing.navReadyRadiusChunks` | int `0..64` | `4` | Radius (in chunks) of the ring around the bot whose NavGrid must be BUILT before the bot plans a path — `N` ⇒ a `(2N+1)²` chunk ring. NavGrids build asynchronously over a few ticks after chunks load and the planner reads an unbuilt cell as AIR, so planning too early picks a truncated-world target (the cold-start canopy bug). The bot **HOLDS** (does not plan) until the ring is built. Default `4`: the block-tier sliding window spans `PathPlan.WINDOW` (=4) level-0 regions — each a 16-block chunk — so the far window target sits up to 3 chunks ahead; `4` covers that window plus a 1-chunk margin (and ⊇ the gather SCAN volume, radius 3). `0` disables the gate (plan immediately, pre-gate behaviour). Not in `BotCaps` — read per readiness poll by `BotNavigator`, `BotGatherer`, and the `BoxedInCourse`/`ParkourCourse` harnesses. | `pathing.navReadyRadiusChunks=0` |
+| `pathing.navReadyTimeoutTicks` | int `1..72000` | `150` | How many consecutive ticks the bot waits for that readiness ring before giving up and telling the owner it can't get terrain data. A give-up **BACKSTOP only** — the gate itself is state-based (it polls real `NavStore` residency and proceeds the instant the ring is built), so on a healthy server the wait is 1–2 ticks and this never fires. It exists so a genuinely un-loadable area (world border, permanently missing chunk) fails cleanly instead of hanging. Default `150` (~7.5 s at 20 t/s). Same consumers as the radius. | `pathing.navReadyTimeoutTicks=300` |
 
 > **Determinism convention — the headless autotest pins HIGH budgets (`internal_docs`-durable, do not lose this):**
 > The time-budget drains (`ChunkNavLoader`, `HpaMaintenance.flush`) are wall-clock-scheduled, so the *number*
 > of columns/leaves drained per tick varies run-to-run with machine timing. That is fine — even good — in
 > production (adaptive scheduling), but it would make the headless autotest (`scripts/run-autotest.ps1`) a
 > non-reproducible regression oracle: a different per-tick drain count can shift when nav/region data becomes
-> available and thus which skeleton a mid-run search reads. So the autotest's config template
-> (`scripts/autotest/orebit.properties`) pins **`pathing.chunkBuildBudgetMs = 100`** and
-> **`pathing.hpaFlushBudgetMs = 100`** (high — never bind) with **`pathing.chunkBuildsPerTick = 8`** (and the
-> hardcoded `MAX_LEAVES_PER_TICK = 64` for the flush). With the ms budgets never binding, the **fixed count
-> backstops govern**, so per-tick drain counts are identical across same-seed runs. Production uses the low
-> defaults (`2.0` / `1.0`) for adaptive scheduling; the autotest trades that for reproducibility. This is the
-> same class of determinism pin as the template's existing `pathing.async=false`. (The generous 1 s clamp
-> ceiling on the two ms keys exists precisely so `100` is a legal, un-clamped value.)
+> available and thus which skeleton a mid-run search reads. The ratified pin for a determinism run is
+> **`pathing.chunkBuildBudgetMs = 100`** and **`pathing.hpaFlushBudgetMs = 100`** (high — never bind) with
+> **`pathing.chunkBuildsPerTick = 8`** (and the hardcoded `MAX_LEAVES_PER_TICK = 64` for the flush). With the
+> ms budgets never binding, the **fixed count backstops govern**, so per-tick drain counts are identical
+> across same-seed runs. Production uses the low defaults (`2.0` / `1.0`) for adaptive scheduling; the
+> autotest trades that for reproducibility. The generous 1 s clamp ceiling on the two ms keys exists
+> precisely so `100` is a legal, un-clamped value — `TimeBudgetConfigTest.highBudgetForAutotestDeterminismIsAcceptedNotClamped`
+> guards exactly that. **Note (verified against the tree):** the autotest template
+> `scripts/autotest/orebit.properties` currently pins only `pathing.async=false` and
+> `pathing.syncSearchBudgetNodes=40000` — the three drain keys above are NOT in the template, so an autotest
+> run today uses the low adaptive defaults. Add them to the template when a drain-timing-sensitive
+> regression needs the pin.
 
 ### `hpa.*` — the persisted region tier
 
 | Key | Type / range | Default | Meaning | Example |
 | --- | --- | --- | --- | --- |
-| `hpa.persistIntervalTicks` | int `>= 0` | `6000` | Cadence (server ticks) of the background crash-insurance flush of the persisted HPA region tier (`<world>/orebit/<dim>/hpa.bin` cost fragments + `res.bin` resource tallies; `DESIGN-worldmodel-persistence.md`), and only for dimensions marked dirty since their last flush. **A safety net only** — the authoritative flush runs on a graceful `SERVER_STOPPING` regardless (the primary trigger for the idle-auto-stop deployment). `0` disables the periodic flush (stop flush still runs). Not read into `BotCaps`; read per tick by `RegionPersistence.tick`. Persisted files are a **cache** — a bad magic / version / IO error treats the file as absent and the live world rebuilds it. Load is eager at `SERVER_STARTED` (all dimensions, tick thread, replaying `mergeUp*`); only level-0 leaves are stored. | `hpa.persistIntervalTicks=1200` |
+| `hpa.persistIntervalTicks` | int `0..16000000` | `6000` | Cadence (server ticks) of the background crash-insurance flush of the persisted HPA region tier, and only for dimensions with shards marked dirty since their last flush. **A safety net only** — the authoritative flush runs on a graceful `SERVER_STOPPING` regardless (the primary trigger for the idle-auto-stop deployment). `0` disables the periodic flush (stop flush still runs). Not read into `BotCaps`; read per tick by `RegionPersistence.tick`. The pass this interval TRIGGERS is itself spread across ticks under `hpa.persistFlushBudgetMs` (it no longer writes every dirty shard in one tick). **On-disk layout is `.mca`-style SHARDED** (`NOTES-perf-and-persistence.md`), not the old per-dimension `hpa.bin`/`res.bin` blobs: `<world>/orebit/<dim>/hpa.<X>.<Z>.bin` (cost levels 0–5 for the level-5 shard at `X=chunkX>>5, Z=chunkZ>>5`) + `hpa.coarse.bin` (cost level 6) + `res.<X>.<Z>.bin` (resource levels 0–5) + `res.coarse.bin` (resource levels 6–21, the global `/bot find`/`report` tally). Persisted files are a **cache** — a bad magic / version / IO error treats the file as absent and the live world rebuilds it. The startup load path is chosen by `hpa.lazyLoad`: eager `RegionPersistence.loadAll` (default) vs. coarse-only + on-demand shard paging. | `hpa.persistIntervalTicks=1200` |
+| `hpa.persistFlushBudgetMs` | float `(0, 1000]` | `2.0` | Per-level per-tick wall-clock budget (ms) for that periodic crash-insurance flush drain (`RegionPersistence.tick`) — the persistence analog of `pathing.hpaFlushBudgetMs`. The interval TRIGGERS the pass; this budget then bounds how much of the dirty-shard backlog is written each tick, the pass RESUMING on later ticks until it clears (the two coarse files written LAST, deferred to a later tick if the budget is spent). That turns the old one-tick flush spike (a whole dimension's dirty shards + both coarse files at once, measured ~1.9 s) into a steady trickle. Elapsed checked after each shard (worst-case overshoot one shard), with a hardcoded ≥1-shard-per-tick backstop so progress is guaranteed. Atomicity isn't required — each shard file is an independent atomic replace and the `SERVER_STOPPING` flush is authoritative — so spreading writes across ticks is safe. Not read into `BotCaps`. | `hpa.persistFlushBudgetMs=8.0` |
+| `hpa.lazyLoad` | boolean | `false` | Page the persisted region tier in **lazily** (Stage-2 bounded region RAM): at server start load ONLY the per-dimension coarse levels (`RegionPersistence.loadCoarseOnly`, which also indexes the shard files by parsing `(X,Z)` out of their filenames) and stream each per-shard leaf file in on demand as the planner touches it (the atomic `RegionShardLoader`, budgeted by `pathing.regionShardLoadBudgetMs`) — instead of eager-loading every shard up front (`loadAll`). Bounds RAM to the coarse tier + the shards actually visited. **Default `false`** — eager-load-all stays the shipped behaviour until the whole bounded-RAM stage is in-game-verified. **Requires a server restart to change** (it governs the startup load path; read once in `OrebitCommon`'s `onServerStarted` hook). | `hpa.lazyLoad=true` |
+| `hpa.residentLeafCap` | int `>= 0` | `0` | The Stage-2 **bounded region RAM** target: the maximum number of resident BUILT level-0 cost leaves (the dominant region-tier RAM cost, ~1.6–5.8 KB each) the cold-shard evictor (`RegionEvictor`) keeps paged in. **Default `0` = UNBOUNDED / eviction OFF** — the evictor is a no-op, so bounded RAM stays opt-in until the stage is in-game-verified. A positive value bounds RAM: once the resident built-leaf count exceeds it, the evictor pages the coldest shards whose backing chunk columns are **all currently unloaded** (LRU by last-touch, flushing any dirty shard first) back to disk — keeping the coarse (level-6) tier resident, so long-range planning still works over evicted regions — and the clobber-guard + `RegionShardLoader` page them back in on demand (byte-identical round-trip). Pairs naturally with `hpa.lazyLoad` (eviction converts an eager-loaded shard into a persisted-non-resident one either way). Read once per eviction sweep off `onWorldTickEnd`, never on the search hot path. | `hpa.residentLeafCap=4096` |
+
+### `doors.*` — how does the bot deal with doors in its path?
+
+| Key | Type / range | Default | Meaning | Example |
+| --- | --- | --- | --- | --- |
+| `doors.toggle` | boolean | `true` | The bot may OPEN/CLOSE hand-toggleable doors (wood/copper) by right-clicking, preferring that over smashing them or routing around. **The only ability-style key that rides `BotCaps`** — `Config.toBotCaps()` folds it into `BotCaps.mayToggleDoors`, which `MovementContext.mayToggleDoors`/`doorSetClears`/`canToggleExitDoor` gate the planner's cheap toggle edit on, and which occupies **bit 3 of the realizability signature** (`BotCaps.realizabilitySig`) — so a doors-on and a doors-off search record distinct crossing theorems. Default `true` (DOORS P3: the follower operates doors for real — opens a closed door before crossing, closes it again on a hallway-corner exit). Set `false` as a kill-switch to fall back to P1 behaviour (an already-open door is walked through, a closed door is mined). Iron doors are never hand-toggleable regardless. Note the door OPEN/CLOSE path never consults the PROTECTED bit, so protecting doors (the default set does) blocks BREAKING them only, not opening them. | `doors.toggle=false` |
 
 ### `crafting.*` — how does `/bot craft` deal with 3x3 recipes needing a table?
 
@@ -152,6 +177,8 @@ threads per search:
   `PathPlan` reads off `caps`; a search knob, excluded from the realizability signature)
 - `costPerHitpoint = pathing.costPerHitpoint` — the unified ticks-per-HP damage price every
   damage-as-cost term reads (hazard transit + fall damage)
+- `mayToggleDoors = doors.toggle` (the one ability-namespace key on `BotCaps`; unlike
+  `boxedInScanRadius` it IS in the realizability signature, bit 3)
 - `jumpHeight = 1` (fixed; not yet an owner knob)
 - `takesDamage = survival.takesDamage`, which also derives the fall window: a mortal bot gets the
   default safe/max fall distances, an immune bot gets unlimited (`IMMUNE_FALL` — every drop free).
@@ -169,8 +196,10 @@ surcharge), so mortality is a move-generation fact too.
   `Config` and `BotCaps` are cached in statics (`ConfigLoader.config()` / `ConfigLoader.botCaps()`).
 - **Hot-reload (no restart):** run **`/bot config reload`** in-game. It re-reads the same file, re-installs the
   cached `Config` + `BotCaps`, and re-bakes the `MiningModel` tick tables (so a changed `ticksByHardness` /
-  `ticksToMineFlat` model takes effect immediately). The command confirms with the new `maxNodes`,
-  `greedyWeight`, `canMine`, `canPlace`.
+  `ticksToMineFlat` model takes effect immediately), re-bakes the region tier's forward place model
+  (`RegionPlaceModel.bakeForward(placeBaseCost, removalCostWeight)`), and re-derives the protected-block
+  table. The command confirms with the new `maxNodes`, `greedyWeight`, `costPerHitpoint`, `canMine`,
+  `canPlace`.
 - **Exception — `mining.protectedBlocks` needs a restart to fully apply:** the list is baked into the
   `NavBlock` classification fingerprint (the PROTECTED descriptor bit) and nav-grid sections cache the
   navtypes they were classified with, so grid data built before a list change keeps the old fingerprints
@@ -183,6 +212,13 @@ surcharge), so mortality is a move-generation fact too.
   or resize the pool (the reload does drain the pool before rebaking the shared cost tables — see
   `internal_docs/DESIGN-background-pathfinding.md`). `pathing.asyncSearchBudgetMs` is read per search, so a reload
   does change it live while async is already on — but toggling async itself is restart-only.
+- **Exception — `hpa.lazyLoad` needs a restart:** it selects the STARTUP load path
+  (`RegionPersistence.loadCoarseOnly` + on-demand shard paging vs. `loadAll`), read once in
+  `OrebitCommon`'s `onServerStarted` hook, so a reload cannot switch an already-loaded tier. The rest of the
+  `hpa.*` group is hot (`persistIntervalTicks`/`persistFlushBudgetMs` are read per flushing tick,
+  `residentLeafCap` per eviction sweep), as are the `pathing.*` per-tick budgets and the `navReady*` gate.
+- **`doors.toggle` is hot** the same way the other `BotCaps` knobs are: the reload re-derives `botCaps`, and
+  the follower reads the live cache per replan — so it applies on the bot's next plan.
 - **`crafting.*` / `farming.*` / `combat.*` / `building.*` are fully hot:** the ability keys are
   executor-read (`BotCrafter`/`BotFarmer`/`BotFighter`/`BotBuilder`) per run/phase/tick, so a
   `/bot config reload` applies to the next `/bot craft` / `/bot farm` / threat / `/bot build`. The reload also re-bakes the `/bot craft` RECIPE INDEX
@@ -205,14 +241,26 @@ fix, and never failing the load:
 - `pathing.maxThreads` clamped to `1..64` (a sanity rail — the real `[1, cores − 2]` clamp happens at pool
   start, where the host core count is known).
 - `pathing.asyncSearchBudgetMs` clamped to `1..10000` (a >10 s per-search budget is treated as a config typo).
-- `pathing.chunkBuildBudgetMs` / `pathing.hpaFlushBudgetMs` clamped to `0.1..1000.0` (positive float; the `floatClamped`
-  helper). The generous 1 s ceiling admits the autotest's high, never-binding determinism pin (`100`).
+- `pathing.chunkBuildBudgetMs` / `pathing.hpaFlushBudgetMs` / `pathing.regionShardLoadBudgetMs` /
+  `hpa.persistFlushBudgetMs` clamped to `0.1..1000.0` (positive float; the `floatClamped` helper — all four
+  per-tick drain budgets share the rail). The generous 1 s ceiling admits the high, never-binding
+  determinism pin (`100`).
 - `pathing.chunkBuildsPerTick` clamped to `1..4096` (the count backstop; `0` would stall the nav pipeline).
+- `pathing.navReadyRadiusChunks` clamped to `0..64` (`0` disables the readiness gate; the ceiling is a typo rail).
+- `pathing.navReadyTimeoutTicks` clamped to `1..72000` (~1 hour ceiling; a give-up backstop, never `0`).
 - `pathing.boxedInScanRadius` clamped to `1..16` (a plan-entry cost knob; `0` would be a degenerate 1-cell box,
   a wide box just costs more at plan-entry).
 - `pathing.async` is a boolean (defaults to `Config.DEFAULT` on anything that isn't exactly `true`/`false`).
-- `mining.maxHardness` clamped to `0..255`.
-- `mining.ticksToMineFlat` clamped to `>= 0`.
+- `hpa.persistIntervalTicks` clamped to `0..16000000` (`0` disables the periodic flush; the ~9.5-day ceiling
+  is a typo rail).
+- `hpa.residentLeafCap` clamped to `0..Integer.MAX_VALUE` (`0` = unbounded / eviction off; no meaningful
+  upper rail — a large cap simply never binds).
+- `hpa.lazyLoad` is a boolean (same true/false-or-default rule).
+- `doors.toggle` is a boolean (same rule).
+- `mining.maxHardness` clamped to `0..255` (`BotCaps.UNBREAKABLE` is the ceiling constant).
+- `mining.ticksToMineFlat` clamped to `0..Integer.MAX_VALUE`.
+- `mining.unbreakableHardness` clamped to `1..10000000` (the synthetic pseudo-hardness deliberately may
+  exceed 255 — it is not stored in the 8-bit descriptor field).
 - `placement.removalCostWeight`, `placement.placeBaseCost`, and `mining.breakBaseCost` clamped to `>= 0.0`
   (the `weightNonNeg` helper).
 - `mining.protectedBlocks` parsed per entry (`ProtectedBlocks.parse`): each malformed id / tag warns and is

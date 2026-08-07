@@ -19,7 +19,7 @@ import com.orebit.mod.worldmodel.resource.ResourceMerger;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
 /**
- * The <b>Stage-2 bounded-region-RAM ORACLE</b> (DESIGN-worldmodel-persistence.md — coarse-only startup +
+ * The <b>Stage-2 bounded-region-RAM ORACLE</b> (NOTES-perf-and-persistence.md §4 — coarse-only startup +
  * on-demand atomic lazy-load). Proves the whole live lazy path is byte-identical to eager-load-all:
  * <b>coarse-only startup + partial-live exploration (with the clobber-guard active) + per-shard lazy-load
  * (decode-with-straddle + reconcile) == a fully eager pyramid</b>, at every level.

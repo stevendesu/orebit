@@ -108,9 +108,19 @@ one Gradle build.
   (`build.gradle.kts`, `settings.gradle.kts`, `stonecutter.gradle.kts`, loader `build.gradle.kts`).
   **`core` holds NO toolchain version values and is not directly buildable.** It is where all
   common/overlay work is authored.
-- **Era branches** — `main` (the newest era, GitHub default = "builds latest"), plus `mc-1.20`,
-  `mc-1.16`, `mc-1.12`, … going back. Each = `core` **+ one small commit** holding that era's
-  toolchain values. Each is independently buildable.
+  **Refinement forced by the 26 era (§8):** "build-script logic lives on `core`" holds only while
+  every era uses the *same build tool*. The 26 era uses pure Fabric Loom, not Architectury, so its
+  `settings`/`stonecutter`/root `build.gradle.kts` — plus `FabricPlatformEvents` and the
+  `fabric.mod.json` deps — are **era-owned on `main`**; `core` keeps the Architectury scripts (which
+  are also `mc-1.21`'s). The merge stays clean *because* `core` never edits those files.
+  Corollary trap: **`FabricPlatformEvents` is era-owned on BOTH eras** (each era carries its own
+  copy), so a new `PlatformEvents` seam method needing Fabric wiring must be added on each era
+  branch directly — a `core` edit to it conflicts with both. Forge/NeoForge impls stay on `core`.
+- **Era branches** — `main` (the newest era, GitHub default = "builds latest"), plus one branch per
+  older era going back. Each = `core` **+ one small commit** holding that era's toolchain values.
+  Each is independently buildable. *(The `mc-1.20`/`mc-1.16`/`mc-1.12` names used in earlier drafts
+  of this section were illustrative only — see §8 for the two eras that actually exist: `mc-1.21`
+  and `main`.)*
 
 **Why this is the dedup answer:** a common bug is fixed **once on `core`**; `git merge core` into
 each era branch propagates it **conflict-free** — because `core` contains no toolchain values,

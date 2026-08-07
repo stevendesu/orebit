@@ -19,8 +19,12 @@ honest BLOCKEDs).
   (`recordToMemory=false`); they still seed (caps-only sig). Antichain compaction lives in
   `RegionCrossingMemory.record` (skip-dominated / replace-strictly-dominated / coexist-incomparable).
 - **Persistence (Phase 2)** — 24 B rows in the v4 invalidation section of every shard/coarse file
-  (`CostPyramidCodec`, file VERSION now 7): `fromKey` carries LEVEL in bits 56..63, `toKey` carries
-  provenance in **two** bits 56..57 (the draft said one spare bit), `capsSig` 8 B. Section header =
+  (`CostPyramidCodec`; **file `VERSION` is 1**, reset from 7 on the 2026-07 `packLevelKey` repack that
+  narrowed `ry` 6→5 bits — disk is a cache, so the v2..v7 history was collapsed rather than bumped to v8;
+  the *layout* is still v7's). Post-repack packing: the key mask is **55** bits, `fromKey` carries LEVEL
+  in bits **55..63**, `toKey` carries provenance in **two** bits **55..56** (the draft said one spare
+  bit), fragment id sits at bits **49..54**, `capsSig` 8 B. Full byte layout:
+  `NOTES-perf-and-persistence.md` §1 and the `CostPyramidCodec` class Javadoc. Section header =
   `INVAL_SIG_SCHEMA_VERSION` (1) + `INVAL_GRAPH_CLASS_ID` (0, "optimistic-v1"); mismatch drops the SECTION
   only. Assign-to-FROM sharding; L6 rows ride the coarse file. `PROV_ESCALATION` rows are SESSION-ONLY
   (filtered at every encode; `PROV_PROOF`/`PROV_ROLLED_UP` persist). Decode additionally DROPS any row
@@ -107,10 +111,12 @@ test (inventory drifts between plan construction and failing search), null-inv n
 
 ## §4 Phase 2 — persistence (the reserved inval section)
 
-- **Record = 24 B**: `fromKey(8) + toKey(8) + capsSig(8)`. Level in fromKey's free high bits (keys
-  use 56; top 8 free). One spare toKey high bit = provenance (proof vs escalation vs rolled-up,
-  see Q1/Q2). Sharding: **assign-to-FROM** (matches the from-keyed read path); straddle eviction is
-  boundary-aware per the ratified sharding design.
+- **Record = 24 B**: `fromKey(8) + toKey(8) + capsSig(8)`. Level in fromKey's free high bits, provenance
+  in toKey's (proof vs escalation vs rolled-up, see Q1/Q2). *(Drafting-era bit positions assumed a 56-bit
+  key; the shipped post-repack numbers are in §0 — 55-bit mask, level 55..63, prov 55..56.)* Sharding:
+  **assign-to-FROM** (matches the from-keyed read path); straddle eviction is boundary-aware per the
+  ratified sharding design — **the on-disk straddle case was never verified**, see
+  `NOTES-perf-and-persistence.md` §8.8.
 - **Section header** (inside the existing reserved slot, before entryCount):
   `sigSchemaVersion (byte)` + `graphClassId (byte, = 0 "optimistic-v1")`. Cache semantics on either
   mismatch: drop the section, re-learn. This is the entire future migration story for new sig

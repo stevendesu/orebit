@@ -31,7 +31,8 @@ DELETED in s36 in favor of the fragment model (`HPA-FRAGMENTS.md`) + cascade (`H
   `SavedData` this section originally sketched. Since re-shipped as the **`.mca`-style SHARDED format**:
   `<world>/orebit/<dim>/hpa.<X>.<Z>.bin` (cost L0–5 per level-5 512-block shard) + `hpa.coarse.bin` (L6),
   `res.*` likewise — uncompressed column-run body (v3+), coarse levels persisted DIRECTLY (no `mergeUp`
-  replay on load), a per-shard invalidation section (v4, #5 memory), format v7 (typed fragments). Stage-2
+  replay on load), a per-shard invalidation section (v4, #5 memory), the "v7" typed-fragment record layout
+  (the on-disk `VERSION` constant was later RESET to 1 — NOTES-region-tier.md §4). Stage-2
   bounded RAM is also live: `hpa.lazyLoad` coarse-only startup + `RegionShardLoader` budgeted atomic
   page-in, plus the opt-in `RegionEvictor` (`hpa.residentLeafCap`, 0 = off). The old `hpa.bin`/`res.bin`
   blobs are ignored on disk. See `DESIGN-worldmodel-persistence.md`.

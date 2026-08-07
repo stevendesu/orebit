@@ -1,10 +1,12 @@
 # DESIGN — Bot Abilities Arc (Crafting / Farming / Fighting / Building)
 
-Status: ACTIVE (2026-07). This is the arc-level design for the four new bot abilities plus the
-shared machinery they introduce. Per-feature detail sections are ratified as each feature starts;
-code Javadocs cite this doc by §-anchor. Owner-facing decision points are collected in §10 —
-everything else follows from the ratified component pattern, the stub-spec corpus, or verified
-vanilla mechanics (sources inline).
+**Status: all four abilities SHIPPED and adopted on every branch (2026-07-29).** This file is KEPT, not
+as an open arc, but as the **live architecture contract for ability components** — §2 (the component
+template, the fighting-interrupt pattern, and the multi-bot / work-tree readiness rules) governs every
+ability written from here on, and §1's work-tree planner ("build a house" → gather wood → craft pickaxe
+→ …) is still a FUTURE arc that composes these four. Per-feature mechanism detail (the vanilla
+constants, the litematic bit format, the version-churn boundaries) is duplicated in the code Javadocs
+that cite this doc by §-anchor; read those first — this is the map, not the territory.
 
 ## §1 Scope, order, and why this order
 
@@ -266,13 +268,10 @@ planner-side table re-bakes in `ConfigLoader.install()` AFTER `PlanExecutor.drai
 
 ## §9 Branch mechanics for this arc
 
-Standard model: common code + overlays + unit tests authored on **core**; `git merge core` into
-`main` (26 era) per feature. TEMPORARY constraint: the mc-1.21 worktree currently carries the
-uncommitted follower-envelope arc (AllyBotEntity et al. dirty), which blocks `git merge core`
-there. Until that lands: mc-1.21-era verification (chiseledCompile, unit tests, autotest) runs in
-a THROWAWAY detached worktree (mc-1.21 HEAD + merge core on a local verify branch); era-owned
-harness additions are committed on that side branch (`mc121-abilities-verify`) for a later
-fast-forward/cherry-pick into `mc-1.21` proper. The user's worktree is never touched.
+*(Removed 2026-08-07 — this section described a TEMPORARY mc-1.21 worktree conflict and a throwaway
+`mc121-abilities-verify` side branch, both resolved when the arc was adopted on every branch on
+2026-07-29. The standing rule is just the CLAUDE.md model: common code + overlays + unit tests on
+**core**, `git merge core` into each era branch; era-owned harness additions on the era branch.)*
 
 ## §10 Owner decision points (flagged, implemented with stated defaults)
 

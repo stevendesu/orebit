@@ -134,15 +134,29 @@ per-movement reference, with every cost constant and its derivation:
 | Climb           | Ascend or descend a ladder, vine, or scaffolding                           |
 | Parkour         | Sprint-jump a gap to a flat (1–3), rising (1–2), or falling (1–4) landing — plus offset landings one cell off the line |
 | DiagonalParkour | The same running jump along a diagonal (gaps 1–2)                          |
-| Swim            | Paddle at the water surface (slow)                                         |
-| Sprint-swim     | Fast prone swimming — the 3D underwater workhorse                          |
+| Swim            | Upright paddling through fluid — four lateral steps plus a straight rise and a straight sink (slow) |
+| Sprint-swim     | Fast prone swimming — lateral travel only, and water only                  |
 | Diagonal sprint-swim | The same stroke along 2- and 3-axis diagonals — true 3D corner-cutting underwater |
-| Start sprint-swim / Surface | The transitions into and out of the prone swimming pose        |
+| Start / end sprint-swim | The in-place transitions into and out of the prone swimming pose  |
+| Surface         | Crawl out of a submerged tunnel onto a bank and stand up as you emerge     |
 | Ride bubble column | Step into an upward bubble column and let it carry you — the free elevator |
 
-The pose-transition row is worth a note: sprint-swimming is *stateful* (you must be in
+The pose-transition rows are worth a note: sprint-swimming is *stateful* (you must be in
 deep water to start it, but can continue through shallows), so the search's node identity
 includes the bot's pose — going prone is a real search edge, not a bookkeeping trick.
+The division of labour between the two swim families follows one rule: **fluid is a
+medium, not a pose.** The prone sprint-swim is fast *lateral* travel and nothing else;
+everything a bot does in fluid upright — entering it from dry land, rising, sinking —
+belongs to the plain Swim rungs. That is why the vertical axis and the pose transitions
+both stand alone: a bot rises up a one-block waterfall upright, and stands up again
+underwater rather than having to reach the surface first.
+
+Lava rides the *same* vocabulary — there is no lava-only movement. The upright rungs work
+in either fluid; only the prone sprint-swim is water-only, because vanilla will not let a
+player enter the swimming pose in lava at all. What separates the two fluids is price, not
+geometry: a lava cell is charged the same swim rung scaled by lava's much slower
+locomotion, plus the damage it deals in the shared health currency — so a mortal bot
+routes the long way around a lava lake, and a bot that can't be hurt simply swims it.
 
 **Planned, extensible** (added later through the same interface): Crawl (1-tall gaps),
 wall-clutch, boat/minecart. Profiling shows the movement-geometry logic is only ~4% of
@@ -177,8 +191,12 @@ overlay, real drops and tool wear, and hard refusals for owner-protected blocks;
 ### Cost model
 
 Costs are in **game ticks** and parameterized on the bot's configured capabilities
-and inventory. Walking is cheapest; swimming is slower in exact proportion to
-vanilla's swim speeds; mining cost is the real vanilla mining time for the block and
+and inventory. Every movement is priced from vanilla's own rates: a flat walk is the
+ruler at ~4.6 ticks per block; upright swimming is appreciably slower than that, and
+its rise/sink rungs are derived from vanilla's in-fluid physics rather than any
+published speed; prone sprint-swimming is the one move *cheaper* than walking, since it
+travels at a land sprint's speed — so a bot will happily use a river as a highway.
+Mining cost is the real vanilla mining time for the block and
 tool; hazards are *costs, not walls* — a mortal bot pays a stiff surcharge per
 fire or berry-bush cell it would pass through (an invulnerable one doesn't), cobwebs
 charge everyone the slowdown physics imposes, and a fall past the safe distance is

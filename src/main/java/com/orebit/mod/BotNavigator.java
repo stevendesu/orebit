@@ -1051,7 +1051,7 @@ final class BotNavigator {
         // log-flood). NO automatic escape is attempted (owner ruling, s52b lava incident: assumption-
         // driven rescue subroutines are the bandaid class this codebase removes) — the bot reports
         // exactly WHAT its cells contain, once, and holds; the fix for each entombment class is designed
-        // from that data (e.g. lava/magma passability = DESIGN-hazard-media.md, owner review).
+        // from that data (e.g. lava/magma passability = the CLAUDE.md CRITICAL INSTRUCTIONS banner, owner review).
         if (pathPlan.startDead()) {
             reportStartDead();
             return;
@@ -1144,7 +1144,7 @@ final class BotNavigator {
      * moves. Report the LIVE contents of the feet/head cells ONCE (chat + log) so the owner sees exactly
      * what the bot is inside — lava, a fallen gravel column, an unbuilt grid — and hold. Deliberately NO
      * automatic escape: every entombment class gets a designed fix from this data (lava/magma media =
-     * DESIGN-hazard-media.md), not an assumption-driven rescue subroutine.
+     * the CLAUDE.md CRITICAL INSTRUCTIONS banner), not an assumption-driven rescue subroutine.
      */
     private void reportStartDead() {
         if (startDeadReported) {

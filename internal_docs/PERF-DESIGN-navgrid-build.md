@@ -137,7 +137,10 @@ moves, the fragment flood does not. **Verdict:** raise as a strategic direction;
 
 ## §2. Recommended sequence (JFR-confirmed)
 
-1. **C1 (the fluid scatter) first** — bit-identical (seam-reset variant), targets the measured 53–66%.
+1. **C1 (the fluid scatter) first** — bit-identical (**CONTINUOUS-carry variant, NO seam reset**), targets
+   the measured 53–66%. *(This line said "seam-reset variant" until 2026-08-07, contradicting §C1's own
+   2026-07-27 correction eighty lines above it. The reset variant DIVERGES —* `FluidScatterIdentityTest`
+   *fixture D fails with reset and passes with continuous carry. Shipped as continuous carry.)*
    Gate: `ChunkBuildBenchmark` navgrid CAVE/SURFACE paired A/B + **bit-exact grid diff** (build a column
    both ways, assert identical packed shorts + depth bytes every scenario) + `PatchStormBenchmark`
    (patchCell fluid re-dilation) + full suite green.

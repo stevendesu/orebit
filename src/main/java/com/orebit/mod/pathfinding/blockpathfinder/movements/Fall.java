@@ -37,7 +37,7 @@ import com.orebit.mod.worldmodel.pathing.TraversalGrid;
  * family): vanilla arrests a faller whose feet begin a tick inside a climbable cell (−0.15 clamp +
  * fallDistance reset), so the fall stops IN the column, damage-free, at the run's bottom cell — but
  * only within {@link #HANG_MAX_DROP} blocks of prior fall (deeper arrests are deliberately unsupported,
- * owner ruling) — see {@link #tryHang} and DESIGN-climb-vocabulary.md §3.1/§3.2. The other fall-distance-RESET media (water,
+ * owner ruling) — see {@link #tryHang} and NOTES-movement-physics.md §4. The other fall-distance-RESET media (water,
  * powder snow, sweet berry bush, cobweb, bubble columns) are classified {@code fallSoftness = 0.0} for
  * correctness but are NOT yet landing targets; the non-standable water landing + the Fall→swim mode
  * coupling stay deferred to v1.1.
@@ -103,7 +103,7 @@ public final class Fall implements Movement {
     /**
      * Ticks to settle an arrested fall into a hang (one arrest tick + one stabilise tick at the −0.15
      * clamp) — the small fixed tail a hang landing pays instead of any fall-damage term (the arrest
-     * resets fallDistance BEFORE impact; DESIGN-climb-vocabulary.md §3.1).
+     * resets fallDistance BEFORE impact; NOTES-movement-physics.md §3).
      */
     private static final float ARREST_SETTLE = 2f;
 
@@ -116,7 +116,7 @@ public final class Fall implements Movement {
      * 2026-07-31): longer-run relaxations (a 2-run arrests to ≈40, ≥4-run from any height) would need
      * deep-column hangable sweeps whose measured per-node cost (TOWER +8-13%, FLOOD +14-18%) buys a
      * case too rare to matter — the column is refused instead (arrest-vs-tunnel past the bound is
-     * nondeterministic anyway; DESIGN-climb-vocabulary.md §5).
+     * nondeterministic anyway; NOTES-movement-physics.md §6).
      */
     static final int HANG_MAX_DROP = 7;
 
@@ -132,7 +132,7 @@ public final class Fall implements Movement {
         final int maxFall = Math.max(ctx.caps().maxFallDistance(), safeFall);
         final float hpCost = ctx.caps().costPerHitpoint(); // ticks per HP — read once, a local in the loop
 
-        // §3.2 (DESIGN-climb-vocabulary.md) — the in-column release-drop from a HANG node: when this
+        // §4 (NOTES-movement-physics.md) — the in-column release-drop from a HANG node: when this
         // node's own feet cell is hangable (feet in a vine — one extra cache-hot read per standing node;
         // non-hang nodes, the overwhelming case, pay one read + one AND and skip) and the cell below the
         // node floor is passable NON-climbable (a climbable below is the contiguous column — Climb-down
@@ -315,7 +315,7 @@ public final class Fall implements Movement {
     }
 
     /**
-     * §3.1 (DESIGN-climb-vocabulary.md) — price + emit a fall arrested in the passable-climbable
+     * §4 (NOTES-movement-physics.md) — price + emit a fall arrested in the passable-climbable
      * ({@link MovementContext#hangable}) run whose TOP cell is {@code climbTop}: walk the run to its
      * bottom, apply the flat tunneling bound ({@link #HANG_MAX_DROP} — feet are sampled once per tick,
      * so a too-fast entry can skip the cell), and emit the HANG node at the run's BOTTOM cell
@@ -448,7 +448,7 @@ public final class Fall implements Movement {
         // cell edge with no runup left for the step that follows).
         // Complete only once actually SETTLED on the landing cell: grounded (a standable floor) OR arrested
         // on a climbable (a HANG landing — feet in the vine cell, never grounded; the one predicate covers
-        // both kinds, since a standing landing reads onClimbable false; DESIGN-climb-vocabulary.md §4).
+        // both kinds, since a standing landing reads onClimbable false; NOTES-movement-physics.md §5).
         // A touchdown on a wrong cell simply never fires done — the follower's grounded-stall recovery
         // re-anchors and replans.
         plan.phase("fall")

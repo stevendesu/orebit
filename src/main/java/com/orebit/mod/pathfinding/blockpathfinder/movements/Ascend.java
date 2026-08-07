@@ -58,7 +58,7 @@ public final class Ascend implements Movement {
         if (ctx.caps().jumpHeight() < 1) return;
         if (ctx.reducesJump(x, y, z)) return; // honey-block floor: the jump apex clears nothing — can't take off
         if (ctx.noJumpFromBody(x, y, z)) return; // cobweb body cell: the stuck multiplier kills take-off velocity
-        // R1 (DESIGN-climb-vocabulary.md §2: "no jump launches from climbable stances — solidFooting floors
+        // R1 (NOTES-movement-physics.md §4: "no jump launches from climbable stances — solidFooting floors
         // only"). An Ascend is jump-based, and a jump is physically impossible with the feet INSIDE a
         // climbable: vanilla truncates a grounded jump whose feet start in one back to the 0.2 climb branch,
         // so the 0.42 launch never happens. solidFooting already encodes exactly that — its third conjunct

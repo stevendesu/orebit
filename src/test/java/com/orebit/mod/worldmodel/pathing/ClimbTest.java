@@ -105,7 +105,7 @@ class ClimbTest {
         assertTrue(last.getY() <= 3, "the plan should end near the pit floor; ended at " + last);
     }
 
-    // ---- The climb/vine vocabulary arc (DESIGN-climb-vocabulary.md §7) ------------------------------
+    // ---- The climb/vine vocabulary arc (NOTES-movement-physics.md §4) ------------------------------
 
     /** Owner ruling 2026-07-31: no jump launches from climbable stances, and a same-side upper ladder
      *  makes the plate stance geometrically impossible (FACING isn't packed) — a gapped ladder column
@@ -118,7 +118,7 @@ class ClimbTest {
     }
 
     /** Physics: a hanging entity can never fire the 0.42 jump and the climb-out pop peaks at +0.154 —
-     *  vine/air/vine cannot ascend (DESIGN-climb-vocabulary.md §1/§2). */
+     *  vine/air/vine cannot ascend (NOTES-movement-physics.md §3/§4). */
     @Test
     void vineGapUpIsRefused() {
         NavGridView grid = buildGappedWall(Blocks.VINE.defaultBlockState());

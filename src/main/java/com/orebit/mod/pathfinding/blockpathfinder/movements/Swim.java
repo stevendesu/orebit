@@ -10,7 +10,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 
 /**
  * Ordinary (non-sprint) swimming — the <b>upright fluid-medium movement</b>
- * (DESIGN-submerged-upright-swim.md §3). Six-directional: the four cardinals plus a straight rise and a
+ * (NOTES-vanilla-fluid-physics.md §1). Six-directional: the four cardinals plus a straight rise and a
  * straight sink, all in the tall {@link MovementContext#MODE_STANDING} pose. It is the structural analogue of
  * {@link Climb} — one movement, several rungs, each priced from its own real vanilla rate — and it is the move
  * that <b>un-walls fluid</b>: before it, {@link MovementContext#passable} rejected every fluid cell, so a river

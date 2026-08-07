@@ -29,7 +29,7 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.Strategy;
 
 /**
- * Headless proof of the <b>fluid-as-a-medium</b> design (DESIGN-submerged-upright-swim.md §3–§5): the upright
+ * Headless proof of the <b>fluid-as-a-medium</b> design (NOTES-vanilla-fluid-physics.md §1/§3): the upright
  * {@link Swim} is six-directional, enters a fluid INTERIOR (not merely a surface), owns the vertical axis alone
  * now that {@code SprintSwim} has none, and yields the lateral axis to the prone family only where that family
  * can actually make progress.

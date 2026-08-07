@@ -19,7 +19,7 @@ import com.orebit.mod.worldmodel.resource.ResourceMerger;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
 /**
- * Headless unit tests for the <b>Stage-2 §2b reconciliation</b> pieces (DESIGN-worldmodel-persistence.md — bounded
+ * Headless unit tests for the <b>Stage-2 §2b reconciliation</b> pieces (NOTES-perf-and-persistence.md §3 — bounded
  * region RAM): (a) {@code decode} reporting the straddle set of coarse cells it skipped by live-world-wins, and
  * (b) {@link RegionReconciler} re-deriving exactly those cells (ascending in-shard + above-shard propagation) so a
  * post-lazy-load pyramid becomes byte-identical to a fully-merged one — without a full {@code mergeUp} of the shard.

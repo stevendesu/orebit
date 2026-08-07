@@ -1,18 +1,29 @@
-# SUBSYSTEMS — map of the RUNNING code (refreshed 2026-07, rolling-skeleton increment A era)
+# SUBSYSTEMS — map of the RUNNING code (refreshed 2026-08-07, post fluid-as-a-medium)
 
 One screen per subsystem: what it does, key files, entry points. Paths relative to
-`src/main/java/com/orebit/mod/` unless noted. Stub-only packages (ai/, tasks/, integration/, …) are NOT
-listed — see CLAUDE.md. Historical design docs referenced by code Javadocs live beside this file
-(condensed, each with a §-map). NOTE: `PathPlan`/`HierarchicalRegionPlan` are under active edit for
-the rolling-skeleton arc — their entries below describe role, not exact current line-level shape; the
-in-flight increment A spec is `DESIGN-rolling-skeleton.md` (core-wt internal_docs).
+`src/main/java/com/orebit/mod/` unless noted. Stub-only packages (ai/, tasks/, sim/, memory/,
+relationships/, integration/, behavior/, requirements/, settings/, eventbus/, clock/, debug/,
+manager/, agent/, data/, scripts/ — all still pure Javadoc + a bare declaration) are NOT listed — see
+CLAUDE.md. The old semantic `worldmodel/region/` package is DELETED from disk; the live region tier is
+`worldmodel/hpa/` + `pathfinding/regionpathfinder/`. Historical design docs referenced by code
+Javadocs live beside this file (condensed, each with a §-map). Rolling-skeleton increment A has
+LANDED (`RegionPathPlan.splice` + the `HierarchicalRegionPlan.Verdict` three-way, consumed by
+`PathPlan`); the spec is `DESIGN-rolling-skeleton.md` (core-wt internal_docs).
 
 ## worldmodel/navblock — block-state interning
 Classifies every `BlockState` (~28k) at static init into a few hundred behavioral navtypes: a `short`
-index into a packed 64-bit `long` descriptor table (topY, shape, fluid, climbable, gravity, damaging,
-transit-slow, hardness, tool, PORTAL bit 43, PROTECTED bit 44, derived STANDABLE/BREAKABLE/OPEN_PLACE/
-COLLISION). Table is ~4–5 KB, L1-resident — the whole hot path reads facts objectlessly.
-`ProtectedBlocks.applyProtected` splits protected states into their own navtypes post-init.
+index into a packed 64-bit `long` descriptor table (topY, shape, stair/door facing+half+hinge, fluid,
+surface, climbable, gravity, damaging, replaceable, hardness, tool, waterloggable, transit-slow
+(41–42), PORTAL (11) / NETHER_PORTAL (12), DOOR_OPEN (43), PROTECTED (44), REDUCED_JUMP/honey (45),
+bubble-column + drag dir (46–47), fall-soft class (48–49), DOOR_TOGGLEABLE (50), NARROW_TOP (51),
+derived STANDABLE (37)/BREAKABLE (38)/OPEN_PLACE (39)/COLLISION (40)). The 2-bit transit-slow field
+now carries FOUR classes: `TRANSIT_NONE`, `TRANSIT_LIGHT` (~0.75×, berry bush / powder snow),
+`TRANSIT_HEAVY` (~0.05×, cobweb) and **`TRANSIT_FLUID`** (~0.4×, **LAVA** — the reciprocal of
+`MovementContext.LAVA_SWIM_COST_FACTOR = 2.5`, claimed 2026-08-07); water is deliberately
+`TRANSIT_NONE` because the swim rungs' costs already ARE the water rates. Table is ~4–5 KB,
+L1-resident — the whole hot path reads facts objectlessly. `NavBlock.applyProtected` (driven from
+`ConfigLoader` with the `ProtectedBlocks` predicate) splits protected states into their own navtypes
+post-init.
 - Files: `worldmodel/navblock/NavBlock.java`, `ClimbableNavBlock.java`
 - Entry: forced by `MiningModel.buildTable` (from `OrebitCommon.init`); read via
   `NavGridView.descriptorAt`, `NavFlags`, `NavSectionBuilder`.
@@ -34,34 +45,56 @@ planner-thread view, no live fallback). `NavGridUpdater` records block changes i
 §4.2) and drains them through `patchCells` at flush barriers, bumping the per-level `editEpoch`.
 `NavReclaim` = epoch-deferred section reclamation for async readers (DESIGN-background-pathfinding.md
 §4.1). `NavWarmup` = boot JIT warm-up (first search 21.8→0.67 ms). `NetherPortalIndex` = per-dimension
-portal-column index (fed by pass 1 + `ChunkNavLoader.record`).
+portal-column index (fed by pass 1 + `ChunkNavLoader.record`). `EdgeFluidScatter` = step 3 of the
+flowing-fluid RISKY_EDIT arc (PERF-DESIGN-navgrid-build §C1): the durable cross-CHUNK lateral fold that
+closes the lateral-air-optimistic gap left by the intra-chunk build scatter (in `computeDepth`) and the
+patch re-dilation, OR-ing flags into a live neighbour grid on the tick thread.
 - Files: `worldmodel/pathing/TraversalGrid.java`, `NavSectionBuilder.java`, `ChunkNavBuilder.java`,
   `NavStore.java`, `NavGridView.java`, `ChunkNavLoader.java`, `NavGridUpdater.java`,
-  `PendingPatches.java` (+ `NavReclaim`, `NavWarmup`, `NetherPortalIndex`)
+  `PendingPatches.java` (+ `NavReclaim`, `NavWarmup`, `NetherPortalIndex`, `EdgeFluidScatter`)
 - Entry: `ChunkNavLoader.register` / `NavGridUpdater.register` from `OrebitCommon.init`.
 
 ## pathfinding/blockpathfinder — block-tier A\* + movements + cuboids + phases + steering
 `BlockPathfinder.findPath` — allocation-free A\* over floor cells (SoA node state, open-addressed
 long→row map, binary heap, per-search `EditPool` arena); returns `BlockPathPlan` (waypoints + per-step
-`Movement` + `StepEdits`). **17 movements** behind `MovementRegistry.TIER1` (registration order =
+`Movement` + `StepEdits`). **18 movements** behind `MovementRegistry.TIER1` (registration order =
 cost-tie priority): Traverse, Diagonal, Ascend, Descend, Fall, Pillar, MineDown, Swim, SprintSwim,
 StartSprintSwim, Surface, Climb, Parkour, DiagonalParkour, **WalkOff** (no-jump gap-1/descend-1 — the
-honey crosser), **DiagonalSprintSwim** (26-connected underwater diagonals/corners), and
-**RideBubbleColumn** (up-column conveyor ride, 3-phase enter/ride/settle). `ParkourEnvelope` is NOT a
-movement: a derived static ballistics admission table (`MAX_GAP[startTopY][gsf][occ]`) read by
-Parkour/DiagonalParkour (supersedes DESIGN-parkour-envelope.md; see `parkour_envelope_params.py`).
+honey crosser), **DiagonalSprintSwim** (26-connected underwater diagonals/corners),
+**RideBubbleColumn** (up-column conveyor ride, 3-phase enter/ride/settle), and **EndSprintSwim**.
+**Fluid is a MEDIUM (2026-08-07)**: `Swim` is the upright `MODE_STANDING` six-directional move — 4
+cardinal laterals plus a straight rise (`UP_COST ≈ 7.41`) and sink (`DOWN_COST ≈ 5.41`), lateral
+`COST ≈ 9.09` air-head / `SUBMERGED_COST ≈ 10.15` fluid-head, all derived from vanilla's fluid
+drag/gravity/impulse constants — and it is **medium-agnostic** (water *and* lava, lava priced through
+`ctx.lavaSwimCellCost`). `SprintSwim` is prone (`MODE_PRONE`), **water-only**, and now offers **only
+the 4 cardinal laterals** at `COST ≈ 3.56` — its pure up/down rungs were deleted (owner ruling
+2026-08-07); the vertical axis belongs to `Swim`. The pose transitions are a symmetric pair, both
+`COST = 2f` in place: `StartSprintSwim` (STANDING→PRONE, in place when already 2-deep, else a
+one-cell dive off the surface) and the new `EndSprintSwim` (PRONE→STANDING at the same cell, gated on
+a pose-fit head cell). `Surface` narrowed to just the **bank crawl-out** — a PRONE→STANDING move ONE
+cardinal cell onto a standable floor, `COST = 2f` + `floorHazardCost`; its old in-place
+water/air-boundary rung moved to `EndSprintSwim`. `ParkourEnvelope` is NOT a movement: a derived
+static ballistics admission table (`MAX_GAP[startTopY][gsf][occ]`) read by Parkour/DiagonalParkour
+(derivation, closed forms and the six ratified margins now live in `NOTES-movement-physics.md`
+§1–§2, which absorbed the deleted DESIGN-parkour-envelope docs; see `parkour_envelope_params.py`).
 `cuboid/` = the macro subsystem (`CuboidExtractor`, `MacroJump`, `GoalForcedCost` premium,
 `NavGridCuboidsView`). Phase framework: `Movement.plan()` → `MovePlan` (guard-based phases —
 `need(Need.AIR|FOOTING|OPEN)`, `drive`, `advanceWhen`, `done`; plan-level `resetWhen`/`failWhen`/
 `requireDoor`) → `PhaseRunner` (per-tick self-healing cursor; `failed()`, `doneNow()` terminal-guard
-probe). Steering: `BotSteering`/`SteerView` seams + `SteerControl` statics (`steerTowards`, `drive`,
-`steerViaGate`, `recenterOnTarget`, the swim family `swimTowards`/`swimPitched*`/`swimServo`,
-`groundServo` — `GROUND_DRIVE` defaults "servo" — `parkourAirborne`/`parkourRunupAlign`, and
-**`holdDepth`** — the bang-bang water autopilot; movements OWN vertical water control). `MovementContext`
+probe). **17 of the 18 movements now execute via `plan()`** (Climb and Diagonal converted; every fluid
+move but one carries a phase plan, `RideBubbleColumn` three of them — enter/ride/settle) — only
+`DiagonalSprintSwim` remains plan-less. Steering: `BotSteering`/`SteerView` seams + `SteerControl` statics (`steerTowards`,
+`drive`, `steerViaGate`, `recenterOnTarget`, `stationKeep`/`settleOnOwnColumn`/`arriveOnTarget`, the
+swim family `swimTowards`/`swimTowardsDirectional`/`swimPitched*`/`swimServo`/**`uprightSwimServo`**
+(the upright-`Swim` driver), `groundServo` — `GROUND_DRIVE` defaults "servo" —
+`parkourAirborne`/`parkourRunupAlign`, and **`holdDepth`** — the bang-bang fluid autopilot, live in
+water AND lava, deadband `WATER_RISE_DEADBAND = 0.2`, `SUBMERGE_BIAS = 0.8`; movements OWN vertical
+water control). `MovementContext`
 = predicate vocabulary incl. `transitOrBreak`; `MiningModel` = tool-tick table + per-search snapshot;
 edits = `EditScratch`/`StepEdits`/`PathEdits`/`EditSnapshot` (break/place **+ door-set** arrays — the
 DOORS thread rides the whole edit pipeline). `BotCaps` = capability record (jump/fall/damage/break/
-place/`maxNodes`/`greedyWeight`/`mayToggleDoors`) + **`realizabilitySig()`/`sigDominates`** — the packed
+place/`mayToggleDoors`, plus the SEARCH knobs `maxNodes`/`greedyWeight`/`boxedInScanRadius` — knobs,
+not movement caps, and deliberately excluded from the sig) + **`realizabilitySig()`/`sigDominates`** — the packed
 caps+tool-tier signature that keys invalidation-memory rows (DESIGN-persisted-invalidation-memory.md
 §3). Flags: `TRACE` off, `PARTIAL_PATH` on, `IRREVERSIBLE_GUARD` on; goal tolerance ±1 XZ / ±2 Y.
 - Files: `pathfinding/blockpathfinder/BlockPathfinder.java`, `MovementContext.java`, `MiningModel.java`,
@@ -78,7 +111,8 @@ nodes and the A==G cliff reroutes instead of collapsing. The (approach → V) bl
 full node key (`approachRowKey`; entry-face DERIVED, reconstructed add-side via `approachRowKeyForStep`),
 so V-approach invalidation is from-fragment-keyed (blaming one dead approach keeps the others alive); the
 blame anchor scan skips virtual fragments; the reverse-Dijkstra field is gated to `VIRTUAL_START_FRAG`
-(byte-identical). See DESIGN-virtual-start-fragment.md §0.5 (core-wt). Edges = portal
+(byte-identical). See `NOTES-region-tier.md` §1–§2 (the surviving core of the deleted
+NOTES-region-tier.md — exact key bit layout + the sentinel id space). Edges = portal
 crossings (footprint overlap), always-possible dig-through (span × tool-aware `RegionMineModel` cost;
 place-side sibling `RegionPlaceModel`), walk-across priced entry→exit; standable-Δy anchors +
 flood-from-bot start membership. Entry points `plan`/`planWithin` (arbitrary from-cell — the extension
@@ -86,7 +120,7 @@ seam) /`costToGoalField` → `RegionCostField` (dense per-(region,fragment) cost
 s53 frontier-floor; the `/bot rtrace` A/B heuristic). `RegionHeuristic` = strategy interface;
 `SimpleRegionHeuristic` (REAL) is the ratified default — the other four heuristic variants are stubs.
 `HierarchicalRegionPlan` = the cascade: a stack of per-level skeletons, re-plan only the exited level.
-**Rolling skeleton (increment A, in flight):** the window base IS the committed cursor (L≤1 for now);
+**Rolling skeleton (increment A, LANDED):** the window base IS the committed cursor (L≤1 for now);
 on a committed crossing the L0 skeleton is spliced-and-extended (`RegionPathPlan.splice` — head
 dropped, 1-hop suffix from the existing tail, cursors SHIFTED never reset) toward L1's advancing
 hand-down, and `onBotMoved` answers a three-way verdict UNCHANGED/EXTENDED(shift)/SWAPPED — EXTENDED
@@ -128,8 +162,10 @@ as a cache (corrupt → rebuilt from live). **Format is .mca-style SHARDED, unco
 per-dim `hpa.bin`/`res.bin` gzip blobs are dead — ignored on disk): per dimension dir
 `<world>/orebit/<dim>/` holds `hpa.<X>.<Z>.bin` (cost levels 0–5 per level-5 shard = 32×32 chunks,
 magic OBHS), `hpa.coarse.bin` (level 6, OBHC), `res.<X>.<Z>.bin` (OBRS), `res.coarse.bin` (levels
-6–21, OBRC). `CostPyramidCodec` (file VERSION 7) / `ResourcePyramidCodec` encode/decode; the cost
-files carry the **invalidation section** (v4 schema): sig-tagged 24-byte `{fromKey,toKey,capsSig}`
+6–21, OBRC). `CostPyramidCodec` (file `VERSION = 1` — reset from 7 on the 2026-07 `packLevelKey`
+repack; disk is a cache, a mismatch just rebuilds) / `ResourcePyramidCodec` (`VERSION = 2`)
+encode/decode; the cost files carry the **invalidation section**
+(`INVAL_SIG_SCHEMA_VERSION = 1`, likewise reset): sig-tagged 24-byte `{fromKey,toKey,capsSig}`
 rows bucketed assign-to-FROM, merged into `RegionCrossingMemory` on load. `RegionPersistence` = the
 driver: eager `loadAll` at SERVER_STARTED (or `loadCoarseOnly` when `hpa.lazyLoad` — decode coarse
 only + build the persisted-shard index), authoritative `flushAll` at SERVER_STOPPING, budgeted dirty
@@ -142,8 +178,9 @@ discriminator), `RegionShardLoader` (budgeted on-demand page-in, `pathing.region
 - Files: `worldmodel/persistence/RegionPersistence.java`, `CostPyramidCodec.java`,
   `ResourcePyramidCodec.java`, `RegionShardLoader.java`, `RegionReconciler.java`, `RegionEvictor.java`,
   `worldmodel/hpa/RegionShardResidency.java`, `ShardRowIndex.java`, `StraddleSet.java`
-- Entry: all hooks wired in `OrebitCommon.init`. Spec: `DESIGN-worldmodel-persistence.md` §2/§2b/§3/
-  §5/§7/§11; invalidation rows `DESIGN-persisted-invalidation-memory.md` §4.
+- Entry: all hooks wired in `OrebitCommon.init`. Spec: `NOTES-perf-and-persistence.md` §1–§5/§7 (the
+  successor to the deleted `NOTES-perf-and-persistence.md`; for the exact byte layout the codec
+  class Javadocs WIN over the note); invalidation rows `DESIGN-persisted-invalidation-memory.md` §4.
 
 ## pathfinding/async + splice — planner pool + plan handoff
 `PlanExecutor` = fixed daemon pool (`pathing.maxThreads`, clamp [1, cores−2]); tick thread `submit`s an
@@ -166,8 +203,11 @@ Owns the region skeleton + a WINDOW of consecutive skeleton regions; runs the bl
 block plan's REMAINING waypoints map back into the committed span (the wiggle rule, keyed on
 (region, fragment)); an already-satisfied target is committed+slid at selection time — no debounce.
 Repair is event-driven: one repair per BLOCKED search result (`blockedGeneration` — blacklist the hop
-by content key, reroute). Async: submit/poll/seam-adopt at the settled boundary; `pollWhenPlanless`
-first-plan adoption; P4 pre-plan from the predicted end cell. Under the rolling skeleton it consumes
+by content key, reroute). **Boxed-in proof**: `maybeProactiveBoxedIn` runs the multi-level coarse→fine
+`RegionPathfinder.isSealedWithin` scan (`pathing.boxedInScanRadius`) at plan entry — a sealed goal box
+fails the plan immediately with `boxedInProven` instead of an optimistic skeleton; `harvestBoxedInProof`
+is the reactive L0-flood backstop at a region-tier give-up. Async: submit/poll/seam-adopt at the
+settled boundary; `pollWhenPlanless` first-plan adoption; P4 pre-plan from the predicted end cell. Under the rolling skeleton it consumes
 the cascade's EXTENDED verdict by shifting its cursors/BLOCKED snapshot and keeping the live block
 plan (`DESIGN-rolling-skeleton.md`, core-wt). Package-private collaborators: **`WindowTargeting`**
 (target-selection policy — goal-in-window, farthest-usable-portal, buried DIG centroids, footprint
@@ -180,11 +220,12 @@ NONE/RETRY/RESULT), **`SkeletonDump`** (cold diagnostics formatter behind `descr
   Spec: HPA-IMPLEMENTATION.md §9, HPA-CASCADE.md, DESIGN-background-pathfinding.md §5/§7.
 
 ## Root package — orchestrator + navigator + gather + portal + mining + lifecycle
-`AllyBotEntity extends FakePlayerEntity implements BotSteering` (~1000 lines) — the ORCHESTRATOR:
+`AllyBotEntity extends FakePlayerEntity implements BotSteering` (~1350 lines) — the ORCHESTRATOR:
 entity identity, full vanilla player tick (forge inputs → `super.tick()` → `doTick()` →
 `MoveReport.after()`), runtime survival gating (invuln/air/hunger per config), mode dispatch
-`Mode {FOLLOW, STAY, COME, GATHER}`, the `BotSteering` seam (incl. `setDoorOpen`), and the `/bot
-trace`/`rtrace` one-shots. Behavior lives on components it constructs and ticks:
+`Mode {FOLLOW, STAY, COME, GATHER, CRAFT, FARM, BUILD}`, the `BotSteering` seam (incl. `setDoorOpen`
+and the strafe input), and the `/bot trace`/`rtrace` one-shots. Behavior lives on components it
+constructs and ticks:
 - **`BotNavigator`** — the two-tier drive/follow: `driveToward` (arrival test → skeleton commit →
   readiness gate → replan-or-slide; emits a `driveState` label), `replan` (fresh `PathPlan`,
   degrade-to-no-plan on bugs), `steerAlongPath` (waypoint cursor by occupancy; per-step `MovePlan` via
@@ -271,9 +312,12 @@ trace`/`rtrace` one-shots. Behavior lives on components it constructs and ticks:
   per-phase buckets, logs when `Debug.VERBOSE`). `FakePlayerEntity`/`FakeClientConnection` live in
   `overlays/` (version-fragile network internals; `FakeNetworkHandler` is gone).
 - Files: `AllyBotEntity.java`, `BotNavigator.java`, `BotGatherer.java`, `BotCrafter.java`,
-  `BotPortalFollower.java`, `BotMining.java`, `BotManager.java`, `BotPositioning.java`,
-  `NavJourneyStats.java`, `SlowTickMonitor.java`, `Debug.java`,
+  `BotFarmer.java`, `BotFighter.java`, `BotBuilder.java`, `BotPortalFollower.java`, `BotMining.java`,
+  `BotManager.java`, `BotPositioning.java`,
+  `MobStrategy.java` + `{Creeper,Skeleton,Melee}Strategy.java`,
+  `NavJourneyStats.java`, `SlowTickMonitor.java`, `Debug.java`, `OrebitCommon.java`,
   `crafting/{RecipeIndex,KnownRecipe,IngredientSlot,CraftAssignment}.java`,
+  `farming/{CropKind,CropKinds}.java`, `building/{Schematic,NbtReader,PaletteResolver}.java`,
   `overlays/<era>/java/com/orebit/mod/FakePlayerEntity.java`,
   `overlays/<era>/java/com/orebit/mod/platform/CraftingOps.java`
 - Entry: `OrebitCommon.init` join/disconnect/tick events → `BotManager`; the entity's vanilla `tick()`
@@ -296,12 +340,14 @@ arms it; each writes an `orebit-<x>-result.properties` + traces, then halts the 
   `ParkourCourse` (`-Dorebit.parkour`, isolated jump shapes), `SwimCourse` (`-Dorebit.swim`, walled
   water tanks incl. bubble columns/kelp), `IceCourse` (`-Dorebit.ice`, 1-wide blue-ice lanes flanked
   by lava — turn-overshoot detector), `IceParkourCourse` (`-Dorebit.iceparkour`, sprint-parkour onto
-  ice landings, slide-overshoot measurement; brake prototypes behind `-Dorebit.iceparkour.brake`).
+  ice landings, slide-overshoot measurement; brake prototypes behind `-Dorebit.iceparkour.brake`),
+  `BoxedInCourse` (`-Dorebit.boxedin`, sealed-enclosure shapes — the give-up-fast oracle for the
+  multi-level `RegionPathfinder.isSealedWithin` scan).
 - **`WorldReplay`** (`-Dorebit.replay`, `run-replay.ps1`): replays a recorded failure route in the
   owner's hand-built real world (loads, never builds), per-tick position/velocity/water-state + plan
   trace, EJECTION guard.
 - Files: `HeadlessAutotest.java`, `ParkourCourse.java`, `SwimCourse.java`, `IceCourse.java`,
-  `IceParkourCourse.java`, `WorldReplay.java`, `scripts/run-autotest.ps1`
+  `IceParkourCourse.java`, `BoxedInCourse.java`, `WorldReplay.java`, `scripts/run-autotest.ps1`
 - Entry: `*.register()` from `OrebitCommon.init` (no-op unless armed).
 
 ## commands/ — the /bot surface
@@ -325,7 +371,7 @@ Trace, RegionTrace (`/bot rtrace`), Probe, Config, Debug. The `ChatCommandParser
 `removalCostWeight`, `placeBaseCost`), `mining.*` (incl. `breakBaseCost`, `protectedBlocks`,
 `allowUnbreakable`, `unbreakableHardness`), `pathing.*` (incl. `greedyWeight`, `costPerHitpoint`,
 `warmup*`, the async trio, `chunkBuildsPerTick`/`chunkBuildBudgetMs`, `navReadyRadiusChunks`/
-`navReadyTimeoutTicks`, `hpaFlushBudgetMs`, `regionShardLoadBudgetMs`), `hpa.*`
+`navReadyTimeoutTicks`, `hpaFlushBudgetMs`, `regionShardLoadBudgetMs`, `boxedInScanRadius`), `hpa.*`
 (`persistIntervalTicks`, `persistFlushBudgetMs`, `lazyLoad`, `residentLeafCap`), **`doors.*`**
 (`doors.toggle`, default true → `BotCaps.mayToggleDoors`), **`crafting.*`**
 (`placeTable`/`reclaimTable`/`tableSearchRadius`), **`farming.*`** (`workRadius`/`till`),
@@ -348,13 +394,14 @@ onPlayerJoin, onPlayerDisconnect, onChunkLoad, onChunkUnload, onWorldTickEnd, on
 per-loader impls in the thin `fabric/`, `forge/`, `neoforge/` modules call `OrebitCommon.init`
 (`ForgePlatformEvents` lives in `overlays-forge/<era>/`; `overlays-fabric/<era>/` carries
 `FabricCommandRegistrar` flavors; `FabricPlatformEvents` is era-owned per branch). Version-STABLE
-adapters in `src/.../platform/`: `PlatformEvents`, `BlockChangeEvents`, `BotInventory`,
+adapters in `src/.../platform/`: `PlatformEvents`, `BlockChangeEvents`, `BotInventory`, `ItemUse`,
 `SectionPalette`, `WorldEdits`. Version-DIVERGENT adapters live in
-`overlays/<era>/java/com/orebit/mod/platform/` (eras compose, highest ≤ active wins; 17 era dirs,
-1.17 = baseline): BlockKinds, BlockLookup, BlockShapes, BotSpawn, BotTeleport, ChunkCoords,
-ClientLoad, CommandFeedback, ConcretePowder, ConfigDir, **DimensionId**, EntityState, ItemDamage,
-**ItemLookup**, LevelBounds, MineableTags, MoveReport, Replaceable, Sections, TagLookup,
-**ToolEnchants**, VersionedBlocks, Worlds — static one-liners so the JIT inlines them. Non-platform
+`overlays/<era>/java/com/orebit/mod/platform/` (eras compose, highest ≤ active wins; **19** era dirs
+1.17 → 26.2, 1.17 = baseline): BlockKinds, BlockLookup, BlockShapes, BotSpawn, BotTeleport,
+ChunkCoords, ClientLoad, CommandFeedback, ConcretePowder, ConfigDir, **CraftingOps**, **DimensionId**,
+EntityState, **FluidRead**, ItemDamage, **ItemLookup**, LevelBounds, MineableTags, **MobKinds**,
+MoveReport, Replaceable, Sections, TagLookup, **ToolEnchants**, VersionedBlocks, Worlds — static
+one-liners so the JIT inlines them. Non-platform
 overlay classes: `FakePlayerEntity`, `FakeClientConnection`, and the `LevelChunkMixin` (1.17/1.21.5).
 Keep core logic in `src/`; only the thin MC-API call goes in an overlay.
 - Files: `platform/PlatformEvents.java`, `platform/BlockChangeEvents.java`,

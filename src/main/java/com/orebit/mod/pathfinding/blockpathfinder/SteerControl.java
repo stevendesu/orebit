@@ -1084,7 +1084,7 @@ public final class SteerControl {
     /**
      * UPRIGHT-SWIM <b>velocity SERVO</b> horizontal drive (YAW-ONLY) — the fluid counterpart of
      * {@link #groundServo}, and the control half of the "fluid is a medium" design
-     * (DESIGN-submerged-upright-swim.md §6). Drives the tall {@link
+     * . Drives the tall {@link
      * com.orebit.mod.pathfinding.blockpathfinder.movements.Swim Swim} / {@link
      * com.orebit.mod.pathfinding.blockpathfinder.movements.Surface Surface} pose and {@link #drive}'s in-water
      * branch. Vertical is NOT its business — {@link #holdDepth} owns the jump/sink.
@@ -1225,7 +1225,7 @@ public final class SteerControl {
 
     /**
      * The parkour <b>predictive-airborne servo</b> — the closed-loop replacement for the open-loop "hold full
-     * forward + sprint to touchdown" airborne drive (DESIGN-parkour-envelope; the ice-overshoot / short-flat
+     * forward + sprint to touchdown" airborne drive (NOTES-movement-physics.md §1; the ice-overshoot / short-flat
      * pathologies). Called every airborne (and, for flat/rising, land) tick by {@link
      * com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour#plan}/{@link
      * com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour#plan} with the jump-axis unit
