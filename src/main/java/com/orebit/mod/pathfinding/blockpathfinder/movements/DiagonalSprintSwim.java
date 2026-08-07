@@ -6,15 +6,25 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 /**
  * Diagonal sprint-swim — prone {@link SprintSwim} to a diagonally-adjacent water cell, the water analogue of
  * how ground {@link Diagonal} relates to {@link Traverse} and {@link DiagonalParkour} to {@link Parkour}. It
- * turns underwater traversal from 6-connected (the {@link SprintSwim} faces: ±X, ±Y, ±Z) into fully
+ * turns underwater traversal from face-connected (the {@link SprintSwim} faces) into fully
  * <b>26-connected</b>: a face-only swim grid must zig-zag (Manhattan) to cover diagonal distance, expanding
  * ~2× the nodes and producing staircased routes, whereas a diagonal swim step covers one cell in each of two
  * (edge) or three (corner) axes for a cost of {@code √2} / {@code √3} — matching the 3-D octile heuristic (see
  * {@link com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder#heuristic}).
  *
  * <h2>The 26 swim directions (this move owns 20 of them)</h2>
- * A cube cell has 26 neighbours: 6 faces + 12 edges + 8 corners. {@link SprintSwim} (the base) emits the 6
- * <b>faces</b> (±X, ±Y, ±Z). This move emits the 20 remaining <b>multi-axis</b> steps:
+ * A cube cell has 26 neighbours: 6 faces + 12 edges + 8 corners. {@link SprintSwim} (the base) emits the
+ * <b>4 horizontal faces</b> (±X, ±Z). This move emits the 20 <b>multi-axis</b> steps:
+ *
+ * <p><b>The two pure-Y faces are emitted by NOBODY in the prone mode, deliberately</b>
+ * (DESIGN-submerged-upright-swim.md §4, 2026-08-07). A swimming look clamps around 80°, so a
+ * <i>straight</i>-up/down heading always leaks the last ~10° as lateral drift, and the prone pose is retained
+ * only while a forward impulse is held — which in a 1×1 shaft is ejection at speed. The vertical axis therefore
+ * belongs to the UPRIGHT {@link Swim} (its rise holds jump and needs no heading at all, so it cannot drift).
+ * <b>The vertical-DIAGONALS below are unaffected and stay:</b> the clamp only forbids the degenerate
+ * pure-vertical heading, and an edge is 45° off horizontal while a corner is ~35° — both comfortably inside
+ * it, and both want lateral velocity anyway. So a prone bot changes Y diagonally or not at all; to rise in
+ * place it leaves the pose via {@link EndSprintSwim}.
  * <ul>
  *   <li><b>4 same-Y horizontal diagonals</b> (edges, {@code ±X±Z}) — pass 1.</li>
  *   <li><b>8 vertical-diagonal edges</b> (a cardinal combined with {@code ±Y}: {@code ±X±Y}, {@code ±Z±Y}) —
@@ -33,9 +43,12 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  * (independent of the Y component), while vertical (Y) is driven by {@code SteerControl.holdDepth} (a bang-bang
  * jump/sink autopilot keyed ONLY on {@code p.ty()} vs the bot's {@code y}, independent of the horizontal) plus
  * the depth PITCH folded into {@code swimServo}/{@code swimPitched}. A combined vertical-diagonal or corner
- * target is therefore just the composition of two already-working independent controllers — the same pair
- * {@link SprintSwim}'s own up/down (pure-Y) and horizontal (pure-XZ) candidates already exercise — and
- * {@code Swim.reachedSwim} gates arrival on all three axes. That is exactly the reuse condition the code
+ * target is therefore just the composition of two already-working independent controllers — the horizontal one
+ * {@link SprintSwim}'s own (pure-XZ) candidates exercise, and the vertical one the upright {@link Swim} rungs
+ * exercise — and {@code Swim.reachedSwim} gates arrival on all three axes. (This paragraph used to cite
+ * {@code SprintSwim}'s own pure-Y candidates as the vertical half of that proof; those were deleted in §4, but
+ * the argument survives unchanged because it rests on {@code holdDepth} being independent of the horizontal
+ * pursuit, not on which move happens to call it.) That is exactly the reuse condition the code
  * convention picks a subclass for — unlike {@link DiagonalParkour}, which is standalone because {@link Parkour}'s
  * execution (a direction-specific takeoff trigger) is NOT reusable.
  *

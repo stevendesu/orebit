@@ -229,8 +229,10 @@ public final class NavBlock {
     // ---- Bit field shifts/masks --------------------------------------------------------------
     // Bits 8–10 hold the stair facing (2) + half (1), populated ONLY for StairBlock states (0 elsewhere, so
     // only stairs split navtypes); bits 11–12 hold the 2-bit portal field (any-portal / is-nether, see below);
-    // bit 13 remains FREE (the rest of the reclaimed 6-bit sturdy-faces mask, unread by pathfinding — see the
-    // block-fingerprints doc). Bit 43 is now also free (the portal marker moved down from it into 11–12).
+    // bits 13 and 43 were freed when the portal marker moved down into 11–12, and were then CLAIMED by the door
+    // encoding below (13 = hinge, 43 = open) — this comment claimed both were still free long after they were
+    // not, so do not read it as a free list. THE FREE BITS ARE 52–63; the highest bit in use is NARROW_TOP (51).
+    // Adding a descriptor bit needs explicit owner sign-off (retroactive ruling after doorToggleable@50).
     private static final int TOP_Y_SHIFT = 0,  TOP_Y_MASK = 0x1F;
     private static final int SHAPE_SHIFT = 5,  SHAPE_MASK = 0x07;
     private static final int STAIR_FACING_SHIFT = 8, STAIR_FACING_MASK = 0x03; // 0=N 1=E 2=S 3=W (stairs AND doors)
