@@ -32,6 +32,14 @@ public final class EditFixtures {
         return edits;
     }
 
+    /** A single {@link StepEdits} holding the given BROKEN and PLACED cells — the per-step form the
+     *  own-edit acknowledgement reads back off a {@link BlockPathPlan} ({@code PathPlanOwnEditTest}). */
+    public static StepEdits step(long[] brokenCells, long[] placedCells) {
+        StepEdits se = new StepEdits();
+        se.load(brokenCells, brokenCells.length, placedCells, placedCells.length, NO_CELLS, NO_FLAGS, 0);
+        return se;
+    }
+
     /** A single-edge {@link StepEdits} that OPENS ({@code open=true}) or CLOSES the door at each given cell
      *  (DOORS P2). Uses the same package-private {@code load} seam a real edge uses. */
     public static StepEdits doorSetStep(boolean open, long... doorCells) {

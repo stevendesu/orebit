@@ -1239,6 +1239,9 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             WorldEdits.breakBlock(level, p);
         }
         lookAtCell(x, y, z); // look at what we place — for a pillar footing that's straight down, like a player
+        // Announce the mutation BEFORE it lands so the plan's own prescribed place is not read back as the
+        // world diverging from it (PathPlan.expectOwnEdit); the slot is consumed by the change it predicts.
+        navigator.expectOwnEdit(x, y, z, false);
         if (cfg.consumesBlocks()) {
             Block block = new BotInventory(this).consumeOnePlaceable();
             if (block == null) { // out of blocks — the next tick / replan nets it

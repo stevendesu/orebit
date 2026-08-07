@@ -3,6 +3,7 @@ package com.orebit.mod.pathfinding;
 import com.orebit.mod.Debug;
 import com.orebit.mod.NavJourneyStats;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
+import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.async.PlanExecutor;
 import com.orebit.mod.pathfinding.async.SearchRequest;
@@ -303,7 +304,10 @@ public final class PathPlan {
     // any dimension-global grid mutation (frontier chunk builds, a house 50k blocks away). Grow-only scratch,
     // re-baselined by snapshotPlanChunks() after every block-plan install; parallel arrays, no per-tick alloc.
     private long[] planChunks = new long[16];  // distinct chunk keys the block plan traverses
-    private int[] planChunkVers = new int[16];  // NavGridUpdater.chunkVersion of each, at snapshot time
+    /** {@link NavGridUpdater#foreignVersion} of each column at snapshot time — the count of changes NOT
+     *  announced by the follower. Deliberately not {@code chunkVersion}: the plan's own prescribed edits move
+     *  that one, so comparing it re-searched the plan every time it executed itself. */
+    private int[] planChunkVers = new int[16];
     private int planChunkCount;                 // used length of the two arrays above
     private int planSnapshotEpoch;              // the dimension epoch at snapshot time (the O(1) early-out)
 
@@ -791,7 +795,7 @@ public final class PathPlan {
                 planChunkVers = java.util.Arrays.copyOf(planChunkVers, planChunkCount * 2);
             }
             planChunks[planChunkCount] = ck;
-            planChunkVers[planChunkCount] = NavGridUpdater.chunkVersion(level, ck);
+            planChunkVers[planChunkCount] = NavGridUpdater.foreignVersion(level, ck);
             planChunkCount++;
         }
     }
@@ -811,12 +815,77 @@ public final class PathPlan {
             return false; // nothing changed anywhere in the dimension since this plan's search
         }
         for (int i = 0; i < planChunkCount; i++) {
-            if (NavGridUpdater.chunkVersion(level, planChunks[i]) != planChunkVers[i]) {
+            // FOREIGN changes only. Our own prescribed break/place was announced to the grid before it
+            // landed (expectOwnEdit → NavGridUpdater.expectChange), so it never moved this counter — the
+            // plan executing itself is not the plan going stale.
+            if (NavGridUpdater.foreignVersion(level, planChunks[i]) != planChunkVers[i]) {
                 impactChunk = planChunks[i];   // diagnostic: WHICH chunk, for impactForensic()
                 return true; // a chunk the path traverses changed → the plan may be stale, re-search
             }
         }
         return false; // changes happened, but not in a chunk this plan traverses — keep following
+    }
+
+    /**
+     * The bot is ABOUT to edit {@code (x,y,z)} — if THIS plan prescribed it, announce the exact mutation to
+     * the grid ({@link NavGridUpdater#expectChange}) so {@link #planImpacted} does not read the plan's own
+     * execution as the world diverging from it. {@code toAir} is the mutation's direction: a break makes the
+     * cell air, a place fills it.
+     *
+     * <p><b>Why</b> (measured 2026-08-06). The follower's edits go through the same {@code onBlockChanged}
+     * seam as any other block change, so every break the plan ordered bumped the chunk version, tripped
+     * {@code planImpacted}, and re-searched the plan that ordered it. In one flagship run <b>16 of 27</b>
+     * re-searches were the bot invalidating its own plan — 11 {@code stone→air}, 3 {@code air→cobblestone},
+     * 2 {@code diorite→air}. That is pure waste (the post-edit world matches the plan's assumption BETTER
+     * than the pre-edit world did) and it is not merely wasteful: a re-search rebuilds the plan mid-move and
+     * resets the waypoint cursor, which is the mechanism behind the 2026-08-06 Descend that failed its
+     * validity envelope by 0.001 blocks while carrying a DiagonalParkour's momentum.
+     *
+     * <p><b>Mutation identity, not a budget</b> (owner ruling 2026-08-06). The first cut let a column tolerate
+     * N changes, N being the number of edits executed there. It answered the wrong question — "how many things
+     * changed here" rather than "did we expect THIS mutation" — and it is sound only while an executed edit
+     * bumps the version exactly once, failing silently in the DANGEROUS direction if one ever bumps zero times
+     * (a grid-invisible change, {@code NavGridEpochTest}): the unspent credit then absorbs the next foreign
+     * change. Announcing the exact cell and direction removes the question. A stone vanishing from the cell we
+     * were mining is our plan executing; a vine appearing in that same cell is not, and the grid can now tell
+     * them apart on its own.
+     *
+     * <p><b>Still verified against the plan's own edit set.</b> The cell must appear in this plan's {@link
+     * StepEdits}: {@code /bot mine} and gather drive the same actuators, and forgiving one of those would
+     * blind the gate for a change no plan predicted.
+     *
+     * <p>Cascading changes are deliberately NOT forgiven: gravel falling because we broke its support, or
+     * water flowing into the hole, arrive after the one-shot slot is spent and at a different cell, so they
+     * count as foreign — which is right, because the plan never modelled them.
+     */
+    public void expectOwnEdit(int x, int y, int z, boolean toAir) {
+        final BlockPathPlan bp = blockPlan;
+        if (bp == null || !prescribesEdit(bp, x, y, z)) {
+            return;   // not ours to forgive — let the change count as divergence
+        }
+        NavGridUpdater.expectChange(level, new BlockPos(x, y, z), toAir);
+    }
+
+    /** Whether this plan folded a break or a place at {@code (x,y,z)} on any of its steps. Cold: runs once
+     *  per executed edit, over a window's worth of mostly edit-free steps. Package-private for
+     *  {@code PathPlanOwnEditTest}, which pins the semantic that keeps this honest: an edit the plan never
+     *  prescribed (a {@code /bot mine} or gather break through the same actuators) is NOT forgiven. */
+    static boolean prescribesEdit(BlockPathPlan bp, int x, int y, int z) {
+        for (int s = 0; s < bp.size(); s++) {
+            final StepEdits e = bp.edits(s);
+            if (e == null) {
+                continue;
+            }
+            for (int i = 0; i < e.breakCount(); i++) {
+                final BlockPos p = e.breakPos(i);
+                if (p.getX() == x && p.getY() == y && p.getZ() == z) return true;
+            }
+            for (int i = 0; i < e.placeCount(); i++) {
+                final BlockPos p = e.placePos(i);
+                if (p.getX() == x && p.getY() == y && p.getZ() == z) return true;
+            }
+        }
+        return false;
     }
 
     /** Diagnostic only: the chunk key whose version last tripped {@link #planImpacted}. */
