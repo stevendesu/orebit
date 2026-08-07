@@ -3,7 +3,6 @@ package com.orebit.mod.worldmodel.pathing;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.concurrent.ConcurrentHashMap;
@@ -137,16 +136,36 @@ class DiagonalHazardJumpTest {
 
     // ---- (4) SAFETY NEGATIVE: a 2-tall hazard column above the obstacle must reject the jump -----------
 
+    /**
+     * Identical to the passing lava corner-cut, but the centre gap cell also has LAVA at {@code y+1} (a 2-tall
+     * lava column). {@code verifyArc} proves the obstacle's body prism {@code y+1..y+3} strictly
+     * {@code passable}, so the {@code y+1} lava rejects — the bot must not FLY through a 2-tall lava column.
+     * That is this test's subject and it is unchanged.
+     *
+     * <p><b>What changed (2026-08-07, DESIGN-submerged-upright-swim.md §3.2/§3.3).</b> This used to assert
+     * {@code assertNull(plan)} — "no other route → NO PATH". That premise, not the arc gate, is what expired.
+     * {@code Swim} used to demand an <i>open-air</i> head at its destination, so only a fluid SURFACE was
+     * enterable and a fluid INTERIOR was a wall; the head test is now "not solid", which is the real
+     * upright-pose fit requirement (it is what lets the bot walk into the body of a waterfall instead of
+     * bridging around it). Lava is a priced medium rather than a wall, so a route exists — and A* takes it only
+     * because this scene is sealed and there is literally nothing else. It is charged accordingly: {@code
+     * lavaSwimCellCost} at the {@code BotCaps.DEFAULT} mortal profile is {@code 9.09×2.5 + 10 HP×100 ≈ 1023}
+     * ticks per cell, ~220 walk-blocks of detour each, against a jump that would have cost a few ticks.
+     *
+     * <p>So the assertion moves to the invariant that actually matters and that the arc gate actually owns:
+     * the bot does not JUMP through the 2-tall column. Swimming it at a four-figure price is the ratified
+     * hazard-media model doing its job (s52b: "A* crosses lava only when nothing else exists").
+     */
     @Test
     void twoTallLavaColumn_rejectsTheDiagonalJump() {
-        // Identical to the passing lava corner-cut, but the centre gap cell also has LAVA at y+1 (a 2-tall
-        // lava column). verifyArc proves the obstacle's body prism y+1..y+3 strictly passable, so the y+1
-        // lava rejects — the bot would otherwise fly through a 2-tall lava column. No other route → NO PATH.
         NavGridView grid = diagCourse(1, Blocks.LAVA.defaultBlockState(),
                 Blocks.LAVA.defaultBlockState(), Blocks.LAVA.defaultBlockState());
         BlockPathPlan plan = search(grid, 5, 5, 5, 7, 5, 7);
 
-        assertNull(plan, "a 2-tall lava column above the obstacle must block the diagonal jump (prism blocked)");
+        assertFalse(contains(plan, MovementRegistry.DIAGONAL_PARKOUR),
+                "the 2-tall lava column must block the diagonal JUMP (verifyArc's body prism is not passable)");
+        assertFalse(contains(plan, MovementRegistry.PARKOUR),
+                "nor may it be crossed by a cardinal jump — the same prism rule applies");
     }
 
     // ---- (5) NEGATIVE: an ordinary walkable diagonal must NOT produce unnecessary parkour ---------------
@@ -246,8 +265,9 @@ class DiagonalHazardJumpTest {
         return n;
     }
 
+    /** Null-safe: a NO-PATH result trivially contains no move (and is a legitimate outcome for the negatives). */
     private static boolean contains(BlockPathPlan plan, Object move) {
-        return count(plan, move) > 0;
+        return plan != null && count(plan, move) > 0;
     }
 
     /** Whether the plan ever STANDS on floor cell {@code (fx,fy,fz)} — waypoints store FEET (floor y+1). */

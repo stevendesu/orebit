@@ -34,6 +34,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.Pose;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.Level;
 import net.minecraft.tags.BlockTags;
@@ -102,14 +103,19 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private Level lastLevel;
 
     /**
-     * The bot's movement mode to seed the planner's start node with — its REAL pose: vanilla {@code
-     * isSwimming()} (the prone {@code Pose.SWIMMING}) ⇒ {@link MovementContext#MODE_PRONE}, so a replan that
-     * fires mid-sprint-swim keeps the prone state instead of re-deriving STANDING from a buoyancy bob and
-     * re-initiating (or, in genuine 1-deep water, getting stuck unable to re-initiate). When the bot is not
-     * swimming, {@link BlockPathfinder#MODE_AUTO} lets the search derive the mode from the start geometry.
+     * The bot's movement mode to seed the planner's start node with — its REAL pose ({@code Pose.SWIMMING},
+     * the 0.6-tall hitbox) ⇒ {@link MovementContext#MODE_PRONE}, so a replan that fires mid-sprint-swim keeps
+     * the prone state instead of re-deriving STANDING from a buoyancy bob and re-initiating (or, in genuine
+     * 1-deep water, getting stuck unable to re-initiate). Otherwise {@link BlockPathfinder#MODE_AUTO} lets the
+     * search derive the mode from the start geometry.
+     *
+     * <p>Reads the same POSE as {@link #prone()} rather than the {@code isSwimming()} flag, for the same
+     * reason and so planner and follower cannot disagree about what mode the bot is in: in the one state where
+     * the two differ (sprint dropped under a 1-tall ceiling — flag false, hitbox still 0.6) seeding
+     * {@code MODE_AUTO} would have the search plan a 1.8-tall body through a gap the bot is lying in.
      */
     int currentStartMode() {
-        return this.isSwimming() ? MovementContext.MODE_PRONE : BlockPathfinder.MODE_AUTO;
+        return this.prone() ? MovementContext.MODE_PRONE : BlockPathfinder.MODE_AUTO;
     }
 
     /**
@@ -929,7 +935,18 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.setYHeadRot(yaw);
     }
 
-    @Override public boolean prone() { return this.isSwimming(); }
+    /**
+     * Whether the bot's hitbox is the 0.6-tall prone one — read from the <b>POSE</b>, not the {@code
+     * isSwimming()} flag (DESIGN-submerged-upright-swim.md §5.1). The two diverge in exactly one state and it
+     * is a state this design creates: dropping sprint clears the flag on the very next tick, but
+     * {@code Player.updatePlayerPose} then FIT-TESTS the desired STANDING pose and falls back through
+     * CROUCHING to {@code Pose.SWIMMING} when the bot has no headroom (bytecode-verified against 1.21.11) — so
+     * a bot in a 1-tall gap reads "not swimming" while still physically 0.6 tall. Every caller of this seam
+     * (EndSprintSwim's stand-up gate, SprintSwim's cursor gate, StartSprintSwim's dive gate) cares about the
+     * HITBOX, so the flag would let a move declare the pose flipped a tick or more before it actually did, and
+     * hand the next move a frame the bot does not fit — the same class of defect as the Surface cursor skip.
+     */
+    @Override public boolean prone() { return this.getPose() == Pose.SWIMMING; }
 
     @Override
     public void faceTowards(double dx, double dy, double dz) {

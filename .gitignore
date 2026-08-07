@@ -62,3 +62,7 @@ scripts/autotest-cliff/world-master/
 scripts/autotest-climb/world-master/
 # Carpet-parkour repro master world (New World 1) — untracked like the other repro masters
 scripts/autotest-carpet/world-master/
+
+# Python bytecode from internal_docs/tools (trace/world-dump analysis helpers)
+__pycache__/
+*.pyc

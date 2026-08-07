@@ -135,7 +135,10 @@ public final class ProbeCommand implements BotCommand {
     }
 
     private static String transitName(int t) {
-        return t == NavBlock.TRANSIT_HEAVY ? "heavy" : t == NavBlock.TRANSIT_LIGHT ? "light" : "none";
+        if (t == NavBlock.TRANSIT_HEAVY) return "heavy";
+        if (t == NavBlock.TRANSIT_LIGHT) return "light";
+        if (t == NavBlock.TRANSIT_FLUID) return "fluid";
+        return "none";
     }
 
     private static String headroomName(int h) {
