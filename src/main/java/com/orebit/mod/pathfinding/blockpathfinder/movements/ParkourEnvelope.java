@@ -6,7 +6,7 @@ package com.orebit.mod.pathfinding.blockpathfinder.movements;
  * It replaces the old hand-tuned per-move constants ({@code Parkour.RISE_MAX}, {@code Parkour.FALL_MAX},
  * {@code DiagonalParkour.MAX_GAP}) with values computed at class-load from closed-form Minecraft
  * ballistics — the exact model validated in {@code internal_docs/parkour_envelope_params.py} (which
- * supersedes the prose envelope table in {@code internal_docs/DESIGN-parkour-envelope.md}). No Minecraft
+ * supersedes the prose envelope table in {@code internal_docs/NOTES-movement-physics.md} §1–§2). No Minecraft
  * imports, so its static init runs in safe order (pure arithmetic) and works headless.
  *
  * <h2>The model (ported verbatim from {@code parkour_envelope_params.py})</h2>

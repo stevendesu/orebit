@@ -182,7 +182,7 @@ public final class MovementContext {
         // START inside a climbable back to the 0.2 climb (the post-move overwrite re-tests onClimbable) —
         // the 0.42 launch never happens, so a takeoff with feet in a floor vine (walk-in stance, reachable
         // since forever) or in a ladder cell above a solid floor (the sink-in hang stance) is physically
-        // impossible (DESIGN-climb-vocabulary.md §1/§4). One extra descriptor read per takeoff gate; the
+        // impossible (NOTES-movement-physics.md §3/§5). One extra descriptor read per takeoff gate; the
         // launch-refusal semantics extend to WalkOff honestly (the ±0.15 climbable clamp kills its
         // momentum-preserving crossing).
         return !NavBlock.isClimbable(descriptorAt(x, y + 1, z));
@@ -976,7 +976,7 @@ public final class MovementContext {
      * Whether {@code d} is a climbable block (ladder / scaffolding / the vine family — the {@link
      * NavBlock#isClimbable CLIMB} fingerprint bit) on an already-read descriptor (read-once form; the
      * climb move reads every cell exactly once via {@link #packedAt}/{@link #descriptorOf}). Note the
-     * climbable shapes diverge (bytecode-adjudicated 2026-07-31, DESIGN-climb-vocabulary.md §1): ladder
+     * climbable shapes diverge (bytecode-adjudicated 2026-07-31, NOTES-movement-physics.md §3): ladder
      * classifies {@code SHAPE_OTHER} and scaffolding {@code SHAPE_FULL} (the empty-context query returns
      * its stand-on-top stable shape) — both NOT {@link #passable} but genuinely {@link #standable}
      * (full-height collision tops), and both read as <i>blocked</i> by the resident HEADROOM bit — while
@@ -1048,7 +1048,7 @@ public final class MovementContext {
      * empty collision, so the arrest position within the cell is exact)? The solid climbables are
      * deliberately excluded: scaffolding's top catches a faller ON TOP (never inside), and a ladder cell
      * entered from above is a 0.0125-block knife-edge between hanging inside and standing on the 3/16
-     * plate — a nondeterministic landing the planner must not emit (DESIGN-climb-vocabulary.md §1/§2).
+     * plate — a nondeterministic landing the planner must not emit (NOTES-movement-physics.md §3/§4).
      * One extra mask on the already-loaded long — never a new grid read.
      */
     public boolean hangable(long d) {
@@ -1137,7 +1137,7 @@ public final class MovementContext {
      * it as no slower than air. It is deliberately NOT consulted by the swim rungs: those price lava through
      * {@link #lavaSwimCellCost}, whose {@code 2.5×} is a MULTIPLIER on the swim rate, and adding a flat
      * walk-derived surcharge on top would double-charge the same physics. Unifying the two is the
-     * dwell-scaled cost-model arc (DESIGN-submerged-upright-swim.md §3.3), not this constant.
+     * dwell-scaled cost-model arc (NOTES-vanilla-fluid-physics.md §5), not this constant.
      */
     public static final float FLUID_TRANSIT_COST =
             com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse.FLAT_COST * (1f / 0.4f - 1f);

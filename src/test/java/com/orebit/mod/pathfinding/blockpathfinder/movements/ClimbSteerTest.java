@@ -148,7 +148,7 @@ class ClimbSteerTest {
     }
 
     /** §3.5 sink-in through a scaffold DECK: grounded atop scaffolding, descending — sneak drops the
-     *  stand-on-top shape. (DESIGN-climb-vocabulary.md §4.) */
+     *  stand-on-top shape. (NOTES-movement-physics.md §5.) */
     @Test
     void sinkThroughScaffoldDeckSneaks() {
         View seg = new View(55.5, 178.0, 256.5, 55.5, 177.0, 256.5); // Δy = −1

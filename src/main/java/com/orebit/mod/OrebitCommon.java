@@ -99,7 +99,7 @@ public final class OrebitCommon {
             }
         });
 
-        // World-model persistence (DESIGN-worldmodel-persistence.md): eager-load every dimension's persisted
+        // World-model persistence (NOTES-perf-and-persistence.md §2/§5): eager-load every dimension's persisted
         // HPA region tier (cost fragments + resource tallies) at server start so the bot's memory of explored
         // terrain survives a restart — the point of the Exaroton-style idle-auto-stop deployment. Registered
         // AFTER ConfigLoader::load (loadAll itself needs no config, but the periodic flush below reads
@@ -146,14 +146,14 @@ public final class OrebitCommon {
         // default no-op still persists recent state. Cheap when clean (one counter bump + a dirty-set test).
         events.onWorldTickEnd(level -> { final long t = System.nanoTime(); RegionPersistence.tick(level); SlowTickMonitor.persist(t); });
 
-        // Stage-2 on-demand region-shard lazy-load drain (DESIGN-worldmodel-persistence.md — bounded region RAM):
+        // Stage-2 on-demand region-shard lazy-load drain (NOTES-perf-and-persistence.md §4):
         // once per level-tick, page in any shards the clobber-guard / RegionGrid.ensureLeaf requested, atomically
         // and under the pathing.regionShardLoadBudgetMs budget. Registered unconditionally: under eager-load-all
         // (hpa.lazyLoad=false) the residency's persisted-shard index is empty, so nothing is ever requested and
         // this is a cheap per-tick queue-empty test. Sits beside RegionPersistence::tick / HpaMaintenance::flush.
         events.onWorldTickEnd(level -> { final long t = System.nanoTime(); RegionShardLoader.drain(level); SlowTickMonitor.shardLoad(t); });
 
-        // Stage-2 cold-shard EVICTION (DESIGN-worldmodel-persistence.md — bounded region RAM, increment 4): once per
+        // Stage-2 cold-shard EVICTION (NOTES-perf-and-persistence.md §4): once per
         // level-tick, if resident built L0 cost leaves exceed hpa.residentLeafCap, page the coldest FULLY-UNLOADED
         // shards back to disk (LRU, flush-if-dirty first, keep the coarse tier resident) until back under cap. This
         // is the half that actually BOUNDS live region RAM; the RegionShardLoader drain above pages evicted shards

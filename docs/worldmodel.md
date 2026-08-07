@@ -40,7 +40,8 @@ Key decisions:
   over the measured count), and the high **6 bits** are precomputed
   *neighbour-property flags* — walkable headroom above the floor, "editing here could
   release a fluid or drop gravel on you", "there's a walk-through hazard in the body
-  space", "there's a solid face to place a block against". These are the multi-cell
+  space", "there's something in the body space that slows you as you pass through it",
+  "there's a solid face to place a block against". These are the multi-cell
   facts the movement code would otherwise re-derive on every search expansion;
   computing them once at build time turns them into a single masked array access.
 - **A parallel depth byte per cell** rides beside the `short` grid — two nibbles
@@ -65,7 +66,8 @@ not defaulted to air.
 
 Above the block layer, the world is divided into a **fixed cubic grid** of
 16×16×16-block regions (an implicit octree — parents are simply the 2×2×2 group of
-their children),
+their children, until a cell grows tall enough to span the whole world vertically, at
+which point there is nothing left to halve and the tree flattens into a quadtree),
 not semantic flood-filled regions. A fixed grid makes block→region assignment trivial
 (coordinate math), makes block place/break updates O(1), and gives a clean
 merge-of-children aggregation up the pyramid.

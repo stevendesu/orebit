@@ -1465,7 +1465,7 @@ public final class PathPlan {
         if (hop < 0) return false;
         if (RegionPathfinder.isVirtualGoal(skeleton.fragmentId(hop + 1))) {
             // The blamed hop is (approach → V). The row must be the FULL approach node key so it equals the one
-            // relaxVirtualGoal checks (parity — DESIGN-virtual-start-fragment §0.5): region + fragment +
+            // relaxVirtualGoal checks (parity — NOTES-region-tier.md §1.1): region + fragment +
             // entry-face + from-fragment. The skeleton stores only region+fragment per step, so entry-face is
             // reconstructed geometrically and from-fragment is the previous step's fragment (VIRTUAL_START_FRAG
             // at the root). This makes (A|from=S → V) independently blameable from (A|from=staircase → V) when
@@ -1558,7 +1558,7 @@ public final class PathPlan {
                 // The unreached virtual goal V is NOT a physical bot position — it shares the goal region, so when
                 // A==G it would falsely match the start region and anchor the walk at V (⇒ lo==hi ⇒ -1 give-up).
                 // Skip virtual fragments so the anchor lands on the real start step and the V-hop below fires
-                // (the A==G false-give-up fix — DESIGN-virtual-start-fragment §0.5).
+                // (the A==G false-give-up fix — NOTES-region-tier.md §2).
                 if (RegionPathfinder.isVirtualGoal(sk.fragmentId(i))) continue;
                 if (rawRegionKey(sk, i, minY) == startRegionRawKey) {
                     lo = i;

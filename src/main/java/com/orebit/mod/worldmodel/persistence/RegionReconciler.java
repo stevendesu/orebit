@@ -10,7 +10,7 @@ import com.orebit.mod.worldmodel.resource.ResourceMerger;
 import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
 /**
- * The Stage-2 <b>§2b reconciliation</b> pass (DESIGN-worldmodel-persistence.md — bounded region RAM). After a lazy
+ * The Stage-2 <b>§2b reconciliation</b> pass (NOTES-perf-and-persistence.md §3/§4). After a lazy
  * shard-load has interned a shard's persisted leaves ({@code decode}) beside a coarse cell that was already
  * live-partial, that coarse cell now STRADDLES a complete-but-not-yet-recomputed child set: some children live,
  * the rest freshly interned from disk. Its stored value is still the partial live rollup. Rather than replay the

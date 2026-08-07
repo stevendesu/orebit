@@ -54,7 +54,7 @@ public final class RegionMineModel {
     public static final RegionMineModel DEFAULT = build(null);
 
     /**
-     * The FORWARD-pass fixed dig model (FINDINGS-region-pillar-flood.md §1): a <b>wooden-pickaxe</b> economy used
+     * The FORWARD-pass fixed dig model (NOTES-region-findings.md §1): a <b>wooden-pickaxe</b> economy used
      * on the region A*'s forward pass <b>regardless of the bot's real inventory</b>. This makes the region
      * skeleton <b>inventory-independent</b> (a bare-handed bot no longer over-prices digging relative to the
      * tool-blind pillar cost — the asymmetry that let the flood pick a pillar-up-and-over partial), yet does not

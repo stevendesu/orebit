@@ -23,7 +23,7 @@ import com.orebit.mod.worldmodel.hpa.StraddleSet;
 
 /**
  * On-disk (de)serializer for a dimension's {@link CostPyramid} fragment records — the cost half of the
- * world-model persistence arc (DESIGN-worldmodel-persistence.md §2, §7). <b>Stage-1 sharded format</b>: instead
+ * world-model persistence arc (NOTES-perf-and-persistence.md §1/§2). <b>Stage-1 sharded format</b>: instead
  * of one whole-dimension {@code hpa.bin} carrying only the level-0 leaves, the cost pyramid is written as
  * Minecraft-{@code .mca}-style per-region SHARDS:
  * <ul>

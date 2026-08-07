@@ -747,7 +747,7 @@ public final class HierarchicalRegionPlan {
     /**
      * Full top-down descent from {@code botFloor} (HPA-CASCADE.md §3); sets {@link #failed} on a no-route.
      *
-     * <p><b>§3a flood escalation (FINDINGS-region-pillar-flood.md §3).</b> The cap-safe top level is only
+     * <p><b>§3a flood escalation (NOTES-region-findings.md §3).</b> The cap-safe top level is only
      * "cap-safe" for a DIRECT route; a real route that must detour away-then-back (a wide obstacle, or the old
      * free-void) can still blow the search area past {@link RegionPathfinder#maxChebAtLevel} at that level. When a
      * per-level search aborts on the flood guard ({@link RegionPathfinder#lastWasFlood()}), we <b>widen the

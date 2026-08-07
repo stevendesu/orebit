@@ -15,7 +15,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 
 /**
- * The Stage-2 bounded-region-RAM <b>on-demand shard loader</b> (DESIGN-worldmodel-persistence.md — coarse-only
+ * The Stage-2 bounded-region-RAM <b>on-demand shard loader</b> (NOTES-perf-and-persistence.md §4 — coarse-only
  * startup + atomic lazy-load). Under {@code hpa.lazyLoad}, {@link RegionPersistence#loadCoarseOnly} loads only the
  * per-dimension coarse levels at start and indexes which shards exist on disk; this class pages those shards in
  * <b>lazily</b> as the planner touches their leaves.

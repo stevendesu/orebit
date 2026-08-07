@@ -48,7 +48,7 @@ import net.minecraft.server.Bootstrap;
  *       Exercises the long reverse-Dijkstra field + the window-target walk.</li>
  *   <li><b>HONEYCOMB</b> — the same walk through a 4-fragment-per-region cave belt whose sealed side pockets
  *       steal the nearest-centroid membership probe: the only scenario whose {@code costAt} reads exercise the
- *       multi-fragment centroid loop + the 63-slot fallback scan (PERF-AUDIT-region-field §3 items 4–5) — the
+ *       multi-fragment centroid loop + the 63-slot fallback scan (NOTES-region-findings.md §5) — the
  *       primary microscope for any change to {@code RegionCostField} slot resolution.</li>
  * </ul>
  *

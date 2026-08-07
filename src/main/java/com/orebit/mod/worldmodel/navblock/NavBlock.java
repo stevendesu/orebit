@@ -203,7 +203,7 @@ public final class NavBlock {
      * a MULTIPLIER on whichever swim rate applies. Setting the class makes the fact available to every
      * consumer (and correctly prices a ground move's body cells through lava, which previously charged damage
      * but no slowness at all); converting the swim path to consume it is the cost-model arc that also makes
-     * the damage charge dwell-scaled. See DESIGN-submerged-upright-swim.md §3.3.
+     * the damage charge dwell-scaled. See NOTES-vanilla-fluid-physics.md §5.
      */
     public static final int TRANSIT_FLUID = 3;
 

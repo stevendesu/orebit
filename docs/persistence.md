@@ -2,16 +2,17 @@
 
 Orebit remembers the world its bots explore. Not the fine, per-block detail near a bot — that's
 cheap to recompute from the live world every time a chunk loads, so it's never saved — but the
-**coarse map**: the shape of terrain far from any bot (for long-range routing) and where the bot
-saw resources (for [`/bot report` and `/bot find`](gathering.md)). That coarse map is written into
-your world folder so it survives a restart. On a server that stops when idle and restarts often,
+**coarse map**: the shape of terrain far from any bot (for long-range routing) and where resources
+were seen (for [`/bot report` and `/bot find`](gathering.md)). Both are tallied from every chunk that
+loads, so the map covers ground your players have walked as well as ground a bot has. That coarse map
+is written into your world folder so it survives a restart. On a server that stops when idle and restarts often,
 this is what lets a bot still know the lay of land it visited hours ago without re-exploring it.
 
 This page is for server admins: **what** Orebit writes, **where**, and what you can safely do with it.
 
 ## Where the files live
 
-Everything Orebit saves goes under a single `orebit/` folder inside your world save, one subfolder
+The saved map goes under a single `orebit/` folder inside your world save, one subfolder
 per dimension:
 
 ```
@@ -38,6 +39,14 @@ to rediscover it. The two `*.coarse.bin` files are a small per-dimension summary
 the coarsest zoom — enough to plan a rough long-distance route the instant the server starts, before
 any detailed shard has loaded.
 
+That folder is the whole of the saved map, but it isn't quite everything Orebit writes. One tiny
+sidecar sits beside it at `<world>/orebit-bots.properties` — a `<botUuid>=<owner name>` line per bot
+this world has seen, so a respawn can re-adopt the world's existing bot when the owner's offline UUID
+changes (a rename, or a dev relaunch) instead of deriving a fresh one. It is *not* part of the cache
+described below: deleting it costs only that adoption fallback, but in the case it exists to cover
+that means a bot starting over with an empty inventory. The bot's inventory itself isn't Orebit data
+at all — it lives in vanilla player data under the bot's UUID, exactly like any player's.
+
 ## It's a cache — you can delete it
 
 **These files are safe to delete.** They are a rebuildable cache, not authoritative save data: Orebit
@@ -52,7 +61,8 @@ the old files are simply ignored as a cache miss and rewritten in the new format
 ## When it's saved
 
 - **On a clean shutdown** — the complete, authoritative save. Whenever the server stops normally, every
-  changed dimension is fully written before it exits.
+  explored dimension is fully written before it exits — all of its shards, not just the ones that
+  changed since the last save.
 - **Periodically, as crash insurance** — every `hpa.persistIntervalTicks` (default ≈ 5 minutes) the bot
   re-saves any dimension that changed since its last save, so a hard crash loses at most a few minutes of
   exploration. This background save is spread out over several ticks under a small time budget
@@ -66,8 +76,9 @@ Both are covered under [World memory in the configuration reference](configurati
 
 Not much — on the order of **a few percent of the size of your vanilla region files** for the same area.
 A single 32×32-chunk shard is tens of kilobytes even for dense cave terrain, against multiple megabytes
-for the vanilla `.mca` region covering the same ground. Only areas a bot has actually explored get a
-shard, so the footprint grows with where your bots have *been*, not with world size.
+for the vanilla `.mca` region covering the same ground. Only ground that has actually been *loaded*
+gets a shard — the map is built from chunks as they load, whoever loaded them — so the footprint grows
+with where you and your bots have been, not with world size.
 
 ## Keeping memory bounded (optional)
 
@@ -76,8 +87,8 @@ On a very long-lived world with an enormous explored area, you can instead have 
 per-dimension summary resident and **stream the detailed shards in and out on demand**:
 
 - `hpa.lazyLoad = true` loads only the two `*.coarse.bin` summaries at start (so long-range planning
-  works immediately) and pages each shard back off disk as a bot approaches the area it covers. Requires
-  a server restart to change.
+  works immediately) and pages each shard back off disk on demand, the moment the planner reaches into
+  the area it covers. Requires a server restart to change.
 - `hpa.residentLeafCap` then caps how much detail stays in memory: once the resident count exceeds it,
   the coldest regions (those whose chunks are all currently unloaded) are written back to disk and
   reloaded only if a bot returns. The summary always stays resident, so the bot can still route across

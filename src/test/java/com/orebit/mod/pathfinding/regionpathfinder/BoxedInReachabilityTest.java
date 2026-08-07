@@ -14,8 +14,8 @@ import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import net.minecraft.core.BlockPos;
 
 /**
- * #4 Increment 1 — the boxed-in negative-reachability harvest (DESIGN-boxed-in-reachability §2/§3/§5,
- * FINDINGS-reverse-reachability §7). Guards the two load-bearing invariants of the harvest, on hand-authored
+ * #4 Increment 1 — the boxed-in negative-reachability harvest (DESIGN-boxed-in-reachability §2/§3/§5).
+ * Guards the two load-bearing invariants of the harvest, on hand-authored
  * headless worlds (the {@link RegionFloodGuardTest} idiom — real {@link FragmentBuilder} flood over authored
  * masks):
  * <ol>

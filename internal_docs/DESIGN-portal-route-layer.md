@@ -14,10 +14,21 @@
   owner-ratified: PathEdits carry on splice EXCEPT across dimension changes — see the
   `path-splice-primitive` memory); lazy-vs-eager leg policy (§4.6); END_PORTAL (§7).
 
-**⚠ Design blocker carried forward (§7):** the doc's plan to widen PORTAL bit 43 into bits 43–44 is DEAD —
-bit 44 is now PROTECTED (s43). Current free descriptor bits: 8–13 and 45–63. Recommended: a fresh 2-bit
-`PORTAL_KIND` at bits 45–46 (0 none / 1 nether / 2 end / 3 gateway), migrating the bit-43 flag; or a lone
-END_PORTAL bit at 45 if gateway is never needed. Verify against `NavBlock` before building §7.
+**✅ §7's descriptor blocker is RESOLVED — re-verified against `NavBlock` 2026-08-07.** Every earlier
+statement of it is stale, in both directions:
+
+- The old "PORTAL is bit 43, widen it into 43–44" plan is dead twice over: the portal marker **moved down
+  to bits 11–12**, and **bit 43 is now `DOOR_OPEN_BIT`** (44 is `PROTECTED`).
+- The follow-up "put a fresh 2-bit `PORTAL_KIND` at 45–46, free bits are 8–13 and 45–63" is also wrong:
+  8–13 are fully claimed (stair/door facing 8–9, stair half 10, portal field 11–12, door hinge 13), and
+  45–51 are claimed too (45 `REDUCED_JUMP`, 46–47 `BUBBLE`, 48–49 `FALLSOFT`, 50 `DOOR_TOGGLEABLE`,
+  51 `NARROW_TOP`). **The free bits are 52–63** — nothing above 51 is in use.
+- **No new bits are needed anyway.** The portal field at 11–12 is *already* the 2-bit kind field this
+  section wanted, mirroring the `fluid` field's low/high shape:
+  `00 none / 01 end (end_portal + end_gateway) / 11 nether / 10 unused`. The LOW bit is what the walker's
+  passability gate subtracts (route around ALL portals); the HIGH bit is what `NetherPortalIndex` and the
+  follower read (enter nether portals deliberately, never chase an end portal). §7 can be built on the
+  existing encoding; only a *gateway-vs-end* split would need the spare `10` code.
 
 **§ map (sections cited by code Javadocs):** §1 problem/scope; §2 what exists; §3 the leg model (route =
 legs + transits, one PathPlan per leg); **§4 THE SPLICE PRIMITIVE** — §4.1 what is spliced, §4.2 why the

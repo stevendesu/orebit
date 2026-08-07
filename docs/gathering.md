@@ -22,29 +22,51 @@ by quantity and proximity, never a brute scan. The store is sparse: a region onl
 row once it actually contains something indexed, which keeps the whole resource memory
 inside a few percent of a save's footprint.
 
-`/bot find <resource>` runs exactly that query and reports the nearest known
-concentration — a way to ask the bot what it has noticed without sending it anywhere.
+`/bot find <resource>` runs exactly that query and reports the handful of known
+concentrations nearest **the bot** (not you) — a way to ask the bot what it has noticed
+without sending it anywhere. The
+coordinates it prints are the *centre of a 16³ region*, not the ore block itself: the
+pyramid localises to a region, and the exact block is a job for a look around once you're
+there. (A couple of resources — `stone`, `wood` — are findable but have no pyramid column
+of their own, so for those `find` falls back to a bounded live look at the chunks currently
+loaded around the bot, and says so if nothing is loaded nearby.)
 
 ## Going and getting it
 
-`/bot gather <resource> [count]` is the query wired to the legs. It's a small state
-machine riding on top of the same navigation and mining the bot uses for everything else:
+`/bot gather <resource> [count]` is that knowledge wired to the legs. It's a small state
+machine riding on top of the same navigation and mining the bot uses for everything else,
+and its order of preference is *look first, remember second*:
 
-1. **Find** the best candidate region from the pyramid.
-2. **Path** there with the two-tier search.
-3. **Scan** the area on arrival — the pyramid is a *compass*, not a map. It says "iron,
-   that way," but the exact block is confirmed by a fresh local look once the bot is close
-   and the chunk is truly loaded, so a stale or coarse count never sends the bot digging
-   at empty rock.
-4. **Mine** it — walk into line of sight, dig it out with [real mining time](world_edits.md),
-   and then collect the drop off the ground.
-5. **Repeat** until the quota is met, then **return** to where the gather started.
+1. **Scan** what's actually here first. The bot sweeps the loaded chunks around itself,
+   nearest-first, looking at the real blocks. This — not the pyramid — is the primary
+   source of targets, precisely because the pyramid is coarse, is filled in as chunks load,
+   and can bucket a count into a neighbouring region: what the world *says* right now beats
+   what the census *remembers*. (It waits for the surrounding terrain to finish building
+   its nav data before committing, so it doesn't commit to a target while half the
+   neighbourhood is still invisible to it.)
+2. **Follow the compass** only when nothing is loaded nearby. Then the pyramid earns its
+   keep: it hands over a distant heading — "iron, that way" — and the bot walks toward it,
+   *still live-scanning the whole way*, so ore that loads en route diverts it immediately
+   rather than being strode past. If it arrives and the region turns out to hold nothing,
+   that tally was stale: the bot notes the region as a dud and asks for the next heading.
+3. **Mine** it — choose among the found ore by what it actually costs to *route* to, path
+   into reach, and dig it out with [real mining time](world_edits.md). If the bot has no
+   tool that would yield the item you asked for, it says so and stops rather than
+   destroying the block for nothing.
+4. **Collect** the drop by following the real item on the ground. The bot tracks that
+   specific dropped entity through its whole life — waits while it's still falling, walks
+   to wherever it has rolled to, and moves on the moment it's picked up (or has burned,
+   despawned, or been taken by someone else). No timers, no guessing at where the drop
+   "should" be.
+5. **Repeat** until the quota is met, then **return** to where the command was issued.
 
 A detail that matters: the quota is counted as **items actually picked up into the
 inventory**, not blocks broken. Fortune enchants, ore that drops raw material, blocks that
 scatter into several items — the bot counts what it *has*, so "gather five iron" ends with
-five iron regardless of drop mechanics. If the resource genuinely runs out before the
-quota is met, the bot stops and tells you rather than wandering forever.
+five iron regardless of drop mechanics. Only the item you asked for counts: incidental
+drops from the same vein still get picked up, they just don't tick the quota. If the
+resource genuinely runs out before the quota is met, the bot stops and tells you rather
+than wandering forever.
 
 Because gather reuses the general navigation, everything the pathfinder knows comes along
 for free — it will drop off a cliff into a cave if that's the cheap way down to the ore,

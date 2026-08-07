@@ -11,7 +11,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 /**
  * Leave the prone sprint-swim — the {@link MovementContext#MODE_PRONE PRONE}&rarr;{@link
  * MovementContext#MODE_STANDING STANDING} transition <b>in place</b>, and the exact mirror of
- * {@link StartSprintSwim} case (1) (DESIGN-submerged-upright-swim.md §5). It does not move the bot: it flips
+ * {@link StartSprintSwim} case (1) . It does not move the bot: it flips
  * the search node's mode at the same {@code (x,y,z)}, which lands on a distinct row because mode is part of the
  * node key — so it is a real search edge, not a zero-progress self-loop.
  *

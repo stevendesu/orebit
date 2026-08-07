@@ -17,7 +17,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  * <b>4 horizontal faces</b> (±X, ±Z). This move emits the 20 <b>multi-axis</b> steps:
  *
  * <p><b>The two pure-Y faces are emitted by NOBODY in the prone mode, deliberately</b>
- * (DESIGN-submerged-upright-swim.md §4, 2026-08-07). A swimming look clamps around 80°, so a
+ * (owner ruling 2026-08-07). A swimming look clamps around 80°, so a
  * <i>straight</i>-up/down heading always leaks the last ~10° as lateral drift, and the prone pose is retained
  * only while a forward impulse is held — which in a 1×1 shaft is ejection at speed. The vertical axis therefore
  * belongs to the UPRIGHT {@link Swim} (its rise holds jump and needs no heading at all, so it cannot drift).

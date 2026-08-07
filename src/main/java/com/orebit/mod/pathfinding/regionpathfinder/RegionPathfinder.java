@@ -112,7 +112,7 @@ public final class RegionPathfinder {
 
     /**
      * The fixed dig model the <b>forward</b> region A* prices with, regardless of the bot's real tool
-     * (FINDINGS-region-pillar-flood.md §1). A wooden-pickaxe economy keeps the skeleton inventory-independent so
+     * (NOTES-region-findings.md §1). A wooden-pickaxe economy keeps the skeleton inventory-independent so
      * a bare-handed bot no longer over-prices digging relative to the tool-blind pillar cost (the asymmetry that
      * fed the pillar-up-and-over flood partial). The REVERSE cost-to-goal field keeps the bot's real tool-aware
      * model. Toggle to {@link RegionMineModel#DEFAULT} to price the forward pass as stone (the tests' baseline).
@@ -284,7 +284,7 @@ public final class RegionPathfinder {
      * out at {@link RegionFragments#MAX_FRAGMENTS}−1 = 61; 62 was the reserved id, 63 = {@link #VIRTUAL_GOAL_FRAG}.
      * Stamping the root's from-fragment with this sentinel keeps {@code (A|from=S → V)} and {@code (A′|from=B → V)}
      * distinct rows — the A==G cliff collapse — AND journey-scopes {@code from=S} rows structurally (S differs each
-     * {@code /bot goto}, so a row naming it can't be world knowledge). DESIGN-virtual-start-fragment §0.5.
+     * {@code /bot goto}, so a row naming it can't be world knowledge). NOTES-region-tier.md §2.
      */
     public static final int VIRTUAL_START_FRAG = 62;
 
@@ -314,7 +314,7 @@ public final class RegionPathfinder {
      * <p><b>Scope (owner ruling, 2026-08-02):</b> {@link #uniformTransitCost}'s AIR chute ONLY. It used to be
      * charged on every MIXED fragment transit too (via {@link #dyCost}), which over-estimated the one region
      * class whose interior we cannot see — see the stairs-optimism note on {@link #walkCost} and
-     * FINDINGS-region-cost-audit §1.
+     * NOTES-region-findings.md §4.
      */
     private static final float UNSAFE_VERTICAL_PENALTY = 16f;
 
@@ -340,7 +340,7 @@ public final class RegionPathfinder {
      * Fold a 3-bit {@code entryFace} (0..5 face, or {@link #ENTRY_START}/{@link #ENTRY_INTERIOR}) into bits 55..57
      * AND the 6-bit {@code fromFrag} (the fragment the search last hopped FROM; {@link #VIRTUAL_START_FRAG} at the
      * root) into bits 58..63 of the physical key — so the SEARCH node identity is
-     * {@code (region, current-fragment, entry-face, from-fragment)} (DESIGN-virtual-start-fragment §0.5). Two
+     * {@code (region, current-fragment, entry-face, from-fragment)} (NOTES-region-tier.md §1, §1.1). Two
      * approaches into one fragment from the same face but different predecessors are now DISTINCT nodes, so the
      * search can try the second after the first is blamed (the two-hallways / A==G cliff fixes).
      */
@@ -352,7 +352,7 @@ public final class RegionPathfinder {
      * The FULL search-node key {@code (region, fragment, entry-face, from-fragment)} — the single shared builder
      * used by BOTH the search-time V-approach blacklist check ({@link #relaxVirtualGoal}) AND the blame add-side
      * ({@link com.orebit.mod.pathfinding.PathPlan#blockedHop}) so the two can never drift (parity requirement,
-     * DESIGN-virtual-start-fragment §0.5). Entry-face is retained in the row (not reduced away) to avoid
+     * NOTES-region-tier.md §1.1). Entry-face is retained in the row (not reduced away) to avoid
      * over-invalidation when two predecessors share a region-local fragment id but enter through different faces.
      */
     public static long approachRowKey(int rx, int ry, int rz, int frag, int entryFace, int fromFrag) {
@@ -707,7 +707,7 @@ public final class RegionPathfinder {
             final float hCur = nodes.f[current] - nodes.g[current];
             if (hCur < bestH) { bestH = hCur; bestRow = current; }
             if (++expansions > MAX_REGION_EXPANSIONS) { budgetHit = true; break; }
-            // §3a cap-safe FLOOD guard (FINDINGS-region-pillar-flood.md §3): the cap-safe box holds ≤
+            // §3a cap-safe FLOOD guard (NOTES-region-findings.md §3): the cap-safe box holds ≤
             // CAP_SAFE_NODES cells, so a NON-flooding search never expands beyond maxChebAtLevel of the start.
             // A pop past that radius means the search area blew its budget — a flood (the free-void or a wide
             // obstacle the clamped goal can't be reached around inside the box). Abort and signal the cascade to
@@ -994,7 +994,7 @@ public final class RegionPathfinder {
         // the region A* is FORCED to route to a DIFFERENT approach (a different side of the goal) instead of
         // re-offering the same dead entry every replan. The FROM side is the FULL approach node key
         // (region + fragment + entry-face + from-fragment), so blaming (A|from=S → V) leaves (A|from=staircase
-        // → V) alive when A==G — the load-bearing approach-conditioning (DESIGN-virtual-start-fragment §0.5).
+        // → V) alive when A==G — the load-bearing approach-conditioning (NOTES-region-tier.md §1.1, §2).
         // Must equal PathPlan.blockedHop's add-side approachRowKey for the same realized route (parity).
         if (blacklist != null
                 && blacklist.contains(approachRowKey(nodes.x[curRow], nodes.y[curRow], nodes.z[curRow],
@@ -1982,7 +1982,7 @@ public final class RegionPathfinder {
      *
      * <p><b>Stairs-optimism (owner ruling, 2026-08-02).</b> Every caller of this method prices a transit
      * through a {@link RegionFragments#KIND_MIXED MIXED} region — the only kind that carries fragments — and
-     * from the region tier we cannot see the interior's SHAPE. Admissibility (FINDINGS-region-cost-audit §0:
+     * from the region tier we cannot see the interior's SHAPE. Admissibility (NOTES-region-findings.md §0:
      * "under-estimating is admissible, over-estimating is not") therefore forces the best case: assume
      * pre-existing stairs/bridges make the transit realizable. A region-transit {@code dy} is a NET elevation
      * change spread across a whole region side of horizontal travel — neither a wall to pillar nor a fall
@@ -2014,7 +2014,7 @@ public final class RegionPathfinder {
      *   <li><b>No cliff term in either direction.</b> A net rise is a staircase and a net drop a ramp — not a
      *       wall to pillar, not a plunge to survive. The old {@code (excess × UNSAFE_VERTICAL_PENALTY)}
      *       measurably deleted cave descents in favour of surface-walk-then-dig-straight-down
-     *       (FINDINGS-region-cost-audit §1: a 19-block cave descent priced 291.2 against an honest 35.2 — the
+     *       (NOTES-region-findings.md §4: a 19-block cave descent priced 291.2 against an honest 35.2 — the
      *       penalty was 88% of the edge).</li>
      * </ul>
      * Both are UNDER-estimates, which §0 admits ("under-estimating is admissible, over-estimating is not") and
@@ -2099,7 +2099,7 @@ public final class RegionPathfinder {
      * </ul>
      * A {@code null}/unbuilt (unloaded) record is <b>NOT free</b> (it once was — the "teleporter through the
      * unknown" that defeated the cap-safe area bound and drove the pillar-to-ceiling flood; see the method body
-     * and {@code FINDINGS-region-pillar-flood.md} §2). It is priced <b>directionally off admissible worldgen
+     * and {@code NOTES-region-findings.md} §2). It is priced <b>directionally off admissible worldgen
      * priors</b> — up is dear (pillar/mine: no player staircases exist in ungenerated terrain), down is cheap
      * (fall), lateral is a walk — and, under {@link #UNBUILT_Y_BANDED} (the default), additionally Y-banded on
      * sea level 63. Still admissibly optimistic (a natural hill/cave might make it cheaper) but no longer a free
@@ -2110,7 +2110,7 @@ public final class RegionPathfinder {
     static float uniformTransitCost(int level, RegionFragments rfM, int f, boolean canPlace, int safeFall,
                                     RegionMineModel mine, float pillarField, boolean reverse,
                                     int neighborRy, int minY) {
-        // UNBUILT / unloaded (null record): FINDINGS-region-pillar-flood.md §2. This was FREE (return 0) — the
+        // UNBUILT / unloaded (null record): NOTES-region-findings.md §2. This was FREE (return 0) — the
         // "teleporter through the unknown" — which DEFEATED the cap-safe area bound: a free field is cheaper than
         // every real move, so the search floods the whole unloaded void (the pillar-to-ceiling bug: 83% of the
         // flood was unbuilt transits). It is no longer free. An unbuilt region holds only worldgen terrain, so

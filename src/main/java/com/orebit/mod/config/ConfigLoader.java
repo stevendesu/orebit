@@ -356,8 +356,9 @@ public final class ConfigLoader {
 
             line(w, "# --- doors: how the bot deals with doors in its path ---");
             line(w, "# Bot may OPEN/CLOSE hand-toggleable doors (wood/copper) instead of smashing or routing around");
-            line(w, "# them. Default false: a planned door-open is only followable once the bot can operate doors (a");
-            line(w, "# later feature), so for now an already-open door is walked through and a closed door is mined.");
+            line(w, "# them. Default true: the follower operates doors for real -- it opens a closed door before");
+            line(w, "# crossing and closes it again on a hallway-corner exit. Set false as a kill-switch to fall back");
+            line(w, "# to walking through an already-open door and MINING a closed one.");
             line(w, "# Iron doors are never hand-toggleable regardless of this.");
             kv(w, ConfigKeys.DOORS_TOGGLE, d.doorToggle());
             line(w, "");

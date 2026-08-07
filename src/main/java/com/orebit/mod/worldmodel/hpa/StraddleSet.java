@@ -8,7 +8,7 @@ import java.util.Set;
  * The decode-time <b>straddle set</b> — the per-level set of <i>coarse</i> region cells a persistence
  * {@code decode} SKIPPED because the live world already had them built ("live world wins"), reported so a later
  * {@code RegionReconciler} pass can re-derive exactly those cells once a lazy shard-load has interned the missing
- * persisted children beside them (DESIGN-worldmodel-persistence.md — bounded region RAM, §2b reconciliation).
+ * persisted children beside them (NOTES-perf-and-persistence.md §3/§4).
  *
  * <h2>Why a "straddle" set</h2>
  * Under a coarse-only / lazy startup, a coarse cell can end up STRADDLING two child sources: some children were

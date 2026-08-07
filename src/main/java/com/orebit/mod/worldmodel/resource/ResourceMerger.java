@@ -62,7 +62,7 @@ public final class ResourceMerger {
      * Generalized upward walk: recompute every ancestor of the row {@code (childLevel, crx, cry, crz)} as the
      * per-column log₂-sum of its children, ascending to {@link ResourcePyramid#RESOURCE_TOP_LEVEL}, stopping the
      * moment a parent's vector is unchanged (damping). {@link #mergeUpTallies} is the {@code childLevel == 0} case;
-     * the reconciler (DESIGN-worldmodel-persistence.md §2b) calls it with {@code childLevel == }
+     * the reconciler (NOTES-perf-and-persistence.md §3) calls it with {@code childLevel == }
      * {@link RegionAddress#SHARD_LEVEL} to propagate a reconciled shard-top tally up to the true-global top.
      * Recomputes only PARENTS ({@code childLevel+1} and up); the row itself is assumed current (a real leaf/merge
      * or a {@link #reconcileNode} the caller already ran).
@@ -88,7 +88,7 @@ public final class ResourceMerger {
 
     /**
      * Recompute the single tally row {@code (level, rx, ry, rz)} in place as the per-column log₂-sum of its
-     * children — the per-cell reconcile primitive (DESIGN-worldmodel-persistence.md §2b). Interns the row if
+     * children — the per-cell reconcile primitive (NOTES-perf-and-persistence.md §3). Interns the row if
      * needed; because the sum reads children through {@code rowIfPresent} it now folds in any freshly-interned
      * persisted children, so a straddle coarse tally becomes correct-full. Runs through the guarded
      * {@link #recomputeParent}, so it composes with the Stage-2 clobber-guard: a child still in a non-resident
@@ -110,7 +110,7 @@ public final class ResourceMerger {
         final int childLevel = parentLevel - 1;
         final int children = RegionAddress.childCount(parentLevel);
 
-        // Stage-2 clobber-guard (DESIGN-worldmodel-persistence.md — bounded region RAM): the resource-tier analog
+        // Stage-2 clobber-guard (NOTES-perf-and-persistence.md §4): the resource-tier analog
         // of PyramidMerger's guard. If ANY absent child ({@code rowIfPresent < 0}) belongs to a
         // persisted-on-disk-but-not-resident shard, this child set is only partially loaded, so summing it would
         // ZERO-OUT the correct, fully-explored persisted coarse tally. DEFER: return false (no change) WITHOUT

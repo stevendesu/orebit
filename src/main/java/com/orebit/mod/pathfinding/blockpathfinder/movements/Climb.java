@@ -12,7 +12,7 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
 /**
  * Traverse existing ladders / vines / scaffolding (MOVEMENT-DESIGN Tier 1 climb — the first consumer of
  * the {@link com.orebit.mod.worldmodel.navblock.NavBlock#isClimbable CLIMB} descriptor bit; the gap
- * edges are DESIGN-climb-vocabulary.md §3.3–§3.7). Seven rules, all edit-free:
+ * edges are NOTES-movement-physics.md §4). Seven rules, all edit-free:
  *
  * <ul>
  *   <li><b>Climb up</b> — one cell up the climb column while the surface continues (the cell the feet move
@@ -24,7 +24,7 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *   <li><b>Grab (entry)</b> — a sideways step into an adjacent climb column at feet level. This is the only
  *       way <i>into</i> a ladder column sideways: ladder ({@code SHAPE_OTHER}) and scaffolding
  *       ({@code SHAPE_FULL}) are non-passable to every walking movement — though their full-height
- *       collision tops ARE standable (the classifier truth; DESIGN-climb-vocabulary.md §1). Vines are
+ *       collision tops ARE standable (the classifier truth; NOTES-movement-physics.md §3). Vines are
  *       empty-shape and passable — the same grab rule covers both. Scaffolding is refused (§3.6): the
  *       lateral hold is a SNEAK, and scaffolding is sneak-exempt (the bot would sink while crossing).
  *   <li><b>Jump-grab (§3.3)</b> — from SOLID FOOTING (standable, non-climbable — owner ruling: no jump
@@ -132,7 +132,7 @@ public final class Climb implements Movement {
      * §3.3 jump-grab, ticks: 3 (rise — a grounded 0.42 jump's feet cross +1.0 during tick 3:
      * 0.42 + 0.3332 + 0.2481 ≈ 1.0013) + 2 (arrest settle at the −0.15 clamp) + 3 (the established
      * jump-commit surcharge the parkour family pays) ≈ 8. Physically derived per the ruler
-     * (DESIGN-climb-vocabulary.md §3.3).
+     * (NOTES-movement-physics.md §4).
      */
     public static final float JUMP_GRAB_COST = 3f + 2f + 3f;
 

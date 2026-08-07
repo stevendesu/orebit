@@ -11,7 +11,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 /**
  * Crawl out of the water onto a bank — the {@link MovementContext#MODE_PRONE PRONE}&rarr;{@link
  * MovementContext#MODE_STANDING STANDING} transition for a bot that <b>cannot stand up where it is</b>
- * (DESIGN-submerged-upright-swim.md §7). It moves the bot one cardinal cell onto a standable floor and comes
+ * . It moves the bot one cardinal cell onto a standable floor and comes
  * upright as it emerges.
  *
  * <h2>The geometry is easy to misread: it is the SOURCE that lacks headroom, not the bank</h2>
@@ -19,7 +19,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  * exit opens onto a standable floor at the same level with two clear cells above it: the bot crawls out and
  * stands up in the act of emerging, because standing up where it is, is physically impossible — vanilla's
  * {@code Player.updatePlayerPose} fit-tests STANDING, then CROUCHING, and falls back to {@code Pose.SWIMMING}
- * in a 1-tall gap (see {@link EndSprintSwim} §5.1). {@code StatefulSwimTest}'s 1×1 hole in a wall is exactly
+ * in a 1-tall gap (see {@link EndSprintSwim} and NOTES-vanilla-fluid-physics.md §3.2). {@code StatefulSwimTest}'s 1×1 hole in a wall is exactly
  * this shape, and it is the reason the move survives at all.
  *
  * <p>It is the ONLY rung for "prone in fluid &rarr; dry standable neighbour": {@link SprintSwim} cannot go

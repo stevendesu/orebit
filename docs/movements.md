@@ -42,10 +42,13 @@ which is what lets hazards be *costs* instead of walls.
 | Fall (hang) | 4.633 + 2.5 / block + 2 | walk-off + drop to the vine + arrest settle — **no damage term** |
 | Parkour | 15.6 / 18.6 / 21.6 | run-up + airtime + commit penalty |
 | DiagonalParkour | ≈ 20.1 / 24.1 | the Parkour table at diagonal reach (base cap 2) |
-| Swim (surface) | 9.09 / block | 20 ÷ 2.2 (surface paddle speed) |
+| Swim (surface, lateral) | 9.09 / block | 20 ÷ 2.2 (head-in-air paddle speed) |
+| Swim (submerged, lateral) | 10.15 / block | 20 ÷ 1.97 (fully-submerged paddle speed) |
+| Swim (rise) | 7.41 / block | 1 ÷ 0.135 (hold-jump terminal rise in fluid) |
+| Swim (sink) | 5.41 / block | 1 ÷ 0.185 (sink terminal rate — gravity assists) |
 | Sprint-swim | 3.564 / block | 20 ÷ 5.612 (sprint-swim speed) |
 | Diagonal sprint-swim | 5.04 / 6.17 | 3.564 × √2 (two axes) / × √3 (all three) |
-| Start sprint-swim / Surface | 2 each | pose transitions |
+| Start / end sprint-swim, Surface | 2 each | pose transitions |
 | Ride bubble column | 4 + 1.43 / block | step in and out + the column's ~0.7 blocks/tick push |
 
 Some sanity checks fall out for free: an existing ladder (8.51/block up) beats
@@ -238,21 +241,57 @@ hitbox higher.
 
 ## Swimming
 
-**Swim** — the slow surface paddle, 20 ÷ 2.2 ≈ **9.09 ticks/block**. It's what
-un-walls water: without it every river is a wall to be bridged.
+Fluid is a **medium**, not a pose. Everything a bot does in fluid *upright* lives on one
+move (**Swim**); the prone sprint-swim family is fast lateral travel and nothing else.
 
-**Sprint-swim** — prone underwater swimming at 20 ÷ 5.612 ≈ **3.564 ticks/block**, the
-3D underwater workhorse and the fastest way to cover ground under the bot's own power.
+**Swim** — the upright paddle, and the move that un-walls fluid: without it every river
+is a wall to be bridged. It is **six-directional** — the four cardinals plus a straight
+**rise** and a straight **sink** — which is the structural analogue of Climb: one
+movement, several rungs, each priced from its own real vanilla rate.
 
-**Diagonal sprint-swim** — the full 3D diagonal set of the same stroke: two-axis
-diagonals (horizontal *or* rising/sinking) at 3.564 × √2 ≈ **5.04**, and true
-three-axis corner moves at 3.564 × √3 ≈ **6.17** — so an underwater path cuts corners
-in all three dimensions instead of staircasing.
+- **Lateral** is priced by whether the bot's head is in air or under it: 20 ÷ 2.2 ≈
+  **9.09 ticks/block** at the surface, 20 ÷ 1.97 ≈ **10.15** fully submerged.
+- **Rise** is **7.41 ticks/block** and **sink** is **5.41**, derived from vanilla's
+  in-fluid integrator rather than a published blocks-per-second figure (the ±0.04/tick
+  swim impulse against 0.8 fluid drag and the −0.005/tick in-fluid gravity). Sinking is
+  the cheaper of the two because gravity pulls the same way as the impulse.
 
-**Start sprint-swim / Surface** — the transitions into and out of the prone pose,
-2 ticks each. Sprint-swimming is *stateful*: you need deep water to go prone but can
-continue through shallows, so the search's node identity includes the bot's pose —
-going prone is a real search edge with a real cost, not bookkeeping.
+The destination *head* cell only has to be **not solid** — air **or** fluid. That is the
+real upright-fit requirement, and it is why a dry bot on the bank can walk straight into
+the **body** of a waterfall instead of needing an open-air surface cell to step onto.
+The lateral rungs also scan a little way **down** the neighbouring column (up to 4 cells
+below the bot's feet) to find the fluid surface, so stepping off a low ledge into water
+is one move rather than a fall.
+
+**Sprint-swim** — prone swimming at 20 ÷ 5.612 ≈ **3.564 ticks/block**, the fastest way
+the bot covers ground under its own power, faster even than walking. It is **lateral
+travel only**: it has no straight-up or straight-down rung, because a swimming look
+clamps at about 80° from horizontal, so a "vertical" heading always leaks the last ~10°
+as sideways drift — recoverable in open water, but ejection at speed inside a 1×1
+column. The vertical axis belongs to upright Swim, whose rise just holds jump and needs
+no heading at all. Where a prone swim can actually make progress it strictly dominates
+the slow upright paddle (crossing *N* cells costs 9.09*N* upright against 2 + 3.56*N* + 2
+prone, and the dive already wins at *N* = 1), so the planner suppresses the slow lateral
+rung there — that suppression is what makes the dive findable at all.
+
+**Diagonal sprint-swim** — the multi-axis set of the same stroke: two-axis diagonals
+(horizontal *or* rising/sinking) at 3.564 × √2 ≈ **5.04**, and true three-axis corner
+moves at 3.564 × √3 ≈ **6.17** — so an underwater path cuts corners in all three
+dimensions instead of staircasing. The 80° clamp doesn't reach these: an edge is 45° off
+horizontal and a corner ~35°, and both want lateral velocity anyway.
+
+**Start sprint-swim / end sprint-swim / Surface** — the pose transitions, 2 ticks each.
+Sprint-swimming is *stateful*: you need 2-deep water to go prone but can continue through
+shallows and 1-tall gaps once you are, so the search's node identity includes the bot's
+pose — changing pose is a real search edge with a real cost, not bookkeeping.
+**Start** goes prone (in place when already submerged, or fused with a one-cell dive from
+the surface). **End** stands back up **in place**, and needs only two non-solid body cells
+to grow into — it does *not* need open air overhead, which is what lets a submerged bot
+stand up mid-water and take the upright rise. **Surface** is the remaining exit for a bot
+that *can't* stand where it is — prone in a 1-tall submerged tunnel — and crawls one cell
+sideways onto a standable bank, coming upright as it emerges. Together they close the
+cycle the whole model turns on: sprint-swim across → stand up underwater → rise or sink
+upright → go prone again → resume sprint-swimming.
 
 **Ride bubble column** — an upward bubble column is a free elevator, and the planner
 treats it as one: step in, let the column push (~0.7 blocks *per tick* — several times
@@ -260,10 +299,20 @@ faster than any climb), step out at the top. Priced at a flat 4 ticks for the st
 and step-out plus ≈ **1.43 ticks per block of lift**, it handily beats ladders and
 pillaring wherever one exists.
 
-Lava, for the record, is priced as water's miserable cousin, not forbidden: swimming a
-lava cell costs 2.5× the water stroke *plus* ten hitpoints of damage per cell for a
-mortal bot (~1,000+ ticks per block at defaults) — so the bot crosses lava only when
-every alternative is catastrophically worse, which is how a player treats it too.
+**Lava is the same vocabulary, at a different price.** There is no lava-only movement:
+every upright Swim rung works in lava exactly as it does in water, and the *cost* does
+the sorting. A lava cell is charged 2.5× the water stroke *plus* ten hitpoints of damage
+for a mortal bot (~1,000+ ticks per block at defaults), so the bot crosses lava only when
+every alternative is catastrophically worse — which is how a player treats it too. An
+invulnerable bot (`survival.takesDamage = false`) pays only the 2.5× slow factor and
+swims through. Lava also now carries a **through-slow** class for the ground moves: a
+fall or a diagonal whose body passes through a lava cell is charged ≈ 6.95 ticks for it,
+where it used to be charged the burn but treated as no slower than air.
+
+The prone family is the one thing that does **not** unify, and that is vanilla's ruling
+rather than ours: Minecraft's swimming pose can only be entered or held in *water*, so
+sprint-swim and its diagonal set gate on water — in lava the upright rungs are the whole
+vocabulary.
 
 ## What the config changes
 

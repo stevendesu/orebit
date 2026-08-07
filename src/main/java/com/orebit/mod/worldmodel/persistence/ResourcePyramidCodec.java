@@ -19,7 +19,7 @@ import com.orebit.mod.worldmodel.resource.ResourcePyramid;
 
 /**
  * On-disk (de)serializer for a dimension's {@link ResourcePyramid} tally rows — the resource half of the
- * world-model persistence arc (DESIGN-worldmodel-persistence.md §2, §7). The compass counterpart to
+ * world-model persistence arc (NOTES-perf-and-persistence.md §1/§2). The compass counterpart to
  * {@link CostPyramidCodec}, and, like it, <b>Stage-1 sharded</b>:
  * <ul>
  *   <li>{@code res.<X>.<Z>.bin} — resource levels <b>0..5</b> for the shard {@code (X = chunkX>>5, Z = chunkZ>>5)}

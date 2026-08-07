@@ -25,8 +25,11 @@
 - §7 `GoalForcedCost` — the admissible goal-cuboid forced-cost heuristic (MACRO-MOVEMENTS §4); since s42
   it excludes the far face relative to the start→goal approach, +Y build face exempt.
 - §8 macro-aware movements; §8.1 the shape of the three axis-aligned macros (Pillar up / MineDown down /
-  Traverse lateral); §8.2 `EditScratch` folds N edits; §8.3 the `MACRO_MOVES` flag (since removed —
-  unconditional); §8.4 Diagonal/Ascend macros (never built).
+  Traverse lateral); §8.2 `EditScratch` folds N edits; §8.3 the `MACRO_MOVES` flag —
+  **still present and still the master switch** (`BlockPathfinder.MACRO_MOVES`, default TRUE; OFF, or an
+  unbounded search with no corridor, makes every macro-aware move emit its plain micro step and
+  reproduces the pre-macro search exactly — the A/B lever, used by `LedgeGoalPillarTest`);
+  §8.4 Diagonal/Ascend macros (never built).
 - §9 `reconstruct` — expand a macro edge to N waypoints (the follower is unchanged). **Update
   (2026-07-23):** `reconstruct` now ALSO fills the per-step `BlockPathPlan.floorYs` carry in both
   the single-waypoint and the macro re-expansion branches (search-native floors, so the follower

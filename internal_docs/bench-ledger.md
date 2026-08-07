@@ -20,6 +20,11 @@
   Source: `HANDOFF.md`, "Persisted Invalidation Memory (#5 increment C) SHIPPED (2026-07-22)" block
   ("perf gate PASSED (… roll-up fold 125ns–72µs cold)"). Per-scenario breakdown was not written
   down — only the envelope. If per-scenario numbers are ever needed, re-run the bench.
+  **⚠ 2026-08-07: that `HANDOFF.md` block is GONE** — HANDOFF.md is the rolling next-session pointer
+  and has since been rewritten for the region-tier arc (2026-07-24). This ledger entry is now the
+  **only surviving record** of the measurement anywhere in the repo (grepped: `internal_docs/`,
+  `docs/`, all Javadoc — `InvalidationRollup.java` and `DESIGN-persisted-invalidation-memory.md`
+  name `RollupFoldBenchmark` but carry no number). Do not delete this entry without re-running.
 - **Verdict:** even the 72 µs worst case is per-BLOCKED-event, not per-node/per-tick — accepted.
 
 ### Persisted invalidation memory (#5 increment C) perf gate — ADOPTED (flat)
@@ -34,9 +39,11 @@
   (BATCH_PISTON −56.5%, BATCH_BLAST −67.5%, TOGGLE_PAIR −99.8%; PatchStorm/SHORT/MULTI gates flat).
 
 ### Per-pop `h` recompute cache (P2, s53) — REFUTED, reverted
-- Full paired A/B table + verdict recorded in `PERF-AUDIT-region-field.md` §P2 ("REFUTED, reverted";
-  no targeted scenario cleared the ≥3% bar; do not re-propose the exact variant; the `f−g` variant
-  is rejected a priori as a behavior change).
+- Verdict + do-not-retry rationale now in `NOTES-region-findings.md` §7 ("REFUTED, reverted"; no
+  targeted scenario cleared the ≥3% bar; do not re-propose the exact variant; the `f−g` variant is
+  rejected a priori as a behavior change). *(Was `PERF-AUDIT-region-field.md` §P2 — that file was
+  consolidated away in the 2026-08-07 doc audit; the full paired A/B table did not survive the
+  consolidation, only the verdict. Re-measure if a number is ever needed.)*
 
 ## MEASUREMENT-PENDING (no repo-written numbers — do not cite figures for these)
 
@@ -50,16 +57,19 @@
    as covered by the #5-increment-C flat gate above. Status: **MEASUREMENT-PENDING** (repo-side).
 3. **Depth-nibble maintenance worst-case discrepancy** — `docs/Optimizations/09_depth_nibbles.md`
    says patch-storm maintenance adds "**+2.7% at worst**"; `PatchStormBenchmark.java` (~line 36)
-   and `NavSectionBuilder.java` (~line 576) both say "**measured worst +1.8%**". Both claim to be
-   the adoption measurement. Resolve from the original s-log or re-measure before citing either.
+   and `NavSectionBuilder.java` both say "**measured worst +1.8%**". Both claim to be the adoption
+   measurement. Resolve from the original s-log or re-measure before citing either.
+   *(Still live and unresolved as of 2026-08-07: `docs/Optimizations/09_depth_nibbles.md:115` vs
+   `NavSectionBuilder.java:636`.)*
 4. **Field-build "~6 µs" Javadoc figure** (`PathPlan.regionFieldFor`) — flagged implausible for
-   larger boxes by `PERF-AUDIT-region-field.md` §2/§6 (the ×63 dense layout zeroing bill); the
-   audit calls for a measured curve across box sizes. Status: **MEASUREMENT-PENDING**.
-5. **`PERF-AUDIT-region-field.md` proposals P1 / P4 / P5** (baked centroids, ×63 layout shrink,
-   de-boxed dig-flood BFS) — PROPOSED, unratified, unmeasured.
-6. **`DESIGN-async-region-tier.md` phases** — PROPOSED; its §-tables carry measured *inputs*
-   (region A* sub-10 µs/level, field build 0.1–1.4 ms) but the ~10–70 µs/replan savings are
-   estimates, not results.
+   larger boxes by `NOTES-region-findings.md` §6 (the ×63 dense layout zeroing bill); a measured
+   curve across box sizes is still owed (`RegionFieldBuildBenchmark` exists for it).
+   Status: **MEASUREMENT-PENDING**.
+5. **Region-field proposals P1 / P4 / P5** (baked centroids, ×63 layout shrink, de-boxed dig-flood
+   BFS) — PROPOSED, unratified, unmeasured. Now in `NOTES-region-findings.md` §6.
+6. **Async region-tier phases** — PROPOSED; the surviving §-tables carry measured *inputs*
+   (region A* sub-10 µs/level, field build 0.1–1.4 ms — `NOTES-region-findings.md`) but the
+   ~10–70 µs/replan savings are estimates, not results.
 7. **`BatchEditBenchmark` REDSTONE shape** — deliberately absent (needs a live `ServerLevel` the
    Knot classloader can't provide); Phase-0 has correctness coverage (`NavGridEpochTest`) but no
    perf number. Fine to leave: its cost is structurally ≤ the old path.
