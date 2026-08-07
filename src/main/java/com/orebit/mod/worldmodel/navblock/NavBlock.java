@@ -191,6 +191,21 @@ public final class NavBlock {
     public static final int TRANSIT_LIGHT = 1;
     /** Severe through-slow (~0.05× speed): cobweb — near-stops the body, planner should route/mine around. */
     public static final int TRANSIT_HEAVY = 2;
+    /**
+     * Fluid through-slow (~0.4× speed): LAVA. The fourth encoding of the field, claimed 2026-08-07 so the
+     * descriptor states lava's slowness as DATA rather than leaving it implicit in a movement-side constant
+     * (owner: <i>"set the slow bit on lava so that we don't need anything special to handle that"</i>).
+     * The {@code 0.4} is the reciprocal of the ratified {@code MovementContext.LAVA_SWIM_COST_FACTOR = 2.5}
+     * (s52b, from lava's ~0.02 vs water's ~0.05 travel acceleration) — the same number, now stated once.
+     *
+     * <p><b>This bit alone does not retire {@code lavaSwimCellCost}</b>, and it is worth being precise about
+     * why: the transit constants are flat tick SURCHARGES derived from the walk cost, while a swim rung needs
+     * a MULTIPLIER on whichever swim rate applies. Setting the class makes the fact available to every
+     * consumer (and correctly prices a ground move's body cells through lava, which previously charged damage
+     * but no slowness at all); converting the swim path to consume it is the cost-model arc that also makes
+     * the damage charge dwell-scaled. See DESIGN-submerged-upright-swim.md §3.3.
+     */
+    public static final int TRANSIT_FLUID = 3;
 
     // ---- Bubble-column class (2 bits, 46–47): a bubble column + its DRAG direction --------------
     /** Not a bubble column. */
@@ -607,10 +622,14 @@ public final class NavBlock {
      * {@link #isSlow} (a slow FLOOR you stand on). Cobweb is heavy (~0.05× speed — near a wall for a
      * planner without shears); sweet berry bush and powder snow are light (~0.75×; both also carry the
      * damaging bit — the bush pricks, powder snow freezes — priced separately by the movement layer).
+     * Lava is {@link #TRANSIT_FLUID} (~0.4×): a body moving through it IS slowed, and saying so here means
+     * the movement layer reads the fact instead of re-deriving it. Water is deliberately {@link
+     * #TRANSIT_NONE} — the swim rungs' costs ARE the water rates, so a transit surcharge would double-charge.
      */
     private static int transitSlow(Block block) {
         if (block == Blocks.COBWEB) return TRANSIT_HEAVY;
         if (block == Blocks.SWEET_BERRY_BUSH || block == Blocks.POWDER_SNOW) return TRANSIT_LIGHT;
+        if (block == Blocks.LAVA) return TRANSIT_FLUID;
         return TRANSIT_NONE;
     }
 

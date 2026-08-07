@@ -8,6 +8,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.movements.Descend;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Diagonal;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalSprintSwim;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.EndSprintSwim;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Fall;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.MineDown;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour;
@@ -47,13 +48,16 @@ public final class MovementRegistry {
     public static final Movement WALK_OFF = new WalkOff();
     public static final Movement DIAGONAL_SPRINT_SWIM = new DiagonalSprintSwim();
     public static final Movement RIDE_BUBBLE_COLUMN = new RideBubbleColumn();
+    public static final Movement END_SPRINT_SWIM = new EndSprintSwim();
 
     /**
      * Tier 1 (ground + water): walk + step-assist, diagonal walk, jump-up-1, step-down-1, safe drop, the
-     * vertical-in-place pair pillar-up / mine-down, the water pair normal-swim / sprint-swim, the
-     * pose-transition pair start-sprint-swim / surface (STANDING↔PRONE, the stateful sprint-swim rule),
-     * ladder/vine climb, and the gap-jump pair (cardinal parkour — flat/rising/falling landings — and its
-     * diagonal counterpart, mirroring the Traverse/Diagonal split).
+     * vertical-in-place pair pillar-up / mine-down, the fluid pair upright-swim (six-directional — the
+     * MEDIUM move) / prone sprint-swim (fast lateral only), the pose transitions start-sprint-swim /
+     * end-sprint-swim (STANDING↔PRONE in place, the stateful sprint-swim rule) plus surface (the prone
+     * crawl-out onto a bank, the one exit with no headroom to stand up in), ladder/vine climb, and the
+     * gap-jump pair (cardinal parkour — flat/rising/falling landings — and its diagonal counterpart,
+     * mirroring the Traverse/Diagonal split).
      * Every move self-gates: the ground moves on {@code MODE_STANDING}, the sprint-swim + surface on
      * {@code MODE_PRONE}, Pillar/MineDown on place/break caps, the swim moves on the presence of water, the
      * climb on a climbable feet/neighbour cell — so a walk-only bot on dry land still gets only the plain
@@ -70,5 +74,5 @@ public final class MovementRegistry {
     public static final List<Movement> TIER1 =
             List.of(TRAVERSE, DIAGONAL, ASCEND, DESCEND, FALL, PILLAR, MINE_DOWN, SWIM, SPRINT_SWIM,
                     START_SPRINT_SWIM, SURFACE, CLIMB, PARKOUR, DIAGONAL_PARKOUR, WALK_OFF,
-                    DIAGONAL_SPRINT_SWIM, RIDE_BUBBLE_COLUMN);
+                    DIAGONAL_SPRINT_SWIM, RIDE_BUBBLE_COLUMN, END_SPRINT_SWIM);
 }

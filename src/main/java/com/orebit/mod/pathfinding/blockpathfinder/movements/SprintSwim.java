@@ -11,9 +11,18 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 /**
  * Fast prone swimming — Minecraft's <b>Sprint Swim</b> (MOVEMENT-DESIGN.md, Tier 1 water). At
  * <b>5.612 blocks/s</b> it is the quickest water traversal there is — faster than the 4.317 b/s walk, and
- * the same speed as a land sprint (sprint and sprint-swim share the 5.612 b/s figure). The 3-D underwater
- * workhorse: it can cross, rise, or sink through flooded space, and A* prefers it over the slow {@link Swim}
- * wherever it is available.
+ * the same speed as a land sprint (sprint and sprint-swim share the 5.612 b/s figure).
+ *
+ * <p><b>Lateral travel, and only lateral travel</b> (DESIGN-submerged-upright-swim.md §4). This move used to be
+ * billed as "the 3-D underwater workhorse"; it is now the fast horizontal one, and the vertical axis belongs
+ * entirely to the upright {@link Swim} (see {@code candidates} for why the verticals were never real). A* still
+ * prefers it over the slow {@link Swim} for crossing water wherever it is available — that preference is what
+ * {@code Swim}'s dominance gate enforces, and the gate is scoped to lateral rungs for exactly this reason.
+ *
+ * <p><b>Water only, by vanilla.</b> {@code Entity.updateSwimming}'s entry branch carries an explicit
+ * {@code FluidTags.WATER} test and its stay branch tests {@code isInWater()} (bytecode-verified against
+ * 1.21.11), so {@code Pose.SWIMMING} cannot be entered or held in lava. The {@code water()} gates below are
+ * that rule, not a simplification — in lava the upright {@link Swim} rungs are the whole vocabulary.
  *
  * <h2>Initiation vs. continuation (a stateful nuance — v1 approximates)</h2>
  * In vanilla you must be in <b>2-deep</b> water (head submerged) to <i>initiate</i> a sprint swim, but once
@@ -45,13 +54,15 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  * <h2>Floor-cell convention (decision C — see {@link Swim})</h2>
  * A swim node's "floor" is the cell below the feet, allowed to be water; the bot's feet are
  * {@code floor.above()}. A submerged position is a node {@code (x,y,z)} whose feet {@code (x,y+1,z)} hold
- * water. Swim-up and swim-down are plain node steps with <b>no block placement</b> — so the "expensive
- * vertical" problem that drives the open-air-pillar pathologies simply does not exist inside water.
+ * water. Vertical movement inside fluid is a plain node step with <b>no block placement</b> — so the
+ * "expensive vertical" problem that drives the open-air-pillar pathologies simply does not exist inside
+ * water; it is just priced at {@link Swim#UP_COST}/{@link Swim#DOWN_COST} instead of a place cost.
  *
  * <h2>Entry</h2>
  * Sprint-swim edges are emitted only from a position whose feet are already in water (the {@code water(feet)}
- * gate). Entering water from land is {@link Swim}'s job; diving from the surface is the down-case here (a
- * surface node's feet — the top water cell — satisfy the gate). A pure land node generates nothing.
+ * gate) and only in {@link MovementContext#MODE_PRONE}. Entering water from land is {@link Swim}'s job;
+ * entering the PRONE pose is {@link StartSprintSwim}'s (including its fused dive-and-go-prone edge from a
+ * surface node). A pure land node generates nothing.
  */
 public class SprintSwim implements Movement {
 
@@ -96,16 +107,17 @@ public class SprintSwim implements Movement {
             }
         }
 
-        // Up: rise one. The new feet cell (x,y+2,z) must hold water; the new head (x,y+3,z) may be water
-        // (still submerged) or air (surfacing) — both are valid arrivals, so only the new feet is gated.
-        if (ctx.built(x, y + 2, z) && ctx.water(x, y + 2, z)) {
-            out.accept(x, y + 1, z, COST);
-        }
-
-        // Down: sink one. The new feet cell (x,y,z) must hold water.
-        if (ctx.built(x, y, z) && ctx.water(x, y, z)) {
-            out.accept(x, y - 1, z, COST);
-        }
+        // NO PURE VERTICALS (DESIGN-submerged-upright-swim.md §4, owner ruling 2026-08-07). This move used to
+        // emit a rise and a sink, and THEY WERE NEVER REAL: a swimming look clamps around 80°, so the last
+        // ~10° of a "straight up" heading is always lateral drift, and the prone pose is only retained while a
+        // forward impulse is held — swimServo's degenerate branch therefore forces vfwd ≥ SERVO_FORWARD_MIN
+        // every single tick, injecting lateral velocity that the position-P column hold cannot even see inside
+        // its dead-band. In open water that is recoverable drift; in a 1×1 waterfall it is ejection at speed
+        // followed by a fall, which is exactly how the flagship column at (154,*,104) failed. The upright
+        // Swim.UP_COST / Swim.DOWN_COST rungs own the vertical axis now — they hold jump or press sink, need no
+        // heading at all, and so cannot drift. Deleting the rungs deletes the defect at its source instead of
+        // servoing around it. (DEFERRED: a wall-braced vertical sprint, cancelling horizontal momentum against
+        // a wall, genuinely could beat the upright rise — but it is situational and would re-open this branch.)
     }
 
     @Override

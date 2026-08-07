@@ -65,6 +65,14 @@ class TransitCostVocabularyTest {
         assertEquals(NavBlock.TRANSIT_NONE, NavBlock.transitSlow(desc(Blocks.AIR)));
         assertEquals(NavBlock.TRANSIT_NONE, NavBlock.transitSlow(desc(Blocks.STONE)),
                 "a solid wall is not a THROUGH-slow (it is priced by its break ticks)");
+        // Lava carries its slowness as DATA (2026-08-07): it is genuinely a slow medium, and saying so in
+        // the descriptor is what lets a ground move's body cells through it be priced without the movement
+        // layer re-deriving the fact. Water is deliberately NOT classified — the swim rungs' costs ARE the
+        // water rates, so a transit surcharge on top would double-charge the same physics.
+        assertEquals(NavBlock.TRANSIT_FLUID, NavBlock.transitSlow(desc(Blocks.LAVA)),
+                "lava is the FLUID through-slow (~0.4× speed, the reciprocal of LAVA_SWIM_COST_FACTOR)");
+        assertEquals(NavBlock.TRANSIT_NONE, NavBlock.transitSlow(desc(Blocks.WATER)),
+                "water is NOT a through-slow — the swim costs already are the water rates");
     }
 
     @Test
