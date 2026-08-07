@@ -1127,6 +1127,22 @@ public final class MovementContext {
             com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse.FLAT_COST * (1f / 0.75f - 1f);
 
     /**
+     * Ticks added per FLUID through-slow body cell ({@link NavBlock#TRANSIT_FLUID} — lava, ~0.4× speed):
+     * {@code FLAT_COST × (1/0.4 − 1) ≈ 6.95} ticks. Same construction as the two above, and the {@code 0.4}
+     * is the reciprocal of {@link #LAVA_SWIM_COST_FACTOR} — one number, stated once, now carried in the
+     * descriptor (owner ruling 2026-08-07).
+     *
+     * <p><b>Scope today:</b> this prices a GROUND move's body cells passing through lava (a {@code Fall}'s
+     * drop column, a {@code Diagonal}'s corner columns) — which previously charged lava's damage but treated
+     * it as no slower than air. It is deliberately NOT consulted by the swim rungs: those price lava through
+     * {@link #lavaSwimCellCost}, whose {@code 2.5×} is a MULTIPLIER on the swim rate, and adding a flat
+     * walk-derived surcharge on top would double-charge the same physics. Unifying the two is the
+     * dwell-scaled cost-model arc (DESIGN-submerged-upright-swim.md §3.3), not this constant.
+     */
+    public static final float FLUID_TRANSIT_COST =
+            com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse.FLAT_COST * (1f / 0.4f - 1f);
+
+    /**
      * The pass-through surcharge (ticks) for the two body cells above floor {@code (fx,fy,fz)}, gated by
      * the cell's already-read {@link NavFlags} bitmask {@code flags} — the g-side price of walking a body
      * through fire / a berry bush / powder snow (damage, mortal bots only) or a cobweb / bush / powder
@@ -1296,6 +1312,7 @@ public final class MovementContext {
         int t = NavBlock.transitSlow(d);
         if (t == NavBlock.TRANSIT_HEAVY) c += WEB_TRANSIT_COST;
         else if (t == NavBlock.TRANSIT_LIGHT) c += LIGHT_TRANSIT_COST;
+        else if (t == NavBlock.TRANSIT_FLUID) c += FLUID_TRANSIT_COST;
         return c;
     }
 

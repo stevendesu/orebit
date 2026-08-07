@@ -53,3 +53,7 @@ logs/
 
 # Autotest master world — backed up on the autotest-world orphan branch, never in code history
 scripts/autotest-world-master/
+
+# Python bytecode from internal_docs/tools (trace/world-dump analysis helpers)
+__pycache__/
+*.pyc

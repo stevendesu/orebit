@@ -1081,6 +1081,106 @@ public final class SteerControl {
         }
     }
 
+    /**
+     * UPRIGHT-SWIM <b>velocity SERVO</b> horizontal drive (YAW-ONLY) — the fluid counterpart of
+     * {@link #groundServo}, and the control half of the "fluid is a medium" design
+     * (DESIGN-submerged-upright-swim.md §6). Drives the tall {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Swim Swim} / {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Surface Surface} pose and {@link #drive}'s in-water
+     * branch. Vertical is NOT its business — {@link #holdDepth} owns the jump/sink.
+     *
+     * <h2>Why the controller it replaces could not work</h2>
+     * Upright swim used to steer with {@link #swimTowards}, which faces a look-ahead point and holds forward,
+     * and whose degenerate (vertical) branch is {@link #recenterOnTarget} — a pure POSITION P-controller that
+     * commands EXACTLY ZERO inside {@link #COLUMN_DEADBAND}. A P-controller settles at a standing offset under
+     * any constant disturbance, and inside its dead-band it does not even try. On the flagship waterfall
+     * (2026-08-06) that is precisely what the log shows: {@code str=0.00} on every water tick while +Z velocity
+     * held at ~0.054 b/t across eight consecutive ticks — vanilla's ~0.014/t flow push against 0.8 drag settles
+     * at 0.07 b/t, the same order — so something external was moving the bot and nothing in the loop could see
+     * it. {@code arriveOnTarget}'s javadoc convicts the same controller for parkour, for the same reason: "no
+     * velocity term … always settles with standing overshoot."
+     *
+     * <h2>Why not {@link #swimServo}</h2>
+     * Owner physics: a PRONE sprint-swimmer travels along its LOOK vector (look down + hold forward = descend),
+     * so {@code swimServo} folds the depth pitch into its facing. An UPRIGHT swimmer does not — pitch is
+     * horizontally inert, and it "is more like grounded movement". Hence the {@code groundServo} mould, with no
+     * depth pitch and no {@link #SERVO_FORWARD_MIN} floor (that floor exists solely to retain the prone pose,
+     * and holding W every tick to keep a pose is exactly what injected the lateral drift that made
+     * {@code SprintSwim}'s verticals unusable).
+     *
+     * <h2>The two branches</h2>
+     * <ul>
+     *   <li><b>Along a segment</b> — desired velocity is the pursuit direction at an intentionally UNREACHABLE
+     *       {@link #SERVO_CRUISE} ceiling, so the forward key saturates and the bot swims flat out while the
+     *       error's CROSS-track component still tilts the heading against a current. This is the direct answer
+     *       to "if we push forward but we somehow have lateral velocity, adjust yaw to counteract it".</li>
+     *   <li><b>Degenerate (a pure vertical segment — the waterfall column)</b> — the case that actually
+     *       mattered, and the one the old code handled worst. Desired velocity is a proportional pull toward
+     *       the column centre, capped at {@link #UPRIGHT_SWIM_SPEED} (never ask the medium for more than it can
+     *       deliver, or the error never leaves saturation and the loop cannot converge). Centred, the desired
+     *       velocity is ZERO — so any residual momentum, from a current or from carried drift, becomes the
+     *       whole error and is answered with reverse thrust. "Hold this column" becomes an active
+     *       station-keep instead of a dead-band no-op.</li>
+     * </ul>
+     */
+    public static void uprightSwimServo(BotSteering b, SteerView p) {
+        computeGeom(b, p, SWIM_CTE_GAIN);
+
+        double dvx, dvz, dirx, dirz;
+        if (G.segLen < EPS) {
+            // Pure vertical: station-keep over the target column. Desired velocity closes the horizontal
+            // offset, capped at what an upright swimmer can actually swim; dead centre it is zero, which turns
+            // the servo into a brake on whatever the water is doing to the bot.
+            double ox = p.tx() - b.x(), oz = p.tz() - b.z();
+            double od = Math.sqrt(ox * ox + oz * oz);
+            if (od > EPS) {
+                double sp = Math.min(UPRIGHT_SWIM_SPEED, UPRIGHT_STATION_GAIN * od);
+                dvx = (ox / od) * sp; dvz = (oz / od) * sp;
+                dirx = ox / od; dirz = oz / od;
+            } else {
+                dvx = 0.0; dvz = 0.0;
+                dirx = 0.0; dirz = 0.0;
+            }
+        } else {
+            dirx = G.qx - b.x(); dirz = G.qz - b.z();       // pursuit (along-track + cross-track return)
+            double dl = Math.sqrt(dirx * dirx + dirz * dirz);
+            if (dl < EPS) { b.setForward(0.0f); return; }
+            dirx /= dl; dirz /= dl;
+            dvx = dirx * SERVO_CRUISE; dvz = dirz * SERVO_CRUISE;
+        }
+
+        // Velocity error = desired - current (horizontal). Face ALONG the error, thrust proportional to its
+        // magnitude: under-speed or pushed off-line → thrust that corrects BOTH; overshoot → the error points
+        // up-track, the yaw flips, and the forward key becomes a brake. No velocity is ever written.
+        double errx = dvx - b.velX();
+        double errz = dvz - b.velZ();
+        double emag = Math.sqrt(errx * errx + errz * errz);
+        if (emag < SERVO_DEADBAND) {
+            tag("uswim:coast");
+            if (dirx != 0.0 || dirz != 0.0) b.faceHorizontally(dirx, dirz);
+            b.setForward(0.0f);
+        } else {
+            tag("uswim:thrust");
+            b.faceHorizontally(errx, errz);
+            b.setForward((float) Math.min(1.0, SERVO_GAIN * emag));
+        }
+    }
+
+    /**
+     * Upright swim speed ceiling (blocks/tick) used as the station-keep cap: the wiki's 2.2 b/s surface paddle
+     * is {@code 2.2/20 = 0.11}. Unlike the cruise ceilings this one is deliberately ACHIEVABLE — a station-keep
+     * loop whose target the medium cannot reach would sit permanently saturated and never settle.
+     */
+    static final double UPRIGHT_SWIM_SPEED = 0.11;
+
+    /**
+     * Station-keep proportional gain (blocks/tick of desired closing speed per block of horizontal offset).
+     * At 1.0 the servo asks to close the whole offset in one tick and is immediately clamped by
+     * {@link #UPRIGHT_SWIM_SPEED}, so it means "return at full swim speed until nearly centred, then ease" —
+     * the ease is what stops the return from becoming the next overshoot.
+     */
+    static final double UPRIGHT_STATION_GAIN = 1.0;
+
     // ---- parkour predictive-airborne servo constants (see parkourAirborne) ---------------------------
     /** Vanilla sprint horizontal ground-accel (the {@code a} in the airborne recurrence); walk is {@link
      *  #PARKOUR_A_WALK}. Both feed the arc predictor and match the follower's held sprint state. */
@@ -1879,7 +1979,11 @@ public final class SteerControl {
         }
         holdClimbableStance(b, p, true);   // the locomotion path: the bot IS translating
         if (b.inWater()) {
-            swimTowards(b, p);
+            // A GROUND move still in water (leaving onto a bank, clipping a stream, knocked into a pool
+            // mid-segment) is an UPRIGHT body in fluid, so it gets the upright velocity servo — same reason
+            // Swim/Surface do: the position-only swimTowards it used to call cannot see a current at all
+            // (§6). holdDepth still lifts/sinks it toward the planned cell.
+            uprightSwimServo(b, p);
             holdDepth(b, p, 0.0);
         } else if ("servo".equals(GROUND_DRIVE)) {
             groundServo(b, p);            // input-only velocity servo (holds a 1-wide low-friction lane); A/B-gated
