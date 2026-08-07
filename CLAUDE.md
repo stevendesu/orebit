@@ -149,11 +149,14 @@ routinely regress.** Understand why before touching anything hot:
   SPIRAL 820, SWIMPOOL 893, BRIDGE 773, SHORT 687, CLIFFS 569), rising to **~2,000–3,000 ns/node on
   edit-heavy or geometrically complex worlds** (FLOOD 2,156; the SHORELINE deep-ocean guard 2,066). That
   upper band is the number that matters for scale: a 10k-node sync search at 2 µs/node is ~20 ms — half a
-  tick — which is what bounds how many bots can plan concurrently. The older "~400–700 ns/node amortized,
-  6k–40k ns/node on a 30-node hop" figures are STALE and were removed: the second is off by ~10× against a
-  direct measurement (SHORT is 27 expansions in 18.56 µs = 687 ns/node), predating NavWarmup and the
-  depth-nibble extraction cut. Setup itself is now small — the 0-expansion SETUP scenario costs 0.68 µs, so
-  for searches past a few hundred pops the naive time/pops division IS the per-node cost. **Per-search setup
+  tick — which is what bounds how many bots can plan concurrently. The older "6k–40k ns/node on a 30-node hop"
+  figure was not a wrong measurement — it was total-time/nodes from an era when **per-search setup DOMINATED**
+  (35k ns/node over 30 nodes implies ~1 ms of setup). That era is over: SHORT is 27 expansions in 18.56 µs
+  ALL-IN = 687 ns/node on exactly that shape. Setup is now **~1–2 µs** (bounded two ways: the 0-expansion
+  SETUP scenario costs 0.68 µs, and subtracting 27 × ~600 ns of search from SHORT's 18.56 µs leaves ~2 µs) —
+  a ~500× collapse, credited to NavWarmup and the depth-nibble cut that removed 75–80% of the cuboid
+  extraction bill. **Consequence for anyone optimizing: setup is no longer the lever it was, and for searches
+  past a few hundred pops the naive time/pops division IS the per-node cost.** **Per-search setup
   is nonetheless still itself
   a hot path**: a "cheap" per-view allocation or init loop is a real regression. The JMH `SHORT` scenario
   exists to catch exactly this; `MULTI` (alternating short/long, fresh view each) guards cross-search
