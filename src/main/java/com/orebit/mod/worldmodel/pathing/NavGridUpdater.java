@@ -165,6 +165,81 @@ public final class NavGridUpdater {
         return m == null ? null : m.get(chunkKey);
     }
 
+    /**
+     * Per-chunk-column count of <b>FOREIGN</b> grid-visible changes — every change EXCEPT the one mutation the
+     * follower announced it was about to make ({@link #expectChange}). This, not {@link #CHUNK_VERSION}, is
+     * what a plan snapshots to decide whether the world diverged from it.
+     *
+     * <p><b>Why identity and not a count</b> (owner ruling 2026-08-06). The first cut let a plan tolerate N
+     * version bumps in a column, N being the number of edits it had executed there. That is sound only while
+     * "an executed edit bumps the version exactly once" holds — and it fails silently in the dangerous
+     * direction if an acknowledged edit ever bumps ZERO times (a grid-invisible change; see
+     * {@code NavGridEpochTest}), because the unspent credit then absorbs the next foreign change instead.
+     * A budget also cannot answer the question actually being asked. The question is not "how many things
+     * changed here" but "did we expect THIS mutation": a stone vanishing from the cell we were mining is our
+     * plan executing, a vine appearing in that same cell is not, and no counter can tell those apart.
+     *
+     * <p>So the classification happens at the change itself, where the position and the before/after states
+     * are in hand, and only unexpected changes move this counter. A plan's snapshot of it is then exact:
+     * unchanged means every change since the snapshot was one the plan predicted.
+     */
+    private static final java.util.WeakHashMap<ServerLevel, java.util.HashMap<Long, int[]>> FOREIGN_VERSION =
+            new java.util.WeakHashMap<>();
+
+    /** The current FOREIGN-change version of chunk column {@code chunkKey}; 0 until its first unexpected
+     *  change. Server thread only. */
+    public static int foreignVersion(ServerLevel level, long chunkKey) {
+        final java.util.HashMap<Long, int[]> m = FOREIGN_VERSION.get(level);
+        if (m == null) {
+            return 0;
+        }
+        final int[] v = m.get(chunkKey);
+        return v == null ? 0 : v[0];
+    }
+
+    // ---- The one-shot expectation the follower arms immediately before it edits ----------------------
+    private static ServerLevel expectLevel;
+    private static long expectPos;
+    private static boolean expectAir;
+    private static boolean expectArmed;
+
+    /**
+     * Announce the <b>exact mutation</b> the follower is about to make: cell {@code pos} is about to become
+     * air ({@code toAir}) or to become filled ({@code !toAir}). The very next matching change is classified as
+     * EXPECTED and does not move {@link #foreignVersion}; everything else does.
+     *
+     * <p>Armed immediately before the edit and consumed by the change it predicts, both on the server tick
+     * thread, so the window is a single synchronous call. That is what makes it exact rather than a heuristic:
+     * a cascading change the edit triggers (gravel falling into the hole, water flowing in) arrives AFTER the
+     * slot is spent, at a different cell, and is correctly counted as foreign — the plan never modelled it.
+     *
+     * <p>One slot, not a set: an edit is a single block mutation and is consumed on the same tick it is armed,
+     * so a second arm can only mean the first never fired (a refused place, a break vanilla declined). Arming
+     * overwrites, which is the conservative resolution — the stale expectation is dropped rather than left
+     * lying in wait to forgive an unrelated change later.
+     *
+     * <p><b>Caller contract</b>: only arm for a mutation the CURRENT PLAN prescribed. The follower's actuators
+     * are shared with {@code /bot mine} and gather, and forgiving one of those would blind the gate for a
+     * change no plan predicted ({@code BotNavigator.expectOwnEdit} does the check).
+     */
+    public static void expectChange(ServerLevel level, BlockPos pos, boolean toAir) {
+        expectLevel = level;
+        expectPos = pos.asLong();
+        expectAir = toAir;
+        expectArmed = true;
+    }
+
+    /** Whether {@code (pos, newState)} is the mutation the follower just announced — and consume the slot. */
+    private static boolean consumeExpected(ServerLevel level, BlockPos pos, BlockState newState) {
+        if (!expectArmed || expectLevel != level || expectPos != pos.asLong()) {
+            return false;
+        }
+        expectArmed = false;
+        // The STATE must match the announced direction too, so a vine growing into the very cell we were
+        // about to mine is not forgiven just because the position lines up.
+        return expectAir == newState.isAir();
+    }
+
     /** Register the nav-grid patcher against the block-change seam (once, at init). */
     public static void register() {
         BlockChangeEvents.register(NavGridUpdater::onBlockChanged);
@@ -207,6 +282,13 @@ public final class NavGridUpdater {
         // …and remember WHICH block did it, so a plan-impacted re-search can name its cause instead of
         // leaving "a vine grew" and "a redstone clock is running" indistinguishable (see ChunkChange).
         recordChange(server, pos, oldState, newState);
+        // Classify it. Only a change the follower did NOT announce moves the foreign version — the counter a
+        // plan actually snapshots. This is the whole own-edit gate: our own prescribed break/place is the
+        // plan executing, not the world diverging from it (see FOREIGN_VERSION).
+        if (!consumeExpected(server, pos, newState)) {
+            FOREIGN_VERSION.computeIfAbsent(server, l -> new java.util.HashMap<>())
+                    .computeIfAbsent(NavStore.key(pos.getX() >> 4, pos.getZ() >> 4), k -> new int[1])[0]++;
+        }
 
         // Nether-portal index maintenance (NetherPortalIndex incremental feed), from the EVENT params:
         // under deferral the resident grid can be stale-by-one-pending-write, but the event's old/new

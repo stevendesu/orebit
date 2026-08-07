@@ -1662,6 +1662,22 @@ final class BotNavigator {
      *       supply (today's behaviour). The geometry/validity check is unchanged.</li>
      * </ul>
      */
+    /**
+     * The bot is ABOUT to edit {@code (x,y,z)} ({@code toAir} = a break, else a place) — announce the exact
+     * mutation so the plan's own prescribed edit is not read back as the world diverging from it
+     * ({@link PathPlan#expectOwnEdit}).
+     *
+     * <p>Call it IMMEDIATELY BEFORE the mutation, never after and never where an edit is merely requested:
+     * the announcement is a one-shot slot consumed by the change it predicts, and {@code mine()} is re-issued
+     * every tick while a break runs — only the completion changes the world. Announcing late would leave the
+     * slot armed to forgive whatever changed next instead.
+     */
+    void expectOwnEdit(int x, int y, int z, boolean toAir) {
+        if (pathPlan != null) {
+            pathPlan.expectOwnEdit(x, y, z, toAir);
+        }
+    }
+
     private void applyEdits(StepEdits edits) {
         ServerLevel level = (ServerLevel) Worlds.of(bot);
         Config cfg = ConfigLoader.config();
@@ -1678,6 +1694,7 @@ final class BotNavigator {
             // step stays blocked → the stall/replan loop routes around it.
             if (!cfg.mayBreak(target, target.getDestroySpeed(level, p))) continue;
             if (inv != null && cfg.consumesTools()) inv.damageBestTool(target); // wear the tool one use
+            expectOwnEdit(p.getX(), p.getY(), p.getZ(), true);  // announce BEFORE: our own prescribed break
             WorldEdits.breakBlock(level, p);
         }
         for (int i = 0; i < edits.placeCount(); i++) {
@@ -1700,8 +1717,10 @@ final class BotNavigator {
             if (inv != null && cfg.consumesBlocks()) {
                 Block block = inv.consumeOnePlaceable();
                 if (block == null) continue; // out of blocks — skip; replan nets it
+                expectOwnEdit(p.getX(), p.getY(), p.getZ(), false); // announce BEFORE: prescribed place
                 WorldEdits.placeBlock(level, p, block.defaultBlockState());
             } else {
+                expectOwnEdit(p.getX(), p.getY(), p.getZ(), false);
                 WorldEdits.placeBlock(level, p, bot.placeBlock()); // conjured, infinite supply
             }
         }
