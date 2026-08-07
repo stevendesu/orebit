@@ -45,9 +45,34 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  * plus bit-extraction yields every field, with no objects and no pointer chasing on the hot path.
  *
  * <p><b>The packed {@code long} is simultaneously the dedup key and the descriptor</b> — two
- * states that pack to the same bits are the same navtype. Measured (profile.BlockStateDedupTest):
- * ~28k states collapse to a few hundred navtypes (≪ 65,536, so a {@code short} index fits with
- * ~100× headroom; the table is a few KB, L1-resident).
+ * states that pack to the same bits are the same navtype. ~28k block states collapse to a few hundred
+ * navtypes; the table is a few KB and L1-resident.
+ *
+ * <p><b>The only number worth writing down is the CAP: 1024.</b> {@code TraversalGrid} packs the navtype
+ * into <b>10 bits</b> of its per-cell {@code short}, so 1024 is a hard structural limit — exceeding it
+ * would truncate indices and silently corrupt the grid, which is why {@code intern} fails loudly instead.
+ * The live count sits in the low hundreds (400–600 territory) but is <b>deliberately not pinned here</b>:
+ * it moves with the Minecraft version (new blocks, new state properties), with any new discriminator added
+ * to {@link #fingerprint}, and at runtime with {@link #applyProtected} (each protected entry SPLITS the
+ * navtypes its states occupied). Three different docs once quoted three different exact values, all stale.
+ *
+ * <p><b>To get the real number, read the log</b> — static init prints it on every start:
+ * {@code [Orebit] NavBlock: <states> states -> <navtypes> navtypes (<bytes> B table, <n> errors)}.
+ *
+ * <p><b>Take that number from a REAL GAME, never from the headless harness — the harness UNDERCOUNTS.</b>
+ * Measured 2026-08-07 on MC 1.21.11, same 29,671 states both ways: <b>live server 433</b>, headless test
+ * <b>396</b>. The cause is {@link #bestTool}, whose result is a BASE field (the {@code tool} ordinal at bits
+ * 32–34, so it splits navtypes): it classifies via {@code BlockTags.MINEABLE_WITH_*}, and a headless
+ * {@code Bootstrap.bootStrap()} has no datapack tag manager, so every tag test returns false and the whole
+ * registry collapses onto one {@code Tool} value. A live server loads the tags and the field fans back out.
+ * Any navtype census from JMH/unit-test output is therefore a floor, not the number.
+ *
+ * <p><b>And it MOVES — a lot — even holding the Minecraft version fixed.</b> Reconstructed from the run logs,
+ * all at 29,671 states (MC 1.21.11): <b>530</b> (2026-06-23) → <b>271</b> (2026-07-10, roughly halved by a
+ * classification change) → 355 → 357 → 361 → 408 → <b>433</b> (2026-08-07). A ~2× swing inside six weeks on
+ * one MC version, because every added or merged discriminator moves it. This is exactly why no exact figure
+ * belongs in prose: three separate docs once quoted 503, ~587 and ~250, and all three were simply snapshots
+ * of different weeks. <b>Quote the cap, estimate the count, and read the log when you need the truth.</b>
  *
  * <h2>What changed from the deprecated byte scheme</h2>
  * The old design keyed per-Block and packed a {@code (mode<<6)|counter} <b>byte</b> index, which
@@ -719,8 +744,8 @@ public final class NavBlock {
      * execution-side {@code Config.mayBreak} guard applies immediately regardless.
      *
      * <p>Splitting is bounded by the list: each protected entry adds at most as many navtypes as its
-     * states had distinct base navtypes (typically a handful per entry against the ~587/1024 measured
-     * headroom). Old navtypes never disappear (grid data may still reference them); a re-protect after an
+     * states had distinct base navtypes (typically a handful per entry against a base count in the
+     * low hundreds, versus the hard 1024 cap). Old navtypes never disappear (grid data may still reference them); a re-protect after an
      * un-protect re-uses the previously interned protected descriptor. Cold: a full-table pass over ~28k
      * states, once per config load — never per node, never per tick.
      *

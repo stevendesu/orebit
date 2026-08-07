@@ -39,7 +39,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  *   <li><b>Reserved NavGrid bit.</b> The TraversalGrid short has a spare flag bit; baking "this water cell
  *       has water above it" (i.e. 2-deep / sprint-initiable) into it at chunk-build time turns the
  *       feet+head probe into a single resident-bit read. (If more bits are ever needed, the navtype index is
- *       only ~250/1024 used, so it can shrink from 10 to 9 bits to free one.)</li>
+ *       the base count is in the 400–600 range against the 1024 cap, so it could shrink from 10 to 9 bits
+ *       only if that headroom is re-verified first — protected-block splits eat into it at runtime.)</li>
  *   <li><b>Node sprint-state.</b> Tracking "already sprint-swimming" in the search node would let the
  *       continuation-in-1-deep case (and the slow submerged {@link Swim} fallback for non-initiated shallow)
  *       be modelled exactly. Heavier (it widens the search space), so it waits until the approximation proves

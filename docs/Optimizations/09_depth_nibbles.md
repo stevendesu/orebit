@@ -112,7 +112,7 @@ bill* rather than a few percent off it.
 
 **The maintenance price**, from the patch-storm benchmark (scattered edits, dig
 columns, light toggles, seam-crossing edits): the baseline patch costs ~1.4–2.1 µs;
-full nibble maintenance adds **+2.7% at worst** — noise against a budget of "block
+full nibble maintenance adds **about +3% at worst** — noise against a budget of "block
 updates must stay invisible."
 
 Both nibbles shipped unconditionally after the measurement round, and a follow-up

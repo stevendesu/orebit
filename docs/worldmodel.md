@@ -27,7 +27,8 @@ Key decisions:
 - **The packed `long` is simultaneously the data and the dedup key.** Two block states
   that pack to the same bits behave identically to the pathfinder, so they *are* the
   same **navtype**. That behavioral dedup collapses Minecraft's ~28,000 block states
-  into a few hundred distinct fingerprints (measured: **~590**), so the index fits
+  into a few hundred distinct fingerprints (**roughly 400–600**, and the exact number
+  moves with the Minecraft version and with how many blocks you protect), so the index fits
   comfortably in a `short` and the whole descriptor table is a few kilobytes — small
   enough to live in L1 cache. Every question the planner asks ("is this damaging?",
   "how slow is walking through it?", "is it climbable?", "is it a portal?", "has the

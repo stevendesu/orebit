@@ -633,7 +633,7 @@ public final class NavSectionBuilder {
         //      Both sweeps early-out at the first fixpoint (recomputed == stored); saturation at
         //      DEPTH_SAT guarantees that within the 15-cell cap on a maintained column. On a never-swept
         //      (single-section) grid the sweeps write UNKNOWN or exact values only — never a stale claim.
-        //      Measured cost: worst scenario +1.8% ns/patch (PatchStormBenchmark, ~1.4–2.1 µs/patch). ----
+        //      Measured cost: worst scenario ~+3% ns/patch (PatchStormBenchmark, ~1.4–2.1 µs/patch). ----
         patchFloorGap(grid, above == null ? null : above.getTraversalGrid(), lx, ly, lz);
         patchRunUp(grid, above == null ? null : above.getTraversalGrid(),
                 below == null ? null : below.getTraversalGrid(), lx, ly, lz);
