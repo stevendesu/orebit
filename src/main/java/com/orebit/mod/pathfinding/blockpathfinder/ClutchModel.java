@@ -230,13 +230,29 @@ public final class ClutchModel {
     private static final float[] RESTITUTION = {0f, 0f, 1.0f, 0f, 0.66f};
 
     /**
-     * Whether the block can be recovered after the landing. True for all five, which is the whole reason a
-     * clutch is priced as TIME rather than as a consumed resource: water and powder snow are scooped back
-     * into the same bucket, and slime, hay and bed are mined back. Retained as a table (rather than assumed)
-     * because a future clutch kind — a placed-and-lost consumable — would be the exception, and the callers
-     * that price reclaim time should already be asking.
+     * Whether the block is taken back after the landing. This is <b>the exact complement of
+     * {@link #LANDS_ON_TOP}</b>, and that is a structural consequence rather than a coincidence — it follows
+     * from what the planner folded:
+     *
+     * <ul>
+     *   <li><b>Sink-through</b> (water, powder snow) fold NO geometry: the plan says that cell is empty and the
+     *       bot rests on the pre-existing floor, so reclaiming is what MAKES the plan true again. Reclaim.</li>
+     *   <li><b>Lands-on-top</b> (slime, hay) fold the block as the node's FLOOR and the node sits ON it, so
+     *       every later step of that plan was searched standing on it. Taking it back deletes the floor the bot
+     *       is on — it drops a block, its feet cell stops matching the waypoint, and the rest of the path is
+     *       framed off a cell it is not in. Do NOT reclaim.</li>
+     * </ul>
+     *
+     * <p>Measured, not theorised: hay reclaimed cleanly and the bot then STOPPED MOVING (owner, 2026-08-08,
+     * on both 1.17.1 and 1.21.11), while water and powder snow completed their paths on the same runs.
+     *
+     * <p>The cost model already assumes the pessimistic side of this — a clutch is priced as a placement and
+     * the recovery is never credited — so a spent hay bale is not a mis-price, just a step the bot built and
+     * left behind. {@code BED} is {@code false} defensively: it is unreachable ({@link #PREFERENCE}), and its
+     * {@link #LANDS_ON_TOP} entry is one of the things that must be settled before it is re-enabled, since a
+     * bed is physically landed ON.
      */
-    private static final boolean[] RECLAIMABLE = {true, true, true, true, true};
+    private static final boolean[] RECLAIMABLE = {true, true, false, false, false};
 
     /**
      * Whether the bot comes to rest ON TOP of the placed block rather than sinking through it into the cell
@@ -269,8 +285,15 @@ public final class ClutchModel {
      * 0.5625-tall collision box, so a bed landing is genuinely on-top-ish) — but the value is unreachable
      * today because the bed is not in {@link #PREFERENCE}. If the bed is ever re-enabled, this entry MUST be
      * revisited alongside the executor's multiblock place; it is not a settled answer.
+     *
+     * <p><b>The bed reads {@code true}</b>, corrected 2026-08-08. It was originally {@code false}, which was
+     * simply wrong — a bed has a real collision box and the bot lands ON it, exactly like slime or hay — and it
+     * went unnoticed only because the kind is unreachable. It was caught by the invariant test asserting
+     * {@link #RECLAIMABLE} is this table's complement: a bed must not be reclaimed either, because if it is
+     * ever re-enabled it will be folded as the node's floor. Two independently-wrong entries would have
+     * cancelled out and reproduced the hay stall the day the bed was switched on.
      */
-    private static final boolean[] LANDS_ON_TOP = {false, false, true, true, false};
+    private static final boolean[] LANDS_ON_TOP = {false, false, true, true, true};
 
     /**
      * {@link #best}'s search order: <b>HAY, SLIME, POWDER_SNOW, WATER</b> — most expendable item first, so
