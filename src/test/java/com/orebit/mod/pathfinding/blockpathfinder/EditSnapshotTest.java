@@ -29,7 +29,7 @@ class EditSnapshotTest {
 
     private static StepEdits step(long[] breaks, long[] places) {
         StepEdits se = new StepEdits();
-        se.load(breaks, breaks.length, places, places.length, new long[0], new boolean[0], 0);
+        se.load(breaks, breaks.length, places, places.length, new long[0], new boolean[0], 0, ClutchModel.NONE, 0L);
         return se;
     }
 

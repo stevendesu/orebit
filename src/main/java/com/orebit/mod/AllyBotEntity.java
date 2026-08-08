@@ -12,6 +12,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
+import com.orebit.mod.pathfinding.blockpathfinder.ClutchModel;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Climb;
@@ -35,7 +36,11 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Pose;
+import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.tags.FluidTags;
@@ -151,6 +156,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     MovementContext.InventoryView inventoryFeasibility() {
         Config cfg = ConfigLoader.config();
         return new BotInventory(this).feasibility(
+                (ServerLevel) Worlds.of(this),
                 caps(), cfg.consumesBlocks(), cfg.conjuredBlockState(), cfg.removalCostWeight(),
                 cfg.placeBaseCost(), cfg.breakBaseCost());
     }
@@ -1275,6 +1281,330 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         OrebitCommon.LOGGER.info("[Orebit] place executed at ({},{},{}) for step {} -> ({},{},{})",
                 x, y, z, lastSteerMove, navigator.segToX(), navigator.segToY(), navigator.segToZ());
         this.swing(InteractionHand.MAIN_HAND);
+    }
+
+    // ---- Fall clutches (the ClutchModel executor seam) ----------------------------------------------
+    //
+    // A clutch is a block the bot places INTO ITS OWN LANDING CELL mid-drop to survive a fall Fall would
+    // otherwise refuse (ClutchModel's class doc). It cannot ride the place() path above for two independent
+    // reasons: place() places the bot's ONE configured/softest block and has no way to be told WHAT to put
+    // down, and two of the five kinds (water, powder snow) are not BlockItems at all, so they are invisible to
+    // the placeable-block budget place() draws from.
+    //
+    // Both verbs mutate the world through the WorldEdits seam and swap the inventory item BY HAND, exactly as
+    // place()/setDoorOpen do — never through BucketItem.emptyContents or any other item-USE pathway. That is
+    // deliberate: the use pathway drags in the interaction stack (hit results, hand swings, per-version
+    // BlockPlaceContext / InteractionResult signature drift, and for buckets an ultrawarm-evaporation branch
+    // that moved from DimensionType.ultraWarm() to an environment attribute at 1.21.11 — see
+    // BotInventory.evaporatesWater). Writing the BlockState directly keeps the whole feature inside seams that
+    // are byte-stable across 1.17.1 → 26.2.
+    //
+    // Neither verb changes the bot's FACING, unlike place() (which lookAtCell()s its footing). A clutch is
+    // placed while the bot is BALLISTIC and the airborne servo owns the heading; lookAtCell on a cell directly
+    // below yields dx=dz=0 and would snap yaw to 0, fighting the steer for the remaining ticks of the drop.
+    // The swing stays — it is cosmetic and costs nothing.
+
+    /**
+     * Place the {@link ClutchModel} block of {@code kind} at {@code (x,y,z)}, consuming the matching carried
+     * item — see {@link BotSteering#placeClutch}. Returns whether the placement happened.
+     *
+     * <p><b>Refusals, all side-effect-free</b> (nothing consumed, nothing announced, no world write), so the
+     * follower may re-issue this every tick of a drop:
+     * <ul>
+     *   <li>{@link ClutchModel#BED} — <b>not supported by this executor</b>; see {@link #clutchItem} for the
+     *       full reasoning. Flagged as a live gap: {@code ClutchModel.best} will still HAND OUT bed, so a bot
+     *       whose only clutch is a bed plans a cushion it then cannot lay.</li>
+     *   <li>the cell already holds this clutch block — placing again is a pure loss. Vanilla {@code setBlock}
+     *       is a no-op when the new state equals the old, so the item would be spent for no world change AND
+     *       the one-shot {@link BotNavigator#expectOwnEdit} slot would be left armed to mispredict the NEXT
+     *       real edit. Returning {@code false} rather than {@code true} is the conservative choice: {@code
+     *       true} would claim ownership of a block the bot did not place and license a later
+     *       {@link #reclaimClutch} of pre-existing terrain.</li>
+     *   <li>the cell is not {@linkplain Replaceable replaceable} — a clutch does NOT clear a soft occupant the
+     *       way {@link #place} does. That clear exists because a planned FOOTING must exist or the bot walks
+     *       onto a cap that was never built; a clutch is a best-effort cushion on a fall the planner already
+     *       priced, so the conservative option (refuse) is taken.</li>
+     *   <li>the bot is not carrying the kind's item.</li>
+     * </ul>
+     *
+     * <p><b>Dimension legality is NOT re-checked here.</b> {@code ClutchModel.best}'s contract makes the mask
+     * authoritative about availability, and {@code BotInventory.clutchMask} already drops water in a level that
+     * evaporates it. Re-testing here would duplicate a rule that is deliberately expressed once, on the model.
+     */
+    @Override
+    public boolean placeClutch(int x, int y, int z, int kind) {
+        final Item item = clutchItem(kind);
+        if (item == null) { // unknown ordinal, or BED (unsupported — see clutchItem)
+            refusalLog("clutch-kind|" + kind, "clutch place REFUSED at (" + x + "," + y + "," + z
+                    + "): kind " + kind + " is not placeable by this executor");
+            return false;
+        }
+        final ServerLevel level = (ServerLevel) Worlds.of(this);
+        final BlockPos p = new BlockPos(x, y, z);
+        final BlockState want = ClutchModel.blockState(kind);
+        final BlockState existing = level.getBlockState(p);
+        if (existing.is(want.getBlock())) {
+            refusalLog("clutch-dup|" + x + "," + y + "," + z, "clutch place SKIPPED at (" + x + "," + y + ","
+                    + z + "): cell already holds " + want.getBlock());
+            return false;
+        }
+        if (!Replaceable.isReplaceable(existing)) {
+            refusalLog("clutch-occ|" + x + "," + y + "," + z, "clutch place REFUSED at (" + x + "," + y + ","
+                    + z + "): non-replaceable occupant " + existing.getBlock());
+            return false;
+        }
+        final Inventory inv = this.getInventory();
+        final int slot = slotHolding(inv, item);
+        if (slot < 0) {
+            refusalLog("clutch-inv|" + kind, "clutch place REFUSED at (" + x + "," + y + "," + z
+                    + "): not carrying " + item);
+            return false;
+        }
+
+        // Consume first, then announce, then mutate. The item swap cannot fail from here, so the ordering
+        // never leaves an armed expectOwnEdit slot behind (the failure the duplicate-cell guard above exists
+        // to prevent). A used bucket becomes an EMPTY bucket in place; a block item just shrinks by one.
+        //
+        // The bucket branch overwrites the WHOLE slot, which would destroy items if a filled bucket could
+        // stack — it cannot: javap on Items.<clinit> shows WATER_BUCKET and POWDER_SNOW_BUCKET registered
+        // .stacksTo(1) (only the EMPTY bucket is .stacksTo(16)), so the slot held exactly one and one empty
+        // bucket replaces it. That asymmetry is the same one reclaimClutch's two-shape split is built on.
+        //
+        // The block branch normalizes a fully spent stack to EMPTY. shrink() only writes the count field, so
+        // without this the slot keeps a count-0 husk whose getItem() still names the block on 26.1+ (see
+        // slotHolding for the version-divergence evidence). Clearing at the WRITE site is the durable half of
+        // that fix: the read guards stop US from being fooled, this stops the husk existing for anyone else —
+        // the container menu, a hopper, the next /bot drop — to be fooled by.
+        final Item residue = clutchResidue(kind);
+        if (residue != null) {
+            inv.setItem(slot, new ItemStack(residue));
+        } else {
+            final ItemStack held = inv.getItem(slot);
+            held.shrink(1);
+            if (held.isEmpty()) inv.setItem(slot, ItemStack.EMPTY);
+        }
+
+        // Announce the mutation BEFORE it lands so the plan's own prescribed edit is not read back as the
+        // world diverging from it — the one-shot slot is consumed by the change it predicts (see place()).
+        navigator.expectOwnEdit(x, y, z, false);
+        WorldEdits.placeBlock(level, p, want);
+        OrebitCommon.LOGGER.info("[Orebit] clutch placed at ({},{},{}) kind={} block={}",
+                x, y, z, kind, want.getBlock());
+        this.swing(InteractionHand.MAIN_HAND);
+        return true;
+    }
+
+    /**
+     * Remove the {@link ClutchModel} block of {@code kind} at {@code (x,y,z)} and hand the item back — see
+     * {@link BotSteering#reclaimClutch}. Returns whether the reclaim happened.
+     *
+     * <p><b>The destination is resolved BEFORE the world is touched</b>, so a full inventory refuses the
+     * reclaim rather than deleting the block to make a point. Two shapes, per {@link #clutchResidue}:
+     * <ul>
+     *   <li><b>bucket kinds</b> (water, powder snow) — one EMPTY bucket is spent to produce the filled one,
+     *       which is what scooping physically is. No empty bucket ⇒ refuse. The empty stack is swapped in
+     *       place when it holds exactly one; a larger stack (empty buckets stack, filled ones do not) is
+     *       shrunk by one and the filled bucket needs a free storage slot of its own.</li>
+     *   <li><b>block kinds</b> (slime, hay) — the item stacks back onto an existing partial stack, else into
+     *       a free storage slot.</li>
+     * </ul>
+     *
+     * <p><b>Water is required to be a SOURCE.</b> A player scooping flowing water gets nothing, and the clutch
+     * we placed was a source ({@code Blocks.WATER.defaultBlockState()}, {@code LEVEL = 0}); a flowing state in
+     * the cell means the source is elsewhere and this is someone else's spill. ({@code WaterFluid.getTickDelay
+     * = 5}, so a source reclaimed inside 5 ticks never spread in the first place.)
+     *
+     * <p><b>Removal writes AIR through {@link WorldEdits#placeBlock} rather than calling
+     * {@link WorldEdits#breakBlock}.</b> {@code breakBlock} routes to vanilla {@code Level.destroyBlock},
+     * which writes {@code fluidState.createLegacyBlock()} — for a water source that is the water block again,
+     * i.e. a no-op — and it plays the break effect for a block we are picking up, not smashing. One uniform
+     * AIR write is both correct for the fluid kinds and silent for the rest.
+     */
+    @Override
+    public boolean reclaimClutch(int x, int y, int z, int kind) {
+        final Item item = clutchItem(kind);
+        if (item == null) return false; // unknown ordinal, or BED — nothing this executor ever placed
+        final ServerLevel level = (ServerLevel) Worlds.of(this);
+        final BlockPos p = new BlockPos(x, y, z);
+        final BlockState placed = ClutchModel.blockState(kind);
+        final BlockState existing = level.getBlockState(p);
+        if (!existing.is(placed.getBlock())) return false; // the cell no longer holds what we put there
+        if (kind == ClutchModel.WATER && !level.getFluidState(p).isSource()) return false;
+
+        final Inventory inv = this.getInventory();
+        final Item residue = clutchResidue(kind);
+        int spendSlot = -1;  // the empty bucket consumed by the scoop (bucket kinds only)
+        int giveSlot;        // where the returned item lands
+        if (residue != null) {
+            spendSlot = slotHolding(inv, residue);
+            if (spendSlot < 0) return false;                     // nothing to scoop into
+            giveSlot = inv.getItem(spendSlot).getCount() == 1
+                    ? spendSlot                                  // clean one-for-one swap
+                    : firstEmptyStorageSlot(inv);                // a stack of empties needs a slot of its own
+        } else {
+            giveSlot = slotWithRoomFor(inv, item);
+            if (giveSlot < 0) giveSlot = firstEmptyStorageSlot(inv);
+        }
+        if (giveSlot < 0) return false;                          // nowhere to put it — leave the block alone
+
+        // Both destinations are resolved above and the world write happens only after they are known good, so
+        // every refusal path leaves the block standing and the inventory untouched — a full bot never trades
+        // the clutch away for nothing.
+        //
+        // The spendSlot shrink cannot underflow, and the reason is the slotHolding isEmpty() guard rather
+        // than anything local: that guard makes spendSlot a stack of count >= 1, this branch runs only when
+        // giveSlot != spendSlot, and giveSlot differs from spendSlot only on the count != 1 arm above — so
+        // count >= 2 here and the shrink lands at >= 1, never at a count-0 husk and never negative. Without
+        // the guard a count-0 empty-bucket husk reached exactly this line and shrank to −1 while the setItem
+        // below minted a filled bucket from nothing.
+        navigator.expectOwnEdit(x, y, z, true);
+        WorldEdits.placeBlock(level, p, Blocks.AIR.defaultBlockState());
+        if (residue != null) {
+            if (giveSlot != spendSlot) inv.getItem(spendSlot).shrink(1);
+            inv.setItem(giveSlot, new ItemStack(item));
+        } else {
+            // isEmpty() here reads as "which resolver won": slotWithRoomFor returns a genuinely partial stack
+            // (grow it), firstEmptyStorageSlot a genuinely free one (fill it). That is only a clean dispatch
+            // because slotWithRoomFor now rejects count-0 husks; before the guard it could return a husk, and
+            // this test was silently rescuing that bug instead of expressing an intent.
+            final ItemStack dest = inv.getItem(giveSlot);
+            if (dest.isEmpty()) inv.setItem(giveSlot, new ItemStack(item));
+            else dest.grow(1);
+        }
+        OrebitCommon.LOGGER.info("[Orebit] clutch reclaimed at ({},{},{}) kind={} item={}", x, y, z, kind, item);
+        this.swing(InteractionHand.MAIN_HAND);
+        return true;
+    }
+
+    /**
+     * The carried item a {@link ClutchModel} kind is placed FROM (and handed back on reclaim), or {@code null}
+     * when this executor cannot handle the kind.
+     *
+     * <p>A {@code switch} rather than a {@code static final Item[]} on purpose: a table would resolve the
+     * {@code Items.*} constants at this class's init, and {@link ClutchModel} goes to the trouble of a lazy
+     * holder precisely so the registry is never touched early. A cold five-way switch, called once per clutch
+     * action, costs nothing and keeps the resolution at the point of use. The four constants are the same ones
+     * {@code BotInventory.clutchKindOf} matches on, all javap-verified present at both ends of the supported
+     * range (1.17.1 and 26.2).
+     *
+     * <p><b>{@link ClutchModel#BED} returns {@code null} — the bed clutch is deliberately NOT executed.</b>
+     * Three things would have to be true to lay one safely and none of them is verifiable inside this seam:
+     * <ol>
+     *   <li><b>It is a two-cell multiblock</b> ({@link ClutchModel#footprint} = 2) and the seam is handed ONE
+     *       cell. Picking the second cell — which of four horizontal neighbours, and on what evidence it is
+     *       free — is a placement DECISION the planner made and did not communicate; inventing it here would
+     *       be widening behaviour beyond the contract.</li>
+     *   <li><b>A half-bed deletes itself.</b> {@code BedBlock.updateShape} returns {@code Blocks.AIR} whenever
+     *       the neighbour in the part's own direction is not the matching half, so laying the two halves as
+     *       two independent {@link WorldEdits#placeBlock} calls depends entirely on which of them triggers a
+     *       shape update on the other and when. Vanilla never does this — it places the foot through the item
+     *       pathway and the head from {@code setPlacedBy} — and the ordering is exactly the kind of thing that
+     *       cannot be asserted from memory across 1.17.1 → 26.2.</li>
+     *   <li><b>The item identity is not a constant.</b> Beds are the one clutch with no stable {@code Items.*}
+     *       spelling ({@code Items.WHITE_BED} exists at 1.17.1 and not at 26.2, where the dyed variants
+     *       collapsed into a colour collection — see {@code BotInventory.clutchKindOf}), so both the consume
+     *       and the give-back would have to carry the specific bed the bot holds, and
+     *       {@link ClutchModel#blockState} hands out {@code RED_BED} as a representative.</li>
+     * </ol>
+     * Refusing is the conservative option and it is stated here rather than half-implemented. <b>The live
+     * consequence, called out rather than papered over:</b> {@code BotInventory.clutchMask} still sets the BED
+     * bit and {@code ClutchModel.PREFERENCE} still tries bed SECOND, so a bot carrying a bed but no hay will
+     * plan a cushioned drop and then eat the raw fall. Closing that needs an edit outside this seam (drop the
+     * bed bit from the mask, or the BED entry from the preference table) until the multiblock place is built.
+     */
+    private static Item clutchItem(int kind) {
+        return switch (kind) {
+            case ClutchModel.WATER -> Items.WATER_BUCKET;
+            case ClutchModel.POWDER_SNOW -> Items.POWDER_SNOW_BUCKET;
+            case ClutchModel.SLIME -> Items.SLIME_BLOCK;
+            case ClutchModel.HAY -> Items.HAY_BLOCK;
+            default -> null; // BED (see above) and any out-of-range ordinal
+        };
+    }
+
+    /**
+     * What the consumed slot becomes after a clutch of this kind is placed, or {@code null} when the item is
+     * simply spent one from the stack. Only the two bucket kinds leave a residue — an EMPTY bucket, which is
+     * also the thing {@link #reclaimClutch} spends to scoop the clutch back up. Encoding the pair this way is
+     * what lets both verbs share one shape instead of branching on WATER/POWDER_SNOW by name.
+     */
+    private static Item clutchResidue(int kind) {
+        return (kind == ClutchModel.WATER || kind == ClutchModel.POWDER_SNOW) ? Items.BUCKET : null;
+    }
+
+    /**
+     * The first slot holding {@code item}, or {@code -1}. Scans the WHOLE container (hotbar + main + armor +
+     * offhand) to match {@code BotInventory.clutchMask}, which builds the planner's carried-kind bitmask over
+     * the same range — a narrower scan here would refuse a clutch the planner was told the bot had (an
+     * offhand water bucket is the realistic case). Cold: one scan per clutch action.
+     *
+     * <p><b>The {@code isEmpty()} guard is load-bearing, not defensive noise.</b> {@code ItemStack.shrink(n)}
+     * is {@code grow(-n)} is {@code setCount(getCount() - n)}, and {@code setCount} writes the field and
+     * NOTHING else — a fully spent stack stays in its slot at COUNT ZERO with its {@code item} field intact.
+     * Whether that husk is visible to an identity compare is <b>version-divergent</b>, javap-verified at both
+     * ends of the range: through 1.21.11 {@code ItemStack.getItem()} opens with {@code isEmpty() ? Items.AIR :
+     * this.item}, so the husk answers AIR and an unguarded scan skips it by luck; at <b>26.1+</b>
+     * {@code getItem()} was rewritten to a bare {@code typeHolder().value()} with no empty short-circuit, so
+     * the husk keeps answering with the item it used to hold. Unguarded, this method therefore returns the
+     * same spent slot forever on the 26 era: {@link #placeClutch} "consumes" a clutch that is not there on
+     * every tick of every drop (effectively infinite clutch blocks), and {@link #reclaimClutch} finds a
+     * count-0 empty bucket, fails its {@code getCount() == 1} test, {@code shrink}s that slot to count −1 and
+     * mints a filled bucket in a fresh slot — item duplication out of a husk.
+     *
+     * <p>Guarding at every READ rather than sweeping the container is vanilla's own convention: nothing
+     * normalizes these stacks away (26.2 {@code ContainerHelper.removeItem} {@code split}s and leaves the
+     * husk in the list; {@code Inventory.tick} simply skips it with an {@code isEmpty()} test), so every
+     * consumer tests. It is also the convention every scan in {@code BotInventory} already follows.
+     */
+    private static int slotHolding(Inventory inv, Item item) {
+        for (int i = 0, n = inv.getContainerSize(); i < n; i++) {
+            ItemStack s = inv.getItem(i);
+            if (!s.isEmpty() && s.getItem() == item) return i;
+        }
+        return -1;
+    }
+
+    /**
+     * The first slot holding {@code item} with room for one more, or {@code -1} — the stack-onto-a-partial
+     * destination {@link #reclaimClutch} prefers over burning a fresh slot. Restricted to the 36 STORAGE slots
+     * (hotbar + main), like {@link #firstEmptyStorageSlot}: the slot this returns is WRITTEN to, and armor
+     * slots are not a place to put a hay bale.
+     *
+     * <p>Carries the same {@code isEmpty()} guard as {@link #slotHolding}, for the same count-0-husk reason
+     * documented there — and it is needed even though {@code getCount() < getMaxStackSize()} looks like it
+     * already excludes a dead stack: it does the opposite. A husk reads {@code 0 < 64}, which is the widest
+     * "room" any slot can advertise, so on 26.1+ (where {@code getItem()} does not short-circuit on empty)
+     * this scan would preferentially hand back the very slot the last clutch was spent from. That happens to
+     * be survivable today only because the one caller re-tests the destination with {@code dest.isEmpty()} and
+     * overwrites instead of {@code grow}ing; a caller that trusted the documented postcondition — "an
+     * EXISTING partial stack of {@code item}" — would {@code grow} a husk from 0 to 1 and lose the reclaimed
+     * item's slot accounting. The guard makes the postcondition true rather than incidental.
+     */
+    private static int slotWithRoomFor(Inventory inv, Item item) {
+        final int n = Math.min(36, inv.getContainerSize());
+        for (int i = 0; i < n; i++) {
+            ItemStack s = inv.getItem(i);
+            if (!s.isEmpty() && s.getItem() == item && s.getCount() < s.getMaxStackSize()) return i;
+        }
+        return -1;
+    }
+
+    /**
+     * The first empty STORAGE slot (hotbar 0–8 + main 9–35; never worn armor, never the offhand), or
+     * {@code -1} when the bot is full. The same 36-slot storage window {@code BotInventory.findSlotMatching}
+     * uses, for the same reason: a reclaimed item belongs where the bot's other items are.
+     *
+     * <p>This one needs no extra guard and gets none: {@code ItemStack.isEmpty()} is {@code this == EMPTY ||
+     * item == AIR || count <= 0} on every version in range (javap-verified 1.20.2 → 26.2), so it is already
+     * COUNT-aware and a spent count-0 husk is reported free — which is exactly right, since writing over a
+     * husk destroys nothing. Correct as written; left alone.
+     */
+    private static int firstEmptyStorageSlot(Inventory inv) {
+        final int n = Math.min(36, inv.getContainerSize());
+        for (int i = 0; i < n; i++) {
+            if (inv.getItem(i).isEmpty()) return i;
+        }
+        return -1;
     }
 
     /** Open/close the door at {@code (x,y,z)} server-side (DOORS P3) — the "right-click the door" reconcile

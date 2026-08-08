@@ -662,12 +662,27 @@ public final class MovementContext {
      *       #breakCost} charges, letting an owner discourage gratuitous digging/punching without forbidding
      *       it. {@code >= 0}, default {@code 0} (and {@code 0} with no snapshot), so the all-defaults and
      *       headless searches price breaks exactly as before.</li>
+     *   <li><b>{@code clutchMask}</b> — the set of {@link ClutchModel} fall-clutch kinds the bot CARRIES and
+     *       that actually function in the dimension it is standing in, packed one bit per kind ({@link
+     *       ClutchModel#bit}). A clutch is a block/fluid the bot drops into the landing cell mid-fall to blunt
+     *       the impact (water, powder snow, slime, hay, bed), so a drop the fall model would otherwise price as
+     *       lethal becomes a survivable one at the cost of one item plus the residual damage {@link
+     *       ClutchModel#damageBlocks} quotes. Kept as a MASK, not a list, because the consumer is a per-
+     *       candidate test on the search's hot path: {@code (clutchMask & bit) != 0} is one AND + one branch,
+     *       no iteration and no allocation, and {@link ClutchModel#best} picks the cheapest qualifying kind
+     *       out of it with pure integer/float math. Snapshotted ONCE per pathfind alongside {@code
+     *       placeableBlocks} and under the same cheap-cap discipline: it is a "does the bot own one at all"
+     *       precheck, NOT a depleting per-node budget — a path that spends two buckets against one carried
+     *       bucket is netted by the mid-path replan, exactly as an over-spent placeable count already is.
+     *       {@code 0} means no clutch is available, which is also what {@link #clutchMask()} reports when no
+     *       snapshot was wired, so headless / benchmark / caps-only searches keep the historical
+     *       refuse-the-lethal-drop behaviour bit-for-bit.</li>
      * </ul>
      * A plain record of primitives + the (resident, read-only) {@link MiningModel.Snapshot}; passing it to
      * {@link #setInventory} costs the hot path nothing (the gates do a field load + array index).
      */
     public record InventoryView(MiningModel.Snapshot mining, boolean consumesBlocks, int placeableBlocks,
-            float placeRemovalPremium, float placeBaseCost, float breakBaseCost) { }
+            float placeRemovalPremium, float placeBaseCost, float breakBaseCost, int clutchMask) { }
 
     /**
      * Wire the per-pathfind inventory feasibility snapshot (once, after construction, before the search
@@ -683,6 +698,18 @@ public final class MovementContext {
     public MiningModel.Snapshot miningSnapshot() {
         InventoryView inv = inventory;
         return inv != null ? inv.mining() : null;
+    }
+
+    /**
+     * This search's carried, dimension-usable fall-clutch set as a {@link ClutchModel} bitmask — see the
+     * {@code clutchMask} component of {@link InventoryView}. {@code 0} for the headless / benchmark /
+     * caps-only searches that supplied no {@link InventoryView}, so a clutch is offered ONLY when a live
+     * bot's real inventory said it owns one; the no-snapshot mode keeps its historical fall pricing
+     * unchanged. One field load + one record accessor — safe to call per candidate drop.
+     */
+    public int clutchMask() {
+        InventoryView inv = inventory;
+        return inv != null ? inv.clutchMask() : 0;
     }
 
     public void setInventory(InventoryView inventory) {

@@ -17,7 +17,7 @@ public final class EditFixtures {
     /** A {@link PathEdits} holding exactly the given PLACED cells (packed {@code BlockPos.asLong}). */
     public static PathEdits withPlaced(long... placedCells) {
         StepEdits se = new StepEdits();
-        se.load(NO_CELLS, 0, placedCells, placedCells.length, NO_CELLS, NO_FLAGS, 0);
+        se.load(NO_CELLS, 0, placedCells, placedCells.length, NO_CELLS, NO_FLAGS, 0, ClutchModel.NONE, 0L);
         PathEdits edits = new PathEdits();
         edits.add(se);
         return edits;
@@ -26,7 +26,7 @@ public final class EditFixtures {
     /** A {@link PathEdits} holding exactly the given BROKEN cells (packed {@code BlockPos.asLong}). */
     public static PathEdits withBroken(long... brokenCells) {
         StepEdits se = new StepEdits();
-        se.load(brokenCells, brokenCells.length, NO_CELLS, 0, NO_CELLS, NO_FLAGS, 0);
+        se.load(brokenCells, brokenCells.length, NO_CELLS, 0, NO_CELLS, NO_FLAGS, 0, ClutchModel.NONE, 0L);
         PathEdits edits = new PathEdits();
         edits.add(se);
         return edits;
@@ -36,7 +36,7 @@ public final class EditFixtures {
      *  own-edit acknowledgement reads back off a {@link BlockPathPlan} ({@code PathPlanOwnEditTest}). */
     public static StepEdits step(long[] brokenCells, long[] placedCells) {
         StepEdits se = new StepEdits();
-        se.load(brokenCells, brokenCells.length, placedCells, placedCells.length, NO_CELLS, NO_FLAGS, 0);
+        se.load(brokenCells, brokenCells.length, placedCells, placedCells.length, NO_CELLS, NO_FLAGS, 0, ClutchModel.NONE, 0L);
         return se;
     }
 
@@ -46,7 +46,7 @@ public final class EditFixtures {
         StepEdits se = new StepEdits();
         boolean[] opens = new boolean[doorCells.length];
         java.util.Arrays.fill(opens, open);
-        se.load(NO_CELLS, 0, NO_CELLS, 0, doorCells, opens, doorCells.length);
+        se.load(NO_CELLS, 0, NO_CELLS, 0, doorCells, opens, doorCells.length, ClutchModel.NONE, 0L);
         return se;
     }
 }

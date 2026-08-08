@@ -64,7 +64,8 @@ public class RegionTubeEscalationTest {
      *  non-null, which turns {@code recordToMemory} ON so escalation blames reach the crossing memory. */
     private static MovementContext.InventoryView inv() {
         int[] tiers = new int[NavBlock.Tool.values().length];
-        return new MovementContext.InventoryView(MiningModel.snapshot(tiers, 255, true), true, 0, 0f, 0f, 0f);
+        return new MovementContext.InventoryView(
+                MiningModel.snapshot(tiers, 255, true), true, 0, 0f, 0f, 0f, 0);
     }
 
     /** Rows of {@code mem} at levels ≥ 1 with {@link RegionCrossingMemory#PROV_ESCALATION} provenance. */

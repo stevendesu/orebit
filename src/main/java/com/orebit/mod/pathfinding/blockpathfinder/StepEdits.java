@@ -41,6 +41,32 @@ public final class StepEdits {
     private long[] doorSets;
     private boolean[] doorSetOpen;
     private int doorSetCount;
+    /**
+     * The {@link ClutchModel} kind this step's movement chose to place into its own landing cell mid-drop
+     * ({@link com.orebit.mod.pathfinding.blockpathfinder.movements.Fall}'s deep-drop branch), or
+     * {@link ClutchModel#NONE} — which is every step of every other movement, so this pair is dead weight on
+     * the common edge and costs one {@code int} + one {@code long} of footprint to carry.
+     *
+     * <p><b>Why the kind has to ride the edit-set at all.</b> The planner does not merely decide THAT a drop
+     * is survivable — it picks WHICH carried block makes it survivable, from a preference order gated on the
+     * bot's actual {@code clutchMask} and on the drop depth ({@link ClutchModel#best}). That choice cannot be
+     * re-derived downstream: the executor sees only a waypoint and a {@link Movement}, and re-running the
+     * preference walk against the LIVE inventory could pick a different kind than the one whose damage the
+     * search priced into {@code g}. So the kind travels with the step, the same way a door crossing's
+     * OPEN/CLOSE target travels on {@link #doorSets} rather than being re-inferred from the door's facing.
+     * {@code BotNavigator} lifts it off {@link BlockPathPlan#edits} and injects it into the step's
+     * {@link MovePlan}, exactly as it already does for {@code requireDoor}.
+     *
+     * <p><b>{@link #clutchCell} is the cell the block goes IN, not the node.</b> The two landing geometries
+     * differ (ClutchModel §Landing): a SINK-THROUGH kind (water, powder snow) occupies the landing FEET cell
+     * while the bot rests on the pre-existing floor beneath it, and a LANDS-ON-TOP kind (slime, hay) BECOMES
+     * the floor. Only the latter folds a {@link #places} entry — a SINK-THROUGH clutch deliberately folds no
+     * geometry, because a {@code PathEdits.PLACED} at the bot's own feet cell would make the node read its
+     * own body space as solid and dead-end itself. Carrying the cell explicitly is therefore the only way the
+     * executor can know where to place for the sink-through kinds at all.
+     */
+    private int clutchKind;
+    private long clutchCell;
 
     /** A poolable, initially-empty edit set; {@link #load} fills it (growing the buffers as needed). */
     StepEdits() {
@@ -48,10 +74,12 @@ public final class StepEdits {
         this.places = new long[2];
         this.doorSets = new long[2];
         this.doorSetOpen = new boolean[2];
+        this.clutchKind = ClutchModel.NONE;
     }
 
     private StepEdits(long[] breaks, int breakCount, long[] places, int placeCount,
-                      long[] doorSets, boolean[] doorSetOpen, int doorSetCount) {
+                      long[] doorSets, boolean[] doorSetOpen, int doorSetCount,
+                      int clutchKind, long clutchCell) {
         this.breaks = breaks;
         this.breakCount = breakCount;
         this.places = places;
@@ -59,14 +87,21 @@ public final class StepEdits {
         this.doorSets = doorSets;
         this.doorSetOpen = doorSetOpen;
         this.doorSetCount = doorSetCount;
+        this.clutchKind = clutchKind;
+        this.clutchCell = clutchCell;
     }
 
     /**
      * Overwrite this (pooled) set from a movement accumulator's buffers, growing the backing arrays only
      * when a longer edit-set than ever before turns up. Steady state touches no heap.
+     *
+     * <p>{@code clutch}/{@code clutchAt} are plain scalar stores, unconditionally overwritten like the three
+     * counts — that is what keeps a RECYCLED pool slot from leaking a previous edge's clutch onto a step that
+     * chose none ({@link ClutchModel#NONE} is written, not skipped).
      */
     void load(long[] srcBreaks, int bn, long[] srcPlaces, int pn,
-              long[] srcDoors, boolean[] srcDoorOpen, int dn) {
+              long[] srcDoors, boolean[] srcDoorOpen, int dn,
+              int clutch, long clutchAt) {
         if (breaks.length < bn) breaks = new long[Math.max(bn, breaks.length << 1)];
         System.arraycopy(srcBreaks, 0, breaks, 0, bn);
         breakCount = bn;
@@ -80,6 +115,8 @@ public final class StepEdits {
         System.arraycopy(srcDoors, 0, doorSets, 0, dn);
         System.arraycopy(srcDoorOpen, 0, doorSetOpen, 0, dn);
         doorSetCount = dn;
+        clutchKind = clutch;
+        clutchCell = clutchAt;
     }
 
     /** An arena-independent, exact-size copy — for the final path's edits handed to a {@link BlockPathPlan}. */
@@ -87,7 +124,7 @@ public final class StepEdits {
         return new StepEdits(Arrays.copyOf(breaks, breakCount), breakCount,
                              Arrays.copyOf(places, placeCount), placeCount,
                              Arrays.copyOf(doorSets, doorSetCount), Arrays.copyOf(doorSetOpen, doorSetCount),
-                             doorSetCount);
+                             doorSetCount, clutchKind, clutchCell);
     }
 
     /** Number of cells this move breaks. */
@@ -133,5 +170,24 @@ public final class StepEdits {
     /** Whether the {@code i}-th door-set targets the OPEN ({@code true}) or CLOSED ({@code false}) state. */
     public boolean doorSetOpenAt(int i) {
         return doorSetOpen[i];
+    }
+
+    /**
+     * The {@link ClutchModel} kind this step places into its landing cell mid-drop, or
+     * {@link ClutchModel#NONE} ({@code -1}) when the step has no clutch — which is every step that is not a
+     * clutched deep {@code Fall}. Callers MUST test against {@code NONE} before using {@link #clutchCell},
+     * whose value is meaningless (0) in that case.
+     */
+    public int clutchKind() {
+        return clutchKind;
+    }
+
+    /**
+     * The cell the clutch block goes in, packed {@link BlockPos#asLong} (no allocation) — the landing FEET
+     * cell for a sink-through kind, the landing FLOOR cell for a lands-on-top kind. Only meaningful when
+     * {@link #clutchKind()} {@code != } {@link ClutchModel#NONE}.
+     */
+    public long clutchCell() {
+        return clutchCell;
     }
 }

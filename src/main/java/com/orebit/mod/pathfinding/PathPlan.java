@@ -8,6 +8,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.async.PlanExecutor;
 import com.orebit.mod.pathfinding.async.SearchRequest;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.ClutchModel;
 import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.OrebitCommon;
@@ -866,10 +867,31 @@ public final class PathPlan {
         NavGridUpdater.expectChange(level, new BlockPos(x, y, z), toAir);
     }
 
-    /** Whether this plan folded a break or a place at {@code (x,y,z)} on any of its steps. Cold: runs once
-     *  per executed edit, over a window's worth of mostly edit-free steps. Package-private for
-     *  {@code PathPlanOwnEditTest}, which pins the semantic that keeps this honest: an edit the plan never
-     *  prescribed (a {@code /bot mine} or gather break through the same actuators) is NOT forgiven. */
+    /**
+     * Whether this plan folded a break, a place, or a <b>clutch</b> at {@code (x,y,z)} on any of its steps.
+     * Cold: runs once per executed edit, over a window's worth of mostly edit-free steps. Package-private for
+     * {@code PathPlanOwnEditTest}, which pins the semantic that keeps this honest: an edit the plan never
+     * prescribed (a {@code /bot mine} or gather break through the same actuators) is NOT forgiven.
+     *
+     * <p><b>Why the clutch cell has to be tested separately.</b> The two clutch landing geometries fold
+     * different edits (ClutchModel §Landing). A LANDS-ON-TOP kind (slime, hay) folds a place at the landing
+     * floor, so its cell is already covered by the place loop. A SINK-THROUGH kind ({@link ClutchModel#WATER},
+     * {@link ClutchModel#POWDER_SNOW}) deliberately folds <b>no geometry edit at all</b> — a
+     * {@code PathEdits.PLACED} at the landing FEET cell would make the node read its own body space as solid
+     * and dead-end the search — so without this third loop its cell is unknown to the gate entirely. Both the
+     * place AND the reclaim would then be classified as foreign divergence, and the resulting
+     * {@link #planImpacted} would re-search the plan MID-CLUTCH: the bot is airborne over a drop it only
+     * survives because of the cushion this plan prescribed, which is the worst possible moment to reset the
+     * waypoint cursor. Testing {@link StepEdits#clutchCell()} closes exactly that hole.
+     *
+     * <p><b>Coordinate-only, deliberately.</b> This answers "is this cell one of ours", not "is this the right
+     * mutation" — and it must stay that way, because a clutch cell is edited TWICE in opposite directions (the
+     * place fills it, the reclaim empties it) and a direction test here would have to forgive both, which is
+     * strictly weaker than forgiving neither. The direction is matched exactly once, later and per-mutation,
+     * at {@code NavGridUpdater.consumeExpected} against {@code newState.isAir()} — the announced {@code toAir}
+     * flag {@link #expectOwnEdit} passes through. Keeping the two concerns split is what lets a vine growing
+     * into the very cell we were about to clutch still count as foreign.
+     */
     static boolean prescribesEdit(BlockPathPlan bp, int x, int y, int z) {
         for (int s = 0; s < bp.size(); s++) {
             final StepEdits e = bp.edits(s);
@@ -883,6 +905,12 @@ public final class PathPlan {
             for (int i = 0; i < e.placeCount(); i++) {
                 final BlockPos p = e.placePos(i);
                 if (p.getX() == x && p.getY() == y && p.getZ() == z) return true;
+            }
+            if (e.clutchKind() != ClutchModel.NONE) {
+                // Packed compare, no BlockPos: clutchCell is only MEANINGFUL past the NONE guard (it is 0 on
+                // every other step, which is a real world cell at (0,0,0) and would forgive edits there).
+                final long c = e.clutchCell();
+                if (BlockPos.getX(c) == x && BlockPos.getY(c) == y && BlockPos.getZ(c) == z) return true;
             }
         }
         return false;
