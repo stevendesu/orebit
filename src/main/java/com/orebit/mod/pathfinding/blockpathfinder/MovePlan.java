@@ -58,6 +58,16 @@ public final class MovePlan {
     private int moveDx, moveDz;
     /** Plan-level door {@link Need#OPEN} reqs (DOORS P3); almost always empty (a door crossing is rare). */
     private final List<Req> doorReqs = new ArrayList<>(0);
+    /**
+     * The plan-level CLUTCH: the {@link ClutchModel} kind to place into the landing cell mid-drop, and the
+     * cell it goes in. {@link ClutchModel#NONE} on every plan but a clutched deep {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Fall}, so this is four dead {@code int}s on the
+     * common step — deliberately scalars rather than a {@link Req} list, because a clutch is one-per-step by
+     * construction ({@link StepEdits} carries exactly one kind + one cell) and the flat fields mirror the
+     * other plan-level scalar {@link #moveDir} rather than paying a list for a value that can never repeat.
+     */
+    private int clutchKind = ClutchModel.NONE;
+    private int clutchX, clutchY, clutchZ;
 
     /** Append a phase; returns it for fluent configuration ({@code .need(...).drive(...).advanceWhen(...)}). */
     public Phase phase(String name) {
@@ -119,6 +129,61 @@ public final class MovePlan {
         doorReqs.add(new Req(Need.OPEN, x, y, z, open));
         return this;
     }
+
+    /**
+     * Record that this step lands on a <b>clutch</b> — the {@link ClutchModel} block of {@code kind} placed
+     * into cell {@code (x,y,z)} mid-drop to survive a fall {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Fall} would otherwise refuse (ClutchModel's class
+     * doc). Injected by {@link com.orebit.mod.BotNavigator} off the step's {@link StepEdits}
+     * ({@link StepEdits#clutchKind()}/{@link StepEdits#clutchCell()}) after the movement builds its geometry
+     * plan, <b>exactly as {@link #requireDoor} is</b>, and for the same reason: the choice is a live-world
+     * fact a movement's cell-geometry {@code plan(...)} cannot derive from floor coords. The planner did not
+     * merely decide THAT the drop is survivable — it picked WHICH carried block makes it so, from a
+     * preference order gated on the bot's {@code clutchMask} and the depth ({@link ClutchModel#best}), and
+     * priced that kind's residual damage into {@code g}. Re-deriving it downstream against the LIVE inventory
+     * could pick a different kind than the one the search paid for, so the decision travels rather than being
+     * recomputed.
+     *
+     * <p><b>Carrying the cell is not redundant with the step's place-set.</b> The two landing geometries
+     * differ (ClutchModel §Landing): a LANDS-ON-TOP kind (slime, hay) folds a {@code PathEdits.PLACED} at the
+     * landing floor, but a SINK-THROUGH kind (water, powder snow) folds <b>no geometry edit at all</b> — a
+     * place at the bot's own feet cell would make the node read its body space as solid and dead-end itself.
+     * For those kinds this cell is the ONLY record of where the block goes.
+     *
+     * <p><b>This plan only CARRIES the requirement; the runner does nothing with it.</b> A clutch is not a
+     * {@link Need} — it is not established before a phase drives (it is placed DURING the drop, at a
+     * fall-distance the geometry vocabulary cannot express) and it is not reconciled against the live world
+     * by the runner. {@code Fall} reads it back off its own plan inside the phase closures it built, and
+     * drives {@link BotSteering#placeClutch}/{@link BotSteering#reclaimClutch} itself. Returns {@code this}
+     * for fluent use.
+     */
+    public MovePlan requireClutch(int x, int y, int z, int kind) {
+        this.clutchX = x;
+        this.clutchY = y;
+        this.clutchZ = z;
+        this.clutchKind = kind;
+        return this;
+    }
+
+    // ---- the clutch, read back by the MOVEMENT (not the runner) --------------------------------------
+    //
+    // PUBLIC, unlike the package-private accessors below, because the reader is Fall — and the movements
+    // live in the sibling package com.orebit.mod.pathfinding.blockpathfinder.movements, so package-private
+    // would be invisible to the one class that needs them. Same split the builder API already has:
+    // phase()/need()/requireDoor() are public because movements call them across that boundary, while
+    // needs()/doorReqs() stay package-private because only PhaseRunner reads them.
+
+    /** The {@link ClutchModel} kind this step clutches with, or {@link ClutchModel#NONE} — which is every
+     *  plan but a clutched deep {@code Fall}. Callers MUST test against {@code NONE} before trusting the
+     *  cell, whose value is meaningless (0,0,0) otherwise. */
+    public int clutchKind() { return clutchKind; }
+    /** X of the cell the clutch block goes in; meaningful only when {@link #clutchKind()} != {@code NONE}. */
+    public int clutchX() { return clutchX; }
+    /** Y of the cell the clutch block goes in — the landing FEET cell for a sink-through kind, the landing
+     *  FLOOR cell for a lands-on-top one ({@link ClutchModel#landsOnTop}). */
+    public int clutchY() { return clutchY; }
+    /** Z of the cell the clutch block goes in; meaningful only when {@link #clutchKind()} != {@code NONE}. */
+    public int clutchZ() { return clutchZ; }
 
     // ---- consumed by PhaseRunner ---------------------------------------------------------------------
     int size() { return phases.size(); }

@@ -18,7 +18,7 @@ public final class SpliceTestPlans {
     /** An {@link EditSnapshot} carrying exactly the given BROKEN + PLACED cells (packed asLong). */
     public static EditSnapshot snapshotOf(long[] breaks, long[] places) {
         StepEdits se = new StepEdits();
-        se.load(breaks, breaks.length, places, places.length, new long[0], new boolean[0], 0);
+        se.load(breaks, breaks.length, places, places.length, new long[0], new boolean[0], 0, ClutchModel.NONE, 0L);
         BlockPathPlan plan = new BlockPathPlan(
                 Arrays.asList(new BlockPos[] { BlockPos.ZERO }),
                 Arrays.asList(new Movement[] { null }),

@@ -1,6 +1,7 @@
 package com.orebit.mod.platform;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.ClutchModel;
 import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
@@ -11,7 +12,11 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -314,7 +319,12 @@ public final class BotInventory {
      *       Efficiency), yielding the {@link MiningModel.Snapshot} the {@link MovementContext#breakable}
      *       tool-feasibility gate + the stage-1d tick lookup read;</li>
      *   <li>reads the carried placeable-block count once ({@link #placeableBlockCount()}) as the placement
-     *       cap's scalar throwaway budget.</li>
+     *       cap's scalar throwaway budget;</li>
+     *   <li>reads the carried fall-clutch set once ({@link #clutchMask(ServerLevel)}) as the {@link
+     *       ClutchModel} bitmask the fall model tests to decide whether an otherwise-lethal drop can be
+     *       cushioned. {@code level} is needed ONLY for that scan (water evaporates in the Nether — see
+     *       {@link #evaporatesWater}), which is why it joins {@link #hasSilkTouchToolFor} and {@link
+     *       #equipForCondition} as a level-taking method on this adapter.</li>
      * </ul>
      * {@code caps} supplies the mining-hardness cap + canBreak; {@code consumesBlocks} is the {@code
      * placement.consumesBlocks} config flag (when off, the placeable count is irrelevant — infinite conjured
@@ -333,7 +343,7 @@ public final class BotInventory {
      * one {@link #consumeOnePlaceable} will place); a bot carrying no placeable block can't place at all, so its
      * premium is 0. Computed ONCE here (cold) into the snapshot scalar {@link MovementContext#placeCost} reads.
      */
-    public MovementContext.InventoryView feasibility(BotCaps caps, boolean consumesBlocks,
+    public MovementContext.InventoryView feasibility(ServerLevel level, BotCaps caps, boolean consumesBlocks,
             BlockState conjured, float removalWeight, float placeBaseCost, float breakBaseCost) {
         if (!MiningModel.ready()) return null;
 
@@ -352,7 +362,103 @@ public final class BotInventory {
                 bestTierPerCategory, caps.maxBreakHardness(), caps.canBreak());
         float premium = placeRemovalPremium(mining, consumesBlocks, conjured, removalWeight);
         return new MovementContext.InventoryView(
-                mining, consumesBlocks, placeableBlockCount(), premium, placeBaseCost, breakBaseCost);
+                mining, consumesBlocks, placeableBlockCount(), premium, placeBaseCost, breakBaseCost,
+                clutchMask(level));
+    }
+
+    /**
+     * The {@link ClutchModel} bitmask of fall-clutch kinds the bot CARRIES and that function in {@code level}
+     * — the once-per-pathfind scan behind {@link MovementContext.InventoryView#clutchMask()}. One pass over
+     * every slot, {@code |=}-ing a bit per kind found; presence-only, because the mask is a cheap cap and not
+     * a depleting budget (see {@link #feasibility}). Allocation-free and cold — one scan per whole replan,
+     * never the A* loop.
+     *
+     * <p>The item→kind table is deliberately IDENTITY comparisons against {@code Items.*} constants for the
+     * four singleton clutches, all four of which are javap-verified present at both ends of the supported
+     * range (1.17.1 and 26.2) — see {@link #clutchKindOf}.
+     *
+     * <p>The dimension gate is NOT hardcoded to water: a carried kind is dropped from the mask when the level
+     * evaporates fluids AND the model says that kind needs a non-evaporating one ({@link
+     * ClutchModel#needsNonEvaporating}). Today that is water alone — powder snow is a block placement rather
+     * than a fluid, and {@code PowderSnowBlock.getCollisionShape} returns its solid box off {@code
+     * entity.fallDistance > 2.5} with no dimension or biome term, so a snow bucket cushions in the Nether
+     * exactly as it does in the Overworld — but the rule lives on the model, so a future evaporating clutch
+     * needs no edit here.
+     */
+    private int clutchMask(ServerLevel level) {
+        final boolean evaporates = evaporatesWater(level);
+        int mask = 0;
+        for (int i = 0, n = inv.getContainerSize(); i < n; i++) {
+            ItemStack s = inv.getItem(i);
+            if (s.isEmpty()) continue;
+            final int kind = clutchKindOf(s.getItem());
+            if (kind == ClutchModel.NONE) continue;
+            if (evaporates && ClutchModel.needsNonEvaporating(kind)) continue;
+            mask |= ClutchModel.bit(kind);
+        }
+        return mask;
+    }
+
+    /**
+     * The {@link ClutchModel} kind {@code item} supplies, or {@link ClutchModel#NONE}. Identity compares
+     * against {@code Items.*} carry the four singleton clutches; all four are javap-verified present at both
+     * ends of the range (1.17.1 and 26.2).
+     *
+     * <p>Beds are the exception and must NOT be matched by constant: 26.x collapsed the sixteen dyed variants
+     * the way it collapsed concrete powder ({@code Blocks.BED} is a {@code ColorCollection} at 26.2, and
+     * javap confirms {@code Items.WHITE_BED} exists at 1.17.1 and does NOT at 26.2), so a per-colour constant
+     * list would not compile across the range, and a {@code #minecraft:beds} item-tag lookup would need a new
+     * flavour of the dynamic-tag seam. The version-stable test is structural — a {@link BlockItem} whose
+     * block is a {@link BedBlock}, both present in both jars. It also picks up modded beds for free, which is
+     * correct rather than lax: {@code BedBlock.fallOn} is the thing that supplies the cushion (it calls
+     * {@code causeFallDamage(d * 0.5, 1.0f)}), so anything extending {@code BedBlock} cushions.
+     */
+    private static int clutchKindOf(Item item) {
+        if (item == Items.WATER_BUCKET) return ClutchModel.WATER;
+        if (item == Items.POWDER_SNOW_BUCKET) return ClutchModel.POWDER_SNOW;
+        if (item == Items.SLIME_BLOCK) return ClutchModel.SLIME;
+        if (item == Items.HAY_BLOCK) return ClutchModel.HAY;
+        if (item instanceof BlockItem bi && bi.getBlock() instanceof BedBlock) return ClutchModel.BED;
+        return ClutchModel.NONE;
+    }
+
+    /**
+     * Whether {@code level} destroys placed water — the one dimension gate the clutch scan needs, since a
+     * water bucket emptied in the Nether evaporates instead of cushioning ({@code BucketItem.emptyContents}
+     * refuses and plays the fizz).
+     *
+     * <h2>Why this is a dimension-KEY test and not {@code dimensionType().ultraWarm()}</h2>
+     * {@code ultraWarm()} is the semantically exact predicate and it is NOT usable from core — javap over
+     * the cached remapped jars pins the divergence precisely:
+     * <ul>
+     *   <li>{@code DimensionType.ultraWarm()} is present 1.17.1 … <b>1.21.10</b>;</li>
+     *   <li>it is <b>absent at 1.21.11</b> and in the whole 26 era — 26.2's {@code DimensionType} record
+     *       carries {@code hasFixedTime/hasSkyLight/hasCeiling/hasEnderDragonFight/coordinateScale/…} and no
+     *       warmth field at all. The behaviour moved to a per-POSITION environment attribute: 26.2's {@code
+     *       BucketItem} calls {@code level.environmentAttributes().getValue(EnvironmentAttributes
+     *       .WATER_EVAPORATES, pos)}.</li>
+     * </ul>
+     * So the divergence boundary falls <i>inside</i> the mc-1.21 era (at 1.21.11), not at the era seam —
+     * an {@code ultraWarm()} call would fail that era's own {@code chiseledCompileCommon} gate, and a
+     * correct exact implementation needs a {@code platform/} overlay seam with two flavours. That seam is
+     * not built here (this pass owns no overlay files); it is the recorded follow-up.
+     *
+     * <p>What is used instead is version-stable at both ends (javap-verified on 1.17.1 and 26.2): {@code
+     * Level.dimension()} returning a {@code ResourceKey<Level>}, and the {@code Level.NETHER} constant.
+     * {@code ResourceKey}s are interned by {@code ResourceKey.create} (a static {@code VALUES} map at
+     * 1.17.1, an {@code InternKey} intern at 26.2), so reference equality is the correct comparison.
+     *
+     * <p><b>The residual gap, stated plainly.</b> This is a key test, so it is exact for vanilla — javap
+     * over 1.21.10's {@code DimensionTypes} bootstrap shows all four built-in dimension types and only the
+     * Nether passes {@code true} in the {@code ultraWarm} ctor slot (overworld, the_end and overworld_caves
+     * all pass {@code false}). It does NOT catch a datapack dimension that sets {@code ultra_warm: true}
+     * under some other id. There the mask would offer a water clutch that fizzles, and the bot would eat
+     * the fall it planned to cushion. That is the failure the overlay seam above closes; it is called out
+     * rather than papered over with a guess about datapack conventions (a "nether-like dimensions also set
+     * has_ceiling" heuristic would be exactly that).
+     */
+    private static boolean evaporatesWater(ServerLevel level) {
+        return level.dimension() == Level.NETHER;
     }
 
     /**

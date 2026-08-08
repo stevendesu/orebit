@@ -256,7 +256,7 @@ public class HierarchicalCascadeTest {
         int[] tiers = new int[NavBlock.Tool.values().length];
         tiers[NavBlock.Tool.PICKAXE.ordinal()] = MiningModel.Tier.IRON.ordinal();
         return new MovementContext.InventoryView(
-                MiningModel.snapshot(tiers, 255, true), true, 0, 0f, 0f, 0f);
+                MiningModel.snapshot(tiers, 255, true), true, 0, 0f, 0f, 0f, 0);
     }
 
     @Test
@@ -339,7 +339,7 @@ public class HierarchicalCascadeTest {
         int[] tiers = new int[NavBlock.Tool.values().length];
         tiers[NavBlock.Tool.PICKAXE.ordinal()] = MiningModel.Tier.DIAMOND.ordinal();
         MovementContext.InventoryView diamond = new MovementContext.InventoryView(
-                MiningModel.snapshot(tiers, 255, true), false, 0, 0f, 0f, 0f);
+                MiningModel.snapshot(tiers, 255, true), false, 0, 0f, 0f, 0f, 0);
         HierarchicalRegionPlan stronger = HierarchicalRegionPlan.build(grid, 0, bot, farGoalX(), CAPS,
                 RegionMineModel.DEFAULT, diamond);
         long[] strongerHop = firstHopKeys(stronger);

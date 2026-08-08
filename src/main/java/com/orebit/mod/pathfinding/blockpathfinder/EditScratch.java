@@ -34,6 +34,11 @@ public final class EditScratch {
     private long[] doors = new long[2];
     private boolean[] doorOpens = new boolean[2];
     private int doorCount;
+    // The clutch this candidate chose, if any (ClutchModel.NONE otherwise) — the block a deep Fall places
+    // into its own landing cell mid-drop. A scalar, not a buffer: a step has at most ONE clutch, because a
+    // clutch is a property of the single landing that terminates the drop.
+    private int clutchKind = ClutchModel.NONE;
+    private long clutchCell;
     private float extraCost;
     private boolean valid;
     private boolean allowEdits;
@@ -58,6 +63,8 @@ public final class EditScratch {
         breakCount = 0;
         placeCount = 0;
         doorCount = 0;
+        clutchKind = ClutchModel.NONE; // cleared like the counts — a stale kind would clutch an unrelated step
+        clutchCell = 0L;
         extraCost = 0f;
         valid = true;
         this.allowEdits = allowEdits;
@@ -218,6 +225,33 @@ public final class EditScratch {
     }
 
     /**
+     * Record that this candidate survives its drop by placing the {@link ClutchModel} block of {@code kind}
+     * into cell {@code (x,y,z)} mid-fall — the planner's CHOICE of clutch, carried to the executor.
+     *
+     * <p><b>This is a channel, not a cost.</b> It folds no break and no place and adds nothing to
+     * {@link #extraCost()}: {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Fall} has already
+     * priced the clutch itself (residual {@link ClutchModel#damageBlocks} × ticks-per-HP, plus the placement
+     * price where the kind folds one), because only the caller knows the drop depth and the chosen kind's
+     * absorption curve. Adding a price here would double-charge it.
+     *
+     * <p><b>Why the cell is a parameter rather than derived from the node.</b> The two landing geometries put
+     * the block in different cells (ClutchModel §Landing): a SINK-THROUGH kind (water, powder snow) goes in
+     * the landing FEET cell {@code (fy+1)} while the bot comes to rest on the pre-existing floor {@code fy},
+     * so the node is unmoved and NO geometry edit is folded — folding a place there would make the node read
+     * its own body cell as solid and dead-end itself. A LANDS-ON-TOP kind (slime, hay) goes in {@code fy+1}
+     * as the FLOOR the bot stands on, moving the node up one and shortening the effective drop, and DOES fold
+     * an ordinary place through {@link #requireFloor}. One scalar cell covers both without the scratch having
+     * to know which geometry applies.
+     *
+     * <p>Last call wins (a plain overwrite): a movement evaluates one landing per candidate, and
+     * {@link #reset(boolean)} clears the slot between candidates, so there is no accumulation to reconcile.
+     */
+    public void setClutch(int kind, int x, int y, int z) {
+        clutchKind = kind;
+        clutchCell = BlockPos.asLong(x, y, z);
+    }
+
+    /**
      * Whether this candidate may fold edits at all — {@code reset(false)} (a {@code RISKY_EDIT} floor)
      * forbids them, and an already-invalid scratch has nothing to gain. The gate the context's
      * break-through fold checks before recording a break (mirrors {@link #requireAir}'s own gate).
@@ -236,8 +270,31 @@ public final class EditScratch {
         return extraCost;
     }
 
-    /** Whether any break, place, or door-set was folded — lets a caller test for edits without {@link #snapshot()}. */
+    /**
+     * Whether this candidate carries ANYTHING the executor must be told about — a break, a place, a door-set,
+     * or a {@linkplain #setClutch clutch} — and therefore whether the search must copy it into a
+     * {@link StepEdits} instead of leaving the edge a plain {@code null}. This is the gate {@code
+     * BlockPathfinder}'s relaxer tests before drawing from the edit arena.
+     *
+     * <p>The clutch disjunct is load-bearing, not defensive: a SINK-THROUGH clutch (water, powder snow) folds
+     * NO geometry by design, so without it a water-bucket clutch would be silently discarded at the relaxer
+     * and the bot would walk off the cliff with no plan to place anything. When no clutch is set the term is
+     * one always-false compare against a scalar field — {@code hasEdits()} is then bit-for-bit the old
+     * predicate, so an unclutched search is unchanged.
+     */
     public boolean hasEdits() {
+        return breakCount != 0 || placeCount != 0 || doorCount != 0 || clutchKind != ClutchModel.NONE;
+    }
+
+    /**
+     * Whether any WORLD-GEOMETRY edit (break / place / door-set) was folded — {@link #hasEdits()} minus the
+     * clutch channel. Distinct because {@code BlockPathfinder}'s {@code anyEdits} flag gates the per-pop
+     * {@link PathEdits} diff rebuild, and a clutch alone contributes nothing to that diff
+     * ({@link PathEdits#add} reads only the three geometry lists): folding the clutch into {@code anyEdits}
+     * would switch on a whole-chain walk per expansion that provably produces an empty diff. Identical to
+     * {@link #hasEdits()} whenever no clutch is set.
+     */
+    boolean hasGeometryEdits() {
         return breakCount != 0 || placeCount != 0 || doorCount != 0;
     }
 
@@ -247,9 +304,12 @@ public final class EditScratch {
      * sink has decided to keep the candidate (the rejected majority never reaches here). The pooled
      * instance reuses/grows its own buffers, so steady state touches no heap. Call only when
      * {@link #hasEdits()} (the search gates on it; an empty set should stay a plain {@code null} edge).
+     *
+     * <p>The {@linkplain #setClutch clutch} kind + cell ride along as two scalar stores — always written, so a
+     * recycled arena slot cannot leak a previous edge's clutch onto this one.
      */
     void copyInto(StepEdits e) {
-        e.load(breaks, breakCount, places, placeCount, doors, doorOpens, doorCount);
+        e.load(breaks, breakCount, places, placeCount, doors, doorOpens, doorCount, clutchKind, clutchCell);
     }
 
     private static long[] push(long[] buf, int count, int x, int y, int z) {
