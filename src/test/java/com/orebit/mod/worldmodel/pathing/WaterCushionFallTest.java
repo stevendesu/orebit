@@ -116,24 +116,46 @@ class WaterCushionFallTest {
         assertEquals(cleanCost(30), cushioned, 1e-3, "water ON the floor cushions the very same drop");
     }
 
-    // ---- The momentum gate -----------------------------------------------------------------------------
+    // ---- Momentum decides WHERE the fall ends, not whether it is allowed --------------------------------
 
     @Test
-    void waterDeeperThanAnyEntryMomentumCanCrossDoesNotCushion() {
-        // 20 blocks of water — past the terminal-velocity penetration bound (~19), so no fall however long
-        // carries the bot to the seabed. Refused rather than planning a node it would take ~1400 ticks of
-        // terminal-crawl sinking to reach.
-        float cost = fallCost(column(Blocks.STONE, 10, Blocks.WATER, 20));
-        assertTrue(Float.isNaN(cost), "a 20-deep water column exceeds the momentum bound and must not cushion");
+    void waterTooDeepToCrossEndsTheFallFloating() {
+        // 20 blocks of water on the floor at y=10, entered after a 10-block free fall. Momentum cannot carry
+        // the bot to the seabed, so the fall ENDS IN THE COLUMN rather than being refused (the pre-2026-08-07
+        // behaviour, which is what made a deep pool unpathable). At a 10-block drop the entry speed is
+        // ~1.13 b/t ⇒ 5 blocks of penetration, so the feet come to rest 5 cells below the surface at y=26
+        // and the node keys on the cell beneath them.
+        int surface = 10 + 20;                       // topmost water cell
+        int landing = surface - 5 - 1;               // node cell = one below the resting feet
+        assertEquals(landing, fallLandingY(column(Blocks.STONE, 10, Blocks.WATER, 20)),
+                "a fall that runs out of momentum must land floating, not be refused");
+        assertEquals(cleanCost(START_Y - landing), fallCost(column(Blocks.STONE, 10, Blocks.WATER, 20)), 1e-3,
+                "a wet endpoint is damage-free and priced as the SHORTER fall that actually happens");
     }
 
     @Test
-    void aShortDropIntoDeepWaterDoesNotCushion() {
-        // The gate is about the WATER column vs the entry speed, not the total depth: this drop is SHALLOWER
-        // than the cushioned 30-block case above, but only 8 blocks of free fall precede 12 blocks of water,
-        // and that entry speed cannot carry the bot through them.
-        float cost = fallCost(column(Blocks.STONE, 20, Blocks.WATER, 12));
-        assertTrue(Float.isNaN(cost), "8 blocks of free fall cannot carry the bot through 12 blocks of water");
+    void aShortDropIntoDeepWaterStopsNearTheSurface() {
+        // The stop depth tracks entry speed, not total depth: only 8 blocks of free fall precede 12 blocks of
+        // water, and at ~1.03 b/t that buys 4 blocks of penetration — so the bot rests near the top of the
+        // column, far above the seabed at y=20.
+        int landing = (20 + 12) - 4 - 1;
+        assertEquals(landing, fallLandingY(column(Blocks.STONE, 20, Blocks.WATER, 12)),
+                "8 blocks of free fall carries the bot 4 blocks into the water, not through 12");
+    }
+
+    @Test
+    void theSeabedAndFloatingBranchesAgreeAtTheBoundary() {
+        // w == p + 1 is the changeover, where the floating cell computes to fy EXACTLY — so the two branches
+        // emit the same node at the same price and there is no discontinuity to tune. Here a 30-block drop
+        // with 7 blocks of water gives airDrop 23 ⇒ p = 7, so w = 7 takes the seabed branch and w = 8 takes
+        // the floating one; both must resolve to y=10.
+        assertEquals(10, fallLandingY(column(Blocks.STONE, 10, Blocks.WATER, 7)),
+                "the last fully-crossed column lands on the seabed (w <= p)");
+        assertEquals(10, fallLandingY(column(Blocks.STONE, 10, Blocks.WATER, 8)),
+                "one block past the window resolves, via the floating branch, to the same seabed cell");
+        assertEquals(fallCost(column(Blocks.STONE, 10, Blocks.WATER, 7)),
+                fallCost(column(Blocks.STONE, 10, Blocks.WATER, 8)), 1e-3,
+                "and the two branches price that shared node identically");
     }
 
     // ---- Only water qualifies --------------------------------------------------------------------------
@@ -170,15 +192,26 @@ class WaterCushionFallTest {
 
     /** The cost of the +X Fall candidate landing in column (3,*,8), or {@code NaN} if none is emitted. */
     private static float fallCost(Map<Integer, Block> dropColumn) {
+        return fall(dropColumn)[1];
+    }
+
+    /** The Y of the +X Fall candidate's landing CELL, or {@link Integer#MIN_VALUE} if none is emitted. */
+    private static int fallLandingY(Map<Integer, Block> dropColumn) {
+        float y = fall(dropColumn)[0];
+        return Float.isNaN(y) ? Integer.MIN_VALUE : (int) y;
+    }
+
+    /** {@code {landingY, cost}} of the +X Fall candidate in column (3,*,8); both NaN when nothing is emitted. */
+    private static float[] fall(Map<Integer, Block> dropColumn) {
         MovementContext ctx = new MovementContext(grid(dropColumn), MORTAL);
-        final float[] got = { Float.NaN };
+        final float[] got = { Float.NaN, Float.NaN };
         new Fall().candidates(ctx, SX, START_Y, NZ, new CandidateSink() {
             @Override
             public void accept(int x, int y, int z, float cost, EditScratch edits) {
-                if (x == NX && z == NZ) got[0] = cost;
+                if (x == NX && z == NZ) { got[0] = y; got[1] = cost; }
             }
         });
-        return got[0];
+        return got;
     }
 
     /**

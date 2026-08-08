@@ -39,16 +39,26 @@ import com.orebit.mod.worldmodel.pathing.TraversalGrid;
  * only within {@link #HANG_MAX_DROP} blocks of prior fall (deeper arrests are deliberately unsupported,
  * owner ruling) — see {@link #tryHang} and NOTES-movement-physics.md §4.
  *
- * <p><b>Water cushion (NOTES-movement-physics.md §7).</b> Water is never a landing target itself (it is not
- * standable), but water standing in a landing's FEET cell makes that landing damage-free from ANY height —
- * the "one block of water on the ground" rule. This is a distinct mechanism from the vine arrest above and
- * carries no tunneling bound, because vanilla resets fallDistance from the bot's FINAL post-move position
- * rather than by sampling cells along the way; see {@link #waterCushioned}. The remaining fall-distance-RESET
- * media (powder snow, sweet berry bush, cobweb) stay classified {@code fallSoftness = 0.0} for descriptor
- * correctness but are deliberately NOT cushions: cobweb's reset provably runs a tick-phase too late to save a
- * same-tick landing, while powder snow / sweet berry are merely UNVERIFIED (powder snow in particular has a
- * genuine same-tick {@code fallOn} override — see the notes beside {@link #WATER_PENETRATION}). Surface-entry
- * swim landings (as opposed to standing on a cushioned floor) remain deferred to the Fall→swim mode coupling.
+ * <p><b>Water cushion (NOTES-movement-physics.md §7).</b> Water standing in a landing's FEET cell makes that
+ * landing damage-free from ANY height — the "one block of water on the ground" rule. This is a distinct
+ * mechanism from the vine arrest above and carries no tunneling bound, because vanilla resets fallDistance
+ * from the bot's FINAL post-move position rather than by sampling cells along the way. The remaining
+ * fall-distance-RESET media (powder snow, sweet berry bush, cobweb) stay classified {@code fallSoftness = 0.0}
+ * for descriptor correctness but are deliberately NOT cushions: cobweb's reset provably runs a tick-phase too
+ * late to save a same-tick landing, while powder snow / sweet berry are merely UNVERIFIED (powder snow in
+ * particular has a genuine same-tick {@code fallOn} override — see the notes beside {@link #WATER_PENETRATION}).
+ *
+ * <p><b>Wet endpoints — a fall may END in the water rather than under it</b> (owner ruling 2026-08-07). Water
+ * is not standable, so it is never a landing TARGET the scans hunt for; but when the scan's standable seabed
+ * lies deeper than the bot's entry momentum can carry it, the fall does not reach that floor and the candidate
+ * used to be refused outright. That refusal is what made a deep pool unpathable — a 16-deep column under a
+ * 60-block drop was skipped entirely and the bot pillared down a staircase beside it. Such a fall now ENDS at
+ * the cell where the bot actually comes to rest, floating ({@link #waterStop}). The emitted node is an ordinary
+ * {@code (x,y,z,mode)} row whose key cell happens to be water — the exact shape {@link Swim}'s own SINK rung
+ * already emits — so the search continues from it with the swim vocabulary at {@link Swim}'s honestly-derived
+ * rates (sink to the seabed, rise, or paddle out sideways), and the whole notion of an unreachable seabed
+ * disappears: the bot was always able to press sink. {@code Fall} remains the movement ON the waypoint, so the
+ * follower runs this class's walk-off → air state machine for the entire edge; only its endpoint is wet.
  *
  * <p><b>Behaviour change (damage-pricing unification):</b> the penalty was a hardcoded {@code
  * DAMAGE_PER_BLOCK = 10} ticks per excess block; it is now the caps value, default {@code 100}. A MORTAL
@@ -140,20 +150,28 @@ public final class Fall implements Movement {
      * {@code Σ (vₜ − v∞) = (v_entry − v∞) / (1 − 0.8) = 5 × (v_entry − v∞)} — saturating at
      * {@code 5 × (3.92 − 0.025) ≈ 19.5} blocks once the fall reaches air terminal velocity.
      *
-     * <p>This is a FEASIBILITY gate, not a trajectory model (see the {@code fall-not-vertical} ruling): the
-     * planner still emits a straight-column landing on the seabed. It only refuses the columns where that
-     * model would be a LIE — past the momentum window the bot is in the 0.025 b/t crawl, so a 40-deep ocean
-     * would take ~1400 ticks of sinking to reach the planned node, which reads as a hung bot.
+     * <p>This is where a wet fall STOPS, not a feasibility gate (it was one until 2026-08-07, and refusing
+     * everything past it is what made deep water unpathable). The value is a genuine resting depth rather than
+     * an arbitrary cutoff: the excess over the terminal crawl decays at {@code 0.8/t}, so the bot is within
+     * 0.1 block of it about 21 ticks after entry and merely creeps at 0.025 b/t thereafter.
+     *
+     * <p><b>Terminal velocity is approached far more slowly than the saturation figure suggests</b> — the air
+     * recurrence converges at ratio 0.98, so a 60-block drop enters at 2.34 b/t (penetration <b>11</b>), not
+     * 3.92. Crossing 16 blocks of water would take a 176-block free fall, and even a 399-block drop only
+     * reaches 18. Do not read the ~19 ceiling as a practical allowance; it is asymptotic and never attained.
      */
     private static final int[] WATER_PENETRATION = new int[256];
 
     /**
-     * The deepest water ANY entry momentum can cross — {@code 5 × (3.92 − 0.025) ≈ 19} blocks, the value at
-     * air terminal velocity. Used as the column-scan cap. Taken from the closed form rather than from
-     * {@code max(WATER_PENETRATION)} because the table is indexed by whole blocks of free fall and its last
-     * entry is a ~255-block drop, which has not QUITE reached terminal velocity — so the table's own maximum
-     * would be a slightly tight cap. An upper bound is the safe direction here: the cap only decides how far
-     * the column walk looks before giving up, and the per-drop table still governs acceptance.
+     * The deepest water ANY entry momentum could cross — {@code 5 × (3.92 − 0.025) ≈ 19} blocks, the value at
+     * air terminal velocity. Taken from the closed form rather than from {@code max(WATER_PENETRATION)}
+     * because the table is indexed by whole blocks of free fall and its last entry is a ~255-block drop,
+     * which has not QUITE reached terminal velocity.
+     *
+     * <p>Documentation and a test anchor only — <b>no longer a scan cap</b>. It bounded the column walk while
+     * that walk answered a yes/no gate; the walk now has to find the water SURFACE in order to place a
+     * floating landing, so truncating it would misplace the node. And as {@link #WATER_PENETRATION} notes,
+     * this ceiling is asymptotic: no reachable drop attains it.
      */
     static final int MAX_WATER_PENETRATION = (int) Math.floor(5.0 * (AIR_TERMINAL - WATER_TERMINAL));
 
@@ -346,7 +364,8 @@ public final class Fall implements Movement {
      */
     private static void tryLanding(MovementContext ctx, CandidateSink out, int nx, int y, int nz,
                                    int fy, int flags, int safeFall, int maxFall, float hpCost, float base) {
-        int depth = y - fy;
+        int landY = fy;          // the cell the emitted node keys on — the seabed, unless the fall ends wet
+        int depth = y - landY;
         // Softness gate — consulted ONLY when the drop is beyond the free window (depth > safeFall), so a
         // short drop, an immune bot (safeFall == maxFall), and the whole common case read no extra descriptor
         // and behave byte-for-byte as before. m ∈ {1.0,0.5,0.2,0.0}: the excess-fall damage the landing block
@@ -354,16 +373,18 @@ public final class Fall implements Movement {
         // HP budget the hard maxFall allows — (depth-safeFall)*m ≤ (maxFall-safeFall); m = 0 ⇒ uncapped.
         float m = 1.0f;
         if (depth > safeFall) {
-            // Water standing on the landing governs BOTH the impact and whether this node is REACHABLE: a
-            // cushion zeroes the damage however deep the drop, while a column too deep for entry momentum to
-            // cross makes the straight-column landing a lie and is refused outright ({@link #waterColumn}).
+            // Water standing on the landing governs BOTH the impact and WHERE the fall ends: a cushion zeroes
+            // the damage however deep the drop, and a column deeper than entry momentum can cross ends the
+            // fall floating part-way down instead of on the seabed ({@link #waterStop}).
             //
-            // The feet-cell probe is INLINED here rather than folded into waterColumn, and the split is
+            // The feet-cell probe is INLINED here rather than folded into waterStop, and the split is
             // deliberate: a dry landing — the overwhelming case — must cost one read and one branch with no
             // call, leaving the column walk in a cold callee that only genuine water ever enters. Measured:
             // routing every landing through the helper cost TOWER ~+2% (pinned fresh-JVM A/B).
             if (ctx.water(nx, fy + 1, nz)) {
-                if (waterColumn(ctx, nx, fy, nz, depth) < 0) return;
+                landY = waterStop(ctx, nx, fy, nz, depth);
+                if (landY == NO_WATER_LANDING) return;
+                depth = y - landY;  // a floating stop is a SHORTER fall than the one to the seabed would be
                 m = 0f;
             } else {
                 m = FALL_MULT[NavBlock.fallSoftness(ctx.descriptorAt(nx, fy, nz))];
@@ -387,7 +408,7 @@ public final class Fall implements Movement {
         // (§3.1). A clean column pays only the AND and emits bit-identically to the pre-arc code.
         float transit = 0f;
         int climbTop = Integer.MIN_VALUE;
-        for (int k = fy + 1; k <= y; k++) {
+        for (int k = landY + 1; k <= y; k++) {
             long cd = ctx.descriptorAt(nx, k, nz);
             // A fall column may contain WATER. {@code passable} is the WALK-clearance predicate and
             // deliberately excludes fluids, but a falling bot enters water freely — and rejecting it here is
@@ -413,53 +434,66 @@ public final class Fall implements Movement {
         float cost = base + depth * PER_BLOCK
                 + transit + ctx.bodyTransitCost(flags, nx, y, nz)
                 // Landing-floor contact damage (magma — standable since s52b): coordinate form reads the
-                // floor descriptor ONLY for a mortal bot; an immune bot pays zero reads here.
-                + ctx.floorHazardCost(nx, fy, nz);
+                // floor descriptor ONLY for a mortal bot; an immune bot pays zero reads here. A floating
+                // (water) landY is not a damaging floor, so this reads zero on that branch.
+                + ctx.floorHazardCost(nx, landY, nz);
         if (depth > safeFall) {
             cost += (depth - safeFall) * hpCost * m; // ≈1 HP per excess block × ticks-per-HP × softness
         }
-        out.accept(nx, fy, nz, cost);
+        out.accept(nx, landY, nz, cost);
     }
 
+    /** {@link #waterStop} sentinel: this column offers no Fall landing at all. */
+    private static final int NO_WATER_LANDING = Integer.MIN_VALUE;
+
     /**
-     * The water standing on the landing at {@code (nx,fy,nz)} for a drop of {@code depth} blocks, called
-     * ONLY once the caller has proven the feet cell holds water: {@code >0} = the cushion depth in blocks
-     * (damage-free impact), {@code -1} = <b>refuse this landing outright</b>.
+     * <b>Where a fall into water actually ends</b>, given the scan's standable seabed at {@code (nx,fy,nz)}
+     * and a drop of {@code depth} blocks. Called ONLY once the caller has proven the seabed's feet cell holds
+     * water. Returns the CELL the emitted node keys on — {@code fy} itself when the bot reaches the floor, a
+     * higher water cell when it does not — or {@link #NO_WATER_LANDING} to refuse the candidate.
      *
      * <p>Three facts drive it, and each is load-bearing:
      * <ul>
      *   <li><b>Water at the FEET is what cushions.</b> Vanilla's reset is driven by the bot's final
-     *       post-move position, so what matters is the cell it ends up standing in — not water it passed
-     *       through. This is why a column suspended over a void needs no special handling: the scan only
-     *       ever accepts a STANDABLE landing, so it walks past the suspended water to the real floor below,
-     *       whose feet cell is air, and the drop is refused on the ordinary budget with no extra machinery.
-     *       (A slow fall would in truth be reset by that suspended water; refusing over-refuses, which is
-     *       the safe direction — we never accept a lethal drop, we occasionally decline a survivable one.)</li>
-     *   <li><b>Momentum must reach the floor.</b> Past the momentum window the bot decays to the 0.025 b/t
-     *       terminal crawl, so a 40-deep ocean would need ~1400 ticks of sinking to arrive at the planned
-     *       seabed node — indistinguishable from a hung bot. That is a REACHABILITY failure, not a pricing
-     *       one, so it returns −1 and kills the candidate rather than merely denying the cushion.</li>
-     *   <li><b>It stays a gate, not a trajectory model.</b> The planner still emits a straight-column
-     *       landing (the {@code fall-not-vertical} ruling); this only refuses the columns where that model
-     *       would be false. Surface-entry swim landings are the proper home for the refused ones and wait
-     *       on the deferred Fall→swim coupling.</li>
+     *       post-move position, so what matters is the cell it ends up in — not water it passed through.
+     *       This is why a column suspended over a void needs no special handling: the scan only ever accepts
+     *       a STANDABLE landing, so it walks past the suspended water to the real floor below, whose feet
+     *       cell is air, and the drop is refused on the ordinary budget with no extra machinery. (A slow
+     *       fall would in truth be reset by that suspended water; over-refusing is the safe direction — we
+     *       never accept a lethal drop, we occasionally decline a survivable one.)</li>
+     *   <li><b>Momentum decides WHERE the fall stops, not WHETHER it is allowed.</b> Entry speed carries the
+     *       bot {@code p} blocks below the surface; if the column is deeper than that, the bot simply comes
+     *       to rest in the water rather than on the seabed, and THAT cell is the landing. Refusing instead
+     *       (the pre-2026-08-07 behaviour) rested on the premise that the remaining descent was a ~1400-tick
+     *       terminal crawl — false, because {@link Swim} has an active sink rung ({@code DOWN_COST}, the
+     *       {@code sinkInWater} press) and simply continues from the floating node at its own honest rate.</li>
+     *   <li><b>It is still not a trajectory model</b> ({@code fall-not-vertical}). The planner names one
+     *       cell and the follower servos to it ({@link SteerControl#holdDepth} in the FALL phase), so the
+     *       whole-block table need only be right to within the servo's authority.</li>
      * </ul>
      *
      * <p>Costs ONE descriptor read when the feet cell is dry (the overwhelming case). The column walk runs
-     * only over genuine water and is capped at {@link #MAX_WATER_PENETRATION} + 1 cells.
+     * only over genuine water and never exceeds the drop itself — i.e. never more iterations than the
+     * transit loop in {@link #tryLanding} already walks on the very same candidate.
      */
-    private static int waterColumn(MovementContext ctx, int nx, int fy, int nz, int depth) {
-        // The caller has already proven the FEET cell (fy+1) is water — this starts at the cell above it.
+    private static int waterStop(MovementContext ctx, int nx, int fy, int nz, int depth) {
+        // Walk the contiguous water column up to find the SURFACE. The caller has already proven the feet
+        // cell (fy+1) is water, so this starts at the cell above it. Bounded by the drop itself: there
+        // cannot be more water above the landing than there is fall to reach it. (The old
+        // MAX_WATER_PENETRATION bound is gone — it was sound while this answered a yes/no gate, but the
+        // surface is now needed to PLACE the floating node, and truncating the walk would misplace it.)
         int w = 1;
-        // Walk the contiguous water column up. Bounded twice: no deeper than any entry momentum can cross,
-        // and never past the step-off level (depth − w is the remaining free fall above the surface).
-        while (w <= MAX_WATER_PENETRATION && depth - w >= 1 && ctx.water(nx, fy + 1 + w, nz)) w++;
-        if (w > MAX_WATER_PENETRATION) return -1;   // deeper than terminal-velocity entry can ever cross
+        while (w < depth && ctx.water(nx, fy + 1 + w, nz)) w++;
         int airDrop = depth - w;
         // No free fall above the water: the bot is stepping off INTO the column, which is Swim's business
         // (it would sink under its own weight, not fall) — decline rather than model it here.
-        if (airDrop < 1) return -1;
-        return w <= WATER_PENETRATION[Math.min(airDrop, WATER_PENETRATION.length - 1)] ? w : -1;
+        if (airDrop < 1) return NO_WATER_LANDING;
+        int p = WATER_PENETRATION[Math.min(airDrop, WATER_PENETRATION.length - 1)];
+        // w <= p: momentum crosses the whole column and the bot stands on the seabed — the historical
+        // cushioned landing, priced exactly as before. Otherwise the feet come to rest p cells below the
+        // surface, so the node cell is one below that. The two branches AGREE at the boundary: w == p+1
+        // yields fy exactly, so there is no discontinuity to tune.
+        return w <= p ? fy : fy + w - p - 1;
     }
 
     /**
@@ -594,9 +628,12 @@ public final class Fall implements Movement {
         // column centre, braking with reverse input the moment that projection overshoots, so held step-off
         // momentum can't carry the bot off a 1-wide landing (or, as measured 2026-08-06, park it at the far
         // cell edge with no runup left for the step that follows).
-        // Complete only once actually SETTLED on the landing cell: grounded (a standable floor) OR arrested
-        // on a climbable (a HANG landing — feet in the vine cell, never grounded; the one predicate covers
-        // both kinds, since a standing landing reads onClimbable false; NOTES-movement-physics.md §5).
+        // Complete only once actually SETTLED on the landing cell. One predicate covers all THREE landing
+        // kinds, because BotSteering.settled() is `grounded() || inWater() || inLava() || hangingOnClimbable()`:
+        // a standable floor (grounded), a HANG in a vine (never grounded — NOTES-movement-physics.md §5), and
+        // now a WET endpoint (floating in the column, also never grounded — see waterStop). Being in water
+        // cannot fire this early: settled() goes true the instant the bot touches the surface, but the feet
+        // cell only matches at the planned stop, many cells further down.
         // A touchdown on a wrong cell simply never fires done — the follower's grounded-stall recovery
         // re-anchors and replans.
         plan.phase("fall")
@@ -619,6 +656,15 @@ public final class Fall implements Movement {
                 .drive((b, v) -> {
                     SteerControl.arriveOnTarget(b, v);
                     SteerControl.holdClimbableStance(b, v, false);
+                    // Wet endpoints (see {@link #waterStop}): a fall into deep water ends FLOATING at the
+                    // cell the entry momentum carries the bot to, and nothing about being in water makes
+                    // the bot grounded. holdDepth is the arrest — it presses the inputs that bring the feet
+                    // to the planned height, so the landing is reached even where the whole-block momentum
+                    // table lands a cell off (the servo, not the table, is what makes reality match the
+                    // model — `fall-not-vertical`). It is a NO-OP out of fluid, so every dry fall — the
+                    // overwhelming case — is bit-identical to before. Bias 0: the bot arrives upright, the
+                    // same bias `drive`'s in-water branch uses for ground moves crossing water.
+                    SteerControl.holdDepth(b, v, 0);
                 })
                 // SETTLED, not the loose onClimbable(): being INSIDE a vine is true on every tick of a fall
                 // THROUGH one, so the loose test called a still-falling bot landed. It also disagreed with
