@@ -455,8 +455,27 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // keep them in lockstep. Re-sync abilities only when it actually flips (avoids per-tick packet churn).
         final boolean immune = !ConfigLoader.config().takesDamage();
         this.setInvulnerable(immune);
+        boolean abilitiesDirty = false;
         if (this.getAbilities().invulnerable != immune) {
             this.getAbilities().invulnerable = immune;
+            abilitiesDirty = true;
+        }
+        // mayfly is a THIRD, independent gate, and it is specific to FALL damage: Player.causeFallDamage opens
+        // with `if (abilities.mayfly) return false;` — literally the first two ops (javap, 1.21.11) — so a bot
+        // carrying it takes ZERO fall damage however the two flags above are set. That makes it invisible to
+        // every other mortality check and silently turns a clutch test into a tautology: the bot survives the
+        // drop whether or not the clutch fired.
+        //
+        // setGameMode(SURVIVAL) at spawn clears it, so on the normal path this is dead code. It is kept because
+        // the flag can be reintroduced behind our back (a /gamemode on the bot, a force-gamemode server, a
+        // restored profile) and because "no fly" is already a stated goal of the survival-player model. Forcing
+        // it false costs an immune bot nothing — entity-level invulnerability still blocks the damage a step later.
+        if (this.getAbilities().mayfly) {
+            this.getAbilities().mayfly = false;
+            this.getAbilities().flying = false;
+            abilitiesDirty = true;
+        }
+        if (abilitiesDirty) {
             this.onUpdateAbilities();
         }
 
