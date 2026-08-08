@@ -66,6 +66,12 @@ verdicts (§3–§6) that the shipped climb arc left behind.
 - §3 NavBlock fact additions. §4 material effects — fact vs execution vs cost.
 - §5 `BotCaps` — the capability gate (PRD §7.3): every movement/candidate is filtered by what THIS bot
   may do (break/place/fall/damage), folded from owner config via `Config.toBotCaps()`.
+  `mayFall` is the one axis NOT owner-config: it is derived per-mode (`AllyBotEntity.caps()` →
+  `withMayFall(false)` in `Mode.ROAM`) and read by `Fall.candidates` as its self-gate, so a roaming bot
+  plans no walk-off drop at any depth. It is deliberately NOT modelled as a squeezed `safeFall`/`maxFall`
+  window — that window PRICES a drop and cannot forbid one (the free, immune and soft-landing/clutch
+  branches all read through it), and narrowing it would also move Parkour's falling-landing tier and the
+  region tier's dy pricing.
 - §6 open questions / deferred decisions. §7 status & build order (historical).
 - §8 nav-grid cell encoding (RATIFIED s17): packed `short` = [6 NavFlags neighbour-property bits |
   10 navtype bits]; fluid+gravity merged into one RISKY_EDIT bit; work items built per consumer, not
