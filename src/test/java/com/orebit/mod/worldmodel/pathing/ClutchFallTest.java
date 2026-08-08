@@ -134,6 +134,20 @@ class ClutchFallTest {
                 "bed must not be offered while the executor cannot place a two-cell multiblock");
     }
 
+    @Test
+    void reclaimIsTheExactComplementOfLandsOnTop() {
+        // The invariant behind the 2026-08-08 hay stall. A lands-on-top clutch is folded as the node's FLOOR
+        // and the node sits ON it, so every later step of the plan was searched standing on that block:
+        // reclaiming it deletes the floor the bot is on, drops it a block, and the rest of the path is framed
+        // off a cell it is not in. A sink-through clutch is the mirror image — it folds no geometry, so the
+        // reclaim is what makes the plan true again. Any kind where these two disagree is a stall waiting to
+        // happen, so pin the relationship rather than the individual values.
+        for (int kind = 0; kind < ClutchModel.COUNT; kind++) {
+            assertEquals(!ClutchModel.landsOnTop(kind), ClutchModel.reclaimable(kind),
+                    "kind " + kind + ": reclaimable must be the complement of landsOnTop");
+        }
+    }
+
     // ---- Pricing ---------------------------------------------------------------------------------------
 
     @Test

@@ -817,6 +817,25 @@ public final class Fall implements Movement {
             return;
         }
         if (st[1] || !b.settled()) return;
+        // A LANDS-ON-TOP clutch is DELIBERATELY NOT RECLAIMED, and this is a consequence of the planner's
+        // geometry split rather than a special case (owner report 2026-08-08: hay landed, took its minor
+        // damage, reclaimed — and the bot then stopped moving).
+        //
+        // For those kinds tryLanding folds the placed block as the node's FLOOR and emits the node ON it, so
+        // every later step of this plan was searched standing on that block. Taking it back deletes the floor
+        // the bot is on: it drops a block, its feet cell is no longer the waypoint, and the whole remaining
+        // path is framed off a cell it is not in. The plan and the world would disagree from that tick on.
+        //
+        // Sink-through kinds are the mirror image and are why the reclaim exists at all: they fold NO geometry,
+        // the plan says that cell is empty, and reclaiming is what MAKES that true again.
+        //
+        // So the item is spent. That is already what the cost model assumes — the placement is priced and the
+        // recovery was never credited — so nothing is mis-priced by keeping it; the bot simply leaves a hay
+        // bale behind as the step it built.
+        if (!ClutchModel.reclaimable(kind)) {
+            st[1] = true;
+            return;
+        }
         // A bouncing kind is NOT at rest merely because it is momentarily grounded — see bounceSettled.
         if (ClutchModel.bounces(kind) && !bounceSettled(b, kind)) return;
         st[1] = b.reclaimClutch(cx, cy, cz, kind);
