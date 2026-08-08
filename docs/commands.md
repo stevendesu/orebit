@@ -15,6 +15,7 @@ simple goal, not from an elaborate command grammar.
 | `/bot come` | Path to your current position once, then stop. |
 | `/bot goto <x> <y> <z>` | Path to a specific block coordinate. |
 | `/bot stay` | Hold position — stop following or pathing. |
+| `/bot roam [radius]` | Send the bot off to explore by itself. It picks a random spot nearby, walks there, and picks another — always preferring the ones that take it *further* from where you set it loose, so it works its way outward instead of pacing in circles. `[radius]` (default 512 blocks) is how far from that starting point it may get; once it reaches the edge it prowls around the rim. It keeps going until you call it off with `/bot stay` or `/bot follow`. **It will not walk off a cliff** — see below. |
 | `/bot here` | The escape hatch: **teleport** the bot to you and resume following. For when pathfinding genuinely can't reach — a sealed area, a gap it can't yet bridge — rather than an everyday recall. |
 | `/bot mine <x> <y> <z>` | Dig out one named block. The bot stops where it is and mines that coordinate the way a player does — best tool equipped, arm swing, the crack overlay building over the real number of ticks, then a survival break with proper drops. It does **not** path to the block first, so aim it at something already within reach. (Coordinates accept `~` relative form, like vanilla commands.) |
 | `/bot find <resource> [minCount]` | Report the nearest known spots for a resource — see [Finding & Gathering](gathering.md). `<resource>` tab-completes; the optional `[minCount]` only reports regions holding at least that many. |
@@ -30,6 +31,36 @@ The bot is a real server-side player, so `follow` / `come` / `goto` are not tele
 the bot walks, jumps, swims, climbs, bridges, and (if you let it) digs its way there,
 paying honest survival costs the whole way. If it can't reach a goal it says so rather
 than cheating its way over.
+
+## Roaming won't step off a ledge
+
+`/bot roam` is the one order that changes what the bot is *able* to do rather than just
+where it's going: while roaming, the **Fall** movement — the deliberate step off an edge
+into a free drop — is switched off entirely. Not "discouraged", not "limited to a safe
+height": the route planner never produces one, so there is no drop off a cliff, off the
+lip of a ravine, or off the rim of a floating island, no matter how survivable the landing
+looks or how much of a detour the alternative is. An exploring bot you have to go fish out
+of a hole isn't much use.
+
+Everything else it can normally do, it still does while roaming. It jumps gaps (and a jump
+may well land it lower than it took off), swims, climbs ladders and vines, bridges, steps
+down single blocks, and digs if you've let it. So it isn't stuck on one plateau — it just
+takes the way down that a careful player would take, and if a spot is *only* reachable by
+jumping off something, it shrugs and goes somewhere else instead.
+
+The destinations it chooses are always real ground it can already see: a standing spot in
+terrain the bot has loaded, with room for its head, and not underwater. It never guesses at
+a coordinate in chunks that haven't generated yet — the frontier moves outward on its own
+as it travels. It also **proves it can get there before it sets off**, so it won't commit to
+a spot on the far side of a drop it refuses to take.
+
+That last part is what makes roaming work in awkward places. Put the bot on a small floating
+island and every spot it can see is on the ground below, with nothing but a drop in between —
+so it shortens its stride and looks closer to home instead. Keep shortening and eventually
+the destinations land on the island itself, and the bot happily paces the island it's on.
+If even that finds nothing — a bot marooned on a single block — it says so plainly and waits
+where it is rather than pretending. Build it a bridge and it notices and carries on exploring
+by itself; there's no timer to wait out.
 
 ## No verb for fighting
 

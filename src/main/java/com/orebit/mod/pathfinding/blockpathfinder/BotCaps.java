@@ -121,7 +121,43 @@ public record BotCaps(
          * realizability signature below. The back-compat constructors default it to {@link
          * #DEFAULT_BOXED_IN_SCAN_RADIUS}. Default {@code 3}.
          */
-        int boxedInScanRadius) {
+        int boxedInScanRadius,
+        /**
+         * May the bot use the {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Fall Fall} movement
+         * <b>at all</b> — the deliberate step off a ledge into a free drop. {@code false} makes {@code Fall}
+         * emit nothing (it self-gates on this exactly as {@code Pillar}/{@code MineDown} self-gate on the
+         * place/break caps), so no route the planner returns contains a walk-off drop of any depth, whatever
+         * the fall window says. This is a <b>separate axis</b> from {@link #safeFallDistance}/{@link
+         * #maxFallDistance}: those price a drop the bot IS willing to take, and no setting of them expresses
+         * "never step off" — {@code maxFall == 0} still lets the immune/soft-landing branches through, and
+         * squeezing the window also perturbs {@link
+         * com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour Parkour}'s falling-landing tier and the
+         * region tier's dy pricing.
+         *
+         * <p>The one live consumer is {@code /bot roam} ({@link com.orebit.mod.BotRoamer}), whose whole point
+         * is a bot that explores without walking off a cliff or the edge of a floating island. Every OTHER
+         * movement stays available — Parkour still jumps gaps (and may land lower), Descend/WalkOff still step
+         * down one, the swim tier still sinks — so a no-fall bot is a routing restriction, not a grounded one.
+         *
+         * <p>Defaults to {@code true} in every back-compat constructor below, so existing call sites
+         * (presets, benchmarks, tests, {@code Config.toBotCaps}) are byte-identical.
+         */
+        boolean mayFall) {
+
+    /**
+     * Back-compat constructor for the pre-{@code mayFall} component list (through {@code boxedInScanRadius}),
+     * defaulting {@link #mayFall} to {@code true} — the historical "Fall is always available" behaviour.
+     * Fall-refusal is not a config knob; it is set programmatically by the one mode that wants it
+     * ({@code /bot roam} → {@link #withMayFall}).
+     */
+    public BotCaps(int jumpHeight, int safeFallDistance, int maxFallDistance, boolean takesDamage,
+                   float costPerHitpoint, boolean canBreak, boolean canPlace, int maxBreakHardness,
+                   boolean allowUnbreakable, int maxNodes, float greedyWeight, boolean mayToggleDoors,
+                   int boxedInScanRadius) {
+        this(jumpHeight, safeFallDistance, maxFallDistance, takesDamage, costPerHitpoint, canBreak, canPlace,
+             maxBreakHardness, allowUnbreakable, maxNodes, greedyWeight, mayToggleDoors, boxedInScanRadius,
+             true);
+    }
 
     /**
      * Full back-compat constructor for the pre-boxed-in-radius component list (through {@code mayToggleDoors}),
@@ -135,6 +171,19 @@ public record BotCaps(
         this(jumpHeight, safeFallDistance, maxFallDistance, takesDamage, costPerHitpoint, canBreak, canPlace,
              maxBreakHardness, allowUnbreakable, maxNodes, greedyWeight, mayToggleDoors,
              DEFAULT_BOXED_IN_SCAN_RADIUS);
+    }
+
+    /**
+     * This capability set with {@link #mayFall} set to {@code allowed} — the one derived-caps seam, used by
+     * {@code AllyBotEntity.caps()} to hand the planner a Fall-free gate while the bot is in {@code
+     * /bot roam}. Returns {@code this} when nothing changes, so the caller's identity-cache stays stable and
+     * the normal (falling) modes allocate nothing at all.
+     */
+    public BotCaps withMayFall(boolean allowed) {
+        if (allowed == mayFall) return this;
+        return new BotCaps(jumpHeight, safeFallDistance, maxFallDistance, takesDamage, costPerHitpoint,
+                canBreak, canPlace, maxBreakHardness, allowUnbreakable, maxNodes, greedyWeight,
+                mayToggleDoors, boxedInScanRadius, allowed);
     }
 
     /**
@@ -250,9 +299,17 @@ public record BotCaps(
     //                 when !canBreak (mirrors the maxBreakHardness zeroing) and when no InventoryView was
     //                 supplied — a null-inv search prices breaks at bare hand (MiningModel.bareHandTicks),
     //                 so BARE(0) is exactly faithful there.
-    //   bits 62..63   free
+    //   bit  62       mayFall — set = the bot may step off a ledge (strictly MORE capable). Appended at a free
+    //                 bit rather than inserted, because stored sigs are persisted bit-for-bit; the schema bump
+    //                 (CostPyramidCodec.INVAL_SIG_SCHEMA_VERSION) is what drops pre-mayFall sections, so no old
+    //                 record is ever re-read under the new layout as a phantom can't-fall bot.
+    //   bit  63       free
     private static final int  SIG_INVULN         = 4;                              // bit 4 (= !takesDamage)
-    private static final long SIG_BOOL_MASK      = 0b11111L;                       // bits 0..4 (the 5 bools)
+    private static final int  SIG_MAYFALL        = 62;                             // bit 62 (see the layout note)
+    // The capability BOOLS, as one mask sigDominates can test in a single AND — bits 0..4 plus the appended
+    // mayFall bit. Non-contiguous by construction (see above); the "every bool set in b must be set in a" rule
+    // is bit-position-agnostic, so appending costs nothing.
+    private static final long SIG_BOOL_MASK      = 0b11111L | (1L << SIG_MAYFALL);
     private static final int  SIG_MBH_SHIFT      = 5;                              // bits 5..12  (8 bits 0..255)
     private static final long SIG_MBH_MASK       = 0xFFL   << SIG_MBH_SHIFT;
     private static final int  SIG_JUMP_SHIFT     = 13;                             // bits 13..16 (4 bits)
@@ -302,6 +359,7 @@ public record BotCaps(
         if (allowUnbreakable) s |= 1L << 2;
         if (mayToggleDoors)   s |= 1L << 3;
         if (!takesDamage)     s |= 1L << SIG_INVULN;
+        if (mayFall)          s |= 1L << SIG_MAYFALL;
         s |= (canBreak ? clampField(maxBreakHardness, 0xFF) : 0L) << SIG_MBH_SHIFT;
         s |= clampField(jumpHeight, 0xF)        << SIG_JUMP_SHIFT;
         s |= clampField(safeFallDistance, 0x1FFF) << SIG_SAFEFALL_SHIFT;

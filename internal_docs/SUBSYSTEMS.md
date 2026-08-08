@@ -251,6 +251,40 @@ constructs and ticks:
   nearest-first readiness-gated scan, two-A\* route-cost target selection, LOS-occluder dig, timed
   mine with drop-goal tool gating, COLLECT tracks the real `ItemEntity` by lifecycle (no timers),
   COMPASS walks toward a `ResourcePyramid` hint, RETURN to the issue cell.
+- **`BotRoamer`** — the `/bot roam` machine: an outward-biased random wander. Per leg it samples 8 random
+  headings at 24–64 blocks from the bot's CURRENT cell, resolves each to a standable floor with headroom in
+  ALREADY-BUILT nav data (`NavGridView.background` — never a live read, so a random column can't force a
+  chunk load), RANKS them by distance from the roam ORIGIN (best-of-N tournament, not a biased radial draw
+  around the origin — a draw ping-pongs the bot across its own start; ranking a local neighbourhood by
+  origin-distance drifts outward), and then **probes the best-ranked with a real block-A\* before
+  committing** (`probeReachable`; null OR partial = not proven, the gatherer's "unproven ≠ cheap" rule).
+  Out-of-`radius` candidates aren't discarded: they rank below every in-bounds one, nearest-origin first, so
+  a rim tick turns the bot back instead of starving. **Probes are spent ONE PER TICK** — a roam tick never
+  costs more than the one block search a replan would.
+  **Unreachable-batch ladder (the 2026-08-08 floating-island freeze):** the picker used to commit to any
+  ranked cell, and on a small island with `mayFall` off EVERY visible cell is on the ground below — the
+  driver then spent its whole BLOCKED→`repairBlocked`→resubmit budget rediscovering, one blacklisted region
+  crossing at a time (each with a superflat region flood), what one block search proves instantly. Root fix
+  is the probe, not recovery around a bad choice. When a whole batch refuses, the leg range HALVES (`shrink`,
+  ≤3 times, 24/64 → 3/8) and a fresh batch is drawn; a completed leg decays `shrink` by one, so leg length
+  self-tunes to the terrain. Shrinking the leg — NOT the roam radius — is what rescues the island bot (at 3–8
+  blocks the candidates land on the island itself, so it paces its island); the radius was never the problem.
+  The FLOOR batch is a deterministic 8-way compass sweep at 3 blocks, not a random draw, so a total refusal
+  is a verdict about the bot's immediate ring rather than eight unlucky dice (a random floor batch strands an
+  8x8-island bot ~17% of the time). Total refusal → report once + PARK, released by STATE only
+  (`NavGridUpdater.editEpoch` advancing, or the bot's cell changing). `RoamIslandReachabilityTest` pins the
+  scene: exhausted-not-budget-hit refusal, <2k expansions, on-island target still reachable, floor sweep
+  finds footing on an 8x8 island and none on a 1x1 pillar. No timers anywhere in the class.
+  A committed leg ends on exactly two observed conditions — `driveToward` arrival or
+  `navigator.navGaveUp()` (post-commit give-up = the terrain moved; counts as a failed leg).
+  **The one mode that alters PLANNER CAPABILITIES**: `AllyBotEntity.caps()` derives
+  `BotCaps.withMayFall(false)` while `mode == ROAM` (identity-cached against the `ConfigLoader.botCaps()`
+  object, so steady-state roaming allocates nothing), and `Fall.candidates` self-gates on it — so no
+  returned route steps off a ledge at any depth. Deliberately NOT a squeezed `safeFall`/`maxFall` window:
+  that window PRICES a drop and cannot forbid one (the free, immune, and soft-landing/clutch branches read
+  through it), and shrinking it would also move Parkour's falling-landing tier and the region tier's dy
+  pricing. `mayFall` is a realizability-sig axis (bit 62; `CostPyramidCodec.INVAL_SIG_SCHEMA_VERSION`
+  bumped to 2) so a roamer's dead crossings never bind an ordinary falling bot.
 - **`BotPortalFollower`** — cross-dimension FOLLOW/COME: seek nearest known portal
   (`NetherPortalIndex`), path to its bottom cell, ENTER terminal state (face, walk in, stand still);
   success = event-detected level change, failure = state-detected (portal broke / vanilla-derived
@@ -324,7 +358,7 @@ constructs and ticks:
   per-phase buckets, logs when `Debug.VERBOSE`). `FakePlayerEntity`/`FakeClientConnection` live in
   `overlays/` (version-fragile network internals; `FakeNetworkHandler` is gone).
 - Files: `AllyBotEntity.java`, `BotNavigator.java`, `BotGatherer.java`, `BotCrafter.java`,
-  `BotFarmer.java`, `BotFighter.java`, `BotBuilder.java`, `BotPortalFollower.java`, `BotMining.java`,
+  `BotFarmer.java`, `BotFighter.java`, `BotBuilder.java`, `BotRoamer.java`, `BotPortalFollower.java`, `BotMining.java`,
   `BotManager.java`, `BotPositioning.java`,
   `MobStrategy.java` + `{Creeper,Skeleton,Melee}Strategy.java`,
   `NavJourneyStats.java`, `SlowTickMonitor.java`, `Debug.java`, `OrebitCommon.java`,
@@ -364,8 +398,9 @@ arms it; each writes an `orebit-<x>-result.properties` + traces, then halts the 
 
 ## commands/ — the /bot surface
 `OrebitCommands.register` builds the Brigadier `/bot` root at the `PlatformEvents.onRegisterCommands`
-seam; each subcommand is a stateless `BotCommand` Strategy. Present (**20**): Spawn, Follow, Stay,
-Come, Goto, Mine, Find, Gather, **Craft** (`/bot craft <item> [count]` — result names tab-completed
+seam; each subcommand is a stateless `BotCommand` Strategy. Present (**21**): Spawn, Follow, Stay,
+Come, Goto, **Roam** (`/bot roam [radius]` — the outward-biased wander that plans with `Fall` disabled;
+see `BotRoamer`), Mine, Find, Gather, **Craft** (`/bot craft <item> [count]` — result names tab-completed
 from `crafting/RecipeIndex`; see `BotCrafter`), **Farm** (`/bot farm` — one tending pass; see
 `BotFarmer`), **Build** (`/bot build <name> <x y z>` — `.litematic`s from
 `<server dir>/orebit-schematics/`; see `BotBuilder`), **Drop** (`/bot drop <all|resources|tools|trash|name>` — tosses

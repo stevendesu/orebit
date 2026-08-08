@@ -260,7 +260,14 @@ public final class Fall implements Movement {
 
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
-        if (ctx.mode() != MovementContext.MODE_STANDING) return; // walk off a ledge — only while upright
+        // Walk off a ledge — only while upright, and only if this bot is allowed to fall at all. The caps gate
+        // rides the SAME early return as the mode gate (one extra already-loaded record field test on the
+        // standing path, none at all off it), mirroring how Pillar/MineDown self-gate on the place/break caps.
+        // caps.mayFall() false ⇒ this movement contributes NO candidates, so no returned path contains a
+        // walk-off drop of any depth (/bot roam — BotRoamer). Deliberately NOT expressed as a squeezed
+        // safeFall/maxFall window: that window prices a drop, it cannot forbid one (the soft-landing/clutch and
+        // immune branches read through it), and shrinking it would also move Parkour's falling-landing tier.
+        if (ctx.mode() != MovementContext.MODE_STANDING || !ctx.caps().mayFall()) return;
         // Scan to the bot's MAX fall (not just the safe one): drops past safeFall are allowed at a damage cost,
         // so a route that needs a hurtful drop isn't a dead end — it's just dearer than a gentle one. maxFall
         // is BOTH the phase-1 scan bound and the hard-landing HP budget the softness acceptance scales.

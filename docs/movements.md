@@ -171,6 +171,17 @@ every dimension.
 Clutches are planned, not reflexive: the bot clutches a drop *it chose to take*. Being
 shoved off a ledge by a creeper is not yet something it saves itself from.
 
+**Fall can be switched off entirely**, and one order does: [`/bot roam`](commands.md). An
+exploring bot that wanders off a cliff or the rim of a floating island is a bot you have to
+go dig out of a hole, so while roaming the planner emits no Fall candidate at all. This is a
+separate switch from the numbers above rather than a very small `maxFall`, because the fall
+window *prices* a drop — it can't forbid one. Every branch on this page routes around it: a
+drop inside the safe distance has no damage term to raise, an invulnerable bot's terms are
+already zero, and a soft or clutched landing is deliberately uncapped. Only turning the
+movement off is actually total. Nothing else changes: a roaming bot still jumps, swims,
+climbs, bridges, and steps down single blocks — including a Parkour jump that lands lower
+than it took off.
+
 **WalkOff** — the no-jump gap cross: walk straight over a one-block gap and land one
 level down on the far side, letting momentum carry the bot across the lip. Two walk
 steps (**9.27 ticks** — the drop itself is the free one-block drop). It exists for

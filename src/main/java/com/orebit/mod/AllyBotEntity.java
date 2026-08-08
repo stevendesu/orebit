@@ -94,6 +94,8 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private final BotFighter fighter;
     /** The {@code /bot build} schematic-execution state machine. */
     private final BotBuilder builder;
+    /** The {@code /bot roam} outward-biased random-wander state machine. */
+    private final BotRoamer roamer;
     /** The cross-dimension FOLLOW/COME portal-seek/ENTER component. */
     private final BotPortalFollower portalFollower;
 
@@ -133,10 +135,33 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      * are plain field reads, never on the A* hot path. Out of the box the config defaults reproduce the
      * historical {@code BotCaps.BREAK_PLACE} + cobblestone behaviour exactly, so nothing changes until the
      * owner edits the file.
+     *
+     * <p><b>{@link Mode#ROAM} derives from that base rather than replacing it.</b> A roaming bot plans with
+     * {@link BotCaps#mayFall} OFF — the whole point of {@code /bot roam} is a bot that explores without
+     * stepping off a cliff or the rim of a floating island — but every other capability is still the owner's
+     * configured one, so roaming does not quietly become a second config. This is THE seam the restriction
+     * flows through: {@code caps()} is the single object the navigator's {@link
+     * com.orebit.mod.pathfinding.PathPlan} construction, the region tier and {@link #inventoryFeasibility}
+     * all read, so gating here gates the whole two-tier search with no per-movement plumbing.
      */
     BotCaps caps() {
-        return ConfigLoader.botCaps();
+        BotCaps base = ConfigLoader.botCaps();
+        if (mode != Mode.ROAM) return base;
+        // Derive once per distinct base object, not per call. botCaps() is a volatile field replaced wholesale
+        // by /bot config reload, so identity IS the staleness test — steady-state roaming allocates nothing,
+        // and a reload is picked up on the next replan exactly as it is for every other mode.
+        if (base != roamCapsBase) {
+            roamCapsBase = base;
+            roamCaps = base.withMayFall(false);
+        }
+        return roamCaps;
     }
+
+    /** The {@link ConfigLoader#botCaps()} object {@link #roamCaps} was derived from — the identity-staleness
+     *  test above. Null until the bot first plans while roaming. */
+    private BotCaps roamCapsBase;
+    /** The cached Fall-free derivation of {@link #roamCapsBase} handed to the planner while roaming. */
+    private BotCaps roamCaps;
 
     /** The throwaway {@link BlockState} the bot places when bridging/footing — the configured conjured block. */
     BlockState placeBlock() {
@@ -174,9 +199,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      *       {@link BotCrafter}.
      *   <li>{@link Mode#FARM} — the tend-the-farm pass ({@code /bot farm}); see {@link BotFarmer}.
      *   <li>{@link Mode#BUILD} — the schematic build ({@code /bot build}); see {@link BotBuilder}.
+     *   <li>{@link Mode#ROAM} — the open-ended outward wander ({@code /bot roam}); see {@link BotRoamer}. The
+     *       one mode that changes the bot's PLANNER CAPABILITIES rather than just its goal: it plans with
+     *       {@link BotCaps#mayFall} off (see {@link #caps()}), so it never routes off a ledge.
      * </ul>
      */
-    public enum Mode { FOLLOW, STAY, COME, GATHER, CRAFT, FARM, BUILD }
+    public enum Mode { FOLLOW, STAY, COME, GATHER, CRAFT, FARM, BUILD, ROAM }
 
     private Mode mode = Mode.FOLLOW;
     private BlockPos comeTarget;    // fixed summon cell (owner's feet block at /bot come time)
@@ -211,6 +239,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         this.farmer = new BotFarmer(this);
         this.fighter = new BotFighter(this);
         this.builder = new BotBuilder(this);
+        this.roamer = new BotRoamer(this);
         this.portalFollower = new BotPortalFollower(this);
     }
 
@@ -426,6 +455,19 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         farmer.startFarm();
     }
 
+    /**
+     * {@code /bot roam [radius]}: switch to {@link Mode#ROAM} and start a {@link BotRoamer} wander anchored at
+     * the bot's current cell, staying within {@code radius} blocks of it. Runs until another {@code /bot}
+     * command changes the mode. Roaming plans WITHOUT the {@code Fall} movement — see {@link #caps()}.
+     */
+    public void startRoam(int radius) {
+        this.mode = Mode.ROAM;
+        this.comeTarget = null;
+        navigator.clearPlan();
+        portalFollower.resetPortalSeek();
+        roamer.startRoam(radius);
+    }
+
     /** {@code /bot build <name> <x y z>}: switch to {@link Mode#BUILD} and start a
      *  {@link BotBuilder} run of {@code schematic} anchored at {@code origin}. */
     public void startBuild(com.orebit.mod.building.Schematic schematic, BlockPos origin) {
@@ -530,6 +572,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                 case CRAFT -> crafter.craftLoopTick();
                 case FARM -> farmer.farmLoopTick();
                 case BUILD -> builder.buildLoopTick();
+                case ROAM -> roamer.roamLoopTick();
                 case COME -> {
                     // Summon to a fixed cell; once there, settle into STAY (distinct from FOLLOW, which
                     // would keep chasing). comeTarget can't be null in COME, but guard defensively.

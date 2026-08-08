@@ -198,7 +198,11 @@ public record Config(
                 /* maxNodes         */ maxNodes,
                 /* greedyWeight     */ greedyWeight,
                 /* mayToggleDoors   */ doorToggle,
-                /* boxedInScanRadius*/ boxedInScanRadius);
+                /* boxedInScanRadius*/ boxedInScanRadius,
+                // Fall is available to every configured bot. It is NOT a config knob: the one mode that
+                // refuses it (/bot roam) derives its own caps with BotCaps.withMayFall(false), so the owner's
+                // file never has to describe a per-mode routing restriction.
+                /* mayFall          */ true);
     }
 
     /**

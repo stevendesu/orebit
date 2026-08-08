@@ -33,6 +33,7 @@ public final class OrebitCommands {
             new StayCommand(),
             new ComeCommand(),
             new GotoCommand(),
+            new RoamCommand(),
             new MineCommand(),
             new FindCommand(),
             new GatherCommand(),
