@@ -13,7 +13,10 @@ honest BLOCKEDs).
   && placeableBlocks<=0)`), invuln bit 4, maxBreakHardness 5..12, jump 13..16, safeFall 17..29, maxFall
   30..42, bit 43 RESERVED `hasBreath` (never set/read), **SIX** 3-bit tool-tier fields at bits 44..61 (all
   real `NavBlock.Tool` categories, ordinals 1..6 — Q2's "~5" became 6; NONE excluded as inert; zeroed when
-  `!canBreak` or null inv). Dominance = per-field masked `>=` (`sigDominates`). Record-site skew fixed at
+  `!canBreak` or null inv), **`mayFall` bit 62** (2026-08-08, for `/bot roam` — set = the bot may step off a
+  ledge, i.e. strictly MORE capable; appended at a free bit rather than inserted because stored sigs are
+  compared bit-for-bit). Dominance = per-field masked `>=` (`sigDominates`); the bool test is a single mask
+  and is bit-position-agnostic, so bit 62 joins bits 0..4 in `SIG_BOOL_MASK` at no cost. Record-site skew fixed at
   the source: `HierarchicalRegionPlan` captures `capsSig` at construction from `PathPlan`'s per-replan
   (caps, inventory) pair — that construction-time value IS every search's sig. Null-inv plans never record
   (`recordToMemory=false`); they still seed (caps-only sig). Antichain compaction lives in
@@ -25,8 +28,11 @@ honest BLOCKEDs).
   in bits **55..63**, `toKey` carries provenance in **two** bits **55..56** (the draft said one spare
   bit), fragment id sits at bits **49..54**, `capsSig` 8 B. Full byte layout:
   `NOTES-perf-and-persistence.md` §1 and the `CostPyramidCodec` class Javadoc. Section header =
-  `INVAL_SIG_SCHEMA_VERSION` (1) + `INVAL_GRAPH_CLASS_ID` (0, "optimistic-v1"); mismatch drops the SECTION
-  only. Assign-to-FROM sharding; L6 rows ride the coarse file. `PROV_ESCALATION` rows are SESSION-ONLY
+  `INVAL_SIG_SCHEMA_VERSION` (**2** — bumped 2026-08-08 when `mayFall` claimed bit 62; a v1 section's rows
+  all carry that bit clear, which under the v2 layout reads as "proven by a bot that cannot fall", a
+  strictly weaker prover, so every one of them would silently stop binding an ordinary bot — dropping and
+  re-learning is the correct cache behaviour) + `INVAL_GRAPH_CLASS_ID` (0, "optimistic-v1"); mismatch drops
+  the SECTION only. Assign-to-FROM sharding; L6 rows ride the coarse file. `PROV_ESCALATION` rows are SESSION-ONLY
   (filtered at every encode; `PROV_PROOF`/`PROV_ROLLED_UP` persist). Decode additionally DROPS any row
   whose TO fragment id ≥ `MAX_FRAGMENTS` (reserved 62 / `VIRTUAL_GOAL_FRAG` 63) — legacy V-row self-clean.
 - **Roll-up (§4b)** — `InvalidationRollup.foldFrom` at record time from `onBlocked` (Q1/Q3 as ratified):

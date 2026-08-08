@@ -150,8 +150,13 @@ public final class CostPyramidCodec {
 
     /** Invalidation-section sig schema (the {@code BotCaps.realizabilitySig} bit layout generation). Bump when a
      *  sig dimension is added/changed (breath, count buckets); old sections then read as absent (re-learn).
-     *  Reset to 1 on the 2026-07 packLevelKey repack; disk is a cache. */
-    static final int INVAL_SIG_SCHEMA_VERSION = 1;
+     *  Reset to 1 on the 2026-07 packLevelKey repack; disk is a cache.
+     *  <p>v2 (2026-08-08): {@code BotCaps.mayFall} appended at sig bit 62 for {@code /bot roam}'s Fall-free
+     *  gate. A v1 section's rows all carry bit 62 clear, which under the v2 layout would read as "recorded by a
+     *  bot that cannot fall" — a strictly weaker prover, so every such record would silently stop binding an
+     *  ordinary falling bot. Dropping the section instead re-learns from live, which is exactly the cache
+     *  contract. */
+    static final int INVAL_SIG_SCHEMA_VERSION = 2;
     /** Invalidation-section region-graph class — 0 = "optimistic-v1", today's single symmetric/optimistic
      *  connectivity graph. A future capability-aware graph persists its own sections under a new id; rows never
      *  transfer across graphs (fragment identities don't). */
