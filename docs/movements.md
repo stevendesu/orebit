@@ -125,6 +125,52 @@ hang landings — falling onto scaffolding lands *on top* (its stand-on shape ca
 you), and dropping into a ladder cell from above is a knife-edge between hanging inside
 and catching the 3/16 plate, so those columns are descended by climbing instead.
 
+**Water catches you, and it needs no bound.** A single block of water in the landing's
+feet cell makes that drop damage-free *from any height* — the old "one block of water on
+the ground" trick. It works for a different reason than the vine arrest: vanilla resets
+fall distance from where the bot **ends up**, not from cells it passed through, so there
+is no sampling to miss and no tunneling bound to respect.
+
+Deeper water is a question of momentum rather than damage. A fall entering water carries
+its speed a little way down and then decays to a 0.025 blocks/tick crawl — about 40 ticks
+per block — so a planner that promised the seabed would be promising a node the bot takes
+a minute to reach. Instead the fall simply **ends where the momentum runs out**, floating
+mid-column, and the swim moves take it from there at their own honest rates. The numbers
+are less generous than they look: terminal velocity (3.92 b/t) is approached so slowly
+that a 60-block drop enters at only 2.34 b/t and carries about **11 blocks** down — and
+crossing 16 blocks of water would need a *176-block* fall. Before this, a deep pool was
+simply unpathable: the bot would refuse the drop and pillar down a staircase beside it.
+
+**Clutches — the bot brings its own landing.** If it is carrying one, the bot can *place*
+the soft landing on the way down, exactly like an MLG water bucket. Three work today:
+
+| Carried | Result | Afterwards |
+|---|---|---|
+| Water bucket | damage-free, any height | scooped back up |
+| Powder snow bucket | damage-free, any height | scooped back up |
+| Hay bale | damage cut to a fifth | left behind as a step |
+
+The block goes in one tick before impact, and that timing is *guaranteed* rather than
+lucky: block reach is 4.5 blocks and a falling bot never exceeds 3.92 blocks/tick, so the
+target cell is always within reach for at least one tick, from any height. The bot simply
+attempts the placement every tick on the way down — the same thing a player does by
+spamming the button.
+
+Water and powder snow are picked straight back up (a water source left behind would spread
+within five ticks, so the reclaim is prompt by design). Hay stays: it becomes the floor the
+bot is standing on, so taking it back would pull the ground out from under it — and leaving
+it is no different from the blocks the bot already leaves when it pillars or bridges. It
+even pays for itself, since the next search reads that hay as an ordinary soft landing and
+takes the same drop for free.
+
+A clutch is only offered when the bot **is carrying the item** and the drop would otherwise
+be refused; it never re-prices a fall the bot could already survive. Water is skipped in the
+Nether, where it evaporates on placement — powder snow is the answer there, and works in
+every dimension.
+
+Clutches are planned, not reflexive: the bot clutches a drop *it chose to take*. Being
+shoved off a ledge by a creeper is not yet something it saves itself from.
+
 **WalkOff** — the no-jump gap cross: walk straight over a one-block gap and land one
 level down on the far side, letting momentum carry the bot across the lip. Two walk
 steps (**9.27 ticks** — the drop itself is the free one-block drop). It exists for
