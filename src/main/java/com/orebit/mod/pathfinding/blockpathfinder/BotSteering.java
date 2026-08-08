@@ -343,6 +343,39 @@ public interface BotSteering {
     void place(int x, int y, int z);
 
     /**
+     * Place the {@link ClutchModel} block of {@code kind} into cell {@code (x,y,z)}, consuming the matching
+     * CARRIED item — the mid-drop clutch action ({@code ClutchModel}'s class doc; {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Fall}'s deep-drop branch). Distinct from
+     * {@link #place}, which places the bot's generic footing block and cannot be told WHAT to place: a clutch
+     * is a specific block chosen by the planner, and two of the five kinds (water, powder snow) are not
+     * {@code BlockItem}s at all, so they can never come out of the footing path's placeable-block budget.
+     *
+     * <p>Returns {@code false} — placing nothing and consuming nothing — when the bot is not carrying the
+     * kind's item, when the cell will not accept the placement, or when the executor does not support the
+     * kind (see the impl's {@link ClutchModel#BED} refusal). A {@code false} is cheap and side-effect-free, so
+     * the caller may simply re-issue it on the next tick; reach is never the reason (interaction reach is 4.5
+     * blocks and air terminal velocity is 3.92 b/t, so the landing cell is inside reach for at least one whole
+     * tick of any drop — attempting the place every tick is provably sufficient).
+     *
+     * <p>Default {@code false} so the headless test doubles need not implement it — a double that ignores
+     * clutches simply never gets one placed, which is the conservative direction.
+     */
+    default boolean placeClutch(int x, int y, int z, int kind) { return false; }
+
+    /**
+     * Remove the {@link ClutchModel} block of {@code kind} from cell {@code (x,y,z)} and hand the item back —
+     * the reclaim half of {@link #placeClutch}, and the reason a clutch is priced as TIME rather than as a
+     * consumed resource ({@link ClutchModel#reclaimable} is true for all five kinds).
+     *
+     * <p>Returns {@code false} — mutating nothing — when the cell no longer holds the expected block, or when
+     * the bot has nowhere to put the returned item (a full inventory, or no empty bucket to scoop into). Both
+     * refusals leave the world untouched, so nothing is ever destroyed to make room.
+     *
+     * <p>Default {@code false} for the headless test doubles, matching {@link #placeClutch}.
+     */
+    default boolean reclaimClutch(int x, int y, int z, int kind) { return false; }
+
+    /**
      * OPEN ({@code open == true}) or CLOSE the hand-toggleable door at cell {@code (x,y,z)} server-side — the
      * "right-click the door" action a {@code Need.OPEN} establishes (DOORS P3), routed to {@link
      * com.orebit.mod.platform.WorldEdits#setDoorOpen}. Authoritative and instant (a direct vanilla {@code

@@ -6,6 +6,7 @@ import com.orebit.mod.pathfinding.PathStatus;
 import com.orebit.mod.pathfinding.async.PlanExecutor;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
+import com.orebit.mod.pathfinding.blockpathfinder.ClutchModel;
 import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
@@ -1437,6 +1438,22 @@ final class BotNavigator {
                     for (int i = 0; i < se.doorSetCount(); i++) {
                         long c = se.doorSetAt(i);
                         mp.requireDoor(BlockPos.getX(c), BlockPos.getY(c), BlockPos.getZ(c), se.doorSetOpenAt(i));
+                    }
+                    // CLUTCHES: same injection, same reason. The search decided not just THAT this drop is
+                    // survivable but WHICH carried block makes it so — ClutchModel.best walks a preference
+                    // order gated on the bot's clutchMask and the depth, and its residual damage is already
+                    // priced into g. Fall's plan(...) sees only floor coords and cannot re-derive that, and
+                    // re-running the preference walk here against the LIVE inventory could pick a DIFFERENT
+                    // kind than the one the search paid for. So the kind rides the step's StepEdits and is
+                    // lifted onto the MovePlan, where Fall reads it back out of its own phase closures.
+                    // NONE on every step of every other movement, so this is one int compare on the common
+                    // step. The cell is carried explicitly because a sink-through kind (water, powder snow)
+                    // folds no place edit at all — StepEdits.clutchCell is then the only record of where the
+                    // block goes.
+                    final int clutch = se.clutchKind();
+                    if (clutch != ClutchModel.NONE) {
+                        long c = se.clutchCell();
+                        mp.requireClutch(BlockPos.getX(c), BlockPos.getY(c), BlockPos.getZ(c), clutch);
                     }
                 }
                 // fromFootY arms PhaseRunner's implicit settle gate — the plan is framed from the bot

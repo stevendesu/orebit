@@ -1129,7 +1129,13 @@ public final class BlockPathfinder {
                 StepEdits e = editPool.take();
                 scratch.copyInto(e);
                 nodes.edits[row] = e;
-                anyEdits = true;
+                // anyEdits gates the per-pop PathEdits diff rebuild, so it tracks WORLD-GEOMETRY edits only.
+                // A clutch-only edge (a sink-through water/powder-snow clutch folds no break or place, by
+                // design — ClutchModel §Landing) contributes nothing to that diff, and switching the rebuild
+                // on for it would cost a whole-chain walk per expansion that provably yields an empty diff.
+                // With no clutch set hasGeometryEdits() == hasEdits(), so this is the old unconditional
+                // assignment exactly.
+                if (scratch.hasGeometryEdits()) anyEdits = true;
             } else {
                 nodes.edits[row] = null;
             }
@@ -1487,6 +1493,9 @@ public final class BlockPathfinder {
                 moves.add(move);
                 // Copy out of the per-search arena: these edits ride home in the BlockPathPlan and are
                 // replayed by the follower over many ticks, while later searches reuse the arena slots.
+                // StepEdits.copy carries the clutch kind + cell across with the break/place/door buffers,
+                // which is what lets BotNavigator lift the planner's chosen ClutchModel kind off the plan and
+                // inject it into this step's MovePlan (the same route requireDoor takes).
                 edits.add(edge == null ? null : edge.copy());
                 floorYs = pushFloorY(floorYs, waypoints.size() - 1, ny);
                 continue;
@@ -1564,6 +1573,15 @@ public final class BlockPathfinder {
      * head-clearance break lands on the last step's body). Every folded edit of the three macro movements is
      * owned by exactly one step under this rule, so nothing is dropped or double-applied. Returns {@code null}
      * when the step owns no edit (the plain-step fast path the follower expects).
+     *
+     * <p><b>The clutch channel is intentionally DROPPED here, and cannot be reached.</b> A slice is only ever
+     * taken for the three macro movements {@link #macroSteps} recognises — Pillar, MineDown and a flat
+     * Traverse run. {@code Fall} is not one of them (its multi-block −Y delta stays a single follower-handled
+     * waypoint precisely so gravity is interpolated rather than expanded), and {@code Fall} is the only
+     * movement that sets a clutch, so no clutch-bearing edge ever enters this method. The rebuilt slices are
+     * therefore loaded with {@link ClutchModel#NONE}: if a FUTURE macro movement ever learns to clutch, this
+     * is the line that would silently lose the kind, and the fix is to slice it by cell like the door-sets —
+     * not to widen {@link #macroSteps}.
      */
     private static StepEdits sliceStep(StepEdits all, int fx, int fy, int fz) {
         long floorPos = BlockPos.asLong(fx, fy, fz);
@@ -1605,7 +1623,8 @@ public final class BlockPathfinder {
         if (pn == 0 && bn == 0 && dn == 0) return null;
         StepEdits s = new StepEdits();
         s.load(bk == null ? NO_CELLS : bk, bn, pl == null ? NO_CELLS : pl, pn,
-               dr == null ? NO_CELLS : dr, drOpen == null ? NO_FLAGS : drOpen, dn);
+               dr == null ? NO_CELLS : dr, drOpen == null ? NO_FLAGS : drOpen, dn,
+               ClutchModel.NONE, 0L); // no macro movement clutches — see the method doc
         return s;
     }
 }

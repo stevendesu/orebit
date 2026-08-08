@@ -62,6 +62,18 @@ cost-tie priority): Traverse, Diagonal, Ascend, Descend, Fall, Pillar, MineDown,
 StartSprintSwim, Surface, Climb, Parkour, DiagonalParkour, **WalkOff** (no-jump gap-1/descend-1 — the
 honey crosser), **DiagonalSprintSwim** (26-connected underwater diagonals/corners),
 **RideBubbleColumn** (up-column conveyor ride, 3-phase enter/ride/settle), and **EndSprintSwim**.
+**Fall carries two 2026-08 additions** (`internal_docs/NOTES-movement-physics.md` §7–§8). *Wet endpoints*:
+a fall into water deeper than entry momentum can cross now ENDS floating at the knee of the in-water decay
+(`Fall.waterStop`) instead of being refused, and `Swim` continues from there — the node is an ordinary
+`(x,y,z,mode)` row whose key cell happens to be water. *Clutches* (`ClutchModel`): a bot carrying water /
+powder snow / hay places its own soft landing mid-drop. Consulted ONLY on a landing the softness gate has
+already refused, gated on `MovementContext.clutchMask()` (0 for every headless/benchmark search, so those
+are bit-identical) and on `caps.canPlace()`. The kind travels on `StepEdits` → `BotNavigator` injects
+`MovePlan.requireClutch` (the `requireDoor` pattern) → `Fall`'s FALL phase places it and, for sink-through
+kinds only, reclaims it. **Geometry split, and `reclaimable == !landsOnTop` is test-pinned**: sink-through
+(water, powder snow) keep the node/depth and fold no geometry; lands-on-top (hay) move the node up one,
+shorten the drop by one, fold the place, and are never reclaimed — the plan searched every later step
+standing on that block. SLIME and BED are excluded from `ClutchModel.PREFERENCE` (see its Javadoc).
 **Fluid is a MEDIUM (2026-08-07)**: `Swim` is the upright `MODE_STANDING` six-directional move — 4
 cardinal laterals plus a straight rise (`UP_COST ≈ 7.41`) and sink (`DOWN_COST ≈ 5.41`), lateral
 `COST ≈ 9.09` air-head / `SUBMERGED_COST ≈ 10.15` fluid-head, all derived from vanilla's fluid

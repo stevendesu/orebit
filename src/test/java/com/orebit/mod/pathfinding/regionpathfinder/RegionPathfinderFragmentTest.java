@@ -313,7 +313,7 @@ public class RegionPathfinderFragmentTest {
         int[] tiers = new int[NavBlock.Tool.values().length];
         tiers[NavBlock.Tool.PICKAXE.ordinal()] = MiningModel.Tier.IRON.ordinal();
         MovementContext.InventoryView inv = new MovementContext.InventoryView(
-                MiningModel.snapshot(tiers, 255, true), true, 0, 0f, 0f, 0f);
+                MiningModel.snapshot(tiers, 255, true), true, 0, 0f, 0f, 0f, 0);
         HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, 0, start, goal, BotCaps.DEFAULT,
                 RegionMineModel.DEFAULT, inv);
         RegionPathPlan l0 = h.l0Skeleton();

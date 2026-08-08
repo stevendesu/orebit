@@ -45,7 +45,8 @@ class RegionCrossingMemoryTest {
     private static MovementContext.InventoryView inv(int[] tiersByCategory, boolean consumesBlocks,
                                                      int placeableBlocks) {
         return new MovementContext.InventoryView(
-                MiningModel.snapshot(tiersByCategory, 255, true), consumesBlocks, placeableBlocks, 0f, 0f, 0f);
+                MiningModel.snapshot(tiersByCategory, 255, true), consumesBlocks, placeableBlocks, 0f, 0f, 0f,
+                0);
     }
 
     /** Bare-hand tier array (every category at {@link MiningModel.Tier#BARE}). */
