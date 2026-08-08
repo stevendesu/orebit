@@ -362,3 +362,77 @@ semantics). The TOWER/FLOOD regression was resolved by SHRINKING the arrest feat
 residual capture shape (e.g. a transient horizontal-collision ratchet beside a curtain on a
 forward-driving move) fail fast into a replan-from-the-hang instead of hovering invisibly. Blast radius:
 every converted move's `failWhen`. **Not implemented — needs the owner's ruling.**
+
+---
+
+## §7 Water as a landing (cushion + wet endpoints)
+
+**The cushion.** Water in a landing's FEET cell makes that landing damage-free from ANY height. Verified
+in 1.21.11 bytecode: `LivingEntity.checkFallDamage` calls `updateInWaterStateAndDoWaterCurrentPushing()`
+FIRST — which calls `resetFallDistance()` when the post-move AABB overlaps water — and only then reaches
+`Entity.checkFallDamage`, where `Block.fallOn` applies damage. The reset therefore lands strictly before
+the impact and is driven by the bot's FINAL position, not by cells sampled along the way. Unlike the vine
+arrest (§3), this is **speed-independent and needs no tunneling bound**.
+
+Cobweb deliberately does NOT qualify, for a reason specific to it: `WebBlock` has no `fallOn` override, so
+its only protection is `Entity.makeStuckInBlock` (via `entityInside` ← `applyEffectsFromBlocks`), which
+`LivingEntity.aiStep` invokes at offset 639 — AFTER `travel()`→`move()`→`checkFallDamage` at 618. That
+reset is one tick-phase too late to save a same-tick landing.
+
+**Wet endpoints — where a deep fall actually stops.** In-water descent with no input is
+`v' = 0.8·v + 0.005` (the Y drag is hardcoded 0.8; the 0.005 is `Attributes.GRAVITY / 16` from
+`getFluidFallingAdjustedMovement`), terminal `0.005 / 0.2 = 0.025 b/t` — a ~40 tick/block crawl. The excess
+over that crawl decays geometrically at 0.8, so momentum contributes
+`Σ (vₜ − v∞) = (v_entry − v∞) / (1 − 0.8) = 5 × (v_entry − v∞)` blocks before the bot is crawling. That is
+the **knee**, and it is a real resting depth: the residual is within 0.1 block after ~21 ticks.
+
+The saturation figure is badly misleading and must not be used as an allowance. Air free fall is
+`v' = (v + 0.08) × 0.98`, which converges at ratio 0.98 — very slowly:
+
+| free fall | entry speed | penetration |
+|---|---|---|
+| 16 blocks | 1.41 b/t | 6 |
+| 60 blocks | 2.34 b/t | **11** |
+| 200 blocks | 3.32 b/t | 16 |
+| 399 blocks | 3.73 b/t | 18 |
+
+Crossing 16 blocks of water needs a **176-block** free fall, and the ~19 ceiling at terminal velocity is
+asymptotic and never attained. Past the knee the fall ENDS floating and the swim rungs own the rest — the
+old behaviour (refuse the candidate) rested on the false premise that the remaining descent was a ~1400-tick
+passive crawl, when `Swim` has an active sink rung (`DOWN_COST = 1/0.185`) and always did.
+
+## §8 Clutch physics (carried soft landings)
+
+All javap-verified against Mojang-mapped 1.21.11 unless noted. Damage is
+`floor((fallDistance + 1e-6 − 3.0) × multiplier)`; `Block.fallOn`'s default multiplier is 1.0.
+
+- **Water** — §7. Damage-free at any height. Cannot be placed where the dimension evaporates water.
+- **Powder snow** — `PowderSnowBlock.getCollisionShape` returns a SOLID 0.9-tall box whenever
+  `entity.fallDistance > 2.5`, tested *before* any boots/descending logic, so a meaningfully-falling bot
+  lands ON it and `PowderSnowBlock.fallOn` only plays a sound. Below 2.5 it sinks through, but that distance
+  is already under the 3.0 safe threshold. Zero damage either way, in every dimension. It is nonetheless
+  modelled as **sink-through**: the landing resets `fallDistance`, the 0.9 shape empties on the next tick,
+  and the bot settles onto the floor beneath.
+- **Hay / honey** — `causeFallDamage(d, 0.2f)`: MULTIPLIER scaling, which is what `FALL_MULT` already models.
+- **Bed** — the odd one out: `causeFallDamage(d * 0.5, 1.0f)` scales the **DISTANCE**, so damage is
+  `floor(0.5·d − 3)`. Damage-free only below d = 8 and survivable to ~46. `FALLSOFT_HALF` treats it as a
+  multiplier and therefore OVERSTATES its protection — conservative (we over-charge), so not urgent.
+  Beds also bounce (`bounceUp`, restitution 0.66).
+- **Slime** — `causeFallDamage(d, 0.0f)` when not sneaking: zero damage plus a bounce. Sneaking DIVERGES at
+  **1.21.2**: ≤1.21.1 the suppressing branch calls `super.fallOn` for FULL damage; 1.21.2+ it simply returns.
+  Not-sneaking is the zero path on every version, so "bounce first, suppress only once the predicted apex is
+  inside the safe window" is correct across the whole range and needs no overlay.
+
+**Two facts that make the executor sound rather than lucky:**
+
+1. **Placement timing is guaranteed.** Block reach is 4.5 (`block_interaction_range` attribute default) and
+   air terminal velocity is 3.92 b/t. Since 3.92 < 4.5 the target cell is inside reach for at least one tick
+   from ANY height — attempting the place every tick cannot miss. This is the same tunneling question
+   `HANG_MAX_DROP` answers with a bound; here the inequality falls the right way.
+2. **The reclaim beats the spread.** `WaterFluid.getTickDelay` = 5, so a source picked back up inside five
+   ticks never spreads — and therefore never produces the burst of unannounced neighbour edits that would
+   invalidate the plan mid-clutch. The realistic place→land→scoop window is ~3 ticks.
+
+**Bounce apex** (for the slime/bed servo): `bounceUp` runs inside `move()`, and `travelInAir` applies one
+tick of gravity in the SAME tick, so the apex sums `v` from the FIRST post-bounce tick and v₀ is never
+counted. Cross-check: `0.42 + apex(0.42) = 1.2522`, exactly the vanilla jump height.

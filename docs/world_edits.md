@@ -58,6 +58,30 @@ appeared, so the bot clears the soft occupant first, the way a player would, and
 places. Only an occupant it may not break at all (owner-protected, or unbreakable)
 aborts the place — the plan re-checks and routes around.
 
+## Clutch placements
+
+One placement doesn't come from the scaffolding budget at all: the **clutch**, where the
+bot drops a soft landing into a cell on its way down a fall it could not otherwise
+survive (see [Movements](movements.md#falling)). Two things make it unlike every other
+edit the bot performs.
+
+It is **gated on real inventory even when `placement.consumesBlocks` is off.** The
+conjured-block supply is deliberately not allowed to conjure a water bucket — a clutch
+spends a specific carried item, so the bot must actually be holding one. It also respects
+`survival.canPlace`: a bot forbidden from editing the world is never handed a drop it can
+only survive by editing the world.
+
+And some clutches are **taken back**. Water and powder snow are scooped into the same
+bucket immediately on landing, so the world ends the move exactly as it began — which
+matters most for water, since a source left alone starts spreading within five ticks. A
+hay bale is not reclaimed: it *becomes* the floor the bot is standing on, so recovering it
+would delete that floor mid-path. It stays as a permanent step, like any block the bot
+places to pillar or bridge, and the next route down reuses it.
+
+Both the placement and the reclaim are announced to the plan before they happen, so
+neither reads as the world changing underneath the bot and neither triggers a re-search —
+the same attribution machinery described below.
+
 ## Punching through hazards
 
 Some blocks you don't walk around *or* dig politely — you punch through them. A cobweb
