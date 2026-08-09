@@ -55,7 +55,11 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * under-claims beside ladders and {@link MovementContext#requireBodyClear} would fold a break of the ladder
  * itself. Climb therefore reads its cells directly ({@code packedAt}/{@code descriptorOf} read-once,
  * {@code UNBUILT} gates as usual) against the one predicate that unifies both climbable shapes: a body cell
- * along a climb is enterable iff {@link MovementContext#passableOrClimbable passable OR climbable}.
+ * along a climb is enterable iff {@link MovementContext#passableOrClimbable passable OR climbable} — a
+ * predicate that (DESIGN-trapdoors.md §4/§6) also admits OPEN-trapdoor cells (body-passable: the wall
+ * panel coexists with the climb column), so climbing through an open hatch above a ladder shaft plans
+ * naturally where the ladder continues. The vanilla open-trapdoor-as-ladder-extension rule stays DEFERRED
+ * (§10 — trapdoor FACING is not packed); the executor's {@code onClimbable} honours it for free.
  *
  * <h2>Edit-free by design</h2>
  * Climb folds no breaks/places (the edit-free {@code accept}): a blocked climb simply isn't emitted, and
@@ -354,8 +358,16 @@ public final class Climb implements Movement {
                     continue;
                 }
                 int pdh = ctx.packedAt(nx, y + 2, nz);
-                if (pdh == MovementContext.UNBUILT
-                        || !ctx.passableOrClimbable(ctx.descriptorOf(nx, y + 2, nz, pdh))) {
+                // LATERAL head cell: face-aware, not the face-blind bodyPassable widening — an open trapdoor
+                // panel admits only when it does not hug this crossing's entry face (DESIGN-trapdoors.md §4:
+                // the per-cell blocked-face rule applies to lateral climb entries exactly as to walks; the
+                // face-blind form is reserved for the VERTICAL column cells, where a cardinal panel face can
+                // never be the crossed face).
+                long dismountHead;
+                if (pdh == MovementContext.UNBUILT) continue;
+                dismountHead = ctx.descriptorOf(nx, y + 2, nz, pdh);
+                if (!ctx.passable(dismountHead) && !ctx.isClimbable(dismountHead)
+                        && !ctx.trapdoorEntryClear(dismountHead, MovementContext.ordinalOf(-d[0], -d[1]))) {
                     continue;
                 }
                 out.accept(nx, y, nz, GRAB_LATERAL_COST);
@@ -368,8 +380,12 @@ public final class Climb implements Movement {
             // extra AND on the already-loaded long.
             if (!ctx.passable(feetD) && !NavBlock.isNarrowTop(feetD)) continue;
             int ph = ctx.packedAt(nx, y + 2, nz);
-            if (ph == MovementContext.UNBUILT
-                    || !ctx.passableOrClimbable(ctx.descriptorOf(nx, y + 2, nz, ph))) {
+            if (ph == MovementContext.UNBUILT) continue;
+            // LATERAL grab head cell — face-aware like the dismount above (§4 per-cell blocked-face): an
+            // open panel across this crossing's entry face refuses; parallel panels and climbables admit.
+            long grabHead = ctx.descriptorOf(nx, y + 2, nz, ph);
+            if (!ctx.passable(grabHead) && !ctx.isClimbable(grabHead)
+                    && !ctx.trapdoorEntryClear(grabHead, MovementContext.ordinalOf(-d[0], -d[1]))) {
                 continue;
             }
 

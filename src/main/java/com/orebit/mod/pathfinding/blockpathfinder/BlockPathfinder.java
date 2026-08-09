@@ -1488,8 +1488,11 @@ public final class BlockPathfinder {
                 // Read coords from the node arrays (the key now packs mode and no longer round-trips to a pos).
                 // Feet-Y is topY-aware: floor.above() for a full-topped floor (topY==16 — full block / TOP
                 // slab), the floor cell ITSELF for a bottom-partial (BOTTOM slab / snow / carpet / plate),
-                // whose collision top is mid-cell so the bot's feet occupy the floor's own cell.
-                waypoints.add(new BlockPos(nx, feetYOf(grid, nx, ny, nz), nz));
+                // whose collision top is mid-cell so the bot's feet occupy the floor's own cell. The floor
+                // descriptor is resolved through the plan's OWN door-sets (edits + edge — latest wins), so a
+                // close-and-stand plate node (a floor that exists only via this path's SET_CLOSED,
+                // DESIGN-trapdoors.md §5) reads its TOGGLED topY instead of drifting to the fy+1 fallback.
+                waypoints.add(new BlockPos(nx, feetYOf(grid, nx, ny, nz, edits, edge), nz));
                 moves.add(move);
                 // Copy out of the per-search arena: these edits ride home in the BlockPathPlan and are
                 // replayed by the follower over many ticks, while later searches reuse the arena slots.
@@ -1505,7 +1508,7 @@ public final class BlockPathfinder {
             int ux = Integer.signum(nx - px), uy = Integer.signum(ny - py), uz = Integer.signum(nz - pz);
             for (int k = 1; k <= j; k++) {
                 int fx = px + ux * k, fy = py + uy * k, fz = pz + uz * k; // floor cell of step k
-                waypoints.add(new BlockPos(fx, feetYOf(grid, fx, fy, fz), fz)); // topY-aware stand position
+                waypoints.add(new BlockPos(fx, feetYOf(grid, fx, fy, fz, edits, edge), fz)); // topY-aware stand position
                 moves.add(move);
                 edits.add(edge == null ? null : sliceStep(edge, fx, fy, fz));
                 floorYs = pushFloorY(floorYs, waypoints.size() - 1, fy);
@@ -1531,16 +1534,54 @@ public final class BlockPathfinder {
      * slab / snow layer / carpet / pressure plate / repeater, topY&lt;16 — collision surface mid-cell) the
      * bot stands WITHIN the floor's own cell, so the feet block IS the floor cell ({@code fy}). Unbuilt or
      * non-standable reads fall back to {@code fy + 1} (full-block behaviour → byte-identical to before).
-     * Cold path (one build per pathfind), so a per-waypoint grid read is fine.
+     *
+     * <p><b>The plan's own door-sets shadow the grid</b> (DESIGN-trapdoors.md §5): a close-and-stand node's
+     * floor exists only via the path's {@code SET_CLOSED} — the grid still reads the OPEN, non-standable
+     * panel, which under the raw read fell to the {@code fy + 1} fallback and drifted the waypoint one cell
+     * above the real 3/16 plate (the follower would then never register arrival). So the floor cell is
+     * first resolved against the walked edges' door-sets ({@code priorEdits} in path order plus the current
+     * {@code edge}), LATEST wins, via the same {@link NavBlock#withOpenableOpen} resolver the search used.
+     * Break/place edits need no handling here: a placed floor's fallback ({@code fy + 1}) already equals
+     * the full-cube answer, and a node's own floor is never broken. Cold path (one build per pathfind), so
+     * the small backward scan per waypoint is fine.
      */
-    private static int feetYOf(NavGridView grid, int fx, int fy, int fz) {
+    private static int feetYOf(NavGridView grid, int fx, int fy, int fz,
+                               List<StepEdits> priorEdits, StepEdits edge) {
         if (grid.built(fx, fy, fz)) {
             long d = grid.descriptorAt(fx, fy, fz);
+            d = resolveDoorSet(d, fx, fy, fz, priorEdits, edge);
             if (NavBlock.isStandable(d)) {
                 return fy + (NavBlock.topY(d) == 16 ? 1 : 0);
             }
         }
         return fy + 1;
+    }
+
+    /** Resolve a reconstructed waypoint's floor descriptor through the plan's own door-sets — the CURRENT
+     *  edge first (it holds the arriving move's fold), then the already-walked edges newest-to-oldest;
+     *  the first (latest) SET at the floor cell wins. Cold path; returns {@code d} untouched when no edge
+     *  set the cell (the overwhelming common case — most plans carry no door-sets at all). */
+    private static long resolveDoorSet(long d, int fx, int fy, int fz,
+                                       List<StepEdits> priorEdits, StepEdits edge) {
+        if (!NavBlock.isDoor(d) && !NavBlock.isTrapdoor(d)) return d; // only openables resolve (bit-flip safety)
+        long cell = BlockPos.asLong(fx, fy, fz);
+        if (edge != null) {
+            for (int i = edge.doorSetCount() - 1; i >= 0; i--) {
+                if (edge.doorSetAt(i) == cell) {
+                    return NavBlock.withOpenableOpen(d, edge.doorSetOpenAt(i));
+                }
+            }
+        }
+        for (int e = priorEdits.size() - 1; e >= 0; e--) {
+            StepEdits prior = priorEdits.get(e);
+            if (prior == null) continue;
+            for (int i = prior.doorSetCount() - 1; i >= 0; i--) {
+                if (prior.doorSetAt(i) == cell) {
+                    return NavBlock.withOpenableOpen(d, prior.doorSetOpenAt(i));
+                }
+            }
+        }
+        return d;
     }
 
     /**

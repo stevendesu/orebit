@@ -82,16 +82,19 @@ public final class MovementContext {
     private static final int[] FACING_DX = {0, 1, 0, -1};
     private static final int[] FACING_DZ = {-1, 0, 1, 0};
 
-    /** No door blocks the current node's exit (the non-door value {@link #currentDoorEdge} holds per pop). Any
-     *  cardinal ordinal (0..3) is distinct from this, so a plain field compare never false-triggers. */
+    /** No openable (door / open trapdoor) blocks the current node's exit (the value {@link #currentDoorEdge}
+     *  holds per pop off any openable). Any cardinal ordinal (0..3) is distinct from this, so a plain field
+     *  compare never false-triggers. */
     public static final int EDGE_NONE = -1;
 
-    // ---- Shared exit-door verdict (the three outcomes of {@link #exitDoorDecision}) --------------------
-    /** No intact feet-door blocks this horizontal exit — proceed exactly as if there were no door. */
+    // ---- Shared exit-openable verdict (the three outcomes of {@link #exitDoorDecision}) ----------------
+    /** No intact feet/head openable blocks this horizontal exit — proceed exactly as if there were none. */
     public static final int EXIT_CLEAR = 0;
-    /** An intact HAND-toggleable feet-door blocks this exit — fold a toggle to leave ({@link #foldExitDoorToggle}). */
+    /** Every blocking feet/head openable can be soundly toggled — fold the SET(s) to leave
+     *  ({@link #foldExitDoorToggle}). */
     public static final int EXIT_TOGGLE = 1;
-    /** An intact NON-toggleable feet-door (iron / flag-off) blocks this exit — the direction is skipped. */
+    /** A blocking feet/head openable cannot be toggled away (iron / flag-off / an unsound close that would
+     *  intersect the standing bot) — the direction is skipped. */
     public static final int EXIT_BLOCKED = 2;
 
     /**
@@ -337,10 +340,13 @@ public final class MovementContext {
      */
     public static final float DOOR_TOGGLE_COST = 6.0f;
 
-    /** Geometry a path-placed block reads as — the cobblestone the follower actually places (full cube). */
-    private static final long PLACED_DESC = NavBlock.descriptorFor(Blocks.COBBLESTONE.defaultBlockState());
-    /** Geometry a path-broken cell reads as — air. */
-    private static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
+    /** Geometry a path-placed block reads as — the cobblestone the follower actually places (full cube).
+     *  Package-visible so {@link EditScratch#requireFloorOrToggle} can return it as a place-fold's
+     *  effective floor descriptor (the §5 within-candidate threading contract). */
+    static final long PLACED_DESC = NavBlock.descriptorFor(Blocks.COBBLESTONE.defaultBlockState());
+    /** Geometry a path-broken cell reads as — air. Package-visible for the same effective-descriptor
+     *  threading (a break-folded body cell reads as air within the folding candidate). */
+    static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
 
     private final NavGridView grid;
     private final BotCaps caps;
@@ -390,21 +396,36 @@ public final class MovementContext {
     private int currentMode = MODE_STANDING;
 
     /**
-     * The blocked-edge ordinal of an intact door (OPEN <b>or</b> CLOSED) the bot is STANDING IN at the node being
-     * expanded (its feet-body cell {@code (x,y+1,z)}), or {@link #EDGE_NONE} when the feet cell is not an intact
-     * door (the overwhelming common case). Set ONCE per popped node by {@link BlockPathfinder} (like {@link
-     * #currentMode}), read per candidate by {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse}
-     * to refuse (or toggle away) an EXIT through the door's blocked side (§2b of DESIGN-04). The blocked edge is
-     * derived STATE-AGNOSTICALLY via {@link NavBlock#doorBlockedEdge}, which already accounts for open/closed — so
-     * a bot that CLOSED an initially-open door on ENTRY (and now stands in a closed door whose panel blocks the
-     * exit) is handled identically to one standing in a genuinely-open door: the exit gate fires and folds a
-     * toggle to the OPPOSITE state (which necessarily clears the blocked edge). Path-edit-aware: a door the path
-     * BROKE reads as air ⇒ {@code EDGE_NONE} (no constraint), and a door the path TOGGLED reads its edited state.
-     * The feet-cell descriptor read {@link #setCurrentDoorEdge} does per pop is GATED by the {@link
-     * NavSection#anyDoor} section prefilter — a door-free section (the common case) pays only a cached section
-     * resolve + bit test; the per-candidate read here is a field compare.
+     * The blocked-edge ordinal of the intact OPENABLE the bot is STANDING IN at the node being expanded (its
+     * feet-body cell {@code (x,y+1,z)}), or {@link #EDGE_NONE} when the feet cell holds none (the overwhelming
+     * common case). Two kinds register (DESIGN-trapdoors.md §5): an intact <b>door</b> (OPEN or CLOSED — its
+     * {@link NavBlock#doorBlockedEdge state-agnostic blocked edge}), and an <b>OPEN trapdoor</b> (its wall
+     * panel's cardinal face, {@link NavBlock#trapdoorBlockedFace} — always 0..3 when open; a CLOSED trapdoor
+     * never registers because no standing node can carry one in its feet cell: the §4 clearance rules refuse
+     * it, and a plate the bot stands ON is its FLOOR cell, not its feet cell). Set ONCE per popped node by
+     * {@link BlockPathfinder} (like {@link #currentMode}), read per candidate by {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse} / {@code Ascend} / {@code Descend} to
+     * refuse (or toggle away) an EXIT through the blocked side (§2b of DESIGN-04). The blocked edge is derived
+     * STATE-AGNOSTICALLY — so a bot that CLOSED an initially-open door on ENTRY (and now stands in a closed
+     * door whose panel blocks the exit) is handled identically to one standing in a genuinely-open door: the
+     * exit gate fires and folds a toggle to the OPPOSITE state (which necessarily clears the blocked edge).
+     * Path-edit-aware: an openable the path BROKE reads as air ⇒ {@code EDGE_NONE} (no constraint), and one
+     * the path TOGGLED reads its edited state.
      */
     private int currentDoorEdge = EDGE_NONE;
+
+    /**
+     * The blocked-face ordinal of an intact OPEN TRAPDOOR panel in the current node's HEAD cell {@code
+     * (x,y+2,z)}, or {@link #EDGE_NONE} (the overwhelming common case). The §4 per-cell rule applies
+     * independently in EACH body cell, so a head-cell panel hugging the exit-side wall blocks that exit even
+     * when the feet cell is clear — without this the crossing was emitted unchecked and the follower walked
+     * the bot into a chest-height panel (a permanent HOLD under the no-recovery rule). Only OPEN trapdoors
+     * register (a door's upper half rides the feet-cell registration — both halves share one blocked edge;
+     * a closed trapdoor in the head cell is a §4 clearance matter, not an exit-face one). Set beside {@link
+     * #currentDoorEdge} by {@link #setCurrentDoorEdge}; consumed by {@link #exitDoorDecision} /
+     * {@link #foldExitDoorToggle}, which apply the half/floor-top soundness gates on the rare match.
+     */
+    private int currentHeadEdge = EDGE_NONE;
 
     public MovementContext(NavGridView grid, BotCaps caps) {
         this.grid = grid;
@@ -456,35 +477,40 @@ public final class MovementContext {
     }
 
     /**
-     * Compute the current node's exit-door constraint from its feet-body cell {@code (x,y+1,z)} and stash it —
-     * called ONCE per popped node by {@link BlockPathfinder}, immediately after {@link #setMode}. Reads one
-     * path-edit-aware descriptor: if it is an intact door (OPEN <b>or</b> CLOSED), its {@link
-     * NavBlock#doorBlockedEdge blocked edge} — derived state-agnostically — is stashed (a move leaving through
-     * that edge is refused, or toggled away, by Traverse); otherwise {@link #EDGE_NONE}. The CLOSED case is real,
-     * not vestigial: entering an initially-OPEN door whose panel blocks the ENTRY edge folds a SET_CLOSED (see
-     * {@link #doorSetClears}), so the bot can END UP standing in a door the diff reads CLOSED, its panel now
-     * blocking a different (the exit) edge — which this must register so the exit can re-toggle it. The
-     * descriptor read + {@link NavBlock#isDoor} bit test are reached ONLY when the feet cell's section actually
-     * contains a door ({@link NavGridView#sectionHasNoDoor} short-circuits the door-free common case to {@code
-     * EDGE_NONE}), so a door-free search pays only the section prefilter, not the read.
+     * Compute the current node's exit-openable constraint from its feet-body cell {@code (x,y+1,z)} and stash
+     * it — called ONCE per popped node by {@link BlockPathfinder}, immediately after {@link #setMode}. Reads
+     * one path-edit-aware descriptor: an intact door (OPEN <b>or</b> CLOSED) registers its {@link
+     * NavBlock#doorBlockedEdge blocked edge}; an OPEN trapdoor registers its panel's cardinal face ({@link
+     * NavBlock#trapdoorBlockedFace} — DESIGN-trapdoors.md §5); otherwise {@link #EDGE_NONE}. The door CLOSED
+     * case is real, not vestigial: entering an initially-OPEN door whose panel blocks the ENTRY edge folds a
+     * SET_CLOSED (see {@link #doorSetClears}), so the bot can END UP standing in a door the diff reads CLOSED,
+     * its panel now blocking a different (the exit) edge — which this must register so the exit can re-toggle
+     * it.
+     *
+     * <p><b>These reads are UNCONDITIONAL — the old {@code sectionHasNoDoor}/{@code anyDoor} section
+     * prefilter is REMOVED</b> (ratified §8 cleanup: it was measured useless by on/off isolation, and it
+     * reflected DOORS only — an open-trapdoor feet cell in a door-free section would have been silently
+     * missed). No anyTrapdoor/anyOpenable section bit may replace it (hard rule); the per-pop cost is two
+     * path-edit-aware descriptor reads (feet + head — the head read is the §4 per-cell blocked-face rule
+     * applied to the cell the bot's head occupies), A/B-benched with the §8 cleanup.
      */
     public void setCurrentDoorEdge(int x, int y, int z) {
-        // Section-level prefilter (anyPortal-style): the overwhelmingly common door-free section skips the
-        // feet-descriptor read (incl. the path-edit-overlay walk descriptorAt does) — a cached section resolve
-        // plus a bit test. A door-set edit is only ever recorded on a cell the grid already classifies as a
-        // door, and PLACED/BROKEN edits never introduce one, so a door-free section can never gain a door via
-        // the edit overlay — the skip is exact, not an approximation. Unbuilt feet section ⇒ not skipped
-        // (falls through to the exact full read below), preserving byte-identical behaviour everywhere a door
-        // could exist.
-        if (grid.sectionHasNoDoor(x, y + 1, z)) {
-            currentDoorEdge = EDGE_NONE;
-            return;
-        }
         long feet = descriptorAt(x, y + 1, z);
         // State-agnostic: ANY intact door in the feet cell registers its blocked edge (doorBlockedEdge already
-        // encodes open/closed). Whether the exit direction actually crosses that edge — and whether the door is
-        // hand-toggleable — is decided per candidate by Traverse (currentDoorEdge() + canToggleExitDoor).
-        currentDoorEdge = NavBlock.isDoor(feet) ? NavBlock.doorBlockedEdge(feet) : EDGE_NONE;
+        // encodes open/closed); an OPEN trapdoor registers its panel face (always a cardinal when open — a
+        // closed trapdoor's UP/DOWN face never constrains a horizontal exit and no standing node carries one
+        // in its feet cell anyway). Whether the exit direction actually crosses the edge — and whether the
+        // openable is hand-toggleable — is decided per candidate (currentDoorEdge() + exitDoorDecision).
+        if (NavBlock.isDoor(feet)) {
+            currentDoorEdge = NavBlock.doorBlockedEdge(feet);
+        } else {
+            currentDoorEdge = NavBlock.openTrapdoor(feet) ? NavBlock.trapdoorBlockedFace(feet) : EDGE_NONE;
+        }
+        // HEAD cell (y+2): only an OPEN trapdoor panel registers (see currentHeadEdge — a door's upper half
+        // is covered by the feet registration, and any other occupant is a §4 clearance matter). The
+        // half/floor-top soundness gates run per candidate on the rare edge match, not here.
+        long head = descriptorAt(x, y + 2, z);
+        currentHeadEdge = NavBlock.openTrapdoor(head) ? NavBlock.trapdoorBlockedFace(head) : EDGE_NONE;
     }
 
     /**
@@ -532,68 +558,207 @@ public final class MovementContext {
                 && NavBlock.doorBlockedEdge(d) == edge;
     }
 
-    /** The target OPEN state a SET should drive door {@code d} to — its TOGGLED state (closed→open, open→closed).
-     *  Used to pick {@code SET_OPEN} vs {@code SET_CLOSED} when folding a crossing (see {@link #doorSetClears}). */
+    /** The target OPEN state a SET should drive openable {@code d} to — its TOGGLED state (closed→open,
+     *  open→closed). Kind-neutral by construction: doors and trapdoors pack OPEN into the SAME shared bit 43,
+     *  so this one read serves both (DESIGN-trapdoors.md §2 — the door-symmetric widening; the name keeps its
+     *  door heritage). Used to pick {@code SET_OPEN} vs {@code SET_CLOSED} when folding a crossing (see
+     *  {@link #doorSetClears} / {@link #trapdoorSetClears}). */
     public boolean doorToggledOpen(long d) {
         return !NavBlock.doorOpen(d);
     }
 
     /**
-     * Whether the bot may TOGGLE the intact door it is STANDING IN (feet cell {@code (x,y+1,z)}) to free an EXIT
-     * the door's swung panel blocks (DOORS P2, §2b). Consulted by {@link
-     * com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse} ONLY when {@link #currentDoorEdge} already
-     * proved the feet door blocks the travel edge; this adds the toggleable + policy gate. When true the move
-     * folds a door SET to the OPPOSITE state (see {@link #foldExitDoorToggle}) instead of skipping the direction;
-     * when false (iron door, or {@code doors.toggle} off) the direction is skipped exactly as in P1.
+     * Whether a blocked trapdoor cell {@code d} is an OPEN trapdoor the bot may cross FREE when entering it
+     * across {@code face} — the trapdoor twin of {@link #doorEntryClear} (DESIGN-trapdoors.md §4–§5): an open
+     * panel is body-passable in every direction EXCEPT across its single {@link NavBlock#trapdoorBlockedFace
+     * blocked face} (the wall strip it hugs). {@code face} uses the 6-way encoding (0..3 cardinal entry edge,
+     * {@link NavBlock#FACE_UP} entering from above, {@link NavBlock#FACE_DOWN} from below). A CLOSED trapdoor
+     * is never entry-clear through this — its horizontal plate bisects a body/transit cell (the upper-body
+     * ceiling arm, {@link #ceilingAdmits}, is the one separate admit). One predictable almost-always-false
+     * {@link NavBlock#openTrapdoor} test on the common blocked cell — reached only behind the passable/door
+     * failure branches, so trapdoor-free worlds pay two bit tests on cells that were already blocked.
      */
-    public boolean canToggleExitDoor(int x, int y, int z) {
-        return caps.mayToggleDoors() && NavBlock.doorToggleable(descriptorAt(x, y + 1, z));
+    public boolean trapdoorEntryClear(long d, int face) {
+        return NavBlock.openTrapdoor(d) && NavBlock.trapdoorBlockedFace(d) != face;
     }
 
     /**
-     * Fold a SET of the feet door the bot is leaving (both its body cells {@code (x,y+1,z)} / {@code (x,y+2,z)})
-     * to the OPPOSITE of its current state onto the candidate's edit set (DOORS P2, §2b) — the exit toggle. The
-     * target is {@link #doorToggledOpen} of the door's current (path-edit-aware) grid state: an OPEN feet door is
-     * closed, a CLOSED one (the corner where entry already toggled an open door shut) is re-opened. Either way the
-     * toggle swings the blocked panel to the perpendicular edge, so the current blocked edge — the exit edge, by
-     * {@link #currentDoorEdge}'s contract — is necessarily cleared. This mirrors the ENTRY fold ({@link
-     * #doorSetClears} → {@link #doorToggledOpen}) so entry-blocked and exit-blocked are handled identically and
-     * state-agnostically. Both cells are set so every downstream {@code descriptorAt} of the door reads
-     * consistently; {@link EditScratch#setDoor} charges the {@link #DOOR_TOGGLE_COST} once (the second half is
-     * recognised as the same door). Called by {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse}
-     * only after {@link #canToggleExitDoor} approved it.
+     * Whether a blocked trapdoor cell {@code d} should fold a cheap OPEN/CLOSE SET to clear a crossing across
+     * {@code face} — the trapdoor twin of {@link #doorSetClears} (DESIGN-trapdoors.md §5). True iff {@code
+     * doors.toggle} is on (the owner-ratified single family key governs trapdoors too), the cell is a
+     * HAND-toggleable trapdoor (wood/copper — not iron, shared bit 50), and the trapdoor <b>currently blocks
+     * {@code face}</b>. Toggling always swaps the blocked face to a perpendicular set (closed UP/DOWN ↔ open
+     * cardinal — §3), so the toggled state necessarily frees {@code face} — a single SET suffices. The caller
+     * must still re-check the TOGGLED geometry against its own body/ceiling rules (closing a panel creates a
+     * plate — see {@link EditScratch#requireAirToward}); iron ({@code toggleable=0}) falls through to the
+     * break fold, which the default config's PROTECTED trapdoors then refuse — routed around, per §3.
      */
-    public void foldExitDoorToggle(EditScratch e, int x, int y, int z) {
-        boolean targetOpen = doorToggledOpen(descriptorAt(x, y + 1, z));
-        e.setDoor(x, y + 1, z, targetOpen);
-        e.setDoor(x, y + 2, z, targetOpen);
+    public boolean trapdoorSetClears(long d, int face) {
+        return caps.mayToggleDoors() && NavBlock.isTrapdoor(d) && NavBlock.handToggleable(d)
+                && !NavBlock.isFluid(d)
+                && NavBlock.trapdoorBlockedFace(d) == face;
     }
 
     /**
-     * The shared EXIT-door verdict (§2b of DESIGN-04) for a horizontal move leaving the current node across the
-     * cardinal step {@code (dx,dz)} — the factored-out gate {@link
+     * Whether a blocked body cell {@code d} is a toggleable CLOSED trapdoor a {@code SET_OPEN} <i>might</i>
+     * clear — the shared capability core of the two closed-plate folds (DESIGN-trapdoors.md §5): the
+     * TOGGLE-FOR-CLEARANCE trigger (b) on the horizontal family ({@link EditScratch#requireAirToward} /
+     * {@link EditScratch#requireUpperBodyToward} — a bisecting plate is a CLEARANCE failure, not a face
+     * crossing: its blocked face is UP/DOWN while travel is horizontal, so the face rule alone never fires)
+     * and the vertical family's {@link #trapdoorSetClearsVertical}. True iff {@code doors.toggle} is on, the
+     * cell is a hand-toggleable CLOSED trapdoor, and it holds no fluid (§10: waterlogged trapdoor cells stay
+     * conservative walls). The horizontal caller must still run the §5 face-vs-travel check on the OPENED
+     * panel ({@link #panelParallel}) — a panel that would lie ACROSS travel refuses the toggle.
+     */
+    public boolean toggleableClosedTrapdoor(long d) {
+        return caps.mayToggleDoors() && NavBlock.isTrapdoor(d) && !NavBlock.trapdoorOpen(d)
+                && NavBlock.handToggleable(d) && !NavBlock.isFluid(d);
+    }
+
+    /**
+     * The §5 face-vs-travel check on an OPENED panel descriptor {@code openDesc}: whether the wall panel
+     * lies PARALLEL to a horizontal crossing entering across cardinal {@code face} (0..3) — i.e. on a SIDE
+     * wall, where §4's guide-rail rule admits the 0.6 body beside it. The panel hugs the wall of its {@link
+     * NavBlock#trapdoorBlockedFace blocked face}; parallel ⟺ that face is on the PERPENDICULAR axis to
+     * travel, which for the 0=N 1=E 2=S 3=W encoding is one XOR + parity test (N/S even, E/W odd). A panel
+     * on the travel axis (entry or far wall) lies ACROSS travel → the trigger-(b) toggle REFUSES (the
+     * closed-blocks-headroom / open-blocks-travel combination is genuinely impassable without breaking).
+     */
+    public static boolean panelParallel(long openDesc, int face) {
+        return ((NavBlock.trapdoorBlockedFace(openDesc) ^ face) & 1) != 0;
+    }
+
+    /**
+     * Whether a non-standable dest-floor cell {@code d} is an OPEN toggleable trapdoor a SET_CLOSED would turn
+     * INTO a floor (DESIGN-trapdoors.md §5, {@code requireFloorOrToggle}): the closed state (a 3/16 plate or a
+     * flush 16/16 hatch, per its half) is standable by construction. Gated on {@code doors.toggle} + the
+     * hand-toggleable bit exactly like the crossing folds; the movement's own rise/topY gates then judge the
+     * toggled geometry ({@link EditScratch#requireFloorOrToggle} returns it).
+     */
+    public boolean trapdoorSetFloors(long d) {
+        return caps.mayToggleDoors() && NavBlock.openTrapdoor(d) && NavBlock.handToggleable(d);
+    }
+
+    /**
+     * Whether a blocked cell {@code d} is a toggleable CLOSED trapdoor a {@code SET_OPEN} would clear for the
+     * VERTICAL family (DESIGN-trapdoors.md §5 — Pillar's overhead jump cell, MineDown's own floor cell): a
+     * closed trapdoor's blocked face is always vertical ({@link NavBlock#FACE_UP} / {@link NavBlock#FACE_DOWN}
+     * per its half — §3), and a vertical pass-through / jump crosses BOTH vertical faces of the cell, so
+     * either half blocks intact — while the OPEN state (a wall-hugging vertical panel, cardinal blocked face)
+     * clears the whole 0.6 shaft (§4). Gated on {@code doors.toggle} + the shared hand-toggleable bit exactly
+     * like the other SET folds; iron ({@code toggleable=0}) falls through to the break path. Consumed by
+     * {@link EditScratch#requireAirVertical}.
+     */
+    public boolean trapdoorSetClearsVertical(long d) {
+        return toggleableClosedTrapdoor(d);
+    }
+
+    /**
+     * Fold the SET(s) that free this exit onto the candidate's edit set (DOORS P2 §2b; trapdoors
+     * DESIGN-trapdoors.md §4–§5) — the exit toggle, now per-cell like the decision that approved it
+     * ({@link #exitDoorDecision} returned {@link #EXIT_TOGGLE} for this same {@code (dx,dz)}):
+     * <ul>
+     *   <li><b>Feet cell</b> ({@link #currentDoorEdge} matches): the target is {@link #doorToggledOpen} of
+     *       the current (path-edit-aware) state — an OPEN feet door is closed, a CLOSED one (entry toggled
+     *       it shut) re-opened; an OPEN feet trapdoor is closed (BOTTOM half over a high floor only — the
+     *       decision's soundness gate; the follower's step-assist absorbs the 3/16 shin plate). A door sets
+     *       BOTH its body cells so downstream {@code descriptorAt} reads consistently ({@link
+     *       EditScratch#setDoor} charges {@link #DOOR_TOGGLE_COST} once); a trapdoor is SINGLE-CELL
+     *       ({@link EditScratch#setTrapdoor} — never the two-half dedup, §5).</li>
+     *   <li><b>Head cell</b> ({@link #currentHeadEdge} matches, start floor top &gt; 3): the open head panel
+     *       is closed into a flush overhead hatch ({@code SET_CLOSED}; TOP half only — the decision's gate —
+     *       whose 13/16 band clears any standing body, {@code 13 ≥ t − 3} for every {@code t ≤ 16}).</li>
+     * </ul>
+     * Both may fold on one candidate (a feet panel AND a head panel blocking the same exit = two SETs, two
+     * toggle costs). Called only after {@link #exitDoorDecision} returned {@link #EXIT_TOGGLE} for this
+     * direction — the soundness gates (toggleable, half, floor top) already ran there.
+     */
+    public void foldExitDoorToggle(EditScratch e, int x, int y, int z, int dx, int dz) {
+        int edge = ordinalOf(dx, dz);
+        if (currentDoorEdge == edge) {
+            long feet = descriptorAt(x, y + 1, z);
+            boolean targetOpen = doorToggledOpen(feet);
+            if (NavBlock.isTrapdoor(feet)) {
+                e.setTrapdoor(x, y + 1, z, targetOpen);
+            } else {
+                e.setDoor(x, y + 1, z, targetOpen);
+                e.setDoor(x, y + 2, z, targetOpen);
+            }
+        }
+        if (currentHeadEdge == edge && floorSurface(x, y, z) > 3) {
+            e.setTrapdoor(x, y + 2, z, false); // close the head panel into a flush overhead hatch (TOP half)
+        }
+    }
+
+    /**
+     * The shared EXIT-openable verdict (§2b of DESIGN-04; trapdoors DESIGN-trapdoors.md §5) for a horizontal
+     * move leaving the current node across the cardinal step {@code (dx,dz)} — the factored-out gate {@link
      * com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse}, {@link
      * com.orebit.mod.pathfinding.blockpathfinder.movements.Ascend} and {@link
      * com.orebit.mod.pathfinding.blockpathfinder.movements.Descend} all consult (a raised/lowered doorway
-     * crosses the SAME feet-door as a flat one, so all three share one decision rather than three drifting
-     * copies). Returns:
+     * crosses the SAME feet cell as a flat one, so all three share one decision rather than three drifting
+     * copies). A feet-cell OPEN trapdoor's panel face rides the identical surface (registered by {@link
+     * #setCurrentDoorEdge}, toggled single-cell by {@link #foldExitDoorToggle}), and a HEAD-cell open panel
+     * ({@link #currentHeadEdge}) is checked independently per the §4 per-cell blocked-face rule. Returns:
      * <ul>
-     *   <li>{@link #EXIT_CLEAR} — the current node's feet cell is not an intact door, or its blocked edge is not
-     *       the one this move crosses ({@link #currentDoorEdge} is {@link #EDGE_NONE} off any door, so the
-     *       overwhelming common case is one field compare that never matches). Proceed normally.
-     *   <li>{@link #EXIT_TOGGLE} — the feet door blocks this exit edge AND is hand-toggleable under {@code
-     *       doors.toggle} ({@link #canToggleExitDoor}): the caller folds {@link #foldExitDoorToggle} onto the
-     *       candidate's edit set (a single SET to the opposite state, which necessarily frees the exit edge).
-     *   <li>{@link #EXIT_BLOCKED} — the feet door blocks this exit edge but is iron / the flag is off: the caller
-     *       skips the direction (P1 behaviour, unchanged).
+     *   <li>{@link #EXIT_CLEAR} — no registered openable blocks this exit edge (both edge fields are {@link
+     *       #EDGE_NONE} off any openable, so the overwhelming common case is two field compares that never
+     *       match). Also returned for a head-cell panel over a ≤3/16 plate floor (body top &lt; 2.0 — the
+     *       head cell is never entered, so its panel cannot block). Proceed normally.
+     *   <li>{@link #EXIT_TOGGLE} — every blocking cell can be SOUNDLY toggled away under {@code doors.toggle}:
+     *       a feet DOOR (hand-toggleable — the historical verdict, unchanged); a feet OPEN TRAPDOOR only as a
+     *       BOTTOM-half close whose 3/16 plate lands within step-assist of the feet (plate top {@code 19 − t
+     *       ≤ }{@link #STEP_ASSIST_MAX_RISE}{@code  ⇒ t ≥ 10} — a TOP-half close would materialize a plate
+     *       through the bot's own waist, and a low floor puts even the shin plate beyond the auto-step); a
+     *       head OPEN TRAPDOOR only as a TOP-half close (flush overhead hatch — a BOTTOM-half close would
+     *       plate through the bot's own head). The caller folds {@link #foldExitDoorToggle}.
+     *   <li>{@link #EXIT_BLOCKED} — a blocking cell is iron / flag-off, or its close is unsound per the half
+     *       and floor-top gates above: the caller skips the direction (the P1 behaviour; the PhaseRunner
+     *       establishes SETs as PRE-conditions before driving, so a plan must never prescribe a close that
+     *       intersects the bot still standing there).
      * </ul>
-     * State-agnostic: {@link #currentDoorEdge} already encodes open/closed, so a door the bot CLOSED on entry is
-     * re-opened here identically to a genuinely-open one. Called once per direction; the toggle is folded per
-     * candidate arm (each arm resets its own {@link EditScratch}).
+     * State-agnostic on doors: {@link #currentDoorEdge} already encodes open/closed, so a door the bot CLOSED
+     * on entry is re-opened here identically to a genuinely-open one. Called once per direction; the toggle is
+     * folded per candidate arm (each arm resets its own {@link EditScratch}). Off any openable this is
+     * byte-identical to the historical door-only decision.
      */
     public int exitDoorDecision(int x, int y, int z, int dx, int dz) {
-        if (currentDoorEdge != ordinalOf(dx, dz)) return EXIT_CLEAR;
-        return canToggleExitDoor(x, y, z) ? EXIT_TOGGLE : EXIT_BLOCKED;
+        int edge = ordinalOf(dx, dz);
+        if (currentDoorEdge != edge && currentHeadEdge != edge) return EXIT_CLEAR;
+        boolean toggles = false;
+        if (currentDoorEdge == edge) {
+            long feet = descriptorAt(x, y + 1, z);
+            if (NavBlock.isTrapdoor(feet)) {
+                // Feet-cell OPEN panel: closing drops the panel INTO the bot's own feet cell. Sound only as
+                // a BOTTOM-half shin plate the walk-out auto-steps (plate top = 16+3 sixteenths above the
+                // floor base; 19 − floorTop ≤ STEP_ASSIST_MAX_RISE). A TOP-half close (13..16/16 — waist
+                // height) or a low start floor jams the bot against its own edit — blocked, route around.
+                if (!caps.mayToggleDoors() || !NavBlock.handToggleable(feet)
+                        || NavBlock.trapdoorHalfTop(feet)
+                        || 19 - floorSurface(x, y, z) > STEP_ASSIST_MAX_RISE) {
+                    return EXIT_BLOCKED;
+                }
+            } else if (!caps.mayToggleDoors() || !NavBlock.handToggleable(feet)) {
+                return EXIT_BLOCKED; // iron door / flag off — the historical P1 skip
+            }
+            toggles = true;
+        }
+        if (currentHeadEdge == edge) {
+            // Head-cell OPEN panel across this exit (§4 per-cell blocked-face). Irrelevant over a ≤3/16
+            // plate floor (body top < 2.0 — the head cell is never entered); otherwise closing must land
+            // the plate ABOVE the body: TOP half → flush overhead hatch (13 ≥ t−3 for every t ≤ 16, always
+            // sound); BOTTOM half → a plate through the bot's own head — blocked.
+            int t = floorSurface(x, y, z);
+            if (t > 3) {
+                long head = descriptorAt(x, y + 2, z);
+                if (!caps.mayToggleDoors() || !NavBlock.handToggleable(head)
+                        || !NavBlock.trapdoorHalfTop(head)) {
+                    return EXIT_BLOCKED;
+                }
+                toggles = true;
+            }
+        }
+        return toggles ? EXIT_TOGGLE : EXIT_CLEAR;
     }
 
     /** Goal X (absolute world block coord) — a macro jump never overshoots it. */
@@ -739,10 +904,12 @@ public final class MovementContext {
             int kind = pathEdits.kindAt(x, y, z);
             if (kind == PathEdits.PLACED) return PLACED_DESC;
             if (kind == PathEdits.BROKEN) return AIR_DESC;
-            // A door-set resolves against THIS door's own facing/hinge (unlike PLACED's universal constant):
-            // read the grid door and force it into the target OPEN/CLOSED state, so doorBlockedEdge follows.
-            if (kind == PathEdits.SET_OPEN)   return NavBlock.withDoorOpen(grid.descriptorAt(x, y, z), true);
-            if (kind == PathEdits.SET_CLOSED) return NavBlock.withDoorOpen(grid.descriptorAt(x, y, z), false);
+            // An openable-set resolves against THIS cell's own descriptor (unlike PLACED's universal
+            // constant): read the grid cell and force it into the target OPEN/CLOSED state via the unified
+            // resolver — a door is a bare bit-43 flip (blocked edge follows its own facing/hinge), a
+            // trapdoor RE-DERIVES its toggled geometry (topY/shape/NARROW_TOP — DESIGN-trapdoors.md §2).
+            if (kind == PathEdits.SET_OPEN)   return NavBlock.withOpenableOpen(grid.descriptorAt(x, y, z), true);
+            if (kind == PathEdits.SET_CLOSED) return NavBlock.withOpenableOpen(grid.descriptorAt(x, y, z), false);
         }
         return grid.descriptorAt(x, y, z);
     }
@@ -778,9 +945,10 @@ public final class MovementContext {
             int kind = pathEdits.kindAt(x, y, z);
             if (kind == PathEdits.PLACED) return PLACED_DESC;
             if (kind == PathEdits.BROKEN) return AIR_DESC;
-            // Door-set: resolve the built door navtype forced into its target state (see descriptorAt).
+            // Openable-set: resolve the built navtype forced into its target state (see descriptorAt —
+            // door = bit flip, trapdoor = geometry re-derivation, dispatched by the unified resolver).
             if (kind == PathEdits.SET_OPEN || kind == PathEdits.SET_CLOSED)
-                return NavBlock.withDoorOpen(NavBlock.descriptor((short) TraversalGrid.navtypeOf(packed)),
+                return NavBlock.withOpenableOpen(NavBlock.descriptor((short) TraversalGrid.navtypeOf(packed)),
                         kind == PathEdits.SET_OPEN);
         }
         return NavBlock.descriptor((short) TraversalGrid.navtypeOf(packed));
@@ -880,34 +1048,99 @@ public final class MovementContext {
                 && headroom(flags) >= need && (y & 15) + need <= 15;
     }
 
+    // ---- Residual body clearance (DESIGN-trapdoors.md §4 — the generalized exact-fit rules) ------------
+    // The HEADROOM grid flags stay whole-cell conservative (the strong fast path: flags may only
+    // SHORT-CIRCUIT ACCEPT); when they fail, the exact fallback applies the residual rules, all in integer
+    // sixteenths of the node's floor topY t:
+    //   * c1 (lower body cell, floor+1) admits: passable OR open-trapdoor (a 3/16 wall-hugging panel
+    //     coexists with the centered 0.6 body — worst case opposite panels leave 10/16 > 0.6). ANY closed
+    //     trapdoor in c1 bisects → blocked.
+    //   * c2 (upper body cell, floor+2) is NOT consulted at all when t ≤ 3 (body top = t/16 + 1.8 ≤
+    //     1.9875 < 2.0 — this admits standing on a floor plate/carpet in a 2-tall hallway with a hard
+    //     ceiling). Otherwise c2 admits: passable, OR open-trapdoor, OR a uniform high ceiling —
+    //     ceilingMinY(c2) ≥ t − 3 (the integer-conservative form of −3.2; closed-TOP trapdoor 13, top slab
+    //     8, everything else 0 — see NavBlock.ceilingMinY).
+    // Cells containing trapdoors/top-slabs never had the HEADROOM flag, so flag-proven paths are
+    // byte-identical; the residual tests ride BEHIND the passable-failure branch, so clear cells pay
+    // nothing new.
+
     /**
-     * Ensure floor {@code (fx,fy,fz)}'s two body cells (feet + head) are clear for a walker, recording any
-     * needed breaks on {@code e}. Fast path: the HEADROOM bit {@link #headroomProves proves} ≥ WALK
-     * clearance in one grid read — no per-cell probes, no edits. Otherwise read the real cells via {@code
-     * requireAir} (which folds breaks under {@code e}'s edit gate, or invalidates if blocked and the bot
-     * can't/may-not break). {@code flags} is the cell's already-read {@link NavFlags} bitmask.
+     * Whether the bot's body can occupy transit/lower-body cell {@code d} — {@link #passable} <b>or</b> an
+     * {@link NavBlock#openTrapdoor OPEN trapdoor} (the §4 residual: the wall panel coexists with the 0.6
+     * body). The face-blind occupancy form (Fall/Climb columns, Pillar shafts, the face-blind {@code
+     * requireBodyClear}); a face-aware crossing uses {@link #trapdoorEntryClear} so a panel is never crossed
+     * through its own wall strip. One extra almost-always-false bit test behind the passable failure.
      */
-    public void requireBodyClear(EditScratch e, int fx, int fy, int fz, int flags) {
-        if (headroomProves(flags, fx, fy, fz, HEADROOM_WALK)) return;
-        e.requireAir(fx, fy + 1, fz);
-        e.requireAir(fx, fy + 2, fz);
+    public boolean bodyPassable(long d) {
+        return passable(d) || NavBlock.openTrapdoor(d);
     }
 
     /**
-     * {@link #requireBodyClear} made DOOR-AWARE for a horizontal crossing (P1) — the variant the door-aware
-     * {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse} uses. Identical to
-     * {@code requireBodyClear} (same HEADROOM fast path, same per-cell fallback) except each body cell is cleared
-     * via {@link EditScratch#requireAirToward}, so an ALREADY-OPEN door in the destination column that does not
-     * block the ENTRY edge (derived from the move's {@code (dx,dz)}) is passed FREE instead of mined. A closed
-     * door, or an open door blocking the entry edge, folds/fails exactly as {@code requireAir} would — byte
-     * identical for every non-open-door cell. Only Traverse calls this; the other movements keep the door-blind
-     * {@code requireBodyClear} (v1 scope: doors are a hallway-walk concern).
+     * The §4 uniform-high-ceiling arm for an UPPER body cell {@code d} over a floor of top {@code floorTopY}:
+     * {@code ceilingMinY(d) ≥ floorTopY − 3}. Admits a full-footprint collision band flush with the cell top
+     * (closed-TOP trapdoor 13/16, {@link NavBlock#SHAPE_SLAB_TOP top slab} 8/16) exactly when the body top
+     * ({@code floorTopY/16 + 1.8}) stays below its underside; everything else reports band 0 and never
+     * admits. Meaningful only for {@code floorTopY > 3} — at {@code t ≤ 3} the upper cell is not consulted at
+     * all (the exact-fit rule; callers gate before calling, and at {@code t ≤ 3} the 0-band would spuriously
+     * pass {@code 0 ≥ t−3}).
+     */
+    public boolean ceilingAdmits(long d, int floorTopY) {
+        return NavBlock.ceilingMinY(d) >= floorTopY - 3;
+    }
+
+    /**
+     * Ensure floor {@code (fx,fy,fz)}'s two body cells (feet + head) are clear for a walker, recording any
+     * needed breaks on {@code e}. Fast path: the HEADROOM bit {@link #headroomProves proves} ≥ WALK
+     * clearance in one grid read — no per-cell probes, no edits. Otherwise read the real cells under the §4
+     * residual rules (see the section comment above), folding breaks under {@code e}'s edit gate or
+     * invalidating where blocked. This historical signature assumes a FULL-block floor ({@code floorTopY =
+     * 16}) — door/plain-cell behavior is bit-identical to the pre-trapdoor form; callers that know the real
+     * floor top thread it via the overload below.
+     */
+    public void requireBodyClear(EditScratch e, int fx, int fy, int fz, int flags) {
+        requireBodyClear(e, fx, fy, fz, flags, 16);
+    }
+
+    /**
+     * {@link #requireBodyClear} with the node's real floor top {@code floorTopY} (sixteenths — the value the
+     * caller's rise math already holds) threaded in for the §4 exact-fit rules: the upper body cell is
+     * skipped entirely at {@code floorTopY ≤ 3}, and otherwise gains the {@link #ceilingAdmits uniform
+     * top-band} admit. Face-blind (the door-blind movements' form; the toward variant below is the crossing-
+     * aware one).
+     */
+    public void requireBodyClear(EditScratch e, int fx, int fy, int fz, int flags, int floorTopY) {
+        if (headroomProves(flags, fx, fy, fz, HEADROOM_WALK)) return;
+        e.requireBodyCell(fx, fy + 1, fz);
+        if (floorTopY > 3) e.requireUpperBody(fx, fy + 2, fz, floorTopY);
+    }
+
+    /**
+     * {@link #requireBodyClear} made OPENABLE-AWARE for a horizontal crossing (P1 doors; DESIGN-trapdoors.md
+     * §4–§5 trapdoors) — the variant the door-aware ground moves ({@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse} / {@code Ascend}) use. Identical to
+     * {@code requireBodyClear} (same HEADROOM fast path) except each body cell is cleared via the face-aware
+     * {@link EditScratch#requireAirToward} / {@link EditScratch#requireUpperBodyToward}, so an intact door not
+     * blocking the ENTRY edge (derived from the move's {@code (dx,dz)}) or an open trapdoor panel parallel to
+     * travel is passed FREE, and one blocking the crossed face folds its toggle SET. Byte-identical for every
+     * non-openable cell. This historical signature assumes a full-block floor ({@code floorTopY = 16}).
      */
     public void requireBodyClearToward(EditScratch e, int fx, int fy, int fz, int flags, int dx, int dz) {
+        requireBodyClearToward(e, fx, fy, fz, flags, dx, dz, 16);
+    }
+
+    /**
+     * {@link #requireBodyClearToward} with the destination floor's real top {@code floorTopY} threaded in
+     * (§4 exact-fit): the upper body cell is skipped at {@code floorTopY ≤ 3} (a plate/carpet floor under a
+     * 2-tall ceiling walks), and otherwise gains the {@link #ceilingAdmits} arm (slab floor under a top-slab
+     * ceiling walks; full floor under one still refuses). The call sites already hold the dest floor top for
+     * their rise gates — they pass the cell's plain {@code topY} (a stair's 16, conservative).
+     */
+    public void requireBodyClearToward(EditScratch e, int fx, int fy, int fz, int flags, int dx, int dz,
+                                       int floorTopY) {
         if (headroomProves(flags, fx, fy, fz, HEADROOM_WALK)) return;
         int entryEdge = ordinalOf(-dx, -dz); // the edge of the destination column the move crosses to enter
         e.requireAirToward(fx, fy + 1, fz, entryEdge);
-        e.requireAirToward(fx, fy + 2, fz, entryEdge);
+        if (floorTopY > 3) e.requireUpperBodyToward(fx, fy + 2, fz, entryEdge, floorTopY);
     }
 
     /**
@@ -1017,12 +1250,18 @@ public final class MovementContext {
 
     /**
      * Body-cell test along a climb column, on an already-read descriptor (read-once form): the bot's feet
-     * or head can occupy this cell while climbing — genuinely clear ({@link #passable}) <b>or</b> itself
-     * climbable (the ladder/vine holds the body). The one predicate that unifies the wall-shaped
-     * (ladder/scaffolding) and empty-shaped (vine) climbables.
+     * or head can occupy this cell while climbing — genuinely clear ({@link #passable}), an <b>OPEN
+     * trapdoor</b> ({@link #bodyPassable} — DESIGN-trapdoors.md §4/§6: a climb column is vertical occupancy
+     * and an open panel's cardinal blocked face is never a vertical crossing's, so climbing through an open
+     * hatch above a ladder shaft plans naturally where the ladder continues), <b>or</b> itself climbable
+     * (the ladder/vine holds the body). VERTICAL-column cells only: {@code Climb}'s two LATERAL head-cell
+     * consumers (grab/dismount) test face-aware instead ({@code passable || isClimbable ||}
+     * {@link #trapdoorEntryClear} — a panel across the lateral entry face refuses, per the §4 per-cell
+     * blocked-face rule). The one predicate that unifies the wall-shaped (ladder/scaffolding) and
+     * empty-shaped (vine) climbables.
      */
     public boolean passableOrClimbable(long d) {
-        return passable(d) || NavBlock.isClimbable(d);
+        return bodyPassable(d) || NavBlock.isClimbable(d);
     }
 
     /**

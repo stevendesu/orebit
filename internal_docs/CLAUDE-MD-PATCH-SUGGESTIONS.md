@@ -33,11 +33,15 @@ Ordered by importance.
   constants (from `internal_docs/parkour_envelope_params.py`; it superseded the hand-tuned envelope
   design docs, whose surviving core is now `NOTES-movement-physics.md` §1–§2).
 
-## 2. The DOORS thread is entirely missing
+## 2. The DOORS thread is entirely missing — **APPLIED 2026-08-09**
 - New config group `doors.toggle` (default true) → `BotCaps.mayToggleDoors`; `MovePlan` has
   `Need.OPEN` + `requireDoor(x,y,z,open)`; door-set edits ride the whole edit pipeline
   (`EditScratch`/`StepEdits`/`PathEdits`/`EditSnapshot` carry door arrays); `BotSteering.setDoorOpen`;
   `TraversalGrid` has an `anyDoor` prefilter. Add to the blockpathfinder + config bullets.
+- **APPLIED (trapdoor-arc doc pass, 2026-08-09):** the doors+trapdoors toggle-thread sentence now
+  lives in CLAUDE.md's blockpathfinder Repo-map entry (inside the `EditScratch`/`StepEdits` clause).
+  Caveat on the last clause: the `anyDoor` prefilter was since REMOVED by the trapdoor arc (measured
+  useless, DESIGN-trapdoors.md §8) — do not apply that part.
 
 ## 3. Persistence bullet is a full generation stale
 - CLAUDE.md: "`RegionPersistence` writes each dimension's level-0 leaves to `<world>/orebit/<dim>/hpa.bin`

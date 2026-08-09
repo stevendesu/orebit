@@ -33,6 +33,7 @@ import com.orebit.mod.worldmodel.pathing.NavStore;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
@@ -374,7 +375,7 @@ final class BotNavigator {
     /**
      * Whether cell {@code (x,y,z)} is one the CURRENT path's own steps up to the executing one PLACED —
      * the "plan knows its own scaffolding" membership test behind the reconcile's break-policy exemption
-     * (owner ruling 2026-07-30; the {@code MovePlan.isDoorCell} precedent of plan-carried cell knowledge
+     * (owner ruling 2026-07-30; the {@code MovePlan.isOpenableCell} precedent of plan-carried cell knowledge
      * queried before acting). The default {@code mining.protectedBlocks} list contains the conjured
      * bridge block (cobblestone), so the moment the plan places a scaffold cell, its OWN later step's
      * {@code Need.AIR} on that cell would be refused by {@code Config.mayBreak} without this vouch (the
@@ -1428,16 +1429,25 @@ final class BotNavigator {
                 // test (Need.AIR mines a cell only if the block blocks the corridor ALONG this route — a closed
                 // door across the path, not an open door along a side).
                 mp.moveDir(Integer.signum(wp.getX() - ffx), Integer.signum(wp.getZ() - ffz));
-                // DOORS P3: fold this step's door-set (SET_OPEN entering / SET_CLOSED on the exit double-toggle)
-                // into the plan as Need.OPEN reqs. A movement's cell-geometry plan(...) can't derive a door-open
-                // from floor coords alone, but the search already folded it onto the step's StepEdits — inject it
-                // here so the PhaseRunner opens/closes the door (and never mines it) as a converted move. Almost
-                // always empty; the loop is a no-op on the common step.
+                // DOORS P3 (+ trapdoors, DESIGN-trapdoors.md §7): fold this step's SET edits (SET_OPEN entering /
+                // SET_CLOSED on the exit double-toggle / the requireFloorOrToggle hatch folds) into the plan as
+                // Need.OPEN reqs. A movement's cell-geometry plan(...) can't derive an openable-state from floor
+                // coords alone, but the search already folded it onto the step's StepEdits — inject it here so
+                // the PhaseRunner toggles the openable (and never mines it) as a converted move. The KIND (door
+                // vs trapdoor — the runner's executor-verb dispatch) is resolved here, once, from the live block
+                // at the cell (the doors[] channel is kind-agnostic by design; the block kind of a cell never
+                // flips out from under a step — an external toggle changes OPEN, not the block). Almost always
+                // empty; the loop is a no-op on the common step.
                 StepEdits se = path.edits(waypointIndex);
                 if (se != null) {
                     for (int i = 0; i < se.doorSetCount(); i++) {
                         long c = se.doorSetAt(i);
-                        mp.requireDoor(BlockPos.getX(c), BlockPos.getY(c), BlockPos.getZ(c), se.doorSetOpenAt(i));
+                        final int ox = BlockPos.getX(c), oy = BlockPos.getY(c), oz = BlockPos.getZ(c);
+                        if (levelBlockAt(ox, oy, oz) instanceof TrapDoorBlock) {
+                            mp.requireTrapdoor(ox, oy, oz, se.doorSetOpenAt(i));
+                        } else {
+                            mp.requireDoor(ox, oy, oz, se.doorSetOpenAt(i));
+                        }
                     }
                     // CLUTCHES: same injection, same reason. The search decided not just THAT this drop is
                     // survivable but WHICH carried block makes it so — ClutchModel.best walks a preference
@@ -1695,6 +1705,26 @@ final class BotNavigator {
         }
     }
 
+    /**
+     * The bot is ABOUT to TOGGLE the openable (door/trapdoor) at {@code (x,y,z)} — announce the same-block
+     * state toggle so the plan's own prescribed SET is not read back as the world diverging from it
+     * ({@link PathPlan#expectOwnToggle} → {@code NavGridUpdater.expectToggle}; DESIGN-trapdoors.md §7 — this
+     * closes the doors gap where every own-toggle counted as a foreign change and cost one wasted re-search).
+     * Same call discipline as {@link #expectOwnEdit}: immediately before the mutation, verified against the
+     * plan's own folded SET cells.
+     */
+    void expectOwnToggle(int x, int y, int z) {
+        if (pathPlan != null) {
+            pathPlan.expectOwnToggle(x, y, z);
+        }
+    }
+
+    /** The live {@link Block} at world cell {@code (x,y,z)} — the cold injection-time kind read (door vs
+     *  trapdoor) for the openable-req dispatch above; step-begin rate, never per-tick or per-node. */
+    private Block levelBlockAt(int x, int y, int z) {
+        return ((ServerLevel) Worlds.of(bot)).getBlockState(new BlockPos(x, y, z)).getBlock();
+    }
+
     private void applyEdits(StepEdits edits) {
         ServerLevel level = (ServerLevel) Worlds.of(bot);
         Config cfg = ConfigLoader.config();
@@ -1741,17 +1771,25 @@ final class BotNavigator {
                 WorldEdits.placeBlock(level, p, bot.placeBlock()); // conjured, infinite supply
             }
         }
-        // Door-set (DOORS P3): open/close each folded (hand-toggleable) door — the "right-click" edit in place of
-        // smashing it. Re-validated on the LIVE door via doorOpenAt (NOT solidAt — an open door keeps a thin
-        // collision box), so an already-correct door is left alone (no redundant swing/sound). This path is for an
-        // UNCONVERTED (legacy steer) move that folds a door-set; today only Traverse folds one and it is converted
-        // (its door-set rides the PhaseRunner Need.OPEN path), so this loop is a defensive backstop for parity.
+        // SET edits (DOORS P3 + trapdoors §7): toggle each folded (hand-toggleable) openable — the "right-click"
+        // edit in place of smashing it. Re-validated on the LIVE block via doorOpenAt (NOT solidAt — an open
+        // door keeps a thin collision box, an open trapdoor its wall panel), so an already-correct openable is
+        // left alone (no redundant update). Dispatched to the matching verb by the live block's kind, and the
+        // own-toggle forgiveness is armed BEFORE the mutation exactly like the break/place loops above. This
+        // path is for an UNCONVERTED (legacy steer) move that folds a SET; every SET-folding move is converted
+        // today, so this loop is a defensive backstop for parity.
         for (int i = 0; i < edits.doorSetCount(); i++) {
             long c = edits.doorSetAt(i);
             int dx = BlockPos.getX(c), dy = BlockPos.getY(c), dz = BlockPos.getZ(c);
             boolean open = edits.doorSetOpenAt(i);
             if (bot.doorOpenAt(dx, dy, dz) != open) {
-                WorldEdits.setDoorOpen(level, new BlockPos(dx, dy, dz), bot, open);
+                BlockPos p = new BlockPos(dx, dy, dz);
+                expectOwnToggle(dx, dy, dz); // announce BEFORE: our own prescribed toggle
+                if (level.getBlockState(p).getBlock() instanceof TrapDoorBlock) {
+                    WorldEdits.setTrapdoorOpen(level, p, bot, open);
+                } else {
+                    WorldEdits.setDoorOpen(level, p, bot, open);
+                }
             }
         }
     }

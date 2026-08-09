@@ -24,6 +24,13 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  * this move folds no edits and does not change height — it emits only a cleanly-walkable diagonal. (A
  * diagonal that also breaks a corner or steps up/down one is a later refinement; this is the open-ground
  * speed primitive.)
+ *
+ * <p><b>Rise gate (owner-ratified bug fix, DESIGN-trapdoors.md §6).</b> Same-block-level is not
+ * automatically walkable: the lip between the two floors' REAL tops must fit the auto-step, exactly as
+ * {@link Traverse}'s flat gate — {@code rise(0, destTopY, startTopY) ≤ STEP_ASSIST_MAX_RISE}. Without it
+ * this move emitted physically unwalkable plate/carpet → full-block diagonals (a 13–15/16 lip no
+ * auto-step clears). Plain {@code topY} on both ends (no diagonal stair directionality — a bottom stair's
+ * 16 is the conservative reading); a negative lip (stepping DOWN onto a plate) passes as always.
  */
 public final class Diagonal implements Movement {
 
@@ -41,6 +48,10 @@ public final class Diagonal implements Movement {
     @Override
     public void candidates(MovementContext ctx, int x, int y, int z, CandidateSink out) {
         if (ctx.mode() != MovementContext.MODE_STANDING) return; // a ground walk — only while upright
+        // The START surface height (sixteenths) for the rise gate below — floorSurface's convention (a
+        // non-standable float node's floor reads 16), read once per expansion, cache-served.
+        final long startDesc = ctx.descriptorAt(x, y, z);
+        final int startTopY = ctx.standable(startDesc) ? ctx.topYOf(startDesc) : 16;
         for (int[] d : DIAGONALS) {
             int nx = x + d[0];
             int nz = z + d[1];
@@ -50,6 +61,13 @@ public final class Diagonal implements Movement {
             if (packed == MovementContext.UNBUILT) continue;
             long dstDesc = ctx.descriptorOf(nx, y, nz, packed);
             if (!ctx.standable(dstDesc)) continue;
+
+            // Rise gate (class doc; the ratified fix): the same-level lip between the two real floor tops
+            // must fit the auto-step — a plate/carpet → full-block diagonal (13–15/16) is unwalkable.
+            if (MovementContext.rise(0, ctx.topYOf(dstDesc), startTopY)
+                    > MovementContext.STEP_ASSIST_MAX_RISE) {
+                continue;
+            }
 
             // Destination body (feet + head) clear — fast-path via the resident HEADROOM bit, else read.
             int flags = MovementContext.flagsOf(packed);

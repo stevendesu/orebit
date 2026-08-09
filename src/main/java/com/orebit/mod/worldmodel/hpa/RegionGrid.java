@@ -370,8 +370,10 @@ public final class RegionGrid {
         final int lx = wx & 15, ly = (wy - minY) & 15, lz = wz & 15;
         final long d = com.orebit.mod.worldmodel.navblock.NavBlock.descriptor(
                 (short) column[ry].getNavtype(lx, ly, lz));
+        // floodPassable, not isPassable — this probe reports the exact seed test the flood mask uses
+        // (openable-as-air, DESIGN-trapdoors.md §8b), so the diagnostic can never contradict the flood.
         return "(" + lx + "," + ly + "," + lz + ")pass="
-                + com.orebit.mod.worldmodel.navblock.NavBlock.isPassable(d);
+                + com.orebit.mod.worldmodel.navblock.NavBlock.floodPassable(d);
     }
 
     /** As {@link #containedFragment(int, int, int, int, int, int, int)}, appending a per-step walk trace to
@@ -534,8 +536,10 @@ public final class RegionGrid {
         if (goalNav < 0) {
             return; // goal section not resident → caller falls back to nearest-centroid
         }
-        if (NavBlock.isPassable(NavBlock.descriptor((short) goalNav))) {
-            // Exposed goal: already in a pocket — seed that fragment at zero dig.
+        if (NavBlock.floodPassable(NavBlock.descriptor((short) goalNav))) {
+            // Exposed goal: already in a pocket — seed that fragment at zero dig. floodPassable keeps
+            // this aligned with the flood mask (openable-as-air, DESIGN-trapdoors.md §8b): a goal
+            // standing in a doorway/hatch cell resolves into the fragment that cell now belongs to.
             int f = slabFragment(s, gx, gy, gz);
             if (f >= 0) {
                 sink.accept(gx >> 4, (gy - minY) >> 4, gz >> 4, f, 0);
@@ -570,12 +574,15 @@ public final class RegionGrid {
                     continue; // unloaded / out of bounds — treat as an impassable wall
                 }
                 long desc = NavBlock.descriptor((short) nav);
-                if (NavBlock.isPassable(desc)) {
+                // floodPassable = the flood mask's own predicate (openable-as-air, §8b): an openable
+                // neighbour IS a pocket touch — the label slab has a fragment id for it — not a wall
+                // to dig through.
+                if (NavBlock.floodPassable(desc)) {
                     int f = slabFragment(s, nx, ny, nz);
                     if (f >= 0) {
                         sink.accept(nx >> 4, (ny - minY) >> 4, nz >> 4, f, d);
                     }
-                    continue; // don't dig into air
+                    continue; // don't dig into air (or an openable — it belongs to the pocket)
                 }
                 // Solid: dig on only if the block is breakable and we're within the dig budget.
                 if (NavBlock.isBreakable(desc) && d < cap) {

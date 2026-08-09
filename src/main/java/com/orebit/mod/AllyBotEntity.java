@@ -48,6 +48,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.BubbleColumnBlock;
 import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.util.Mth;
@@ -1268,7 +1269,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      * applies {@link Config#mayBreak} itself, like every other route executor (applyEdits/place, the
      * gather LOS-occluder dig, builder clears) — with ONE exemption: a cell the current path's own
      * executed prefix PLACED ({@link BotNavigator#planPlacedAt}). The plan knows its own scaffolding
-     * (the {@code isDoorCell} precedent): the default {@code mining.protectedBlocks} list contains the
+     * (the {@code isOpenableCell} precedent): the default {@code mining.protectedBlocks} list contains the
      * conjured bridge block, so without the vouch the plan's own later step would be refused its own
      * cobble (the six place→refuse pairs in the 2026-07-30 log). A refusal holds the phase; the refusal
      * log names it once per cell (the place-refusal idiom — {@code Debug.VERBOSE}-gated, so a production
@@ -1672,22 +1673,39 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     /** Open/close the door at {@code (x,y,z)} server-side (DOORS P3) — the "right-click the door" reconcile
      *  action, routed to {@link WorldEdits#setDoorOpen} (authoritative, both-halves sync, iron/non-door no-op).
      *  Cosmetically faces the door (like {@link #place} looks at its footing) but never swings — operating a
-     *  door is not a hand attack. */
+     *  door is not a hand attack. Announces the toggle BEFORE it lands ({@link BotNavigator#expectOwnToggle} —
+     *  the own-edit forgiveness the break/place actuators already have; DESIGN-trapdoors.md §7 closes the
+     *  doors gap too), so the plan's own prescribed toggle is not read back as the world diverging from it. */
     @Override
     public void setDoorOpen(int x, int y, int z, boolean open) {
         lookAtCell(x, y, z); // cosmetic — face the door we operate; no swing
+        navigator.expectOwnToggle(x, y, z); // announce BEFORE: our own prescribed door toggle
         WorldEdits.setDoorOpen((ServerLevel) Worlds.of(this), new BlockPos(x, y, z), this, open);
     }
 
-    /** Live OPEN-property readback for the door at {@code (x,y,z)} (see {@link BotSteering#doorOpenAt}) — reads
-     *  {@code DoorBlock.OPEN}, NOT collision ({@link #solidAt}), because an open door still has a thin collision
-     *  box; {@code false} for a non-door cell. The door executor's gate + verify-readback. */
+    /** Open/close the trapdoor at {@code (x,y,z)} server-side (DESIGN-trapdoors.md §7) — the trapdoor twin of
+     *  {@link #setDoorOpen}, routed to {@link WorldEdits#setTrapdoorOpen} (authoritative single-cell property
+     *  write, iron/non-trapdoor no-op). Same discipline: cosmetic face, no swing, own-toggle announced before
+     *  the mutation lands. */
+    @Override
+    public void setTrapdoorOpen(int x, int y, int z, boolean open) {
+        lookAtCell(x, y, z); // cosmetic — face the hatch we operate; no swing
+        navigator.expectOwnToggle(x, y, z); // announce BEFORE: our own prescribed trapdoor toggle
+        WorldEdits.setTrapdoorOpen((ServerLevel) Worlds.of(this), new BlockPos(x, y, z), this, open);
+    }
+
+    /** Live OPEN-property readback for the openable at {@code (x,y,z)} (see {@link BotSteering#doorOpenAt}) —
+     *  reads the shared {@code BlockStateProperties.OPEN} of a door OR trapdoor (the door-family widening,
+     *  DESIGN-trapdoors.md §7), NOT collision ({@link #solidAt}): an open door still has a thin collision box
+     *  and an open trapdoor its wall panel. {@code false} for a non-openable cell. The SET executor's gate +
+     *  verify-readback. */
     @Override
     public boolean doorOpenAt(int x, int y, int z) {
         ServerLevel level = (ServerLevel) Worlds.of(this);
         scratchPos.set(x, y, z);
         BlockState s = level.getBlockState(scratchPos);
-        return s.getBlock() instanceof DoorBlock && s.getValue(BlockStateProperties.OPEN);
+        return (s.getBlock() instanceof DoorBlock || s.getBlock() instanceof TrapDoorBlock)
+                && s.getValue(BlockStateProperties.OPEN);
     }
 
     // ---- Survival gating (the bot runs the full vanilla player tick via doTick — see tick()) ----------

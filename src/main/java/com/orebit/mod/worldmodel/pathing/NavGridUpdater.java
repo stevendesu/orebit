@@ -9,7 +9,11 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.DoubleBlockHalf;
 
 /**
  * Keeps the nav grid live as the world changes — the block-update hook that retires the follower's
@@ -240,6 +244,76 @@ public final class NavGridUpdater {
         return expectAir == newState.isAir();
     }
 
+    // ---- The one-shot STATE-TOGGLE expectation the follower arms before an openable toggle ------------
+    //
+    // The break/place slot above matches a DIRECTION (cell becomes air / becomes filled); a door or trapdoor
+    // toggle is neither — the SAME Block changes state in place. This is its own slot with its own match rule
+    // (pos-matched, oldState != newState, same Block — DESIGN-trapdoors.md §7), because widening the
+    // direction slot to "or any state change" would forgive mutations the plan never predicted. A door's
+    // vanilla setOpen mutates TWO cells (the clicked half plus the updateShape-synced other half), so the
+    // slot carries up to two cells — the armed cell and, for a door, its derived other half — each consumed
+    // AT MOST ONCE (the one-shot discipline, per cell). Arming overwrites the whole slot, exactly like
+    // expectChange: a leftover cell can only mean the predicted change never fired, and the stale expectation
+    // is dropped rather than left lying in wait.
+    private static ServerLevel toggleLevel;
+    private static long togglePosA, togglePosB;
+    private static boolean toggleArmedA, toggleArmedB;
+
+    /**
+     * Announce that the follower is about to TOGGLE the openable at {@code pos} — a same-block state change
+     * (OPEN flip), not a break/place. The very next matching change at each covered cell is classified as
+     * EXPECTED and does not move {@link #foreignVersion}; everything else does. For a <b>door</b> the slot
+     * also covers the door's OTHER half (derived here from the pre-toggle state's {@code DoubleBlockHalf} —
+     * vanilla's {@code setOpen} syncs it via {@code updateShape} in the same synchronous {@code setBlock}
+     * cascade, so both halves' changes are the one prescribed toggle); a trapdoor is single-cell. Matching is
+     * exact per cell: position, {@code oldState != newState}, and {@code oldState.getBlock() ==
+     * newState.getBlock()} — so a door being BROKEN (block changes) or a vine growing there is never forgiven.
+     *
+     * <p>Same caller contract as {@link #expectChange}: armed immediately before the mutation, server thread,
+     * only for a toggle the CURRENT PLAN prescribed ({@code PathPlan.expectOwnToggle} does the check).
+     */
+    public static void expectToggle(ServerLevel level, BlockPos pos) {
+        toggleLevel = level;
+        togglePosA = pos.asLong();
+        toggleArmedA = true;
+        toggleArmedB = false;
+        final BlockState state = level.getBlockState(pos);
+        if (state.getBlock() instanceof DoorBlock
+                && state.hasProperty(BlockStateProperties.DOUBLE_BLOCK_HALF)) {
+            final boolean lower =
+                    state.getValue(BlockStateProperties.DOUBLE_BLOCK_HALF) == DoubleBlockHalf.LOWER;
+            togglePosB = (lower ? pos.above() : pos.below()).asLong();
+            toggleArmedB = true;
+        }
+    }
+
+    /** Whether {@code (pos, oldState → newState)} is (half of) the toggle the follower just announced — and
+     *  consume that cell's one-shot. A pos match spends the cell either way (like {@link #consumeExpected}'s
+     *  direction check); forgiveness additionally requires a same-Block state change. */
+    private static boolean consumeExpectedToggle(ServerLevel level, BlockPos pos,
+                                                 BlockState oldState, BlockState newState) {
+        if ((!toggleArmedA && !toggleArmedB) || toggleLevel != level) {
+            return false;
+        }
+        final long p = pos.asLong();
+        if (toggleArmedA && p == togglePosA) {
+            toggleArmedA = false;
+        } else if (toggleArmedB && p == togglePosB) {
+            toggleArmedB = false;
+        } else {
+            return false;
+        }
+        // Forgiveness requires a genuine OPENABLE state flip: same block, different state, AND the block is
+        // a door/trapdoor. The instanceof guards the dangling-arm case — the executor verbs no-op on a
+        // stale-grid cell that no longer holds an openable, leaving this one-shot armed; without the kind
+        // check it would forgive ONE later same-block state change of whatever occupies the cell (a
+        // comparator, an observer), suppressing a legitimate foreignVersion bump. (A dangling arm over a
+        // REAL door can still forgive one genuine foreign toggle there — known, narrow; the grid patch
+        // itself still lands either way.)
+        return oldState != newState && oldState.getBlock() == newState.getBlock()
+                && (oldState.getBlock() instanceof DoorBlock || oldState.getBlock() instanceof TrapDoorBlock);
+    }
+
     /** Register the nav-grid patcher against the block-change seam (once, at init). */
     public static void register() {
         BlockChangeEvents.register(NavGridUpdater::onBlockChanged);
@@ -283,9 +357,11 @@ public final class NavGridUpdater {
         // leaving "a vine grew" and "a redstone clock is running" indistinguishable (see ChunkChange).
         recordChange(server, pos, oldState, newState);
         // Classify it. Only a change the follower did NOT announce moves the foreign version — the counter a
-        // plan actually snapshots. This is the whole own-edit gate: our own prescribed break/place is the
-        // plan executing, not the world diverging from it (see FOREIGN_VERSION).
-        if (!consumeExpected(server, pos, newState)) {
+        // plan actually snapshots. This is the whole own-edit gate: our own prescribed break/place — or
+        // prescribed door/trapdoor TOGGLE (the state-toggle slot) — is the plan executing, not the world
+        // diverging from it (see FOREIGN_VERSION).
+        if (!consumeExpected(server, pos, newState)
+                && !consumeExpectedToggle(server, pos, oldState, newState)) {
             FOREIGN_VERSION.computeIfAbsent(server, l -> new java.util.HashMap<>())
                     .computeIfAbsent(NavStore.key(pos.getX() >> 4, pos.getZ() >> 4), k -> new int[1])[0]++;
         }

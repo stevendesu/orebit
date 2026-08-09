@@ -285,5 +285,12 @@ public final class OrebitCommon {
         // gives up honestly on the sealed goal (navGaveUp + boxedInProven) and reaches the open goal. Same
         // inert-unless-armed discipline (-Dorebit.boxedin); registered last.
         BoxedInCourse.register(events);
+
+        // Headless TRAPDOOR-ARC diagnostic (the :fabric:<ver>:runTrapdoor run config): boxed 1-wide corridors
+        // whose only route runs through a trapdoor (open-to-progress, close-to-progress, the flush pocket,
+        // the MineDown hatch-drop, close-then-parkour, the §9-3b sandwich needle, and an external mid-crossing
+        // re-flip) — the live follower proof of DESIGN-trapdoors.md §9. Same inert-unless-armed discipline
+        // (-Dorebit.trapdoor).
+        TrapdoorCourse.register(events);
     }
 }

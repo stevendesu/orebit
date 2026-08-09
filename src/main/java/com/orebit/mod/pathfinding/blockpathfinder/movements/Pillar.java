@@ -31,6 +31,16 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  * repeated Pillar chains upward). The takeoff needs the new head cell ({@code y+3}) clear; the new feet
  * cell ({@code y+2}) is the old head, already clear because any search node has verified body clearance.
  *
+ * <p><b>Trapdoors (DESIGN-trapdoors.md §5).</b> The overhead clearance cells ride {@link
+ * EditScratch#requireAirVertical}: an OPEN hatch's wall panel passes free (§4 — clear for the 0.6 shaft),
+ * and a toggleable CLOSED hatch (either half — a closed plate's blocked face is always vertical) folds a
+ * {@code SET_OPEN} instead of a break, so a bot pillars up through its own hatch. The SET rides the
+ * step's edits, so later pops in the chain read the toggled state through the path diff (pillar pops
+ * stand on their own edits). The per-level column footing stays plain {@code requireFloor} — a
+ * toggled-closed plate ({@code topY 3}) could never re-launch the next step (the full-height start gate),
+ * so it is deliberately not offered as pillar footing. Start gate unchanged: pillaring off a 3/16 plate
+ * stays refused.
+ *
  * <p><b>Caps.</b> Requires {@link BotCaps#canPlace} (it places the footing) and {@code jumpHeight ≥ 1};
  * a walk-only bot emits nothing here, exactly as before. Also requires a <b>full-height start floor</b>
  * ({@code topY == 16}): the placed footing's top sits {@code 32 − startTopY} sixteenths above the start
@@ -114,8 +124,12 @@ public final class Pillar implements Movement {
             EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
             // Place the footing, supported by the floor below (the bot's current floor — solid by invariant).
             e.requireFloor(x, ny, z);
-            // Takeoff head-clearance: the new head cell must be clear (break-fold if the bot may break).
-            e.requireAir(x, y + 3, z);
+            // Takeoff head-clearance: the new head cell must be clear — air, an OPEN hatch's wall panel, or
+            // a toggleable CLOSED hatch swung open with a folded SET_OPEN (DESIGN-trapdoors.md §5: the
+            // opened panel hugs a wall, clear for the 0.6 shaft; either half — its blocked face is always
+            // vertical). Break-fold otherwise, exactly as before. The SET rides this step's edits, so the
+            // NEXT pillar pop stands on its own toggled state (pillar pops stand on their own edits).
+            e.requireAirVertical(x, y + 3, z);
             if (e.valid()) out.accept(x, ny, z, COST + e.extraCost(), e);
             return;
         }
@@ -159,8 +173,8 @@ public final class Pillar implements Movement {
         // certified and may be solid. So check both explicitly (break-fold if the bot may break). For J==1
         // the feet cell y+2 is the old head, already clear by the node body-clearance invariant, so this
         // requireAir folds nothing → byte-for-byte parity with the micro head-only check.
-        e.requireAir(x, y + j + 1, z); // feet at landing (new cell for J>1; old head for J==1)
-        e.requireAir(x, y + j + 2, z); // head at landing
+        e.requireAirVertical(x, y + j + 1, z); // feet at landing (new cell for J>1; old head for J==1)
+        e.requireAirVertical(x, y + j + 2, z); // head at landing (a capping hatch is toggled open — §5)
         if (!e.valid()) {
             // The full-J landing pokes into a non-uniform ceiling. Don't drop the move (that would forbid
             // even a 1-step pillar and break vertical reachability) — fall back to the micro single step,
@@ -168,7 +182,7 @@ public final class Pillar implements Movement {
             // itself blocked, exactly as the micro move would).
             e = ctx.edits().reset(!MovementContext.risksEdit(flags));
             e.requireFloor(x, ny, z);
-            e.requireAir(x, y + 3, z);
+            e.requireAirVertical(x, y + 3, z);
             if (e.valid()) out.accept(x, ny, z, COST + e.extraCost(), e);
             return;
         }

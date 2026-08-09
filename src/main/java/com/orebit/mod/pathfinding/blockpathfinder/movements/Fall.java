@@ -101,8 +101,11 @@ import com.orebit.mod.worldmodel.pathing.TraversalGrid;
  * </ul>
  *
  * <p>The landing must be {@link MovementContext#standable} (so it never "lands" in lava/cactus — those
- * aren't standable) and the whole drop column, plus the step-off transit, must be {@link
- * MovementContext#passable}. The highest reachable landing wins (shortest, safest drop). Fall folds no edits
+ * aren't standable) and the whole drop column, plus the step-off transit, must be clear: the drop column
+ * rides {@link MovementContext#bodyPassable} (passable, or an OPEN trapdoor — the §4 face-blind occupancy,
+ * exact for a vertical drop whose crossed faces are never a panel's cardinal blocked face; closed trapdoors
+ * stay standable landings), the step-off body the stricter {@link MovementContext#passable} (a lateral
+ * crossing, kept conservative in v1). The highest reachable landing wins (shortest, safest drop). Fall folds no edits
  * on any landing the TERRAIN alone makes survivable (you can't usefully break/place mid-drop), so it never
  * consults {@code RISKY_EDIT}; the single clutch place above is the one exception. Every cell the
  * drop transits (the step-off body and the whole column down to the landing feet/head) is additionally
@@ -512,14 +515,18 @@ public final class Fall implements Movement {
             long cd = ctx.descriptorAt(nx, k, nz);
             // A fall column may contain WATER. {@code passable} is the WALK-clearance predicate and
             // deliberately excludes fluids, but a falling bot enters water freely — and rejecting it here is
-            // precisely what made every water landing unreachable before the cushion arc. Lava and bubble
-            // columns remain blockers (neither is {@code passable} nor {@code water}). {@link #tryHang}'s own
-            // span walk is deliberately NOT relaxed: a climbable arrest INSIDE water is unverified physics
+            // precisely what made every water landing unreachable before the cushion arc. It may also contain
+            // an OPEN TRAPDOOR ({@code bodyPassable} = passable-or-open-trapdoor, DESIGN-trapdoors.md §4/§6):
+            // the wall-hugging 3/16 panel coexists with the centred 0.6 body, and its cardinal blocked face
+            // is never a vertical drop's, so falling THROUGH an open hatch is exact face-blind occupancy
+            // (CLOSED trapdoors stay standable LANDINGS, found by the scans, never admitted here). Lava and
+            // bubble columns remain blockers (none is body-passable nor {@code water}). {@link #tryHang}'s
+            // own span walk is deliberately NOT relaxed: a climbable arrest INSIDE water is unverified physics
             // (buoyancy vs the −0.15 clamp), so such a column emits nothing rather than a guessed candidate.
             // Reachable via WATERLOGGED ladders/scaffolding only — both implement SimpleWaterloggedBlock and
             // have empty collision, so they read as climbable AND swimmable. Vines cannot (VineBlock is not
             // waterloggable), so the common vine-curtain column is unaffected by that restriction.
-            if (!ctx.passable(cd) && !ctx.water(cd)) return;
+            if (!ctx.bodyPassable(cd) && !ctx.water(cd)) return;
             if (ctx.isClimbable(cd)) climbTop = k;
             transit += ctx.cellTransitCost(cd);
         }

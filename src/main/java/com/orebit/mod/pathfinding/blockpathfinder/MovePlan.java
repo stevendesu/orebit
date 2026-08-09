@@ -40,12 +40,14 @@ public final class MovePlan {
         /** The cell must be solid footing — the runner places a block there while it is missing. */
         FOOTING,
         /**
-         * The (hand-toggleable) door at the cell must reach a target OPEN state (DOORS P3) — the runner
-         * {@link BotSteering#setDoorOpen}s it (instant, place-like) while the live door
-         * ({@link BotSteering#doorOpenAt}, <b>not</b> {@code solidAt} — an open door still has collision) does
-         * not read that state. The target ({@code open}) rides on the {@link Req}. Carried at plan level (not
-         * inside a phase) because a door-open is a precondition of the WHOLE crossing, established before any
-         * phase drives — see {@link #requireDoor} and {@link PhaseRunner}.
+         * The (hand-toggleable) openable — door OR trapdoor — at the cell must reach a target OPEN state
+         * (DOORS P3; trapdoors DESIGN-trapdoors.md §7) — the runner {@link BotSteering#setDoorOpen}s /
+         * {@link BotSteering#setTrapdoorOpen}s it (instant, place-like; the {@link Req} carries which kind)
+         * while the live openable ({@link BotSteering#doorOpenAt}, <b>not</b> {@code solidAt} — an open door
+         * still has collision, an open trapdoor its wall panel) does not read that state. The target
+         * ({@code open}) rides on the {@link Req}. Carried at plan level (not inside a phase) because an
+         * openable-state is a precondition of the WHOLE crossing, established before any phase drives — see
+         * {@link #requireDoor}/{@link #requireTrapdoor} and {@link PhaseRunner}.
          */
         OPEN
     }
@@ -56,7 +58,8 @@ public final class MovePlan {
     /** The step's horizontal movement direction (signum), for the runner's direction-aware body-obstruction test
      *  ({@link BotSteering#movementBlockedAt}). {@code (0,0)} (the default) = a vertical/undirected move. */
     private int moveDx, moveDz;
-    /** Plan-level door {@link Need#OPEN} reqs (DOORS P3); almost always empty (a door crossing is rare). */
+    /** Plan-level openable {@link Need#OPEN} reqs — doors AND trapdoors (DOORS P3; DESIGN-trapdoors.md §7);
+     *  almost always empty (an openable crossing is rare). */
     private final List<Req> doorReqs = new ArrayList<>(0);
     /**
      * The plan-level CLUTCH: the {@link ClutchModel} kind to place into the landing cell mid-drop, and the
@@ -123,10 +126,25 @@ public final class MovePlan {
      * live-world fact a movement's cell-geometry {@code plan(...)} cannot derive on its own. The runner opens
      * all door reqs (via {@link BotSteering#setDoorOpen}) as a pre-pass each tick and re-validates them with
      * {@link BotSteering#doorOpenAt}; a cell governed by a door req is never mined by a {@link Need#AIR} on the
-     * same cell ({@link #isDoorCell}). Returns {@code this} for fluent use.
+     * same cell ({@link #isOpenableCell}). Returns {@code this} for fluent use.
      */
     public MovePlan requireDoor(int x, int y, int z, boolean open) {
-        doorReqs.add(new Req(Need.OPEN, x, y, z, open));
+        doorReqs.add(new Req(Need.OPEN, x, y, z, open, false));
+        return this;
+    }
+
+    /**
+     * Require the <b>trapdoor</b> at cell {@code (x,y,z)} reach {@code open} before the crossing drives
+     * (DESIGN-trapdoors.md §7) — the trapdoor twin of {@link #requireDoor}, riding the same plan-level
+     * {@link Need#OPEN} list (re-validated per tick via the shared {@link BotSteering#doorOpenAt} read, never
+     * mined — {@link #isOpenableCell}). The kind flag is what the runner dispatches the executor verb on
+     * ({@link BotSteering#setTrapdoorOpen} vs {@link BotSteering#setDoorOpen}); it is resolved ONCE at
+     * injection by {@link com.orebit.mod.BotNavigator} from the live block at the folded SET's cell — the
+     * kind of a cell never flips out from under a step (an external toggle changes OPEN, not the block).
+     * Returns {@code this} for fluent use.
+     */
+    public MovePlan requireTrapdoor(int x, int y, int z, boolean open) {
+        doorReqs.add(new Req(Need.OPEN, x, y, z, open, true));
         return this;
     }
 
@@ -194,9 +212,10 @@ public final class MovePlan {
     int moveDz() { return moveDz; }
     List<Req> doorReqs() { return doorReqs; }
 
-    /** Whether cell {@code (x,y,z)} is governed by a door {@link Need#OPEN} (so a {@code Need.AIR} must NOT mine
-     *  it — the door is opened/closed by hand, never smashed). Linear over the tiny door list (usually empty). */
-    boolean isDoorCell(int x, int y, int z) {
+    /** Whether cell {@code (x,y,z)} is governed by an openable {@link Need#OPEN} — door or trapdoor — (so a
+     *  {@code Need.AIR} must NOT mine it: a SET-governed cell is opened/closed by hand, never smashed).
+     *  Linear over the tiny openable list (usually empty). */
+    boolean isOpenableCell(int x, int y, int z) {
         for (int i = 0; i < doorReqs.size(); i++) {
             Req r = doorReqs.get(i);
             if (r.x == x && r.y == y && r.z == z) return true;
@@ -293,15 +312,18 @@ public final class MovePlan {
         }
     }
 
-    /** One geometry requirement: a {@link Need} at a world cell. {@code open} is the target door state, used
-     *  only by {@link Need#OPEN} (true for AIR/FOOTING, where it is inert). */
+    /** One geometry requirement: a {@link Need} at a world cell. {@code open} is the target openable state and
+     *  {@code trapdoor} the openable KIND (trapdoor vs door — the runner's executor-verb dispatch); both are
+     *  used only by {@link Need#OPEN} ({@code open} true / {@code trapdoor} false for AIR/FOOTING, where they
+     *  are inert). */
     static final class Req {
         final Need kind;
         final int x, y, z;
         final boolean open;
-        Req(Need kind, int x, int y, int z) { this(kind, x, y, z, true); }
-        Req(Need kind, int x, int y, int z, boolean open) {
-            this.kind = kind; this.x = x; this.y = y; this.z = z; this.open = open;
+        final boolean trapdoor;
+        Req(Need kind, int x, int y, int z) { this(kind, x, y, z, true, false); }
+        Req(Need kind, int x, int y, int z, boolean open, boolean trapdoor) {
+            this.kind = kind; this.x = x; this.y = y; this.z = z; this.open = open; this.trapdoor = trapdoor;
         }
     }
 }
