@@ -137,7 +137,11 @@ Protection stops the bot **breaking** a block, not **using** it: a protected woo
 opened and closed to walk through (a non-destructive action) — only iron doors, which can't be hand-operated,
 get routed around. **Trapdoors work the same way**: protected from breaking by default, but a hand-toggleable
 trapdoor is still operated — opened to drop through or clear headroom, closed to stand on — under the same
-`doors.toggle` capability, while iron trapdoors (redstone-only) are routed around. And protecting a block
+`doors.toggle` capability, while iron trapdoors (redstone-only) are routed around. **So do fence gates**:
+protected from breaking by default, but every gate is hand-operable (there is no iron gate), so a closed gate
+is simply opened to walk through under the same `doors.toggle` capability — and if you turn that capability
+off, a closed protected gate can be neither opened nor broken, making it a solid wall the bot routes
+around. And protecting a block
 never stops it being a deliberate *target*: `/bot mine iron` still
 works even though ores can appear in a protected list, because protection only governs breaking blocks *to
 clear a path*.

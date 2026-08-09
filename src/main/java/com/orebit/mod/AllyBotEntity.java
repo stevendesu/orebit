@@ -48,6 +48,7 @@ import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.BubbleColumnBlock;
 import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
@@ -1694,17 +1695,31 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         WorldEdits.setTrapdoorOpen((ServerLevel) Worlds.of(this), new BlockPos(x, y, z), this, open);
     }
 
+    /** Open/close the fence gate at {@code (x,y,z)} server-side (DESIGN-fence-gates.md §4) — the gate member
+     *  of the {@link #setDoorOpen}/{@link #setTrapdoorOpen} verb family, routed to {@link
+     *  WorldEdits#setGateOpen} (authoritative single-cell property write, non-gate no-op — no iron refusal,
+     *  since no iron gate exists). Same discipline: cosmetic face, no swing, own-toggle announced before the
+     *  mutation lands. */
+    @Override
+    public void setGateOpen(int x, int y, int z, boolean open) {
+        lookAtCell(x, y, z); // cosmetic — face the gate we operate; no swing
+        navigator.expectOwnToggle(x, y, z); // announce BEFORE: our own prescribed gate toggle
+        WorldEdits.setGateOpen((ServerLevel) Worlds.of(this), new BlockPos(x, y, z), this, open);
+    }
+
     /** Live OPEN-property readback for the openable at {@code (x,y,z)} (see {@link BotSteering#doorOpenAt}) —
-     *  reads the shared {@code BlockStateProperties.OPEN} of a door OR trapdoor (the door-family widening,
-     *  DESIGN-trapdoors.md §7), NOT collision ({@link #solidAt}): an open door still has a thin collision box
-     *  and an open trapdoor its wall panel. {@code false} for a non-openable cell. The SET executor's gate +
-     *  verify-readback. */
+     *  reads the shared {@code BlockStateProperties.OPEN} of a door, trapdoor OR fence gate (the door-family
+     *  widening, DESIGN-trapdoors.md §7 / DESIGN-fence-gates.md §4), NOT collision ({@link #solidAt}): an
+     *  open door still has a thin collision box and an open trapdoor its wall panel. {@code false} for a
+     *  non-openable cell. The SET executor's gate + verify-readback — without the gate arm a gate
+     *  {@code Need.OPEN} could never observe "open" and the runner would re-issue the toggle forever. */
     @Override
     public boolean doorOpenAt(int x, int y, int z) {
         ServerLevel level = (ServerLevel) Worlds.of(this);
         scratchPos.set(x, y, z);
         BlockState s = level.getBlockState(scratchPos);
-        return (s.getBlock() instanceof DoorBlock || s.getBlock() instanceof TrapDoorBlock)
+        return (s.getBlock() instanceof DoorBlock || s.getBlock() instanceof TrapDoorBlock
+                || s.getBlock() instanceof FenceGateBlock)
                 && s.getValue(BlockStateProperties.OPEN);
     }
 

@@ -12,10 +12,13 @@ LANDED (`RegionPathPlan.splice` + the `HierarchicalRegionPlan.Verdict` three-way
 
 ## worldmodel/navblock — block-state interning
 Classifies every `BlockState` (~28k) at static init into a few hundred behavioral navtypes: a `short`
-index into a packed 64-bit `long` descriptor table (topY, shape, stair/door facing+half+hinge, fluid,
+index into a packed 64-bit `long` descriptor table (topY, shape, stair/door/trapdoor facing+half+hinge
+(gate FACING deliberately unpacked), fluid,
 surface, climbable, gravity, damaging, replaceable, hardness, tool, waterloggable, transit-slow
-(41–42), PORTAL (11) / NETHER_PORTAL (12), DOOR_OPEN (43), PROTECTED (44), REDUCED_JUMP/honey (45),
-bubble-column + drag dir (46–47), fall-soft class (48–49), DOOR_TOGGLEABLE (50), NARROW_TOP (51),
+(41–42), PORTAL (11) / NETHER_PORTAL (12), shared openable OPEN (43 — door/trapdoor/fence-gate),
+PROTECTED (44), REDUCED_JUMP/honey (45),
+bubble-column + drag dir (46–47), fall-soft class (48–49), HAND_TOGGLEABLE (50 — non-iron
+doors/trapdoors + ALL fence gates), NARROW_TOP (51),
 derived STANDABLE (37)/BREAKABLE (38)/OPEN_PLACE (39)/COLLISION (40)). The 2-bit transit-slow field
 now carries FOUR classes: `TRANSIT_NONE`, `TRANSIT_LIGHT` (~0.75×, berry bush / powder snow),
 `TRANSIT_HEAVY` (~0.05×, cobweb) and **`TRANSIT_FLUID`** (~0.4×, **LAVA** — the reciprocal of
@@ -110,7 +113,13 @@ DOORS thread rides the whole edit pipeline). **Trapdoors ride the same machinery
 shared-bit classification (facing/half/open/toggleable on the door/stair bits, kind = `openable`), a 6-way
 blocked-FACE model, generalized residual clearance, TOGGLE-FOR-CLEARANCE SET folds (grow-on-demand doors
 buffer), MineDown/Pillar toggle arms + Ascend's same-level jump arm + Diagonal's rise gate — arms only,
-NO new movement classes; live-verified 7/7 by the `TrapdoorCourse` harness. `BotCaps` = capability record (jump/fall/damage/break/
+NO new movement classes; live-verified 7/7 by the `TrapdoorCourse` harness. **Fence gates ride it too**
+(DESIGN-fence-gates.md): the third `openable` kind — open/hand-toggleable on the shared bits 43/50,
+FACING deliberately unpacked; closed gate = whole-cell blocker (topY 24 + NARROW_TOP), open gate = pure
+air; face-agnostic `SET_OPEN` fold via `MovementContext.gateSetClears` in
+`requireAirToward`/`requireUpperBodyToward` — no new movement classes AND no per-movement edits;
+executor verb `BotSteering.setGateOpen` → `WorldEdits.setGateOpen` (setBlock-only — `FenceGateBlock`
+has no vanilla `setOpen`); `GateCourse` harness in flight, live run pending. `BotCaps` = capability record (jump/fall/damage/break/
 place/`mayToggleDoors`, plus the SEARCH knobs `maxNodes`/`greedyWeight`/`boxedInScanRadius` — knobs,
 not movement caps, and deliberately excluded from the sig) + **`realizabilitySig()`/`sigDominates`** — the packed
 caps+tool-tier signature that keys invalidation-memory rows (DESIGN-persisted-invalidation-memory.md
@@ -184,10 +193,10 @@ as a cache (corrupt → rebuilt from live). **Format is .mca-style SHARDED, unco
 per-dim `hpa.bin`/`res.bin` gzip blobs are dead — ignored on disk): per dimension dir
 `<world>/orebit/<dim>/` holds `hpa.<X>.<Z>.bin` (cost levels 0–5 per level-5 shard = 32×32 chunks,
 magic OBHS), `hpa.coarse.bin` (level 6, OBHC), `res.<X>.<Z>.bin` (OBRS), `res.coarse.bin` (levels
-6–21, OBRC). `CostPyramidCodec` (file `VERSION = 1` — reset from 7 on the 2026-07 `packLevelKey`
-repack; disk is a cache, a mismatch just rebuilds) / `ResourcePyramidCodec` (`VERSION = 2`)
-encode/decode; the cost files carry the **invalidation section**
-(`INVAL_SIG_SCHEMA_VERSION = 1`, likewise reset): sig-tagged 24-byte `{fromKey,toKey,capsSig}`
+6–21, OBRC). `CostPyramidCodec` (file `VERSION = 2` — reset to 1 from 7 on the 2026-07 `packLevelKey`
+repack, re-bumped v2 by the trapdoor arc; disk is a cache, a mismatch just rebuilds) /
+`ResourcePyramidCodec` (`VERSION = 2`) encode/decode; the cost files carry the **invalidation section**
+(`INVAL_SIG_SCHEMA_VERSION = 4` — reset to 1, then v2 `mayFall` / v3 trapdoors / v4 fence gates): sig-tagged 24-byte `{fromKey,toKey,capsSig}`
 rows bucketed assign-to-FROM, merged into `RegionCrossingMemory` on load. `RegionPersistence` = the
 driver: eager `loadAll` at SERVER_STARTED (or `loadCoarseOnly` when `hpa.lazyLoad` — decode coarse
 only + build the persisted-shard index), authoritative `flushAll` at SERVER_STOPPING, budgeted dirty
@@ -245,16 +254,16 @@ NONE/RETRY/RESULT), **`SkeletonDump`** (cold diagnostics formatter behind `descr
 `AllyBotEntity extends FakePlayerEntity implements BotSteering` (~1350 lines) — the ORCHESTRATOR:
 entity identity, full vanilla player tick (forge inputs → `super.tick()` → `doTick()` →
 `MoveReport.after()`), runtime survival gating (invuln/air/hunger per config), mode dispatch
-`Mode {FOLLOW, STAY, COME, GATHER, CRAFT, FARM, BUILD}`, the `BotSteering` seam (incl. `setDoorOpen`
-and the strafe input), and the `/bot trace`/`rtrace` one-shots. Behavior lives on components it
+`Mode {FOLLOW, STAY, COME, GATHER, CRAFT, FARM, BUILD}`, the `BotSteering` seam (incl.
+`setDoorOpen`/`setTrapdoorOpen`/`setGateOpen` and the strafe input), and the `/bot trace`/`rtrace` one-shots. Behavior lives on components it
 constructs and ticks:
 - **`BotNavigator`** — the two-tier drive/follow: `driveToward` (arrival test → skeleton commit →
   readiness gate → replan-or-slide; emits a `driveState` label), `replan` (fresh `PathPlan`,
   degrade-to-no-plan on bugs), `steerAlongPath` (waypoint cursor by occupancy; per-step `MovePlan` via
   `PhaseRunner`, legacy one-shot steer for unconverted moves; validity-envelope failure → log-once +
   HOLD, no auto-replan while movement bugs are hunted), `repairStep` (BLOCKED → one blacklist+reroute
-  per generation; FAILED → `giveUp()`), `applyEdits` (server-side break/place/door execution,
-  live-revalidated). A planless bot WAITS — no straight-line fallback, no motion-signature stuck
+  per generation; FAILED → `giveUp()`), `applyEdits` (server-side break/place/openable-SET execution —
+  doors, trapdoors, fence gates — live-revalidated). A planless bot WAITS — no straight-line fallback, no motion-signature stuck
   recovery (s52); `dumpStuck` is diagnostic-only. Owns the `NavJourneyStats` pair (live +
   last-completed).
 - **`BotGatherer`** — the `/bot gather` machine: `GatherPhase {SCAN, MINE, COLLECT, COMPASS, RETURN}`;
@@ -293,8 +302,9 @@ constructs and ticks:
   returned route steps off a ledge at any depth. Deliberately NOT a squeezed `safeFall`/`maxFall` window:
   that window PRICES a drop and cannot forbid one (the free, immune, and soft-landing/clutch branches read
   through it), and shrinking it would also move Parkour's falling-landing tier and the region tier's dy
-  pricing. `mayFall` is a realizability-sig axis (bit 62; `CostPyramidCodec.INVAL_SIG_SCHEMA_VERSION`
-  bumped to 2) so a roamer's dead crossings never bind an ordinary falling bot.
+  pricing. `mayFall` is a realizability-sig axis (bit 62; the `CostPyramidCodec.INVAL_SIG_SCHEMA_VERSION`
+  v2 bump — now **4** after the trapdoor (v3) and fence-gate (v4) broadenings of sig bit 3) so a
+  roamer's dead crossings never bind an ordinary falling bot.
 - **`BotPortalFollower`** — cross-dimension FOLLOW/COME: seek nearest known portal
   (`NetherPortalIndex`), path to its bottom cell, ENTER terminal state (face, walk in, stand still);
   success = event-detected level change, failure = state-detected (portal broke / vanilla-derived
@@ -401,7 +411,7 @@ arms it; each writes an `orebit-<x>-result.properties` + traces, then halts the 
   multi-level `RegionPathfinder.isSealedWithin` scan), `TrapdoorCourse` (`-Dorebit.trapdoor`,
   `scripts/run-trapdoor.ps1` — the DESIGN-trapdoors.md §9 live tiles: hallway-open/close,
   flush-hatch pocket, hatch-drop, close-then-parkour, the §9-3b sandwich needle, external-toggle
-  trick; 7/7 PASS 2026-08-08).
+  trick; 7/7 PASS 2026-08-08). A `GateCourse` sibling for fence gates is in flight (live run pending).
 - **`WorldReplay`** (`-Dorebit.replay`, `run-replay.ps1`): replays a recorded failure route in the
   owner's hand-built real world (loads, never builds), per-tick position/velocity/water-state + plan
   trace, EJECTION guard.
@@ -434,7 +444,7 @@ Trace, RegionTrace (`/bot rtrace`), Probe, Config, Debug. The `ChatCommandParser
 `warmup*`, the async trio, `chunkBuildsPerTick`/`chunkBuildBudgetMs`, `navReadyRadiusChunks`/
 `navReadyTimeoutTicks`, `hpaFlushBudgetMs`, `regionShardLoadBudgetMs`, `boxedInScanRadius`), `hpa.*`
 (`persistIntervalTicks`, `persistFlushBudgetMs`, `lazyLoad`, `residentLeafCap`), **`doors.*`**
-(`doors.toggle`, default true → `BotCaps.mayToggleDoors`), **`crafting.*`**
+(`doors.toggle`, default true → `BotCaps.mayToggleDoors` — doors, trapdoors, AND fence gates), **`crafting.*`**
 (`placeTable`/`reclaimTable`/`tableSearchRadius`), **`farming.*`** (`workRadius`/`till`),
 **`combat.*`** (`defend`/`scanRadius`), and **`building.*`** (`clearMismatches`) — the ability
 namespaces are executor-read and fully hot.

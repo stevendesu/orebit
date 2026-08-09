@@ -99,14 +99,19 @@ public record BotCaps(
          */
         float greedyWeight,
         /**
-         * May OPEN/CLOSE hand-toggleable doors (wood/copper) by right-clicking, instead of smashing or routing
-         * around them ({@code doors.toggle}). The P3 executor operates doors for real (open before crossing,
-         * close on the exit double-toggle), so the live config default ({@link
+         * May OPEN/CLOSE the hand-toggleable openable family — doors and trapdoors (wood/copper) and every
+         * fence gate (no iron gate exists) — by right-clicking, instead of smashing or routing around them
+         * ({@code doors.toggle}, the owner-ratified single family key). The P3 executor operates the family
+         * for real (open before crossing, close on the exit double-toggle; trapdoors and gates ride the same
+         * pre-pass), so the live config default ({@link
          * com.orebit.mod.config.Config#DEFAULT}) is now {@code true}. With this off the planner is byte-identical
-         * to P1 (an already-open door is passable, a closed door is mined); with it on, {@link
-         * MovementContext#doorSetClears}/{@code canToggleExitDoor} fold a cheap {@code SET_OPEN}/{@code
-         * SET_CLOSED} the search prefers over a break. Iron doors are never hand-toggleable regardless (they lack
-         * {@link com.orebit.mod.worldmodel.navblock.NavBlock#doorToggleable}). NOTE: the back-compat constructor
+         * to P1 (an already-open openable is passable, a closed one is mined — a closed default-PROTECTED fence
+         * gate becomes a hard wall routed around, the toggle having been the only way through); with it on,
+         * {@link MovementContext#doorSetClears}/{@link MovementContext#trapdoorSetClears}/{@link
+         * MovementContext#gateSetClears}/{@code canToggleExitDoor} fold a cheap {@code SET_OPEN}/{@code
+         * SET_CLOSED} the search prefers over a break. Iron doors/trapdoors are never hand-toggleable regardless
+         * (they lack {@link com.orebit.mod.worldmodel.navblock.NavBlock#handToggleable}'s bit). NOTE: the
+         * back-compat constructor
          * below still defaults this OFF for legacy {@code new BotCaps(...)} call sites (presets/benchmarks/tests).
          */
         boolean mayToggleDoors,

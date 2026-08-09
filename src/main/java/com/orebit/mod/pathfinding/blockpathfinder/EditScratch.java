@@ -114,6 +114,11 @@ public final class EditScratch {
      *       MovementContext#panelParallel}): a panel that would lie ACROSS the travel axis (trapdoor facing
      *       along the corridor) refuses the toggle and falls through — the closed-blocks-headroom /
      *       open-blocks-travel combination is genuinely impassable without breaking;</li>
+     *   <li><b>fence gate (DESIGN-fence-gates.md §3)</b>: a toggleable CLOSED gate ({@link
+     *       MovementContext#gateSetClears} — FACE-AGNOSTIC: the centered 4/16 plate blocks every crossing
+     *       and {@code face} is unused, so the arm serves vertical faces too) → fold a {@code SET_OPEN}
+     *       and admit; the toggled state is {@code Shapes.empty()}, passable by construction, so there is
+     *       no post-toggle re-evaluation and no gate analog of the face-vs-travel check;</li>
      *   <li>else the break fold ({@link #requireAir}'s tail), unchanged.</li>
      * </ul>
      * Returns the cell's EFFECTIVE descriptor for the caller's remaining within-candidate checks (§5
@@ -158,6 +163,14 @@ public final class EditScratch {
                 setTrapdoor(x, y, z, true);
                 return toggled;
             }
+        }
+        // Gate arm (DESIGN-fence-gates.md §3) — face-agnostic: a closed gate blocks every crossing and its
+        // open state is empty collision, so one SET_OPEN clears any face (incl. vertical — `face` unused)
+        // with no post-toggle re-check. Behind the door/trapdoor arms: the common blocked cell pays one
+        // almost-always-false kind test.
+        if (ctx.gateSetClears(d)) {
+            setGate(x, y, z, true);
+            return NavBlock.withOpenableOpen(d, true);
         }
         foldBreakOrFail(x, y, z, d);
         return valid ? MovementContext.AIR_DESC : d;
@@ -208,6 +221,12 @@ public final class EditScratch {
                 setTrapdoor(x, y, z, true);
                 return toggled;
             }
+        }
+        // Gate arm (DESIGN-fence-gates.md §3) — a closed gate in a head cell (over a t>3 floor) opens to
+        // empty collision; face-agnostic, no post-toggle re-check (see requireAirToward's gate arm).
+        if (ctx.gateSetClears(d)) {
+            setGate(x, y, z, true);
+            return NavBlock.withOpenableOpen(d, true);
         }
         foldBreakOrFail(x, y, z, d);
         return valid ? MovementContext.AIR_DESC : d;
@@ -414,6 +433,19 @@ public final class EditScratch {
      * toggle offered ({@link MovementContext#trapdoorSetClears} / {@link MovementContext#trapdoorSetFloors}).
      */
     void setTrapdoor(int x, int y, int z, boolean targetOpen) {
+        setOpenable(x, y, z, targetOpen, false);
+    }
+
+    /**
+     * Fold an OPEN/CLOSE of the (hand-toggleable) fence gate at cell {@code (x,y,z)} to {@code targetOpen}
+     * (DESIGN-fence-gates.md §3) — the gate twin of {@link #setTrapdoor}, riding the SAME kind-agnostic
+     * doors[] channel ({@code descriptorAt} resolves through the unified {@link NavBlock#withOpenableOpen}).
+     * A gate is ONE cell, so it never participates in the per-door two-half dedup — each gate SET charges
+     * its own {@link MovementContext#DOOR_TOGGLE_COST} (re-folding the exact same cell within one candidate
+     * stays a no-op). The caller has already proven the toggle offered
+     * ({@link MovementContext#gateSetClears}).
+     */
+    void setGate(int x, int y, int z, boolean targetOpen) {
         setOpenable(x, y, z, targetOpen, false);
     }
 

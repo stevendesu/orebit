@@ -84,6 +84,7 @@ public final class ProbeCommand implements BotCommand {
                     + " protected=" + NavBlock.isProtected(d)
                     + " hardness=" + NavBlock.hardness(d)
                     + " breakable=" + ctx.breakable(d)
+                    + openableInfo(d)
                     + (NavBlock.hasCollision(d) && ctx.breakBlockedReason(d) != null
                             ? " (blocked: " + ctx.breakBlockedReason(d) + ")" : ""));
             CommandFeedback.send(source, "  flags=0x" + Integer.toHexString(flags)
@@ -131,7 +132,28 @@ public final class ProbeCommand implements BotCommand {
                 + " damaging=" + NavBlock.isDamaging(d)
                 + " transitSlow=" + transitName(NavBlock.transitSlow(d))
                 + " cellTransitCost=" + ctx.cellTransitCost(d)
-                + " breakThrough=" + (ctx.breakableThrough(d) ? String.valueOf(ctx.breakCost(d)) : "no");
+                + " breakThrough=" + (ctx.breakableThrough(d) ? String.valueOf(ctx.breakCost(d)) : "no")
+                + openableInfo(d);
+    }
+
+    /** The openable facts of a descriptor — kind, the shared open bit (43), the shared hand-toggleable bit
+     *  (50) — for the whole door family (door / trapdoor / fence gate); empty for non-openables so the
+     *  common line is unchanged (the conditional-suffix idiom of the "(blocked: …)" tail). The
+     *  stale-grid-vs-caps discriminator for openable bugs: a live gate whose probe shows no openable field
+     *  is a stale/unclassified cell, one showing {@code toggleable=false} an iron door/trapdoor, and a
+     *  correct dump with no toggle in the plan points at {@code doors.toggle}/caps. */
+    private static String openableInfo(long d) {
+        final String kind = NavBlock.isDoor(d) ? "door"
+                : NavBlock.isTrapdoor(d) ? "trapdoor"
+                : NavBlock.isGate(d) ? "gate"
+                : null;
+        if (kind == null) {
+            return "";
+        }
+        final boolean open = NavBlock.isDoor(d) ? NavBlock.doorOpen(d)
+                : NavBlock.isTrapdoor(d) ? NavBlock.trapdoorOpen(d)
+                : NavBlock.gateOpen(d);
+        return " openable=" + kind + " open=" + open + " toggleable=" + NavBlock.handToggleable(d);
     }
 
     private static String transitName(int t) {

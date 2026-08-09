@@ -26,7 +26,9 @@ Key decisions:
   loses this. The openable family shows how tightly the fingerprint packs: doors,
   trapdoors, and fence gates are told apart by one small "openable kind" field, and
   share common facing / top-or-bottom-half / open / hand-toggleable fields (stairs
-  reuse the same facing and half slots) — so a trapdoor's whole navigation identity,
+  reuse the same facing and half slots; a fence gate packs only open +
+  hand-toggleable — its facing is behaviorally void, since a closed gate blocks
+  every crossing alike and an open one is just air) — so a trapdoor's whole navigation identity,
   which wall its open panel hugs, which half its closed plate sits in, and whether
   the bot may toggle it by hand, costs no new bits at all.
 - **The packed `long` is simultaneously the data and the dedup key.** Two block states

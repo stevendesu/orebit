@@ -157,6 +157,12 @@ public final class CostPyramidCodec {
     // fragment populations/footprints and goal resolution. That supersedes the arc's earlier
     // honest-scope note ("open panels stay region-tier WALLS"): openables are now region-tier open
     // space, with unrealizable hops left to RegionEdgeBlacklist + the capsSig-keyed invalidations.
+    // The 2026-08-09 fence-gate arc (DESIGN-fence-gates.md §6) rides v2 UNCHANGED: gates were already
+    // flood-passable under v2 (the openable-as-air note above names them explicitly), and the gate
+    // classification bits (shared open/hand-toggleable) change no flood output and no standable verdict
+    // at gate cells (closed topY 24 non-standable before and after; open passable before and after) —
+    // new navtypes appearing is normal churn, not a semantic change to persisted leaf data. The arc's
+    // realizability change lives in INVAL_SIG_SCHEMA_VERSION v4 below.
     static final short VERSION = 2;
 
     /** Invalidation-section sig schema (the {@code BotCaps.realizabilitySig} bit layout generation). Bump when a
@@ -174,8 +180,16 @@ public final class CostPyramidCodec {
      *  row recorded under the trapdoor-blind classifier can be plainly FALSE for the very caps sig it names,
      *  so old negatives are over-pessimistic and the section is dropped (re-learn). The cost body is governed
      *  by the separate {@code VERSION} constant (itself bumped to v2 in this same arc — a sig-schema mismatch
-     *  alone would drop only this section and keep cost rows, the mandated pattern). */
-    static final int INVAL_SIG_SCHEMA_VERSION = 3;
+     *  alone would drop only this section and keep cost rows, the mandated pattern).
+     *  <p>v4 (2026-08-09, DESIGN-fence-gates.md §6): no bit moved, but sig bit 3's MEANING broadened again —
+     *  {@code mayToggleDoors} now governs fence gates too (the third openable kind on the same {@code
+     *  doors.toggle} key), and the gate arc added realizability no v3-era search had (the face-agnostic
+     *  {@code SET_OPEN} fold through a closed gate — under the default PROTECTED-gates config the ONLY way
+     *  through one). A v3 "unreachable" row recorded under the gate-blind planner can be plainly FALSE for
+     *  the very caps sig it names, so old negatives are over-pessimistic and the section is dropped
+     *  (re-learn). The cost body's {@code VERSION} stays 2 — gates were already flood-passable under v2, so
+     *  gate classification changes no flood output (see the VERSION note above). */
+    static final int INVAL_SIG_SCHEMA_VERSION = 4;
     /** Invalidation-section region-graph class — 0 = "optimistic-v1", today's single symmetric/optimistic
      *  connectivity graph. A future capability-aware graph persists its own sections under a new id; rows never
      *  transfer across graphs (fragment identities don't). */

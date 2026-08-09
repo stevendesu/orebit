@@ -654,6 +654,24 @@ public final class MovementContext {
     }
 
     /**
+     * Whether a blocked cell {@code d} is a toggleable CLOSED fence gate a {@code SET_OPEN} clears — the
+     * gate member of the SET-fold family (DESIGN-fence-gates.md §3), and by design the degenerate one:
+     * <b>FACE-AGNOSTIC</b>, no {@code face} parameter. A closed gate's centered 4/16 plate leaves 6/16 on
+     * each side — under the 0.6 body width from EVERY approach, so it blocks every crossing — and the open
+     * state is {@code Shapes.empty()} (zero hitbox), so a single {@code SET_OPEN} clears them all and the
+     * toggled descriptor is passable <b>by construction</b> (no post-toggle re-evaluation, no blocked-face
+     * model, no residual clearance — see {@link EditScratch#requireAirToward}). Gated on {@code
+     * doors.toggle} + the shared hand-toggleable bit (set unconditionally for gates — no iron gate exists)
+     * exactly like {@link #doorSetClears}/{@link #trapdoorSetClears}; gates cannot be waterlogged (§1), so
+     * no fluid conjunct. One predictable almost-always-false {@link NavBlock#isGate} test on the common
+     * blocked cell, reached only behind the passable/door/trapdoor failure branches.
+     */
+    public boolean gateSetClears(long d) {
+        return caps.mayToggleDoors() && NavBlock.isGate(d) && NavBlock.handToggleable(d)
+                && !NavBlock.gateOpen(d);
+    }
+
+    /**
      * Fold the SET(s) that free this exit onto the candidate's edit set (DOORS P2 §2b; trapdoors
      * DESIGN-trapdoors.md §4–§5) — the exit toggle, now per-cell like the decision that approved it
      * ({@link #exitDoorDecision} returned {@link #EXIT_TOGGLE} for this same {@code (dx,dz)}):
