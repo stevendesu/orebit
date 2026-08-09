@@ -22,17 +22,17 @@ honest BLOCKEDs).
   (`recordToMemory=false`); they still seed (caps-only sig). Antichain compaction lives in
   `RegionCrossingMemory.record` (skip-dominated / replace-strictly-dominated / coexist-incomparable).
 - **Persistence (Phase 2)** — 24 B rows in the v4 invalidation section of every shard/coarse file
-  (`CostPyramidCodec`; **file `VERSION` is 2** — reset to 1 from 7 on the 2026-07 `packLevelKey` repack that
-  narrowed `ry` 6→5 bits (disk is a cache, so the v2..v7 history was collapsed rather than bumped to v8;
-  the *layout* is still v7's), then re-bumped to 2 by the trapdoor arc's flood-semantics change). Post-repack packing: the key mask is **55** bits, `fromKey` carries LEVEL
+  (`CostPyramidCodec`; **file `VERSION` is 1, PINNED pre-release** — owner ruling 2026-08-09: zero wild
+  installs, semantic changes append to the codec Javadoc history instead of bumping. Reset to 1 from 7 on
+  the 2026-07 `packLevelKey` repack that narrowed `ry` 6→5 bits; disk is a cache; the *layout* is still v7's). Post-repack packing: the key mask is **55** bits, `fromKey` carries LEVEL
   in bits **55..63**, `toKey` carries provenance in **two** bits **55..56** (the draft said one spare
   bit), fragment id sits at bits **49..54**, `capsSig` 8 B. Full byte layout:
   `NOTES-perf-and-persistence.md` §1 and the `CostPyramidCodec` class Javadoc. Section header =
-  `INVAL_SIG_SCHEMA_VERSION` (**4** — v2 2026-08-08 when `mayFall` claimed bit 62: a v1 section's rows
-  all carry that bit clear, which under the v2 layout reads as "proven by a bot that cannot fall", a
-  strictly weaker prover, so every one of them would silently stop binding an ordinary bot — dropping and
-  re-learning is the correct cache behaviour; v3/v4 as sig bit 3 broadened to trapdoors then fence gates,
-  making old "unrealizable even with toggling" negatives potentially false) + `INVAL_GRAPH_CLASS_ID` (0, "optimistic-v1"); mismatch drops
+  `INVAL_SIG_SCHEMA_VERSION` (**1, PINNED pre-release** — same ruling; the codec Javadoc's history logs
+  the semantic changes that would have bumped it: mayFall bit 62 [a v1-era section's rows carry that bit
+  clear, reading as a strictly weaker prover — dropping and re-learning is the correct cache behaviour],
+  sig bit 3 broadening to trapdoors then fence gates, and the trapdoor-ladder climb's planner-strength
+  increase) + `INVAL_GRAPH_CLASS_ID` (0, "optimistic-v1"); mismatch drops
   the SECTION only. Assign-to-FROM sharding; L6 rows ride the coarse file. `PROV_ESCALATION` rows are SESSION-ONLY
   (filtered at every encode; `PROV_PROOF`/`PROV_ROLLED_UP` persist). Decode additionally DROPS any row
   whose TO fragment id ≥ `MAX_FRAGMENTS` (reserved 62 / `VIRTUAL_GOAL_FRAG` 63) — legacy V-row self-clean.

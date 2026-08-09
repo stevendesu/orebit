@@ -163,7 +163,10 @@ public interface BotSteering {
 
     /**
      * Whether the cell directly BELOW the bot's feet is a climbable — the "topped out on a curtain" stance,
-     * the complement of {@link #onClimbable} (feet INSIDE one). Owner physics (manual proof, 2026-08-01):
+     * the complement of {@link #onClimbable} (feet INSIDE one). "Climbable" here is the SAME rule vanilla
+     * applies to a feet cell: the {@code #climbable} tag OR the trapdoor-over-equal-facing-ladder special
+     * case (DESIGN-trapdoor-ladder-climb.md §1/§5 — a bot topped out above an open mouth is held by it
+     * exactly as above a curtain). Owner physics (manual proof, 2026-08-01):
      * this stance is not a stand at all. A vine has no collision, so the bot sinks into the cell, vanilla's
      * climb branch instantly re-lifts it at the surface, and it sinks again — a bounce across the boundary.
      * Holding JUMP is what makes it stable: it does not cancel the sink, it out-runs it by climbing at the

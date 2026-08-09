@@ -2,6 +2,7 @@ package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
+import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
@@ -12,13 +13,15 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
 /**
  * Traverse existing ladders / vines / scaffolding (MOVEMENT-DESIGN Tier 1 climb — the first consumer of
  * the {@link com.orebit.mod.worldmodel.navblock.NavBlock#isClimbable CLIMB} descriptor bit; the gap
- * edges are NOTES-movement-physics.md §4). Seven rules, all edit-free:
+ * edges are NOTES-movement-physics.md §4). Eight rules:
  *
  * <ul>
  *   <li><b>Climb up</b> — one cell up the climb column while the surface continues (the cell the feet move
- *       into is itself climbable). Top-outs are NOT this move's job: from the topmost climb node,
- *       {@link Ascend} emits onto the adjacent floor one up (it never checks the <i>source</i> floor), and
- *       its held-jump steer is exactly the vanilla ladder top-out input.
+ *       into is itself climbable, OR a {@link MovementContext#trapdoorClimbable trapdoor-climbable} open
+ *       mouth over the current rung — the vanilla trapdoor-over-ladder rule,
+ *       DESIGN-trapdoor-ladder-climb.md §3). Top-outs are the §3.4 EXIT-TOP emission below — NOT
+ *       {@link Ascend}'s job: Ascend gates its takeoff on {@code solidFooting}, which rejects every
+ *       climbable floor (c84c4b9), so no Ascend ever launches from a climb node.
  *   <li><b>Climb down</b> — one cell down while the surface continues, or the final dismount step onto
  *       standable ground at the column's base.
  *   <li><b>Grab (entry)</b> — a sideways step into an adjacent climb column at feet level. This is the only
@@ -40,6 +43,12 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *       adjacent standable ground at the same feet height. Emitted only from a genuine hang (feet cell
  *       climbable AND the node's own floor not standable), because that is exactly the stance with no walk
  *       alternative — a grounded bot beside a vine reaches the same cell with a plain {@link Traverse}.
+ *   <li><b>Top-entry (§3.8, DESIGN-trapdoor-ladder-climb.md §3)</b> — from real footing, step sideways INTO
+ *       an adjacent trapdoor-ladder mouth at FLOOR level and sink one cell onto the ladder (an open mouth
+ *       enters free; a hand-toggleable CLOSED mouth folds the §4 {@code SET_OPEN}). This is the ONLY way
+ *       from a rim into a flush shaft: no plain-ladder top-entry exists at all — a ladder plate is
+ *       NARROW_TOP, so Traverse/Descend/Fall/WalkOff all refuse it as a destination floor and MineDown
+ *       refuses it as a landing — a pre-existing gap this arm does not close for trapdoor-less shafts.</li>
  * </ul>
  *
  * <h2>Node semantics — no new mode</h2>
@@ -58,12 +67,17 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * along a climb is enterable iff {@link MovementContext#passableOrClimbable passable OR climbable} — a
  * predicate that (DESIGN-trapdoors.md §4/§6) also admits OPEN-trapdoor cells (body-passable: the wall
  * panel coexists with the climb column), so climbing through an open hatch above a ladder shaft plans
- * naturally where the ladder continues. The vanilla open-trapdoor-as-ladder-extension rule stays DEFERRED
- * (§10 — trapdoor FACING is not packed); the executor's {@code onClimbable} honours it for free.
+ * naturally where the ladder continues. The vanilla open-trapdoor-as-ladder-EXTENSION rule (an equal-facing
+ * mouth REPLACING the top rung) is likewise modeled since DESIGN-trapdoor-ladder-climb.md — the
+ * {@link MovementContext#trapdoorClimbable} neighbor predicate over the packed ladder facing.
  *
- * <h2>Edit-free by design</h2>
- * Climb folds no breaks/places (the edit-free {@code accept}): a blocked climb simply isn't emitted, and
- * the existing break-through moves already price mining a ladder/vine out of the way. v1 trusts the
+ * <h2>Edit-free, except the two §4 mouth SETs</h2>
+ * Climb folds no breaks/places (a blocked climb simply isn't emitted, and the existing break-through moves
+ * already price mining a ladder/vine out of the way). Its ONLY edits are the two
+ * DESIGN-trapdoor-ladder-climb.md §4 {@code SET_OPEN} folds on a hand-toggleable CLOSED trapdoor mouth
+ * ({@link EditScratch#openClimbMouth} — the from-below continue and the §3.8 top-entry), which ride the
+ * kind-agnostic doors[] channel and surface as the plan-level {@code Need.OPEN} pre-pass exactly as door
+ * SETs do (the injection in {@code BotNavigator} is movement-agnostic). v1 trusts the
  * classifier bit alone for vines (no backing-block check) — the miss mode is a failed climb → follower
  * stall recovery → replan. Chained climbs are repeated ±1 edges; a macro Y-collapse (mirroring
  * {@link Pillar}'s, gated {@code ctx.macroAxis() == AXIS_Y}) is a later follow-up, out of v1. The
@@ -152,6 +166,16 @@ public final class Climb implements Movement {
      */
     public static final float SINK_IN_COST = CLIMB_DOWN_COST + 2f;
 
+    /**
+     * §3.8 top-entry (DESIGN-trapdoor-ladder-climb.md §3), ticks: one lateral step off the rim into the
+     * mouth column ({@link Traverse#FLAT_COST} — a plain walk-off; the shaft's far wall stops the carry, so
+     * no eased/sneaked crossing is needed) + the arrested one-cell descent through the climbable mouth
+     * ({@link #SINK_IN_COST} — the same {@code −0.15}/t clamp + arrest tail as §3.5; the mouth is
+     * trapdoor-climbable, so vanilla clamps the drop the instant the feet enter it). ≈ 13.3 — dearer than
+     * any walk, so A* enters a shaft only when descending it is actually wanted.
+     */
+    public static final float TOP_ENTRY_COST = Traverse.FLAT_COST + SINK_IN_COST;
+
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
     /**
@@ -180,6 +204,16 @@ public final class Climb implements Movement {
         int pf = ctx.packedAt(x, y + 1, z);
         long selfFeetD = pf == MovementContext.UNBUILT ? 0L : ctx.descriptorOf(x, y + 1, z, pf);
         boolean onClimb = pf != MovementContext.UNBUILT && ctx.isClimbable(selfFeetD);
+        if (!onClimb && pf != MovementContext.UNBUILT && NavBlock.openTrapdoor(selfFeetD)) {
+            // Trapdoor-climbable stance (DESIGN-trapdoor-ladder-climb.md §3): feet inside an OPEN trapdoor
+            // MOUTH whose cell below is an equal-facing ladder — vanilla trapdoorUsableAsLadder holds the
+            // bot exactly as a rung would, so the vertical rules apply unchanged (climb-down re-enters the
+            // ladder; the mouth's own top-out fires from here onto the rim). ONE extra floor-cell read,
+            // taken only behind the almost-always-false openTrapdoor bit test.
+            int pfl = ctx.packedAt(x, y, z);
+            onClimb = pfl != MovementContext.UNBUILT
+                    && ctx.trapdoorClimbable(selfFeetD, ctx.descriptorOf(x, y, z, pfl));
+        }
 
         if (onClimb) {
             // Climb up: the climb rule is a precondition on the cell the FEET ARE IN, never on the cell they
@@ -189,13 +223,54 @@ public final class Climb implements Movement {
             int p2 = ctx.packedAt(x, y + 2, z);
             if (p2 != MovementContext.UNBUILT) {
                 long d2 = ctx.descriptorOf(x, y + 2, z, p2);
-                if (ctx.isClimbable(d2)) {
-                    // (1) CONTINUE the surface — the new feet cell is climbable too, so the stance is
-                    // self-sustaining and the column simply carries on upward.
+                if (ctx.isClimbable(d2) || ctx.trapdoorClimbable(d2, selfFeetD)) {
+                    // (1) CONTINUE the surface — the new feet cell is climbable too (a rung, or an OPEN
+                    // trapdoor MOUTH over this rung: DESIGN-trapdoor-ladder-climb.md §3 — the below cell of
+                    // the entered mouth IS the current feet cell, already in hand, zero extra reads), so the
+                    // stance is self-sustaining and the column simply carries on upward. EXIT-TOP then fires
+                    // from the mouth node itself (the cell above a mouth is plain rim air).
+                    int p3 = ctx.packedAt(x, y + 3, z);
+                    if (p3 != MovementContext.UNBUILT) {
+                        long d3 = ctx.descriptorOf(x, y + 3, z, p3);
+                        if (ctx.passableOrClimbable(d3)) {
+                            out.accept(x, y + 1, z, CLIMB_UP_COST);
+                        } else if (ctx.trapdoorMouthOpensForClimb(d3, d2)) {
+                            // §4 from-below toggle, one rung EARLIER than the entered-cell arm below: the
+                            // entered rung's HEAD cell is the closed mouth. This is the stance the toggle
+                            // physically happens from — a CLOSED plate intersects the body of any stance
+                            // directly beneath it (exactly what this head gate refuses), so the entered-cell
+                            // arm's node is unreachable while the mouth is closed and, without this arm, the
+                            // §4 from-below climb never plans (found by TrapdoorLadderClimbTest: the closed-
+                            // oak shaft search exhausted at the rung below the top). The SET rides the step
+                            // that climbs UNDER the mouth; the next continue reads the mouth OPEN through the
+                            // path diff and enters it as a ladder extension. The facing test is against d2 —
+                            // the ladder rung the mouth must extend. isTrapdoor leads the predicate, so
+                            // trapdoor-free worlds pay one almost-always-false test only on head-blocked
+                            // continues.
+                            EditScratch e = ctx.edits().reset();
+                            e.openClimbMouth(x, y + 3, z);
+                            out.accept(x, y + 1, z, CLIMB_UP_COST + e.extraCost(), e);
+                        }
+                    }
+                } else if (ctx.trapdoorMouthOpensForClimb(d2, selfFeetD)) {
+                    // §4 from-below toggle arm, ENTERED-cell site (DESIGN-trapdoor-ladder-climb.md): the
+                    // cell the feet would enter holds a CLOSED hand-toggleable trapdoor that would be
+                    // trapdoor-climbable when open (equal facing, read off the CLOSED state's packed
+                    // facing) — fold a SET_OPEN on the mouth and CONTINUE through it. Reachable only from
+                    // a START seeded directly beneath the closed mouth (the start node is interned with no
+                    // geometry gate; every in-search entry into this stance is refused by the head gate the
+                    // arm above services) — the mid-climb case folds one rung earlier, above. The SET rides
+                    // the step's edits, so the mouth node's own pops read the OPEN state through the path
+                    // diff, and the executor surfaces it as the plan-level Need.OPEN pre-pass
+                    // (BotNavigator's movement-agnostic injection). An IRON closed mouth fails the
+                    // predicate and is simply not emitted — no break fallback (Climb stays otherwise
+                    // edit-free; routed around/given up, §4).
                     int p3 = ctx.packedAt(x, y + 3, z);
                     if (p3 != MovementContext.UNBUILT
                             && ctx.passableOrClimbable(ctx.descriptorOf(x, y + 3, z, p3))) {
-                        out.accept(x, y + 1, z, CLIMB_UP_COST);
+                        EditScratch e = ctx.edits().reset();
+                        e.openClimbMouth(x, y + 2, z);
+                        out.accept(x, y + 1, z, CLIMB_UP_COST + e.extraCost(), e);
                     }
                 } else if (ctx.passable(d2)) {
                     // (2) §3.4 TOP-OUT: rise out of the column's top cell. The resulting node's floor is the
@@ -224,8 +299,9 @@ public final class Climb implements Movement {
                     //       onto those same leaves, whose top face IS the top-out feet height.
                     //   !isNarrowTop — aimed at the wrong hazard. What must never be planned is a JUMP off a
                     //       ladder plate (the alternating ladder/air/ladder ascent, geometrically valid only
-                    //       when the ladders swap sides for headroom, and FACING isn't packed in the
-                    //       descriptor). But that is already refused twice over and by the right test:
+                    //       when the ladders swap sides for headroom — a side-swap the planner does not
+                    //       model even now that ladder FACING is packed). But that is already refused twice
+                    //       over and by the right test:
                     //       MovementContext.solidFooting rejects any climbable floor cell, killing Ascend /
                     //       Parkour / DiagonalParkour / WalkOff takeoffs, and §3.3's jump-grab below excludes
                     //       it again with its own !isClimbable(d0). Blocking the climb-OUT bought no safety
@@ -301,6 +377,55 @@ public final class Climb implements Movement {
                     // shape vanishes for a descending entity); recenter off a ladder's 3/16 plate +
                     // gravity + the −0.15 arrest (see steer's Δy<0 grounded branch).
                     out.accept(x, y - 1, z, SINK_IN_COST);
+                }
+                if (ctx.parkourLandable(d0)) {
+                    // §3.8 TOP-ENTRY (DESIGN-trapdoor-ladder-climb.md §3): from real footing, step sideways
+                    // INTO an adjacent trapdoor-ladder MOUTH at FLOOR level (nx,y,nz) and sink one cell —
+                    // the entered feet cell is the mouth, held by vanilla trapdoorUsableAsLadder, and the
+                    // climb-down rules take it from there. This is the ONLY entry into a flush shaft from
+                    // its rim: a ladder plate is NARROW_TOP, so every landing move (Traverse/Descend/Fall/
+                    // WalkOff dest floors, MineDown's landing) refuses it — the plain-ladder variant of
+                    // this geometry is a PRE-EXISTING gap this arm deliberately does not close (no vanilla
+                    // rule holds a body in a bare mouth-less air cell). The mouth cell is the same cell
+                    // Traverse reads as its dest floor, so the extra read rides a warm section cache; the
+                    // almost-always-false isTrapdoor kind test is the first test on it.
+                    for (int[] d : CARDINALS) {
+                        int nx = x + d[0];
+                        int nz = z + d[1];
+                        int pm = ctx.packedAt(nx, y, nz);
+                        if (pm == MovementContext.UNBUILT) continue;
+                        long dm = ctx.descriptorOf(nx, y, nz, pm);
+                        if (!NavBlock.isTrapdoor(dm)) continue;
+                        int pl = ctx.packedAt(nx, y - 1, nz);
+                        if (pl == MovementContext.UNBUILT) continue;
+                        long dl = ctx.descriptorOf(nx, y - 1, nz, pl);
+                        // OPEN mouth enters free; a CLOSED hand-toggleable mouth folds the §4 SET_OPEN
+                        // (iron closed fails both and is not emitted — routed around/given up).
+                        boolean openMouth = ctx.trapdoorClimbable(dm, dl);
+                        if (!openMouth && !ctx.trapdoorMouthOpensForClimb(dm, dl)) continue;
+                        // The crossing: the bot walks off the rim at its own feet level, so the cell above
+                        // the mouth must be genuinely clear, and the crossing head cell face-aware like the
+                        // grab's (§4 per-cell blocked-face rule for lateral entries).
+                        int pc = ctx.packedAt(nx, y + 1, nz);
+                        if (pc == MovementContext.UNBUILT
+                                || !ctx.passable(ctx.descriptorOf(nx, y + 1, nz, pc))) {
+                            continue;
+                        }
+                        int ph2 = ctx.packedAt(nx, y + 2, nz);
+                        if (ph2 == MovementContext.UNBUILT) continue;
+                        long entryHead = ctx.descriptorOf(nx, y + 2, nz, ph2);
+                        if (!ctx.passable(entryHead) && !ctx.isClimbable(entryHead)
+                                && !ctx.trapdoorEntryClear(entryHead, MovementContext.ordinalOf(-d[0], -d[1]))) {
+                            continue;
+                        }
+                        if (openMouth) {
+                            out.accept(nx, y - 1, nz, TOP_ENTRY_COST);
+                        } else {
+                            EditScratch e = ctx.edits().reset();
+                            e.openClimbMouth(nx, y, nz);
+                            out.accept(nx, y - 1, nz, TOP_ENTRY_COST + e.extraCost(), e);
+                        }
+                    }
                 }
             }
         }

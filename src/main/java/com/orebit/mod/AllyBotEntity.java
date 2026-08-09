@@ -1088,12 +1088,25 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     }
 
     /** The topped-out-on-a-curtain discriminator ({@link BotSteering#climbableBelow}). Same live read as
-     *  {@link #scaffoldingBelow}, against the same {@code #climbable} tag vanilla's own {@code onClimbable}
-     *  uses — so the two stances (feet IN vs feet ABOVE) are classified by one consistent rule. */
+     *  {@link #scaffoldingBelow}, against the same rule vanilla's own {@code onClimbable} applies to a feet
+     *  cell — the {@code #climbable} tag PLUS the hardcoded {@code trapdoorUsableAsLadder} special case
+     *  (DESIGN-trapdoor-ladder-climb.md §1/§5: an OPEN trapdoor over an equal-facing {@code Blocks.LADDER}
+     *  is a rung; HALF/waterlogging not consulted) — so the two stances (feet IN vs feet ABOVE) are
+     *  classified by one consistent rule. The trapdoor arm is what lets the §3.4 top-out ABOVE a mouth
+     *  reach {@code Climb.reached} / hold the jump stance instead of livelocking (the vanilla predicate
+     *  itself only ever evaluates the bot's OWN feet cell, so this below-cell mirror is hand-rolled — two
+     *  live block reads, the second behind the trapdoor instanceof). */
     @Override
     public boolean climbableBelow() {
         ServerLevel level = (ServerLevel) Worlds.of(this);
-        return level.getBlockState(this.blockPosition().below()).is(BlockTags.CLIMBABLE);
+        BlockPos below = this.blockPosition().below();
+        BlockState s = level.getBlockState(below);
+        if (s.is(BlockTags.CLIMBABLE)) return true;
+        if (!(s.getBlock() instanceof TrapDoorBlock) || !s.getValue(BlockStateProperties.OPEN)) return false;
+        BlockState ladder = level.getBlockState(below.below());
+        return ladder.is(Blocks.LADDER)
+                && ladder.getValue(BlockStateProperties.HORIZONTAL_FACING)
+                        == s.getValue(BlockStateProperties.HORIZONTAL_FACING);
     }
 
     /**
