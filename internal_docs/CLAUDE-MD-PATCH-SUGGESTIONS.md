@@ -54,10 +54,10 @@ Ordered by importance.
   **Version correction (2026-08-07):** an earlier draft of this item said "`CostPyramidCodec` file
   VERSION 7 / v4 invalidation section". Both were **RESET to 1** by the 2026-07 `packLevelKey`
   repack. **Do not "restore" 7/4 and do not bump to v8** (see the code comment in
-  `CostPyramidCodec` and `NOTES-region-tier.md` §4). *(Update 2026-08-09: since re-bumped for real
-  semantic changes — live values are `CostPyramidCodec.VERSION = 2` [trapdoor arc],
-  `INVAL_SIG_SCHEMA_VERSION = 4` [v2 mayFall, v3 trapdoors, v4 fence gates],
-  `ResourcePyramidCodec.VERSION = 2`.)*
+  `CostPyramidCodec` and `NOTES-region-tier.md` §4). *(Update 2026-08-09: ALL persistence versions
+  PINNED at 1 pre-release — owner ruling, zero wild installs; the interim v2/v4 bumps were reverted
+  and semantic changes now append to the codec Javadoc history instead. Live values:
+  `CostPyramidCodec.VERSION = 1`, `INVAL_SIG_SCHEMA_VERSION = 1`, `ResourcePyramidCodec.VERSION = 1`.)*
 - New REAL classes to list: `worldmodel/persistence/CostPyramidCodec`, `ResourcePyramidCodec`,
   `RegionShardLoader` (lazy page-in, `pathing.regionShardLoadBudgetMs`), `RegionReconciler`
   (straddle-cell re-derive after lazy load), `RegionEvictor` (cold-shard LRU eviction, OFF at

@@ -19,6 +19,7 @@ import net.minecraft.world.level.block.BubbleColumnBlock;
 import net.minecraft.world.level.block.DoorBlock;
 import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.FenceGateBlock;
+import net.minecraft.world.level.block.LadderBlock;
 import net.minecraft.world.level.block.PointedDripstoneBlock;
 import net.minecraft.world.level.block.SnowLayerBlock;
 import net.minecraft.world.level.block.StairBlock;
@@ -92,12 +93,15 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *   5–7     3   shape       ShapeClass ordinal (EMPTY..OTHER) — see {@link #SHAPE_FULL} etc.
  *   8–9     2   horizFacing SHARED horizontal FACING (0=N 1=E 2=S 3=W); 0 for cells with no facing. Populated for
  *                           {@link StairBlock} states (via {@link #stairFacing}), {@link DoorBlock} states (via
- *                           {@link #doorFacing}) AND {@link TrapDoorBlock} states (via {@link #trapdoorFacing}) —
- *                           a cell is a stair XOR a door XOR a trapdoor (disambiguated by {@link #isStair} /
- *                           {@link #isDoor} / {@link #isTrapdoor}), so the field is reused (DESIGN-trapdoors.md
- *                           §2 — zero new bits). On a BOTTOM stair the HIGH 16/16 half is on the FACING side, the
- *                           LOW 8/16 front opposite (empirically verified, StairVoxelProbe), so a walk-up reads
- *                           as a +0.5 step-assist rather than a +1.0 jump.
+ *                           {@link #doorFacing}), {@link TrapDoorBlock} states (via {@link #trapdoorFacing}) AND
+ *                           {@link LadderBlock} states (via {@link #ladderFacing}) — a cell is a stair XOR a
+ *                           door XOR a trapdoor XOR a ladder (disambiguated by {@link #isStair} / {@link #isDoor}
+ *                           / {@link #isTrapdoor} / {@link #isLadder}), so the field is reused (DESIGN-trapdoors.md
+ *                           §2, DESIGN-trapdoor-ladder-climb.md §2 — zero new bits). On a BOTTOM stair the HIGH
+ *                           16/16 half is on the FACING side, the LOW 8/16 front opposite (empirically verified,
+ *                           StairVoxelProbe), so a walk-up reads as a +0.5 step-assist rather than a +1.0 jump.
+ *                           Ladder facing feeds ONLY the vanilla trapdoor-over-ladder climb rule (equal-facing
+ *                           test); vines/scaffolding do NOT pack facing (the vanilla rule is ladder-identity-only).
  *   10      1   half        SHARED HALF bit (1 = TOP): {@link StairBlock} HALF (via {@link #stairHalf}) XOR
  *                           {@link TrapDoorBlock} HALF (via {@link #trapdoorHalfTop}); 0 for everything else
  *                           (incl. doors and slabs — a door does NOT set this bit; slab-ness is the
@@ -298,6 +302,11 @@ public final class NavBlock {
     // consumers. POWERED/IN_WALL are likewise unread (IN_WALL is collision-invariant — outline/occlusion only),
     // so those states collapse in dedup.
     private static final long GATE_OPEN_BIT = DOOR_OPEN_BIT;      // 1 = open (gates; doors/trapdoors read via doorOpen/trapdoorOpen)
+    // Ladders reuse the shared facing field (DESIGN-trapdoor-ladder-climb.md §2 — ZERO new bits): a cell is
+    // stair XOR door XOR trapdoor XOR ladder, discriminated for ladders by CLIMB ∧ SHAPE_OTHER (see #isLadder —
+    // uniqueness over the interned table is a classifier invariant, pinned by test). Fans the ladder navtypes
+    // 1 → 4 (× waterlogged); consumed only by the equal-facing half of the vanilla trapdoor-over-ladder rule.
+    private static final int LADDER_FACING_SHIFT = STAIR_FACING_SHIFT, LADDER_FACING_MASK = STAIR_FACING_MASK;
     private static final int OPEN_SHIFT  = 14, OPEN_MASK  = 0x03;
     private static final int FLUID_SHIFT = 16, FLUID_MASK = 0x03;
     private static final int SURF_SHIFT  = 18, SURF_MASK  = 0x03;
@@ -557,6 +566,15 @@ public final class NavBlock {
             if (state.getValue(BlockStateProperties.OPEN)) d |= GATE_OPEN_BIT;
             d |= HAND_TOGGLEABLE_BIT;
         }
+        // Ladder FACING (DESIGN-trapdoor-ladder-climb.md §2, owner-ratified 2026-08-09): pack
+        // HORIZONTAL_FACING into the SHARED facing field (bits 8–9) — the ladder joins the stair XOR door
+        // XOR trapdoor XOR ladder family, ZERO new bits, ladder navtypes fan 1 → 4 (trivial vs the cap).
+        // Consumed only by the vanilla trapdoor-over-ladder climb rule (LivingEntity.trapdoorUsableAsLadder:
+        // OPEN trapdoor + exactly Blocks.LADDER below + EQUAL facing — HALF/waterlogging not consulted).
+        // Vines/scaffolding deliberately do NOT pack facing: the vanilla rule is ladder-identity-only.
+        if (block instanceof LadderBlock) {
+            d |= (long) horizontalFacingOrdinal(state) << LADDER_FACING_SHIFT;
+        }
         return withDerived(d);
     }
 
@@ -690,10 +708,11 @@ public final class NavBlock {
     /**
      * The 2-bit horizontal-facing ordinal (0=N 1=E 2=S 3=W) from a state's {@link
      * BlockStateProperties#HORIZONTAL_FACING} — shared by stairs (the FACING side is where a BOTTOM stair's HIGH
-     * 16/16 half sits, StairVoxelProbe), doors (the facing that {@link #doorBlockedEdge} rotates from) and
-     * trapdoors (the facing whose OPPOSITE wall the open panel hugs, {@link #trapdoorBlockedFace}). Every
-     * {@link StairBlock}, {@link DoorBlock} and {@link TrapDoorBlock} carries HORIZONTAL_FACING on every
-     * supported version.
+     * 16/16 half sits, StairVoxelProbe), doors (the facing that {@link #doorBlockedEdge} rotates from),
+     * trapdoors (the facing whose OPPOSITE wall the open panel hugs, {@link #trapdoorBlockedFace}) and ladders
+     * (the equal-facing half of the vanilla trapdoor-over-ladder rule, {@link #ladderFacing}). Every
+     * {@link StairBlock}, {@link DoorBlock}, {@link TrapDoorBlock} and {@link LadderBlock} carries
+     * HORIZONTAL_FACING on every supported version.
      */
     private static int horizontalFacingOrdinal(BlockState state) {
         switch (state.getValue(BlockStateProperties.HORIZONTAL_FACING)) {
@@ -1088,6 +1107,27 @@ public final class NavBlock {
                 : isGate(d) ? withGateOpen(d, open)
                 : withDoorOpen(d, open);
     }
+    // ---- Ladders (DESIGN-trapdoor-ladder-climb.md §2) — meaningful only when isLadder(d) -------------
+    /**
+     * Whether this cell is a {@link LadderBlock} — the gate on {@link #ladderFacing} (the ladder analog of
+     * {@link #isStair} / {@link #isDoor} / {@link #isTrapdoor}, disambiguating the shared facing bits 8–9).
+     * <b>Derived from existing bits, zero new bits:</b> {@code CLIMB ∧ SHAPE_OTHER} is unique to ladders
+     * over the whole interned table — the climbable set is CLOSED (the 8-block identity list in
+     * {@link #isClimbable(Block)}: ladder, scaffolding, the vine family), and within it the shapes diverge:
+     * ladder = the 3/16 wall plate ({@code SHAPE_OTHER}), scaffolding = {@code SHAPE_FULL} (its null-context
+     * stand-on-top shape), every vine = {@code SHAPE_EMPTY}. No non-climbable cell can satisfy the
+     * conjunction (the CLIMB bit is only ever set for that list). Uniqueness is pinned by test over every
+     * interned navtype, so a future climbable whose shape drifts into OTHER fails loudly instead of
+     * silently reading a bogus facing.
+     */
+    public static boolean isLadder(long d) { return (d & CLIMB_BIT) != 0 && shape(d) == SHAPE_OTHER; }
+    /** A ladder's HORIZONTAL_FACING ordinal (0=N 1=E 2=S 3=W); reads the shared facing field (bits 8–9).
+     *  0 for non-ladders — always gate on {@link #isLadder} first (a stair/door/trapdoor uses the same bits
+     *  via {@link #stairFacing} / {@link #doorFacing} / {@link #trapdoorFacing}). Consumed by the vanilla
+     *  trapdoor-over-ladder climb rule: an OPEN trapdoor whose cell below is a ladder with EQUAL facing is
+     *  climbable ({@code LivingEntity.trapdoorUsableAsLadder} — the {@code MovementContext.trapdoorClimbable}
+     *  neighbor predicate; never a descriptor bit, the rule is neighbor-dependent). */
+    public static int ladderFacing(long d) { return (int) (d >>> LADDER_FACING_SHIFT) & LADDER_FACING_MASK; }
     /** Fluid: 0 none, 1 water (incl. waterlogged), 3 lava (low bit = is-fluid, high bit = is-lava). */
     public static int fluid(long d)        { return (int) (d >>> FLUID_SHIFT) & FLUID_MASK; }
     /** Any fluid present (water or lava) — the low fluid bit. */

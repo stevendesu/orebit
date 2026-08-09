@@ -108,6 +108,9 @@ arc began.
 
 ## §6 Persistence
 
+*(Superseded 2026-08-09 post-arc: ALL persistence versions PINNED at 1 pre-release — owner ruling,
+zero wild installs; the bumps below survive as codec-Javadoc history entries, not live values.)*
+
 - `CostPyramidCodec.VERSION` **stays 2** — gate classification changes no flood output (gates were
   already flood-passable in v2); prose note only.
 - `INVAL_SIG_SCHEMA_VERSION` **3 → 4** — bit 3 (`mayToggleDoors`) broadens its meaning again
