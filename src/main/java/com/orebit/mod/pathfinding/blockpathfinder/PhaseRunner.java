@@ -186,15 +186,24 @@ public final class PhaseRunner {
         boolean holding = false;
         holdNeed = null;
 
-        // Doors FIRST (DOORS P3), before any body-cell geometry — a door-open is a precondition of the whole
-        // crossing, so it is opened BEFORE the bot drives through (and the exit double-toggle CLOSEs before the
-        // exit segment drives). setDoorOpen is instant (a direct server set), so all door reqs resolve this tick;
-        // we re-validate against the LIVE door via doorOpenAt — NOT solidAt, because an open door keeps a thin
-        // collision box (solidAt would stay true and never clear the hold). Self-healing like FOOTING: re-issued
-        // each tick until the door reads the target state. Almost always empty (a door crossing is rare).
+        // Openables FIRST (DOORS P3; trapdoors identically — DESIGN-trapdoors.md §7), before any body-cell
+        // geometry — an openable-state is a precondition of the whole crossing, so it is established BEFORE the
+        // bot drives through (and the exit double-toggle CLOSEs before the exit segment drives). The toggle is
+        // instant (a direct server set), so all reqs resolve this tick; we re-validate against the LIVE block
+        // via doorOpenAt (the shared OPEN property covers doors and trapdoors) — NOT solidAt, because an open
+        // door keeps a thin collision box and an open trapdoor its wall panel (solidAt would stay true and
+        // never clear the hold). Self-healing like FOOTING: re-issued each tick until the openable reads the
+        // target state — which is also the anti-trick property: an EXTERNALLY re-flipped door/trapdoor simply
+        // mismatches again next tick and is re-toggled, no timers. The executor verb dispatches on the req's
+        // kind flag (resolved once at injection from the live block — see MovePlan.requireTrapdoor).
+        // Almost always empty (an openable crossing is rare).
         for (MovePlan.Req d : plan.doorReqs()) {
             if (bot.doorOpenAt(d.x, d.y, d.z) != d.open) {
-                bot.setDoorOpen(d.x, d.y, d.z, d.open);
+                if (d.trapdoor) {
+                    bot.setTrapdoorOpen(d.x, d.y, d.z, d.open);
+                } else {
+                    bot.setDoorOpen(d.x, d.y, d.z, d.open);
+                }
                 if (holdNeed == null) { holdNeed = MovePlan.Need.OPEN; holdX = d.x; holdY = d.y; holdZ = d.z; }
                 holding = true; // re-validate next tick (the toggle is instant)
             }
@@ -205,9 +214,10 @@ public final class PhaseRunner {
         // anything is unmet, hold on the target column instead of driving the phase (stop and fix the geometry).
         for (MovePlan.Req r : phase.needs()) {
             if (r.kind == MovePlan.Need.AIR) {
-                // A door cell is governed by a Need.OPEN (opened by hand above) — NEVER mine it, even a CLOSED
-                // toggleable door (which DOES obstruct the corridor): the crossing opens it by hand, not by force.
-                if (plan.isDoorCell(r.x, r.y, r.z)) continue;
+                // An openable cell (door OR trapdoor) is governed by a Need.OPEN (toggled by hand above) —
+                // NEVER mine it, even a CLOSED toggleable one (which DOES obstruct the corridor): the crossing
+                // operates it by hand, not by force.
+                if (plan.isOpenableCell(r.x, r.y, r.z)) continue;
                 // Mine only a GENUINE obstruction — the block's live collision actually intrudes into the bot's
                 // body corridor (movementBlockedAt), NOT merely "has some collision" (solidAt). This is the
                 // general fix for the whole passable-collision class: a movement's plan() declares Need.AIR on its

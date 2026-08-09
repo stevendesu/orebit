@@ -21,10 +21,10 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  *       above it. Same-level is NOT automatically flat: the LIP between the two floors' real tops
  *       ({@code destTopY − startTopY}, sixteenths) must be ≤ {@link MovementContext#STEP_ASSIST_MAX_RISE}
  *       — walking from a very low partial (a 2/16 repeater plate) onto a full block is a 14/16 rise no
- *       auto-step clears. <i>Known gap (documented, not invented away):</i> a same-level lip of 10..20
- *       sixteenths IS jumpable in vanilla ({@link MovementContext#JUMP_RISE}) but NO movement emits a
- *       same-block-level jump today (Ascend is strictly one level up), so such a lip is simply not
- *       offered.
+ *       auto-step clears. A same-level lip of 10..20 sixteenths is {@link Ascend}'s <b>same-level jump
+ *       arm</b> (owner-ratified, DESIGN-trapdoors.md §6 — the historical "one-way plate pocket" gap is
+ *       closed): Traverse still owns everything within the auto-step budget, Ascend owns the jumpable
+ *       band above it.
  *   <li><b>Step-assist</b> (one cell up onto a low partial) — a slab / snow-layer / stair lip is
  *       auto-stepped (~0.6 blocks) without a jump when the RISE from the start floor's top to the
  *       destination floor's top ({@link MovementContext#rise}: {@code 16 + destTopY − startTopY}) is
@@ -39,7 +39,21 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  * <p><b>Body clearance via the resident bit.</b> The two body cells above a destination floor are checked
  * through the precomputed {@code HEADROOM} flag ({@link MovementContext#requireBodyClear}) — one grid read
  * instead of two {@code descriptorAt} probes — falling back to per-cell reads (which also fold breaks)
- * only when the bit can't be trusted near a section face or when the bot must mine its way through.
+ * only when the bit can't be trusted near a section face or when the bot must mine its way through. The
+ * fallback applies the §4 residual rules face-aware (DESIGN-trapdoors.md): the dest floor's real
+ * {@code topY} is threaded so a ≤3/16 plate floor skips its head cell and a slab floor admits a flush
+ * top-band ceiling, and openable body cells pass free / fold SETs per their blocked face.
+ *
+ * <p><b>Close-and-stand ({@code requireFloorOrToggle}, DESIGN-trapdoors.md §5).</b> A non-standable dest
+ * floor cell that is a toggleable OPEN trapdoor folds a {@code SET_CLOSED} — the closed state (a 3/16
+ * plate for a BOTTOM half, a flush 16/16 hatch for a TOP half) is standable by construction — and the
+ * rise gates then judge the TOGGLED topY: the flat arm admits a same-level close (step down onto the
+ * plate / walk onto the flush hatch), the step-assist arm admits the one-up close-and-step (the §5
+ * "closing a panel creates a plate" emission, {@code rise(1,3,16)=3 ≤ 9}); a toggled rise past the
+ * auto-step budget is left to {@link Ascend}'s jump arms. The exit gate ({@link
+ * MovementContext#exitDoorDecision}) covers a feet-cell OPEN trapdoor's panel face identically to a door
+ * (registered by {@code setCurrentDoorEdge}, folded single-cell), and the macro collapse already skips
+ * when an exit toggle is owed — trapdoor exits included.
  *
  * <h2>Macro-awareness (cuboid collapse — MACRO-IMPLEMENTATION.md §8.1)</h2>
  *
@@ -172,12 +186,39 @@ public final class Traverse implements Movement {
                     // hazard/slow surcharge for the destination body (zero-read when the flag bits are
                     // clear; the edit-folding form breaks through a bush/web where that's cheaper).
                     EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
-                    if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z);
-                    ctx.requireBodyClearToward(e, nx, y, nz, flags, d[0], d[1]);
+                    if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
+                    // Dest floor top threaded for the §4 exact-fit body rules (a ≤3/16 plate floor skips the
+                    // head cell; a slab floor admits a flush top-band ceiling). Plain topY — a stair's 16 is
+                    // the conservative standing surface for clearance, matching the historical default.
+                    ctx.requireBodyClearToward(e, nx, y, nz, flags, d[0], d[1], ctx.topYOf(pd));
                     if (e.valid()) {
                         out.accept(nx, y, nz,
                                 cost(ctx, pd) + ctx.bodyTransitCost(e, flags, nx, y, nz) + e.extraCost(), e);
                         continue; // already have footing here; don't also step-assist/bridge this column
+                    }
+                }
+            }
+
+            // Close-and-stand, same level (DESIGN-trapdoors.md §5): the dest floor cell is a toggleable
+            // OPEN trapdoor — fold a SET_CLOSED (requireFloorOrToggle) and stand on the closed state (a
+            // 3/16 plate or a flush 16/16 hatch per its half), gating the rise on the TOGGLED topY: a
+            // BOTTOM half is a −13 step down (always walks), a TOP half a 16−sTop lip (walks off a full
+            // start; from a low partial it exceeds the auto-step and Ascend's same-level jump arm owns
+            // it). Reached only behind the !standable failure path + one almost-always-false predicate,
+            // so trapdoor-free worlds pay nothing new.
+            if (built && !standable && ctx.trapdoorSetFloors(pd)) {
+                int flags = MovementContext.flagsOf(p);
+                EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+                if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
+                long fd = e.requireFloorOrToggle(nx, y, nz); // folds the SET_CLOSED; returns the toggled floor
+                int fTop = ctx.topYOf(fd);
+                if (e.valid()
+                        && MovementContext.rise(0, fTop, sTop) <= MovementContext.STEP_ASSIST_MAX_RISE) {
+                    ctx.requireBodyClearToward(e, nx, y, nz, flags, d[0], d[1], fTop);
+                    if (e.valid()) {
+                        out.accept(nx, y, nz,
+                                cost(ctx, fd) + ctx.bodyTransitCost(e, flags, nx, y, nz) + e.extraCost(), e);
+                        continue;
                     }
                 }
             }
@@ -196,12 +237,35 @@ public final class Traverse implements Movement {
                                 <= MovementContext.STEP_ASSIST_MAX_RISE) {
                     int flags = MovementContext.flagsOf(pu);
                     EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
-                    if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z);
-                    ctx.requireBodyClearToward(e, nx, uy, nz, flags, d[0], d[1]);
+                    if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
+                    // Dest floor top threaded (§4 exact-fit) — the step-assist ONTO a 3/16 plate one up is
+                    // exactly the case whose head cell must not be consulted (2-tall hallway hatch pocket).
+                    ctx.requireBodyClearToward(e, nx, uy, nz, flags, d[0], d[1], ctx.topYOf(pud));
                     if (e.valid()) {
                         out.accept(nx, uy, nz,
                                 cost(ctx, pud) + ctx.bodyTransitCost(e, flags, nx, uy, nz) + e.extraCost(), e);
                         continue;
+                    }
+                } else if (!noAutoStepFromStance && ctx.trapdoorSetFloors(pud)) {
+                    // Close-and-stand, one up (§5): a toggleable OPEN trapdoor one cell up folds SET_CLOSED
+                    // and the auto-step gates the TOGGLED topY — a closed BOTTOM half is the ratified
+                    // "closing a panel creates a plate" emission (rise(1,3,16)=3 ≤ 9, the dy=+1 plate node
+                    // the self-refusing flat arm hands over to); a closed TOP half (rise 16+16−sTop > 9)
+                    // refuses here and is Ascend's jump-onto-hatch arm.
+                    int flags = MovementContext.flagsOf(pu);
+                    EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+                    if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
+                    long fd = e.requireFloorOrToggle(nx, uy, nz);
+                    int fTop = ctx.topYOf(fd);
+                    if (e.valid()
+                            && MovementContext.rise(1, fTop, sTop) <= MovementContext.STEP_ASSIST_MAX_RISE) {
+                        ctx.requireBodyClearToward(e, nx, uy, nz, flags, d[0], d[1], fTop);
+                        if (e.valid()) {
+                            out.accept(nx, uy, nz,
+                                    cost(ctx, fd) + ctx.bodyTransitCost(e, flags, nx, uy, nz) + e.extraCost(),
+                                    e);
+                            continue;
+                        }
                     }
                 }
             }
@@ -217,7 +281,7 @@ public final class Traverse implements Movement {
                     && MovementContext.rise(0, 16, sTop) <= MovementContext.STEP_ASSIST_MAX_RISE) {
                 int flags = MovementContext.flagsOf(p);
                 EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
-                if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z);
+                if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
                 e.requireFloor(nx, y, nz);
                 ctx.requireBodyClearToward(e, nx, y, nz, flags, d[0], d[1]);
                 if (e.valid()) {

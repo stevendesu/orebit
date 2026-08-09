@@ -24,6 +24,15 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  * throwaway floor is <i>placed</i> against the wall to descend onto (the counterpart to {@link Ascend}'s
  * staircase-up). Repeated Descend+place builds a staircase down a sheer drop the bot can't safely
  * {@link Fall} — completing controlled 3D descent through the existing kinds.
+ *
+ * <p><b>Trapdoors (DESIGN-trapdoors.md §5–§6).</b> The dest floor rides {@code requireFloorOrToggle}: a
+ * toggleable OPEN trapdoor one down closes into a standable hatch (a 1+13/16 drop onto the BOTTOM-half
+ * plate, an exact 1 onto a flush TOP half — both within the gentle step-down, no rise gate needed), and
+ * every other cell behaves bit-identically to the historical {@code requireFloor}. The two lower transit
+ * cells were already cleared face-aware ({@code requireAirToward}) and inherit the trapdoor arms from
+ * that primitive: an open panel parallel to travel passes free, one across the crossed face folds its
+ * SET. The step-off head cell {@code y+2} and the transit cell {@code y+1} stay strict (no §4 ceiling
+ * admit): both are crossed at the START level mid-step, where a top-band plate genuinely bisects.
  */
 public final class Descend implements Movement {
 
@@ -60,10 +69,21 @@ public final class Descend implements Movement {
             int flags = MovementContext.flagsOf(packed);
             EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
             // §2b: fold the exit-door toggle onto this arm when leaving through a blocked (toggleable) feet door.
-            if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z);
-            // Footing: step onto the block below, or BUILD A STEP DOWN — place a throwaway floor one down
-            // against the wall and descend onto it (if the bot may place and the spot is placeable).
-            if (!dstStandable) e.requireFloor(nx, dy, nz);
+            if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
+            // Footing: step onto the block below, CLOSE an open hatch into one (§5 requireFloorOrToggle —
+            // the toggle arm only), or BUILD A STEP DOWN (the historical requireFloor place arm). The
+            // TOGGLED descriptor feeds the cost reads below (a closed hatch is never slow nor damaging);
+            // the PLACE arm deliberately keeps pricing the PRE-place grid descriptor (dstDesc — the Ascend
+            // parity rule: the historical cost read, so e.g. a step-down-place into a FIRE cell still
+            // charges its floor hazard and non-trapdoor searches are byte-identical to the float).
+            long floorDesc = dstDesc;
+            if (!dstStandable) {
+                if (ctx.trapdoorSetFloors(dstDesc)) {
+                    floorDesc = e.requireFloorOrToggle(nx, dy, nz);
+                } else {
+                    e.requireFloor(nx, dy, nz);
+                }
+            }
             // The step-off transit (nx, y..y+2, nz) is the dest floor's body column; clear it through the
             // dest's JUMP-level HEADROOM, else read/break the three cells under the RISKY_EDIT gate. A door in
             // the dest column is a LOWERED doorway (a door standing on the step the bot drops onto): it occupies
@@ -84,8 +104,8 @@ public final class Descend implements Movement {
                 // surcharge for the landing body cells (nx, y-1's body = y, y+1 — the transit), zero-read
                 // when the dest flag bits are clear; the edit-folding form breaks through a bush/web where
                 // that's cheaper. The step-off head cell (y+2) is clearance-only.
-                float cost = (ctx.isSlow(dstDesc) ? COST * Traverse.SLOW_COST_FACTOR : COST)
-                        + ctx.floorHazardCost(dstDesc)
+                float cost = (ctx.isSlow(floorDesc) ? COST * Traverse.SLOW_COST_FACTOR : COST)
+                        + ctx.floorHazardCost(floorDesc)
                         + ctx.bodyTransitCost(e, flags, nx, dy, nz);
                 out.accept(nx, dy, nz, cost + e.extraCost(), e);
             }

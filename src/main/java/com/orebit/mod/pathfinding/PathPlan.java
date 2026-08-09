@@ -868,7 +868,27 @@ public final class PathPlan {
     }
 
     /**
-     * Whether this plan folded a break, a place, or a <b>clutch</b> at {@code (x,y,z)} on any of its steps.
+     * The bot is ABOUT to TOGGLE the openable (door/trapdoor) at {@code (x,y,z)} — if THIS plan prescribed a
+     * SET there, announce the same-block state toggle to the grid ({@link NavGridUpdater#expectToggle}) so
+     * {@link #planImpacted} does not read the plan's own toggle as the world diverging from it
+     * (DESIGN-trapdoors.md §7 — this closes the doors gap: previously every own door toggle counted as a
+     * FOREIGN change and cost one wasted-but-correct re-search). The toggle has no {@code toAir} direction —
+     * the SAME Block changes state in place — so it rides its own expectation slot with its own match rule
+     * (pos + same Block + {@code old != new}; a door's other half is covered there too). Verified against the
+     * plan's own {@link StepEdits} doorSets exactly as {@link #expectOwnEdit} is against breaks/places: a
+     * toggle no plan prescribed is never forgiven.
+     */
+    public void expectOwnToggle(int x, int y, int z) {
+        final BlockPathPlan bp = blockPlan;
+        if (bp == null || !prescribesEdit(bp, x, y, z)) {
+            return;   // not ours to forgive — let the change count as divergence
+        }
+        NavGridUpdater.expectToggle(level, new BlockPos(x, y, z));
+    }
+
+    /**
+     * Whether this plan folded a break, a place, a <b>door/trapdoor SET</b>, or a <b>clutch</b> at
+     * {@code (x,y,z)} on any of its steps.
      * Cold: runs once per executed edit, over a window's worth of mostly edit-free steps. Package-private for
      * {@code PathPlanOwnEditTest}, which pins the semantic that keeps this honest: an edit the plan never
      * prescribed (a {@code /bot mine} or gather break through the same actuators) is NOT forgiven.
@@ -905,6 +925,14 @@ public final class PathPlan {
             for (int i = 0; i < e.placeCount(); i++) {
                 final BlockPos p = e.placePos(i);
                 if (p.getX() == x && p.getY() == y && p.getZ() == z) return true;
+            }
+            // Door/trapdoor SETs (DESIGN-trapdoors.md §7): the toggle executors verify their own-toggle
+            // announcement here. Coordinate-only like the rest — the toggle DIRECTION is matched later, at
+            // NavGridUpdater.consumeExpectedToggle (same Block + old != new), the same concern split the
+            // clutch cell documents above.
+            for (int i = 0; i < e.doorSetCount(); i++) {
+                final long c = e.doorSetAt(i);
+                if (BlockPos.getX(c) == x && BlockPos.getY(c) == y && BlockPos.getZ(c) == z) return true;
             }
             if (e.clutchKind() != ClutchModel.NONE) {
                 // Packed compare, no BlockPos: clutchCell is only MEANINGFUL past the NONE guard (it is 0 on

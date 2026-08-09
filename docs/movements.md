@@ -70,9 +70,26 @@ walks at ~0.4× speed, so crossing it costs 4.633 ÷ 0.4 ≈ 11.6 ticks — a
 **Diagonal** — the corner-cutting variant at √2 distance (6.552 ticks), with corner
 clearance checks so the bot's 0.6-wide hitbox never clips a fence post mid-cut. Folds
 no edits — a blocked diagonal just isn't offered (the two cardinal steps still are).
+It also enforces the **rise gate**: a same-level diagonal whose destination surface
+sits more than the 9/16 auto-step above the start surface (a carpet-to-full-block
+lip, say) is refused rather than emitted as an impossible walk — the cardinal jump
+arm owns that lip.
 
 **Ascend / Descend** — the ±1-level steps, each priced as one walk step. Ascend may
-place a step block to climb where none exists; Descend may dig one out.
+place a step block to climb where none exists; Descend may dig one out. Ascend also
+carries the **same-level jump arm**: a lip between two floors at the *same* block
+level that is too tall for the auto-step but within one jump's 1.25-block gain
+(10..20 sixteenths — climbing out of a flush-sunk hatch pocket, or a carpet-lip
+pocket) is emitted as a jump, priced like the +1 step.
+
+**Trapdoors** ride the door machinery: a hand-toggleable trapdoor blocking a crossing
+folds a cheap **open/close SET** (6 ticks, same as a door toggle, gated by
+`doors.toggle`) instead of being mined — closing an open hatch makes a floor to stand
+on, opening a closed plate clears headroom or drops the bot through (MineDown), and a
+vertically-stacked pair is opened as two SETs in one step. An opened panel that would
+swing *across* the travel direction refuses instead — no toggle chain plans a
+crossing the panel itself would block. Iron trapdoors are never hand-toggled and are
+routed around (or mined, where policy allows).
 
 ## Vertical, in place
 

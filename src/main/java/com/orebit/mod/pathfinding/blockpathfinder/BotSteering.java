@@ -386,11 +386,31 @@ public interface BotSteering {
     void setDoorOpen(int x, int y, int z, boolean open);
 
     /**
-     * Whether the door at cell {@code (x,y,z)} is currently OPEN (its live {@code DoorBlock.OPEN} property) —
-     * the door executor's gate and verify-readback (DOORS P3). It reads the OPEN <b>block-state property</b>,
-     * NOT {@link #solidAt}: an open door keeps a thin (~3px) collision box, so {@code solidAt} stays TRUE even
-     * when open — testing solidness would make a {@code Need.OPEN} wrongly MINE the door. Non-door cells read
-     * {@code false}. Reads the live level, so it reflects the bot's own just-issued {@link #setDoorOpen}.
+     * OPEN ({@code open == true}) or CLOSE the hand-toggleable trapdoor at cell {@code (x,y,z)} server-side —
+     * the trapdoor twin of {@link #setDoorOpen} (DESIGN-trapdoors.md §7), routed to {@link
+     * com.orebit.mod.platform.WorldEdits#setTrapdoorOpen}. Authoritative and instant (a direct property
+     * write — {@code TrapDoorBlock} has no vanilla {@code setOpen} to call); iron / non-trapdoor cells are
+     * no-ops (see WorldEdits). The entity layer may cosmetically face the trapdoor but never swings.
+     * Reactive like the door verb: the runner re-issues it while the live trapdoor does not read the target
+     * state ({@link #doorOpenAt}, which covers trapdoors too — shared {@code OPEN} property).
+     *
+     * <p>A {@code default} no-op — the {@link #placeClutch} pattern, NOT the abstract {@link #setDoorOpen}
+     * shape — so the many existing headless test doubles need no edits: a double that ignores trapdoors
+     * simply never satisfies a trapdoor req, which the runner surfaces as a visible hold (the conservative
+     * direction). Doubles under trapdoor test override it.
+     */
+    default void setTrapdoorOpen(int x, int y, int z, boolean open) { }
+
+    /**
+     * Whether the <b>openable</b> (door OR trapdoor) at cell {@code (x,y,z)} is currently OPEN — its live
+     * {@code OPEN} block-state property, which {@code DoorBlock} and {@code TrapDoorBlock} share
+     * ({@code BlockStateProperties.OPEN}) — the SET executor's gate and verify-readback (DOORS P3;
+     * trapdoors DESIGN-trapdoors.md §7 ride the same read, so the name keeps its door heritage). It reads
+     * the OPEN <b>block-state property</b>, NOT {@link #solidAt}: an open door keeps a thin (~3px) collision
+     * box (an open trapdoor keeps its wall panel), so {@code solidAt} stays TRUE even when open — testing
+     * solidness would make a {@code Need.OPEN} wrongly MINE the cell. Non-openable cells read {@code false}.
+     * Reads the live level, so it reflects the bot's own just-issued {@link #setDoorOpen}/{@link
+     * #setTrapdoorOpen}.
      */
     boolean doorOpenAt(int x, int y, int z);
 

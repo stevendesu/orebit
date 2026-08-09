@@ -135,7 +135,10 @@ banners, ladders, and more — so a bot won't chew through someone's build. Wild
 
 Protection stops the bot **breaking** a block, not **using** it: a protected wooden or copper door is still
 opened and closed to walk through (a non-destructive action) — only iron doors, which can't be hand-operated,
-get routed around. And protecting a block never stops it being a deliberate *target*: `/bot mine iron` still
+get routed around. **Trapdoors work the same way**: protected from breaking by default, but a hand-toggleable
+trapdoor is still operated — opened to drop through or clear headroom, closed to stand on — under the same
+`doors.toggle` capability, while iron trapdoors (redstone-only) are routed around. And protecting a block
+never stops it being a deliberate *target*: `/bot mine iron` still
 works even though ores can appear in a protected list, because protection only governs breaking blocks *to
 clear a path*.
 

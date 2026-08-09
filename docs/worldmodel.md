@@ -23,7 +23,12 @@ Key decisions:
 - **Identity is per-`BlockState`, not per-`Block`.** Orientation changes navigation:
   north-facing stairs can be ascended from the south but not the north; growth stages
   change whether you can walk through or stand on a block. Keying on the block alone
-  loses this.
+  loses this. The openable family shows how tightly the fingerprint packs: doors,
+  trapdoors, and fence gates are told apart by one small "openable kind" field, and
+  share common facing / top-or-bottom-half / open / hand-toggleable fields (stairs
+  reuse the same facing and half slots) — so a trapdoor's whole navigation identity,
+  which wall its open panel hugs, which half its closed plate sits in, and whether
+  the bot may toggle it by hand, costs no new bits at all.
 - **The packed `long` is simultaneously the data and the dedup key.** Two block states
   that pack to the same bits behave identically to the pathfinder, so they *are* the
   same **navtype**. That behavioral dedup collapses Minecraft's ~28,000 block states

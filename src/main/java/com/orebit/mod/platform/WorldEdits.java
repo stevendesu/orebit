@@ -6,7 +6,9 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 
 /**
  * The thin server-side world-mutation seam the path follower uses to execute a step's folded
@@ -61,6 +63,54 @@ public final class WorldEdits {
         Block block = state.getBlock();
         if (block instanceof DoorBlock door && block != Blocks.IRON_DOOR) {
             door.setOpen(actor, level, state, pos, open);
+        }
+    }
+
+    /**
+     * OPEN or CLOSE the (hand-toggleable) trapdoor at {@code pos} server-side, authoritatively — the trapdoor
+     * twin of {@link #setDoorOpen} (DESIGN-trapdoors.md §7). Unlike {@code DoorBlock}, <b>{@code TrapDoorBlock}
+     * has no {@code setOpen} convenience at any version</b> (member sweeps 1.17.1 → 26.2), so this is a
+     * hand-rolled authoritative write in the house style (no interaction stack): force the {@code OPEN}
+     * property to the target and {@code setBlock} it. Single cell — a trapdoor has no two-half sync.
+     *
+     * <p><b>Two guards, mirroring the door verb.</b> A non-trapdoor {@code pos} (stale grid) is a no-op via
+     * the {@code instanceof} test; an <b>iron</b> trapdoor is refused ({@code Blocks.IRON_TRAPDOOR} is the
+     * complete vanilla hand-toggle exception set at every version — copper trapdoors ARE hand-openable). A
+     * trapdoor already at the target state is a no-op too, so re-issuing the verb never spams block updates.
+     *
+     * <p><b>Deliberately setBlock-only — the vanilla sound/game-event side effects are DROPPED</b>, per the
+     * ratified drift rule (§7: javap-pin the side-effect surface or ship without it). Both candidates drift:
+     * <ul>
+     *   <li><b>Sound</b>: the classic wood-trapdoor level events (ids 1007 open / 1013 close) are DEAD on
+     *       modern clients — the client handler's switch has no case for them at 1.21.11 or 26.2, and 26.2's
+     *       {@code LevelEvent} class dropped the constants outright (javap-verified; vanilla switched trapdoors
+     *       to {@code BlockSetType} sounds at 1.19.4). The 4-arg {@code levelEvent} overload also churns
+     *       {@code Player}&rarr;{@code Entity} at 1.21.5, and the modern {@code playSound}/{@code BlockSetType}
+     *       path does not exist &le;1.19.3 (and {@code getType()} is protected). No single sound surface spans
+     *       the range.</li>
+     *   <li><b>Game event</b>: {@code GameEvent.BLOCK_OPEN}'s field type churns {@code GameEvent} &rarr;
+     *       {@code Holder.Reference<GameEvent>} mid-range (javap 1.17.1 vs 1.21.1) — source-incompatible for
+     *       common code.</li>
+     * </ul>
+     * So the toggle is silent and sculk-invisible in v1 — accepted; an overlay flavor can restore parity later.
+     * The waterlogged fluid re-tick vanilla schedules is likewise skipped (the tick-scheduler API churned at
+     * 1.18.2); flag {@code 3} (neighbour updates + client sync, per the ratified §7 form) lets neighbours react.
+     *
+     * <p><b>Version stability of what IS used</b> (all javap-verified 1.17.1 → 26.2): {@code instanceof
+     * TrapDoorBlock} (class stable, copper subclasses extend it), {@code Blocks.IRON_TRAPDOOR},
+     * {@code BlockStateProperties.OPEN} ({@code BooleanProperty}), {@code StateHolder.getValue/setValue}, and
+     * {@code Level.setBlock(BlockPos, BlockState, int)}. Core baseline, no overlay flavor. ({@code actor} is
+     * unused today — carried for seam symmetry with {@link #setDoorOpen}, and it is what a future sound/
+     * game-event parity overlay would attribute the toggle to.)
+     */
+    public static void setTrapdoorOpen(ServerLevel level, BlockPos pos, Entity actor, boolean open) {
+        BlockState state = level.getBlockState(pos);
+        Block block = state.getBlock();
+        if (block instanceof TrapDoorBlock && block != Blocks.IRON_TRAPDOOR) {
+            if (state.getValue(BlockStateProperties.OPEN) == open) {
+                return; // already at target — no redundant block update
+            }
+            level.setBlock(pos, state.setValue(BlockStateProperties.OPEN, open), 3);
         }
     }
 }

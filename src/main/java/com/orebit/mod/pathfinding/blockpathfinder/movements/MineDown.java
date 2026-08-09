@@ -33,6 +33,17 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  * <p><b>Caps.</b> Requires {@link BotCaps#canBreak}; a non-breaking bot emits nothing. The floor must be
  * actually breakable (not bedrock/fluid) and not {@code RISKY_EDIT} (don't undermine sand / tap a flow).
  *
+ * <p><b>Trapdoors — the hatch-drop toggle arm (DESIGN-trapdoors.md §5).</b> The floor cell rides {@link
+ * com.orebit.mod.pathfinding.blockpathfinder.EditScratch#requireAirVertical}: when the block stood on is a
+ * toggleable CLOSED trapdoor (either half — a closed plate's blocked face is always vertical, and the drop
+ * crosses both vertical faces), a {@code SET_OPEN} is folded INSTEAD of the break ({@link
+ * MovementContext#DOOR_TOGGLE_COST} vs the real mining ticks — the toggle when permitted, else the break
+ * path unchanged; iron / {@code doors.toggle}-off falls through). The opened panel is a wall-hugging
+ * vertical, body-passable for the drop and for the landed stance's feet cell (§4), and the standard
+ * descend checks run against that OPEN descriptor — "stand on hatch, open it, drop through". Note the
+ * {@code canBreak} top gate still applies: a genuinely walk-only bot never runs MineDown at all, hatch or
+ * not (an unratified widening deliberately not taken).
+ *
  * <h2>Macro collapse (MACRO-IMPLEMENTATION.md §8.1)</h2>
  * A deep shaft is a long uniform run of "break the block underfoot, drop one." Rather than emit one
  * single-step candidate and let A* re-expand the shaft block-by-block, the macro path collapses the whole
@@ -82,7 +93,9 @@ public final class MineDown implements Movement {
         NavGridCuboidsView cuboids = ctx.cuboids();
         if (!BlockPathfinder.MACRO_MOVES || cuboids == null || ctx.macroAxis() != Axes.AXIS_Y) {
             EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
-            e.requireAir(x, y, z);
+            // The floor stood on: break it — or, when it is a toggleable CLOSED trapdoor, fold the §5
+            // SET_OPEN instead (the hatch-drop; class doc) and drop through the opened wall panel.
+            e.requireAirVertical(x, y, z);
             if (e.valid()) out.accept(x, dy, z, COST + e.extraCost(), e);
             return;
         }
@@ -109,7 +122,7 @@ public final class MineDown implements Movement {
             // don't undermine a gravity stack / tap a fluid mid-shaft just because the START cell was safe.
             // The start level (k==1) was already gated by the reset() above. Clamp the jump above a risky cell.
             if (k > 1 && MovementContext.risksEdit(ctx.flagsAt(x, by, z))) { J = k - 1; break; }
-            e.requireAir(x, by, z);          // break the block the bot stands on at the start of step k
+            e.requireAirVertical(x, by, z);  // break — or §5-toggle a closed hatch — the step-k floor
             if (!e.valid()) {                // this level can't be broken — clamp to the last valid step
                 J = k - 1;
                 break;

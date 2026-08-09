@@ -91,14 +91,19 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *   0–4     5   topY        collision top surface, round(maxY*16), clamped 0..31
  *   5–7     3   shape       ShapeClass ordinal (EMPTY..OTHER) — see {@link #SHAPE_FULL} etc.
  *   8–9     2   horizFacing SHARED horizontal FACING (0=N 1=E 2=S 3=W); 0 for cells with no facing. Populated for
- *                           BOTH {@link StairBlock} states (via {@link #stairFacing}) AND {@link DoorBlock} states
- *                           (via {@link #doorFacing}) — a cell is a stair XOR a door (disambiguated by
- *                           {@link #isStair} / {@link #isDoor}), so the field is reused. On a BOTTOM stair the HIGH
- *                           16/16 half is on the FACING side, the LOW 8/16 front opposite (empirically verified,
- *                           StairVoxelProbe), so a walk-up reads as a +0.5 step-assist rather than a +1.0 jump.
- *   10      1   stairHalf   {@link StairBlock} HALF (0=bottom 1=top); 0 for non-stairs (incl. doors — a door does
- *                           NOT set this bit). A TOP stair's top surface is flat 16/16 everywhere, so it needs no
- *                           directional handling.
+ *                           {@link StairBlock} states (via {@link #stairFacing}), {@link DoorBlock} states (via
+ *                           {@link #doorFacing}) AND {@link TrapDoorBlock} states (via {@link #trapdoorFacing}) —
+ *                           a cell is a stair XOR a door XOR a trapdoor (disambiguated by {@link #isStair} /
+ *                           {@link #isDoor} / {@link #isTrapdoor}), so the field is reused (DESIGN-trapdoors.md
+ *                           §2 — zero new bits). On a BOTTOM stair the HIGH 16/16 half is on the FACING side, the
+ *                           LOW 8/16 front opposite (empirically verified, StairVoxelProbe), so a walk-up reads
+ *                           as a +0.5 step-assist rather than a +1.0 jump.
+ *   10      1   half        SHARED HALF bit (1 = TOP): {@link StairBlock} HALF (via {@link #stairHalf}) XOR
+ *                           {@link TrapDoorBlock} HALF (via {@link #trapdoorHalfTop}); 0 for everything else
+ *                           (incl. doors and slabs — a door does NOT set this bit; slab-ness is the
+ *                           SHAPE_SLAB_* classes). A TOP stair's top surface is flat 16/16 everywhere, so it
+ *                           needs no directional handling; a trapdoor's HALF picks its CLOSED plate position
+ *                           (BOTTOM = 3/16 floor plate, TOP = plate flush with the cell top).
  *   11      1   portal      ANY teleport portal — LOW bit of a 2-bit field (mirrors {@code fluid}: low = is-portal,
  *                           high = is-nether). Base identity field, NOT derived. The walker routes AROUND any set cell.
  *   12      1   netherPortal HIGH bit of the portal field: 00 none / 01 end (end_portal + end_gateway) / 11 nether / 10 unused.
@@ -121,10 +126,13 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           0 none / 1 light (sweet berry bush, powder snow ~0.75×) / 2 heavy (cobweb ~0.05×).
  *                           Distinct from the {@code surface} slow field (bits 18–19), which prices standing
  *                           ON a slow floor (soul sand / honey); this prices moving THROUGH a slowing cell.
- *   43      1   doorOpen    {@link DoorBlock} OPEN (1 = open, 0 = closed); 0 for non-doors. Colocated with the
- *                           movement-impact cluster; consumed by {@link #doorBlockedEdge} (open ⇒ perpendicular
- *                           edge, closed ⇒ opposite edge). (Formerly the nether-portal bit — the portal field moved
- *                           down to bits 11–12, widened to a 2-bit any-portal / is-nether field.)
+ *   43      1   open        SHARED OPEN bit (1 = open, 0 = closed): {@link DoorBlock} OPEN (via {@link #doorOpen})
+ *                           XOR {@link TrapDoorBlock} OPEN (via {@link #trapdoorOpen}); 0 for non-openables.
+ *                           Colocated with the movement-impact cluster; consumed by {@link #doorBlockedEdge}
+ *                           (open ⇒ perpendicular edge, closed ⇒ opposite edge) and {@link #trapdoorBlockedFace}
+ *                           (closed ⇒ UP/DOWN per half, open ⇒ the cardinal opposite facing). (Formerly the
+ *                           nether-portal bit — the portal field moved down to bits 11–12, widened to a 2-bit
+ *                           any-portal / is-nether field.)
  *   44      1   protected   owner-protected block ({@code mining.protectedBlocks}) — the bot must NEVER
  *                           break it. A base identity field applied AFTER static-init by {@link
  *                           #applyProtected} (the list needs the loaded config + bound datapack tags), so
@@ -156,14 +164,16 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           its excess-fall damage budget + cost by {1.0,0.5,0.2,0.0} (00 = unchanged; 11 =
  *                           uncapped). A base identity field (like {@code portal}/{@code bubble}), one
  *                           mask-and-shift on the hot path.
- *   50      1   doorToggleable a door the bot can OPEN/CLOSE BY HAND (wood + copper) vs a redstone-only iron
- *                           door (DOORS P2). Set for every {@link DoorBlock} except {@link Blocks#IRON_DOOR}
- *                           (the {@code Blocks.*} idiom of the door/portal/bubble reads — range-stable, no
- *                           platform seam; copper doors, added in 1.21, are non-iron and hand-openable, so the
- *                           test needs no version gate — pre-1.21 the non-iron door set is simply the wood
- *                           species). Meaningful only when {@link #isDoor}. Consumed by the planner's
- *                           prefer-open-over-smash SET fold (an iron door has no SET option → break/route as
- *                           in P1).
+ *   50      1   handToggleable a GENERIC hand-toggleable openable — one the bot can OPEN/CLOSE BY HAND vs a
+ *                           redstone-only iron one. Set for every {@link DoorBlock} except {@link
+ *                           Blocks#IRON_DOOR} (DOORS P2) and every {@link TrapDoorBlock} except {@link
+ *                           Blocks#IRON_TRAPDOOR} (DESIGN-trapdoors.md §2) — the {@code Blocks.*} idiom of the
+ *                           door/portal/bubble reads (range-stable, no platform seam; copper doors AND copper
+ *                           trapdoors are non-iron and hand-openable, so the test needs no version gate —
+ *                           pre-copper the non-iron set is simply the wood species). Kind discrimination is the
+ *                           {@code openable} field (14–15), NOT this bit. Meaningful only when {@link #isDoor}
+ *                           / {@link #isTrapdoor}. Consumed by the planner's prefer-open-over-smash SET fold
+ *                           (an iron door/trapdoor has no SET option → break/route as in P1).
  *   51      1   narrowTop   the collision footprint is a NARROW POST — either XZ extent of the shape's
  *                           bounding box under the bot's own 0.6-block body width (bamboo ~3px with a
  *                           position-hash offset, chain 3px, end/lightning rod 4px, pointed dripstone,
@@ -252,12 +262,15 @@ public final class NavBlock {
     public static final int FALLSOFT_ZERO  = 3;
 
     // ---- Bit field shifts/masks --------------------------------------------------------------
-    // Bits 8–10 hold the stair facing (2) + half (1), populated ONLY for StairBlock states (0 elsewhere, so
-    // only stairs split navtypes); bits 11–12 hold the 2-bit portal field (any-portal / is-nether, see below);
-    // bits 13 and 43 were freed when the portal marker moved down into 11–12, and were then CLAIMED by the door
-    // encoding below (13 = hinge, 43 = open) — this comment claimed both were still free long after they were
-    // not, so do not read it as a free list. THE FREE BITS ARE 52–63; the highest bit in use is NARROW_TOP (51).
-    // Adding a descriptor bit needs explicit owner sign-off (retroactive ruling after doorToggleable@50).
+    // Bits 8–10 hold the shared facing (2) + half (1) fields, populated for StairBlock, DoorBlock (facing
+    // only) and TrapDoorBlock states (0 elsewhere, so only those families split navtypes); bits 11–12 hold
+    // the 2-bit portal field (any-portal / is-nether, see below); bits 13 and 43 were freed when the portal
+    // marker moved down into 11–12, and were then CLAIMED by the door encoding below (13 = hinge, 43 = open)
+    // — this comment claimed both were still free long after they were not, so do not read it as a free list.
+    // THE FREE BITS ARE 52–63; the highest bit in use is NARROW_TOP (51). The trapdoor arc added ZERO bits:
+    // facing/half/open/hand-toggleable are all SHARED fields discriminated by the openable kind (14–15) —
+    // DESIGN-trapdoors.md §2, owner-ratified 2026-08-08. Adding a descriptor bit needs explicit owner
+    // sign-off (retroactive ruling after handToggleable@50).
     private static final int TOP_Y_SHIFT = 0,  TOP_Y_MASK = 0x1F;
     private static final int SHAPE_SHIFT = 5,  SHAPE_MASK = 0x07;
     private static final int STAIR_FACING_SHIFT = 8, STAIR_FACING_MASK = 0x03; // 0=N 1=E 2=S 3=W (stairs AND doors)
@@ -267,7 +280,14 @@ public final class NavBlock {
     // precomputed. DOOR_FACING_SHIFT/_MASK alias the stair facing field deliberately (same 2-bit HORIZONTAL_FACING).
     private static final int DOOR_FACING_SHIFT = STAIR_FACING_SHIFT, DOOR_FACING_MASK = STAIR_FACING_MASK;
     private static final long DOOR_HINGE_BIT = 1L << 13; // 1 = RIGHT hinge, 0 = LEFT (doors only)
-    private static final long DOOR_OPEN_BIT  = 1L << 43; // 1 = open, 0 = closed (doors only)
+    private static final long DOOR_OPEN_BIT  = 1L << 43; // 1 = open, 0 = closed (doors XOR trapdoors)
+    // Trapdoors reuse the shared fields too (DESIGN-trapdoors.md §2 — ZERO new bits): facing rides bits 8–9,
+    // HALF rides bit 10 (1 = TOP), OPEN rides bit 43. A cell is stair XOR door XOR trapdoor (the openable kind
+    // at 14–15 disambiguates), so no read ever sees another family's packing. The blocked FACE is DERIVED at
+    // query time (see #trapdoorBlockedFace), never stored — the doorBlockedEdge discipline.
+    private static final int TRAPDOOR_FACING_SHIFT = STAIR_FACING_SHIFT, TRAPDOOR_FACING_MASK = STAIR_FACING_MASK;
+    private static final long TRAPDOOR_HALF_BIT = STAIR_HALF_BIT; // 1 = TOP half (trapdoors; stairs read via stairHalf)
+    private static final long TRAPDOOR_OPEN_BIT = DOOR_OPEN_BIT;  // 1 = open (trapdoors; doors read via doorOpen)
     private static final int OPEN_SHIFT  = 14, OPEN_MASK  = 0x03;
     private static final int FLUID_SHIFT = 16, FLUID_MASK = 0x03;
     private static final int SURF_SHIFT  = 18, SURF_MASK  = 0x03;
@@ -290,7 +310,7 @@ public final class NavBlock {
     private static final long REDUCED_JUMP_BIT = 1L << 45;            // reduced-jump floor: honey (base field)
     private static final int BUBBLE_SHIFT = 46, BUBBLE_MASK = 0x03;   // bubble column + drag dir (base field)
     private static final int FALLSOFT_SHIFT = 48, FALLSOFT_MASK = 0x03; // landing fall-damage class (base field)
-    private static final long DOOR_TOGGLEABLE_BIT = 1L << 50;           // hand-openable door (wood/copper), not iron
+    private static final long HAND_TOGGLEABLE_BIT = 1L << 50;          // hand-openable door/trapdoor, not iron
     private static final long NARROW_TOP_BIT = 1L << 51;                // narrow-post collision top (base field)
 
     // ---- Precomputed predicate bits (37+) ----------------------------------------------------
@@ -496,7 +516,24 @@ public final class NavBlock {
             // idiom used for portals/bubble columns above (range-stable, no BlockSetType.canOpenByHand seam).
             // Copper doors (≥1.21) are non-iron + hand-openable, so this needs no explicit version gate: on
             // versions without copper the non-iron door set is exactly the wood species.
-            if (block != Blocks.IRON_DOOR) d |= DOOR_TOGGLEABLE_BIT;
+            if (block != Blocks.IRON_DOOR) d |= HAND_TOGGLEABLE_BIT;
+        }
+        // Trapdoor directional solidity (DESIGN-trapdoors.md §2, owner-ratified 2026-08-08): pack
+        // HORIZONTAL_FACING into the SHARED facing field (bits 8–9), HALF into the shared bit 10 (1 = TOP),
+        // and OPEN into the shared bit 43 — ZERO new bits (a cell is stair XOR door XOR trapdoor; the openable
+        // kind at 14–15 disambiguates every read). Geometry keeps its generic collision-shape derivation
+        // above: closed-BOTTOM → topY 3 SHAPE_PARTIAL_LOW (a standable 3/16 floor plate), closed-TOP → topY 16
+        // SHAPE_OTHER (a standable hatch flush with the cell top; its 13/16 gap beneath is invisible to topY —
+        // see #ceilingMinY), open → topY 16 SHAPE_OTHER + NARROW_TOP (a 3/16 full-height panel on the wall
+        // opposite facing, not standable). POWERED is deliberately unread (powered variants dedup; hand-toggle
+        // works regardless, and a redstone re-force is an external change the grid repatch absorbs).
+        // Hand-toggleable iff NOT the iron trapdoor — the Blocks.IRON_DOOR idiom above, vanilla-complete
+        // across the range (copper trapdoors, ≥1.20.3, are non-iron + hand-openable, so no version gate).
+        if (block instanceof TrapDoorBlock) {
+            d |= (long) horizontalFacingOrdinal(state) << TRAPDOOR_FACING_SHIFT;
+            if (state.getValue(BlockStateProperties.HALF) == Half.TOP) d |= TRAPDOOR_HALF_BIT;
+            if (state.getValue(BlockStateProperties.OPEN)) d |= TRAPDOOR_OPEN_BIT;
+            if (block != Blocks.IRON_TRAPDOOR) d |= HAND_TOGGLEABLE_BIT;
         }
         return withDerived(d);
     }
@@ -631,8 +668,10 @@ public final class NavBlock {
     /**
      * The 2-bit horizontal-facing ordinal (0=N 1=E 2=S 3=W) from a state's {@link
      * BlockStateProperties#HORIZONTAL_FACING} — shared by stairs (the FACING side is where a BOTTOM stair's HIGH
-     * 16/16 half sits, StairVoxelProbe) and doors (the facing that {@link #doorBlockedEdge} rotates from). Every
-     * {@link StairBlock} and {@link DoorBlock} carries HORIZONTAL_FACING on every supported version.
+     * 16/16 half sits, StairVoxelProbe), doors (the facing that {@link #doorBlockedEdge} rotates from) and
+     * trapdoors (the facing whose OPPOSITE wall the open panel hugs, {@link #trapdoorBlockedFace}). Every
+     * {@link StairBlock}, {@link DoorBlock} and {@link TrapDoorBlock} carries HORIZONTAL_FACING on every
+     * supported version.
      */
     private static int horizontalFacingOrdinal(BlockState state) {
         switch (state.getValue(BlockStateProperties.HORIZONTAL_FACING)) {
@@ -818,7 +857,9 @@ public final class NavBlock {
     /** Stair horizontal FACING ordinal (0=N 1=E 2=S 3=W); 0 for non-stairs. On a BOTTOM stair the HIGH
      *  16/16 half is on the FACING side (StairVoxelProbe) — see the movement layers directional-surface resolver. */
     public static int stairFacing(long d)  { return (int) (d >>> STAIR_FACING_SHIFT) & STAIR_FACING_MASK; }
-    /** Stair HALF: 0 = bottom (directional surface), 1 = top (flat 16/16 top — no directional handling). */
+    /** Stair HALF: 0 = bottom (directional surface), 1 = top (flat 16/16 top — no directional handling).
+     *  Reads the SHARED half bit (10) — a trapdoor packs its own HALF there ({@link #trapdoorHalfTop}), so
+     *  gate on {@link #isStair} first. */
     public static int stairHalf(long d)    { return (d & STAIR_HALF_BIT) != 0 ? 1 : 0; }
     /** Openable kind: 0 none, 1 door, 2 trapdoor, 3 fence-gate. */
     public static int openable(long d)     { return (int) (d >>> OPEN_SHIFT) & OPEN_MASK; }
@@ -827,11 +868,13 @@ public final class NavBlock {
     /** Whether this cell is a {@link DoorBlock} (any material incl. iron) — the gate on the door queries below. */
     public static boolean isDoor(long d)   { return openable(d) == OPEN_DOOR; }
     /** A door's HORIZONTAL_FACING ordinal (0=N 1=E 2=S 3=W); reads the shared facing field (bits 8–9). 0 for
-     *  non-doors — always gate on {@link #isDoor} first (a stair uses the same bits via {@link #stairFacing}). */
+     *  non-doors — always gate on {@link #isDoor} first (a stair/trapdoor uses the same bits via
+     *  {@link #stairFacing} / {@link #trapdoorFacing}). */
     public static int doorFacing(long d)   { return (int) (d >>> DOOR_FACING_SHIFT) & DOOR_FACING_MASK; }
     /** A door's DOOR_HINGE side: {@code true} = RIGHT, {@code false} = LEFT (bit 13). 0 for non-doors. */
     public static boolean doorHinge(long d){ return (d & DOOR_HINGE_BIT) != 0; }
-    /** Whether a door is OPEN ({@code true}) or CLOSED ({@code false}) (bit 43). 0 for non-doors. */
+    /** Whether a door is OPEN ({@code true}) or CLOSED ({@code false}); reads the SHARED open bit (43) — a
+     *  trapdoor packs its own OPEN there ({@link #trapdoorOpen}), so gate on {@link #isDoor} first. */
     public static boolean doorOpen(long d) { return (d & DOOR_OPEN_BIT) != 0; }
     /**
      * The single cardinal edge (0=N 1=E 2=S 3=W) a door BLOCKS in its current state — DERIVED, never stored, so
@@ -847,11 +890,13 @@ public final class NavBlock {
         return (facing + 2) & 3;
     }
     /**
-     * Whether a door can be opened/closed BY HAND (wood + copper), vs a redstone-only iron door (bit 50, DOORS
-     * P2). {@code false} for non-doors — gate on {@link #isDoor} first. The planner offers a cheap OPEN/CLOSE
-     * SET edit only for toggleable doors; an iron door has no SET option and falls through to break/route.
+     * Whether a door can be opened/closed BY HAND (wood + copper), vs a redstone-only iron door (DOORS P2).
+     * Reads the SHARED hand-toggleable bit (50) — a hand-openable trapdoor sets the same bit
+     * ({@link #handToggleable} is the kind-neutral read) — so gate on {@link #isDoor} first. The planner
+     * offers a cheap OPEN/CLOSE SET edit only for toggleable doors; an iron door has no SET option and falls
+     * through to break/route.
      */
-    public static boolean doorToggleable(long d) { return (d & DOOR_TOGGLEABLE_BIT) != 0; }
+    public static boolean doorToggleable(long d) { return (d & HAND_TOGGLEABLE_BIT) != 0; }
     /**
      * The same door descriptor forced into the {@code open} state — sets/clears the OPEN bit (43), leaving
      * facing/hinge/toggleable and every derived predicate bit untouched (none depends on OPEN: a door is
@@ -863,6 +908,120 @@ public final class NavBlock {
      */
     public static long withDoorOpen(long d, boolean open) {
         return open ? (d | DOOR_OPEN_BIT) : (d & ~DOOR_OPEN_BIT);
+    }
+
+    // ---- Trapdoor directional solidity (DESIGN-trapdoors.md §2–§4) — meaningful only when isTrapdoor(d) ----
+    /** Whether this cell is a {@link TrapDoorBlock} (any material incl. iron) — the gate on the trapdoor
+     *  queries below (the trapdoor analog of {@link #isDoor}). */
+    public static boolean isTrapdoor(long d) { return openable(d) == OPEN_TRAPDOOR; }
+    /** A trapdoor's HORIZONTAL_FACING ordinal (0=N 1=E 2=S 3=W); reads the shared facing field (bits 8–9).
+     *  0 for non-trapdoors — always gate on {@link #isTrapdoor} first (a stair/door uses the same bits via
+     *  {@link #stairFacing} / {@link #doorFacing}). The OPEN panel hugs the wall OPPOSITE this facing. */
+    public static int trapdoorFacing(long d) { return (int) (d >>> TRAPDOOR_FACING_SHIFT) & TRAPDOOR_FACING_MASK; }
+    /** A trapdoor's HALF: {@code true} = TOP (its CLOSED plate is flush with the cell top, 13..16/16),
+     *  {@code false} = BOTTOM (a 3/16 floor plate); reads the shared half bit (10). HALF does NOT affect the
+     *  OPEN shape (vanilla fact, DESIGN-trapdoors.md §1) but is packed unconditionally so a toggle round-trips
+     *  to the right closed geometry. Gate on {@link #isTrapdoor} (a stair shares the bit via {@link #stairHalf}). */
+    public static boolean trapdoorHalfTop(long d) { return (d & TRAPDOOR_HALF_BIT) != 0; }
+    /** Whether a trapdoor is OPEN ({@code true}, a 3/16 full-height panel on the wall opposite facing) or
+     *  CLOSED ({@code false}, a horizontal plate per its half); reads the shared open bit (43). Gate on
+     *  {@link #isTrapdoor} (a door shares the bit via {@link #doorOpen}). */
+    public static boolean trapdoorOpen(long d) { return (d & TRAPDOOR_OPEN_BIT) != 0; }
+    /**
+     * An OPEN trapdoor cell — <b>body-passable for occupancy and transit</b> (Traverse/Diagonal bodies,
+     * Fall/Climb columns, Pillar shafts) in every direction EXCEPT across its {@link #trapdoorBlockedFace
+     * blocked face} (DESIGN-trapdoors.md §4): the 3/16 wall-hugging panel coexists with the centered 0.6
+     * body — worst case opposite-wall panels leave 10/16 = 0.625 &gt; 0.6. A PREDICATE over existing fields,
+     * not a descriptor change: {@link #isPassable} stays {@code false} (the shape is non-empty), and the
+     * clearance rules admit the cell explicitly instead. <b>WATERLOGGED cells are excluded</b> (§10:
+     * waterlogged trapdoor cells stay conservative walls — a waterlogged cell is a full water source, so
+     * admitting it would walk a dry body into water the walk family neither prices nor survives; the
+     * pre-arc verdict for these cells was "wall", and this conjunct keeps it).
+     */
+    public static boolean openTrapdoor(long d) { return isTrapdoor(d) && trapdoorOpen(d) && !isFluid(d); }
+    /** {@link #trapdoorBlockedFace} vertical encodings — 0..3 are the door-edge cardinals (0=N 1=E 2=S 3=W). */
+    public static final int FACE_UP = 4, FACE_DOWN = 5;
+    /**
+     * The single FACE (0=N 1=E 2=S 3=W / {@link #FACE_UP} / {@link #FACE_DOWN}) a trapdoor BLOCKS in its
+     * current state — DERIVED at query time like {@link #doorBlockedEdge}, never stored (DESIGN-trapdoors.md
+     * §3). CLOSED half=BOTTOM is a floor plate → blocks DOWN; CLOSED half=TOP is a ceiling plate → blocks UP;
+     * OPEN is a full-height panel on the wall OPPOSITE facing → blocks that cardinal ({@code (facing+2)&3}:
+     * facing N→S, S→N, E→W, W→E). The other 5 faces are crossable (subject to the §4 clearance rules);
+     * crossing the blocked face requires a SET fold, and toggling always clears the crossed face (closed↔open
+     * swaps the blocked face to a perpendicular set — the door principle). Undefined for non-trapdoors — gate
+     * on {@link #isTrapdoor}.
+     */
+    public static int trapdoorBlockedFace(long d) {
+        if (trapdoorOpen(d)) return (trapdoorFacing(d) + 2) & 3;
+        return trapdoorHalfTop(d) ? FACE_UP : FACE_DOWN;
+    }
+    /**
+     * Whether an OPENABLE cell (door / trapdoor) can be toggled BY HAND — the kind-neutral read of the shared
+     * bit 50 ({@link #doorToggleable} is the door-flavored twin). Set for every {@link DoorBlock} except
+     * {@link Blocks#IRON_DOOR} and every {@link TrapDoorBlock} except {@link Blocks#IRON_TRAPDOOR} (each the
+     * complete vanilla exception set). Gate on the matching kind ({@link #isDoor} / {@link #isTrapdoor});
+     * {@code false} for every non-openable cell.
+     */
+    public static boolean handToggleable(long d) { return (d & HAND_TOGGLEABLE_BIT) != 0; }
+    /**
+     * The lowest Y (in 16ths of the cell, 0..16) of a UNIFORM full-footprint collision band at the CELL TOP —
+     * the "high ceiling" height consumed by the generalized residual clearance rule (DESIGN-trapdoors.md §4):
+     * an upper body cell admits a bot standing on floor topY {@code t} when {@code ceilingMinY(c2) >= t - 3}
+     * (the integer-conservative form of −3.2). Only shapes whose collision is CONFINED to such a band
+     * qualify: a CLOSED TOP-half trapdoor → <b>13</b> (its plate spans 13..16/16), a {@link #SHAPE_SLAB_TOP
+     * top slab} → <b>8</b>; everything else → <b>0</b> (no admissible band — notably TOP-half STAIRS report
+     * 0, since their riser descends to the floor on one side and admitting them is unsound without direction
+     * math). Passable cells also report 0 — callers test passability/open-trapdoor first; 0 simply never
+     * admits via the ceiling arm. <b>WATERLOGGED cells report 0</b> (§10 conservative-wall rule, same as
+     * {@link #openTrapdoor}): a waterlogged closed-TOP hatch / top slab is a full water source below its
+     * band — admitting it as a walking ceiling would put the bot's head inside water, unpriced and
+     * breath-blind; pre-arc these cells were walls, and the ceiling arm must not newly admit them.
+     */
+    public static int ceilingMinY(long d) {
+        if (isFluid(d)) return 0;
+        if (isTrapdoor(d) && !trapdoorOpen(d) && trapdoorHalfTop(d)) return 13;
+        if (shape(d) == SHAPE_SLAB_TOP) return 8;
+        return 0;
+    }
+    /**
+     * The same trapdoor descriptor forced into the {@code open} state — unlike {@link #withDoorOpen} (a bare
+     * bit-43 flip: a door's geometry is open/closed-invariant), a trapdoor toggle CHANGES GEOMETRY, so this
+     * RE-DERIVES it (DESIGN-trapdoors.md §2): topY ({@code open ? 16 : half=TOP ? 16 : 3}), shape
+     * ({@code open ? OTHER : half=TOP ? OTHER : PARTIAL_LOW}), NARROW_TOP (open only — the 3/16 panel), then
+     * the derived predicate bits (STANDABLE/BREAKABLE/OPEN_PLACE/COLLISION) via the same {@link #withDerived}
+     * the classifier uses. Every non-geometry field (fluid, hardness, tool, toolRequired, protected, transit,
+     * damage, surface, climb, gravity, replaceable, waterloggable, bubble, fallSoftness, reducedJump,
+     * openable, facing, half, hand-toggleable) carries over untouched. Pinned by test
+     * (TrapdoorClassificationTest): for EVERY trapdoor blockstate S and both targets o,
+     * {@code withTrapdoorOpen(desc(S), o) == desc(S.setValue(OPEN, o))} <b>bit-for-bit</b> — the resolver
+     * reproduces the interned real state exactly, so a planned {@code SET_OPEN}/{@code SET_CLOSED} edit
+     * resolves to true geometry. Undefined for non-trapdoors — the caller applies it only to trapdoor cells.
+     */
+    public static long withTrapdoorOpen(long d, boolean open) {
+        long base = d & ~(DERIVED_MASK | TRAPDOOR_OPEN_BIT | NARROW_TOP_BIT
+                | ((long) TOP_Y_MASK << TOP_Y_SHIFT) | ((long) SHAPE_MASK << SHAPE_SHIFT));
+        int topY, shapeClass;
+        if (open) {
+            base |= TRAPDOOR_OPEN_BIT | NARROW_TOP_BIT;
+            topY = 16; shapeClass = SHAPE_OTHER;
+        } else if ((d & TRAPDOOR_HALF_BIT) != 0) {
+            topY = 16; shapeClass = SHAPE_OTHER;
+        } else {
+            topY = 3;  shapeClass = SHAPE_PARTIAL_LOW;
+        }
+        base |= (long) (topY & TOP_Y_MASK) << TOP_Y_SHIFT
+              | (long) (shapeClass & SHAPE_MASK) << SHAPE_SHIFT;
+        return withDerived(base);
+    }
+    /**
+     * Unified SET-edit resolver for OPENABLE cells (DESIGN-trapdoors.md §2): dispatches on the openable kind
+     * — a door is a bare bit flip ({@link #withDoorOpen}), a trapdoor re-derives geometry
+     * ({@link #withTrapdoorOpen}). This is how a planned {@code SET_OPEN}/{@code SET_CLOSED} edit resolves
+     * against the cell's own descriptor regardless of kind. Fence gates ({@code OPEN_GATE}) are reserved and
+     * not yet toggleable (§10); undefined for non-openable cells — the caller applies it only to openable cells.
+     */
+    public static long withOpenableOpen(long d, boolean open) {
+        return isTrapdoor(d) ? withTrapdoorOpen(d, open) : withDoorOpen(d, open);
     }
     /** Fluid: 0 none, 1 water (incl. waterlogged), 3 lava (low bit = is-fluid, high bit = is-lava). */
     public static int fluid(long d)        { return (int) (d >>> FLUID_SHIFT) & FLUID_MASK; }
@@ -985,6 +1144,25 @@ public final class NavBlock {
     public static boolean isSwimmableLava(long d) { return fluid(d) == FLUID_LAVA && isPassable(d); }
     /** True if nothing collides here (air/plant/fluid). */
     public static boolean isPassable(long d) { return shape(d) == SHAPE_EMPTY; }
+    /**
+     * CONNECTIVITY-ONLY passability for the REGION tier's flood-fill (fragment membership + region
+     * goal/seed resolution): geometrically {@link #isPassable passable}, OR any OPENABLE cell —
+     * doors, trapdoors, fence gates, <b>including the iron variants the bot cannot hand-toggle</b>.
+     * Owner ruling 2026-08-09 (DESIGN-trapdoors.md §8b): an openable blocks at most 1 of its 6 faces
+     * — "5/6 faces are passable — there's a chance you can path through it just fine — and if you
+     * can't, we'll figure that out and invalidate." The region tier is deliberately optimistic;
+     * unrealizable hops are absorbed by {@code RegionEdgeBlacklist} + the capsSig-keyed persisted
+     * invalidations ({@code mayToggleDoors} is sig bit 3), which is why even an iron door reads as
+     * open space here.
+     *
+     * <p><b>NOT for the block tier</b> — movements keep exact geometry ({@link #doorBlockedEdge},
+     * {@link #trapdoorBlockedFace}, the DESIGN-trapdoors.md §4 residual-clearance rules). The only
+     * consumers are {@code FragmentLeafComputer}'s flood masks and {@code RegionGrid.goalDigSeeds}'
+     * passable tests. Plain FENCES are not openable ({@code openable == NONE}) and correctly stay
+     * walls; OPEN fence gates were already {@link #SHAPE_EMPTY} passable — the cells this predicate
+     * newly admits are closed gates/doors/plates and open door/trapdoor panels.
+     */
+    public static boolean floodPassable(long d) { return isPassable(d) || openable(d) != OPEN_NONE; }
 
     // ---- Precomputed predicate bits (see #withDerived) — a single mask-and-test on the hot path ------
 

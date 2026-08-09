@@ -67,12 +67,6 @@ public class NavSection {
         return grid.runUp(x, y, z);
     }
 
-    /** Whether any cell in this section is a door — the per-pop exit-door gate prefilter (see
-     *  {@link TraversalGrid#anyDoor}). */
-    public boolean anyDoor() {
-        return grid.anyDoor();
-    }
-
     public BlockPos getOrigin() {
         return origin;
     }
