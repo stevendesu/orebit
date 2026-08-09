@@ -402,15 +402,34 @@ public interface BotSteering {
     default void setTrapdoorOpen(int x, int y, int z, boolean open) { }
 
     /**
-     * Whether the <b>openable</b> (door OR trapdoor) at cell {@code (x,y,z)} is currently OPEN — its live
-     * {@code OPEN} block-state property, which {@code DoorBlock} and {@code TrapDoorBlock} share
-     * ({@code BlockStateProperties.OPEN}) — the SET executor's gate and verify-readback (DOORS P3;
-     * trapdoors DESIGN-trapdoors.md §7 ride the same read, so the name keeps its door heritage). It reads
-     * the OPEN <b>block-state property</b>, NOT {@link #solidAt}: an open door keeps a thin (~3px) collision
-     * box (an open trapdoor keeps its wall panel), so {@code solidAt} stays TRUE even when open — testing
-     * solidness would make a {@code Need.OPEN} wrongly MINE the cell. Non-openable cells read {@code false}.
-     * Reads the live level, so it reflects the bot's own just-issued {@link #setDoorOpen}/{@link
-     * #setTrapdoorOpen}.
+     * OPEN ({@code open == true}) or CLOSE the hand-toggleable fence gate at cell {@code (x,y,z)}
+     * server-side — the gate member of the {@link #setDoorOpen}/{@link #setTrapdoorOpen} verb family
+     * (DESIGN-fence-gates.md §4), routed to {@link com.orebit.mod.platform.WorldEdits#setGateOpen}.
+     * Authoritative and instant (a direct property write — {@code FenceGateBlock}, like {@code
+     * TrapDoorBlock}, has no vanilla {@code setOpen} at any version); non-gate cells are no-ops (see
+     * WorldEdits — and there is NO iron refusal, since no iron gate exists). The entity layer may
+     * cosmetically face the gate but never swings. Reactive like the door verb: the runner re-issues it
+     * while the live gate does not read the target state ({@link #doorOpenAt}, which covers gates too —
+     * shared {@code OPEN} property).
+     *
+     * <p>A {@code default} no-op — the {@link #setTrapdoorOpen} pattern — so the many existing headless
+     * test doubles need no edits: a double that ignores gates simply never satisfies a gate req, which
+     * the runner surfaces as a visible hold (the conservative direction). Doubles under gate test
+     * override it.
+     */
+    default void setGateOpen(int x, int y, int z, boolean open) { }
+
+    /**
+     * Whether the <b>openable</b> (door, trapdoor OR fence gate) at cell {@code (x,y,z)} is currently OPEN
+     * — its live {@code OPEN} block-state property, which {@code DoorBlock}, {@code TrapDoorBlock} and
+     * {@code FenceGateBlock} share ({@code BlockStateProperties.OPEN}) — the SET executor's gate and
+     * verify-readback (DOORS P3; trapdoors DESIGN-trapdoors.md §7 and gates DESIGN-fence-gates.md §4 ride
+     * the same read, so the name keeps its door heritage). It reads the OPEN <b>block-state property</b>,
+     * NOT {@link #solidAt}: an open door keeps a thin (~3px) collision box (an open trapdoor keeps its
+     * wall panel), so {@code solidAt} stays TRUE even when open — testing solidness would make a {@code
+     * Need.OPEN} wrongly MINE the cell. Non-openable cells read {@code false}. Reads the live level, so it
+     * reflects the bot's own just-issued {@link #setDoorOpen}/{@link #setTrapdoorOpen}/{@link
+     * #setGateOpen}.
      */
     boolean doorOpenAt(int x, int y, int z);
 

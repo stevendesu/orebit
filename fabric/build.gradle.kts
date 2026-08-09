@@ -219,6 +219,24 @@ loom {
             project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
             isIdeConfigGenerated = false
         }
+        // Fence-gate-arc diagnostic: a superflat server that arms the common-src GateCourse hook
+        // (-Dorebit.gate) in its own run dir (run/gate). Launch: ./gradlew :fabric:1.21.11:runGate
+        // (after scripts/run-gate.ps1 preps the run dir with a FLAT server.properties + toggle-isolating
+        // orebit.properties). Mirrors the trapdoor config exactly.
+        create("gate") {
+            server()
+            configName = "Orebit Gate ($minecraft)"
+            runDir = "../../../run/gate"
+            vmArg("-Dorebit.gate=true")
+            for (key in listOf("debug")) {
+                val v = project.findProperty("orebit.gate.$key")
+                if (v != null) vmArg("-Dorebit.gate.$key=$v")
+            }
+            // Ground drive-strategy selector rides through for the ground velocity-servo A/B (Stage 2):
+            //   ./gradlew :fabric:1.21.11:runGate "-Porebit.ground.drive=servo"
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
+            isIdeConfigGenerated = false
+        }
         // Real-world REPLAY diagnostic: a server that arms the common-src WorldReplay hook (-Dorebit.replay)
         // in its own run dir (run/replay), which LOADS the owner's "Swims" world (copied in by
         // scripts/run-replay.ps1 — NOT a flat regen) and replays the reported-failing goto. Launch:

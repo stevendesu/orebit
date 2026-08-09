@@ -109,10 +109,10 @@ covering the things people place and decorate with:
 - **Ladders**
 
 **Doors are still used, not just avoided.** Protection forbids *breaking* a block, not operating it — so the
-bot still **opens and closes** wooden/copper doors and trapdoors to pass through (a non-destructive action;
-an already-open fence gate is walked through, but the bot does not yet operate closed gates). Iron doors and
+bot still **opens and closes** wooden/copper doors, trapdoors, **and fence gates** to pass through (a
+non-destructive action). Iron doors and
 iron trapdoors (which need redstone) can't be hand-operated, so a protected iron one is **routed around**
-rather than smashed.
+rather than smashed; every fence gate is hand-operable — there is no iron gate.
 
 **Leaves are intentionally not protected** — the bot may cut through foliage. **Ores are not protected either**
 — protecting a block only stops the bot breaking it *to make a path*; a block you explicitly send the bot to
@@ -200,7 +200,7 @@ player simulation, so when these are on, the mechanics are the real ones — not
 | `survival.hunger` | `false` | If `true`, the bot's food bar drains from activity like a player's. If `false`, it never gets hungry (and can always sprint). Note the bot doesn't yet feed itself — a hungry bot is your problem to keep fed. |
 | `survival.needsBreath` | `false` | If `true`, the bot's air depletes underwater and it can drown. If `false`, it can swim submerged indefinitely. |
 
-### Doors — how the bot handles doors
+### Doors — how the bot handles doors, trapdoors, and fence gates
 
 ```properties
 doors.toggle = true
@@ -208,7 +208,7 @@ doors.toggle = true
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `doors.toggle` | `true` | Whether the bot may open and close hand-operable doors **and trapdoors** (wooden, copper) by right-clicking them, rather than smashing through or routing around — it opens a closed door before crossing (closing it again behind itself on a hallway corner), opens a hatch to drop through, and closes an open hatch to walk across it. Set `false` as a kill-switch: an already-open door or trapdoor is walked through, a closed one is mined (or routed around when protected). Iron doors and iron trapdoors are never hand-operable regardless of this setting (they need redstone). |
+| `doors.toggle` | `true` | Whether the bot may open and close hand-operable doors, **trapdoors and fence gates** (wooden, copper — every fence gate is hand-operable) by right-clicking them, rather than smashing through or routing around — it opens a closed door before crossing (closing it again behind itself on a hallway corner), opens a hatch to drop through, closes an open hatch to walk across it, and opens a closed fence gate to walk through. Set `false` as a kill-switch: an already-open door, trapdoor or gate is walked through, a closed one is mined (or routed around when protected). Beware: fence gates are in [the default protected set](#the-default-protected-blocks-set), so with this off a closed fence gate can't be opened **or** broken — it becomes a solid wall the bot routes around. Iron doors and iron trapdoors are never hand-operable regardless of this setting (they need redstone); there is no iron fence gate. |
 
 ### Crafting — how `/bot craft` handles recipes that need a crafting table
 

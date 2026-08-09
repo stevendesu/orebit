@@ -190,7 +190,7 @@ public final class PhaseRunner {
         // geometry — an openable-state is a precondition of the whole crossing, so it is established BEFORE the
         // bot drives through (and the exit double-toggle CLOSEs before the exit segment drives). The toggle is
         // instant (a direct server set), so all reqs resolve this tick; we re-validate against the LIVE block
-        // via doorOpenAt (the shared OPEN property covers doors and trapdoors) — NOT solidAt, because an open
+        // via doorOpenAt (the shared OPEN property covers doors, trapdoors and fence gates) — NOT solidAt, because an open
         // door keeps a thin collision box and an open trapdoor its wall panel (solidAt would stay true and
         // never clear the hold). Self-healing like FOOTING: re-issued each tick until the openable reads the
         // target state — which is also the anti-trick property: an EXTERNALLY re-flipped door/trapdoor simply
@@ -199,8 +199,10 @@ public final class PhaseRunner {
         // Almost always empty (an openable crossing is rare).
         for (MovePlan.Req d : plan.doorReqs()) {
             if (bot.doorOpenAt(d.x, d.y, d.z) != d.open) {
-                if (d.trapdoor) {
+                if (d.openableKind == MovePlan.Req.OPENABLE_TRAPDOOR) {
                     bot.setTrapdoorOpen(d.x, d.y, d.z, d.open);
+                } else if (d.openableKind == MovePlan.Req.OPENABLE_GATE) {
+                    bot.setGateOpen(d.x, d.y, d.z, d.open);
                 } else {
                     bot.setDoorOpen(d.x, d.y, d.z, d.open);
                 }

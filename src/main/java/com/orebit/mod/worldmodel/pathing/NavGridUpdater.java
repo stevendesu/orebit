@@ -10,6 +10,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
@@ -265,7 +266,8 @@ public final class NavGridUpdater {
      * EXPECTED and does not move {@link #foreignVersion}; everything else does. For a <b>door</b> the slot
      * also covers the door's OTHER half (derived here from the pre-toggle state's {@code DoubleBlockHalf} —
      * vanilla's {@code setOpen} syncs it via {@code updateShape} in the same synchronous {@code setBlock}
-     * cascade, so both halves' changes are the one prescribed toggle); a trapdoor is single-cell. Matching is
+     * cascade, so both halves' changes are the one prescribed toggle); a trapdoor or fence gate is
+     * single-cell. Matching is
      * exact per cell: position, {@code oldState != newState}, and {@code oldState.getBlock() ==
      * newState.getBlock()} — so a door being BROKEN (block changes) or a vine growing there is never forgiven.
      *
@@ -303,15 +305,26 @@ public final class NavGridUpdater {
         } else {
             return false;
         }
-        // Forgiveness requires a genuine OPENABLE state flip: same block, different state, AND the block is
-        // a door/trapdoor. The instanceof guards the dangling-arm case — the executor verbs no-op on a
-        // stale-grid cell that no longer holds an openable, leaving this one-shot armed; without the kind
-        // check it would forgive ONE later same-block state change of whatever occupies the cell (a
-        // comparator, an observer), suppressing a legitimate foreignVersion bump. (A dangling arm over a
-        // REAL door can still forgive one genuine foreign toggle there — known, narrow; the grid patch
-        // itself still lands either way.)
+        return forgivableToggle(oldState, newState);
+    }
+
+    /**
+     * The forgiveness MATCH RULE of {@link #consumeExpectedToggle} (a pos-matched cell's state change is
+     * forgiven only when this holds): a genuine OPENABLE state flip — same block, different state, AND the
+     * block is a door/trapdoor/fence gate. The instanceof guards the dangling-arm case — the executor verbs
+     * no-op on a stale-grid cell that no longer holds an openable, leaving the one-shot armed; without the
+     * kind check it would forgive ONE later same-block state change of whatever occupies the cell (a
+     * comparator, an observer), suppressing a legitimate foreignVersion bump. (A dangling arm over a REAL
+     * door can still forgive one genuine foreign toggle there — known, narrow; the grid patch itself still
+     * lands either way.) Package-private seam: the slot machinery around it is welded to a live
+     * {@code ServerLevel} (the {@code PathPlanOwnEditTest} split), so the kind rule is pinned here
+     * ({@code NavGridToggleForgivenessTest}) — each openable kind added to the executor verbs MUST be added
+     * to this chain, or its own toggles read as foreign changes and burn a window re-search apiece.
+     */
+    static boolean forgivableToggle(BlockState oldState, BlockState newState) {
         return oldState != newState && oldState.getBlock() == newState.getBlock()
-                && (oldState.getBlock() instanceof DoorBlock || oldState.getBlock() instanceof TrapDoorBlock);
+                && (oldState.getBlock() instanceof DoorBlock || oldState.getBlock() instanceof TrapDoorBlock
+                        || oldState.getBlock() instanceof FenceGateBlock);
     }
 
     /** Register the nav-grid patcher against the block-change seam (once, at init). */

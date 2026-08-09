@@ -33,6 +33,7 @@ import com.orebit.mod.worldmodel.pathing.NavStore;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
@@ -1434,7 +1435,7 @@ final class BotNavigator {
                 // Need.OPEN reqs. A movement's cell-geometry plan(...) can't derive an openable-state from floor
                 // coords alone, but the search already folded it onto the step's StepEdits — inject it here so
                 // the PhaseRunner toggles the openable (and never mines it) as a converted move. The KIND (door
-                // vs trapdoor — the runner's executor-verb dispatch) is resolved here, once, from the live block
+                // / trapdoor / gate — the runner's executor-verb dispatch) is resolved here, once, from the live block
                 // at the cell (the doors[] channel is kind-agnostic by design; the block kind of a cell never
                 // flips out from under a step — an external toggle changes OPEN, not the block). Almost always
                 // empty; the loop is a no-op on the common step.
@@ -1443,8 +1444,11 @@ final class BotNavigator {
                     for (int i = 0; i < se.doorSetCount(); i++) {
                         long c = se.doorSetAt(i);
                         final int ox = BlockPos.getX(c), oy = BlockPos.getY(c), oz = BlockPos.getZ(c);
-                        if (levelBlockAt(ox, oy, oz) instanceof TrapDoorBlock) {
+                        Block ob = levelBlockAt(ox, oy, oz);
+                        if (ob instanceof TrapDoorBlock) {
                             mp.requireTrapdoor(ox, oy, oz, se.doorSetOpenAt(i));
+                        } else if (ob instanceof FenceGateBlock) {
+                            mp.requireGate(ox, oy, oz, se.doorSetOpenAt(i));
                         } else {
                             mp.requireDoor(ox, oy, oz, se.doorSetOpenAt(i));
                         }
@@ -1785,8 +1789,11 @@ final class BotNavigator {
             if (bot.doorOpenAt(dx, dy, dz) != open) {
                 BlockPos p = new BlockPos(dx, dy, dz);
                 expectOwnToggle(dx, dy, dz); // announce BEFORE: our own prescribed toggle
-                if (level.getBlockState(p).getBlock() instanceof TrapDoorBlock) {
+                Block lb = level.getBlockState(p).getBlock();
+                if (lb instanceof TrapDoorBlock) {
                     WorldEdits.setTrapdoorOpen(level, p, bot, open);
+                } else if (lb instanceof FenceGateBlock) {
+                    WorldEdits.setGateOpen(level, p, bot, open);
                 } else {
                     WorldEdits.setDoorOpen(level, p, bot, open);
                 }
