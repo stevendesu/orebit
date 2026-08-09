@@ -299,5 +299,12 @@ public final class OrebitCommon {
         // hard-wall refusal control) — the live follower proof of DESIGN-fence-gates.md §7. Same
         // inert-unless-armed discipline (-Dorebit.gate).
         GateCourse.register(events);
+
+        // Headless TRAPDOOR-LADDER-ARC diagnostic (the :fabric:<ver>:runShaft run config): floating stone
+        // slabs bored with 1x1 ladder shafts whose mouth holds an equal-facing trapdoor (open/closed x
+        // topdown/bottomup with own-toggle counting, plain-shaft pre-existing-gap controls, and the
+        // iron-closed honest-refusal control) — the live follower proof of DESIGN-trapdoor-ladder-climb.md
+        // §7. Same inert-unless-armed discipline (-Dorebit.shaft).
+        ShaftCourse.register(events);
     }
 }

@@ -1283,6 +1283,37 @@ public final class MovementContext {
     }
 
     /**
+     * The vanilla trapdoor-over-ladder climb rule as a NEIGHBOR predicate (DESIGN-trapdoor-ladder-climb.md
+     * §1/§3 — {@code LivingEntity.trapdoorUsableAsLadder}, bytecode-pinned 1.17.1→26.2): feet cell
+     * {@code dFeet} is an OPEN trapdoor AND the cell below it {@code dBelow} is a ladder with EQUAL facing
+     * (HALF and waterlogging are not consulted by vanilla; the {@link NavBlock#openTrapdoor} conjunct keeps
+     * the §10 waterlogged-cells-stay-walls conservatism). Climbability of the trapdoor cell is
+     * neighbor-dependent, so this can never be a descriptor bit — callers hold both descriptors. The
+     * almost-always-false {@code openTrapdoor} bit test leads the conjunction, so trapdoor-free worlds pay
+     * one predictable test.
+     */
+    public boolean trapdoorClimbable(long dFeet, long dBelow) {
+        return NavBlock.openTrapdoor(dFeet) && NavBlock.isLadder(dBelow)
+                && NavBlock.trapdoorFacing(dFeet) == NavBlock.ladderFacing(dBelow);
+    }
+
+    /**
+     * Whether a CLOSED trapdoor mouth {@code dMouth} would become {@link #trapdoorClimbable trapdoor-climbable}
+     * under a {@code SET_OPEN} the bot may fold (DESIGN-trapdoor-ladder-climb.md §4): a hand-toggleable
+     * closed trapdoor ({@code doors.toggle} on, not iron — an IRON closed mouth refuses here and the climb
+     * routes around/gives up, while an iron OPEN mouth climbs fine via {@link #trapdoorClimbable}) over a
+     * ladder {@code dBelow} with EQUAL facing — the facing test uses the CLOSED trapdoor's packed facing,
+     * which a toggle never changes. The almost-always-false {@link NavBlock#isTrapdoor} kind test leads the
+     * conjunction. Callers fold the SET via {@link EditScratch#openClimbMouth} only after this returns true.
+     */
+    public boolean trapdoorMouthOpensForClimb(long dMouth, long dBelow) {
+        return NavBlock.isTrapdoor(dMouth) && !NavBlock.trapdoorOpen(dMouth)
+                && caps.mayToggleDoors() && NavBlock.handToggleable(dMouth) && !NavBlock.isFluid(dMouth)
+                && NavBlock.isLadder(dBelow)
+                && NavBlock.trapdoorFacing(dMouth) == NavBlock.ladderFacing(dBelow);
+    }
+
+    /**
      * Can the bot stand on top of this cell? True for any solid-topped shape (full / slab / stair /
      * layer / low partial) that isn't a fluid. Damaging floors (magma, cactus tops) ARE standable since
      * s52b — the damage is priced by {@link #floorHazardCost}, not walled off. Excludes

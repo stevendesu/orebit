@@ -73,8 +73,10 @@ public final class ResourcePyramidCodec {
     static final int MAGIC_SHARD = ('O' << 24) | ('B' << 16) | ('R' << 8) | 'S';
     /** Coarse-file magic — ASCII "OBRC" (Orebit Resource Coarse, levels 6..21). */
     static final int MAGIC_COARSE = ('O' << 24) | ('B' << 16) | ('R' << 8) | 'C';
-    /** Schema version; bump on any incompatible layout change. v2 dropped gzip. */
-    static final short VERSION = 2;
+    /** Schema version — PINNED AT 1 PRE-RELEASE (owner ruling 2026-08-09; zero wild installs — semantic
+     *  changes add a history note here instead of bumping; see {@code CostPyramidCodec}'s pin note).
+     *  History: v2 dropped gzip. */
+    static final short VERSION = 1;
 
     /** Indexed column count (24) — a compile-time constant, so this reference stays MC-free. */
     private static final int COLUMNS = ResourceClasses.COLUMN_COUNT;

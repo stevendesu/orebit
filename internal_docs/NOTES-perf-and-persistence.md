@@ -33,12 +33,14 @@ Per dimension, under `<world>/orebit/<sanitized-dim>/` (`RegionPersistence.ROOT_
 Globs are `hpa.*.bin` / `res.*.bin`; the dot-middle-segment requirement means the legacy per-dimension
 `hpa.bin` / `res.bin` blobs (and `*.bin.tmp`) never match — old blobs are **ignored, never deleted**.
 
-**Versions (do not repeat the old "v7" claim).** `CostPyramidCodec.VERSION == 2` and
-`INVAL_SIG_SCHEMA_VERSION == 4` — both were **reset to 1** on the 2026-07 `packLevelKey` repack
-(`ry` narrowed 6→5 bits), collapsing the v2..v7 history rather than bumping to v8, because disk is a
-cache; since re-bumped: `VERSION` v2 by the trapdoor arc (openable flood semantics), the sig schema
-v2 (`mayFall` bit 62) / v3 (trapdoors join sig bit 3) / v4 (fence gates join sig bit 3).
-`ResourcePyramidCodec.VERSION == 2`. The *layout* is still the v7 layout; the version *history*
+**Versions (do not repeat the old "v7" claim).** ALL persistence version constants are **PINNED AT 1
+pre-release** (owner ruling 2026-08-09: zero wild installs — semantic changes append a dated entry to
+the codec Javadoc's history instead of bumping; resume bump discipline at first release):
+`CostPyramidCodec.VERSION == 1`, `INVAL_SIG_SCHEMA_VERSION == 1`, `ResourcePyramidCodec.VERSION == 1`.
+They were first reset to 1 on the 2026-07 `packLevelKey` repack (`ry` narrowed 6→5 bits), collapsing
+the v2..v7 history rather than bumping to v8, because disk is a cache; the post-repack semantic
+changes (openable flood, `mayFall` bit 62, trapdoors/gates on sig bit 3, the trapdoor-ladder climb)
+live as history entries in the codec Javadocs. The *layout* is still the v7 layout; the version *history*
 (v2 dropped gzip, v3 column-run body, v4 real invalidation section, v5 floorless-leaf semantics, v6
 fragment-count sentinel, v7 typed fragments) is worth reading in the codec Javadoc.
 
@@ -62,7 +64,7 @@ per level:
       short recordLen
       byte[recordLen]            // CostCodec.packRegion bitstream
 per file (LAST, shard AND coarse):
-  byte  INVAL_SIG_SCHEMA_VERSION (=4)
+  byte  INVAL_SIG_SCHEMA_VERSION (=1, pinned pre-release)
   byte  INVAL_GRAPH_CLASS_ID     (=0, "optimistic-v1")
   int   invalCount
   invalCount x { long fromStored; long toStored; long capsSig; }   // 24 B/row

@@ -437,6 +437,23 @@ public final class EditScratch {
     }
 
     /**
+     * Fold the {@code SET_OPEN} that turns a CLOSED trapdoor mouth into a climbable ladder extension
+     * (DESIGN-trapdoor-ladder-climb.md §4) — {@code Climb}'s two mouth arms (the from-below continue and
+     * the rim top-entry). The caller has already proven the toggle offered AND climb-enabling via
+     * {@link MovementContext#trapdoorMouthOpensForClimb} (hand-toggleable + facing equality against the
+     * ladder below — a facing-mismatched mouth must never fold: opened, it would extend nothing and the
+     * climb premise would be false). Public, unlike the package-private {@link #setTrapdoor}, because Climb
+     * reads its cells through {@code packedAt}/{@code descriptorOf} (its UNBUILT discipline) and so cannot
+     * ride a self-verdicting {@code require*} that re-reads via {@code descriptorAt}. Rides the
+     * kind-agnostic doors[] channel and charges one {@link MovementContext#DOOR_TOGGLE_COST}, exactly like
+     * every other single-cell trapdoor SET; like all SET folds it bypasses the {@code RISKY_EDIT}
+     * ({@code allowEdits}) gate (the door-symmetric precedent).
+     */
+    public void openClimbMouth(int x, int y, int z) {
+        setTrapdoor(x, y, z, true);
+    }
+
+    /**
      * Fold an OPEN/CLOSE of the (hand-toggleable) fence gate at cell {@code (x,y,z)} to {@code targetOpen}
      * (DESIGN-fence-gates.md §3) — the gate twin of {@link #setTrapdoor}, riding the SAME kind-agnostic
      * doors[] channel ({@code descriptorAt} resolves through the unified {@link NavBlock#withOpenableOpen}).

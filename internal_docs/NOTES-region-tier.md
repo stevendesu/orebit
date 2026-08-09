@@ -151,10 +151,11 @@ A==G, blaming the direct approach must leave the staircase approach alive).
 
 ## §4 On-disk versions were RESET to 1 — do not "bump to v8"
 
-`CostPyramidCodec.VERSION` and `INVAL_SIG_SCHEMA_VERSION` were reset to **1** here (live values have
-since re-bumped for real semantic changes: `VERSION` = 2 [trapdoor flood semantics], sig schema = 4
-[v2 mayFall bit 62, v3 trapdoors, v4 fence gates] — the point of this section is only that the OLD
-v2..v7 history must never be "restored"). The long v2..v7 history is
+`CostPyramidCodec.VERSION` and `INVAL_SIG_SCHEMA_VERSION` are **1** — reset here on the repack, and
+since 2026-08-09 PINNED at 1 pre-release by owner ruling (zero wild installs; semantic changes append
+to the codec Javadoc history — mayFall/trapdoors/gates/ladder-climb are entries there — instead of
+bumping; the point of this section is that the OLD v2..v7 history must never be "restored" either).
+The long v2..v7 history is
 described in `CostPyramidCodec`'s class doc for semantics only; the constant itself was reset on the
 2026-07 `packLevelKey` repack (`ry` 6→5 bits shifted every field down one bit). Disk is a **cache** —
 a version mismatch simply cache-misses and rebuilds from live, which is why collapsing the history was

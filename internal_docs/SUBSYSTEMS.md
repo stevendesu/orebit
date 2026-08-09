@@ -193,10 +193,12 @@ as a cache (corrupt → rebuilt from live). **Format is .mca-style SHARDED, unco
 per-dim `hpa.bin`/`res.bin` gzip blobs are dead — ignored on disk): per dimension dir
 `<world>/orebit/<dim>/` holds `hpa.<X>.<Z>.bin` (cost levels 0–5 per level-5 shard = 32×32 chunks,
 magic OBHS), `hpa.coarse.bin` (level 6, OBHC), `res.<X>.<Z>.bin` (OBRS), `res.coarse.bin` (levels
-6–21, OBRC). `CostPyramidCodec` (file `VERSION = 2` — reset to 1 from 7 on the 2026-07 `packLevelKey`
-repack, re-bumped v2 by the trapdoor arc; disk is a cache, a mismatch just rebuilds) /
-`ResourcePyramidCodec` (`VERSION = 2`) encode/decode; the cost files carry the **invalidation section**
-(`INVAL_SIG_SCHEMA_VERSION = 4` — reset to 1, then v2 `mayFall` / v3 trapdoors / v4 fence gates): sig-tagged 24-byte `{fromKey,toKey,capsSig}`
+6–21, OBRC). `CostPyramidCodec` (file `VERSION = 1`) /
+`ResourcePyramidCodec` (`VERSION = 1`) encode/decode — ALL persistence versions PINNED at 1
+pre-release (owner ruling 2026-08-09: zero wild installs; semantic changes append to the codec
+Javadoc's history — mayFall, trapdoors, gates, ladder-climb are entries there, not live values;
+disk is a cache, a mismatch just rebuilds); the cost files carry the **invalidation section**
+(`INVAL_SIG_SCHEMA_VERSION = 1`, same pin): sig-tagged 24-byte `{fromKey,toKey,capsSig}`
 rows bucketed assign-to-FROM, merged into `RegionCrossingMemory` on load. `RegionPersistence` = the
 driver: eager `loadAll` at SERVER_STARTED (or `loadCoarseOnly` when `hpa.lazyLoad` — decode coarse
 only + build the persisted-shard index), authoritative `flushAll` at SERVER_STOPPING, budgeted dirty
@@ -302,8 +304,8 @@ constructs and ticks:
   returned route steps off a ledge at any depth. Deliberately NOT a squeezed `safeFall`/`maxFall` window:
   that window PRICES a drop and cannot forbid one (the free, immune, and soft-landing/clutch branches read
   through it), and shrinking it would also move Parkour's falling-landing tier and the region tier's dy
-  pricing. `mayFall` is a realizability-sig axis (bit 62; the `CostPyramidCodec.INVAL_SIG_SCHEMA_VERSION`
-  v2 bump — now **4** after the trapdoor (v3) and fence-gate (v4) broadenings of sig bit 3) so a
+  pricing. `mayFall` is a realizability-sig axis (bit 62 — the sig-schema
+  history's v2 entry; the constant itself is PINNED at 1 pre-release, see the persistence section) so a
   roamer's dead crossings never bind an ordinary falling bot.
 - **`BotPortalFollower`** — cross-dimension FOLLOW/COME: seek nearest known portal
   (`NetherPortalIndex`), path to its bottom cell, ENTER terminal state (face, walk in, stand still);

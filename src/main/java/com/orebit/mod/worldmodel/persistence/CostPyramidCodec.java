@@ -143,6 +143,10 @@ public final class CostPyramidCodec {
      * file would mis-align on the new per-fragment bits and carry stale populations, so it must cache-miss
      * and rebuild from live.
      */
+    // PINNED AT 1 PRE-RELEASE (owner ruling 2026-08-09): there are zero installations in the wild, so
+    // semantic changes do NOT bump this constant — they add a dated entry to the history below instead
+    // (the changelog from which an honest version is chosen at first public release). A stale dev cache
+    // is fixed by deleting <world>/orebit/, not by a bump. Resume real bump discipline at first release.
     // Reset to 1 on the 2026-07 packLevelKey repack (ry narrowed 6→5 bits; region/fragment/entry fields all
     // shifted down one bit). Disk is a CACHE — a mismatch simply cache-misses and rebuilds from live, so the
     // long v-history is collapsed rather than bumped to v8.
@@ -162,11 +166,16 @@ public final class CostPyramidCodec {
     // classification bits (shared open/hand-toggleable) change no flood output and no standable verdict
     // at gate cells (closed topY 24 non-standable before and after; open passable before and after) —
     // new navtypes appearing is normal churn, not a semantic change to persisted leaf data. The arc's
-    // realizability change lives in INVAL_SIG_SCHEMA_VERSION v4 below.
-    static final short VERSION = 2;
+    // realizability change lives in the INVAL_SIG_SCHEMA_VERSION history below.
+    // (The "v2" above is HISTORY, not the live value — see the pre-release pin note at the top.)
+    static final short VERSION = 1;
 
-    /** Invalidation-section sig schema (the {@code BotCaps.realizabilitySig} bit layout generation). Bump when a
-     *  sig dimension is added/changed (breath, count buckets); old sections then read as absent (re-learn).
+    /** Invalidation-section sig schema (the {@code BotCaps.realizabilitySig} bit layout generation).
+     *  <p><b>PINNED AT 1 PRE-RELEASE</b> (owner ruling 2026-08-09, same as {@code VERSION} above): zero wild
+     *  installs, so schema-relevant changes add a dated entry to the history below instead of bumping; the
+     *  v2..v5 entries are that changelog, not the live value. Resume bump discipline at first release.
+     *  Post-release rule: bump when a sig dimension is added/changed (breath, count buckets) or when old
+     *  sections' verdicts become false; old sections then read as absent (re-learn).
      *  Reset to 1 on the 2026-07 packLevelKey repack; disk is a cache.
      *  <p>v2 (2026-08-08): {@code BotCaps.mayFall} appended at sig bit 62 for {@code /bot roam}'s Fall-free
      *  gate. A v1 section's rows all carry bit 62 clear, which under the v2 layout would read as "recorded by a
@@ -188,8 +197,18 @@ public final class CostPyramidCodec {
      *  through one). A v3 "unreachable" row recorded under the gate-blind planner can be plainly FALSE for
      *  the very caps sig it names, so old negatives are over-pessimistic and the section is dropped
      *  (re-learn). The cost body's {@code VERSION} stays 2 — gates were already flood-passable under v2, so
-     *  gate classification changes no flood output (see the VERSION note above). */
-    static final int INVAL_SIG_SCHEMA_VERSION = 4;
+     *  gate classification changes no flood output (see the VERSION note above).
+     *  <p>v5 (2026-08-09, DESIGN-trapdoor-ladder-climb.md §6): no bit moved and no sig dimension changed, but
+     *  the planner's movement set got strictly STRONGER under unchanged caps — Climb learned the vanilla
+     *  trapdoor-over-ladder rule (ladder FACING packed into the shared facing bits, the trapdoor-climbable
+     *  continue / mouth top-out / rim top-entry emissions, and the §4 {@code SET_OPEN} mouth folds), so a v4
+     *  "unreachable" row recorded under the ladder-blind planner (a shaft crossing whose only route climbs
+     *  through a trapdoor mouth) can be plainly FALSE for the very caps sig it names. Old negatives are
+     *  over-pessimistic and the section is dropped (re-learn). The cost body's {@code VERSION} stays 2 —
+     *  ladder cells' flood verdicts are unchanged (ladders were and remain non-floodPassable; the mouth was
+     *  already openable-as-air), and the ladder navtype fan-out is normal per-boot churn, not a semantic
+     *  change to persisted leaf data. */
+    static final int INVAL_SIG_SCHEMA_VERSION = 1;
     /** Invalidation-section region-graph class — 0 = "optimistic-v1", today's single symmetric/optimistic
      *  connectivity graph. A future capability-aware graph persists its own sections under a new id; rows never
      *  transfer across graphs (fragment identities don't). */

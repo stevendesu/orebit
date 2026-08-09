@@ -236,7 +236,9 @@ formulas below already account for that via `t`).
   `NavGridUpdater.onBlockChanged` → navtype differs (open/closed descriptors differ) → patch +
   `editEpoch` bump → `planImpacted` → window re-search. Verified chain; nothing new needed beyond
   the descriptor split making states distinguishable (they already are, geometrically).
-- **`CostPyramidCodec.VERSION` 1 → 2** (classification semantics change: open trapdoors become
+- *(2026-08-09 note: all persistence versions have since been PINNED at 1 pre-release — owner
+  ruling; the bumps below survive as codec-Javadoc history entries, not live values.)*
+  **`CostPyramidCodec.VERSION` 1 → 2** (classification semantics change: open trapdoors become
   passable, plate floors/toggle affordances change leaf costs — the v5-era precedent: stale shards
   must read as absent). **`INVAL_SIG_SCHEMA_VERSION` 2 → 3** (bit 3's meaning broadens to the
   door-family + new realizability from trapdoor toggling/jump arm — old negatives are
