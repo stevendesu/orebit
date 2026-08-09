@@ -31,7 +31,9 @@ post-init.
 ## worldmodel/pathing — the nav grid pipeline
 `TraversalGrid` = per-16³ section: packed `short[4096]` (low 10 bits navtype, high 6 `NavFlags`
 neighbour bits) + parallel `byte[4096]` depth nibbles (floorGap low / runUp high; 14=saturate,
-15=UNKNOWN) + an `anyDoor` prefilter. `NavSection` wraps a grid + nullable log₂ `resourceTally`;
+15=UNKNOWN). (The old `anyDoor` section prefilter was measured useless and REMOVED — trapdoor arc §8;
+the per-pop openable context is an unconditional feet-descriptor read, and no anyX bit may replace
+it.) `NavSection` wraps a grid + nullable log₂ `resourceTally`;
 `NavSectionPool` recycles; `NavStore` = per-level chunkKey→NavSection[] map (+ `ringBuilt` readiness).
 `ChunkNavBuilder` drives the column build over `NavSectionBuilder`'s kernels — `classifyInto`/
 `classifyNavtypes` (pass 1, + resource tally + portal discovery), `computeFlags` (pass 2, 3-row
@@ -104,7 +106,11 @@ water AND lava, deadband `WATER_RISE_DEADBAND = 0.2`, `SUBMERGE_BIAS = 0.8`; mov
 water control). `MovementContext`
 = predicate vocabulary incl. `transitOrBreak`; `MiningModel` = tool-tick table + per-search snapshot;
 edits = `EditScratch`/`StepEdits`/`PathEdits`/`EditSnapshot` (break/place **+ door-set** arrays — the
-DOORS thread rides the whole edit pipeline). `BotCaps` = capability record (jump/fall/damage/break/
+DOORS thread rides the whole edit pipeline). **Trapdoors ride the same machinery** (DESIGN-trapdoors.md):
+shared-bit classification (facing/half/open/toggleable on the door/stair bits, kind = `openable`), a 6-way
+blocked-FACE model, generalized residual clearance, TOGGLE-FOR-CLEARANCE SET folds (grow-on-demand doors
+buffer), MineDown/Pillar toggle arms + Ascend's same-level jump arm + Diagonal's rise gate — arms only,
+NO new movement classes; live-verified 7/7 by the `TrapdoorCourse` harness. `BotCaps` = capability record (jump/fall/damage/break/
 place/`mayToggleDoors`, plus the SEARCH knobs `maxNodes`/`greedyWeight`/`boxedInScanRadius` — knobs,
 not movement caps, and deliberately excluded from the sig) + **`realizabilitySig()`/`sigDominates`** — the packed
 caps+tool-tier signature that keys invalidation-memory rows (DESIGN-persisted-invalidation-memory.md
@@ -145,7 +151,11 @@ owns `CostPyramid` + `ResourcePyramid` + `residency()` + `crossingMemory()`; `he
 `RegionFragments` (62-fragment cap + typed-fragment S/W bits), `FragmentBuilder`/
 `FragmentLeafComputer`/`LeafCostComputer`, `CostCodec`, `PyramidMerger` (coarse roll-up +
 `reconcileNode`/`mergeUpFrom` for the persistence seam), `HpaMaintenance` (debounced dirty-leaf
-recompute on block change; also evicts touched invalidation rows).
+recompute on block change; also evicts touched invalidation rows). Leaf flood connectivity is
+**openable-as-air** (ratified 2026-08-09, DESIGN-trapdoors.md §8b): `NavBlock.floodPassable` admits
+every door/trapdoor/fence-gate cell — iron included — into the passable mask and into
+`goalDigSeeds`' goal resolution; deliberate optimism, unrealizable hops absorbed by the blacklist +
+capsSig invalidations (`standable[]`/typing untouched).
 - Files: `pathfinding/regionpathfinder/RegionPathfinder.java`, `HierarchicalRegionPlan.java`,
   `RegionPathPlan.java`, `RegionMineModel.java`, `RegionPlaceModel.java`, `RegionCostField.java`,
   `worldmodel/hpa/RegionGrid.java`, `FragmentBuilder.java`, `HpaMaintenance.java`
@@ -388,12 +398,16 @@ arms it; each writes an `orebit-<x>-result.properties` + traces, then halts the 
   by lava — turn-overshoot detector), `IceParkourCourse` (`-Dorebit.iceparkour`, sprint-parkour onto
   ice landings, slide-overshoot measurement; brake prototypes behind `-Dorebit.iceparkour.brake`),
   `BoxedInCourse` (`-Dorebit.boxedin`, sealed-enclosure shapes — the give-up-fast oracle for the
-  multi-level `RegionPathfinder.isSealedWithin` scan).
+  multi-level `RegionPathfinder.isSealedWithin` scan), `TrapdoorCourse` (`-Dorebit.trapdoor`,
+  `scripts/run-trapdoor.ps1` — the DESIGN-trapdoors.md §9 live tiles: hallway-open/close,
+  flush-hatch pocket, hatch-drop, close-then-parkour, the §9-3b sandwich needle, external-toggle
+  trick; 7/7 PASS 2026-08-08).
 - **`WorldReplay`** (`-Dorebit.replay`, `run-replay.ps1`): replays a recorded failure route in the
   owner's hand-built real world (loads, never builds), per-tick position/velocity/water-state + plan
   trace, EJECTION guard.
 - Files: `HeadlessAutotest.java`, `ParkourCourse.java`, `SwimCourse.java`, `IceCourse.java`,
-  `IceParkourCourse.java`, `BoxedInCourse.java`, `WorldReplay.java`, `scripts/run-autotest.ps1`
+  `IceParkourCourse.java`, `BoxedInCourse.java`, `TrapdoorCourse.java`, `WorldReplay.java`,
+  `scripts/run-autotest.ps1`
 - Entry: `*.register()` from `OrebitCommon.init` (no-op unless armed).
 
 ## commands/ — the /bot surface

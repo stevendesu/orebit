@@ -15,10 +15,15 @@ import com.orebit.mod.worldmodel.pathing.NavSection;
  * A level-0 region is one 16³ {@link NavSection}. This mirrors {@link LeafCostComputer}'s occupancy scan
  * exactly: for each of the 4096 local cells, look up the cell's resident navtype → {@link NavBlock}
  * descriptor (no live block reads) and tally {@link NavBlock#isStandable standable} /
- * {@link NavBlock#isPassable passable}, fill the water mask (descriptor fluid == WATER on a passable cell —
- * the per-fragment W/S type source) + its count (the truly-uniform all-dry/all-water split),
- * and the Σ-hardness over SOLID cells (the mine-edge cost scale). It then hands the masks + tallies to
- * {@link FragmentBuilder#build} at {@code G = 16}.
+ * {@link NavBlock#floodPassable flood-passable} (<b>openable-as-air</b>, DESIGN-trapdoors.md §8b: every
+ * door/trapdoor/fence-gate cell — iron included — is region-tier open space; deliberate optimism,
+ * unrealizable hops absorbed by the blacklist + capsSig invalidations), fill the water mask (descriptor
+ * fluid == WATER on a flood-passable cell — the per-fragment W/S type source) + its count (the
+ * truly-uniform all-dry/all-water split), and the Σ-hardness over SOLID (non-flood-passable) cells (the
+ * mine-edge cost scale). It then hands the masks + tallies to {@link FragmentBuilder#build} at
+ * {@code G = 16}. Only the passable mask uses the flood predicate — {@code standable[]} keeps
+ * {@link NavBlock#isStandable} (a closed-bottom trapdoor stays a FLOOR), so fragment typing is
+ * undisturbed.
  *
  * <h2>Cost model</h2>
  * No per-cell costs are computed or stored — edge costs are derived at query time from the fragment footprints
@@ -81,7 +86,10 @@ public final class FragmentLeafComputer {
                 for (int lx = 0; lx < LEAF; lx++) {
                     long desc = NavBlock.descriptor((short) section.getNavtype(lx, ly, lz));
                     boolean st = NavBlock.isStandable(desc);
-                    boolean pa = NavBlock.isPassable(desc);
+                    // Flood membership is openable-as-air (NavBlock.floodPassable, DESIGN-trapdoors.md
+                    // §8b): doors/trapdoors/fence gates — iron included — count as open space here.
+                    // ONLY this mask changes; standable[] keeps the exact isStandable verdict.
+                    boolean pa = NavBlock.floodPassable(desc);
                     int i = idx(lx, ly, lz);
                     standable[i] = st;
                     passable[i] = pa;
@@ -89,12 +97,17 @@ public final class FragmentLeafComputer {
                     if (st) standCount++;
                     if (pa) {
                         passCount++;
+                        // Accepted optimism (§8b): a WATERLOGGED openable is flood-passable + water
+                        // fluid, so it reads as a WATER cell in the fragment type source even though
+                        // the block-tier swim family still treats it as a conservative wall (§10).
                         if (NavBlock.fluid(desc) == FLUID_WATER) {
                             waterCount++;
                             wa = true;
                         }
                     } else {
-                        // SOLID (non-passable) cell: contributes to the mine-edge hardness average.
+                        // SOLID (non-flood-passable) cell: contributes to the mine-edge hardness
+                        // average. Openable cells now fall on the passable side, so they no longer
+                        // dilute the hardness scale — consistent with not being walls to the flood.
                         solidCount++;
                         hardnessSumSolid += NavBlock.hardness(desc);
                     }
@@ -139,7 +152,9 @@ public final class FragmentLeafComputer {
                 for (int x = 0; x < LEAF; x++) {
                     long desc = NavBlock.descriptor((short) section.getNavtype(x, y, z));
                     int i = idx(x, y, z);
-                    boolean pa = NavBlock.isPassable(desc);
+                    // Same openable-as-air flood membership as computeLeaf (must stay predicate-
+                    // identical: fragmentContaining/labelFragments reproduce build()'s exact flood).
+                    boolean pa = NavBlock.floodPassable(desc);
                     standable[i] = NavBlock.isStandable(desc);
                     passable[i] = pa;
                     water[i] = pa && NavBlock.fluid(desc) == FLUID_WATER;

@@ -27,6 +27,24 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  * bit can't prove (near a section face, or genuinely blocked) are read and — when the bot may break and
  * the edit isn't {@code RISKY_EDIT} — folded into a break-set.
  *
+ * <p><b>The same-level jump arm (owner-ratified, DESIGN-trapdoors.md §6).</b> A {@code dy = 0} neighbour
+ * whose surface-to-surface rise sits in {@code (STEP_ASSIST_MAX_RISE, JUMP_RISE]} — a 13/16 plate→full
+ * lip, a 15/16 carpet→full lip — is jumpable in vanilla but was historically unemittable (the documented
+ * "one-way plate pocket": Traverse's flat walk caps at the auto-step 9, and this class was strictly one
+ * level up). The arm shares every takeoff gate with the +1 arm ({@code MODE_STANDING}, {@code
+ * solidFooting}, {@code reducesJump}/{@code noJumpFromBody}), demands jump headroom over BOTH columns
+ * (whole-cell conservative, §4 v1 — the source {@code y+3} via the existing {@code HEADROOM_JUMP}
+ * pattern, the dest column's own {@code y+3} likewise), applies the §4 residual body rules to the dest
+ * (real floor {@code topY} threaded), admits a toggleable OPEN trapdoor dest via {@code
+ * requireFloorOrToggle} (jump onto the closing hatch), and is priced like the +1 jump. This is what lets
+ * a bot step out of a flush-sunk hatch pocket (and fixes the documented carpet-lip pocket).
+ *
+ * <p><b>Trapdoor dest on the +1 arm (DESIGN-trapdoors.md §5).</b> A non-standable dest one up that is a
+ * toggleable OPEN trapdoor folds a {@code SET_CLOSED} ({@code requireFloorOrToggle}) and the rise gates
+ * judge the TOGGLED topY: a closed TOP half is the ordinary 16/16 jump-onto-hatch ({@code rise(1,16,16)
+ * = 16 ∈ (9,20]}); a closed BOTTOM half ({@code rise(1,3,16) = 3 ≤ 9}) is refused here — Traverse's
+ * step-assist owns it (no double emission).
+ *
  * <p><b>Break / place modifiers (MOVEMENT-DESIGN §1, decision 1).</b> Two folds give the bot upward
  * mobility through this one kind: a blocked body/takeoff cell is <i>broken</i> (dig a staircase up into a
  * hillside), and a missing destination floor is <i>placed</i> — including, when the footing one-up-and-over
@@ -49,6 +67,16 @@ public final class Ascend implements Movement {
      * MovementContext#placeCost}), so building up is naturally avoided unless it's the only way.
      */
     public static final float COST = Traverse.FLAT_COST;
+
+    /**
+     * Highest takeoff surface (sixteenths) from which the same-level jump arm can possibly emit:
+     * an emission needs {@code rise = lvlTop − sTop > STEP_ASSIST_MAX_RISE} and no same-level landing
+     * tops out above 16 (standable floors cap there; a toggled hatch is 3 or 16), so
+     * {@code sTop ≤ 16 − (STEP_ASSIST_MAX_RISE + 1)}. The call-site gate on this constant is a pure
+     * short-circuit — it never changes the candidate set, it only skips the arm's dest-column reads
+     * on takeoffs (full block, slab, stair) that could never satisfy the rise gate anyway.
+     */
+    static final int SAME_LEVEL_MAX_START_TOP = 16 - (MovementContext.STEP_ASSIST_MAX_RISE + 1);
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
@@ -112,6 +140,21 @@ public final class Ascend implements Movement {
             int sTop = startStair ? ctx.directionalTopY(startDesc, d[0], d[1]) : startTopY;
             boolean canGainPlacedStep = MovementContext.rise(1, 16, sTop) <= MovementContext.JUMP_RISE;
 
+            // Same-level JUMP arm (dy = 0; owner-ratified, DESIGN-trapdoors.md §6) — evaluated FIRST, in
+            // its own helper, because the +1 arm below `continue`s out of the direction on its own gates
+            // (a refused +1 dest must not silence the dy=0 lip jump — the flush-hatch pocket exit is
+            // exactly a direction whose +1 dest is unbuildable).
+            // Takeoff-surface short-circuit (candidate-set-EQUIVALENT — the JFR-measured fix for the
+            // +5%/+6% SHORT/CLIFFS regression the unconditional arm cost): every emission needs
+            // rise = lvlTop − sTop > STEP_ASSIST_MAX_RISE with a landing top ≤ 16 (standables cap at 16;
+            // a toggled hatch is 3 or 16), so sTop ≤ 16 − (STEP_ASSIST_MAX_RISE + 1) = 6 is NECESSARY —
+            // only plate (3) / carpet (1) / thin-snow takeoffs qualify; full (16), slab (8) and stair
+            // (directional 8/16) starts can never fire the arm. One in-register compare per direction
+            // skips the dest-column reads on essentially every pop.
+            if (sTop <= SAME_LEVEL_MAX_START_TOP) {
+                sameLevelJump(ctx, out, x, y, z, d, sTop, srcClear, srcRisky, exitDoorToggle);
+            }
+
             // The destination floor (nx,uy,nz) is read three ways below (standable, topY, flags) — resolve
             // its grid slot ONCE and derive each from it.
             int dstPacked = ctx.packedAt(nx, uy, nz);
@@ -124,32 +167,59 @@ public final class Ascend implements Movement {
             //  - rise > JUMP_RISE (20): one jump can't gain it (slab → full one up = 24) — no candidate.
             // A missing floor is the build-a-step arm: the placed step is a full cube, gated once above.
             boolean dstStandable = ctx.standable(dstDesc);
+            boolean dstFloorToggle = false;
             if (dstStandable) {
                 // Directional dest surface (the stair's edge facing back toward the start) — a stair step-up
                 // reads as an 8/16 rise (Traverse's step-assist owns it) instead of a spurious 16/16 jump.
                 int rise = MovementContext.rise(1, ctx.directionalTopY(dstDesc, -d[0], -d[1]), sTop);
                 if (rise <= MovementContext.STEP_ASSIST_MAX_RISE) continue; // Traverse's step-assist
                 if (rise > MovementContext.JUMP_RISE) continue;            // taller than one jump gains
-            } else if (!canGainPlacedStep) {
-                continue; // a placed full-cube step would sit 32 − startTopY > 20 above the start surface
+            } else {
+                // Trapdoor dest (§5): a toggleable OPEN trapdoor one up closes into a standable hatch —
+                // the rise gate then runs on the TOGGLED topY below. Otherwise the build-a-step arm.
+                dstFloorToggle = ctx.trapdoorSetFloors(dstDesc);
+                if (!dstFloorToggle && !canGainPlacedStep) {
+                    continue; // a placed full-cube step would sit 32 − startTopY > 20 above the start surface
+                }
             }
 
             int dstFlags = MovementContext.flagsOf(dstPacked);
             EditScratch e = ctx.edits().reset(!(srcRisky || MovementContext.risksEdit(dstFlags)));
             // §2b: fold the exit-door toggle onto this arm when leaving through a blocked (toggleable) feet door.
-            if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z);
-            // Footing: stand on the block that's there, or BUILD A STEP UP. If the footing one-up-and-over
-            // has no face of its own (open air / a ledge), a support block is placed beneath it against the
-            // floor the bot stands on, then the footing on top — the two-block staircase step. requireFootingOn
-            // folds 0, 1 or 2 places; invalid if the bot can't place or the spot is RISKY_EDIT.
-            if (!dstStandable) e.requireFootingOn(nx, uy, nz, nx, y, nz);
+            if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
+            // The landing's EFFECTIVE floor: the standing block, the toggled-closed hatch, or (build arm)
+            // the dest cell itself — a PLACED step reads as the conjured full cube (16) for the body rules
+            // and stays the pre-place descriptor for the cost reads (air: never slow, never damaging).
+            long floorDesc = dstDesc;
+            int landTop = 16;
+            if (dstStandable) {
+                landTop = ctx.topYOf(dstDesc);
+            } else if (dstFloorToggle) {
+                // Close-and-jump (§5): fold the SET_CLOSED, then gate the rise on the toggled topY — a
+                // closed TOP half is the 16/16 jump-onto-hatch; a closed BOTTOM half (rise 3 ≤ 9) is
+                // Traverse's step-assist (no double emission); past JUMP_RISE nothing jumps it.
+                floorDesc = e.requireFloorOrToggle(nx, uy, nz);
+                landTop = ctx.topYOf(floorDesc);
+                int rise = MovementContext.rise(1, landTop, sTop);
+                if (rise <= MovementContext.STEP_ASSIST_MAX_RISE) continue;
+                if (rise > MovementContext.JUMP_RISE) continue;
+            } else {
+                // Footing: BUILD A STEP UP. If the footing one-up-and-over has no face of its own (open
+                // air / a ledge), a support block is placed beneath it against the floor the bot stands
+                // on, then the footing on top — the two-block staircase step. requireFootingOn folds 0, 1
+                // or 2 places; invalid if the bot can't place or the spot is RISKY_EDIT.
+                e.requireFootingOn(nx, uy, nz, nx, y, nz);
+            }
             // The takeoff head-clearance (source y+3) and the landing body (feet+head) must be clear; cells
             // the HEADROOM bit can't prove are read and — when allowed — folded into a break-set (dig up). The
             // landing body is cleared DOOR-AWARE: a RAISED doorway (a door standing on the step the bot climbs
             // onto) is walked past free / opened rather than mined, exactly as Traverse handles a flat one. The
             // entry edge is derived from the horizontal component (dx,dz), the SAME feet-door direction as a walk.
             if (!srcClear) e.requireAir(x, y + 3, z);
-            ctx.requireBodyClearToward(e, nx, uy, nz, dstFlags, d[0], d[1]);
+            // Landing floor top threaded for the §4 exact-fit body rules (a slab landing under a top-slab
+            // ceiling admits; a plate landing skips its head cell; a toggled hatch uses its closed topY). The
+            // source y+3 jump-headroom cell above stays whole-cell conservative (§4 v1) — plain requireAir.
+            ctx.requireBodyClearToward(e, nx, uy, nz, dstFlags, d[0], d[1], landTop);
             if (e.valid()) {
                 // Slow-FLOOR surcharge on the landing (soul sand / honey — same rule as Traverse/Diagonal;
                 // a floor this move PLACES reads as the conjured full cube, never slow) plus the
@@ -157,11 +227,68 @@ public final class Ascend implements Movement {
                 // dest flag bits are clear; the edit-folding form breaks through a bush/web where that's
                 // cheaper). The source y+3 takeoff cell is clearance-only — not a body cell the bot
                 // lingers in — and is left unpriced.
-                float cost = (ctx.isSlow(dstDesc) ? COST * Traverse.SLOW_COST_FACTOR : COST)
-                        + ctx.floorHazardCost(dstDesc)
+                float cost = (ctx.isSlow(floorDesc) ? COST * Traverse.SLOW_COST_FACTOR : COST)
+                        + ctx.floorHazardCost(floorDesc)
                         + ctx.bodyTransitCost(e, dstFlags, nx, uy, nz);
                 out.accept(nx, uy, nz, cost + e.extraCost(), e);
             }
+        }
+    }
+
+    /**
+     * The same-level JUMP arm (dy = 0; owner-ratified, DESIGN-trapdoors.md §6 — see the class doc): a lip
+     * in {@code (STEP_ASSIST_MAX_RISE, JUMP_RISE]} between two floors at the SAME block level — plate→full
+     * 13, carpet→full 15 — jumpable, historically unemittable (the one-way plate pocket). The hoisted
+     * takeoff gates (mode / solidFooting / reducesJump / noJumpFromBody / caps) have already run in {@link
+     * #candidates}; jump headroom is demanded over BOTH columns, whole-cell conservative (§4 v1). Split out
+     * (rather than appended to the direction loop) because the +1 arm's own gates {@code continue} out of
+     * the direction and must not silence this arm.
+     */
+    private static void sameLevelJump(MovementContext ctx, CandidateSink out, int x, int y, int z,
+                                      int[] d, int sTop, boolean srcClear, boolean srcRisky,
+                                      boolean exitDoorToggle) {
+        int nx = x + d[0];
+        int nz = z + d[1];
+        int lvlPacked = ctx.packedAt(nx, y, nz);
+        if (lvlPacked == MovementContext.UNBUILT) return;
+        long lvlDesc = ctx.descriptorOf(nx, y, nz, lvlPacked);
+        boolean lvlStandable = ctx.standable(lvlDesc);
+        boolean lvlFloorToggle = !lvlStandable && ctx.trapdoorSetFloors(lvlDesc);
+        if (!lvlStandable && !lvlFloorToggle) return; // no floor to jump onto (no build arm at dy=0)
+        if (lvlStandable) {
+            int rise = MovementContext.rise(0, ctx.directionalTopY(lvlDesc, -d[0], -d[1]), sTop);
+            if (rise <= MovementContext.STEP_ASSIST_MAX_RISE) return; // Traverse's flat walk owns it
+            if (rise > MovementContext.JUMP_RISE) return;            // taller than one jump gains
+        }
+        int lvlFlags = MovementContext.flagsOf(lvlPacked);
+        EditScratch e = ctx.edits().reset(!(srcRisky || MovementContext.risksEdit(lvlFlags)));
+        if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
+        long lvlFloor = lvlDesc;
+        int lvlTop;
+        if (lvlStandable) {
+            lvlTop = ctx.directionalTopY(lvlDesc, -d[0], -d[1]);
+        } else {
+            // Close-and-jump at the same level (§5): e.g. from a sunken plate onto an adjacent open
+            // trapdoor that closes into a flush TOP hatch (rise(0,16,3) = 13 ∈ (9,20]).
+            lvlFloor = e.requireFloorOrToggle(nx, y, nz);
+            lvlTop = ctx.topYOf(lvlFloor);
+            int rise = MovementContext.rise(0, lvlTop, sTop);
+            if (rise <= MovementContext.STEP_ASSIST_MAX_RISE) return; // Traverse's close-and-stand
+            if (rise > MovementContext.JUMP_RISE) return;
+        }
+        if (!srcClear) e.requireAir(x, y + 3, z);
+        // Jump headroom over the DEST column too — whole-cell conservative (§4 v1): the y+3 cell above
+        // the dest floor, proven by its resident JUMP bit, else required air (the takeoff pattern).
+        if (!ctx.headroomProves(lvlFlags, nx, y, nz, MovementContext.HEADROOM_JUMP)) {
+            e.requireAir(nx, y + 3, nz);
+        }
+        ctx.requireBodyClearToward(e, nx, y, nz, lvlFlags, d[0], d[1], lvlTop);
+        if (e.valid()) {
+            // Priced like the +1 jump arm: one jump's worth of walk time + the landing's floor terms.
+            float cost = (ctx.isSlow(lvlFloor) ? COST * Traverse.SLOW_COST_FACTOR : COST)
+                    + ctx.floorHazardCost(lvlFloor)
+                    + ctx.bodyTransitCost(e, lvlFlags, nx, y, nz);
+            out.accept(nx, y, nz, cost + e.extraCost(), e);
         }
     }
 
@@ -234,13 +361,15 @@ public final class Ascend implements Movement {
      */
     @Override
     public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
-        // Contract tripwire (PATHOLOGY P1B): an Ascend is BY CONTRACT a cardinal unit step one up (ty == fy+1,
-        // the geometry candidates resolved — see the class doc). A caller handing us any other frame (the
-        // historical +1 floor drift) would have us build a physically-impossible fiction (a 2-block jump) and
-        // livelock; report it through the EXISTING validity-envelope FAILED path instead — detection, not
-        // recovery: the follower drops the plan and replans from the bot's real floor. FLOOR-level contract
-        // (the foot deltas below are topY-aware and may differ when either floor is a partial standable).
-        if (ty != fy + 1) {
+        // Contract tripwire (PATHOLOGY P1B): an Ascend is BY CONTRACT a cardinal step one up (ty == fy+1) OR
+        // the same-level jump arm's flat frame (ty == fy, the partial-floor lip jump — DESIGN-trapdoors.md
+        // §6; its foot band still rises, via the topY-aware fromFootY/toFootY, and every phase below is
+        // parameterized on those, so the same BUILD→CLIMB plan drives both). Any other frame (the historical
+        // +1 floor drift) would have us build a physically-impossible fiction (a 2-block jump) and livelock;
+        // report it through the EXISTING validity-envelope FAILED path instead — detection, not recovery: the
+        // follower drops the plan and replans from the bot's real floor. FLOOR-level contract (the foot
+        // deltas below are topY-aware and may differ when either floor is a partial standable).
+        if (ty != fy + 1 && ty != fy) {
             MovePlan broken = new MovePlan();
             broken.failWhen(b -> true);
             return broken;

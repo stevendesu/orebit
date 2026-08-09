@@ -2,6 +2,8 @@ package com.orebit.mod.pathfinding.blockpathfinder;
 
 import java.util.Arrays;
 
+import com.orebit.mod.worldmodel.navblock.NavBlock;
+
 import net.minecraft.core.BlockPos;
 
 /**
@@ -29,10 +31,14 @@ public final class EditScratch {
     private int breakCount;
     private long[] places = new long[3];
     private int placeCount;
-    // Door OPEN/CLOSE sets (DOORS P2) — a crossing folds a SET on each of a door's two body cells; almost
-    // always empty. The parallel {@code doorOpens} says whether each target state is OPEN (true) or CLOSED.
+    // Openable OPEN/CLOSE sets (DOORS P2; trapdoors DESIGN-trapdoors.md §5 share the channel) — a door
+    // crossing folds a SET on each of its two body cells, a trapdoor on its single cell; almost always
+    // empty. The parallel {@code doorOpens} says whether each target state is OPEN (true) or CLOSED;
+    // {@code doorHalves} marks which entries are DOOR halves — scratch-only bookkeeping for the per-door
+    // one-cost dedup (a trapdoor SET must never vertically pair with anything), never copied out.
     private long[] doors = new long[2];
     private boolean[] doorOpens = new boolean[2];
+    private boolean[] doorHalves = new boolean[2];
     private int doorCount;
     // The clutch this candidate chose, if any (ClutchModel.NONE otherwise) — the block a deep Fall places
     // into its own landing cell mid-drop. A scalar, not a buffer: a step has at most ONE clutch, because a
@@ -84,24 +90,192 @@ public final class EditScratch {
     }
 
     /**
-     * {@link #requireAir} made DOOR-AWARE for a horizontal crossing (P1): a blocked body cell that is an
-     * ALREADY-OPEN door not blocking {@code entryEdge} (the cardinal ordinal of the edge the move crosses to
-     * enter this column) is passed FREE — no break, no cost — instead of mined. Every other cell behaves exactly
-     * as {@link #requireAir} (the door test is one predictable, almost-always-false {@link
-     * MovementContext#doorEntryClear} branch inserted between the passable check and the break fold). Used only by
-     * {@link MovementContext#requireBodyClearToward}.
+     * {@link #requireAir} made OPENABLE-AWARE for a crossing (doors P1/P2; trapdoors DESIGN-trapdoors.md
+     * §4–§5) — the TRANSIT / LOWER-BODY cell primitive. {@code face} is the face of THIS cell the body
+     * crosses to enter it: the cardinal entry-edge ordinal (0..3) — every live consumer is horizontal
+     * (Traverse/Ascend via {@code requireBodyClearToward}, Descend's transit cells); the vertical family
+     * clears its cells through {@link #requireAirVertical} instead. Verdicts, in order:
+     * <ul>
+     *   <li>passable → free (the untouched hot path);</li>
+     *   <li>an intact door not blocking {@code face} → free ({@link MovementContext#doorEntryClear});</li>
+     *   <li>a hand-toggleable door blocking {@code face} → fold a SET to the toggled state ({@link
+     *       MovementContext#doorSetClears}, cost {@link MovementContext#DOOR_TOGGLE_COST} once per door);</li>
+     *   <li>an OPEN trapdoor whose panel is not across {@code face} → free ({@link
+     *       MovementContext#trapdoorEntryClear} — §4: the panel coexists with the 0.6 body);</li>
+     *   <li>an OPEN trapdoor blocking {@code face} → fold a {@code SET_CLOSED} ({@link
+     *       MovementContext#trapdoorSetClears}, single cell, same cost) and re-check the TOGGLED geometry
+     *       against the transit rule: the closed plate bisects this cell, so the candidate self-refuses
+     *       (§5 — the flat arm dies; the step-up/jump arms own the closed-plate geometry via {@link
+     *       #requireFloorOrToggle});</li>
+     *   <li><b>TOGGLE-FOR-CLEARANCE, trigger (b) (§5 — required, not optional)</b>: a toggleable CLOSED
+     *       trapdoor bisecting this body cell ({@link MovementContext#toggleableClosedTrapdoor} — its
+     *       UP/DOWN blocked face never matches a horizontal crossing, so the face arm above cannot fire) →
+     *       fold a {@code SET_OPEN} and admit the opened panel, INCLUDING the face-vs-travel check ({@link
+     *       MovementContext#panelParallel}): a panel that would lie ACROSS the travel axis (trapdoor facing
+     *       along the corridor) refuses the toggle and falls through — the closed-blocks-headroom /
+     *       open-blocks-travel combination is genuinely impassable without breaking;</li>
+     *   <li>else the break fold ({@link #requireAir}'s tail), unchanged.</li>
+     * </ul>
+     * Returns the cell's EFFECTIVE descriptor for the caller's remaining within-candidate checks (§5
+     * threading — {@code PathEdits} only covers ANCESTOR steps, so a fold made here is invisible to {@code
+     * descriptorAt} until the next node): the read descriptor when passed free, the TOGGLED descriptor after
+     * a SET fold, air after a break fold. Meaningful only while {@link #valid()}.
      */
-    public void requireAirToward(int x, int y, int z, int entryEdge) {
-        if (!valid) return;
+    public long requireAirToward(int x, int y, int z, int face) {
+        if (!valid) return MovementContext.AIR_DESC;
         long d = ctx.descriptorAt(x, y, z);
-        if (ctx.passable(d)) return;
-        if (ctx.doorEntryClear(d, entryEdge)) return; // already-open door, not blocking our entry → free passage
+        if (ctx.passable(d)) return d;
+        if (ctx.doorEntryClear(d, face)) return d; // intact door, not blocking our entry → free passage
         // P2: a hand-toggleable door blocking our entry edge — fold a cheap OPEN/CLOSE SET (prefer over smashing)
         // when doors.toggle is on. Toggling always moves the blocked panel to the perpendicular edge, so the
         // OTHER state frees this entry edge (see MovementContext.doorSetClears). Iron / non-toggleable doors and
         // the flag-off case fall through to the P1 break fold unchanged.
-        if (ctx.doorSetClears(d, entryEdge)) { setDoor(x, y, z, ctx.doorToggledOpen(d)); return; }
+        if (ctx.doorSetClears(d, face)) {
+            boolean target = ctx.doorToggledOpen(d);
+            setDoor(x, y, z, target);
+            return NavBlock.withOpenableOpen(d, target);
+        }
+        // Trapdoor arms (§4–§5) — behind the door tests (a cell is one openable kind; the common blocked cell
+        // is neither and pays only the almost-always-false bit tests).
+        if (ctx.trapdoorEntryClear(d, face)) return d; // open panel parallel to travel → free passage
+        if (ctx.trapdoorSetClears(d, face)) {
+            boolean target = ctx.doorToggledOpen(d); // shared open bit 43 — the openable toggled state
+            long toggled = NavBlock.withOpenableOpen(d, target);
+            setTrapdoor(x, y, z, target);
+            // Post-toggle transit re-check: CLOSING a panel leaves a plate that bisects a transit cell —
+            // this candidate self-refuses on the post-toggle geometry (the step-up/jump arms own the plate).
+            if (!ctx.bodyPassable(toggled)) valid = false;
+            return toggled;
+        }
+        // §5 TOGGLE-FOR-CLEARANCE trigger (b): a toggleable CLOSED trapdoor bisecting this body cell — its
+        // blocked face is UP/DOWN while the crossing is horizontal, so only this clearance arm can offer the
+        // SET_OPEN. The opened panel must lie PARALLEL to travel (a side wall — the §4 guide-rail admit);
+        // along-axis facings refuse the toggle and fall through to the break fold (which the default
+        // PROTECTED-trapdoors config then refuses — route around, per §5).
+        if (face <= 3 && ctx.toggleableClosedTrapdoor(d)) {
+            long toggled = NavBlock.withOpenableOpen(d, true);
+            if (MovementContext.panelParallel(toggled, face)) {
+                setTrapdoor(x, y, z, true);
+                return toggled;
+            }
+        }
         foldBreakOrFail(x, y, z, d);
+        return valid ? MovementContext.AIR_DESC : d;
+    }
+
+    /**
+     * The UPPER-BODY (head) cell counterpart of {@link #requireAirToward} for a STANDING occupancy over a
+     * floor of top {@code floorTopY} (sixteenths) — DESIGN-trapdoors.md §4. Identical verdict chain plus the
+     * one extra face-blind admit: a <b>uniform high ceiling</b> ({@link MovementContext#ceilingAdmits}:
+     * {@code ceilingMinY(d) ≥ floorTopY − 3} — a closed-TOP trapdoor or top slab whose underside clears the
+     * body top), tested after the face-crossing toggle arm so a panel ACROSS the crossed face still folds its
+     * SET (whose closed-TOP result the ceiling arm then admits — the §5 close-overhead case; a closed-BOTTOM
+     * result bisects the head space and self-refuses) — and BEFORE the §5 trigger-(b) arm, so a closed-TOP
+     * hatch that already admits as a ceiling is never needlessly toggled: trigger (b) fires only for a
+     * closed plate that genuinely FAILS the §4 residual rules (a closed-BOTTOM head plate), folding a
+     * {@code SET_OPEN} whose panel must lie parallel to travel ({@link MovementContext#panelParallel}).
+     * Callers do not consult this cell at all when {@code floorTopY ≤ 3} (the exact-fit rule — {@link
+     * MovementContext#requireBodyClearToward}); {@code face} is the cardinal entry edge (the vertical family
+     * has no standing head cell). Returns the effective descriptor, as {@link #requireAirToward}.
+     */
+    public long requireUpperBodyToward(int x, int y, int z, int face, int floorTopY) {
+        if (!valid) return MovementContext.AIR_DESC;
+        long d = ctx.descriptorAt(x, y, z);
+        if (ctx.passable(d)) return d;
+        if (ctx.doorEntryClear(d, face)) return d;
+        if (ctx.doorSetClears(d, face)) {
+            boolean target = ctx.doorToggledOpen(d);
+            setDoor(x, y, z, target);
+            return NavBlock.withOpenableOpen(d, target);
+        }
+        if (ctx.trapdoorEntryClear(d, face)) return d;
+        if (ctx.trapdoorSetClears(d, face)) {
+            boolean target = ctx.doorToggledOpen(d);
+            long toggled = NavBlock.withOpenableOpen(d, target);
+            setTrapdoor(x, y, z, target);
+            // Post-toggle head-space re-check: an opened panel is body-passable; a closed one admits only
+            // via the ceiling band (closed-TOP → flush overhead hatch; closed-BOTTOM bisects → refuse).
+            if (!ctx.bodyPassable(toggled) && !ctx.ceilingAdmits(toggled, floorTopY)) valid = false;
+            return toggled;
+        }
+        if (ctx.ceilingAdmits(d, floorTopY)) return d; // §4: flush top-band ceiling (closed-top hatch / top slab)
+        // §5 TOGGLE-FOR-CLEARANCE trigger (b), head-cell flavor: a toggleable CLOSED plate that failed the
+        // ceiling arm above (a closed-BOTTOM head plate — the head-bisection case) folds a SET_OPEN when the
+        // opened panel lies parallel to travel; along-axis facings fall through to the break fold (§5).
+        if (face <= 3 && ctx.toggleableClosedTrapdoor(d)) {
+            long toggled = NavBlock.withOpenableOpen(d, true);
+            if (MovementContext.panelParallel(toggled, face)) {
+                setTrapdoor(x, y, z, true);
+                return toggled;
+            }
+        }
+        foldBreakOrFail(x, y, z, d);
+        return valid ? MovementContext.AIR_DESC : d;
+    }
+
+    /**
+     * The VERTICAL-family cell requirement (DESIGN-trapdoors.md §5) — for a cell the body crosses through
+     * BOTH vertical faces, or must wholly clear for a jump: {@code Pillar}'s overhead cell {@code y+3} (the
+     * shaft the jump rises through) and {@code MineDown}'s own floor cell (the hatch it drops through).
+     * Verdicts, in order:
+     * <ul>
+     *   <li>{@link MovementContext#bodyPassable body-passable} (passable, or an OPEN trapdoor — §4: the
+     *       wall-hugging panel coexists with the centred 0.6 shaft body, and its cardinal blocked face is
+     *       never a vertical crossing's) → free;</li>
+     *   <li>a toggleable CLOSED trapdoor ({@link MovementContext#trapdoorSetClearsVertical} — EITHER half:
+     *       a closed plate's blocked face is always vertical, and the vertical pass-through/jump crosses
+     *       both vertical faces) → fold a {@code SET_OPEN}; the opened panel is body-passable by
+     *       construction (re-checked for parity with the other toggle arms);</li>
+     *   <li>else the break fold ({@link #requireAir}'s tail) — iron / flag-off trapdoors and every other
+     *       blocked cell, byte-identical verdict and cost to the historical {@code requireAir}.</li>
+     * </ul>
+     * Deliberately does NOT free-pass intact doors (unlike the vertical faces of {@link #requireAirToward}):
+     * the historical vertical-family behaviour broke/refused a door cell and no ruling widened it. Like the
+     * other SET folds — and unlike the break tail — the toggle bypasses the {@code RISKY_EDIT}
+     * ({@code allowEdits}) gate (the door-symmetric precedent, see {@link #requireFloorOrToggle}). Returns
+     * the cell's EFFECTIVE descriptor, as {@link #requireAirToward}.
+     */
+    public long requireAirVertical(int x, int y, int z) {
+        if (!valid) return MovementContext.AIR_DESC;
+        long d = ctx.descriptorAt(x, y, z);
+        if (ctx.bodyPassable(d)) return d;
+        if (ctx.trapdoorSetClearsVertical(d)) {
+            long toggled = NavBlock.withOpenableOpen(d, true); // SET_OPEN — swing the hatch out of the shaft
+            setTrapdoor(x, y, z, true);
+            if (!ctx.bodyPassable(toggled)) valid = false; // always-true today; parity with the other arms
+            return toggled;
+        }
+        foldBreakOrFail(x, y, z, d);
+        return valid ? MovementContext.AIR_DESC : d;
+    }
+
+    /**
+     * The FACE-BLIND lower-body cell requirement — {@link #requireAir} plus the §4 residual admit ({@link
+     * MovementContext#bodyPassable}: passable OR open-trapdoor, no face test — pure occupancy). The door-blind
+     * movements' {@code requireBodyClear} c1 primitive; deliberately does NOT admit doors (byte-identity with
+     * the historical door-blind path). Returns the effective descriptor, as {@link #requireAirToward}.
+     */
+    public long requireBodyCell(int x, int y, int z) {
+        if (!valid) return MovementContext.AIR_DESC;
+        long d = ctx.descriptorAt(x, y, z);
+        if (ctx.bodyPassable(d)) return d;
+        foldBreakOrFail(x, y, z, d);
+        return valid ? MovementContext.AIR_DESC : d;
+    }
+
+    /**
+     * The FACE-BLIND upper-body cell requirement over a floor of top {@code floorTopY} — {@link
+     * #requireBodyCell} plus the §4 {@link MovementContext#ceilingAdmits uniform-top-band} admit. Callers skip
+     * this cell entirely at {@code floorTopY ≤ 3} (the exact-fit rule). Door-blind like {@code
+     * requireBodyCell}. Returns the effective descriptor.
+     */
+    public long requireUpperBody(int x, int y, int z, int floorTopY) {
+        if (!valid) return MovementContext.AIR_DESC;
+        long d = ctx.descriptorAt(x, y, z);
+        if (ctx.bodyPassable(d)) return d;
+        if (ctx.ceilingAdmits(d, floorTopY)) return d;
+        foldBreakOrFail(x, y, z, d);
+        return valid ? MovementContext.AIR_DESC : d;
     }
 
     /** Shared tail of {@link #requireAir}/{@link #requireAirToward}: fold a break of a breakable blocked cell
@@ -130,6 +304,40 @@ public final class EditScratch {
         } else {
             valid = false; // no footing, and either the bot can't place or an edit here is forbidden (risky)
         }
+    }
+
+    /**
+     * {@link #requireFloor} grown the trapdoor arm (DESIGN-trapdoors.md §5): a dest floor cell that is not
+     * standable but is a toggleable OPEN trapdoor ({@link MovementContext#trapdoorSetFloors} — {@code
+     * doors.toggle} on, not iron) folds a {@code SET_CLOSED} — the closed state (3/16 plate for a BOTTOM
+     * half, flush 16/16 hatch for a TOP half) is standable by construction — at the same single {@link
+     * MovementContext#DOOR_TOGGLE_COST}. Ordered standable → toggle → place, so every non-open-trapdoor
+     * cell behaves bit-identically to {@code requireFloor} (Stage 3 movements switch their dest-floor call
+     * sites over without behavior change on trapdoor-free worlds). Like the crossing SET folds — and unlike
+     * the break/place folds — the toggle deliberately bypasses the {@code RISKY_EDIT} ({@code allowEdits})
+     * gate, the door-symmetric precedent ({@link #requireAirToward} folds door SETs unconditionally too).
+     *
+     * <p>Returns the EFFECTIVE floor descriptor — the read one when already standable, the TOGGLED one after
+     * the SET fold (so the movement's rise/topY math uses the real closed topY, 3 or 16 per half — the §5
+     * threading contract: the caller must NOT re-read the cell via {@code descriptorAt}, which only sees
+     * ANCESTOR steps' edits), or the conjured full-cube {@code PLACED} descriptor after a place fold.
+     * The caller keeps its own gates: this method never judges rise — "return the toggled descriptor, let
+     * the movement's own gates decide". Meaningful only while {@link #valid()}.
+     */
+    public long requireFloorOrToggle(int x, int y, int z) {
+        if (!valid) return MovementContext.AIR_DESC;
+        long d = ctx.descriptorAt(x, y, z);
+        if (ctx.standable(d)) return d;
+        if (ctx.trapdoorSetFloors(d)) {
+            setTrapdoor(x, y, z, false); // SET_CLOSED — close the hatch into a floor
+            return NavBlock.withOpenableOpen(d, false);
+        }
+        if (allowEdits && ctx.placeable(x, y, z, d)) {
+            addPlace(x, y, z);
+            return MovementContext.PLACED_DESC;
+        }
+        valid = false;
+        return d;
     }
 
     /**
@@ -185,28 +393,57 @@ public final class EditScratch {
      * <p><b>One interaction, one cost — even though a door is two body cells.</b> A crossing folds a SET on
      * BOTH the door's cells (feet + head) so every downstream {@code descriptorAt} of the door reads the same
      * state; but the toggle is a single right-click, so the {@link MovementContext#DOOR_TOGGLE_COST} is charged
-     * only for the FIRST cell of a door — the second (vertically adjacent, same target) is recognised as the
-     * other half and folded free. Re-folding the exact same cell is a no-op. This keeps the g-cost honest (one
-     * toggle ≈ 6 ticks ≪ breaking both halves) without needing to know which half is the lower one.
+     * only for the FIRST cell of a door — the second (vertically adjacent, same target, itself a door half) is
+     * recognised as the other half and folded free. Re-folding the exact same cell is a no-op. This keeps the
+     * g-cost honest (one toggle ≈ 6 ticks ≪ breaking both halves) without needing to know which half is the
+     * lower one. The two-half dedup is DOOR-GATED (DESIGN-trapdoors.md §5): only entries folded through
+     * {@code setDoor} participate, so a single-cell trapdoor SET vertically adjacent to a door half — or to
+     * another trapdoor — is always charged its own toggle.
      */
     void setDoor(int x, int y, int z, boolean targetOpen) {
+        setOpenable(x, y, z, targetOpen, true);
+    }
+
+    /**
+     * Fold an OPEN/CLOSE of the (hand-toggleable) trapdoor at cell {@code (x,y,z)} to {@code targetOpen}
+     * (DESIGN-trapdoors.md §5) — the single-cell twin of {@link #setDoor}, riding the SAME doors[] channel
+     * ({@code SET_OPEN}/{@code SET_CLOSED} are kind-agnostic; {@code descriptorAt} resolves through the
+     * unified {@link NavBlock#withOpenableOpen}). A trapdoor is ONE cell, so it never participates in the
+     * per-door two-half dedup — each trapdoor SET charges its own {@link MovementContext#DOOR_TOGGLE_COST}
+     * (re-folding the exact same cell within one candidate stays a no-op). The caller has already proven the
+     * toggle offered ({@link MovementContext#trapdoorSetClears} / {@link MovementContext#trapdoorSetFloors}).
+     */
+    void setTrapdoor(int x, int y, int z, boolean targetOpen) {
+        setOpenable(x, y, z, targetOpen, false);
+    }
+
+    /** Shared tail of {@link #setDoor}/{@link #setTrapdoor}: exact-cell no-op dedup, the door-gated two-half
+     *  cost dedup ({@code doorHalf} entries only, both sides), append, one toggle cost per openable. */
+    private void setOpenable(int x, int y, int z, boolean targetOpen, boolean doorHalf) {
         long cell = BlockPos.asLong(x, y, z);
-        boolean sameDoor = false;
         for (int i = 0; i < doorCount; i++) {
             if (doors[i] == cell) return; // already folded this exact cell
         }
-        long below = BlockPos.asLong(x, y - 1, z), above = BlockPos.asLong(x, y + 1, z);
-        for (int i = 0; i < doorCount; i++) {
-            if ((doors[i] == below || doors[i] == above) && doorOpens[i] == targetOpen) { sameDoor = true; break; }
+        boolean sameDoor = false;
+        if (doorHalf) {
+            long below = BlockPos.asLong(x, y - 1, z), above = BlockPos.asLong(x, y + 1, z);
+            for (int i = 0; i < doorCount; i++) {
+                if ((doors[i] == below || doors[i] == above) && doorOpens[i] == targetOpen && doorHalves[i]) {
+                    sameDoor = true;
+                    break;
+                }
+            }
         }
         if (doorCount == doors.length) {
             doors = Arrays.copyOf(doors, doors.length * 2);
             doorOpens = Arrays.copyOf(doorOpens, doorOpens.length * 2);
+            doorHalves = Arrays.copyOf(doorHalves, doorHalves.length * 2);
         }
         doors[doorCount] = cell;
         doorOpens[doorCount] = targetOpen;
+        doorHalves[doorCount] = doorHalf;
         doorCount++;
-        if (!sameDoor) extraCost += MovementContext.DOOR_TOGGLE_COST; // one right-click per door, not per half
+        if (!sameDoor) extraCost += MovementContext.DOOR_TOGGLE_COST; // one right-click per openable, not per half
     }
 
     /**

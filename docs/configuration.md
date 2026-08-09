@@ -109,9 +109,10 @@ covering the things people place and decorate with:
 - **Ladders**
 
 **Doors are still used, not just avoided.** Protection forbids *breaking* a block, not operating it — so the
-bot still **opens and closes** wooden/copper doors, trapdoors, and fence gates to pass through (a
-non-destructive action). Iron doors (which need redstone) can't be hand-operated, so a protected iron door is
-**routed around** rather than smashed.
+bot still **opens and closes** wooden/copper doors and trapdoors to pass through (a non-destructive action;
+an already-open fence gate is walked through, but the bot does not yet operate closed gates). Iron doors and
+iron trapdoors (which need redstone) can't be hand-operated, so a protected iron one is **routed around**
+rather than smashed.
 
 **Leaves are intentionally not protected** — the bot may cut through foliage. **Ores are not protected either**
 — protecting a block only stops the bot breaking it *to make a path*; a block you explicitly send the bot to
@@ -207,7 +208,7 @@ doors.toggle = true
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `doors.toggle` | `true` | Whether the bot may open and close hand-operable doors (wooden, copper) by right-clicking them, rather than smashing through or routing around — it opens a closed door before crossing and closes it again behind itself on a hallway corner. Set `false` as a kill-switch: an already-open door is walked through, a closed one is mined. Iron doors are never hand-operable regardless of this setting (they need redstone). |
+| `doors.toggle` | `true` | Whether the bot may open and close hand-operable doors **and trapdoors** (wooden, copper) by right-clicking them, rather than smashing through or routing around — it opens a closed door before crossing (closing it again behind itself on a hallway corner), opens a hatch to drop through, and closes an open hatch to walk across it. Set `false` as a kill-switch: an already-open door or trapdoor is walked through, a closed one is mined (or routed around when protected). Iron doors and iron trapdoors are never hand-operable regardless of this setting (they need redstone). |
 
 ### Crafting — how `/bot craft` handles recipes that need a crafting table
 

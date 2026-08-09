@@ -76,6 +76,20 @@ class PathPlanOwnEditTest {
     }
 
     @Test
+    void prescribedDoorSetIsRecognised() {
+        // DESIGN-trapdoors.md §7 (own-toggle forgiveness): a folded door/trapdoor SET is an own edit exactly
+        // as a break/place is — the toggle executors verify their expectToggle announcement against it. A
+        // cell the plan never SET stays divergence (the same over-forgiveness guard as the other kinds).
+        final Movement any = MovementRegistry.TIER1.get(0);
+        final long doorCell = new BlockPos(12, 65, 10).asLong();
+        final List<BlockPos> waypoints = Arrays.asList(new BlockPos(10, 64, 10), new BlockPos(11, 64, 10));
+        final BlockPathPlan bp = new BlockPathPlan(waypoints, Arrays.asList(any, any),
+                Arrays.asList(null, EditFixtures.doorSetStep(true, doorCell)), 0f);
+        assertTrue(PathPlan.prescribesEdit(bp, 12, 65, 10), "the plan folded a SET here — the toggle is ours");
+        assertFalse(PathPlan.prescribesEdit(bp, 12, 66, 10), "the other-half cell is NOT prescribed — the pair is forgiven at the grid slot, not here");
+    }
+
+    @Test
     void unprescribedEditIsNotForgiven() {
         final BlockPathPlan bp = plan();
         // The gather / `/bot mine` case: same actuator, same tick, a cell this plan never mentioned.

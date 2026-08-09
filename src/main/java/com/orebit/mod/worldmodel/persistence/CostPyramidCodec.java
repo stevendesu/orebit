@@ -146,7 +146,18 @@ public final class CostPyramidCodec {
     // Reset to 1 on the 2026-07 packLevelKey repack (ry narrowed 6→5 bits; region/fragment/entry fields all
     // shifted down one bit). Disk is a CACHE — a mismatch simply cache-misses and rebuilds from live, so the
     // long v-history is collapsed rather than bumped to v8.
-    static final short VERSION = 1;
+    // v2 (2026-08-08, DESIGN-trapdoors.md §8) is a SEMANTIC bump, not a layout change: the ratified
+    // defensive bump for the trapdoor arc's classification split (shared facing/half/open descriptor
+    // fields fan trapdoors into per-facing/half/open navtypes). The bump guards the navtype
+    // population change and any standable-verdict drift at trapdoor cells — the v5-era precedent: stale
+    // shards must read as absent and rebuild from live classify. v2 ALSO covers the 2026-08-09
+    // openable-as-air leaf connectivity (DESIGN-trapdoors.md §8b — same uncommitted arc, so no second
+    // bump): the leaf flood mask moved NavBlock.isPassable -> floodPassable, admitting EVERY openable
+    // cell (doors/trapdoors/fence gates, iron included) into fragment membership, which changes leaf
+    // fragment populations/footprints and goal resolution. That supersedes the arc's earlier
+    // honest-scope note ("open panels stay region-tier WALLS"): openables are now region-tier open
+    // space, with unrealizable hops left to RegionEdgeBlacklist + the capsSig-keyed invalidations.
+    static final short VERSION = 2;
 
     /** Invalidation-section sig schema (the {@code BotCaps.realizabilitySig} bit layout generation). Bump when a
      *  sig dimension is added/changed (breath, count buckets); old sections then read as absent (re-learn).
@@ -155,8 +166,16 @@ public final class CostPyramidCodec {
      *  gate. A v1 section's rows all carry bit 62 clear, which under the v2 layout would read as "recorded by a
      *  bot that cannot fall" — a strictly weaker prover, so every such record would silently stop binding an
      *  ordinary falling bot. Dropping the section instead re-learns from live, which is exactly the cache
-     *  contract. */
-    static final int INVAL_SIG_SCHEMA_VERSION = 2;
+     *  contract.
+     *  <p>v3 (2026-08-08, DESIGN-trapdoors.md §8): no bit moved, but sig bit 3's MEANING broadened — {@code
+     *  mayToggleDoors} now governs the whole door FAMILY (trapdoors ride the same {@code doors.toggle} key),
+     *  and the trapdoor arc added realizability no v2-era search had (toggle folds on the crossing/vertical
+     *  families, {@code requireFloorOrToggle} hatch floors, the same-level jump arm). A v2 "unreachable"
+     *  row recorded under the trapdoor-blind classifier can be plainly FALSE for the very caps sig it names,
+     *  so old negatives are over-pessimistic and the section is dropped (re-learn). The cost body is governed
+     *  by the separate {@code VERSION} constant (itself bumped to v2 in this same arc — a sig-schema mismatch
+     *  alone would drop only this section and keep cost rows, the mandated pattern). */
+    static final int INVAL_SIG_SCHEMA_VERSION = 3;
     /** Invalidation-section region-graph class — 0 = "optimistic-v1", today's single symmetric/optimistic
      *  connectivity graph. A future capability-aware graph persists its own sections under a new id; rows never
      *  transfer across graphs (fragment identities don't). */

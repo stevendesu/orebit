@@ -40,10 +40,13 @@ import net.minecraft.world.level.chunk.Strategy;
  *   <li><b>Ascend start deficit</b> — rise = {@code 16 + destTopY − startTopY}: slab → full one up is
  *       24 &gt; 20 (impossible); slab → slab one up is 16 (an ordinary jump); full → slab one up is
  *       8 ≤ 9 (Traverse's step-assist, NOT an Ascend).</li>
- *   <li><b>Traverse same-level lip</b> — {@code destTopY − startTopY} ≤ 9 to walk: a 2/16 repeater
- *       plate onto a full block is a 14/16 rise no auto-step clears (and — the documented KNOWN GAP —
- *       no movement emits the same-block-level JUMP that lip physically allows, so the route is null,
- *       not rerouted).</li>
+ *   <li><b>Traverse same-level lip / Ascend's same-level jump arm</b> — {@code destTopY − startTopY}
+ *       ≤ 9 to walk; a 10..20/16 lip (a 2/16 repeater plate onto a full block is 14) is beyond every
+ *       auto-step but within one jump, and is emitted by {@link
+ *       com.orebit.mod.pathfinding.blockpathfinder.movements.Ascend}'s same-level jump arm
+ *       (owner-ratified, DESIGN-trapdoors.md §6 — the historical "no same-block-level jump" KNOWN GAP
+ *       is closed; this test's substrate updated per the ratified model rather than pinning the old
+ *       one-way pocket).</li>
  *   <li><b>Pillar full-start gate</b> — the placed cube's top is {@code 32 − startTopY} above the start
  *       surface; from a slab {@code 8 + 20 = 28 < 32} — no pillar off a slab.</li>
  *   <li><b>Parkour rising start deficit</b> — the +1 landing obeys the same 24 &gt; 20 rejection from a
@@ -129,20 +132,24 @@ class PartialHeightTest {
     // ---------------------------------------------------------------- Traverse same-level lip (rule 2)
 
     @Test
-    void lowPartialStartRejectsAFlatLipAboveNineSixteenths() {
-        // Control: slab start onto full-block floors at the SAME level is an 8/16 lip — walkable.
-        assertNotNull(BlockPathfinder.findPath(buildFlat(slab()), START,
-                        new BlockPos(6, 5, 8), BotCaps.DEFAULT, CORRIDOR),
-                "sanity: an 8/16 same-level lip (slab → full) auto-steps");
-        // Repeater start (top 2/16) onto full-block floors: lip 14/16 > 9 — not auto-steppable by
-        // Traverse/Ascend (there is no same-block-level step move for a 10..20/16 lip). The fixture WALLS
-        // x=1 (buildFlat), so no parkour run-up cell exists to overfly the sunk repeater onto the lip — the
-        // ISSUE-3 jump-over (which WOULD escape an open repeater trap) is denied here — so the route is null,
-        // isolating the walk/step start-deficit rejection.
-        assertNull(BlockPathfinder.findPath(buildFlat(lowPlate()), START,
-                        new BlockPos(6, 5, 8), BotCaps.DEFAULT, CORRIDOR),
-                "a 14/16 same-level lip must not be walked flat (no Traverse/Ascend covers it, and the "
-                        + "parkour jump-over is walled off in this fixture)");
+    void lowPartialStartJumpsAFlatLipAboveNineSixteenths() {
+        // Control: slab start onto full-block floors at the SAME level is an 8/16 lip — walked flat, no
+        // jump anywhere (the auto-step's side of the partition, unchanged).
+        BlockPathPlan walk = BlockPathfinder.findPath(buildFlat(slab()), START,
+                new BlockPos(6, 5, 8), BotCaps.DEFAULT, CORRIDOR);
+        assertNotNull(walk, "sanity: an 8/16 same-level lip (slab → full) auto-steps");
+        assertEquals(0, count(walk, MovementRegistry.ASCEND),
+                "an auto-steppable lip is Traverse's, never a jump (no double emission)");
+        // Repeater start (top 2/16) onto full-block floors: lip 14/16 — beyond every auto-step (> 9) but
+        // within one jump (≤ 20). Historically UNEMITTABLE (the documented one-way low-partial pocket:
+        // this assertion used to pin the null route); the owner-ratified same-level jump arm
+        // (DESIGN-trapdoors.md §6/§11.4) closes the gap — the lip is now JUMPED, and the step is an
+        // ASCEND (the arm's owner), not a Traverse (whose flat gate still refuses it).
+        BlockPathPlan jump = BlockPathfinder.findPath(buildFlat(lowPlate()), START,
+                new BlockPos(6, 5, 8), BotCaps.DEFAULT, CORRIDOR);
+        assertNotNull(jump, "a 14/16 same-level lip is jumped by Ascend's same-level arm (ratified)");
+        assertTrue(count(jump, MovementRegistry.ASCEND) >= 1,
+                "the 10..20/16 lip band belongs to the same-level JUMP arm — an Ascend waypoint");
     }
 
     // ---------------------------------------------------------------- Pillar full-start gate (rule 3)

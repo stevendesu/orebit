@@ -168,7 +168,7 @@ and walks in.
 
 ### Folded interactions
 
-Breaking blocks, placing blocks, and toggling doors / fence gates / trapdoors are
+Breaking blocks, placing blocks, and toggling doors and trapdoors are
 **not separate moves** — they don't change your position. Instead they are folded
 into the movement that needs them, as edits that add cost and validity requirements:
 

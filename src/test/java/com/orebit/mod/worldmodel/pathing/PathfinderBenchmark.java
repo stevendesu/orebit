@@ -108,7 +108,7 @@ import net.minecraft.world.level.chunk.Strategy;
 public class PathfinderBenchmark {
 
     @Param({"TOWER", "OPEN", "UPOVER_OPEN", "UPOVER_WALL", "SHORT", "MULTI", "FLOOD", "CLIFFS",
-            "BRIDGE", "SPIRAL", "SETUP", "SETUP_MACRO", "SWIMPOOL", "SWIM1X1", "SHORELINE"})
+            "BRIDGE", "SPIRAL", "SETUP", "SETUP_MACRO", "SWIMPOOL", "SWIM1X1", "SHORELINE", "HATCHES"})
     private String scenario;
 
     private NavGridView grid;
@@ -298,6 +298,21 @@ public class PathfinderBenchmark {
                 corridor = null;
                 caps = BotCaps.DEFAULT;
                 swimSanityDryRun();
+                break;
+            case "HATCHES":
+                // The TRAPDOOR-heavy guard (DESIGN-trapdoors.md §9, coverage — no A/B baseline claim): a
+                // long flat walk crossing SEVEN full-width walls of closed-TOP oak trapdoors at chest
+                // height (world x = 16k+8, k=-3..3, every z, facing NORTH → each opened panel lands on a
+                // side wall). A walk+toggle bot must fold ONE §5 trigger-(b) SET_OPEN per wall, so pops
+                // along the route exercise the whole trapdoor surface: the per-pop feet+head exit-context
+                // reads, the openable entry chain behind the passable failure, the toggled-descriptor
+                // threading, and the SET-carrying edit chains between walls.
+                grid = buildHatchesWorld();
+                start = HATCHES_START;
+                goal = HATCHES_GOAL;
+                corridor = null;
+                caps = HATCHES_CAPS;
+                hatchesSanityDryRun();
                 break;
             default:
                 throw new IllegalArgumentException("unknown scenario: " + scenario);
@@ -673,6 +688,135 @@ public class PathfinderBenchmark {
             }
         }
         return chunks;
+    }
+
+    // --- HATCHES geometry: the trapdoor-heavy guard. Flat stone world; every chunk column cx=-3..3
+    //     carries a full-width SANDWICH wall of closed oak trapdoors (local x=8, all z): closed-TOP in
+    //     the feet cell y=1 (facing NORTH) + closed-BOTTOM in the head cell y=2 (facing SOUTH) — the
+    //     §9-3b needle pair. The straight west→east walk crosses 7 walls; each crossing folds TWO §5
+    //     trigger-(b) SET_OPENs (panels land on opposite side walls, the 10/16 slot). The sandwich (not
+    //     a single chest plate) is load-bearing: a lone closed-TOP hatch is STANDABLE, and with Ascend +
+    //     Descend at FLAT_COST each the jump-OVER (9.3 ticks) undercuts the toggle-through (10.6) — the
+    //     head plate forbids standing on the wall, so every crossing is forced through the toggle arms.
+    //     Start/goal sit in the flat outer chunks (cx=±4).
+    static final BlockPos HATCHES_START = new BlockPos(-60, 0, 8);
+    static final BlockPos HATCHES_GOAL = new BlockPos(60, 0, 8);
+
+    /** HATCHES caps: walk-only + doors.toggle — the toggle is the ONLY tool, so every wall crossing is
+     *  forced through the trigger-(b) fold (a breaker would price the hatches as cheap mines and a placer
+     *  could pillar over; both would bypass the surface under measure). */
+    static final BotCaps HATCHES_CAPS = new BotCaps(1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL,
+            false, BotCaps.DEFAULT_COST_PER_HITPOINT, false, false, BotCaps.UNBREAKABLE, false,
+            BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT, true);
+
+    static NavGridView buildHatchesWorld() {
+        return new NavGridView(0, buildHatchesChunks());
+    }
+
+    /** The hatches world's raw chunk map: the flat ground+air column for cx=±4, and a shared walled
+     *  column (ground + the local-x=8 trapdoor row at y=1) for cx=-3..3. */
+    static ConcurrentHashMap<Long, NavSection[]> buildHatchesChunks() {
+        BlockState air = Blocks.AIR.defaultBlockState();
+        BlockState stone = Blocks.STONE.defaultBlockState();
+        BlockState feetHatch = Blocks.OAK_TRAPDOOR.defaultBlockState()
+                .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.HORIZONTAL_FACING,
+                        net.minecraft.core.Direction.NORTH)
+                .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.OPEN, false)
+                .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.HALF,
+                        net.minecraft.world.level.block.state.properties.Half.TOP)
+                .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED, false);
+        BlockState headHatch = feetHatch
+                .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.HORIZONTAL_FACING,
+                        net.minecraft.core.Direction.SOUTH)
+                .setValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.HALF,
+                        net.minecraft.world.level.block.state.properties.Half.BOTTOM);
+
+        // Walled ground section: stone plane at local y=0 plus the sandwich rows at local x=8, y=1..2.
+        PalettedContainer<BlockState> walledStates = new PalettedContainer<>(
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                walledStates.set(x, 0, z, stone);
+            }
+        }
+        for (int z = 0; z < 16; z++) {
+            walledStates.set(8, 1, z, feetHatch);
+            walledStates.set(8, 2, z, headHatch);
+            // Stone LID over the wall column: without it, Ascend onto the standable closed-TOP feet hatch
+            // (one trigger-(b) SET on the head plate) plus a Descend off is CHEAPER than the two-SET
+            // walk-through (15.3 vs 21.3 ticks around the column) and the route stops exercising the
+            // sandwich. The lid kills the stand-on-top (head cell stone) so every crossing is the pair.
+            walledStates.set(8, 3, z, stone);
+        }
+        NavSection walledGround = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(walledStates, false, walledGround.getTraversalGrid());
+
+        // Plain flat ground section + shared air (the buildFlatChunks idiom).
+        PalettedContainer<BlockState> groundStates = new PalettedContainer<>(
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                groundStates.set(x, 0, z, stone);
+            }
+        }
+        NavSection flatGround = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(groundStates, false, flatGround.getTraversalGrid());
+
+        PalettedContainer<BlockState> airStates = new PalettedContainer<>(
+                air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
+        NavSection airMid = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(airStates, true, airMid.getTraversalGrid());
+        NavSection airTop = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(airStates, true, airTop.getTraversalGrid());
+        NavSection airMid2 = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(airStates, true, airMid2.getTraversalGrid());
+        NavSection airTop2 = NavSection.create(BlockPos.ZERO);
+        NavSectionBuilder.classifyInto(airStates, true, airTop2.getTraversalGrid());
+
+        NavSection[] flatColumn = { flatGround, airMid, airMid, airTop };
+        NavSectionBuilder.computeDepth(flatColumn);
+        NavSection[] walledColumn = { walledGround, airMid2, airMid2, airTop2 };
+        NavSectionBuilder.computeDepth(walledColumn);
+
+        ConcurrentHashMap<Long, NavSection[]> chunks = new ConcurrentHashMap<>();
+        for (int cx = -4; cx <= 4; cx++) {
+            NavSection[] column = (cx >= -3 && cx <= 3) ? walledColumn : flatColumn;
+            for (int cz = -4; cz <= 4; cz++) {
+                chunks.put(NavStore.key(cx, cz), column);
+            }
+        }
+        return chunks;
+    }
+
+    /**
+     * Setup-time (NOT measured) shape check for HATCHES: the walk+toggle bot must FIND, and the route must
+     * carry exactly FOURTEEN SET_OPENs (two trigger-(b) folds per sandwich wall) and zero breaks — if a
+     * movement/cost change reroutes it (or a trigger-b regression walls it out), the scenario no longer
+     * measures the trapdoor surface and the guard is void.
+     */
+    private void hatchesSanityDryRun() {
+        var plan = BlockPathfinder.findPath(grid, start, goal, caps, corridor);
+        int expansions = BlockPathfinder.lastExpansions();
+        int setOpens = 0, breaks = 0;
+        if (plan != null) {
+            for (int i = 0; i < plan.size(); i++) {
+                var e = plan.edits(i);
+                if (e == null) continue;
+                breaks += e.breakCount();
+                for (int j = 0; j < e.doorSetCount(); j++) {
+                    if (e.doorSetOpenAt(j)) setOpens++;
+                }
+            }
+        }
+        System.out.println("[PathfinderBenchmark] HATCHES sanity: found=" + (plan != null)
+                + " expansions=" + expansions + " setOpens=" + setOpens + " breaks=" + breaks);
+        if (plan == null) {
+            throw new IllegalStateException("HATCHES did not find a path — fixture broken");
+        }
+        if (setOpens != 14 || breaks != 0) {
+            throw new IllegalStateException("HATCHES route carried " + setOpens + " SET_OPENs / " + breaks
+                    + " breaks (expected 14 / 0) — no longer the trapdoor-heavy guard");
+        }
     }
 
     // --- SHORELINE geometry: the WATER-REFUSAL guard. A 1-wide stone highway 30 blocks long floating at

@@ -201,6 +201,24 @@ loom {
             }
             isIdeConfigGenerated = false
         }
+        // Trapdoor-arc diagnostic: a superflat server that arms the common-src TrapdoorCourse hook
+        // (-Dorebit.trapdoor) in its own run dir (run/trapdoor). Launch: ./gradlew :fabric:1.21.11:runTrapdoor
+        // (after scripts/run-trapdoor.ps1 preps the run dir with a FLAT server.properties + toggle-isolating
+        // orebit.properties). Mirrors the ice/parkour configs exactly.
+        create("trapdoor") {
+            server()
+            configName = "Orebit Trapdoor ($minecraft)"
+            runDir = "../../../run/trapdoor"
+            vmArg("-Dorebit.trapdoor=true")
+            for (key in listOf("debug")) {
+                val v = project.findProperty("orebit.trapdoor.$key")
+                if (v != null) vmArg("-Dorebit.trapdoor.$key=$v")
+            }
+            // Ground drive-strategy selector rides through for the ground velocity-servo A/B (Stage 2):
+            //   ./gradlew :fabric:1.21.11:runTrapdoor "-Porebit.ground.drive=servo"
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
+            isIdeConfigGenerated = false
+        }
         // Real-world REPLAY diagnostic: a server that arms the common-src WorldReplay hook (-Dorebit.replay)
         // in its own run dir (run/replay), which LOADS the owner's "Swims" world (copied in by
         // scripts/run-replay.ps1 — NOT a flat regen) and replays the reported-failing goto. Launch:
