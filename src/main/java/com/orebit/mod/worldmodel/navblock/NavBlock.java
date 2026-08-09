@@ -127,7 +127,8 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           Distinct from the {@code surface} slow field (bits 18–19), which prices standing
  *                           ON a slow floor (soul sand / honey); this prices moving THROUGH a slowing cell.
  *   43      1   open        SHARED OPEN bit (1 = open, 0 = closed): {@link DoorBlock} OPEN (via {@link #doorOpen})
- *                           XOR {@link TrapDoorBlock} OPEN (via {@link #trapdoorOpen}); 0 for non-openables.
+ *                           XOR {@link TrapDoorBlock} OPEN (via {@link #trapdoorOpen}) XOR {@link FenceGateBlock}
+ *                           OPEN (via {@link #gateOpen}); 0 for non-openables.
  *                           Colocated with the movement-impact cluster; consumed by {@link #doorBlockedEdge}
  *                           (open ⇒ perpendicular edge, closed ⇒ opposite edge) and {@link #trapdoorBlockedFace}
  *                           (closed ⇒ UP/DOWN per half, open ⇒ the cardinal opposite facing). (Formerly the
@@ -166,14 +167,16 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           mask-and-shift on the hot path.
  *   50      1   handToggleable a GENERIC hand-toggleable openable — one the bot can OPEN/CLOSE BY HAND vs a
  *                           redstone-only iron one. Set for every {@link DoorBlock} except {@link
- *                           Blocks#IRON_DOOR} (DOORS P2) and every {@link TrapDoorBlock} except {@link
+ *                           Blocks#IRON_DOOR} (DOORS P2), every {@link TrapDoorBlock} except {@link
  *                           Blocks#IRON_TRAPDOOR} (DESIGN-trapdoors.md §2) — the {@code Blocks.*} idiom of the
  *                           door/portal/bubble reads (range-stable, no platform seam; copper doors AND copper
  *                           trapdoors are non-iron and hand-openable, so the test needs no version gate —
- *                           pre-copper the non-iron set is simply the wood species). Kind discrimination is the
- *                           {@code openable} field (14–15), NOT this bit. Meaningful only when {@link #isDoor}
- *                           / {@link #isTrapdoor}. Consumed by the planner's prefer-open-over-smash SET fold
- *                           (an iron door/trapdoor has no SET option → break/route as in P1).
+ *                           pre-copper the non-iron set is simply the wood species) — and every {@link
+ *                           FenceGateBlock} UNCONDITIONALLY (DESIGN-fence-gates.md §1: no iron gate exists at
+ *                           any version). Kind discrimination is the {@code openable} field (14–15), NOT this
+ *                           bit. Meaningful only when {@link #isDoor} / {@link #isTrapdoor} / {@link #isGate}.
+ *                           Consumed by the planner's prefer-open-over-smash SET fold (an iron door/trapdoor
+ *                           has no SET option → break/route as in P1).
  *   51      1   narrowTop   the collision footprint is a NARROW POST — either XZ extent of the shape's
  *                           bounding box under the bot's own 0.6-block body width (bamboo ~3px with a
  *                           position-hash offset, chain 3px, end/lightning rod 4px, pointed dripstone,
@@ -288,6 +291,13 @@ public final class NavBlock {
     private static final int TRAPDOOR_FACING_SHIFT = STAIR_FACING_SHIFT, TRAPDOOR_FACING_MASK = STAIR_FACING_MASK;
     private static final long TRAPDOOR_HALF_BIT = STAIR_HALF_BIT; // 1 = TOP half (trapdoors; stairs read via stairHalf)
     private static final long TRAPDOOR_OPEN_BIT = DOOR_OPEN_BIT;  // 1 = open (trapdoors; doors read via doorOpen)
+    // Fence gates reuse the shared fields too (DESIGN-fence-gates.md §2 — ZERO new bits): OPEN rides bit 43,
+    // hand-toggleable bit 50 (set unconditionally — no iron gate exists at any version). FACING is deliberately
+    // NOT packed: it is behaviorally void for gates (open collision is Shapes.empty() regardless of facing;
+    // closed blocks every crossing regardless of axis), and packing it would 4x the gate navtypes for zero
+    // consumers. POWERED/IN_WALL are likewise unread (IN_WALL is collision-invariant — outline/occlusion only),
+    // so those states collapse in dedup.
+    private static final long GATE_OPEN_BIT = DOOR_OPEN_BIT;      // 1 = open (gates; doors/trapdoors read via doorOpen/trapdoorOpen)
     private static final int OPEN_SHIFT  = 14, OPEN_MASK  = 0x03;
     private static final int FLUID_SHIFT = 16, FLUID_MASK = 0x03;
     private static final int SURF_SHIFT  = 18, SURF_MASK  = 0x03;
@@ -534,6 +544,18 @@ public final class NavBlock {
             if (state.getValue(BlockStateProperties.HALF) == Half.TOP) d |= TRAPDOOR_HALF_BIT;
             if (state.getValue(BlockStateProperties.OPEN)) d |= TRAPDOOR_OPEN_BIT;
             if (block != Blocks.IRON_TRAPDOOR) d |= HAND_TOGGLEABLE_BIT;
+        }
+        // Fence gates (DESIGN-fence-gates.md §2, owner-ratified 2026-08-09): pack OPEN into the shared bit 43
+        // and hand-toggleable into the shared bit 50 — UNCONDITIONALLY (the vanilla roster is all-wood, all
+        // hand-openable at every version 1.17.1→26.x; no iron gate exists, so unlike the door/trapdoor branches
+        // there is no Blocks.* exception test). Geometry keeps its generic collision-shape derivation above:
+        // closed → topY 24 SHAPE_OTHER + NARROW_TOP (a centered 4/16 plate — a whole-cell blocker, never
+        // standable), open → Shapes.empty() SHAPE_EMPTY (passable air). FACING is deliberately NOT packed
+        // (behaviorally void — see the GATE_OPEN_BIT comment); POWERED/IN_WALL are deliberately unread
+        // (IN_WALL is collision-invariant), so all those states collapse in dedup.
+        if (block instanceof FenceGateBlock) {
+            if (state.getValue(BlockStateProperties.OPEN)) d |= GATE_OPEN_BIT;
+            d |= HAND_TOGGLEABLE_BIT;
         }
         return withDerived(d);
     }
@@ -956,11 +978,13 @@ public final class NavBlock {
         return trapdoorHalfTop(d) ? FACE_UP : FACE_DOWN;
     }
     /**
-     * Whether an OPENABLE cell (door / trapdoor) can be toggled BY HAND — the kind-neutral read of the shared
-     * bit 50 ({@link #doorToggleable} is the door-flavored twin). Set for every {@link DoorBlock} except
-     * {@link Blocks#IRON_DOOR} and every {@link TrapDoorBlock} except {@link Blocks#IRON_TRAPDOOR} (each the
-     * complete vanilla exception set). Gate on the matching kind ({@link #isDoor} / {@link #isTrapdoor});
-     * {@code false} for every non-openable cell.
+     * Whether an OPENABLE cell (door / trapdoor / fence gate) can be toggled BY HAND — the kind-neutral read
+     * of the shared bit 50 ({@link #doorToggleable} is the door-flavored twin). Set for every {@link
+     * DoorBlock} except {@link Blocks#IRON_DOOR}, every {@link TrapDoorBlock} except {@link
+     * Blocks#IRON_TRAPDOOR} (each the complete vanilla exception set), and every {@link FenceGateBlock}
+     * UNCONDITIONALLY (no iron gate exists at any version — DESIGN-fence-gates.md §1). Gate on the matching
+     * kind ({@link #isDoor} / {@link #isTrapdoor} / {@link #isGate}); {@code false} for every non-openable
+     * cell.
      */
     public static boolean handToggleable(long d) { return (d & HAND_TOGGLEABLE_BIT) != 0; }
     /**
@@ -1013,15 +1037,56 @@ public final class NavBlock {
               | (long) (shapeClass & SHAPE_MASK) << SHAPE_SHIFT;
         return withDerived(base);
     }
+    // ---- Fence gates (DESIGN-fence-gates.md §2–§3) — meaningful only when isGate(d) ------------------
+    /** Whether this cell is a {@link FenceGateBlock} — the gate on the fence-gate queries below (the
+     *  fence-gate analog of {@link #isDoor} / {@link #isTrapdoor}). */
+    public static boolean isGate(long d) { return openable(d) == OPEN_GATE; }
+    /** Whether a fence gate is OPEN ({@code true}, {@code Shapes.empty()} — zero collision, passable air)
+     *  or CLOSED ({@code false}, a centered 4/16-thick × 24/16-tall plate — a whole-cell blocker); reads
+     *  the SHARED open bit (43). Gate on {@link #isGate} (doors/trapdoors share the bit via
+     *  {@link #doorOpen} / {@link #trapdoorOpen}). Gates have NO blocked-face model (unlike
+     *  {@link #doorBlockedEdge} / {@link #trapdoorBlockedFace}): closed blocks every crossing — the plate
+     *  leaves 6/16 on each side, under the 0.6 body width — and open blocks none. */
+    public static boolean gateOpen(long d) { return (d & GATE_OPEN_BIT) != 0; }
     /**
-     * Unified SET-edit resolver for OPENABLE cells (DESIGN-trapdoors.md §2): dispatches on the openable kind
-     * — a door is a bare bit flip ({@link #withDoorOpen}), a trapdoor re-derives geometry
-     * ({@link #withTrapdoorOpen}). This is how a planned {@code SET_OPEN}/{@code SET_CLOSED} edit resolves
-     * against the cell's own descriptor regardless of kind. Fence gates ({@code OPEN_GATE}) are reserved and
-     * not yet toggleable (§10); undefined for non-openable cells — the caller applies it only to openable cells.
+     * The same fence-gate descriptor forced into the {@code open} state — like {@link #withTrapdoorOpen}
+     * (and unlike {@link #withDoorOpen}'s bare bit flip), a gate toggle CHANGES GEOMETRY, so this
+     * RE-DERIVES it (DESIGN-fence-gates.md §2): open → topY 0 + {@code SHAPE_EMPTY} + bit 43, NARROW_TOP
+     * cleared (empty shapes are never marked); closed → topY 24 + {@code SHAPE_OTHER} + NARROW_TOP (the
+     * centered plate's 4/16 thin axis) − bit 43; then the derived predicate bits
+     * (STANDABLE/BREAKABLE/OPEN_PLACE/COLLISION) via the same {@link #withDerived} the classifier uses —
+     * an open result is passable with no collision, a closed result has collision, is breakable per
+     * hardness/protected, and is never standable (topY 24 + narrow). Every non-geometry field (openable
+     * kind, hand-toggleable, protected, hardness, tool, toolRequired, transit, damage, surface, climb,
+     * gravity, replaceable, waterloggable, bubble, fallSoftness, reducedJump) carries over untouched.
+     * Pinned by test (GateClassificationTest, the {@link #withTrapdoorOpen} contract): for EVERY
+     * fence-gate blockstate S and both targets o, {@code withGateOpen(desc(S), o) ==
+     * desc(S.setValue(OPEN, o))} <b>bit-for-bit</b>. Undefined for non-gates — the caller applies it only
+     * to gate cells.
+     */
+    public static long withGateOpen(long d, boolean open) {
+        long base = d & ~(DERIVED_MASK | GATE_OPEN_BIT | NARROW_TOP_BIT
+                | ((long) TOP_Y_MASK << TOP_Y_SHIFT) | ((long) SHAPE_MASK << SHAPE_SHIFT));
+        if (open) {
+            base |= GATE_OPEN_BIT; // SHAPE_EMPTY + topY 0 are the cleared fields' zero values
+        } else {
+            base |= NARROW_TOP_BIT
+                  | (long) (24 & TOP_Y_MASK) << TOP_Y_SHIFT
+                  | (long) (SHAPE_OTHER & SHAPE_MASK) << SHAPE_SHIFT;
+        }
+        return withDerived(base);
+    }
+    /**
+     * Unified SET-edit resolver for OPENABLE cells (DESIGN-trapdoors.md §2; gates DESIGN-fence-gates.md
+     * §2): dispatches on the openable kind — a door is a bare bit flip ({@link #withDoorOpen}); a trapdoor
+     * and a fence gate re-derive geometry ({@link #withTrapdoorOpen} / {@link #withGateOpen}). This is how
+     * a planned {@code SET_OPEN}/{@code SET_CLOSED} edit resolves against the cell's own descriptor
+     * regardless of kind. Undefined for non-openable cells — the caller applies it only to openable cells.
      */
     public static long withOpenableOpen(long d, boolean open) {
-        return isTrapdoor(d) ? withTrapdoorOpen(d, open) : withDoorOpen(d, open);
+        return isTrapdoor(d) ? withTrapdoorOpen(d, open)
+                : isGate(d) ? withGateOpen(d, open)
+                : withDoorOpen(d, open);
     }
     /** Fluid: 0 none, 1 water (incl. waterlogged), 3 lava (low bit = is-fluid, high bit = is-lava). */
     public static int fluid(long d)        { return (int) (d >>> FLUID_SHIFT) & FLUID_MASK; }

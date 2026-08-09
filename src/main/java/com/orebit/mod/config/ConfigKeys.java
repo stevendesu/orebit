@@ -306,15 +306,19 @@ public final class ConfigKeys {
      */
     public static final String HPA_RESIDENT_LEAF_CAP = "hpa.residentLeafCap";
 
-    // ---- doors: how the bot deals with doors in its path --------------------------------------------
+    // ---- doors: how the bot deals with doors/trapdoors/fence gates in its path ----------------------
     /**
-     * {@code boolean} — the bot may OPEN/CLOSE hand-toggleable doors (wood/copper) by right-clicking, preferring
-     * that over smashing them or routing around. Rides into {@link
+     * {@code boolean} — the bot may OPEN/CLOSE the hand-toggleable openable family — doors and trapdoors
+     * (wood/copper) and every fence gate (no iron gate exists) — by right-clicking, preferring that over
+     * smashing them or routing around; the owner-ratified single family key (DESIGN-trapdoors.md §5,
+     * DESIGN-fence-gates.md §3). Rides into {@link
      * com.orebit.mod.pathfinding.blockpathfinder.BotCaps#mayToggleDoors}. <b>Default {@code true}</b> (DOORS P3):
-     * the follower now operates doors for real — it opens a closed door before crossing and closes it again on a
-     * hallway-corner exit — so the feature is complete and on by default, like the other movements. Set it
-     * {@code false} as a kill-switch to fall back to P1 behaviour (an already-open door is walked through, a
-     * closed door is mined). Iron doors are never hand-toggleable regardless of this flag.
+     * the follower operates the family for real — it opens a closed door before crossing and closes it again on a
+     * hallway-corner exit; trapdoors and gates ride the same executor pre-pass. Set it {@code false} as a
+     * kill-switch to fall back to P1 behaviour (an already-open openable is walked through, a closed one is
+     * mined — or routed around when protected; a closed FENCE GATE then becomes a hard wall under the default
+     * config, since {@code #minecraft:fence_gates} sits in {@code mining.protectedBlocks} and the toggle was the
+     * only way through). Iron doors and iron trapdoors are never hand-toggleable regardless of this flag.
      */
     public static final String DOORS_TOGGLE = "doors.toggle";
 

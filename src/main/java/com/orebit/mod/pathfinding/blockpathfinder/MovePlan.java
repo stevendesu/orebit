@@ -129,7 +129,7 @@ public final class MovePlan {
      * same cell ({@link #isOpenableCell}). Returns {@code this} for fluent use.
      */
     public MovePlan requireDoor(int x, int y, int z, boolean open) {
-        doorReqs.add(new Req(Need.OPEN, x, y, z, open, false));
+        doorReqs.add(new Req(Need.OPEN, x, y, z, open, Req.OPENABLE_DOOR));
         return this;
     }
 
@@ -137,14 +137,28 @@ public final class MovePlan {
      * Require the <b>trapdoor</b> at cell {@code (x,y,z)} reach {@code open} before the crossing drives
      * (DESIGN-trapdoors.md §7) — the trapdoor twin of {@link #requireDoor}, riding the same plan-level
      * {@link Need#OPEN} list (re-validated per tick via the shared {@link BotSteering#doorOpenAt} read, never
-     * mined — {@link #isOpenableCell}). The kind flag is what the runner dispatches the executor verb on
-     * ({@link BotSteering#setTrapdoorOpen} vs {@link BotSteering#setDoorOpen}); it is resolved ONCE at
-     * injection by {@link com.orebit.mod.BotNavigator} from the live block at the folded SET's cell — the
-     * kind of a cell never flips out from under a step (an external toggle changes OPEN, not the block).
+     * mined — {@link #isOpenableCell}). The kind is what the runner dispatches the executor verb on
+     * ({@link BotSteering#setTrapdoorOpen} vs {@link BotSteering#setDoorOpen} vs
+     * {@link BotSteering#setGateOpen}); it is resolved ONCE at injection by
+     * {@link com.orebit.mod.BotNavigator} from the live block at the folded SET's cell — the kind of a cell
+     * never flips out from under a step (an external toggle changes OPEN, not the block).
      * Returns {@code this} for fluent use.
      */
     public MovePlan requireTrapdoor(int x, int y, int z, boolean open) {
-        doorReqs.add(new Req(Need.OPEN, x, y, z, open, true));
+        doorReqs.add(new Req(Need.OPEN, x, y, z, open, Req.OPENABLE_TRAPDOOR));
+        return this;
+    }
+
+    /**
+     * Require the <b>fence gate</b> at cell {@code (x,y,z)} reach {@code open} before the crossing drives
+     * (DESIGN-fence-gates.md §4) — the gate member of the {@link #requireDoor}/{@link #requireTrapdoor}
+     * family, riding the same plan-level {@link Need#OPEN} list (re-validated per tick via the shared
+     * {@link BotSteering#doorOpenAt} read, never mined — {@link #isOpenableCell}) and dispatching the
+     * runner to {@link BotSteering#setGateOpen}. Kind resolved ONCE at injection, exactly as
+     * {@link #requireTrapdoor} documents. Returns {@code this} for fluent use.
+     */
+    public MovePlan requireGate(int x, int y, int z, boolean open) {
+        doorReqs.add(new Req(Need.OPEN, x, y, z, open, Req.OPENABLE_GATE));
         return this;
     }
 
@@ -212,9 +226,9 @@ public final class MovePlan {
     int moveDz() { return moveDz; }
     List<Req> doorReqs() { return doorReqs; }
 
-    /** Whether cell {@code (x,y,z)} is governed by an openable {@link Need#OPEN} — door or trapdoor — (so a
-     *  {@code Need.AIR} must NOT mine it: a SET-governed cell is opened/closed by hand, never smashed).
-     *  Linear over the tiny openable list (usually empty). */
+    /** Whether cell {@code (x,y,z)} is governed by an openable {@link Need#OPEN} — door, trapdoor or fence
+     *  gate — (so a {@code Need.AIR} must NOT mine it: a SET-governed cell is opened/closed by hand, never
+     *  smashed). Linear over the tiny openable list (usually empty). */
     boolean isOpenableCell(int x, int y, int z) {
         for (int i = 0; i < doorReqs.size(); i++) {
             Req r = doorReqs.get(i);
@@ -313,17 +327,21 @@ public final class MovePlan {
     }
 
     /** One geometry requirement: a {@link Need} at a world cell. {@code open} is the target openable state and
-     *  {@code trapdoor} the openable KIND (trapdoor vs door — the runner's executor-verb dispatch); both are
-     *  used only by {@link Need#OPEN} ({@code open} true / {@code trapdoor} false for AIR/FOOTING, where they
-     *  are inert). */
+     *  {@code openableKind} the openable KIND (door / trapdoor / fence gate — the runner's executor-verb
+     *  dispatch); both are used only by {@link Need#OPEN} ({@code open} true / {@code openableKind}
+     *  {@link #OPENABLE_DOOR} for AIR/FOOTING, where they are inert). */
     static final class Req {
+        /** Openable-kind encodings for a {@link Need#OPEN} req — which executor verb the runner issues
+         *  ({@code setDoorOpen} / {@code setTrapdoorOpen} / {@code setGateOpen}). Resolved ONCE at
+         *  injection from the live block (see {@link MovePlan#requireTrapdoor}). */
+        static final int OPENABLE_DOOR = 0, OPENABLE_TRAPDOOR = 1, OPENABLE_GATE = 2;
         final Need kind;
         final int x, y, z;
         final boolean open;
-        final boolean trapdoor;
-        Req(Need kind, int x, int y, int z) { this(kind, x, y, z, true, false); }
-        Req(Need kind, int x, int y, int z, boolean open, boolean trapdoor) {
-            this.kind = kind; this.x = x; this.y = y; this.z = z; this.open = open; this.trapdoor = trapdoor;
+        final int openableKind;
+        Req(Need kind, int x, int y, int z) { this(kind, x, y, z, true, OPENABLE_DOOR); }
+        Req(Need kind, int x, int y, int z, boolean open, int openableKind) {
+            this.kind = kind; this.x = x; this.y = y; this.z = z; this.open = open; this.openableKind = openableKind;
         }
     }
 }

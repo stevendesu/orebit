@@ -292,5 +292,12 @@ public final class OrebitCommon {
         // re-flip) — the live follower proof of DESIGN-trapdoors.md §9. Same inert-unless-armed discipline
         // (-Dorebit.trapdoor).
         TrapdoorCourse.register(events);
+
+        // Headless FENCE-GATE-ARC diagnostic (the :fabric:<ver>:runGate run config): boxed 1-wide corridors
+        // whose only route runs through a fence gate (open-to-cross with exactly one own toggle, the
+        // already-open zero-SET control, an external mid-approach re-close, and the doors.toggle=false
+        // hard-wall refusal control) — the live follower proof of DESIGN-fence-gates.md §7. Same
+        // inert-unless-armed discipline (-Dorebit.gate).
+        GateCourse.register(events);
     }
 }

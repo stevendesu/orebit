@@ -91,6 +91,15 @@ swing *across* the travel direction refuses instead — no toggle chain plans a
 crossing the panel itself would block. Iron trapdoors are never hand-toggled and are
 routed around (or mined, where policy allows).
 
+**Fence gates** ride the same machinery: a closed gate is a whole-cell blocker — a
+tall narrow post the bot can never stand on, and one that cannot be waterlogged —
+so a crossing folds the same 6-tick open SET, gated by the same `doors.toggle`.
+Unlike a door or trapdoor the fold is *face-agnostic*: the closed plate blocks every
+crossing and the open gate is simply air, so which way it faces never matters and no
+swing-across refusal applies. Every vanilla fence gate is wooden and hand-openable
+(there is no iron gate), and the default config protects `#minecraft:fence_gates`
+from breaking — so under defaults the toggle is the only way through a closed gate.
+
 ## Vertical, in place
 
 **Pillar** — jump and place a block beneath yourself, gaining one block of height in

@@ -6,6 +6,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
@@ -107,6 +108,48 @@ public final class WorldEdits {
         BlockState state = level.getBlockState(pos);
         Block block = state.getBlock();
         if (block instanceof TrapDoorBlock && block != Blocks.IRON_TRAPDOOR) {
+            if (state.getValue(BlockStateProperties.OPEN) == open) {
+                return; // already at target — no redundant block update
+            }
+            level.setBlock(pos, state.setValue(BlockStateProperties.OPEN, open), 3);
+        }
+    }
+
+    /**
+     * OPEN or CLOSE the fence gate at {@code pos} server-side, authoritatively — the gate member of the
+     * {@link #setDoorOpen}/{@link #setTrapdoorOpen} verb family (DESIGN-fence-gates.md §4). Like {@code
+     * TrapDoorBlock} — and unlike {@code DoorBlock} — <b>{@code FenceGateBlock} has no {@code setOpen}
+     * convenience at any version</b> (member sweeps 1.17.1 → 26.2), so this is the same hand-rolled
+     * authoritative write in the house style (no interaction stack): force the {@code OPEN} property to the
+     * target and {@code setBlock} it. Single cell — a gate has no two-half sync.
+     *
+     * <p><b>One guard, not two.</b> A non-gate {@code pos} (stale grid) is a no-op via the {@code
+     * instanceof} test; there is <b>no iron refusal</b> — no iron/redstone-only fence gate exists at any
+     * version (the vanilla roster is all-wood, all hand-openable), so the family's iron backstop has no gate
+     * case. A gate already at the target state is a no-op too, so re-issuing the verb never spams block
+     * updates.
+     *
+     * <p><b>{@code FACING} is written AS-READ</b> (DESIGN-fence-gates.md §1). Vanilla's use handler
+     * re-faces a gate toward its opener on close→open, but that flip is always 180° ({@code FACING.axis} is
+     * invariant for the block's lifetime) and open collision is {@code Shapes.empty()} regardless of facing
+     * — the re-face is visual only, so a property-preserving write is behaviorally exact at every version.
+     *
+     * <p><b>Deliberately setBlock-only — the vanilla sound/game-event side effects are DROPPED</b>, the
+     * same ratified drift ruling as {@link #setTrapdoorOpen} (the gate sound surface churned three times
+     * across the range: levelEvent ids → {@code SoundEvents} fields → {@code WoodType}; no single surface
+     * spans it, and the game-event holder type churns mid-range). Silent and sculk-invisible in v1 —
+     * accepted; an overlay flavor can restore parity later. Flag {@code 3} (neighbour updates + client
+     * sync, the ratified form) lets neighbours react.
+     *
+     * <p><b>Version stability of what IS used</b> (all javap-verified 1.17.1 → 26.2): {@code instanceof
+     * FenceGateBlock}, {@code BlockStateProperties.OPEN}, {@code StateHolder.getValue/setValue}, and
+     * {@code Level.setBlock(BlockPos, BlockState, int)}. Core baseline, no overlay flavor. ({@code actor}
+     * is unused today — carried for seam symmetry with {@link #setDoorOpen}, the future sound/game-event
+     * parity attribution.)
+     */
+    public static void setGateOpen(ServerLevel level, BlockPos pos, Entity actor, boolean open) {
+        BlockState state = level.getBlockState(pos);
+        if (state.getBlock() instanceof FenceGateBlock) {
             if (state.getValue(BlockStateProperties.OPEN) == open) {
                 return; // already at target — no redundant block update
             }
