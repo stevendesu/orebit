@@ -90,8 +90,27 @@ envelope/log-and-hold rules apply.
 
 ## §6 Region tier & persistence
 
-- Region tier: ZERO work (mouth already flood-passable via openable-as-air; ladder-column flood
-  blindness is pre-existing and out of scope).
+- Region tier: ~~ZERO work (mouth already flood-passable via openable-as-air; ladder-column flood
+  blindness is pre-existing and out of scope)~~ **SUPERSEDED same day (owner follow-up ruling
+  2026-08-09): climbable-as-air.** `NavBlock.floodPassable` gained the CLIMB disjunct
+  (`isPassable || openable != NONE || climbable`) — "a ladder is passable on 5/6 faces, and the
+  other face adjoins a wall by definition. You can always walk past a ladder, and it's arguably
+  MORE passable than air since you can climb up and down it." Ladder (SHAPE_OTHER) and scaffolding
+  (SHAPE_FULL) rows join fragment membership + goal resolution; vines were already SHAPE_EMPTY
+  passable. Flood MEMBERSHIP + goal resolution only — `standable[]` and every block-tier predicate
+  untouched; optimism absorbed by `RegionEdgeBlacklist` + capsSig invalidations (the §8b pattern).
+  **Half-fix asymmetry:** a flush bare-ladder shaft now region-connects BOTH ways, but the block
+  tier still has no bare-ladder TOP-ENTRY (NARROW_TOP, tracked outside this arc) — so top-down
+  bare shafts region-connect then blacklist-absorb honestly, while bottom-up routes plan end to
+  end **only when the ladder itself reaches rim level** (the `TrapdoorLadderClimbTest.plainShaft`
+  pin geometry). A ladder stopping below a bare mouth is a TWO-sided block-tier gap (probed
+  2026-08-09: `findPath` null in either direction — the §3.4 exit-top tops out ON the NARROW_TOP
+  plate one below rim feet, which no jump/walk move may leave), so `ShaftCourse`'s plain tiles run
+  the ladder through the mouth cell to match the pin (control-plain-bottomup now expects ARRIVAL;
+  control-plain-topdown keeps GAP).
+  `CostPyramidCodec.VERSION` stays 1 per the pre-release pin; the flood-semantics change is a
+  dated history entry in its Javadoc (stale dev caches carry ladder-blind connectivity until
+  rebuilt or `<world>/orebit/` is deleted).
 - ~~`INVAL_SIG_SCHEMA_VERSION` 4 → 5~~ **SUPERSEDED mid-arc (owner ruling 2026-08-09): all
   persistence versions PINNED at 1 pre-release** — zero wild installs, so the planner-strength
   staleness (persisted negative crossings recorded pre-arc can now be false — a shaft crossing
@@ -130,7 +149,9 @@ via the per-tick hatch watch (no redstone on any tile, so every state change is 
 ## §8 Deferred / out of scope
 
 - Vines/scaffolding facing packing (vanilla rule is ladder-only).
-- Ladder-column region-flood blindness (pre-existing).
+- ~~Ladder-column region-flood blindness (pre-existing).~~ CLOSED by the 2026-08-09 climbable-as-air
+  follow-up ruling (§6) — what remains open is the BLOCK-tier bare-ladder top-entry (NARROW_TOP),
+  tracked outside this arc.
 - Any Climb macro/run compression (Climb stays per-cell rungs).
 - The stale Climb class-doc claim that Ascend handles top-outs (recon-found): FIX the comment in
   passing (doc-only), but no Ascend behavior change.
@@ -143,3 +164,7 @@ via the per-tick hatch watch (no redstone on any tile, so every state change is 
   same day by the owner's pre-release pin-at-1 ruling; ships as a Javadoc history entry instead.
 - 2026-08-09: iron trapdoors climb when open, refuse toggling when closed (vanilla `instanceof` +
   the family handToggleable rule).
+- 2026-08-09 owner (follow-up, post-merge): climbable-as-air region flood — "a ladder is passable
+  on 5/6 faces, and the other face adjoins a wall by definition. You can always walk past a
+  ladder, and it's arguably MORE passable than air since you can climb up and down it."
+  Scaffolding and vines included. Flood membership + goal resolution only; see §6.
