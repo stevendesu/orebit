@@ -144,16 +144,27 @@ public final class StaircaseCourse {
         /** Half-width in Z. 1 = a 3-wide stair; the diagonal tiles widen it into a crossable slope. */
         final int halfW;
         final int zStart, zGoal;   // differ on a DIAGONAL tile, forcing an angled ascent
+        /**
+         * Flat pad columns before the first tread — the bot's RUN-UP, and the experimental variable the
+         * owner's own flat-world repro pointed at (2026-08-10): dead-on approach, but enough room to build
+         * momentum before the first jump. A player accelerates over several ticks, so a long pad arrives at
+         * step 0 at full speed while a short one arrives still accelerating; the horizontal distance covered
+         * during the jump arc scales with it, and on a 1:1 staircase that decides which tread the bot comes
+         * down on.
+         */
+        final int runUp;
 
         final double startX, startY, startZ;
         final float startYaw;
         final BlockPos goal;
 
-        Trial(String name, int steps, int stepRun, boolean snowy, boolean diagonal, int baseX, int baseZ) {
+        Trial(String name, int steps, int stepRun, boolean snowy, boolean diagonal, int runUp,
+                int baseX, int baseZ) {
             this.name = name;
             this.steps = steps;
             this.stepRun = stepRun;
             this.snowy = snowy;
+            this.runUp = runUp;
             this.baseX = baseX;
             this.baseZ = baseZ;
             this.zc = baseZ + 6;
@@ -167,7 +178,7 @@ public final class StaircaseCourse {
             this.halfW = diagonal ? 4 : 1;
             this.zStart = diagonal ? zc - 3 : zc;
             this.zGoal = diagonal ? zc + 3 : zc;
-            this.startX = baseX - 2.5;
+            this.startX = baseX - runUp + 0.5; // stand at the FAR end of the pad — the whole run-up is used
             this.startY = Y0;
             this.startZ = zStart + 0.5;
             this.startYaw = yaw(1, 0); // face +X, up the slope
@@ -179,7 +190,7 @@ public final class StaircaseCourse {
          * {@link Integer#MIN_VALUE} when {@code x} is off the tile entirely (no assertion possible there).
          */
         int surfaceFeetYAt(int x) {
-            if (x < baseX - 4) return Integer.MIN_VALUE;
+            if (x < baseX - runUp) return Integer.MIN_VALUE;
             if (x < baseX) return Y0;                       // start pad
             if (x < baseX + span) return Y0 + 1 + (x - baseX) / stepRun;
             if (x <= baseX + span + 3) return topFeetY;     // landing
@@ -224,12 +235,22 @@ public final class StaircaseCourse {
         }
 
         void buildTrialList() {
-            add("step1",    1, 1, false, false);
-            add("step2",    2, 1, false, false);
-            add("step4",    4, 1, false, false);
-            add("step8",    8, 1, false, false);
-            add("snow4",    4, 1, true,  false);
-            add("spaced4",  4, 3, false, false);
+            //   name          steps stepRun snowy diagonal runUp
+            add("step1",       1, 1, false, false, 3);
+            add("step2",       2, 1, false, false, 3);
+            add("step4",       4, 1, false, false, 3);
+            add("step8",       8, 1, false, false, 3);
+            add("snow4",       4, 1, true,  false, 3);
+            add("spaced4",     4, 3, false, false, 3);
+            // RUN-UP tiles — dead-on approach, but a long flat pad so the bot reaches the first tread at
+            // full speed instead of still accelerating. Owner's own flat-world repro (2026-08-10) pointed
+            // here: same geometry as step4/step8 above, the ONLY variable is how much momentum is carried
+            // into the first jump. Horizontal distance covered during the arc scales with entry speed, and
+            // on a 1:1 staircase that decides which tread the bot comes down on.
+            add("run6step4",   4, 1, false, false, 6);
+            add("run12step4",  4, 1, false, false, 12);
+            add("run12step8",  8, 1, false, false, 12);
+            add("run12snow4",  4, 1, true,  false, 12);
             // DIAGONAL tiles — a wide slope crossed at an angle, so every Ascend is entered out of a
             // Diagonal with cross-axis momentum. The straight-on tiles above all PASSED on the first run
             // (2026-08-10, maxAbove=0.000 across the board), which is exactly what says the missing
@@ -237,19 +258,19 @@ public final class StaircaseCourse {
             // a Diagonal and entered at offCentre=(0.389,-0.320), and Ascend's own climb phase carries an
             // arrestCarryFrom guard written for "an Ascend entered carrying momentum perpendicular to its
             // own step -> launches off-lane -> permanent fail->HOLD".
-            add("diag4",    4, 1, false, true);
-            add("diag8",    8, 1, false, true);
-            add("diagsnow4", 4, 1, true, true);
+            add("diag4",       4, 1, false, true,  3);
+            add("diag8",       8, 1, false, true,  3);
+            add("diagsnow4",   4, 1, true,  true,  3);
         }
 
-        void add(String name, int steps, int stepRun, boolean snowy, boolean diagonal) {
+        void add(String name, int steps, int stepRun, boolean snowy, boolean diagonal, int runUp) {
             int i = trials.size();
             int row = i / COLS;
             int col = i % COLS;
             if ((row & 1) == 1) col = COLS - 1 - col; // snake: keep consecutive trials adjacent
             int bx = BASE_X + col * STRIDE;
             int bz = BASE_Z + row * STRIDE;
-            trials.add(new Trial(name, steps, stepRun, snowy, diagonal, bx, bz));
+            trials.add(new Trial(name, steps, stepRun, snowy, diagonal, runUp, bx, bz));
         }
 
         void start(MinecraftServer server) {
@@ -488,9 +509,10 @@ public final class StaircaseCourse {
          */
         void buildTile(Trial tr) {
             int bx = tr.baseX, zc = tr.zc;
-            clear(bx - 6, bx + tr.span + 6, Y0 - 1, tr.topFeetY + 4, zc - tr.halfW - 2, zc + tr.halfW + 2);
-            // Start pad: feet stand at Y0, so the pad's top solid cell is Y0-1.
-            fill(bx - 4, bx - 1, Y0 - 1, tr);
+            clear(bx - tr.runUp - 2, bx + tr.span + 6, Y0 - 1, tr.topFeetY + 4,
+                    zc - tr.halfW - 2, zc + tr.halfW + 2);
+            // Start pad (the run-up): feet stand at Y0, so the pad's top solid cell is Y0-1.
+            fill(bx - tr.runUp, bx - 1, Y0 - 1, tr);
             // The staircase: column x carries the tread whose top is surfaceFeetYAt(x).
             for (int x = bx; x < bx + tr.span; x++) {
                 fill(x, x, tr.surfaceFeetYAt(x) - 1, tr);
