@@ -1252,7 +1252,8 @@ public final class NavBlock {
     /**
      * CONNECTIVITY-ONLY passability for the REGION tier's flood-fill (fragment membership + region
      * goal/seed resolution): geometrically {@link #isPassable passable}, OR any OPENABLE cell —
-     * doors, trapdoors, fence gates, <b>including the iron variants the bot cannot hand-toggle</b>.
+     * doors, trapdoors, fence gates, <b>including the iron variants the bot cannot hand-toggle</b> —
+     * OR any CLIMBABLE cell ({@link #isClimbable}: ladder, scaffolding, the vine family).
      * Owner ruling 2026-08-09 (DESIGN-trapdoors.md §8b): an openable blocks at most 1 of its 6 faces
      * — "5/6 faces are passable — there's a chance you can path through it just fine — and if you
      * can't, we'll figure that out and invalidate." The region tier is deliberately optimistic;
@@ -1260,14 +1261,26 @@ public final class NavBlock {
      * invalidations ({@code mayToggleDoors} is sig bit 3), which is why even an iron door reads as
      * open space here.
      *
+     * <p><b>Climbable-as-air</b> (owner follow-up ruling 2026-08-09, DESIGN-trapdoor-ladder-climb.md
+     * §6): "a ladder is passable on 5/6 faces, and the other face adjoins a wall by definition. You
+     * can always walk past a ladder, and it's arguably MORE passable than air since you can climb up
+     * and down it." Only the ladder (SHAPE_OTHER plate) and scaffolding (SHAPE_FULL) rows are newly
+     * admitted — every vine is already SHAPE_EMPTY passable. Known asymmetry: this makes a flush
+     * bare-ladder shaft region-CONNECTED in both directions, but the block tier still has no
+     * bare-ladder TOP-ENTRY (a ladder plate is NARROW_TOP — the gap is tracked outside this arc), so
+     * a top-down bare shaft region-connects and is then absorbed honestly by the blacklist while
+     * bottom-up routes plan end to end.
+     *
      * <p><b>NOT for the block tier</b> — movements keep exact geometry ({@link #doorBlockedEdge},
      * {@link #trapdoorBlockedFace}, the DESIGN-trapdoors.md §4 residual-clearance rules). The only
      * consumers are {@code FragmentLeafComputer}'s flood masks and {@code RegionGrid.goalDigSeeds}'
      * passable tests. Plain FENCES are not openable ({@code openable == NONE}) and correctly stay
      * walls; OPEN fence gates were already {@link #SHAPE_EMPTY} passable — the cells this predicate
-     * newly admits are closed gates/doors/plates and open door/trapdoor panels.
+     * newly admits are closed gates/doors/plates, open door/trapdoor panels, ladders, and scaffolds.
      */
-    public static boolean floodPassable(long d) { return isPassable(d) || openable(d) != OPEN_NONE; }
+    public static boolean floodPassable(long d) {
+        return isPassable(d) || openable(d) != OPEN_NONE || isClimbable(d);
+    }
 
     // ---- Precomputed predicate bits (see #withDerived) — a single mask-and-test on the hot path ------
 

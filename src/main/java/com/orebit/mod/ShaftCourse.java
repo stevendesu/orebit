@@ -33,7 +33,10 @@ import net.minecraft.world.phys.Vec3;
  * tile is an isolated station over a flat world: a floating stone slab (11 layers) bored with a 1x1 shaft
  * {@link #DEPTH} cells deep, a full-height ladder column on the shaft's west wall (FACING = {@link #FACING}),
  * and — on the hatch tiles — a trapdoor in the MOUTH cell (the bore's top cell, level with the slab's top
- * layer) with FACING == the ladder's, the exact vanilla {@code trapdoorUsableAsLadder} geometry (§1). The
+ * layer) with FACING == the ladder's, the exact vanilla {@code trapdoorUsableAsLadder} geometry (§1); on the
+ * PLAIN controls the ladder itself runs through the mouth cell to rim level (the
+ * {@code TrapdoorLadderClimbTest.plainShaft} pin geometry — see {@code buildTile} for why a bare mouth over
+ * a stopped-short ladder would instead be a two-sided block-tier dead end). The
  * course drives one goto per tile end to end: the §3 mouth rules (climb-continue through an open mouth, the
  * §3.8 rim top-entry), the §4 {@code SET_OPEN} folds (the {@code Need.OPEN} pre-pass on a Climb step), and
  * the §5 {@code climbableBelow} top-out fix under full vanilla physics.
@@ -58,12 +61,23 @@ import net.minecraft.world.phys.Vec3;
  *       exactly ONE closed→open transition, none back), then arrives at the bottom undamaged.</li>
  *   <li><b>bottomup-closed</b> — CLOSED oak mouth from below: the §4 from-below toggle arm; same
  *       exactly-one-own-toggle assertion, arrival on the rim.</li>
- *   <li><b>control-plain-topdown</b> and (6) <b>control-plain-bottomup</b> — NO trapdoor (the mouth cell is
- *       plain air): PRE-EXISTING-GAP CONTROLS. No plain-ladder top-entry/top-out onto a flush rim exists
- *       today (§3 — a ladder plate is NARROW_TOP, refused as every landing/destination floor), and this arc
- *       deliberately does not close it. These tiles record the verdict <b>GAP</b> (nav gives up or times
- *       out) rather than FAIL — a no-route outcome here is PRE-EXISTING, not this arc — and GAP does not
- *       count into {@code failed}. An arrival (undamaged) records PASS: it would mean the gap closed.</li>
+ *   <li><b>control-plain-topdown</b> — NO trapdoor (the ladder runs through the mouth cell to rim
+ *       level), rim → bottom: the remaining gap is BLOCK-TIER-ONLY. The climbable-as-air region flood
+ *       (owner ruling 2026-08-09, DESIGN-trapdoor-ladder-climb.md §6 follow-up) connects the bare
+ *       shaft, but no block-tier plain-ladder TOP-ENTRY onto a flush rim exists (§3 — a ladder plate is
+ *       NARROW_TOP, refused as every landing/destination floor; tracked outside this arc; pinned by
+ *       {@code TrapdoorLadderClimbTest.topToBottomPlainShaftIsThePreExistingGap} over this exact
+ *       geometry). This tile records the verdict <b>GAP</b> (nav gives up or times out) rather than
+ *       FAIL — pre-existing, not this arc — and GAP does not count into {@code failed}. An arrival
+ *       (undamaged) records PASS: the gap closed.</li>
+ *   <li value="6"><b>control-plain-bottomup</b> — NO trapdoor, shaft bottom → rim: since the
+ *       climbable-as-air flood, this CONTROL guards the climbable-flood connectivity LIVE — the region
+ *       tier connects the bare shaft (ladder cells are flood-passable) and, over this tile's
+ *       ladder-to-rim geometry, the block tier's bottom-up climb + top-out route is the pre-existing
+ *       baseline ({@code TrapdoorLadderClimbTest.plainShaftBottomToTopIsThePreExistingBaseline} — a
+ *       geometry constraint, see {@code buildTile}), so the tile expects the NORMAL arrival PASS:
+ *       alive + undamaged, zero hatch ops (there is no hatch). A no-route outcome is a real FAIL here,
+ *       not a GAP.</li>
  *   <li value="7"><b>control-iron-bottomup</b> — IRON trapdoor CLOSED in the mouth: never hand-toggleable
  *       (§4), no mining, no placing → genuinely NO route. PASS = an honest give-up
  *       ({@link BotNavigator#navGaveUp}, the {@link GateCourse} toggleoff verdict pattern incl. its
@@ -137,14 +151,13 @@ public final class ShaftCourse {
         BOTTOMUP_OPEN,   // open oak mouth, bottom -> rim: mouth continue + §3.4/§5 top-out, zero toggles
         TOPDOWN_CLOSED,  // closed oak mouth, rim -> bottom: §3.8 + the §4 fold, exactly one own SET_OPEN
         BOTTOMUP_CLOSED, // closed oak mouth, bottom -> rim: the §4 from-below arm, exactly one own SET_OPEN
-        PLAIN_TOPDOWN,   // CONTROL: no trapdoor, rim -> bottom — the pre-existing plain-shaft gap
-        PLAIN_BOTTOMUP,  // CONTROL: no trapdoor, bottom -> rim — the pre-existing plain-shaft gap
+        PLAIN_TOPDOWN,   // CONTROL: no trapdoor, rim -> bottom — the BLOCK-TIER-ONLY top-entry gap
+        PLAIN_BOTTOMUP,  // CONTROL: no trapdoor, bottom -> rim — guards climbable-flood connectivity live
         IRON_BOTTOMUP;   // CONTROL: iron closed mouth — honest give-up, hatch untouched
 
         boolean topdown() { return this == TOPDOWN_OPEN || this == TOPDOWN_CLOSED || this == PLAIN_TOPDOWN; }
         boolean hasHatch() { return this != PLAIN_TOPDOWN && this != PLAIN_BOTTOMUP; }
         boolean startsOpen() { return this == TOPDOWN_OPEN || this == BOTTOMUP_OPEN; }
-        boolean plainControl() { return this == PLAIN_TOPDOWN || this == PLAIN_BOTTOMUP; }
     }
 
     /** One shaft challenge: a kind + its base grid cell, with start/goal geometry precomputed. */
@@ -380,7 +393,11 @@ public final class ShaftCourse {
                 tickIron(tr, dist);
                 return;
             }
-            if (tr.kind.plainControl()) {
+            // Since the climbable-as-air flood only the TOP-DOWN plain tile keeps the GAP verdict (the
+            // block-tier-only top-entry gap); PLAIN_BOTTOMUP now expects the normal arrival PASS below
+            // — it guards the climbable-flood connectivity live (no hatch, so the world-state
+            // assertions are trivially zero hatch ops).
+            if (tr.kind == Kind.PLAIN_TOPDOWN) {
                 tickPlainControl(tr, dist);
                 return;
             }
@@ -450,11 +467,13 @@ public final class ShaftCourse {
         }
 
         /**
-         * The plain-shaft CONTROL verdict: NO trapdoor, so any no-route outcome is the PRE-EXISTING
-         * plain-ladder gap (§3 — no top-entry/flush top-out exists today), NOT this arc's failure. Those
-         * outcomes record the distinct verdict GAP (excluded from {@code failed}); a genuine undamaged
-         * arrival records PASS (the gap closed); only anomalies (death, falling off the slab — caught in
-         * the shared tick above) FAIL.
+         * The plain-shaft TOP-DOWN control verdict (PLAIN_TOPDOWN only — PLAIN_BOTTOMUP rides the
+         * normal arrival path since the climbable-as-air flood): NO trapdoor, and the remaining gap is
+         * BLOCK-TIER-ONLY — the region tier connects the bare shaft, but no block-tier plain-ladder
+         * TOP-ENTRY exists (§3, NARROW_TOP; tracked outside this arc), so a no-route outcome is
+         * PRE-EXISTING, NOT this arc's failure. Those outcomes record the distinct verdict GAP
+         * (excluded from {@code failed}); a genuine undamaged arrival records PASS (the gap closed);
+         * only anomalies (death, falling off the slab — caught in the shared tick above) FAIL.
          */
         void tickPlainControl(Trial tr, double dist) {
             if (bot.mode() == AllyBotEntity.Mode.STAY && dist < 1.2) {
@@ -473,11 +492,11 @@ public final class ShaftCourse {
                     bot.comeTo(tr.goal, 0.75, 0.75, 0);
                     return;
                 }
-                record(tr, "GAP", "CONTROL: nav gave up — the PRE-EXISTING plain-shaft gap, not this arc");
+                record(tr, "GAP", "CONTROL: nav gave up — the BLOCK-TIER-ONLY plain-ladder top-entry gap, not this arc");
                 return;
             }
             if (attemptTicks >= ATTEMPT_BUDGET) {
-                record(tr, "GAP", "CONTROL: timeout without a route — pre-existing, not this arc");
+                record(tr, "GAP", "CONTROL: timeout without a route — the block-tier-only top-entry gap, not this arc");
             }
         }
 
@@ -607,13 +626,21 @@ public final class ShaftCourse {
             for (int y = Y0 - DEPTH + 1; y <= Y0; y++) {
                 set(tr.sx, y, tr.sz, AIR);
             }
-            // The full-height ladder column: every bore cell below the mouth, hung on the west wall (the
-            // wall exists before the ladders — placement order matters, ladders pop without support).
-            for (int y = Y0 - DEPTH + 1; y <= Y0 - 1; y++) {
+            // The ladder column, hung on the west wall (the wall exists before the ladders — placement
+            // order matters, ladders pop without support). Hatch tiles stop it at the rung below the
+            // mouth (vanilla trapdoorUsableAsLadder wants exactly Blocks.LADDER in the cell below the
+            // trapdoor); the PLAIN controls run it THROUGH the mouth cell to rim level — the
+            // TrapdoorLadderClimbTest plainShaft geometry BOTH plain pins are stated over. A ladder
+            // stopping below a BARE mouth is a TWO-sided block-tier gap (probed 2026-08-09: findPath
+            // returns null in either direction — the §3.4 exit-top tops out ON the NARROW_TOP plate one
+            // below rim feet, which no jump/walk move may leave), so that shape would break tile 6's
+            // arrival expectation while proving nothing about the flood.
+            int ladderTop = tr.kind.hasHatch() ? Y0 - 1 : Y0;
+            for (int y = Y0 - DEPTH + 1; y <= ladderTop; y++) {
                 set(tr.sx, y, tr.sz, ladder());
             }
-            // The mouth: equal-facing trapdoor on the hatch tiles; plain air on the pre-existing-gap
-            // controls (identical geometry minus the hatch — that difference IS the control).
+            // The mouth cell: an equal-facing trapdoor on the hatch tiles; the ladder's own top rung on
+            // the plain controls (that difference IS the control).
             if (tr.kind.hasHatch()) {
                 set(tr.sx, Y0, tr.sz, trapdoor(tr.kind == Kind.IRON_BOTTOMUP, tr.kind.startsOpen()));
             }
