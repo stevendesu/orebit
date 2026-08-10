@@ -1,7 +1,13 @@
 Known Bugs:
 ===========
-Door hinges confuse the follower - should be a minor polish pass to move around the hinge
 Regions marked dirty DURING persist flush are queued for NEXT TICK instead of next persist - leading slow persists to last forever
+Claude reported "bare-ladder top-entry" and "bug #9's remaining half". Worth getting more details on this
+
+
+Known Gaps:
+===========
+Dripleaf is treated as solid at region tier, but technically is passable... may require a new movement, though.
+Small amethyst bud and first growth stage cocoa are small enough to transit beside them... need a "small_hitbox" bit in the nav descriptor
 
 
 Other ideas:
@@ -17,11 +23,10 @@ Region Pathology:
 
 New moves:
 ==========
-4b. Trapdoors
-5. Clutch falls (water / snow / boat / etc)
-6. Trapdoor crawl
-7. Wall Clutch
-8. Honey slide
+1. Trapdoor crawl
+2. Dripleaf sink (see "gaps", above)
+3. Wall Clutch
+4. Honey slide
 
 Others (potentially?):
 Parkour into air (to fall -- e.g. to water)
@@ -38,21 +43,40 @@ Precise-goto arrival radius: ARRIVE_DIST=2.5 is fine for "come to me" (follow) b
 
 Optimization ideas:
 ===================
-Right now the fixed cost at the start of every search is mostly two things:
- * Building cuboids
- * Reverse Dijkstra
-Maybe we can make this faster (e.g. use reverse-A* instead of reverse-Dijkstra? add same-X/same-Z nibbles simialr to same-Y nibble?)
+
+**Idea 1: Futility Flood**
 
 We can "detect" flooding if we just popped an expensive node then popped a cheap node far away. Basically if h() > bestH then we're about to consider a potential flood.
 There must be some way to do a cheaper "proof of futility" without running full-A*. Considered flood fill or other options here...
+
+**Idea 2: Greedy-like non-admissible heuristic adjustments**
 
 At the block level, perhaps a quadratic distance term when you're outside of the skeleton to discourage looking in the wrong direction?
 
 At the block level, perhaps a guard at sea level (if the goal is Y > 63, punish exploring Y < 62) to avoid pathological floods into the ocean?
 
+**Idea 3: Scatter safe-fall**
+
 During NavGrid build the same way we now scatter for "risky edit", we can scatter safe fall distances. If there's water, set a "safe fall" bit on every block above it.
 This would eliminate the downward scan during searches and replace it with checking a single "can I drop here" bit.
 Could also revive the idea of "a run of 2 climbables interrupts a fall from N height, a run of 3 interrupts from M height".
+
+Idea 3 was investigated and rejected as-written, but Claude had a few ideas based on this which might be worth considering. Some notes:
+ * There is no free bit in the NavGrid short. 10 bits are used for the navtype descriptor index and the other 6 are all accounted for. We can't afford a "safe fall" bit
+ * Even if we COULD afford a "safe fall" bit -- scattering to the ~6 neighbors isn't the same as scattering to an unbounded column above. This would make NavGrid construction outrageously slow
+ * 99% of the time we aren't even reading the depth nibble (4 neighboring cells are same Y level or a 1-level difference: not a fall)
+ * The 1% of the time that we ARE reading the depth nibble, 99% of THOSE the landing block is within 14 so the depth nibble works
+ * The 1% of the time we go beyond the depth nibble, we can still jump 14 at a time so the total number of reads is low(-ish)
+
+Still, Claude said there may be some recoverable ideas here, so leaving this on the table
+
+**Idea 4: Pre-fetch neighbors**
+
+I believe Ascend, Traverse, and Descend all independently read the 4 cardinal cells (to determine if they're solid, passable, etc).
+We could pull these once outside of ANY specific movement's logic and pass them as inputs to all movements.
+So movements get a pointer to the NavGrid plus a handful of pre-pulled cells that we know they're likely to need.
+
+IN GENERAL: I'd love to do another JFR run and understand where we're spending our time. We've accepted multiple "+3%" costs to add new features, and those compound.
 
 
 New features:
@@ -76,14 +100,3 @@ Gilded Lily:
 Elytra flight (requires flight control and some way to predict fly-able paths)
 Ender pearls (simpler parabolic arc)
 Vehicles (minecart, boat, horse/donkey/camel, strider)
-
-
-Documentation:
-==============
-Need to ensure we document the servo / auto-pilot mechanism (hazard avoidance, momentum retention when next waypoint is colinear, etc)
-Once crafting/fighting/building are added, need documentation
-Movement docs should describe Parkour jump limits (conservative)
-Once new movements are added, need to ensure movement docs list all movements
-Should do a correctness pass over all docs
-If we add performance optimizations (above) we should include them in optimizations docs
-
