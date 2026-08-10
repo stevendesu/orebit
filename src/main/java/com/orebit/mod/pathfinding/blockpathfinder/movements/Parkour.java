@@ -8,6 +8,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
+import com.orebit.mod.platform.FallDamage;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 /**
@@ -136,12 +137,27 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *       (the conservative, dearer direction);</li>
  *   <li><b>falling</b>: {@code AIR_COST[g] + }{@link #FALL_EXTRA}{@code [drop]}, the marginal descent
  *       ticks from the parabola table (ticks to −1/−2/−3 minus ticks to 0: 14/15/17 − 12 = 2/3/5 —
- *       consistent with {@link Fall#PER_BLOCK}'s ≈2.5 t/block average), plus {@link
- *       com.orebit.mod.pathfinding.blockpathfinder.BotCaps#costPerHitpoint} per block past {@link
- *       com.orebit.mod.pathfinding.blockpathfinder.BotCaps#safeFallDistance} (the damage-as-cost model,
- *       ≈1 HP per excess block in the planner's unified ticks-per-HP currency — the same term {@link
- *       Fall} charges, so a parkour drop and a walk-off drop price damage identically); a drop beyond
- *       {@link com.orebit.mod.pathfinding.blockpathfinder.BotCaps#maxFallDistance} is never emitted.</li>
+ *       consistent with {@link Fall#PER_BLOCK}'s ≈2.5 t/block average), plus the DAMAGE term below; a
+ *       drop beyond {@link com.orebit.mod.pathfinding.blockpathfinder.BotCaps#maxFallDistance} is never
+ *       emitted.</li>
+ * </ul>
+ *
+ * <h3>Falling damage — the drop is not the fall distance</h3>
+ * A parkour LEAVES THE GROUND, and vanilla accumulates {@code fallDistance} from the jump APEX, so a
+ * drop of {@code dr} cells really falls {@code dr + }{@link #JUMP_APEX} ≈ {@code dr + 1.2522} blocks.
+ * The cost is {@link com.orebit.mod.platform.FallDamage#damageFor} HP × {@link
+ * com.orebit.mod.pathfinding.blockpathfinder.BotCaps#costPerHitpoint}, the planner's unified
+ * ticks-per-HP currency. This is where a parkour drop and a walk-off {@link Fall} of the same depth
+ * deliberately DIVERGE — {@code Fall} never leaves the ground, so its distance really is the cell count.
+ * <ul>
+ *   <li>Before the apex correction the term was {@code (dr − safeFall)} on the bare drop, and since the
+ *       falling class only offers {@code dr ≤ }{@link #FALL_DEPTH}{@code  = 3} against a default
+ *       {@code safeFall = 3} it was <b>unreachable</b>: every falling parkour priced as damage-free
+ *       while the bot took real damage. Owner-reproduced in-game 2026-08-10.</li>
+ *   <li>The rounding rule is version-divergent (javap-verified boundary at <b>1.21.5</b>: {@code ceil}
+ *       below, {@code floor} at and above), which is why it sits behind the {@code platform/FallDamage}
+ *       overlay seam rather than inline here. Resulting HP at {@code safeFall = 3} — {@code dr} 1/2/3 →
+ *       <b>0/1/2</b> on ≤1.21.4, <b>0/0/1</b> on ≥1.21.5.</li>
  * </ul>
  * Flat totals 15.6 / 18.6 / 21.6 (v1 unchanged). Per-block cost stays ≥ the octile ruler (4.633)
  * everywhere except the rising discount's worst case, which the greedy weight already tolerates
@@ -309,6 +325,24 @@ public final class Parkour implements Movement {
      * ≈2.5 t/block average over the same window).
      */
     private static final float[] FALL_EXTRA = {0f, 2f, 3f, 5f};
+
+    /**
+     * Blocks of fall distance the JUMP ITSELF contributes, on top of the drop between floors — the apex
+     * of a grounded {@code vy₀ = 0.42} jump under the per-tick {@code vy ← (vy − 0.08)·0.98} recurrence
+     * (NOTES-movement-physics.md §"Apexes"; the same physics {@link MovementContext#JUMP_RISE} states in
+     * sixteenths for CLEARANCE purposes — this is the blocks-as-float form, needed here because vanilla
+     * fall damage is a continuous distance, not a cell count).
+     *
+     * <p><b>This is the correction that made falling parkour honest.</b> Vanilla accumulates {@code
+     * fallDistance} from the APEX, not from the takeoff floor, so a parkour that drops {@code dr} cells
+     * really falls {@code dr + 1.2522} blocks. Pricing the bare {@code dr} against {@code safeFall} left
+     * the damage term ({@code dr > safeFall} with {@code dr ≤ }{@link #FALL_DEPTH}{@code  = 3} and
+     * {@code safeFall = 3}) <b>unreachable</b> — every falling parkour was modelled damage-free while
+     * the bot took real damage on the deeper rows. Owner-observed on the flagship route and reproduced
+     * in-game 2026-08-10; a walk-off {@link Fall} of the same depth is unaffected because it never
+     * leaves the ground.
+     */
+    public static final float JUMP_APEX = 1.2522f;
 
     /** Behavioral premium (ticks) for an all-or-nothing move — a jump can't be abandoned halfway. */
     public static final float COMMIT_PENALTY = 3f;
@@ -716,10 +750,15 @@ public final class Parkour implements Movement {
                             verifiedTransit = Float.intBitsToFloat((int) vs);
                             float cost = RUNUP_COST + AIR_COST[g] + FALL_EXTRA[dr] + COMMIT_PENALTY
                                     + verifiedTransit + ctx.cellTransitCost(fd) + descTransit;
-                            if (dr > safeFall) {
-                                // Damage-as-cost, Fall's exact term: ≈1 HP per excess block × the unified
-                                // ticks-per-HP knob (rare branch — a hurt landing — so the caps read is fine).
-                                cost += (dr - safeFall) * ctx.caps().costPerHitpoint();
+                            // Damage-as-cost. The fall distance is the drop PLUS the jump apex (JUMP_APEX):
+                            // vanilla accumulates fallDistance from the apex, so this move's real fall is
+                            // dr + 1.2522 and the old bare-dr term could never fire (dr <= FALL_DEPTH == 3
+                            // == safeFall). Rounding is version-divergent at 1.21.5, hence the platform
+                            // seam; a whole-cell Fall is unaffected by that split. The caps read stays in
+                            // the rare hurt-landing branch.
+                            int hp = FallDamage.damageFor(dr + JUMP_APEX, safeFall);
+                            if (hp > 0) {
+                                cost += hp * ctx.caps().costPerHitpoint();
                             }
                             out.accept(cx, fy, cz, cost);
                             found |= DIR_EMITTED;
