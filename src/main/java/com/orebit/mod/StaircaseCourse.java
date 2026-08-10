@@ -128,12 +128,44 @@ public final class StaircaseCourse {
         OrebitCommon.LOGGER.info("[Orebit/staircase] armed: {} trials", course.trials.size());
     }
 
+    /**
+     * The owner's EXACT 1.20.1 flat-world repro (reported 2026-08-10), block for block: grass placed on the
+     * default superflat (bedrock / 2 dirt / grass), bot teleported to {@link #EXACT_START}, then
+     * {@code goto} the floor cell {@link #EXACT_GOAL}. Reported behaviour: leaps the first step, leaps the
+     * second, freezes — usually on the third, occasionally the second or fourth.
+     *
+     * <p>Reproduced VERBATIM rather than re-derived, because every synthetic tile in this course passed and
+     * the difference has to be something the synthesis got wrong. Two candidates are visible in the block
+     * list alone: it is <b>1 block wide</b> (every block at {@link #EXACT_Z}, where the synthetic tiles are
+     * 3 or 9 wide, so the bot has zero lateral tolerance), and its <b>top landing floats</b> — {@code x=-5},
+     * {@code -4}, {@code -3} carry a single block each with open air beneath, where the synthetic landings
+     * are solid to the base. Coordinates are absolute and near the world floor; the harness places them
+     * where they were reported instead of translating to {@link #Y0}, so nothing can be lost in transit.
+     */
+    private static final int[][] EXACT_BLOCKS = {
+            {-10, -59},
+            {-9, -59}, {-9, -58},
+            {-8, -59}, {-8, -58}, {-8, -57},
+            {-7, -59}, {-7, -58}, {-7, -57}, {-7, -56},
+            {-6, -59}, {-6, -58}, {-6, -57}, {-6, -56}, {-6, -55},
+            {-5, -55},
+            {-4, -55},
+            {-3, -55},
+    };
+    private static final int EXACT_Z = -2;
+    private static final double[] EXACT_START = {-11.5, -60, -1.5}; // /tp -12 -60 -2, block-centred
+    private static final BlockPos EXACT_GOAL = new BlockPos(-3, -55, EXACT_Z);
+    /** Feet Y on the untouched superflat surface (grass in cell -61, top at -60). */
+    private static final int EXACT_GROUND_FEET = -60;
+
     /** One staircase challenge. {@code stepRun} &gt; 1 inserts a flat run after each rise (the spaced tile). */
     private static final class Trial {
         final String name;
         final int steps;
         final int stepRun;
         final boolean snowy;
+        /** Verbatim owner repro ({@link #EXACT_BLOCKS}) — ignores the synthetic layout entirely. */
+        final boolean exact;
         final int baseX, baseZ;
         final int zc;
 
@@ -158,9 +190,34 @@ public final class StaircaseCourse {
         final float startYaw;
         final BlockPos goal;
 
+        /** The verbatim-repro tile: absolute coordinates, its own start/goal, no synthetic layout at all. */
+        Trial() {
+            this.name = "exact";
+            this.exact = true;
+            this.steps = 5;
+            this.stepRun = 1;
+            this.snowy = false;
+            this.runUp = 2;
+            this.baseX = EXACT_BLOCKS[0][0];
+            this.baseZ = EXACT_Z;
+            this.zc = EXACT_Z;
+            this.span = EXACT_GOAL.getX() - baseX;
+            this.topFeetY = EXACT_GOAL.getY() + 1;
+            this.minFloorY = EXACT_GROUND_FEET - 3; // below the untouched superflat surface = fell off
+            this.halfW = 0;
+            this.zStart = EXACT_Z;
+            this.zGoal = EXACT_Z;
+            this.startX = EXACT_START[0];
+            this.startY = EXACT_START[1];
+            this.startZ = EXACT_START[2];
+            this.startYaw = yaw(1, 0); // face +X, up the stairs
+            this.goal = EXACT_GOAL;
+        }
+
         Trial(String name, int steps, int stepRun, boolean snowy, boolean diagonal, int runUp,
                 int baseX, int baseZ) {
             this.name = name;
+            this.exact = false;
             this.steps = steps;
             this.stepRun = stepRun;
             this.snowy = snowy;
@@ -190,6 +247,17 @@ public final class StaircaseCourse {
          * {@link Integer#MIN_VALUE} when {@code x} is off the tile entirely (no assertion possible there).
          */
         int surfaceFeetYAt(int x) {
+            if (exact) {
+                // Tallest placed block in column x, +1 = the feet height there. Derived from the block list
+                // itself so a transcription slip in a hand-written table cannot silently mis-score the tile.
+                int top = Integer.MIN_VALUE;
+                for (int[] b : EXACT_BLOCKS) {
+                    if (b[0] == x && b[1] > top) top = b[1];
+                }
+                if (top != Integer.MIN_VALUE) return top + 1;
+                if (x < EXACT_BLOCKS[0][0]) return EXACT_GROUND_FEET; // untouched superflat approach
+                return Integer.MIN_VALUE;                            // past the landing — nothing to assert
+            }
             if (x < baseX - runUp) return Integer.MIN_VALUE;
             if (x < baseX) return Y0;                       // start pad
             if (x < baseX + span) return Y0 + 1 + (x - baseX) / stepRun;
@@ -235,6 +303,9 @@ public final class StaircaseCourse {
         }
 
         void buildTrialList() {
+            // The owner's verbatim 1.20.1 repro runs FIRST — it is the only tile known to fail in the
+            // field, so its verdict is the one that decides whether this harness is useful at all.
+            trials.add(new Trial());
             //   name          steps stepRun snowy diagonal runUp
             add("step1",       1, 1, false, false, 3);
             add("step2",       2, 1, false, false, 3);
@@ -508,6 +579,10 @@ public final class StaircaseCourse {
          * left the tile sideways, which is a distinct, meaningful outcome.
          */
         void buildTile(Trial tr) {
+            if (tr.exact) {
+                buildExact();
+                return;
+            }
             int bx = tr.baseX, zc = tr.zc;
             clear(bx - tr.runUp - 2, bx + tr.span + 6, Y0 - 1, tr.topFeetY + 4,
                     zc - tr.halfW - 2, zc + tr.halfW + 2);
@@ -539,6 +614,22 @@ public final class StaircaseCourse {
             }
         }
 
+        /**
+         * The verbatim owner repro, placed on the UNTOUCHED superflat surface (the flat world this course
+         * already boots is the same bedrock / 2 dirt / grass preset the owner used). Air out the volume
+         * above the surface first so a re-run never inherits a previous shape, then place the 18 grass
+         * blocks exactly where they were reported. Nothing is translated or re-derived.
+         */
+        void buildExact() {
+            for (int x = -14; x <= 1; x++)
+                for (int y = EXACT_GROUND_FEET; y <= EXACT_GROUND_FEET + 12; y++)
+                    for (int z = EXACT_Z - 3; z <= EXACT_Z + 3; z++)
+                        set(x, y, z, AIR);
+            for (int[] b : EXACT_BLOCKS) {
+                set(b[0], b[1], EXACT_Z, Blocks.GRASS_BLOCK.defaultBlockState());
+            }
+        }
+
         /** Air out the tile's whole envelope first, so a rebuild never inherits a previous shape. */
         void clear(int x0, int x1, int y0, int y1, int z0, int z1) {
             for (int x = x0; x <= x1; x++)
@@ -558,9 +649,13 @@ public final class StaircaseCourse {
          */
         void probeTile(Trial tr) {
             StringBuilder sb = new StringBuilder();
-            for (int x = tr.baseX - 1; x <= tr.baseX + tr.span + 1; x++) {
-                BlockPos feet = new BlockPos(x, tr.surfaceFeetYAt(x), tr.zc);
-                sb.append(' ').append(x).append(':').append(feet.getY())
+            for (int x = tr.baseX - tr.runUp; x <= tr.baseX + tr.span + 1; x++) {
+                int feetY = tr.surfaceFeetYAt(x);
+                if (feetY == Integer.MIN_VALUE) {
+                    continue; // off the tile — no feet height is defined there
+                }
+                BlockPos feet = new BlockPos(x, feetY, tr.zc);
+                sb.append(' ').append(x).append(':').append(feetY)
                         .append('=').append(level.getBlockState(feet).getBlock().getClass().getSimpleName());
             }
             OrebitCommon.LOGGER.info("[Orebit/staircase] {} probe (x:feetY=blockInFeetCell){}", tr.name, sb);
