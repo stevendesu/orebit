@@ -345,45 +345,12 @@ public final class StaircaseCourse {
         }
 
         void buildTrialList() {
-            // The owner's verbatim 1.20.1 repro runs FIRST — it is the only tile known to fail in the
-            // field, so its verdict is the one that decides whether this harness is useful at all.
+            // ONLY the owner's verbatim 1.20.1 repro (owner ruling, 2026-08-10: "we're trying to repro ONLY
+            // on the exact map I gave you"). The synthetic tiles are DELETED: every one of them
+            // PASSED at maxAbove=0.000 — iteration count (1/2/4/8), zero-collision snow treads, step
+            // adjacency, pre-first-step run-up (3/6/12) and off-lane diagonal entry — so none of them
+            // isolates the defect and all they cost was runtime. One tile keeps the fix loop at ~15 s.
             trials.add(new Trial());
-            //   name          steps stepRun snowy diagonal runUp
-            add("step1",       1, 1, false, false, 3);
-            add("step2",       2, 1, false, false, 3);
-            add("step4",       4, 1, false, false, 3);
-            add("step8",       8, 1, false, false, 3);
-            add("snow4",       4, 1, true,  false, 3);
-            add("spaced4",     4, 3, false, false, 3);
-            // RUN-UP tiles — dead-on approach, but a long flat pad so the bot reaches the first tread at
-            // full speed instead of still accelerating. Owner's own flat-world repro (2026-08-10) pointed
-            // here: same geometry as step4/step8 above, the ONLY variable is how much momentum is carried
-            // into the first jump. Horizontal distance covered during the arc scales with entry speed, and
-            // on a 1:1 staircase that decides which tread the bot comes down on.
-            add("run6step4",   4, 1, false, false, 6);
-            add("run12step4",  4, 1, false, false, 12);
-            add("run12step8",  8, 1, false, false, 12);
-            add("run12snow4",  4, 1, true,  false, 12);
-            // DIAGONAL tiles — a wide slope crossed at an angle, so every Ascend is entered out of a
-            // Diagonal with cross-axis momentum. The straight-on tiles above all PASSED on the first run
-            // (2026-08-10, maxAbove=0.000 across the board), which is exactly what says the missing
-            // ingredient is the approach and not the staircase: the field's failing Ascend was preceded by
-            // a Diagonal and entered at offCentre=(0.389,-0.320), and Ascend's own climb phase carries an
-            // arrestCarryFrom guard written for "an Ascend entered carrying momentum perpendicular to its
-            // own step -> launches off-lane -> permanent fail->HOLD".
-            add("diag4",       4, 1, false, true,  3);
-            add("diag8",       8, 1, false, true,  3);
-            add("diagsnow4",   4, 1, true,  true,  3);
-        }
-
-        void add(String name, int steps, int stepRun, boolean snowy, boolean diagonal, int runUp) {
-            int i = trials.size();
-            int row = i / COLS;
-            int col = i % COLS;
-            if ((row & 1) == 1) col = COLS - 1 - col; // snake: keep consecutive trials adjacent
-            int bx = BASE_X + col * STRIDE_X;
-            int bz = BASE_Z + row * STRIDE_Z;
-            trials.add(new Trial(name, steps, stepRun, snowy, diagonal, runUp, bx, bz));
         }
 
         void start(MinecraftServer server) {
