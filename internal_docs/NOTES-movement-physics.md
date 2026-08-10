@@ -406,6 +406,29 @@ passive crawl, when `Swim` has an active sink rung (`DOWN_COST = 1/0.185`) and a
 All javap-verified against Mojang-mapped 1.21.11 unless noted. Damage is
 `floor((fallDistance + 1e-6 − 3.0) × multiplier)`; `Block.fallOn`'s default multiplier is 1.0.
 
+> ⚠️ **That formula is the 1.21.5+ one, NOT universal — the rounding direction flips at 1.21.5.**
+> Swept with javap over every cached Mojang-mapped jar (2026-08-10):
+>
+> | MC range | `LivingEntity.calculateFallDamage` | Damage-free iff |
+> |---|---|---|
+> | 1.15.2 → **1.21.4** | `ceil((d − 3.0F − jumpBoost) × mult)` | `d ≤ 3.0` |
+> | **1.21.5** → 26.2 | `floor(calculateFallPower(d) × mult × FALL_DAMAGE_MULTIPLIER)`, where `calculateFallPower(d) = (d + 1.0E-6) − SAFE_FALL_DISTANCE` | `d < 4.0` |
+>
+> At 1.21.5 the safe distance became an **attribute** (default 3.0), `FALL_DAMAGE_MULTIPLIER` joined it
+> (default 1.0), and the signature widened to `(double, float)`. The behavioural gap is the fractional
+> band: a **3.5-block fall costs 1 HP pre-1.21.5 and nothing after**.
+>
+> `ceil` and `floor` **agree at every whole-block distance**, which is why this split is invisible to
+> `Fall`/`WalkOff` (they measure drops in cells) and why it went unnoticed. Only sub-block distances
+> diverge — today the only one the planner produces is the **jump apex a falling `Parkour` adds to its
+> drop** (`Parkour.JUMP_APEX ≈ 1.2522`, §"Apexes"). The planner does not reimplement either rule: it
+> calls the `platform/FallDamage` overlay seam, whose two flavours (`overlays/1.17`, `overlays/1.21.5`)
+> carry the arithmetic and the full derivation.
+>
+> Owner-measured in-game on 1.21.x (2026-08-10), matching the `floor` row exactly: walk-off drops of
+> 3.0 / 3.5 / 3.9375 all dealt zero damage, while a **jump** from 3.0 — apex-inclusive `d ≈ 4.2522` —
+> dealt damage.
+
 - **Water** — §7. Damage-free at any height. Cannot be placed where the dimension evaporates water.
 - **Powder snow** — `PowderSnowBlock.getCollisionShape` returns a SOLID 0.9-tall box whenever
   `entity.fallDistance > 2.5`, tested *before* any boots/descending logic, so a meaningfully-falling bot
