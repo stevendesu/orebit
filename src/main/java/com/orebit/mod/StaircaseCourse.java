@@ -141,11 +141,15 @@ public final class StaircaseCourse {
         final int topFeetY;    // feet Y on the last tread / the landing
         final int minFloorY;   // a fall this far below the pad = off the course
 
+        /** Half-width in Z. 1 = a 3-wide stair; the diagonal tiles widen it into a crossable slope. */
+        final int halfW;
+        final int zStart, zGoal;   // differ on a DIAGONAL tile, forcing an angled ascent
+
         final double startX, startY, startZ;
         final float startYaw;
         final BlockPos goal;
 
-        Trial(String name, int steps, int stepRun, boolean snowy, int baseX, int baseZ) {
+        Trial(String name, int steps, int stepRun, boolean snowy, boolean diagonal, int baseX, int baseZ) {
             this.name = name;
             this.steps = steps;
             this.stepRun = stepRun;
@@ -156,11 +160,18 @@ public final class StaircaseCourse {
             this.span = steps * stepRun;
             this.topFeetY = Y0 + steps;
             this.minFloorY = Y0 - 6;
+            // A diagonal tile is a WIDE uniform slope (height depends on X alone) whose start and goal sit
+            // on opposite Z edges, so the only route up crosses it at an angle and every Ascend is entered
+            // out of a Diagonal, carrying cross-axis momentum. That is the field geometry: the owner's
+            // hillside rose one block per column and the bot traversed it obliquely.
+            this.halfW = diagonal ? 4 : 1;
+            this.zStart = diagonal ? zc - 3 : zc;
+            this.zGoal = diagonal ? zc + 3 : zc;
             this.startX = baseX - 2.5;
             this.startY = Y0;
-            this.startZ = zc + 0.5;
-            this.startYaw = yaw(1, 0); // face +X, up the stairs
-            this.goal = new BlockPos(baseX + span + 2, topFeetY, zc);
+            this.startZ = zStart + 0.5;
+            this.startYaw = yaw(1, 0); // face +X, up the slope
+            this.goal = new BlockPos(baseX + span + 2, topFeetY, zGoal);
         }
 
         /**
@@ -213,22 +224,32 @@ public final class StaircaseCourse {
         }
 
         void buildTrialList() {
-            add("step1",   1, 1, false);
-            add("step2",   2, 1, false);
-            add("step4",   4, 1, false);
-            add("step8",   8, 1, false);
-            add("snow4",   4, 1, true);
-            add("spaced4", 4, 3, false);
+            add("step1",    1, 1, false, false);
+            add("step2",    2, 1, false, false);
+            add("step4",    4, 1, false, false);
+            add("step8",    8, 1, false, false);
+            add("snow4",    4, 1, true,  false);
+            add("spaced4",  4, 3, false, false);
+            // DIAGONAL tiles — a wide slope crossed at an angle, so every Ascend is entered out of a
+            // Diagonal with cross-axis momentum. The straight-on tiles above all PASSED on the first run
+            // (2026-08-10, maxAbove=0.000 across the board), which is exactly what says the missing
+            // ingredient is the approach and not the staircase: the field's failing Ascend was preceded by
+            // a Diagonal and entered at offCentre=(0.389,-0.320), and Ascend's own climb phase carries an
+            // arrestCarryFrom guard written for "an Ascend entered carrying momentum perpendicular to its
+            // own step -> launches off-lane -> permanent fail->HOLD".
+            add("diag4",    4, 1, false, true);
+            add("diag8",    8, 1, false, true);
+            add("diagsnow4", 4, 1, true, true);
         }
 
-        void add(String name, int steps, int stepRun, boolean snowy) {
+        void add(String name, int steps, int stepRun, boolean snowy, boolean diagonal) {
             int i = trials.size();
             int row = i / COLS;
             int col = i % COLS;
             if ((row & 1) == 1) col = COLS - 1 - col; // snake: keep consecutive trials adjacent
             int bx = BASE_X + col * STRIDE;
             int bz = BASE_Z + row * STRIDE;
-            trials.add(new Trial(name, steps, stepRun, snowy, bx, bz));
+            trials.add(new Trial(name, steps, stepRun, snowy, diagonal, bx, bz));
         }
 
         void start(MinecraftServer server) {
@@ -467,15 +488,15 @@ public final class StaircaseCourse {
          */
         void buildTile(Trial tr) {
             int bx = tr.baseX, zc = tr.zc;
-            clear(bx - 6, bx + tr.span + 6, Y0 - 1, tr.topFeetY + 4, zc - 3, zc + 3);
+            clear(bx - 6, bx + tr.span + 6, Y0 - 1, tr.topFeetY + 4, zc - tr.halfW - 2, zc + tr.halfW + 2);
             // Start pad: feet stand at Y0, so the pad's top solid cell is Y0-1.
-            fill(bx - 4, bx - 1, Y0 - 1, zc, tr);
+            fill(bx - 4, bx - 1, Y0 - 1, tr);
             // The staircase: column x carries the tread whose top is surfaceFeetYAt(x).
             for (int x = bx; x < bx + tr.span; x++) {
-                fill(x, x, tr.surfaceFeetYAt(x) - 1, zc, tr);
+                fill(x, x, tr.surfaceFeetYAt(x) - 1, tr);
             }
             // Top landing (4 columns) so the goal never sits on a step edge.
-            fill(bx + tr.span, bx + tr.span + 3, tr.topFeetY - 1, zc, tr);
+            fill(bx + tr.span, bx + tr.span + 3, tr.topFeetY - 1, tr);
         }
 
         /**
@@ -483,9 +504,9 @@ public final class StaircaseCourse {
          * {@code topSolidY}. On a snowy tile the top cell becomes {@code grass_block[snowy=true]} and the
          * feet cell above it gets a {@code snow[layers=1]} — the field surface exactly.
          */
-        void fill(int x0, int x1, int topSolidY, int zc, Trial tr) {
+        void fill(int x0, int x1, int topSolidY, Trial tr) {
             for (int x = x0; x <= x1; x++) {
-                for (int z = zc - 1; z <= zc + 1; z++) {
+                for (int z = tr.zc - tr.halfW; z <= tr.zc + tr.halfW; z++) {
                     for (int y = Y0 - 2; y <= topSolidY; y++) {
                         set(x, y, z, tr.snowy && y == topSolidY ? SNOWY_GRASS : STONE);
                     }
