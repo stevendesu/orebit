@@ -98,11 +98,29 @@ public final class StaircaseCourse {
     private static final int Y0 = 150;
     private static final int BASE_X = 8;
     private static final int BASE_Z = 8;
-    private static final int COLS = 2;
-    private static final int STRIDE = 48; // > the longest tile span so tiles' nav grids never touch
+    /**
+     * Tile grid. The WHOLE grid must stay inside the server's {@code view-distance} (14 chunks) or a tile's
+     * chunks never load, nav never builds, and the settle gate waits on a readiness that can never arrive.
+     * A 2-column grid at stride 48 pushed the last of 14 tiles out past {@code z≈290} and hung a run for 14
+     * minutes (2026-08-10) — hence 4 columns, and separate X/Z strides because the tiles are LONG
+     * (run-up + span + landing ≈ 28 columns) but narrow (≤ 11 with the diagonal slopes). 14 tiles → 4 rows
+     * → {@code z ≤ 80}, {@code x ≤ 128}: comfortably inside the loaded ring.
+     * {@link #SETTLE_GIVEUP_TICKS} is the backstop that turns a recurrence into a loud per-tile FAIL
+     * instead of a silent hang.
+     */
+    private static final int COLS = 4;
+    private static final int STRIDE_X = 40;
+    private static final int STRIDE_Z = 24;
 
     private static final int WARMUP_TICKS = 160;
     private static final int SETTLE_TICKS = 60;
+    /**
+     * Hard cap on the pre-goto settle. The gate waits for nav residency around the goal, which is the right
+     * thing to wait for and a readiness that NEVER arrives if the tile sits outside the loaded area — so
+     * without a cap the whole course hangs on one bad tile (2026-08-10, 14 minutes of silence). Exceeding
+     * it is a harness fault, reported as such rather than as a bot failure.
+     */
+    private static final int SETTLE_GIVEUP_TICKS = 600;
     private static final int NAV_RETRY_WINDOW = 60;
     private static final int MAX_NAV_RETRY = 5;
     /** Per-trial budget (ticks). Even step8 climbs in well under this; the wedge is permanent, so it times out. */
@@ -282,6 +300,13 @@ public final class StaircaseCourse {
             return Integer.MIN_VALUE;
         }
 
+        /**
+         * Feet Y at the foot of this tile's climb — the zero point for {@code stepsClimbed}. The synthetic
+         * tiles are built at {@link #Y0}; the verbatim tile lives at the world floor, and scoring it against
+         * {@code Y0} reported {@code climbed=0/5} for a climb that plainly happened.
+         */
+        int baseFeetY() { return exact ? EXACT_GROUND_FEET : Y0; }
+
         static float yaw(int dx, int dz) { return (float) Math.toDegrees(Math.atan2(-dx, dz)); }
     }
 
@@ -356,8 +381,8 @@ public final class StaircaseCourse {
             int row = i / COLS;
             int col = i % COLS;
             if ((row & 1) == 1) col = COLS - 1 - col; // snake: keep consecutive trials adjacent
-            int bx = BASE_X + col * STRIDE;
-            int bz = BASE_Z + row * STRIDE;
+            int bx = BASE_X + col * STRIDE_X;
+            int bz = BASE_Z + row * STRIDE_Z;
             trials.add(new Trial(name, steps, stepRun, snowy, diagonal, runUp, bx, bz));
         }
 
@@ -440,7 +465,13 @@ public final class StaircaseCourse {
 
             if (settling) {
                 int target = index == 0 ? WARMUP_TICKS : SETTLE_TICKS;
-                if (++settleTicks < target || !navReadyAround(tr.goal)) {
+                if (++settleTicks > SETTLE_GIVEUP_TICKS) {
+                    // Harness fault, not a bot failure — say so plainly so nobody reads it as a movement bug.
+                    record(tr, "FAIL", "HARNESS: nav never became ready around the goal after "
+                            + SETTLE_GIVEUP_TICKS + " ticks (tile outside the loaded/view-distance area?)");
+                    return;
+                }
+                if (settleTicks < target || !navReadyAround(tr.goal)) {
                     return;
                 }
                 settling = false;
@@ -497,7 +528,7 @@ public final class StaircaseCourse {
             if (expect == Integer.MIN_VALUE) {
                 return; // off the tile — nothing to measure against
             }
-            int reached = (int) Math.floor(bot.getY()) - Y0;
+            int reached = (int) Math.floor(bot.getY()) - tr.baseFeetY();
             if (reached > stepsClimbed) {
                 stepsClimbed = Math.min(reached, tr.steps);
             }
