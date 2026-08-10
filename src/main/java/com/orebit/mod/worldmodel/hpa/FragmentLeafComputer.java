@@ -15,9 +15,10 @@ import com.orebit.mod.worldmodel.pathing.NavSection;
  * A level-0 region is one 16³ {@link NavSection}. This mirrors {@link LeafCostComputer}'s occupancy scan
  * exactly: for each of the 4096 local cells, look up the cell's resident navtype → {@link NavBlock}
  * descriptor (no live block reads) and tally {@link NavBlock#isStandable standable} /
- * {@link NavBlock#floodPassable flood-passable} (<b>openable-as-air</b>, DESIGN-trapdoors.md §8b: every
- * door/trapdoor/fence-gate cell — iron included — is region-tier open space; deliberate optimism,
- * unrealizable hops absorbed by the blacklist + capsSig invalidations), fill the water mask (descriptor
+ * {@link NavBlock#floodPassable flood-passable} (<b>openable-as-air + climbable-as-air</b>,
+ * DESIGN-trapdoors.md §8b / DESIGN-trapdoor-ladder-climb.md §6: every door/trapdoor/fence-gate cell —
+ * iron included — and every climbable cell (ladder/scaffolding/vines) is region-tier open space;
+ * deliberate optimism, unrealizable hops absorbed by the blacklist + capsSig invalidations), fill the water mask (descriptor
  * fluid == WATER on a flood-passable cell — the per-fragment W/S type source) + its count (the
  * truly-uniform all-dry/all-water split), and the Σ-hardness over SOLID (non-flood-passable) cells (the
  * mine-edge cost scale). It then hands the masks + tallies to {@link FragmentBuilder#build} at
@@ -86,9 +87,10 @@ public final class FragmentLeafComputer {
                 for (int lx = 0; lx < LEAF; lx++) {
                     long desc = NavBlock.descriptor((short) section.getNavtype(lx, ly, lz));
                     boolean st = NavBlock.isStandable(desc);
-                    // Flood membership is openable-as-air (NavBlock.floodPassable, DESIGN-trapdoors.md
-                    // §8b): doors/trapdoors/fence gates — iron included — count as open space here.
-                    // ONLY this mask changes; standable[] keeps the exact isStandable verdict.
+                    // Flood membership is openable-as-air + climbable-as-air (NavBlock.floodPassable,
+                    // DESIGN-trapdoors.md §8b + DESIGN-trapdoor-ladder-climb.md §6): doors/trapdoors/
+                    // fence gates — iron included — and ladders/scaffolding/vines count as open space
+                    // here. ONLY this mask changes; standable[] keeps the exact isStandable verdict.
                     boolean pa = NavBlock.floodPassable(desc);
                     int i = idx(lx, ly, lz);
                     standable[i] = st;

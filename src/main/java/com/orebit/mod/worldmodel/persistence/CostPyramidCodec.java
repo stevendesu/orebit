@@ -167,6 +167,12 @@ public final class CostPyramidCodec {
     // at gate cells (closed topY 24 non-standable before and after; open passable before and after) —
     // new navtypes appearing is normal churn, not a semantic change to persisted leaf data. The arc's
     // realizability change lives in the INVAL_SIG_SCHEMA_VERSION history below.
+    // 2026-08-09 (climbable-as-air flood, DESIGN-trapdoor-ladder-climb.md §6 follow-up ruling): a
+    // SEMANTIC flood change with no layout change — NavBlock.floodPassable gained the CLIMB disjunct,
+    // so ladder/scaffolding/vine cells join fragment membership. Leaf fragment populations/footprints
+    // and goalDigSeeds' goal resolution change (a bare 1x1 ladder shaft now region-connects its two
+    // ends). The constant stays 1 per the pre-release pin above; a stale dev cache carries the old
+    // (ladder-blind) connectivity until its leaves are rebuilt from live or <world>/orebit/ is deleted.
     // (The "v2" above is HISTORY, not the live value — see the pre-release pin note at the top.)
     static final short VERSION = 1;
 
@@ -207,7 +213,10 @@ public final class CostPyramidCodec {
      *  over-pessimistic and the section is dropped (re-learn). The cost body's {@code VERSION} stays 2 —
      *  ladder cells' flood verdicts are unchanged (ladders were and remain non-floodPassable; the mouth was
      *  already openable-as-air), and the ladder navtype fan-out is normal per-boot churn, not a semantic
-     *  change to persisted leaf data. */
+     *  change to persisted leaf data. (The parenthetical was superseded LATER the same day: the
+     *  climbable-as-air follow-up ruling gave {@code NavBlock.floodPassable} the CLIMB disjunct, so
+     *  ladder/scaffolding/vine cells ARE now flood-passable — see the 2026-08-09 climbable-as-air entry in
+     *  the {@code VERSION} history above. It stands here as what was true when v5 was recorded.) */
     static final int INVAL_SIG_SCHEMA_VERSION = 1;
     /** Invalidation-section region-graph class — 0 = "optimistic-v1", today's single symmetric/optimistic
      *  connectivity graph. A future capability-aware graph persists its own sections under a new id; rows never

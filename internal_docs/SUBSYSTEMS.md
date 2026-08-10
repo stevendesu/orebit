@@ -161,10 +161,14 @@ owns `CostPyramid` + `ResourcePyramid` + `residency()` + `crossingMemory()`; `he
 `FragmentLeafComputer`/`LeafCostComputer`, `CostCodec`, `PyramidMerger` (coarse roll-up +
 `reconcileNode`/`mergeUpFrom` for the persistence seam), `HpaMaintenance` (debounced dirty-leaf
 recompute on block change; also evicts touched invalidation rows). Leaf flood connectivity is
-**openable-as-air** (ratified 2026-08-09, DESIGN-trapdoors.md §8b): `NavBlock.floodPassable` admits
-every door/trapdoor/fence-gate cell — iron included — into the passable mask and into
-`goalDigSeeds`' goal resolution; deliberate optimism, unrealizable hops absorbed by the blacklist +
-capsSig invalidations (`standable[]`/typing untouched).
+**openable-as-air + climbable-as-air** (ratified 2026-08-09, DESIGN-trapdoors.md §8b +
+DESIGN-trapdoor-ladder-climb.md §6): `NavBlock.floodPassable` = `isPassable || openable != NONE ||
+climbable` — admits every door/trapdoor/fence-gate cell (iron included) and every climbable cell
+(ladder/scaffolding/vines; owner: "you can always walk past a ladder — it's arguably MORE passable
+than air") into the passable mask and into `goalDigSeeds`' goal resolution; deliberate optimism,
+unrealizable hops absorbed by the blacklist + capsSig invalidations (`standable[]`/typing
+untouched; block tier still has no bare-ladder top-entry, so top-down bare shafts region-connect
+then blacklist-absorb).
 - Files: `pathfinding/regionpathfinder/RegionPathfinder.java`, `HierarchicalRegionPlan.java`,
   `RegionPathPlan.java`, `RegionMineModel.java`, `RegionPlaceModel.java`, `RegionCostField.java`,
   `worldmodel/hpa/RegionGrid.java`, `FragmentBuilder.java`, `HpaMaintenance.java`
