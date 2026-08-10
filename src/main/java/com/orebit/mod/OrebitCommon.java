@@ -306,5 +306,12 @@ public final class OrebitCommon {
         // iron-closed honest-refusal control) — the live follower proof of DESIGN-trapdoor-ladder-climb.md
         // §7. Same inert-unless-armed discipline (-Dorebit.shaft).
         ShaftCourse.register(events);
+
+        // Headless ITERATED-ASCEND diagnostic (the :fabric:<ver>:runStaircase run config): free-standing
+        // stone staircases of 1/2/4/8 back-to-back steps, plus a snowy-tread clone of the field surface
+        // (zero-collision snow[layers=1] in every feet cell) and a flat-spaced control — the live repro for
+        // the 2026-08-10 wedge where the bot ends a climb grounded one block ABOVE the Ascend's intended
+        // landing and fail->holds. Same inert-unless-armed discipline (-Dorebit.staircase).
+        StaircaseCourse.register(events);
     }
 }
