@@ -17,6 +17,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementRegistry;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour;
+import com.orebit.mod.platform.FallDamage;
 
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
@@ -44,9 +45,17 @@ import net.minecraft.world.level.chunk.Strategy;
  * the old hardcoded RISE_MAX=3 that offered an unmakeable jump the bot fell short of. Fall damage is a
  * COST, not a
  * blocker: shrinking {@code safeFallDistance} on an otherwise-identical bot raises the SAME route's plan
- * cost by exactly {@code (drop − safeFall) ·} {@link BotCaps#costPerHitpoint} (the unified damage knob —
- * ≈1 HP per excess block × ticks-per-HP; both bots here carry the 100-tick default). A drop beyond
- * {@code maxFallDistance} is never emitted at all (plan is null, not merely expensive).
+ * cost by the extra HP that narrower window prices, × {@link BotCaps#costPerHitpoint} (both bots here
+ * carry the 100-tick default). A drop beyond {@code maxFallDistance} is never emitted at all (plan is
+ * null, not merely expensive).
+ *
+ * <p><b>The fall distance is NOT the drop.</b> A parkour leaves the ground, so vanilla accumulates
+ * {@code fallDistance} from the jump APEX and the real fall is {@code drop + }{@link Parkour#JUMP_APEX}.
+ * The damage assertions below therefore take their expected HP from {@link FallDamage} rather than from
+ * the old {@code (drop − safeFall)} arithmetic, which ignored the apex (leaving the term unreachable at
+ * default caps) and whose rounding is version-divergent at 1.21.5 anyway. {@code FallDamageTest} pins
+ * that seam's numbers directly with hardcoded values; what these tests add is that the PLANNER applies
+ * them — once, on the right route, in the unified ticks-per-HP currency.
  *
  * <p><b>Envelope negatives.</b> A 5-gap is beyond every row of the table (never offered); a blocked
  * transit cell in a gap column
@@ -167,9 +176,15 @@ class ParkourLandingsTest {
 
     @Test
     void fallDamagePastTheSafeWindowIsChargedAsCost() {
-        // Same course, two bots differing ONLY in safeFallDistance: 3 (drop 1 is free) vs 0 (drop 1 costs
-        // one block ≈ 1 HP of damage). The route is forced, so the plan costs differ by exactly
-        // costPerHitpoint (both bots carry the 100-tick default).
+        // Same course, two bots differing ONLY in safeFallDistance: the default 3 vs 0. The route is
+        // forced, so the plans differ by exactly the damage the two windows price on the identical jump
+        // (both bots carry the 100-tick costPerHitpoint default).
+        final float distance = 1 + Parkour.JUMP_APEX; // drop 1, plus the apex — the class Javadoc's rule
+        final int freeHp = FallDamage.damageFor(distance, BotCaps.DEFAULT_SAFE_FALL);
+        final int hurtHp = FallDamage.damageFor(distance, 0f);
+        assertTrue(hurtHp > freeHp,
+                "fixture must separate the two windows or the cost assertion below is vacuous");
+
         NavGridView grid = buildCourse(3, 4, null);
         BlockPathPlan free = BlockPathfinder.findPath(grid, START, new BlockPos(9, 4, 8),
                 BotCaps.DEFAULT, CORRIDOR);
@@ -178,8 +193,8 @@ class ParkourLandingsTest {
 
         assertNotNull(free, "the damage-free bot should jump");
         assertNotNull(hurt, "damage is a cost, not a blocker — the fragile bot still jumps");
-        assertEquals(BotCaps.DEFAULT_COST_PER_HITPOINT, hurt.cost() - free.cost(), 1e-3,
-                "one block past the safe window should surcharge exactly 1 HP × costPerHitpoint");
+        assertEquals((hurtHp - freeHp) * BotCaps.DEFAULT_COST_PER_HITPOINT, hurt.cost() - free.cost(), 1e-3,
+                "the shrunken window should surcharge exactly (hurtHp − freeHp) × costPerHitpoint");
     }
 
     @Test
@@ -209,7 +224,7 @@ class ParkourLandingsTest {
     @Test
     void deeperFallingJumpIsOfferedAndChargesDamage() {
         // 2-gap, landing floor y=3 (drop 2): in the one unconditional envelope (s52). Shrinking the
-        // safe window to 0 surcharges 2 blocks of damage on the same forced route.
+        // safe window to 0 surcharges the apex-inclusive fall on the same forced route.
         NavGridView grid = buildCourse(2, 3, null);
         BlockPos goal = new BlockPos(8, 3, 8);
         BlockPathPlan free = BlockPathfinder.findPath(grid, START, goal, BotCaps.DEFAULT, CORRIDOR);
@@ -221,11 +236,17 @@ class ParkourLandingsTest {
         assertEquals(4, waypointOf(free, MovementRegistry.PARKOUR).getY(),
                 "the −2 jump's waypoint should STAND one above the y=3 landing floor");
 
+        final float distance = 2 + Parkour.JUMP_APEX; // drop 2, plus the apex
+        final int freeHp = FallDamage.damageFor(distance, BotCaps.DEFAULT_SAFE_FALL);
+        final int hurtHp = FallDamage.damageFor(distance, 0f);
+        assertTrue(hurtHp > freeHp,
+                "fixture must separate the two windows or the cost assertion below is vacuous");
+
         BlockPathPlan hurt = BlockPathfinder.findPath(grid, START, goal,
                 capsWithFallWindow(0, BotCaps.DEFAULT_MAX_FALL), CORRIDOR);
         assertNotNull(hurt, "damage is a cost, not a blocker");
-        assertEquals(2 * BotCaps.DEFAULT_COST_PER_HITPOINT, hurt.cost() - free.cost(), 1e-3,
-                "two blocks past the safe window should surcharge exactly 2 HP × costPerHitpoint");
+        assertEquals((hurtHp - freeHp) * BotCaps.DEFAULT_COST_PER_HITPOINT, hurt.cost() - free.cost(), 1e-3,
+                "the shrunken window should surcharge exactly (hurtHp − freeHp) × costPerHitpoint");
     }
 
     @Test
