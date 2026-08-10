@@ -153,7 +153,23 @@ public final class StaircaseCourse {
             {-3, -55},
     };
     private static final int EXACT_Z = -2;
+
+    /**
+     * {@link #EXACT_BLOCKS} entries are <b>FEET cells, not block cells</b> — the owner read them off F3,
+     * whose {@code Block:} line reports {@code blockPosition()}, the cell the player stands IN, one above
+     * the block being stood ON (owner, 2026-08-10). So each entry's block goes at {@code y + this offset},
+     * and the entry's own {@code y} IS the feet height in that column.
+     *
+     * <p>The resulting shape confirms the reading: with the offset every rise is exactly ONE block, matching
+     * the owner's "all of my ascends are 1-block". Taken as block cells the list instead makes the
+     * ground→first-step rise TWO blocks — more than a 1.2522 apex can gain — i.e. a staircase with no legal
+     * entrance, which would have failed the tile for entirely the wrong reason. {@link Course#probeTile}
+     * dumps the built profile so the geometry is confirmed from the world rather than assumed.
+     */
+    private static final int EXACT_Y_OFFSET = -1;
+
     private static final double[] EXACT_START = {-11.5, -60, -1.5}; // /tp -12 -60 -2, block-centred
+    /** The owner's {@code goto} target. Already a FEET cell, which is what {@code comeTo} takes. */
     private static final BlockPos EXACT_GOAL = new BlockPos(-3, -55, EXACT_Z);
     /** Feet Y on the untouched superflat surface (grass in cell -61, top at -60). */
     private static final int EXACT_GROUND_FEET = -60;
@@ -202,7 +218,7 @@ public final class StaircaseCourse {
             this.baseZ = EXACT_Z;
             this.zc = EXACT_Z;
             this.span = EXACT_GOAL.getX() - baseX;
-            this.topFeetY = EXACT_GOAL.getY() + 1;
+            this.topFeetY = EXACT_GOAL.getY(); // the goal IS the landing's feet cell
             this.minFloorY = EXACT_GROUND_FEET - 3; // below the untouched superflat surface = fell off
             this.halfW = 0;
             this.zStart = EXACT_Z;
@@ -254,7 +270,8 @@ public final class StaircaseCourse {
                 for (int[] b : EXACT_BLOCKS) {
                     if (b[0] == x && b[1] > top) top = b[1];
                 }
-                if (top != Integer.MIN_VALUE) return top + 1;
+                // The entries ARE feet heights (EXACT_Y_OFFSET), so the tallest one in the column is it.
+                if (top != Integer.MIN_VALUE) return top;
                 if (x < EXACT_BLOCKS[0][0]) return EXACT_GROUND_FEET; // untouched superflat approach
                 return Integer.MIN_VALUE;                            // past the landing — nothing to assert
             }
@@ -626,7 +643,7 @@ public final class StaircaseCourse {
                     for (int z = EXACT_Z - 3; z <= EXACT_Z + 3; z++)
                         set(x, y, z, AIR);
             for (int[] b : EXACT_BLOCKS) {
-                set(b[0], b[1], EXACT_Z, Blocks.GRASS_BLOCK.defaultBlockState());
+                set(b[0], b[1] + EXACT_Y_OFFSET, EXACT_Z, Blocks.GRASS_BLOCK.defaultBlockState());
             }
         }
 
