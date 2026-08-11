@@ -118,7 +118,12 @@ affordances.
   holding all the fields above (one array read + bit-extract — no objects, no pointer
   chasing). Behavioral-equality dedup is lossless (distinct *behavior*, not lumped).
 - **Measured (`profile.BlockStateDedupTest`, 2026-06):** the 27,866 block states
-  collapse to **587 distinct fingerprints** (576 quantized) — a **48× collapse**. So:
+  collapse to **587 distinct fingerprints** (576 quantized) — a **48× collapse**.
+  *(A DATED READING, deliberately preserved as the record behind the sizing decision —
+  NOT a live figure. The count moves with the MC version and at runtime with
+  `mining.protectedBlocks`; never propagate this number forward. The durable output of
+  this measurement is the conclusion below, which does not depend on the exact value.)*
+  So:
   the index needs only ~10 bits (a `short` has ~100× headroom; the old 256/byte cap
   was genuinely too tight, which forced the previous lossy lumping); the descriptor
   table is **~4.6 KB — smaller than L1 cache**, so there is no cache-eviction concern
