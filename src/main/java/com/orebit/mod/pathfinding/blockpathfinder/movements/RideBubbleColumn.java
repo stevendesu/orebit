@@ -61,8 +61,16 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  * of the ~0.7 b/tick submerged conveyor push (the physical time to rise one block). {@link #RIDE_BASE} = a
  * small fixed allowance covering the lateral swim-in at the bottom + the settle/step-out at the top. Both terms
  * are non-negative and derived from the push constant; the ride cost is well above the search's minimum step
- * (≥ {@code RIDE_BASE}), so the octile heuristic stays admissible. This move fires only adjacent to a bubble
- * column (rare), so it adds no cost to the common per-node expansion beyond one {@code bubbleUp} probe.
+ * (≥ {@code RIDE_BASE}), so the octile heuristic stays admissible.
+ *
+ * <p><b>Per-pop read cost (measured by inspection 2026-08-11 — the older "no cost beyond one {@code
+ * bubbleUp} probe" claim was wrong).</b> A bubble column is rare, but the ENTRY PROBE is not free and is
+ * not one read: {@code candidates} tests all four feet-level cardinals, each as {@code built(cx,fy,cz)}
+ * <b>plus</b> {@code bubbleUp(cx,fy,cz)} — two section resolves apiece — so <b>every STANDING pop pays 8
+ * grid reads</b> whether or not a column exists anywhere nearby (the {@code ||} short-circuits only when
+ * the cell is unbuilt). Collapsing the pair to one {@code packedAt} + {@code descriptorOf} would halve it;
+ * no section-level "anyBubble" prefilter bit may be added to avoid it (hard rule — see the {@code anyDoor}
+ * removal in DESIGN-trapdoors.md §8).
  *
  * <h2>Follower — three STATE phases, no timers (no-arbitrary-timers)</h2>
  * The conveyor drives the vertical velocity; the follower must NOT fight it (an input-based {@code holdDepth}'s

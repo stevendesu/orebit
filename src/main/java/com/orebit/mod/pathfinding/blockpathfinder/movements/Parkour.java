@@ -52,14 +52,22 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *   <li><b>Blocked prisms no longer terminate the walk eagerly.</b> The lazy walk scans node-level cells
  *       past a blocked prism (bounded by {@code maxGapAll}), and backwards verification rejects every
  *       landing whose arc crosses the blocked column — the same candidates the eager termination
- *       produced. Once one demanded prism fails, the direction returns outright: every later landing's
- *       arc contains the failed column, so nothing farther can ever emit.</li>
- *   <li><b>Multiple landings per direction never re-read prism cells.</b> Falling landings don't end the
- *       scan, so one direction can demand verification several times (at non-decreasing depths — landing
- *       columns only grow). A monotone prefix cursor (two scalar locals: columns-verified +
- *       accumulated surcharge, zero allocation) resumes verification where the last demand stopped, so
- *       each prism cell is read at most once per direction and the surcharge keeps the eager
- *       column-ascending summation order.</li>
+ *       produced. <b>Only the FALLING arm actually returns on {@code PRISM_BLOCKED}</b> ({@code
+ *       tryFalling}'s {@code return found}); the two FLAT arms merely skip their emit, and because {@code
+ *       overfly} was already latched from {@code trigger} BEFORE the prism was demanded, the direction
+ *       walks on to the next column. Every later landing then re-demands a prefix containing the same
+ *       failed column and fails identically, so the CANDIDATE SET is still exactly the eager one — this
+ *       costs redundant reads, never a wrong candidate. (Corrected 2026-08-11: this bullet previously
+ *       claimed the direction "returns outright" in all arms, which the flat arms do not do.)</li>
+ *   <li><b>Multiple landings per direction re-read prism cells on the FLAT arms.</b> Falling landings
+ *       don't end the scan, so one direction can demand verification several times (at non-decreasing
+ *       depths — landing columns only grow). A monotone prefix cursor (two scalar locals:
+ *       columns-verified + accumulated surcharge, zero allocation) exists to resume verification where
+ *       the last demand stopped — but <b>only the falling arm writes it back</b>. The flat and rising
+ *       call sites discard {@code verifyPrisms}' returned cursor, so a flat emit followed by continued
+ *       scanning re-walks the whole prism prefix from column 1. The surcharge still keeps the eager
+ *       column-ascending summation order in every case. (Corrected 2026-08-11: this bullet previously
+ *       claimed each prism cell is read at most once per direction.)</li>
  *   <li><b>UNBUILT stays exactly as strict for every cell actually consulted:</b> an unbuilt node-level
  *       cell ends the direction, a consulted {@code y+1} / down-cell behaves as in v1.1, and an unbuilt
  *       prism cell consulted during backwards verification rejects the landing (and, per the first
@@ -534,9 +542,13 @@ public final class Parkour implements Movement {
      * {@code c = 1..maxGapAll+1} reading only the node-level cell (plus the CRAWL-gated {@code y+1}
      * rising-detection read and the envelope-capped falling down-cells); when a landing is actually
      * found, verify+price its gap prisms BACKWARDS via {@link #verifyPrisms} through the monotone prefix
-     * cursor ({@code verified}/{@code verifiedTransit} — demands only ever deepen, so no prism cell is
-     * read twice even when one direction emits several falling landings). A failed demand ends the whole
-     * direction: every later landing's arc contains the failed column. Stop at the first standable
+     * cursor ({@code verified}/{@code verifiedTransit} — demands only ever deepen). <b>The cursor is
+     * written back ONLY by the falling arm</b>, so only there does a prism cell go unread twice; the flat
+     * and rising arms discard {@code verifyPrisms}' return, and a later demand re-walks the prefix from
+     * column 1 (class Javadoc, corrected 2026-08-11). Likewise <b>only the falling arm returns on a
+     * failed demand</b> — the flat arms skip their emit and keep walking, because {@code overfly} is
+     * latched from {@code trigger} before the prism is demanded. Harmless to the candidate set (the
+     * re-demand fails on the same column), costly in reads. Stop at the first standable
      * node-level cell (never overfly a ledge, v1) or blocked/unbuilt consulted cell. Primitives only,
      * zero allocation.
      *
@@ -788,7 +800,12 @@ public final class Parkour implements Movement {
      * {@link #PRISM_BLOCKED} on a blocked/unbuilt cell (UNBUILT is as strict here as it was in the eager
      * walk: the cell was consulted, so it rejects). Demands are monotone ({@code n} never shrinks within
      * a direction — landing columns only grow), so with {@code n <= verified} this is a no-op returning
-     * the cursor unchanged, and no prism cell is ever read twice per direction.
+     * the cursor unchanged.
+     *
+     * <p><b>The no-re-read property holds only where the CALLER stores the returned cursor</b> (corrected
+     * 2026-08-11). Today just the falling arm does; the two flat arms and both rising arms pass
+     * {@code verified} in and throw the result away, so for them the monotone-prefix precondition never
+     * establishes itself and every demand re-walks {@code y+1..y+3} for columns {@code 1..n} from scratch.
      */
     private static long verifyPrisms(MovementContext ctx, int x, int y, int z, int dx, int dz,
             int verified, float transit, int n) {

@@ -227,8 +227,12 @@ public final class NavGridView {
     /**
      * The E3 floorGap nibble at world cell {@code (x,y,z)} ({@link TraversalGrid#floorGap}), or
      * {@link TraversalGrid#DEPTH_UNKNOWN} where that chunk's nav data isn't built. Resolution shares the
-     * same per-search chunk cache as {@link #packedAt} — the consumer ({@code Fall}) reads the flags slot of
-     * the same cell immediately before, so this second call is a cache-key compare plus an array index.
+     * same per-search chunk cache as {@link #packedAt}. There are TWO consumers, and the free-second-resolve
+     * argument covers only one (corrected 2026-08-11, which named {@code Fall} as "the consumer"):
+     * {@code Fall} reads the flags slot of the same cell immediately before, so its call really is a
+     * cache-key compare plus an array index; {@code WalkOff} reads the nibble as the FIRST touch of that
+     * cell in each direction — by design, since on flat ground it alone ends the direction — and so pays a
+     * full resolve.
      */
     public int floorGapAt(int x, int y, int z) {
         NavSection section = sectionAt(x, y, z);

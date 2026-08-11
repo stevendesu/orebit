@@ -16,7 +16,9 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  *
  * <p>The step-off transit is the three cells {@code (nx, y..y+2, nz)} — head clearance stepping off, the
  * transit, and the new head — which are exactly the destination floor's body column. So the dest's
- * {@code JUMP}-level HEADROOM bit proves the transit clear in a single read; where it can't (near a
+ * {@code JUMP}-level HEADROOM bit proves the transit clear with ZERO additional reads (corrected
+ * 2026-08-11 — "in a single read" over-stated it: the flags ride the one {@code packedAt} slot already
+ * resolved for the dest-floor standability test); where it can't (near a
  * section face, or a block in the way), the cells are read and folded into a break-set under the
  * {@code RISKY_EDIT} gate.
  *

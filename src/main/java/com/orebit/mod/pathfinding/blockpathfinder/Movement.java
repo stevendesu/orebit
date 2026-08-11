@@ -14,12 +14,21 @@ package com.orebit.mod.pathfinding.blockpathfinder;
  * search's correctness for moves already shipped can't regress when a new one lands).
  *
  * <h2>The two-resolution interplay</h2>
- * A movement uses {@link MovementContext#built} (the cached 2-bit grid) only as a cheap "is this cell's
- * nav data loaded" gate, and {@link MovementContext#descriptorAt}-derived predicates ({@link
- * MovementContext#standable}, {@link MovementContext#passable}) for the <i>precise</i> per-cell checks.
- * The coarse grid finds candidates; live geometry decides whether the move actually works — which is
- * what fixes the "head-in-block" class of bug precisely at the move level rather than approximating it
- * in the grid.
+ * A movement gates on "is this cell's nav data loaded", then uses {@link MovementContext#descriptorAt}-
+ * derived predicates ({@link MovementContext#standable}, {@link MovementContext#passable}) for the
+ * <i>precise</i> per-cell checks. The coarse grid finds candidates; live geometry decides whether the move
+ * actually works — which is what fixes the "head-in-block" class of bug precisely at the move level rather
+ * than approximating it in the grid.
+ *
+ * <p><b>How that gate is actually spelled</b> (corrected 2026-08-11 — this said "{@link
+ * MovementContext#built} (the cached 2-bit grid)", and there is no 2-bit grid: that was the deleted
+ * {@code TraversalClass}. A {@link com.orebit.mod.worldmodel.pathing.TraversalGrid} cell is a packed
+ * {@code short} = 6 flag bits + a 10-bit navtype, and {@code built} is a section-presence test, not a
+ * per-cell value.) <b>No Tier-1 GROUND movement calls {@code built} any more</b> — they resolve the slot
+ * once with {@link MovementContext#packedAt} and compare against {@link MovementContext#UNBUILT}, which
+ * folds the loaded-gate, the flags and the navtype into ONE section resolve. Only the fluid family and
+ * {@code RideBubbleColumn} still pay the older {@code built} + {@code descriptorAt} pair, at two resolves
+ * per cell. Prefer {@code packedAt}/{@link MovementContext#descriptorOf} in new movements.
  */
 public interface Movement {
 

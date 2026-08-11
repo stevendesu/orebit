@@ -991,8 +991,14 @@ public final class MovementContext {
     /**
      * The E3 floorGap nibble at cell {@code (x,y,z)} ({@link TraversalGrid#floorGap}) —
      * {@link TraversalGrid#DEPTH_UNKNOWN} where unbuilt or unmaintained, in which case the caller
-     * legacy-scans. The consumer ({@code Fall}) reads this through the same per-search chunk cache as the
-     * flags slot it just read, so the second resolve is a cache-key compare plus an array index.
+     * legacy-scans.
+     *
+     * <p><b>Two consumers, and the free-second-resolve argument holds for only one</b> (corrected
+     * 2026-08-11 — this named {@code Fall} as "the consumer"). {@code Fall} reads it right after
+     * {@link #flagsAt} on the SAME cell, so its resolve really is a cache-key compare plus an array index.
+     * {@code WalkOff} reads it as the FIRST touch of that cell in each direction — deliberately, since on
+     * flat ground the nibble alone ends the direction and is the whole per-direction cost — so it pays a
+     * full resolve. Both are correct; only the cost reasoning differs.
      */
     public int floorGapAt(int x, int y, int z) {
         return grid.floorGapAt(x, y, z);
@@ -1019,7 +1025,10 @@ public final class MovementContext {
         return NavFlags.headroom(flags);
     }
 
-    /** Whether editing this floor's body space risks a fluid flow / gravity cascade (from {@code flags}). */
+    /** Whether editing at/next to this floor risks a gravity cascade, or disturbs LAVA (from {@code flags}).
+     *  NOT "a fluid flow" (corrected 2026-08-11): since the 2026-08-10 ruling water never sets the bit and
+     *  lava sets it unconditionally — the fluid half means "a lava cell is one of my six orthogonal
+     *  neighbours", with no flowing/impoundment test at all. See {@code NavFlags}' lava-term section. */
     public static boolean risksEdit(int flags) {
         return NavFlags.risksEdit(flags);
     }
@@ -1043,8 +1052,17 @@ public final class MovementContext {
      * <p>(The COLUMN build/patch path now computes near-seam bits against the section above — vertical
      * overscan, see {@code NavFlags} — so a live grid's top-row bits are honest, not just one-directional.
      * The per-level guard here is KEPT anyway: single-section producers without column context
-     * ({@code classifyInto}, the neighbour-less {@code patchCell}) remain air-optimistic above, and the
-     * guard costs one compare. Do not relax it while those paths exist.)
+     * ({@code classifyInto} — documented as the headless/test entry — and the neighbour-less 5-arg
+     * {@code patchCell}) remain air-optimistic above. Do not relax it while those paths exist.)
+     *
+     * <p><b>The guard is one compare, but a guard that FIRES is not cheap</b> (recorded 2026-08-11 — the
+     * old "costs one compare" note read as though the whole thing were free). A refused proof falls the
+     * caller back to the per-cell {@code descriptorAt} probes, and the refusal is purely positional:
+     * {@link #HEADROOM_WALK} is refused for {@code y&15 ∈ {14,15}} (12.5% of floor cells) and
+     * {@link #HEADROOM_JUMP} for {@code y&15 ∈ {13,14,15}} (18.75%) — on a LIVE grid whose bits are
+     * already exact there. Closing that gap means making the remaining producers seam-exact (or letting
+     * the consumer learn the grid had column context), NOT deleting the guard: on a headless/test grid it
+     * is the only thing standing between a trusted proof and an optimistic bit.
      *
      * <p><b>SELF-EDIT COHERENCE (owner-ratified 2026-07-30 — the place-box gate).</b> The resident flags
      * cannot see the current path's edits. For BREAKS that is fail-safe: the flags read the cell solid,
@@ -1252,8 +1270,11 @@ public final class MovementContext {
 
     /**
      * Whether {@code d} is a climbable block (ladder / scaffolding / the vine family — the {@link
-     * NavBlock#isClimbable CLIMB} fingerprint bit) on an already-read descriptor (read-once form; the
-     * climb move reads every cell exactly once via {@link #packedAt}/{@link #descriptorOf}). Note the
+     * NavBlock#isClimbable CLIMB} fingerprint bit) on an already-read descriptor (read-once form; {@code
+     * Climb} resolves its cells via {@link #packedAt}/{@link #descriptorOf} — though NOT "exactly once"
+     * as this said before 2026-08-11: it re-resolves its own floor cell {@code (x,y,z)} in the climb-down
+     * arm and again in the hang test, and a third time in the trapdoor-stance branch, and its top-entry
+     * and grab loops both touch the same four cardinal columns). Note the
      * climbable shapes diverge (bytecode-adjudicated 2026-07-31, NOTES-movement-physics.md §3): ladder
      * classifies {@code SHAPE_OTHER} and scaffolding {@code SHAPE_FULL} (the empty-context query returns
      * its stand-on-top stable shape) — both NOT {@link #passable} but genuinely {@link #standable}
