@@ -1,6 +1,8 @@
 package com.orebit.mod.worldmodel.pathing;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -22,32 +24,34 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.Strategy;
 
 /**
- * <b>Bit-identity proof for the flowing-fluid RISKY_EDIT SCATTER</b> (PERF-DESIGN-navgrid-build §C1). The
- * chunk-column build used to GATHER RISKY_EDIT's fluid term per cell ({@link NavFlags#risksFluidFlow} at
- * {@code y+1}/{@code y+2} inside {@link NavFlags#compute}); it now SCATTERS it from each flowing source in
- * {@link NavSectionBuilder#computeDepth}, folded into the ascending floorGap sweep. Both express the same
- * dilation of the flowing-fluid set, so the produced grids must be <b>byte-for-byte identical</b>.
+ * <b>Identity + semantics proof for the LAVA RISKY_EDIT SCATTER</b> (PERF-DESIGN-navgrid-build §C1,
+ * re-scoped by the owner ruling of 2026-08-10 — see {@link NavFlags}'s lava-term section).
  *
- * <p>Each fixture is a multi-section chunk column classified two ways from the SAME block states:
+ * <p>The chunk-column build SCATTERS RISKY_EDIT from each lava cell in
+ * {@link NavSectionBuilder#computeDepth}, folded into the ascending floorGap sweep. The scatter's geometry
+ * is a <b>1-cell dilation over the 6 orthogonal neighbours</b> of every lava cell — nothing else. It must
+ * therefore equal an independent per-cell GATHER of the same dilation, so this test builds each fixture
+ * twice from the SAME block states:
  * <ul>
- *   <li><b>SCATTER (production)</b> — {@link NavSectionBuilder#computeFlags} (whose {@code compute} no
- *       longer gathers fluid) then {@link NavSectionBuilder#computeDepth} (the scatter fold).</li>
- *   <li><b>GATHER (reference)</b> — the <i>same</i> {@code computeFlags} base, then the retained
- *       {@code risksFluidFlow} gather OR-ed in per cell over the identical vertical-overscan scratch
- *       {@code computeFlags} builds, then a scatter-free copy of the depth sweeps.</li>
+ *   <li><b>SCATTER (production)</b> — {@link NavSectionBuilder#computeFlags} (whose {@code compute} owns
+ *       only the gravity term) then {@link NavSectionBuilder#computeDepth} (the scatter fold).</li>
+ *   <li><b>GATHER (reference)</b> — the <i>same</i> {@code computeFlags} base, then an oracle that walks
+ *       the whole column in <b>column-Y space</b> ({@code colY = section*16 + row}) and OR-s RISKY_EDIT
+ *       into every cell with a lava 6-neighbour, then a scatter-free copy of the depth sweeps.</li>
  * </ul>
- * Sharing the {@code computeFlags} base isolates the single property under test — do the scattered
+ * Working the oracle in column-Y — rather than through the per-section descriptor scratch the production
+ * code uses — makes it independent of the scratch's upward-only overscan, which is exactly the machinery
+ * the vertical seams stress.
+ *
+ * <p>Sharing the {@code computeFlags} base isolates the single property under test — do the scattered
  * RISKY_EDIT cells equal the gathered ones? — from every other flag/nibble. The assertion compares both
  * the packed {@link TraversalGrid#raw()} shorts and the {@link TraversalGrid#depthRaw()} bytes of every
  * section.
  *
- * <p>The fixtures deliberately exercise: a flowing source next to floor cells (RISKY set), a
- * fluid-over-fluid non-source (RISKY not set), a flowing source at a section's BOTTOM row that must
- * scatter DOWN across the seam (matching the old gather's read of the section-above overscan), a
- * fluid-over-fluid pair straddling a section seam (the reset-vs-continuous-carry discriminator: the
- * continuous carry sees the real cell below across the seam, exactly as the gather did — so NO seam reset
- * is bit-identical), lava sources, and a flowing source scattering into an all-air section below it
- * (the uniform-air {@code computeFlags} fast path).
+ * <p>Beyond the identity, three semantic tests pin the ruling itself: <b>water never scatters</b> (the old
+ * flowing-fluid dilation is gone, not merely re-shaped), <b>lava scatters in all six directions and only
+ * those</b> (no diagonals, no ±2 rows, centre excluded), and <b>both vertical section seams are crossed</b>
+ * (row 0 lava marks the section below's row 15; row 15 lava marks the section above's row 0).
  */
 class FluidScatterIdentityTest {
 
@@ -59,7 +63,6 @@ class FluidScatterIdentityTest {
     private static BlockState STONE;
     private static BlockState WATER;
     private static BlockState LAVA;
-    private static long AIR_DESC;
 
     @BeforeAll
     static void boot() {
@@ -72,7 +75,6 @@ class FluidScatterIdentityTest {
         STONE = Blocks.STONE.defaultBlockState();
         WATER = Blocks.WATER.defaultBlockState();
         LAVA = Blocks.LAVA.defaultBlockState();
-        AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
     }
 
     /** A classified column ready for the flags+depth passes: navtypes resident, flags 0, depth UNKNOWN. */
@@ -85,15 +87,16 @@ class FluidScatterIdentityTest {
     private static List<Fixture> fixtures() {
         List<Fixture> f = new ArrayList<>();
         f.add(new Fixture("RICH", FluidScatterIdentityTest::buildRich));
-        f.add(new Fixture("AIR_BELOW_FLUID", FluidScatterIdentityTest::buildAirBelowFluid));
+        f.add(new Fixture("AIR_BELOW_LAVA", FluidScatterIdentityTest::buildAirBelowLava));
         return f;
     }
 
     /**
      * A 4-section column (world y 0..63) with a stone floor and a spread of fluid shapes:
-     * a shallow water pond (flowing over the floor), a deep water column (source at the base,
-     * non-sources above it), lava sources, a flowing source straddling the s0/s1 seam from below,
-     * and a fluid-over-fluid pair straddling the s0/s1 seam (the carry-vs-reset discriminator).
+     * water in several arrangements (none of which may scatter anything), a lone lava cell, a lava column,
+     * lava on BOTH sides of a section seam (the upward and downward seam crossings), lava at the top row of
+     * the last content-bearing section (scattering into an ALL-AIR section above), and lava flush against a
+     * lateral section face (whose off-section offset must be dropped identically by both pipelines).
      */
     private static Column buildRich() {
         PalettedContainer<BlockState>[] secs = newColumn(4);
@@ -102,67 +105,68 @@ class FluidScatterIdentityTest {
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) put(secs, x, 0, z, STONE);
         }
-        // A: shallow water pond one above the floor — every cell water-over-stone ⇒ flowing; the floor
-        //    cells around/under it must pick up RISKY_EDIT.
+        // WATER — must contribute NOTHING. A shallow pond over the floor (every cell was "flowing" under the
+        // old model, so under the old rules this whole patch lit up), a deep column (source + non-sources),
+        // and a pair straddling the s0/s1 seam.
         for (int x = 3; x <= 6; x++) {
             for (int z = 3; z <= 6; z++) put(secs, x, 1, z, WATER);
         }
-        // B: deep water column — y1 flowing (over stone), y2/y3 fluid-over-fluid NON-sources.
         put(secs, 10, 1, 10, WATER);
         put(secs, 10, 2, 10, WATER);
         put(secs, 10, 3, 10, WATER);
-        // E: lava — a lone source and a 3-deep column (source at base, non-sources above).
-        put(secs, 1, 1, 12, LAVA);
-        put(secs, 1, 1, 13, LAVA);
-        put(secs, 1, 2, 13, LAVA);
-        put(secs, 1, 3, 13, LAVA);
-        // C: flowing source AT a section's bottom row (world y16 = s1 row 0) over air (world y15 = s0 top).
-        //    Must scatter DOWN across the seam into s0 rows 15 and 14.
-        put(secs, 12, 16, 5, WATER);
-        put(secs, 12, 17, 5, WATER); // non-source above it (fluid-over-fluid)
-        // D: fluid-over-fluid straddling the seam — water at world y15 (s0 top) AND world y16 (s1 bottom),
-        //    with air below the pair. The y15 cell is a flowing source (over air y14); the y16 cell is NOT
-        //    (real fluid below it, across the seam). A seam RESET would wrongly flag y16 flowing — this is
-        //    the discriminator that a CONTINUOUS carry (no reset) is the bit-identical choice.
         put(secs, 14, 15, 7, WATER);
         put(secs, 14, 16, 7, WATER);
+
+        // LAVA — a lone cell (all 6 neighbours in-section) and a 3-tall column.
+        put(secs, 1, 5, 12, LAVA);
+        put(secs, 5, 10, 5, LAVA);
+        put(secs, 5, 11, 5, LAVA);
+        put(secs, 5, 12, 5, LAVA);
+        // Vertical section seam, DOWNWARD: lava at s1's row 0 (world y16) marks s0's row 15 (world y15).
+        put(secs, 12, 16, 5, LAVA);
+        // Vertical section seam, UPWARD: lava at s0's row 15 (world y15) marks s1's row 0 (world y16).
+        put(secs, 2, 15, 9, LAVA);
+        // Upward seam into an ALL-AIR section: lava at s1's row 15 (world y31) marks s2's row 0 (y32).
+        put(secs, 8, 31, 8, LAVA);
+        // Lateral section face: the x-1 offset leaves the section and must be dropped by BOTH pipelines.
+        put(secs, 0, 5, 9, LAVA);
 
         return classify(secs, new boolean[] { false, false, true, true });
     }
 
     /**
-     * A 4-section column whose bottom section is ALL AIR with a fluid section directly above it: the s1
-     * bottom-row source scatters DOWN into the all-air s0's top rows, exercising the uniform-air
-     * {@code computeFlags} fast path together with the cross-seam scatter.
+     * A 4-section column whose bottom section is ALL AIR with lava directly above it: the s1 bottom-row lava
+     * scatters DOWN into the all-air s0's top row, exercising the uniform-air {@code computeFlags} fast path
+     * together with the cross-seam scatter.
      */
-    private static Column buildAirBelowFluid() {
+    private static Column buildAirBelowLava() {
         PalettedContainer<BlockState>[] secs = newColumn(4);
-        // s0 (world y0..15): all air.  s1: a flowing water source at its bottom rows.
-        put(secs, 5, 16, 5, WATER);          // world y16 = s1 row 0, over air (s0 top) ⇒ flowing
-        put(secs, 5, 17, 5, WATER);          // non-source above it
-        put(secs, 6, 16, 9, LAVA);           // a second flowing source (lava) at the seam
+        // s0 (world y0..15): all air.  s1: lava at its bottom row.
+        put(secs, 5, 16, 5, LAVA);
+        put(secs, 5, 17, 5, LAVA);
+        put(secs, 6, 16, 9, WATER); // water at the same seam: still nothing
         return classify(secs, new boolean[] { true, false, true, true });
     }
 
     // ---- The two build pipelines -------------------------------------------------------------
 
-    /** SCATTER (production): computeFlags per section (fluid-free compute) + computeDepth (scatter fold). */
+    /** SCATTER (production): computeFlags per section (lava-free compute) + computeDepth (scatter fold). */
     private static void buildScatter(Column col) {
         applyFlags(col);
         NavSectionBuilder.computeDepth(col.sections());
     }
 
-    /** GATHER (reference): the SAME computeFlags base, then the retained per-cell fluid gather OR-ed in,
-     *  then the scatter-free depth sweeps. This reconstructs the exact pre-C1 grid. */
+    /** GATHER (reference): the SAME computeFlags base, then the independent column-Y lava gather, then the
+     *  scatter-free depth sweeps. */
     private static void buildGather(Column col) {
         applyFlags(col);
-        applyFluidGather(col);
+        applyLavaGather(col.sections());
         legacyDepthNibbles(col.sections());
     }
 
     /** Pass 2 exactly as {@link com.orebit.mod.worldmodel.pathing.ChunkNavBuilder} drives it: each section's
      *  flags with the section above as vertical overscan (null when top or all-air). Shared base for both
-     *  pipelines so only the fluid RISKY_EDIT differs. */
+     *  pipelines so only the lava RISKY_EDIT differs. */
     private static void applyFlags(Column col) {
         NavSection[] s = col.sections();
         boolean[] allAir = col.allAir();
@@ -173,24 +177,22 @@ class FluidScatterIdentityTest {
         }
     }
 
-    /** The retained-gather reference: OR RISKY_EDIT into each floor cell for which the pre-C1
-     *  {@code risksFluidFlow(y+1) || risksFluidFlow(y+2)} holds, over the identical overscan scratch
-     *  {@code computeFlags} used. */
-    private static void applyFluidGather(Column col) {
-        NavSection[] s = col.sections();
-        boolean[] allAir = col.allAir();
-        long[] desc = new long[NavFlags.SCRATCH_SIZE];
-        for (int i = 0; i < s.length; i++) {
-            TraversalGrid grid = s[i].getTraversalGrid();
-            NavSection above = i + 1 < s.length ? s[i + 1] : null;
-            TraversalGrid aboveGrid = (above == null || allAir[i + 1]) ? null : above.getTraversalGrid();
-            fillScratch(desc, grid, aboveGrid);
-            for (int y = 0; y < 16; y++) {
+    /**
+     * The independent oracle: OR RISKY_EDIT into every cell of the column that has a LAVA cell among its 6
+     * orthogonal neighbours, working directly in column-Y space. Lateral offsets that leave the 0..15
+     * section footprint resolve to "no lava" — the same air-optimism the production scatter has at a chunk
+     * face (closed separately by {@code EdgeFluidScatter}, which this fixture does not exercise).
+     */
+    private static void applyLavaGather(NavSection[] col) {
+        for (int i = 0; i < col.length; i++) {
+            if (col[i] == null) continue;
+            TraversalGrid grid = col[i].getTraversalGrid();
+            for (int ly = 0; ly < 16; ly++) {
+                int colY = (i << 4) | ly;
                 for (int z = 0; z < 16; z++) {
                     for (int x = 0; x < 16; x++) {
-                        if (NavFlags.risksFluidFlow(desc, x, y + 1, z)
-                                || NavFlags.risksFluidFlow(desc, x, y + 2, z)) {
-                            grid.orFlags(x, y, z, NavFlags.RISKY_EDIT);
+                        if (anyLavaNeighbour(col, x, colY, z)) {
+                            grid.orFlags(x, ly, z, NavFlags.RISKY_EDIT);
                         }
                     }
                 }
@@ -198,26 +200,23 @@ class FluidScatterIdentityTest {
         }
     }
 
-    /** Replica of {@link NavSectionBuilder}'s fillScratch/fillOverscan: navtypes → descriptors + the
-     *  section-above's bottom {@link NavFlags#OVERSCAN_ROWS} rows as overscan (air when {@code above} null). */
-    private static void fillScratch(long[] desc, TraversalGrid grid, TraversalGrid above) {
-        short[] raw = grid.raw();
-        for (int i = 0; i < 4096; i++) {
-            desc[i] = NavBlock.descriptor((short) (raw[i] & TraversalGrid.NAVTYPE_MASK));
-        }
-        if (above == null) {
-            Arrays.fill(desc, 4096, NavFlags.SCRATCH_SIZE, AIR_DESC);
-        } else {
-            short[] araw = above.raw();
-            for (int i = 0; i < NavFlags.OVERSCAN_ROWS * 256; i++) {
-                desc[4096 + i] = NavBlock.descriptor((short) (araw[i] & TraversalGrid.NAVTYPE_MASK));
-            }
-        }
+    /** The 6-offset structuring element, spelled out (no shared table — this is meant to be independent). */
+    private static boolean anyLavaNeighbour(NavSection[] col, int x, int colY, int z) {
+        return lavaAt(col, x - 1, colY, z) || lavaAt(col, x + 1, colY, z)
+                || lavaAt(col, x, colY - 1, z) || lavaAt(col, x, colY + 1, z)
+                || lavaAt(col, x, colY, z - 1) || lavaAt(col, x, colY, z + 1);
     }
 
-    /** A verbatim copy of the PRE-scatter {@code computeDepth} — the two single-direction nibble sweeps,
-     *  with NO fluid scatter. The oracle's Pass 3, so the reference grid's depth bytes come from the same
-     *  logic as production's (which the scatter left untouched). */
+    private static boolean lavaAt(NavSection[] col, int x, int colY, int z) {
+        if (x < 0 || x > 15 || z < 0 || z > 15 || colY < 0 || (colY >> 4) >= col.length) return false;
+        NavSection s = col[colY >> 4];
+        if (s == null) return false;
+        return NavBlock.isLava(NavBlock.descriptor((short) s.getTraversalGrid().navtype(x, colY & 15, z)));
+    }
+
+    /** A verbatim copy of the scatter-free {@code computeDepth} — the two single-direction nibble sweeps.
+     *  The oracle's Pass 3, so the reference grid's depth bytes come from the same logic as production's
+     *  (which the scatter leaves untouched). */
     private static void legacyDepthNibbles(NavSection[] sections) {
         int[] colA = new int[256];
         int[] colB = new int[256];
@@ -272,7 +271,7 @@ class FluidScatterIdentityTest {
         }
     }
 
-    // ---- The assertion -----------------------------------------------------------------------
+    // ---- The identity assertion --------------------------------------------------------------
 
     @Test
     void scatterBuildIsByteIdenticalToTheGather() {
@@ -294,7 +293,97 @@ class FluidScatterIdentityTest {
         }
     }
 
+    // ---- The semantic assertions (the owner ruling itself) -----------------------------------
+
+    /**
+     * <b>Water is inert.</b> The term used to fire on any fluid whose cell-below was dry — which a pond over
+     * a floor satisfies at every cell — so this scene used to light up a 6×6 patch of RISKY_EDIT. Nothing in
+     * the scene has gravity, so a single RISKY bit anywhere is a regression.
+     */
+    @Test
+    void waterNeverScatters() {
+        PalettedContainer<BlockState>[] secs = newColumn(2);
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) put(secs, x, 0, z, STONE);
+        }
+        for (int x = 3; x <= 6; x++) {                       // a pond, every cell "flowing" under the old rule
+            for (int z = 3; z <= 6; z++) put(secs, x, 1, z, WATER);
+        }
+        put(secs, 10, 1, 10, WATER);                          // a 3-deep column
+        put(secs, 10, 2, 10, WATER);
+        put(secs, 10, 3, 10, WATER);
+        put(secs, 12, 15, 12, WATER);                         // straddling the section seam
+        put(secs, 12, 16, 12, WATER);
+        NavSection[] col = build(secs, new boolean[] { false, false });
+
+        for (int i = 0; i < col.length; i++) {
+            for (int y = 0; y < 16; y++) {
+                for (int z = 0; z < 16; z++) {
+                    for (int x = 0; x < 16; x++) {
+                        assertFalse(NavFlags.risksEdit(col[i].getFlags(x, y, z)),
+                                "water must not set RISKY_EDIT — section " + i + " (" + x + "," + y + "," + z + ")");
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * <b>Lava's dilation is exactly the 6 orthogonal neighbours</b> — not 4 horizontals, not two rows down,
+     * not the diagonals, and not the lava cell itself. One lava cell in open air, well away from every face.
+     */
+    @Test
+    void lavaScattersToTheSixOrthogonalNeighboursOnly() {
+        PalettedContainer<BlockState>[] secs = newColumn(2);
+        put(secs, 8, 8, 8, LAVA);
+        NavSection[] col = build(secs, new boolean[] { false, true });
+
+        assertTrue(risky(col, 7, 8, 8), "x-1");
+        assertTrue(risky(col, 9, 8, 8), "x+1");
+        assertTrue(risky(col, 8, 7, 8), "y-1");
+        assertTrue(risky(col, 8, 9, 8), "y+1");
+        assertTrue(risky(col, 8, 8, 7), "z-1");
+        assertTrue(risky(col, 8, 8, 9), "z+1");
+
+        assertFalse(risky(col, 8, 8, 8), "the lava cell itself is not marked (centre excluded)");
+        assertFalse(risky(col, 7, 7, 8), "diagonals are not marked");
+        assertFalse(risky(col, 8, 6, 8), "two rows down is not marked (the old y-2 row is gone)");
+        assertFalse(risky(col, 6, 8, 8), "two cells out is not marked");
+    }
+
+    /**
+     * <b>Both vertical section seams are crossed.</b> Lava at a section's bottom row marks the section
+     * BELOW's row 15; lava at a section's top row marks the section ABOVE's row 0. The second direction is
+     * the one the descriptor scratch cannot express (it overscans upward only), so it is scattered through
+     * the real neighbour grid — see {@code NavSectionBuilder.scatterLavaRisky}.
+     */
+    @Test
+    void lavaCrossesBothVerticalSectionSeams() {
+        PalettedContainer<BlockState>[] secs = newColumn(3);
+        put(secs, 4, 16, 4, LAVA);  // s1 row 0  -> DOWN into s0 row 15 (world y15)
+        put(secs, 9, 15, 9, LAVA);  // s0 row 15 -> UP   into s1 row 0  (world y16)
+        NavSection[] col = build(secs, new boolean[] { false, false, true });
+
+        assertTrue(risky(col, 4, 15, 4), "row-0 lava must mark the section BELOW's row 15");
+        assertTrue(risky(col, 9, 16, 9), "row-15 lava must mark the section ABOVE's row 0");
+        // ...and nothing two rows away in either direction.
+        assertFalse(risky(col, 4, 14, 4), "no second row below");
+        assertFalse(risky(col, 9, 17, 9), "no second row above");
+    }
+
     // ---- Fixture plumbing --------------------------------------------------------------------
+
+    /** RISKY_EDIT at a WORLD-y cell of the column (minY 0). */
+    private static boolean risky(NavSection[] col, int x, int wy, int z) {
+        return NavFlags.risksEdit(col[wy >> 4].getFlags(x, wy & 15, z));
+    }
+
+    /** The production pipeline end to end: classify, overscan flags, column depth sweep (with the scatter). */
+    private static NavSection[] build(PalettedContainer<BlockState>[] secs, boolean[] allAir) {
+        Column col = classify(secs, allAir);
+        buildScatter(col);
+        return col.sections();
+    }
 
     @SuppressWarnings("unchecked")
     private static PalettedContainer<BlockState>[] newColumn(int n) {

@@ -300,7 +300,9 @@ This file covers persistence only. The other live measurement records:
 - `internal_docs/bench-ledger.md` — sourced numbers with no `docs/Optimizations` chapter, plus the
   explicit MEASUREMENT-PENDING list.
 - `internal_docs/PERF-DESIGN-navgrid-build.md` §4 — the NavGrid-build JFR (CAVE 3060 µs/column,
-  `NavFlags.risksFluidFlow` 65.9%; SURFACE 838 µs, 53.1%), the shipped C1 fluid SCATTER
+  `NavFlags.risksFluidFlow` 65.9%; SURFACE 838 µs, 53.1%), the shipped C1 fluid SCATTER (since 2026-08-10 a
+  LAVA-ONLY 6-neighbour dilation — `NavFlags.risksLavaEdit`; these numbers predate that and are if anything
+  conservative, the new predicate being strictly cheaper)
   (**continuous carry, no seam reset**), and the deferred **C4 off-thread build** (the largest remaining
   tick-budget lever).
 - `internal_docs/PERF-DESIGN-navgrid-edit-batching.md` status header — the s54 batching A/B

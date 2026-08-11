@@ -84,18 +84,25 @@ public class NavFlagsTest {
         put(g, 8, 10, 8, state(Blocks.SAND));
         assertTrue(NavFlags.risksEdit(flags(g)), "sand overhead = risky edit");
 
-        // The FLUID term of RISKY_EDIT is NOT gathered by compute() any more — it was moved to the per-source
-        // SCATTER in NavSectionBuilder.computeDepth (PERF-DESIGN-navgrid-build §C1): a flowing source marks its
-        // horizontal-neighbour floor cells during the section build, not here. So compute() over a bare grid
-        // leaves an adjacent flowing source CLEAR; the fluid RISKY_EDIT is proven at the build/patch level by
-        // FluidScatterIdentityTest / FluidPatchIdentityTest / CrossChunkFluidScatterTest. (This assertion was
-        // flipped from the pre-scatter GATHER behaviour when the term moved — compute() now owns only the
-        // gravity term above.)
+        // The FLUID term of RISKY_EDIT is NOT gathered by compute() — it is SCATTERED from each LAVA cell in
+        // NavSectionBuilder.computeDepth (PERF-DESIGN-navgrid-build §C1) during the section build, not here.
+        // So compute() over a bare grid leaves even an adjacent lava cell CLEAR; the lava RISKY_EDIT is proven
+        // at the build/patch level by FluidScatterIdentityTest / FluidPatchIdentityTest /
+        // CrossChunkFluidScatterTest. (compute() owns only the gravity term above.)
         g = freshGrid();
         put(g, 8, 8, 8, state(Blocks.STONE));
-        put(g, 7, 9, 8, state(Blocks.WATER)); // beside the feet cell; (7,8,8) stays air (not draining)
+        put(g, 7, 9, 8, state(Blocks.LAVA)); // beside the feet cell
         assertFalse(NavFlags.risksEdit(flags(g)),
-                "compute() no longer gathers the fluid term — it is scattered during the section build");
+                "compute() does not gather the lava term — it is scattered during the section build");
+
+        // ...and WATER never contributes to RISKY_EDIT at all any more (owner ruling 2026-08-10): the old
+        // flowing-fluid dilation is gone, not merely relocated. Asserted here as well as at the build level
+        // so a re-introduction of a water term in compute() is caught immediately.
+        g = freshGrid();
+        put(g, 8, 8, 8, state(Blocks.STONE));
+        put(g, 7, 9, 8, state(Blocks.WATER));
+        put(g, 8, 9, 8, state(Blocks.WATER));
+        assertFalse(NavFlags.risksEdit(flags(g)), "water is never a RISKY_EDIT hazard");
 
         // --- CLEARABLE_HAZARD (walk-through, cost not block) -------------------------------------
         // Fire in the body space over a solid floor.

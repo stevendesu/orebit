@@ -1471,9 +1471,9 @@ public final class MovementContext {
      * section read the section above — see {@code NavFlags} "Boundary handling"), so the prefilter is
      * EXACT for this method: a hazard just across a section's top face IS flagged and charged. (The old
      * within-section computation left the top ~3 floor rows of every section stale-CLEAR — this zero-read
-     * fast path then transited a seam-row berry-bush maze for free, lethally. Only the LATERALLY-read bits
-     * — RISKY_EDIT's fluid scan, PLACEABLE_NEIGHBOR — remain air-optimistic at chunk-side faces; neither
-     * is read here.) Solid damaging blocks (cactus / magma / campfire) in the body space also set the
+     * fast path then transited a seam-row berry-bush maze for free, lethally. Of the LATERALLY-read bits,
+     * RISKY_EDIT's lava term is now folded across chunk faces by {@code EdgeFluidScatter}; only
+     * PLACEABLE_NEIGHBOR remains air-optimistic there. Neither is read here.) Solid damaging blocks (cactus / magma / campfire) in the body space also set the
      * hazard bit, but {@link #cellTransitCost} charges only passable cells, so a folded BREAK of such a
      * block is priced by its mining ticks alone.
      *

@@ -61,8 +61,8 @@ public final class EditScratch {
     /**
      * Clear the accumulator for a fresh candidate. When {@code allowEdits} is false, no break or place is
      * folded — a blocked/empty required cell makes the move <i>invalid</i> instead of editing through it.
-     * Movements pass {@code false} to honour the {@code RISKY_EDIT} flag: editing this floor cell's body
-     * space could release a fluid or drop a gravity block, so the bot must reach it without editing or not
+     * Movements pass {@code false} to honour the {@code RISKY_EDIT} flag: editing at/next to this cell could
+     * disturb LAVA or drop a gravity block, so the bot must reach it without editing or not
      * at all. Returns {@code this} for fluent use.
      */
     public EditScratch reset(boolean allowEdits) {
