@@ -24,6 +24,7 @@ import com.orebit.mod.platform.CommandFeedback;
 import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.MoveReport;
 import com.orebit.mod.platform.Replaceable;
+import com.orebit.mod.platform.StepHeight;
 import com.orebit.mod.platform.WorldEdits;
 import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
@@ -233,6 +234,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     public AllyBotEntity(MinecraftServer server, ServerLevel world, GameProfile profile, Player owner) {
         super(server, world, profile);
+        // Undo ServerPlayer's 1.0 auto-step (see platform/StepHeight). A real player never spends that
+        // value — their physics runs client-side on LocalPlayer, which keeps LivingEntity's 0.6 — but this
+        // bot runs Entity.move server-side, so without the pin it silently climbs a full block off a
+        // FALLING tick and lands a tread above the one the planner routed it to. No-op from 1.20.5, where
+        // Mojang dropped the assignment and step height became an attribute.
+        StepHeight.pinToPlayerDefault(this);
         this.owner = owner;
         this.mining = new BotMining(this);
         this.navigator = new BotNavigator(this);
