@@ -43,13 +43,27 @@ import net.minecraft.world.phys.Vec3;
  *   run 2  to-floor (-21,65,63) top 66.0  ->  bot grounded at botY 67.000   (+1)
  * </pre>
  * Both confirmed against saved {@code playerdata} ({@code onGround=1}), so the +1 is physical, not a
- * logging artifact. The jump arc itself is textbook — apex measured at {@code 66.252} from a takeoff of
- * {@code 65.0}, i.e. exactly {@code MovementContext.JUMP_RISE}'s 1.2522 — so ONE jump cannot reach +2 over
- * the takeoff; a second jump is the only arithmetic that gets there. The prime suspect is therefore
- * {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Ascend}'s climb-phase jump gate
- * ({@code b.setJumping(b.footY() < landFootY)}) re-arming on a landing that has not settled — the same
- * "launched from one block too high → permanent fail→HOLD" family that gate was written to close for the
- * 2026-08-01 vine top-out.
+ * logging artifact.
+ *
+ * <h2>SOLVED (2026-08-10) — it was never a jump</h2>
+ * This class originally recorded a second-jump hypothesis (that {@code Ascend}'s climb-phase gate,
+ * {@code b.setJumping(b.footY() < landFootY)}, re-armed on an unsettled landing). <b>That was wrong</b>,
+ * and the harness is what disproved it: this tile's trace shows exactly ONE jump — apex {@code -58.748}
+ * from a takeoff of {@code -60.000}, i.e. {@code MovementContext.JUMP_RISE}'s 1.2522 to the digit — and
+ * then a single tick in which the bot goes from <i>falling</i> at {@code y=-58.976} to <i>grounded</i> at
+ * {@code y=-58.000}. A gain of {@code +0.976} against a negative velocity, which no jump explains.
+ *
+ * <p>The cause is vanilla: {@code LivingEntity}'s constructor sets step height {@code 0.6} and
+ * {@code ServerPlayer}'s constructor then <b>overwrites it with {@code 1.0}</b> (1.17.1 → 1.20.4;
+ * javap-verified). {@code Entity.collide}'s step-up branch is armed by
+ * {@code onGround() || (yClamped && dy < 0.0)} — it fires while FALLING into a floor — and pre-1.21 it
+ * lifts by the FULL step height from the pre-move box before re-dropping. Lift {@code 1.0}, re-drop
+ * blocked after {@code 0.024} by the next tread's top, net {@code +0.976}. At {@code 0.6} the lift leaves
+ * the hitbox inside the obstacle and no step happens at all, which is why 1.21.11 always passed. See
+ * {@code platform/StepHeight} for the fix (pin the bot to a player's 0.6) and the full derivation.
+ *
+ * <p><b>Kept as a regression test.</b> Without the pin this tile fails at {@code maxAbove=1.000} in ~40 s;
+ * with it, {@code PASS} at {@code maxAbove=0.000} on both 1.20.1 and 1.21.11.
  *
  * <h2>The tiles</h2>
  * Staircases run +X, 3 wide in Z (hillside-like: the bot has room, so a fall off the side is a real
