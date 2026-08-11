@@ -18,10 +18,19 @@ import java.util.Arrays;
  *       packed geometry descriptor with one more array index. 10 bits = 1024 navtypes (measured ~590, so
  *       ~1.7× headroom); {@link NavSectionBuilder} guards against the count outgrowing this budget.
  *   <li><b>Flags</b> (high 6 bits): the precomputed neighbour-property bitmask (see {@link NavFlags}) —
- *       headroom, edit-hazard, walk-through hazard, placeable-neighbour — the multi-cell facts the
- *       movement layer would otherwise re-derive on every A* expansion. Computed once at build /
- *       block-update and read as one masked array access.
+ *       edit-hazard, walk-through hazard, 2-bit headroom, placeable-neighbour, through-slow — the
+ *       multi-cell facts the movement layer would otherwise re-derive on every A* expansion. Computed once
+ *       at build / block-update and read as one masked array access. (One of the six,
+ *       {@code PLACEABLE_NEIGHBOR}, is maintained but currently read only by {@code /bot probe} — see
+ *       {@link NavFlags}.)
  * </ul>
+ *
+ * <p><b>There is no spare bit.</b> All six flag bits are allocated and {@code FLAGS_MASK | (NAVTYPE_MASK
+ * << FLAGS_SHIFT)} covers the {@code short} exactly (6 + 10 = 16). A new resident per-cell fact therefore
+ * has to retire a flag, ride a derived {@link com.orebit.mod.worldmodel.navblock.NavBlock} descriptor bit,
+ * or land in the parallel depth byte — it cannot be squeezed in here, and the navtype field cannot give one
+ * up either (9 bits caps at 512 against a measured ~590 navtypes). Recorded because the question recurs;
+ * see {@code future-work.txt} ("Idea 3: Scatter safe-fall").
  *
  * <p><b>Why store both, not re-read live</b> (favour-cpu-over-ram): a live {@code getBlockState} is a
  * palette walk + a navtype-map lookup, and the neighbour facts are an 8-cell scan; keeping both resident

@@ -46,12 +46,15 @@ Key decisions:
 - **The grid entry is one `short` per cell**, holding *both* resolutions the planner
   reads: the low **10 bits** are the navtype index (1024 possible — ~1.7× headroom
   over the measured count), and the high **6 bits** are precomputed
-  *neighbour-property flags* — walkable headroom above the floor, "editing here could
-  release a fluid or drop gravel on you", "there's a walk-through hazard in the body
-  space", "there's something in the body space that slows you as you pass through it",
-  "there's a solid face to place a block against". These are the multi-cell
-  facts the movement code would otherwise re-derive on every search expansion;
-  computing them once at build time turns them into a single masked array access.
+  *neighbour-property flags* — walkable headroom above the floor (that one takes two
+  bits), "editing here could drop gravel on you or disturb lava", "there's a
+  walk-through hazard in the body space", "there's something in the body space that
+  slows you as you pass through it", "there's a solid face to place a block against".
+  Most of these are multi-cell facts the movement code would otherwise re-derive on
+  every search expansion; computing them once at build time turns them into a single
+  masked array access. That accounts for all sixteen bits exactly — **the cell is
+  full**, which is why new per-cell facts have to earn their place by displacing
+  something rather than being added on the side.
 - **A parallel depth byte per cell** rides beside the `short` grid — two nibbles
   answering the two *vertical* questions the search asks most: how far down is the
   first standable floor (consumed by falling moves — one read instead of a downward

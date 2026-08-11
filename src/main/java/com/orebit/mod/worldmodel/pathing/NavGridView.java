@@ -17,7 +17,9 @@ import net.minecraft.world.level.block.state.BlockState;
  *       The cheap "is it loaded enough to trust" prefilter that keeps the search inside the loaded radius
  *       (replaces the old {@code classAt != null}; the 4-value class it returned was dead).
  *   <li><b>Neighbour flags:</b> {@link #flagsAt} — the precomputed {@link NavFlags} bitmask (headroom,
- *       edit-hazard, walk-through hazard, placeable-neighbour) from the high 6 bits of the resident grid.
+ *       edit-hazard, walk-through hazard, through-slow, placeable-neighbour) from the high 6 bits of the
+ *       resident grid — all six allocated. ({@code PLACEABLE_NEIGHBOR} is maintained but currently read
+ *       only by {@code /bot probe}; the placement path re-derives its own fan-out — see {@link NavFlags}.)
  *   <li><b>Fine geometry:</b> {@link #descriptorAt} — the full {@link NavBlock} geometry for a cell. The
  *       grid stores the resolved navtype per cell (the low 10 bits of the same packed {@code short} — see
  *       {@link TraversalGrid}), so this is a flat masked array read plus one descriptor-table index — no
