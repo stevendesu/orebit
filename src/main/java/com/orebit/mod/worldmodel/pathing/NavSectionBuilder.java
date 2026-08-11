@@ -46,11 +46,9 @@ public final class NavSectionBuilder {
     // cell below / navtype of the cell above). Same per-thread pattern as the scratches above.
     private static final ThreadLocal<int[]> DEPTH_COL_A = ThreadLocal.withInitial(() -> new int[256]);
     private static final ThreadLocal<int[]> DEPTH_COL_B = ThreadLocal.withInitial(() -> new int[256]);
-    // A third per-column carry beside DEPTH_COL_A/B, used by the ascending floorGap sweep to fold the
-    // flowing-fluid RISKY_EDIT SCATTER (PERF-DESIGN-navgrid-build §C1) into that same pass: 1 iff the cell
-    // directly below (previous sweep step) held a fluid — the "not already draining straight down" half of
-    // the flowing test. Per-thread, same pattern as the A/B carries.
-    private static final ThreadLocal<int[]> DEPTH_COL_FLUID = ThreadLocal.withInitial(() -> new int[256]);
+    // (A third per-column carry, DEPTH_COL_FLUID, used to live here: it held "the cell below was fluid",
+    // the second half of the old FLOWING test. The RISKY_EDIT fluid term is now LAVA-ONLY and
+    // UNCONDITIONAL — no cell-below read — so the carry is gone; see NavFlags' lava-term section.)
     private static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
 
     // LEGACY reflection helpers, consumed ONLY by the JMH reference benchmark
@@ -424,7 +422,13 @@ public final class NavSectionBuilder {
      *       {@code run(y) = nav(y+1)==nav(y) ? min(run(y+1)+1, 14) : 0}, seeded 0 at the top of the built
      *       column (unbuilt above = "differs", the same hard wall the extractor's legacy scan reports).</li>
      * </ul>
-     * A {@code null} section slot (a chunk shorter than the level column) ends the ascending sweep — every
+     * The ascending sweep also carries the <b>lava RISKY_EDIT SCATTER</b> (PERF-DESIGN-navgrid-build §C1):
+     * it already decodes every cell's descriptor, so a single {@link NavBlock#isLava} mask test per cell
+     * drives {@link #scatterLavaRisky}'s 6-neighbour dilation for free on non-lava terrain. That is a FLAGS
+     * write riding a depth pass — deliberate, and the reason the term is not gathered in
+     * {@link NavFlags#compute}.
+     *
+     * <p>A {@code null} section slot (a chunk shorter than the level column) ends the ascending sweep — every
      * cell above it keeps {@link TraversalGrid#DEPTH_UNKNOWN} (conservative: readers legacy-scan) — and
      * resets the descending sweep's state (cells below it read "absent above"). Single-section producers
      * ({@code classifyInto}, headless tests) never call this, so their grids stay all-UNKNOWN — correctness
@@ -433,19 +437,15 @@ public final class NavSectionBuilder {
     public static void computeDepth(NavSection[] sections) {
         final int[] colA = DEPTH_COL_A.get();
         final int[] colB = DEPTH_COL_B.get();
-        final int[] fluidBelow = DEPTH_COL_FLUID.get();
 
         {
-            // Ascending floorGap sweep, with the flowing-fluid RISKY_EDIT SCATTER folded in
-            // (PERF-DESIGN-navgrid-build §C1 — replacing NavFlags.risksFluidFlow's per-cell GATHER). colA =
-            // gap of the cell below; colB = standability of the cell below (1/0); fluidBelow = whether the
-            // cell below held a fluid (1/0). The bottom row of the bottom-most built section is the
-            // DEPTH_SAT seed. fluidBelow is initialised to 0 (nothing below the world bottom is fluid); it
-            // then carries CONTINUOUSLY across section seams — the old per-section gather also saw the real
-            // cell below every flowing source it read (its lowest read is the floor cell's own row y+1,
-            // whose below-read y is in-scratch/overscan, never the below-section air OOB), so the continuous
-            // carry is bit-identical (verified by FluidScatterIdentityTest); NO seam reset is needed.
-            java.util.Arrays.fill(fluidBelow, 0, 256, 0);
+            // Ascending floorGap sweep, with the LAVA RISKY_EDIT SCATTER folded in
+            // (PERF-DESIGN-navgrid-build §C1). colA = gap of the cell below; colB = standability of the cell
+            // below (1/0). The bottom row of the bottom-most built section is the DEPTH_SAT seed.
+            //
+            // The scatter is stateless now that the term is lava-only + unconditional: a cell either IS lava
+            // (one mask test on the descriptor this sweep already decoded) or costs nothing. No per-column
+            // carry, no cell-below read, no seam-carry subtleties.
             boolean seeded = false;
             for (int i = 0; i < sections.length; i++) {
                 NavSection s = sections[i];
@@ -456,13 +456,20 @@ public final class NavSectionBuilder {
                 TraversalGrid grid = s.getTraversalGrid();
                 final short[] raw = grid.raw();
                 final byte[] depth = grid.depthRaw();
-                // The section directly below, for a flowing source in this section's bottom row(s) whose
-                // endangered floor cells (rows y-1/y-2) cross the seam downward — exactly the cells the old
-                // gather reached UP into this section via the section-above's overscan. Null (no section
-                // below, or a hole) ⇒ those cross-seam scatters fall off the bottom (air-optimistic, as the
-                // gather was at the world floor).
+                // The vertical neighbours, for a lava cell in this section's bottom/top row whose 6-neighbour
+                // dilation crosses the section seam: row 0 lava marks row 15 of `below`, row 15 lava marks
+                // row 0 of `above`. Either null (world edge, a column hole, or a chunk shorter than the level
+                // column) ⇒ that one scatter falls off the built column, which is exactly what the reader
+                // sees there anyway.
+                //
+                // Writing into `above` before the sweep reaches it is safe: pass 2 (computeFlags) has already
+                // run for EVERY section of the column before computeDepth is called (ChunkNavBuilder), so no
+                // later write clobbers the bit — this sweep only writes DEPTH nibbles, and orFlags leaves the
+                // navtype field it reads untouched.
                 TraversalGrid below = (i > 0 && sections[i - 1] != null)
                         ? sections[i - 1].getTraversalGrid() : null;
+                TraversalGrid above = (i + 1 < sections.length && sections[i + 1] != null)
+                        ? sections[i + 1].getTraversalGrid() : null;
                 for (int y = 0; y < 16; y++) {
                     boolean seedRow = !seeded && y == 0;
                     for (int c = 0; c < 256; c++) {
@@ -474,16 +481,11 @@ public final class NavSectionBuilder {
                         colA[c] = gap;
                         colB[c] = NavBlock.isStandable(d) ? 1 : 0;
 
-                        // Flowing-fluid scatter: a fluid cell whose own cell-below is dry is "flowing"; it
-                        // endangers the floor cells one and two rows below its 4 in-bounds horizontal
-                        // neighbours (the exact set the old risksFluidFlow(y+1)/risksFluidFlow(y+2) gather
-                        // selected). Detection reuses the already-decoded descriptor d — ~1 bit-test/cell
-                        // when fluid-free.
-                        int fl = NavBlock.fluid(d) != 0 ? 1 : 0;
-                        boolean flowing = fl != 0 && fluidBelow[c] == 0;
-                        fluidBelow[c] = fl;
-                        if (flowing) {
-                            scatterFluidRisky(grid, below, c & 15, y, (c >> 4) & 15);
+                        // Lava scatter: a lava cell UNCONDITIONALLY marks its 6 orthogonal neighbours
+                        // RISKY_EDIT. Detection reuses the already-decoded descriptor d — exactly ONE mask
+                        // test per cell when the cell is not lava, which is the overwhelming common case.
+                        if (NavBlock.isLava(d)) {
+                            scatterLavaRisky(grid, below, above, c & 15, y, (c >> 4) & 15);
                         }
                     }
                     if (seedRow) seeded = true;
@@ -521,29 +523,37 @@ public final class NavSectionBuilder {
     }
 
     /**
-     * Scatter the flowing-fluid RISKY_EDIT bit from a flowing source at section-local {@code (x,y,z)} onto
-     * the floor cells it endangers: its 4 in-bounds horizontal neighbours at rows {@code y-1} and
-     * {@code y-2}. Rows that fall below the source's own section cross into {@code below} (the section
-     * directly beneath) — the seam the old per-section gather crossed via the section-above's overscan
-     * ({@code y-1 → below row 15}, {@code y-2 → below row 14}); when {@code below} is null those scatters
-     * drop off the world floor (air-optimistic, matching the gather). Allocation-free — iterates the shared
-     * {@link NavFlags#HORIZONTAL} offset table, OR-ing RISKY_EDIT while preserving navtype + existing flags.
+     * Scatter the lava RISKY_EDIT bit from the lava cell at section-local {@code (x,y,z)} onto its 6
+     * orthogonal neighbours — the whole geometry of the term (NavFlags, "RISKY_EDIT's fluid term"). The
+     * exact SCATTER counterpart of {@link NavFlags#risksLavaEdit}'s gather; both iterate the same shared
+     * {@link NavFlags#SIX} offset table so they cannot drift.
+     *
+     * <p>Three destinations, resolved per offset:
+     * <ul>
+     *   <li><b>In-section</b> — the common case, straight into {@code grid}.</li>
+     *   <li><b>Vertical seam</b> — {@code y-1} at row 0 crosses into {@code below}'s row 15, {@code y+1} at
+     *       row 15 crosses into {@code above}'s row 0. Both are same-CHUNK by construction
+     *       ({@link NavStore}'s per-chunk column) and both are already flag-complete when this runs (pass 2
+     *       precedes pass 3 for the whole column). A null neighbour = the built column ends there; the
+     *       scatter drops, as it must.</li>
+     *   <li><b>Lateral chunk face</b> — {@code x±1}/{@code z±1} off the 0..15 section: dropped here (the
+     *       neighbour chunk may not even be built yet) and folded separately by {@link EdgeFluidScatter}.</li>
+     * </ul>
+     * Allocation-free: no per-cell object, no per-cell array; OR-ing RISKY_EDIT preserves navtype + the
+     * other flag bits.
      */
-    private static void scatterFluidRisky(TraversalGrid grid, TraversalGrid below, int x, int y, int z) {
-        for (int[] o : NavFlags.HORIZONTAL) {
-            int nx = x + o[0], nz = z + o[1];
-            if (nx < 0 || nx > 15 || nz < 0 || nz > 15) continue; // lateral OOB: air-optimistic (as the gather)
-            markRiskyRow(grid, below, nx, y - 1, nz);
-            markRiskyRow(grid, below, nx, y - 2, nz);
-        }
-    }
-
-    /** OR RISKY_EDIT into cell {@code (nx, ry, nz)}, crossing into {@code below}'s top rows when {@code ry<0}. */
-    private static void markRiskyRow(TraversalGrid grid, TraversalGrid below, int nx, int ry, int nz) {
-        if (ry >= 0) {
-            grid.orFlags(nx, ry, nz, NavFlags.RISKY_EDIT);
-        } else if (below != null) {
-            below.orFlags(nx, 16 + ry, nz, NavFlags.RISKY_EDIT); // ry=-1 → row 15, ry=-2 → row 14
+    private static void scatterLavaRisky(TraversalGrid grid, TraversalGrid below, TraversalGrid above,
+                                         int x, int y, int z) {
+        for (int[] o : NavFlags.SIX) {
+            int nx = x + o[0], ny = y + o[1], nz = z + o[2];
+            if (nx < 0 || nx > 15 || nz < 0 || nz > 15) continue; // chunk face: EdgeFluidScatter's job
+            if (ny < 0) {
+                if (below != null) below.orFlags(nx, NavSection.SIZE - 1, nz, NavFlags.RISKY_EDIT);
+            } else if (ny >= NavSection.SIZE) {
+                if (above != null) above.orFlags(nx, 0, nz, NavFlags.RISKY_EDIT);
+            } else {
+                grid.orFlags(nx, ny, nz, NavFlags.RISKY_EDIT);
+            }
         }
     }
 
@@ -563,7 +573,7 @@ public final class NavSectionBuilder {
      * small neighbourhood whose flags read it. Far cheaper than a rebuild: no palette scan, an O(1)
      * navtype write, and a small neighbourhood recompute reusing {@link NavFlags}.
      *
-     * <p><b>Vertical seam (the overscan contract, both directions of the READ):</b>
+     * <p><b>Vertical seam (three pieces — the overscan contract plus the lava term's downward read):</b>
      * <ul>
      *   <li><b>Upward reads</b> — the recompute window's top rows ({@code ly >= 12} changes reach cells
      *       whose {@code y+3} crosses the face) read the section ABOVE via the scratch's overscan rows,
@@ -573,10 +583,22 @@ public final class NavSectionBuilder {
      *       <i>its</i> upward overscan, so their hazard/slow/headroom bits are recomputed here too (the
      *       inverse window, rows {@code 13+ly..15} — minimal, mirroring the read footprint). {@code below}
      *       nullable: world-bottom/unbuilt → skip; an unbuilt section gets honest bits when it builds.</li>
+     *   <li><b>Upward propagation</b> (added with the lava RISKY_EDIT term, 2026-08-10) — the lava gather
+     *       reads a floor cell's OWN cell-below ({@code F-1}), so an {@code ly == 15} change now DOES alter
+     *       the above section's row 0. A third, one-row window on {@code above} covers it.
+     *       <p>Precisely why this is new: the superseded {@code risksFluidFlow} gather also read one row
+     *       below its call point, but it was CALLED at {@code y+1}/{@code y+2} relative to the floor cell,
+     *       so its deepest touch was {@code F} itself — never {@code F-1}. The lava term is a plain
+     *       6-neighbour dilation evaluated AT {@code F}, which reaches one row deeper, and that row is what
+     *       falls off a section's bottom face at {@code ly == 0}. So the claim is not "nothing read
+     *       downward before" (it did); it is that nothing read BELOW THE FLOOR CELL before. Measured cost of
+     *       the extra pass: {@code PatchStormBenchmark} SEAM +3.5% (two clean interleaved pairs,
+     *       2026-08-11), every other scenario flat or faster; accepted by the owner for the correctness
+     *       gain.</li>
      * </ul>
-     * Lateral neighbours keep the air default (lateral overscan is the deferred follow-up — see NavFlags),
-     * so a change never touches another CHUNK's data; the vertical neighbours are same-chunk by
-     * construction ({@link NavStore}'s per-chunk column).
+     * Lateral neighbours keep the air default within this method (a change never touches another CHUNK's
+     * data here); the cross-chunk lava fold is {@link EdgeFluidScatter}, driven from the drain. The vertical
+     * neighbours are same-chunk by construction ({@link NavStore}'s per-chunk column).
      *
      * <p>The descriptor scratch is reconstructed from resident navtypes (≈4.8k cheap array reads — well
      * below the old whole-chunk {@code refreshNavData}); the below pass refills it once more. It can be
@@ -598,27 +620,40 @@ public final class NavSectionBuilder {
                                  int lx, int ly, int lz, short newNavtype) {
         final long[] desc = DESC_SCRATCH.get();
         final TraversalGrid grid = section.getTraversalGrid();
+        final TraversalGrid aboveGrid = above == null ? null : above.getTraversalGrid();
+        final TraversalGrid belowGrid = below == null ? null : below.getTraversalGrid();
 
         // Write the new navtype first (with its stale flags — the window recompute below fixes them), so
         // BOTH scratch rebuilds — this section's, and the below section's, which reads this grid as ITS
         // overscan — see the new block.
         grid.set(lx, ly, lz, newNavtype & 0xFFFF, grid.flags(lx, ly, lz));
 
-        fillScratch(desc, grid, above == null ? null : above.getTraversalGrid());
+        fillScratch(desc, grid, aboveGrid);
 
         // Recompute the changed cell's flags + the cells whose flags depend on it. NavFlags.compute()
-        // reads the headroom column up to y+3 and the x±1 / z±1 placeable/fluid/gravity neighbourhood,
-        // so the inverse affected set is x±1 / y-3..y+1 / z±1 (clamped to this section; the part below
-        // the face is the below-section pass, and cells above the face never read downward — upward-only
-        // overscan means an ly=15 change can't change the above section's stored flags).
-        recomputeWindow(grid, desc, lx, ly, lz);
+        // reads the headroom column up to y+3 and the x±1 / z±1 placeable/gravity neighbourhood, and the
+        // lava term reads the 6 orthogonal neighbours, so the inverse affected set is
+        // x±1 / y-3..y+1 / z±1 (clamped to this section; the parts across the two section faces are the
+        // seam passes below). belowGrid feeds the one lava read the upward-only scratch cannot serve.
+        recomputeWindow(grid, belowGrid, desc, lx, ly, lz);
 
         // Below-seam propagation: rebuild the scratch AS THE BELOW SECTION SEES IT (its navtypes + this
         // just-patched grid as overscan) and run the same inverse window on a virtual change at y = 16+ly.
+        // Its rows are 13+ly..15 — never row 0 — so no below-below grid is ever needed (null).
         if (ly < NavFlags.OVERSCAN_ROWS && below != null) {
-            final TraversalGrid belowGrid = below.getTraversalGrid();
             fillScratch(desc, belowGrid, grid);
-            recomputeWindow(belowGrid, desc, lx, ly + NavSection.SIZE, lz);
+            recomputeWindow(belowGrid, null, desc, lx, ly + NavSection.SIZE, lz);
+        }
+
+        // Above-seam propagation (the mirror, required only by the lava term's DOWNWARD read): a change in
+        // this section's TOP row is the y-1 neighbour of the above section's row 0, and no scratch reaches
+        // downward across a face. Rebuild the scratch AS THE ABOVE SECTION SEES IT and run the window on a
+        // virtual change at y = ly-16 = -1, which clamps to row 0 alone. A null overscan is EXACT there —
+        // a row-0 cell reads at most y+3 = row 3, inside the above section's own 4096 cells — and THIS grid
+        // is handed in as its below, supplying the cross-face lava descriptors.
+        if (ly == NavSection.SIZE - 1 && aboveGrid != null) {
+            fillScratch(desc, aboveGrid, null);
+            recomputeWindow(aboveGrid, grid, desc, lx, ly - NavSection.SIZE, lz);
         }
 
         // ---- Depth-nibble maintenance (floorGap/runUp). A navtype change can flip this cell's
@@ -629,9 +664,8 @@ public final class NavSectionBuilder {
         //      DEPTH_SAT guarantees that within the 15-cell cap on a maintained column. On a never-swept
         //      (single-section) grid the sweeps write UNKNOWN or exact values only — never a stale claim.
         //      Measured cost: worst scenario ~+3% ns/patch (PatchStormBenchmark, ~1.4–2.1 µs/patch). ----
-        patchFloorGap(grid, above == null ? null : above.getTraversalGrid(), lx, ly, lz);
-        patchRunUp(grid, above == null ? null : above.getTraversalGrid(),
-                below == null ? null : below.getTraversalGrid(), lx, ly, lz);
+        patchFloorGap(grid, aboveGrid, lx, ly, lz);
+        patchRunUp(grid, aboveGrid, belowGrid, lx, ly, lz);
     }
 
     // Per-thread batch scratch for patchCells: a 4096-bit changed-cell set (one bit per section-local
@@ -669,8 +703,10 @@ public final class NavSectionBuilder {
      *   <li><b>P2</b>: ONE {@code fillScratch} over the final field + one {@link #recomputeWindow} per
      *       changed cell, then — when any {@code ly <} {@link NavFlags#OVERSCAN_ROWS} cell changed —
      *       ONE below-seam scratch fill (the below grid with this just-patched grid as its overscan) +
-     *       the inverse window per low cell, exactly the single-cell seam contract amortized per
-     *       section-pair.</li>
+     *       the inverse window per low cell, and — when any {@code ly == 15} cell changed — ONE above-seam
+     *       fill + a one-row window per top-row cell (the lava RISKY_EDIT term's downward read; see
+     *       {@link #patchCell}). Exactly the single-cell seam contract amortized per section-pair, in both
+     *       directions.</li>
      * </ul>
      * Final grid state is byte-identical to the sequential loop (depth: P1 IS the sequential regime,
      * one cell at a time from a consistent grid; flags = f(final navtypes) on the union of windows
@@ -706,6 +742,7 @@ public final class NavSectionBuilder {
         // regime the 15-cell cap + saturation argument is sound for — see the method doc).
         int changed = 0;
         boolean anyLow = false;
+        boolean anyHigh = false;
         for (int w = 0; w < 64; w++) {
             long b = bits[w];
             while (b != 0) {
@@ -722,6 +759,7 @@ public final class NavSectionBuilder {
                 patchRunUp(grid, aboveGrid, belowGrid, lx, ly, lz);
                 changed++;
                 anyLow |= ly < NavFlags.OVERSCAN_ROWS;
+                anyHigh |= ly == NavSection.SIZE - 1;
             }
         }
         if (changed == 0) return;
@@ -738,7 +776,7 @@ public final class NavSectionBuilder {
             while (b != 0) {
                 final int p = (w << 6) | Long.numberOfTrailingZeros(b);
                 b &= b - 1;
-                recomputeWindow(grid, desc, p & 15, p >>> 8, (p >>> 4) & 15);
+                recomputeWindow(grid, belowGrid, desc, p & 15, p >>> 8, (p >>> 4) & 15);
             }
         }
         if (anyLow && belowGrid != null) {
@@ -748,7 +786,25 @@ public final class NavSectionBuilder {
                 while (b != 0) {
                     final int p = (w << 6) | Long.numberOfTrailingZeros(b);
                     b &= b - 1;
-                    recomputeWindow(belowGrid, desc, p & 15, (p >>> 8) + NavSection.SIZE, (p >>> 4) & 15);
+                    // Rows 13+ly..15 of the below grid — never row 0, so no below-below grid is needed.
+                    recomputeWindow(belowGrid, null, desc, p & 15, (p >>> 8) + NavSection.SIZE,
+                            (p >>> 4) & 15);
+                }
+            }
+        }
+        // The above-seam mirror (the lava term's downward read — see patchCell): a top-row change is the
+        // y-1 neighbour of the above section's row 0. One scratch fill AS THE ABOVE SECTION SEES IT (null
+        // overscan is exact for row 0, which reads at most y+3 = row 3) + a one-row window per top-row cell,
+        // with THIS grid as the above section's below.
+        if (anyHigh && aboveGrid != null) {
+            fillScratch(desc, aboveGrid, null);
+            for (int w = ((NavSection.SIZE - 1) * 256) >> 6; w < 64; w++) { // words 60..63 = ly 15
+                long b = bits[w];
+                while (b != 0) {
+                    final int p = (w << 6) | Long.numberOfTrailingZeros(b);
+                    b &= b - 1;
+                    recomputeWindow(aboveGrid, grid, desc, p & 15, (p >>> 8) - NavSection.SIZE,
+                            (p >>> 4) & 15);
                 }
             }
         }
@@ -827,48 +883,61 @@ public final class NavSectionBuilder {
      * The inverse-footprint flags recompute around a changed cell (which may sit in the overscan rows —
      * the window then clamps to this grid's top rows). Navtypes stay resident.
      *
-     * <p><b>Flowing-fluid RISKY_EDIT re-dilation (the patch-path counterpart of the build-path SCATTER —
-     * PERF-DESIGN-navgrid-build §C1).</b> {@link NavFlags#compute} no longer gathers the flowing-fluid
-     * RISKY_EDIT term (the build moved it to {@link #computeDepth}'s scatter), so on its own it would leave
-     * that term stale after a live edit that adds/removes a flowing fluid (or the block below one). The
-     * patch path therefore re-derives it HERE, authoritatively, per window cell:
-     * {@code RISKY_EDIT = gravity(compute) | anyFlowingHorizontalNeighbour(y+1 | y+2)} via the retained
-     * reference GATHER {@link NavFlags#risksFluidFlow} over the freshly-rebuilt {@code desc} scratch.
+     * <p><b>Lava RISKY_EDIT re-dilation (the patch-path counterpart of the build-path SCATTER —
+     * PERF-DESIGN-navgrid-build §C1).</b> {@link NavFlags#compute} does not gather the lava RISKY_EDIT term
+     * (the build owns it via {@link #computeDepth}'s scatter), so on its own it would leave that term stale
+     * after a live edit that adds or removes lava. The patch path therefore re-derives it HERE,
+     * authoritatively, per window cell:
+     * {@code RISKY_EDIT = gravity(compute) | anyLavaAmongTheSixNeighbours} via the GATHER
+     * {@link NavFlags#risksLavaEdit} over the freshly-rebuilt {@code desc} scratch, plus the one neighbour
+     * that scratch cannot reach — see the seam bullet.
      * <ul>
      *   <li><b>Authoritative, not additive</b> — {@code compute} writes the gravity-only RISKY_EDIT from
-     *       scratch (clearing the bit when gravity no longer sets it), then the gather OR-s the fluid term
-     *       back in. A cell that LOSES its only flowing neighbour has RISKY_EDIT correctly CLEARED unless
+     *       scratch (clearing the bit when gravity no longer sets it), then the gather OR-s the lava term
+     *       back in. A cell that LOSES its only lava neighbour has RISKY_EDIT correctly CLEARED unless
      *       gravity also sets it — the {@code grid.set} below stores the whole recomputed flags, never an
      *       accumulate.</li>
      *   <li><b>The window is a superset of the affected set</b> — an edit at {@code (lx,ly,lz)} can change
-     *       the fluid term only of floor cells in the 4-neighbour columns of {@code (lx,lz)} at rows
-     *       {@code ly-2..ly} (a floor cell's term reads its horizontal neighbours' fluid at rows
-     *       {@code y..y+2}); the box {@code (lx±1, ly-3..ly+1, lz±1)} covers all of them. The below-seam
-     *       caller runs this same window on the section below (rows {@code 13+ly..15}) with THIS grid as its
-     *       overscan, catching the cross-seam-downward cells the same footprint reaches. Cells outside the
-     *       window keep their already-correct stored term.</li>
-     *   <li><b>Bit-identical to a rebuild</b> — over the final navtypes the per-cell gather equals the
-     *       whole-column scatter (the {@code FluidScatterIdentityTest} oracle), and it reads only the rows
-     *       {@code y..y+2} of 4-neighbour columns present in {@code desc} (this section + its vertical
-     *       overscan), exactly what a full build reads for that cell. Cross-chunk lateral faces stay
-     *       air-optimistic in both forms (a separate follow-on — step 3).</li>
+     *       the lava term of exactly its 6 orthogonal neighbours, all inside
+     *       {@code (lx±1, ly-1..ly+1, lz±1)} ⊂ the box {@code (lx±1, ly-3..ly+1, lz±1)} this method walks
+     *       (that box is sized by {@code compute}'s own inverse footprint, which is deeper). Cells outside
+     *       the window keep their already-correct stored term.</li>
+     *   <li><b>The vertical seam, both ways.</b> The dilation crosses a section face; the scratch only
+     *       overscans UPWARD. So {@code y+1} at row 15 is fine (it lands in the overscan), but {@code y-1}
+     *       at row 0 would read air — hence {@code belowGrid}: when non-null its row 15 supplies that one
+     *       descriptor directly. In the other direction, an {@code ly == 15} edit changes the section
+     *       ABOVE's row 0, which this window cannot reach at all; {@link #patchCell}/{@link #patchCells} run
+     *       a second, one-row window on the above grid for exactly that case. The below-seam caller
+     *       (rows {@code 13+ly..15} of the section below, THIS grid as its overscan) never reaches row 0, so
+     *       it correctly passes {@code belowGrid == null}.</li>
+     *   <li><b>Bit-identical to a rebuild</b> — over the final navtypes the per-cell 6-neighbour gather is
+     *       the same dilation as the whole-column scatter (the {@code FluidScatterIdentityTest} oracle), and
+     *       it reads only cells present in {@code desc} + the supplied below row, exactly what a full build
+     *       sees for that cell. Cross-chunk lateral faces are folded by {@link EdgeFluidScatter} in both
+     *       forms.</li>
      * </ul>
-     * O(window) gathers per patch (a patch touches O(1) cells), so the reference gather is cheap here even
-     * though it was the build hot path — see PERF-DESIGN-navgrid-build §C1.
+     * O(window) gathers per patch (a patch touches O(1) cells), so the gather is cheap here even though it
+     * would be too costly on the build hot path — see PERF-DESIGN-navgrid-build §C1.
      */
-    private static void recomputeWindow(TraversalGrid grid, long[] desc, int lx, int ly, int lz) {
+    private static void recomputeWindow(TraversalGrid grid, TraversalGrid belowGrid, long[] desc,
+                                        int lx, int ly, int lz) {
         for (int y = clampCell(ly - 3); y <= clampCell(ly + 1); y++) {
             for (int z = clampCell(lz - 1); z <= clampCell(lz + 1); z++) {
                 for (int x = clampCell(lx - 1); x <= clampCell(lx + 1); x++) {
                     int flags = NavFlags.compute(desc, x, y, z);
-                    if (NavFlags.risksFluidFlow(desc, x, y + 1, z)
-                            || NavFlags.risksFluidFlow(desc, x, y + 2, z)) {
+                    if (NavFlags.risksLavaEdit(desc, x, y, z)
+                            || (y == 0 && belowGrid != null && isLavaAt(belowGrid, x, NavSection.SIZE - 1, z))) {
                         flags |= NavFlags.RISKY_EDIT;
                     }
                     grid.set(x, y, z, grid.navtype(x, y, z), flags);
                 }
             }
         }
+    }
+
+    /** Whether a grid cell's resident navtype is lava — the below-seam half of the lava RISKY_EDIT gather. */
+    private static boolean isLavaAt(TraversalGrid g, int x, int y, int z) {
+        return NavBlock.isLava(NavBlock.descriptor((short) g.navtype(x, y, z)));
     }
 
     private static int clampCell(int v) {

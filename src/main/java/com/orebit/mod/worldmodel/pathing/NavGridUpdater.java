@@ -428,8 +428,8 @@ public final class NavGridUpdater {
         pendingGlobal -= n;
         final int minY = LevelBounds.minY(level);
         final ConcurrentHashMap<Long, NavSection[]> chunks = NavStore.chunksOf(level);
-        // DURABLE cross-chunk fluid edge fold (#7 step 3): the drain's authoritative recomputeWindow rewrites
-        // each edge cell's flags from the LOCAL scratch, dropping the cross-face fluid RISKY_EDIT term. Note
+        // DURABLE cross-chunk lava edge fold (#7 step 3): the drain's authoritative recomputeWindow rewrites
+        // each edge cell's flags from the LOCAL scratch, dropping the cross-face lava RISKY_EDIT term. Note
         // which faces the batch touches BEFORE the drain clears the queue, then re-derive that term
         // authoritatively (both sides) AFTER — resolving the lateral neighbour from the same live store. This
         // sits OUTSIDE drain() deliberately: BatchDrainIdentityTest drives drain() directly against a

@@ -51,7 +51,8 @@ planner-thread view, no live fallback). `NavGridUpdater` records block changes i
 `NavReclaim` = epoch-deferred section reclamation for async readers (DESIGN-background-pathfinding.md
 §4.1). `NavWarmup` = boot JIT warm-up (first search 21.8→0.67 ms). `NetherPortalIndex` = per-dimension
 portal-column index (fed by pass 1 + `ChunkNavLoader.record`). `EdgeFluidScatter` = step 3 of the
-flowing-fluid RISKY_EDIT arc (PERF-DESIGN-navgrid-build §C1): the durable cross-CHUNK lateral fold that
+lava RISKY_EDIT arc (PERF-DESIGN-navgrid-build §C1; LAVA-ONLY/6-directional since the 2026-08-10 owner
+ruling): the durable cross-CHUNK lateral fold that
 closes the lateral-air-optimistic gap left by the intra-chunk build scatter (in `computeDepth`) and the
 patch re-dilation, OR-ing flags into a live neighbour grid on the tick thread.
 - Files: `worldmodel/pathing/TraversalGrid.java`, `NavSectionBuilder.java`, `ChunkNavBuilder.java`,

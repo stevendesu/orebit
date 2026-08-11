@@ -21,25 +21,30 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.Strategy;
 
 /**
- * <b>Correctness proof for the DURABLE cross-chunk (lateral) fluid RISKY_EDIT fold</b> (#7 step 3,
- * PERF-DESIGN-navgrid-build §C1 — {@link EdgeFluidScatter}). Steps 1/2 (the intra-chunk build SCATTER +
- * patch re-dilation) are lateral-air-optimistic: a flowing source straddling a chunk boundary leaves the
- * boundary cells' RISKY_EDIT wrong. Step 3 reconciles the 4 lateral faces at BOTH the build and the patch
- * site. This test proves both halves against an INDEPENDENT cross-gather reference.
+ * <b>Correctness proof for the DURABLE cross-chunk (lateral) lava RISKY_EDIT fold</b>
+ * (PERF-DESIGN-navgrid-build §C1 — {@link EdgeFluidScatter}). Steps 1/2 (the intra-chunk build SCATTER +
+ * patch re-dilation) are lateral-air-optimistic: lava straddling a chunk boundary leaves the boundary
+ * cells' RISKY_EDIT wrong. Step 3 reconciles the 4 lateral faces at BOTH the build and the patch site. This
+ * test proves both halves against an INDEPENDENT cross-gather reference.
+ *
+ * <p>The dilation is a plain 1-cell step in each of the 6 orthogonal directions, so the LATERAL half this
+ * class owns has <b>no row offset</b>: lava at column row {@code colY} marks the cell at the SAME
+ * {@code colY} directly across the face. (The old flowing-fluid model marked {@code colY-1}/{@code colY-2};
+ * those rows are gone with it, and the assertions below pin that they stay clear.)
  *
  * <p>Two adjacent chunk columns are used throughout: chunk {@code (0,0)} (world x 0..15) and chunk
  * {@code (1,0)} (world x 16..31), sharing the {@code x=15 ↔ x=0} face.
  *
  * <ol>
- *   <li><b>Build-order invariance + reference.</b> A flowing source straddling the shared face; building
- *       (chunk0 then chunk1, each reconciling against whatever is already stored) must be byte-identical to
- *       (chunk1 then chunk0), AND equal to an intra-only build with the ground-truth cross term OR-ed in by
- *       an independent GATHER (the "single-big-column" authority, where the face would be interior and the
+ *   <li><b>Build-order invariance + reference.</b> Lava straddling the shared face; building (chunk0 then
+ *       chunk1, each reconciling against whatever is already stored) must be byte-identical to (chunk1 then
+ *       chunk0), AND equal to an intra-only build with the ground-truth cross term OR-ed in by an
+ *       independent GATHER (the "single-big-column" authority, where the face would be interior and the
  *       intra scatter is exact).</li>
- *   <li><b>Patch durability.</b> After a converged build: (a) an ADD of a flowing source on one chunk's face
- *       cell makes the ABUTTING neighbour edge cell gain RISKY_EDIT; (b) a non-fluid patch on the neighbour's
- *       edge cell must NOT clear the still-valid cross contribution (the drain's authoritative window clears
- *       it; the reconcile re-derives it).</li>
+ *   <li><b>Patch durability.</b> After a converged build: (a) an ADD of lava on one chunk's face cell makes
+ *       the ABUTTING neighbour edge cell gain RISKY_EDIT — and an ADD of WATER makes it gain nothing;
+ *       (b) a non-lava patch on the neighbour's edge cell must NOT clear the still-valid cross
+ *       contribution (the drain's authoritative window clears it; the reconcile re-derives it).</li>
  * </ol>
  */
 class CrossChunkFluidScatterTest {
@@ -100,45 +105,47 @@ class CrossChunkFluidScatterTest {
         applyCrossReference(r1, 0, r0, 15); // chunk1 x=0  face pulls from chunk0 x=15
         assertColumnsEqual("cross-gather reference chunk0", r0, a0);
         assertColumnsEqual("cross-gather reference chunk1", r1, a1);
+
+        // ...and the named bits the fold exists for.
+        assertTrue(risky(a1, 0, 1, 8), "chunk0's face lava must mark chunk1's abutting cell at the SAME row");
+        assertFalse(risky(a1, 0, 0, 8), "no row-below contribution (the old colY-1 row is gone)");
+        assertTrue(risky(a0, 15, 5, 2), "chunk1's face lava must mark chunk0's abutting cell");
+        assertFalse(risky(a1, 0, 7, 3), "chunk0's face WATER must contribute nothing across the boundary");
+        assertFalse(risky(a0, 15, 9, 11), "chunk1's face WATER must contribute nothing across the boundary");
     }
 
-    /** Chunk0 states: stone floor + a face-straddling flowing source and an interior one (interior must be
-     *  untouched by the cross fold). */
+    /** Chunk0 states: stone floor + face lava, an interior lava (must stay a purely-intra scatter) and a
+     *  face WATER cell that must fold nothing. */
     private static PalettedContainer<BlockState>[] scene0() {
         PalettedContainer<BlockState>[] s = floor();
-        put(s, 15, 1, 8, WATER); // face source (flowing over stone) -> scatters into chunk1 (0,·,8)
-        put(s, 5, 1, 5, WATER);  // interior source (must stay a purely-intra scatter)
+        put(s, 15, 1, 8, LAVA);  // east-face lava -> marks chunk1 (0,1,8)
+        put(s, 5, 1, 5, LAVA);   // interior lava (purely intra)
+        put(s, 15, 7, 3, WATER); // east-face water -> nothing, in either direction
         return s;
     }
 
-    /** Chunk1 states: stone floor + several face sources at assorted rows/materials. */
+    /** Chunk1 states: stone floor + a face lava at a different row and a face water. */
     private static PalettedContainer<BlockState>[] scene1() {
         PalettedContainer<BlockState>[] s = floor();
-        put(s, 0, 1, 8, WATER);  // face source opposite chunk0's
-        put(s, 0, 3, 10, WATER); // face source over AIR (flowing at a higher row) -> chunk0 (15,{2,1},10)
-        put(s, 0, 1, 2, LAVA);   // a lava face source
+        put(s, 0, 5, 2, LAVA);    // west-face lava -> marks chunk0 (15,5,2)
+        put(s, 0, 9, 11, WATER);  // west-face water -> nothing
         return s;
     }
 
-    /** For each face floor cell of {@code g} (the plane {@code x==gFixed}), OR RISKY_EDIT when {@code n}'s
-     *  opposite face ({@code x==nFixed}) holds a FLOWING source one or two rows above — the independent
-     *  cross-chunk GATHER oracle (the counterpart of the production SCATTER). */
+    /** For each face cell of {@code g} (the plane {@code x==gFixed}), OR RISKY_EDIT when {@code n}'s opposite
+     *  face ({@code x==nFixed}) holds LAVA at the SAME column row — the independent cross-chunk GATHER oracle
+     *  (the counterpart of the production SCATTER). */
     private static void applyCrossReference(NavSection[] g, int gFixed, NavSection[] n, int nFixed) {
         int height = g.length << 4;
         for (int z = 0; z < 16; z++) {
             for (int colY = 0; colY < height; colY++) {
-                if (refFlowing(n, nFixed, colY + 1, z) || refFlowing(n, nFixed, colY + 2, z)) {
-                    orRiskyRef(g, gFixed, colY, z);
-                }
+                if (refLava(n, nFixed, colY, z)) orRiskyRef(g, gFixed, colY, z);
             }
         }
     }
 
-    private static boolean refFlowing(NavSection[] col, int x, int colY, int z) {
-        if (colY < 0 || (colY >> 4) >= col.length) return false;
-        long here = descAtRef(col, x, colY, z);
-        if (NavBlock.fluid(here) == 0) return false;
-        return NavBlock.fluid(descAtRef(col, x, colY - 1, z)) == 0;
+    private static boolean refLava(NavSection[] col, int x, int colY, int z) {
+        return NavBlock.isLava(descAtRef(col, x, colY, z));
     }
 
     private static long descAtRef(NavSection[] col, int x, int colY, int z) {
@@ -167,32 +174,38 @@ class CrossChunkFluidScatterTest {
         EdgeFluidScatter.reconcileBuild(chunks, 1, 0, k -> { });
 
         // The abutting neighbour edge cell starts clear.
-        assertFalse(risky(c1, 0, 4, 8), "pre-edit: neighbour edge cell must have no cross RISKY");
+        assertFalse(risky(c1, 0, 5, 8), "pre-edit: neighbour edge cell must have no cross RISKY");
 
-        // ADD a flowing water source on chunk0's east face (over air) via the production flush path.
-        flushEdit(chunks, 0, c0[0], 15, 5, 8, WATER); // chunk0, world (15,5,8), section 0
+        // ADD lava on chunk0's east face via the production flush path.
+        flushEdit(chunks, 0, c0[0], 15, 5, 8, LAVA); // chunk0, world (15,5,8), section 0
 
-        assertTrue(risky(c1, 0, 4, 8), "ADD on the face must give the abutting neighbour edge cell RISKY");
-        assertTrue(risky(c1, 0, 3, 8), "the source at colY=5 endangers colY-1 and colY-2 across the face");
+        assertTrue(risky(c1, 0, 5, 8), "ADD on the face must give the abutting neighbour edge cell RISKY");
+        assertFalse(risky(c1, 0, 4, 8), "the dilation is a 1-cell lateral step: no colY-1 contribution");
+        assertFalse(risky(c1, 0, 6, 8), "no colY+1 contribution either");
+        assertFalse(risky(c1, 1, 5, 8), "and it does not reach two cells in");
+
+        // ADD water on the face: nothing at all.
+        flushEdit(chunks, 0, c0[0], 15, 9, 3, WATER);
+        assertFalse(risky(c1, 0, 9, 3), "water on the face must contribute nothing across the boundary");
     }
 
     @Test
     void patchOnNeighbourEdgeKeepsCrossContribution() {
-        // chunk0 has a flowing water source on its east face; converged build sets chunk1's edge RISKY.
+        // chunk0 has face lava; the converged build sets chunk1's abutting edge cell RISKY.
         PalettedContainer<BlockState>[] s0 = floor();
-        put(s0, 15, 5, 8, WATER); // flowing over air (15,4,8)
+        put(s0, 15, 5, 8, LAVA);
         NavSection[] c0 = fullBuild(s0);
         NavSection[] c1 = fullBuild(floor());
         ConcurrentHashMap<Long, NavSection[]> chunks = pair(c0, c1);
         EdgeFluidScatter.reconcileBuild(chunks, 0, 0, k -> { });
         EdgeFluidScatter.reconcileBuild(chunks, 1, 0, k -> { });
-        assertTrue(risky(c1, 0, 4, 8), "build must give chunk1's edge cell A's cross RISKY");
+        assertTrue(risky(c1, 0, 5, 8), "build must give chunk1's edge cell chunk0's cross RISKY");
 
-        // A NON-fluid patch on that very edge cell: the drain's authoritative window clears the cross term;
-        // the reconcile must re-derive it (chunk0's source still flows), so RISKY SURVIVES.
-        flushEdit(chunks, 1, c1[0], 0, 4, 8, GLASS); // chunk1, world (16,4,8) -> local x=0
+        // A NON-lava patch on that very edge cell: the drain's authoritative window clears the cross term;
+        // the reconcile must re-derive it (chunk0's lava is still there), so RISKY SURVIVES.
+        flushEdit(chunks, 1, c1[0], 0, 5, 8, GLASS); // chunk1, world (16,5,8) -> local x=0
 
-        assertTrue(risky(c1, 0, 4, 8), "A's still-valid cross contribution must survive B's non-fluid edit");
+        assertTrue(risky(c1, 0, 5, 8), "chunk0's still-valid cross contribution must survive chunk1's edit");
     }
 
     /** Run one live edit (in chunk {@code chunkX}, chunkZ 0) through the exact production flush sequence:
