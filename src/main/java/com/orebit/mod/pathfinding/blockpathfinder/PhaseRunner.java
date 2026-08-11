@@ -257,6 +257,15 @@ public final class PhaseRunner {
             // for a bot sliding out of the very cell its plan is framed from. A bot in a climbable is not
             // ballistic: it can always stop, and stationKeep now holds it unconditionally. Only a genuinely
             // airborne bot must keep homing.
+            //
+            // "STOP" IS MEDIUM-RELATIVE (2026-08-10). Zero inputs stops a bot only where something already
+            // holds it up. In fluid a no-input bot SINKS ~0.025/tick: measured on a submerged wall break,
+            // 41 hold ticks took botY 39.992 -> 39.018, the foot cell left the Traverse's admitted band,
+            // failWhen fired, and BotMining's reactive progress reset with the block unbroken (a break
+            // continues only while the mover keeps asking for the SAME cell). stationKeep therefore asks
+            // what HOLDS the bot in its current medium — the depth autopilot in fluid, sneak on a
+            // climbable, nothing on the ground. Nothing here needs a budget: failWhen is purely POSITIONAL,
+            // so once the bot genuinely holds position an arbitrarily long break is fine.
             if (bot.settled() || bot.onClimbable()) {
                 SteerControl.stationKeep(bot, view);
             } else {
