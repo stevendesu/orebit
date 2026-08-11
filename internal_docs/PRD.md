@@ -431,6 +431,14 @@ Adopt Baritone's **tick-based** model (its strongest part; ours was unspecified)
 - **Hazards/fluids/surfaces:** lava avoided (huge cost), water/soul-sand slow,
   ice slippery; fall beyond safe height pruned unless a water bucket is available. The
   *damage* cost of hazards depends on the health setting (below).
+  > **STATUS NOTE 2026-08-10 — "ice slippery" was never built into the planner.** The other
+  > items here shipped; slipperiness did not. `NavBlock` carried a `SURFACE_SLIPPERY` value in
+  > its 2-bit `surface` field that **no cost function ever read** (the field's only live consumer
+  > is `MovementContext.isSlow`, testing `SURFACE_SLOW`), so the value was removed. Slipperiness
+  > is handled instead at EXECUTION time, where it belongs: the follower reads the live block's
+  > vanilla friction (`BotSteering.slipperinessAt` → `getFriction()`) to shape the parkour
+  > air-brake and the ground cross-track gain. Pricing ice in the search remains open design
+  > intent, not a described-but-broken feature.
 - **A bot is not a player — several player constraints are configurable** (per server
   and/or per bot), and the cost model is parameterized on them:
   - **Food/hunger: ignored.** Bots don't eat, so sprint is always available — drop

@@ -44,7 +44,16 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *                                value matches the walk-passable test the ground movements use (water in
  *                                the body space is NOT clearance for a walker — swim is a later movement).
  *   bit 4     PLACEABLE_NEIGHBOR a solid (non-fluid) face among the six neighbours to bridge a placed
- *                                block against.
+ *                                block against. COMPUTED AND MAINTAINED, BUT CURRENTLY UNREAD BY THE
+ *                                SEARCH PATH (recorded 2026-08-11 — the bit is under review, not deleted).
+ *                                Its only consumer in src/main is the diagnostic {@code /bot probe}
+ *                                (ProbeCommand). The placement path does NOT use it:
+ *                                {@code MovementContext.placeable} runs its own 6-neighbour
+ *                                {@code descriptorAt} fan-out, and on a DIFFERENT predicate — the movement
+ *                                layer asks "not vanilla-REPLACEABLE" (so torches/grass/dripstone support a
+ *                                placement), while this bit asks "not passable AND fluid-free". The two are
+ *                                not interchangeable, so swapping the fan-out for a bit test would be a
+ *                                behavior change, not an optimization.
  *   bit 5     SLOW_TRANSIT       a through-slow passable block in the body space (cobweb / berry bush /
  *                                powder snow — NavBlock.transitSlow != 0): moving through costs extra
  *                                regardless of damage caps (physics slows everyone). Like
@@ -112,7 +121,9 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * <ul>
  *   <li><b>{@code PLACEABLE_NEIGHBOR} at lateral faces</b> — it has no cross-chunk fold
  *       ({@link EdgeFluidScatter} is fluid-only), so a placeable face just across a chunk boundary is
- *       missed. Pessimistic only: at worst a legal bridge is not offered.</li>
+ *       missed. Pessimistic only, and <i>inert</i> today: no route is affected, because nothing on the
+ *       search path reads the bit at all (see its entry in the bitmask table above) — the optimism would
+ *       only start to cost routes if a consumer were ever wired up.</li>
  *   <li><b>The downward face</b> — {@code y-1} reads at a section's bottom row ({@code unsupported},
  *       {@code hasPlaceableNeighbor}'s down face) resolve to air. Both err safe: RISKY_EDIT over-sets
  *       (a gravity block is assumed unsupported) and PLACEABLE_NEIGHBOR under-sets. The LAVA term is the
@@ -281,7 +292,10 @@ public final class NavFlags {
         return false;
     }
 
-    /** Any of the six neighbours offers a solid (non-fluid) face to place a bridging block against. */
+    /** Any of the six neighbours offers a solid (non-fluid) face to place a bridging block against.
+     *  NOTE: this is NOT the predicate the placement path uses — {@code MovementContext.placeable} asks
+     *  "not vanilla-REPLACEABLE" over its own fan-out and never reads this bit. See the class doc's
+     *  {@code PLACEABLE_NEIGHBOR} entry. */
     private static boolean hasPlaceableNeighbor(long[] desc, int x, int y, int z) {
         for (int[] o : SIX) {
             long n = at(desc, x + o[0], y + o[1], z + o[2]);

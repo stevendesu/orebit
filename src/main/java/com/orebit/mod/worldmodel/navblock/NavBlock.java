@@ -116,7 +116,17 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           perpendicular blocked edge. (Formerly the remainder of the reclaimed sturdy-faces mask.)
  *   14–15   2   openable    0 none / 1 door / 2 trapdoor / 3 fence-gate
  *   16–17   2   fluid       00 none / 01 water / 11 lava (low bit = is-fluid, high = is-lava; water incl. waterlogged)
- *   18–19   2   surface     0 none / 1 slow / 2 slippery
+ *   18–19   2   surface     0 none / 1 slow (2–3 UNUSED). Prices standing ON a slow FLOOR (soul sand /
+ *                           honey, {@code Block.getSpeedFactor() < 1}); read only by {@code
+ *                           MovementContext.isSlow}. A SLIPPERY value (2) existed until 2026-08-10 and was
+ *                           removed as dead: nothing in the planner ever read it. Slipperiness IS used, but
+ *                           by the FOLLOWER, which reads the CONTINUOUS vanilla friction live off the level
+ *                           ({@code BotSteering.slipperinessAt} → {@code Block.getFriction()}, 0.6 / 0.98 /
+ *                           0.989) — a servo gain, not a class, so it can never consume a grid bit. The field
+ *                           stays 2 BITS ON PURPOSE: narrowing it would either leave a hole at bit 19 or
+ *                           renumber every field above it, and freeing descriptor bits is not scarce here
+ *                           (52–63 are free). Keeping the width makes this an assignment-only change with a
+ *                           byte-identical layout.
  *   20      1   climbable
  *   21      1   gravity     falling block (sand/gravel/concrete-powder)
  *   22      1   damaging
@@ -223,7 +233,10 @@ public final class NavBlock {
     // Fluid encoding: low bit = "is a fluid", high bit = "is lava". So none=00, water=01, lava=11 —
     // and "is fluid" is the low bit alone (no OR of two values), "is lava" the high bit alone.
     private static final int FLUID_NONE = 0, FLUID_WATER = 1, FLUID_LAVA = 3;
-    private static final int SURFACE_NONE = 0, SURFACE_SLOW = 1, SURFACE_SLIPPERY = 2;
+    // Surface: the only live value is SLOW (a floor you walk slowly across). Encodings 2–3 of the 2-bit
+    // field are unused — SURFACE_SLIPPERY was removed 2026-08-10 as dead (no reader; see the bit-layout
+    // note above). The field keeps its 2-bit width so no other field's shift moves.
+    private static final int SURFACE_NONE = 0, SURFACE_SLOW = 1;
     private static final int OPEN_NONE = 0, OPEN_DOOR = 1, OPEN_TRAPDOOR = 2, OPEN_GATE = 3;
 
     // ---- Transit-slow class (2 bits, 41–42): moving THROUGH a passable cell is slowed ---------
@@ -458,9 +471,7 @@ public final class NavBlock {
                 : block instanceof FenceGateBlock ? OPEN_GATE
                 : OPEN_NONE;
 
-        int surface = isSlippery(block) ? SURFACE_SLIPPERY
-                : isSlow(block) ? SURFACE_SLOW
-                : SURFACE_NONE;
+        int surface = isSlow(block) ? SURFACE_SLOW : SURFACE_NONE;
 
         float destroyTime = block.defaultDestroyTime();
         int hardness = destroyTime < 0 ? 255 : clamp(Math.round(destroyTime * 5f), 0, 254);
@@ -674,11 +685,6 @@ public final class NavBlock {
                 || block == Blocks.CAVE_VINES || block == Blocks.CAVE_VINES_PLANT
                 || block == Blocks.TWISTING_VINES || block == Blocks.TWISTING_VINES_PLANT
                 || block == Blocks.WEEPING_VINES || block == Blocks.WEEPING_VINES_PLANT;
-    }
-
-    private static boolean isSlippery(Block block) {
-        return block == Blocks.ICE || block == Blocks.PACKED_ICE
-                || block == Blocks.BLUE_ICE || block == Blocks.FROSTED_ICE;
     }
 
     /**
@@ -1134,7 +1140,7 @@ public final class NavBlock {
     public static boolean isFluid(long d)  { return (d & ((long) 1 << FLUID_SHIFT)) != 0; }
     /** Lava specifically — the high fluid bit. */
     public static boolean isLava(long d)   { return (d & ((long) 2 << FLUID_SHIFT)) != 0; }
-    /** Surface: 0 none, 1 slow, 2 slippery. */
+    /** Surface: 0 none, 1 slow (2–3 unused; the SLIPPERY class was removed 2026-08-10 — see the bit layout). */
     public static int surface(long d)      { return (int) (d >>> SURF_SHIFT) & SURF_MASK; }
     public static boolean isClimbable(long d)   { return (d & CLIMB_BIT) != 0; }
     public static boolean hasGravity(long d)    { return (d & GRAVITY_BIT) != 0; }

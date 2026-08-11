@@ -14,7 +14,11 @@ LANDED (`RegionPathPlan.splice` + the `HierarchicalRegionPlan.Verdict` three-way
 Classifies every `BlockState` (~28k) at static init into a few hundred behavioral navtypes: a `short`
 index into a packed 64-bit `long` descriptor table (topY, shape, stair/door/trapdoor facing+half+hinge
 (gate FACING deliberately unpacked), fluid,
-surface, climbable, gravity, damaging, replaceable, hardness, tool, waterloggable, transit-slow
+surface (SLOW-FLOOR ONLY — the field's old `SURFACE_SLIPPERY` value was removed 2026-08-10, dead since it
+was written: nothing in the planner ever read it. The field keeps its 2-bit width so no other field's shift
+moves; encodings 2–3 are unused. Slipperiness is a live FOLLOWER read,
+`BotSteering.slipperinessAt` → vanilla `getFriction()`, never a grid fact),
+climbable, gravity, damaging, replaceable, hardness, tool, waterloggable, transit-slow
 (41–42), PORTAL (11) / NETHER_PORTAL (12), shared openable OPEN (43 — door/trapdoor/fence-gate),
 PROTECTED (44), REDUCED_JUMP/honey (45),
 bubble-column + drag dir (46–47), fall-soft class (48–49), HAND_TOGGLEABLE (50 — non-iron
@@ -33,8 +37,10 @@ post-init.
 
 ## worldmodel/pathing — the nav grid pipeline
 `TraversalGrid` = per-16³ section: packed `short[4096]` (low 10 bits navtype, high 6 `NavFlags`
-neighbour bits) + parallel `byte[4096]` depth nibbles (floorGap low / runUp high; 14=saturate,
-15=UNKNOWN). (The old `anyDoor` section prefilter was measured useless and REMOVED — trapdoor arc §8;
+neighbour bits — **all six allocated, 6+10=16, there is NO spare bit**; `PLACEABLE_NEIGHBOR` is
+computed+maintained but read only by `/bot probe` today, since `MovementContext.placeable` runs its own
+6-neighbour fan-out on a different predicate) + parallel `byte[4096]` depth nibbles (floorGap low / runUp
+high; 14=saturate, 15=UNKNOWN). (The old `anyDoor` section prefilter was measured useless and REMOVED — trapdoor arc §8;
 the per-pop openable context is an unconditional feet-descriptor read, and no anyX bit may replace
 it.) `NavSection` wraps a grid + nullable log₂ `resourceTally`;
 `NavSectionPool` recycles; `NavStore` = per-level chunkKey→NavSection[] map (+ `ringBuilt` readiness).

@@ -42,6 +42,14 @@ early-out**; CAVE/SURFACE contain zero fluid yet it scans every cell and returns
 does **not** register (early-outs on the first solid neighbour) — so `PLACEABLE` is a non-issue and any
 bit-plane work on it (old C2) is dropped. The depth sweeps are the secondary cost (21–32%).
 
+> **ADDENDUM 2026-08-11 — `PLACEABLE_NEIGHBOR` has no reader.** The forensic's "non-issue" verdict stands
+> and is now doubly true: audit of `src/main` found the bit's only consumer is the diagnostic
+> `/bot probe` (`ProbeCommand`). `MovementContext.placeable` never reads it — it runs its own
+> 6-neighbour `descriptorAt` fan-out, on a *different* predicate (not vanilla-REPLACEABLE, vs the bit's
+> not-passable-AND-fluid-free). So the cheapest optimization available on this bit is deleting its
+> computation, not accelerating it. The bit is UNDER REVIEW, not removed — do not assume either way
+> without the owner's call.
+
 ---
 
 ## §1. Candidate optimizations (ranked; each states bit-exactness, value, risk, effort)
@@ -124,7 +132,8 @@ maintenance, both covered by the grid-diff + `PatchStormBenchmark` gates (§3).
 ### C2 — Bit-plane precompute for the lateral neighbour scans (high value, HIGH risk; deferred behind C1)
 
 **Mechanism.** For sections C1 *can't* skip (fluid/gravity actually present — and for
-`PLACEABLE_NEIGHBOR`, which C1 barely guards since most sections have solids), build per-section bit-planes
+`PLACEABLE_NEIGHBOR`, which C1 barely guards since most sections have solids; but see the §0 addendum —
+that bit currently has no reader on the search path, so its half of this item is chasing dead work), build per-section bit-planes
 (`fluid`, `solid`) once (4096 bits = 64 `long`s) and compute "has-lateral-fluid-neighbour" /
 "has-placeable-neighbour" for whole 16-cell rows via **bitwise shift+OR** (±x = intra-lane shift, ±z =
 lane shift, ±y = plane shift) instead of per-cell 4–6 scalar reads.
