@@ -50,7 +50,35 @@ bit-plane work on it (old C2) is dropped. The depth sweeps are the secondary cos
 pathfinder; any change to a flag/nibble is a behavior change. "Bit-identical" below means provably the
 same output, not an approximation.
 
-### C1 — Flowing-fluid SCATTER, folded into the depth sweep (FLAGSHIP; owner 2026-07-25; bit-identical)
+### C1 — Fluid SCATTER, folded into the depth sweep (FLAGSHIP; owner 2026-07-25; bit-identical)
+
+> **SEMANTIC SUPERSESSION — owner ruling 2026-08-10: the term is now LAVA-ONLY, UNCONDITIONAL, and
+> 6-DIRECTIONAL.** Everything below about *which cells* RISKY_EDIT's fluid term covers is HISTORY. The
+> mechanism (a scatter folded into `computeDepth`'s ascending sweep, a patch-path gather, a cross-chunk
+> lateral fold) is unchanged and still the shipped design; only the predicate and the offsets changed:
+> - **Predicate:** `NavBlock.isLava(d)` — one mask test, no cell-below read, no "flowing" concept. **Water
+>   no longer contributes at all.** The flowing test (`fluid(F) && !fluid(F_below)`) was shown by bytecode
+>   analysis of vanilla `FlowingFluid.spread` to be close to ANTI-correlated with real spreading: a fluid
+>   cell that *can* drain downward does not spread sideways, while impoundment (every cell with fluid
+>   below) never matched yet always floods on a break. Modelling vanilla properly needs source-vs-flowing
+>   and fluid-level bits `NavBlock`'s 2-bit fluid field does not store, so the term was re-scoped to a
+>   blunt lava keep-away zone instead.
+> - **Geometry:** a 1-cell dilation over the **6 orthogonal neighbours** (`x±1`, `y±1`, `z±1`), centre
+>   excluded — replacing "4 horizontal neighbours at rows `fy-1`/`fy-2`".
+> - **Consequences for the machinery:** the `DEPTH_COL_FLUID` per-column carry is DELETED (the predicate is
+>   stateless); the vertical section seam is now crossed in **both** directions, so the build scatter takes
+>   the above grid as well as the below one, and the patch path grew (a) an explicit below-grid read for its
+>   row-0 cells and (b) an **above-seam window** for `ly == 15` edits — the lava term is the first flag fact
+>   that reads DOWNWARD across a section face, which the upward-only descriptor overscan cannot serve; the
+>   cross-chunk lateral fold (`EdgeFluidScatter`) loses its row offset and its flowing carry (same `colY`).
+> - **Perf note:** the non-lava common case is now ONE mask test per cell with no scratch read at all, so
+>   the build sweep is cheaper than the flowing variant measured below. The patch path is slightly more
+>   expensive: `ly == 15` edits now pay one extra `fillScratch` + a one-row window (`PatchStormBenchmark`
+>   re-measure pending).
+>
+> The authoritative prose lives in `NavFlags`'s class Javadoc ("RISKY_EDIT's fluid term: LAVA-ONLY,
+> unconditional, 6-directional"). The rest of this section is retained as the record of how the scatter
+> mechanism was derived and why the seam carry was continuous.
 
 The owner's reformulation, superseding the earlier per-section palette-guard (which had only
 section-level fidelity, still paid the 3-row overscan, and would have to persist `hasFluid`/`hasGravity`

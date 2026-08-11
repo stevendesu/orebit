@@ -31,7 +31,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  * following move.
  *
  * <p><b>Caps.</b> Requires {@link BotCaps#canBreak}; a non-breaking bot emits nothing. The floor must be
- * actually breakable (not bedrock/fluid) and not {@code RISKY_EDIT} (don't undermine sand / tap a flow).
+ * actually breakable (not bedrock/fluid) and not {@code RISKY_EDIT} (don't undermine sand / dig beside lava).
  *
  * <p><b>Trapdoors — the hatch-drop toggle arm (DESIGN-trapdoors.md §5).</b> The floor cell rides {@link
  * com.orebit.mod.pathfinding.blockpathfinder.EditScratch#requireAirVertical}: when the block stood on is a

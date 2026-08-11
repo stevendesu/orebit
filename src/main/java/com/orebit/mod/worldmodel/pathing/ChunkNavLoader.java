@@ -153,7 +153,7 @@ public final class ChunkNavLoader {
         final long navStart = System.nanoTime();
         NavStore.put(level, k, ChunkNavBuilder.buildAllSections(level, chunk, portals));
         // DURABLE cross-chunk fluid edge fold (#7 step 3, PERF-DESIGN-navgrid-build §C1): the intra-chunk
-        // SCATTER is lateral-air-optimistic, so a flowing source straddling a chunk boundary leaves the
+        // SCATTER is lateral-air-optimistic, so lava straddling a chunk boundary leaves the
         // boundary cells' RISKY_EDIT wrong. Now that this chunk is built + stored, reconcile its 4 lateral
         // faces against whichever neighbours are already built (both directions, monotone OR into the live
         // neighbour grid — tick-thread single-writer, planners only read). Each MODIFIED neighbour is bumped;

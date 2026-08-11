@@ -482,6 +482,50 @@ public final class SteerControl {
      *
      * <p>The facing is not lost by dropping the target-ward push: {@link BotSteering#mine} aims at the cell
      * it breaks (BotMining's look-at-centre), so the hold never needs to face its own obstruction.
+     *
+     * <h2>"Stop" is medium-relative — zero inputs only STOP a bot the ground is already holding</h2>
+     * Ground is the one medium where standing still is free: release everything and friction keeps the bot
+     * exactly where it is. In every other medium the bot is being CARRIED somewhere while it holds, so the
+     * inputs that mean "stay put" are different inputs — and emitting none is not a hold at all, it is a
+     * slow drift out of the frame the plan was built from. Two are real:
+     * <ul>
+     *   <li><b>Fluid</b> — buoyancy/gravity never balance for a headless bot (vanilla's swim-down is a
+     *       CLIENT tick it does not run), so a no-input bot sinks. Convicted 2026-08-10 on a submerged wall
+     *       break: 41 hold ticks at a constant {@code dm.y=-0.025} took botY {@code 39.992 -> 39.018} —
+     *       0.974 blocks — the foot cell left the {@code Traverse}'s admitted band, {@link
+     *       MovePlan#failWhen} fired, and {@code BotMining}'s reactive progress (a break continues only
+     *       while the mover keeps asking for the SAME cell) reset with the block unbroken. The station-keep
+     *       is {@link #holdDepthAt} — the same depth autopilot every swim move and {@link #drive}'s
+     *       in-water branch already press — aimed at the CENTRE of the bot's own feet cell, the vertical
+     *       twin of this method's own-column re-centre. Deadband {@code ±}{@link #WATER_RISE_DEADBAND}
+     *       around {@code footY+0.5} keeps the whole hold inside {@code [footY+0.3, footY+0.7]}, so the
+     *       foot cell is unreachable from either side however long the break takes ({@code failWhen} is
+     *       purely POSITIONAL — no tick budget — so an arbitrarily slow break is fine once the bot is
+     *       actually still).</li>
+     *   <li><b>Climbable</b> — sneak, as before: vanilla's {@code handleOnClimbable} zeroes the
+     *       {@code -0.15}/t slide for a sneaking Player.</li>
+     * </ul>
+     *
+     * <p><b>Fluid outranks climbable, and that is a vanilla fact, not a preference</b> (javap-verified on
+     * 1.21.11 named bytecode, 2026-08-10). {@code LivingEntity.travel} dispatches
+     * {@code shouldTravelInFluid(...) ? travelInFluid : isFallFlying() ? travelFallFlying : travelInAir},
+     * and {@code handleOnClimbable} has exactly ONE caller —
+     * {@code handleRelativeFrictionAndCalculateMovement}, itself called from exactly one site, inside
+     * {@code travelInAir}. So a bot on a LADDER IN WATER runs the fluid branch and the climbable clamp
+     * never executes: sneak there is not a weaker hold, it is no hold at all. (What DOES survive into the
+     * fluid branch is the involuntary climb — {@code travelInWater} still turns
+     * {@code horizontalCollision && onClimbable} into {@code vy=0.2} — which the own-column re-centre
+     * already starves of input.)
+     *
+     * <p><b>Scaffolding is exempt from the sneak-hold</b> (same verification pass; NOTES-movement-physics
+     * §3). Vanilla's hold reads
+     * {@code y<0 && !getInBlockState().is(Blocks.SCAFFOLDING) && isSuppressingSlidingDownLadder() && this
+     * instanceof Player} — scaffolding is excluded by name — and {@code ScaffoldingBlock.getCollisionShape}
+     * additionally returns {@code Shapes.empty()} for a DESCENDING context, so a sneak on a scaffold deck
+     * deletes the very surface holding the bot up. On scaffolding sneak is a DESCEND input; the hold
+     * therefore presses nothing and lets the bot rest on the next deck plate (which makes it
+     * {@code grounded}, the medium that needs no input at all). {@link BotSteering#scaffoldingBelow} is the
+     * existing seam read for this — the same one {@code Climb}'s sink-in step uses.
      */
     public static void stationKeep(BotSteering b, SteerView p) {
         recenterOn(b, Math.floor(b.x()) + 0.5, Math.floor(b.z()) + 0.5);
@@ -496,9 +540,29 @@ public final class SteerControl {
         // relevant while the runner has stopped it; only holding is.
         //
         // Deliberately NOT applied to drive()'s stance call, where the descend intent IS the point.
-        if (!b.grounded() && b.onClimbable()) {
-            b.setSneak(true);
-            return;
+        //
+        // WHAT HOLDS ME, in the medium I am in RIGHT NOW — a stateless per-tick question, re-asked every
+        // tick, with no timer and no memory of how long the hold has run (see the class doc above for the
+        // verification behind the ordering). Grounded skips the whole chain: a floor is already holding the
+        // bot, and zero inputs is the correct — and byte-identical-to-before — answer there.
+        if (!b.grounded()) {
+            if (b.inWater() || b.inLava()) {
+                // Fluid FIRST: vanilla's fluid travel branch never runs the climbable clamp, so on a
+                // ladder in water sneak does nothing and only the depth autopilot can hold the bot.
+                tag("hold:depth");
+                holdDepthAt(b, b.footY() + 0.5);   // the centre of MY OWN cell, never the step's target
+                return;
+            }
+            if (b.onClimbable()) {
+                // Scaffolding is sneak-exempt in vanilla (and sneak deletes its deck shape outright), so
+                // pressing sneak there DESCENDS. Nothing holds a bot inside scaffolding: press nothing and
+                // let it settle onto the next plate, which grounds it.
+                if (!b.scaffoldingBelow()) {
+                    tag("hold:sneak");
+                    b.setSneak(true);
+                }
+                return;
+            }
         }
         holdClimbableStance(b, p);
     }
@@ -1707,10 +1771,28 @@ public final class SteerControl {
      * (s52: relocated from the follower's cross-cutting water rule — movements own their controls.)
      */
     public static void holdDepth(BotSteering b, SteerView p, double bias) {
+        holdDepthAt(b, p.ty() - bias);
+    }
+
+    /**
+     * {@link #holdDepth} against an ABSOLUTE {@code depth} instead of the step's planned one — the same
+     * bang-bang autopilot, with the target supplied by the caller.
+     *
+     * <p>Exists because the two callers want the depth from opposite places. A MOVE is travelling, so its
+     * target is the segment's planned feet height ({@code p.ty() - bias}) and {@link #holdDepth} is the
+     * right spelling. The runner's {@link #stationKeep} hold is NOT travelling: consulting the step's
+     * planned height there would drive the bot toward the cell it has been stopped from entering — the
+     * vertical twin of the {@code (58,133,189)} wedge that made the hold re-centre on its OWN column rather
+     * than the target, and the same reason {@code stationKeep} refuses to delegate its vertical to
+     * {@link #holdClimbableStance} (whose descend branch reads the MOVE's intent). So the hold passes its
+     * own cell instead.
+     *
+     * <p>No-op out of fluid, so a caller need not pre-test the medium — the guard IS the medium test.
+     */
+    public static void holdDepthAt(BotSteering b, double depth) {
         if (!b.inWater() && !b.inLava()) { // the autopilot works in ANY fluid (lava swims like slow water)
             return;
         }
-        final double depth = p.ty() - bias;
         if (b.y() < depth - WATER_RISE_DEADBAND) {
             b.setJumping(true);
         } else if (b.y() > depth + WATER_RISE_DEADBAND) {

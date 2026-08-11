@@ -105,7 +105,7 @@ public class TraversalGrid {
     /**
      * OR the given {@link NavFlags} bit(s) into this cell's flag field, preserving its navtype and any flags
      * already set. The build seam for a SCATTER pass that folds a neighbour-derived bit onto an
-     * already-computed cell (the flowing-fluid RISKY_EDIT scatter in {@link NavSectionBuilder#computeDepth}).
+     * already-computed cell (the lava RISKY_EDIT scatter in {@link NavSectionBuilder#computeDepth}).
      */
     public void orFlags(int x, int y, int z, int flags) {
         data[getLinearIndex(x, y, z)] |= (short) ((flags & FLAGS_MASK) << FLAGS_SHIFT);
