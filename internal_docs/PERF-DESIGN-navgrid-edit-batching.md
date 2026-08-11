@@ -92,7 +92,9 @@ Two properties matter for batching:
    bot); under-bumping (missing a real grid change) breaks the debounce contract.
 2. It bumps **even for navtype-invariant state changes** (a repeater ticking, a crop growing a
    stage): the only no-op filter upstream is the interned-reference check `oldState == newState` at
-   `NavGridUpdater.java:53`. NavBlock collapses ~28k states into ~587 navtypes (~48×), so a large
+   `NavGridUpdater.java:53`. NavBlock collapses tens of thousands of block states into a few hundred
+   navtypes — a large-factor collapse, though the exact count is version- and config-dependent and is
+   deliberately not quoted here (see `TraversalGrid`) — so a large
    class of real-world block changes — redstone power levels, crop ages, fence connections —
    changes the BlockState but NOT the navtype, yet today pays a full patch AND arms every bot's
    re-search.
