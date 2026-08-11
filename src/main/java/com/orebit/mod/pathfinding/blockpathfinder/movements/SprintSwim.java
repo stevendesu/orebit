@@ -36,11 +36,21 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  * for "already prone-swimming" — the continuation-in-1-deep state. The precise rule is deferred to a stateful
  * refinement:
  * <ul>
- *   <li><b>Reserved NavGrid bit.</b> The TraversalGrid short has a spare flag bit; baking "this water cell
- *       has water above it" (i.e. 2-deep / sprint-initiable) into it at chunk-build time turns the
- *       feet+head probe into a single resident-bit read. (If more bits are ever needed, the navtype index is
- *       the base count is in the 400–600 range against the 1024 cap, so it could shrink from 10 to 9 bits
- *       only if that headroom is re-verified first — protected-block splits eat into it at runtime.)</li>
+ *   <li><b>A NavGrid bit — but there is no spare one</b> (corrected 2026-08-11; this bullet used to claim
+ *       "the TraversalGrid short has a spare flag bit", which was never true). Baking "this water cell has
+ *       water above it" (i.e. 2-deep / sprint-initiable) into the grid at chunk-build time would turn the
+ *       feet+head probe into a single resident-bit read — but the packed {@code short} is <b>exactly
+ *       full</b>: 6 {@link com.orebit.mod.worldmodel.pathing.NavFlags} bits ({@code FLAGS_MASK = 0x3F}, all
+ *       six allocated) + a 10-bit navtype index ({@code NAVTYPE_MASK = 0x3FF}) = 16. Freeing one means
+ *       retiring a flag, and shrinking the navtype index to 9 bits is NOT an option — but the margin is
+ *       THIN, so quote the real numbers rather than a vibe. Measured on 1.21.11 (29,671 states):
+ *       <b>515</b> navtypes after the {@code SURFACE_SLIPPERY} removal, 517 before it — against a 9-bit
+ *       cap of 512. So 9 bits misses by ~3, and {@code NavBlock.applyProtected} splits push the live count
+ *       further up at runtime, exactly when a user configures more protected blocks. (A headless
+ *       {@code Bootstrap} that never binds the {@code mineable/*} tags reports ~480 instead — the tool
+ *       field collapses — so JMH/boot-harness figures UNDERCOUNT and must not be used for this decision.)
+ *       Widening the cell is separately ruled out (see {@code TraversalGrid}, MOVEMENT-DESIGN §8, and the
+ *       same finding recorded in {@code future-work.txt} under "Idea 3: Scatter safe-fall").</li>
  *   <li><b>Node sprint-state.</b> Tracking "already sprint-swimming" in the search node would let the
  *       continuation-in-1-deep case (and the slow submerged {@link Swim} fallback for non-initiated shallow)
  *       be modelled exactly. Heavier (it widens the search space), so it waits until the approximation proves
