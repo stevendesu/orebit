@@ -42,13 +42,17 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  *       feet+head probe into a single resident-bit read — but the packed {@code short} is <b>exactly
  *       full</b>: 6 {@link com.orebit.mod.worldmodel.pathing.NavFlags} bits ({@code FLAGS_MASK = 0x3F}, all
  *       six allocated) + a 10-bit navtype index ({@code NAVTYPE_MASK = 0x3FF}) = 16. Freeing one means
- *       retiring a flag, and shrinking the navtype index to 9 bits is NOT an option — but the margin is
- *       THIN, so quote the real numbers rather than a vibe. Measured on 1.21.11 (29,671 states):
- *       <b>515</b> navtypes after the {@code SURFACE_SLIPPERY} removal, 517 before it — against a 9-bit
- *       cap of 512. So 9 bits misses by ~3, and {@code NavBlock.applyProtected} splits push the live count
- *       further up at runtime, exactly when a user configures more protected blocks. (A headless
- *       {@code Bootstrap} that never binds the {@code mineable/*} tags reports ~480 instead — the tool
- *       field collapses — so JMH/boot-harness figures UNDERCOUNT and must not be used for this decision.)
+ *       retiring a flag, and shrinking the navtype index to 9 bits is NOT an option: 9 bits caps at 512,
+ *       and the live navtype count sits in that same range — close enough that it can land on either side.
+ *       <p><b>Do not hardcode a navtype count anywhere, and do not trust one you find.</b> The count is
+ *       NOT a property of the code: it varies with the MC version, and it varies at RUNTIME with the
+ *       owner's {@code mining.protectedBlocks} config, because {@link
+ *       com.orebit.mod.worldmodel.navblock.NavBlock#applyProtected} SPLITS matching states into new
+ *       navtypes after static-init. A headless {@code Bootstrap} that never binds the {@code mineable/*}
+ *       tags collapses the {@code tool} field and undercounts further still. Measure it in the
+ *       configuration you actually care about — the boot log line is
+ *       {@code [Orebit] NavBlock: <states> states -> <navtypes> navtypes} — and treat the result as a
+ *       reading, not a fact.
  *       Widening the cell is separately ruled out (see {@code TraversalGrid}, MOVEMENT-DESIGN §8, and the
  *       same finding recorded in {@code future-work.txt} under "Idea 3: Scatter safe-fall").</li>
  *   <li><b>Node sprint-state.</b> Tracking "already sprint-swimming" in the search node would let the

@@ -28,9 +28,17 @@ import java.util.Arrays;
  * <p><b>There is no spare bit.</b> All six flag bits are allocated and {@code FLAGS_MASK | (NAVTYPE_MASK
  * << FLAGS_SHIFT)} covers the {@code short} exactly (6 + 10 = 16). A new resident per-cell fact therefore
  * has to retire a flag, ride a derived {@link com.orebit.mod.worldmodel.navblock.NavBlock} descriptor bit,
- * or land in the parallel depth byte — it cannot be squeezed in here, and the navtype field cannot give one
- * up either (9 bits caps at 512 against a measured ~590 navtypes). Recorded because the question recurs;
- * see {@code future-work.txt} ("Idea 3: Scatter safe-fall").
+ * or land in the parallel depth byte — it cannot be squeezed in here, and the navtype field cannot safely
+ * give one up either: 9 bits caps at 512, which is the same order as the live navtype count, so the field
+ * would be one config change away from overflowing. Recorded because the question recurs; see
+ * {@code future-work.txt} ("Idea 3: Scatter safe-fall").
+ *
+ * <p><b>Never hardcode a navtype count.</b> It is not a property of the code — it moves with the MC version
+ * AND at runtime with {@code mining.protectedBlocks}, since {@link
+ * com.orebit.mod.worldmodel.navblock.NavBlock#applyProtected} splits matching states into fresh navtypes
+ * after static-init. Any figure written down here would be stale for someone else's config on the day it
+ * was written. Read the boot line ({@code [Orebit] NavBlock: … states -> … navtypes}) in the configuration
+ * you care about instead.
  *
  * <p><b>Why store both, not re-read live</b> (favour-cpu-over-ram): a live {@code getBlockState} is a
  * palette walk + a navtype-map lookup, and the neighbour facts are an 8-cell scan; keeping both resident
