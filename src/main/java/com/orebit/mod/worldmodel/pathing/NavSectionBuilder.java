@@ -94,8 +94,11 @@ public final class NavSectionBuilder {
 
         // The grid packs the navtype into 10 bits (TraversalGrid.NAVTYPE_CAPACITY). If NavBlock ever
         // interns more navtypes than that (heavily-modded servers), the high index bits would collide
-        // with the flag bits and cells would mis-resolve. Vanilla measures ~590, well under 1024; warn
-        // loudly rather than corrupt silently. The fix is to compact the descriptor to shed navtypes
+        // with the flag bits and cells would mis-resolve. The live count is well under 1024 on vanilla but
+        // is NOT a constant — it moves with the MC version and at runtime with mining.protectedBlocks (see
+        // NavBlock.applyProtected), which is exactly why this is a runtime check and not an assumption; do
+        // not record a figure here. Warn loudly rather than corrupt silently. The fix if it ever trips is
+        // to compact the descriptor to shed navtypes
         // (MOVEMENT-DESIGN §8), NOT to widen the cell. (AIR_DESC above already forced NavBlock
         // class-init, so the count is final here.)
         if (NavBlock.navtypeCount() > TraversalGrid.NAVTYPE_CAPACITY) {
