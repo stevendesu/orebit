@@ -893,7 +893,12 @@ public final class BlockPathfinder {
             int curMode = nodes.mode[current];
             relaxer.currentMode = curMode; // default dest mode for ordinary (mode-preserving) accepts
             ctx.setMode(curMode);          // surfaced to each movement's candidates() for mode-gating
-            ctx.setCurrentDoorEdge(cx, cy, cz); // §2b: refuse a Traverse exit through an intact open door's blocked side
+            // §2b exit-openable verdict for Traverse/Ascend/Descend: registers an intact door (OPEN *or*
+            // CLOSED) or an open trapdoor in the feet cell, plus an open trapdoor panel in the HEAD cell.
+            // This is the ENTIRE shared per-pop prologue and its whole cost: two path-edit-aware descriptor
+            // reads (y+1, y+2). Every movement below re-reads the floor/feet/head itself — candidates()
+            // takes bare ints, so nothing else is shared between them.
+            ctx.setCurrentDoorEdge(cx, cy, cz);
             List<Movement> tier1 = MovementRegistry.TIER1;
             for (int mi = 0, mn = tier1.size(); mi < mn; mi++) {
                 relaxer.move = mi;

@@ -72,7 +72,11 @@ Unified SET resolver: `NavBlock.withOpenableOpen(d, open)` = isDoor → withDoor
 withTrapdoorOpen. `PathEdits.SET_OPEN/SET_CLOSED` are reused unchanged — no new edit kinds.
 
 Navtype budget: facing×half×open splits grow trapdoor navtypes from ~3 to ~16 per behavior family
-(×2 waterlogged, ×~3 families wood/iron/copper) — estimated +60..90 navtypes on ~433 live (cap 1024).
+(×2 waterlogged, ×~3 families wood/iron/copper) — a low-tens-of-navtypes addition against the **1024 cap**
+(the 10-bit navtype field, the one durable number here). The "on ~433 live" baseline this line used to
+quote was removed 2026-08-11: the live count moves with the MC version *and* at runtime with
+`mining.protectedBlocks`, so no such figure can be written down as fact — measure it in your own config
+from the boot line `[Orebit] NavBlock: … states -> … navtypes`.
 
 ## §3 Blocked-FACE model (6-way)
 

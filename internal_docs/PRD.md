@@ -739,8 +739,13 @@ bar HPA\* and the macro-ops were held to.
 Ratified during design review (with rationale recorded in project memory):
 
 1. NavBlock identity is **per-BlockState**; **short** index → **packed 64-bit `long`**
-   descriptor; palette-compressed on disk, expanded in memory. *Measured:* 27,866
-   states → 587 distinct navtypes (48× collapse; ~4.6 KB table, L1-resident).
+   descriptor; palette-compressed on disk, expanded in memory. Tens of thousands of block
+   states collapse to a few hundred navtypes — a large (tens-fold) collapse into a small
+   L1-resident table. **Do not record the exact count here**: it moves with the MC version
+   *and* at runtime with `mining.protectedBlocks` (`NavBlock.applyProtected` splits matching
+   states into fresh navtypes after static-init), so any figure is stale for someone else's
+   config. Read the boot line `[Orebit] NavBlock: … states -> … navtypes` in the configuration
+   you care about. The durable constant is the **1024 cap** (the 10-bit navtype field).
 2. Nav grid is **recomputed on load**, never persisted.
 3. Regions are a **fixed cubic grid**, not semantic.
 4. Resource tracking is a **sparse log₂ octree** over ~64 classes; section-granular.

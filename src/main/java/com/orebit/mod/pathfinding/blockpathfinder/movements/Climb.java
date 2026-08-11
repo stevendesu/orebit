@@ -89,8 +89,12 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * Vanilla {@code LivingEntity.onClimbable()} tests the feet block against {@code BlockTags.CLIMBABLE};
  * while on a climbable, {@code (horizontalCollision || jumping)} sets vertical velocity to {@code +0.2}
  * (climb up) and otherwise clamps the fall to {@code −0.15} — so holding the jump input climbs, and doing
- * nothing descends. No new {@link BotSteering} input and no {@code MovePlan} (nothing to break/place; the
- * motion is monotone): {@link #steer} re-centres on the column and holds jump only when the target is
+ * nothing descends. No new {@link BotSteering} input. (This said "and no {@code MovePlan}" until
+ * 2026-08-11 — stale: Climb was the LAST movement converted to the phase model and DOES override
+ * {@link #plan}, building a single {@code climb} phase with {@code resetWhen}/{@code failWhen}/{@code done}
+ * — see the conversion note further down. What remains true is that it folds no break/place there and the
+ * motion is monotone, so the phase delegates its drive straight to {@link #steer}.)
+ * {@link #steer} re-centres on the column and holds jump only when the target is
  * above. The default block-exact {@link #reached} stands — at 0.117 b/t the feet occupy each waypoint cell
  * for ~8 ticks. A stalled climb (slide-back at −0.15/t while off the ground) has NO recovery machinery
  * (s52 deleted the airborne-stall recovery; the no-recovery rule): it surfaces as a visible stall, and a

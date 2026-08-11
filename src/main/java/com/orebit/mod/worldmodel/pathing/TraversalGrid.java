@@ -15,8 +15,9 @@ import java.util.Arrays;
  * <ul>
  *   <li><b>Navtype</b> (low 10 bits): the {@link com.orebit.mod.worldmodel.navblock.NavBlock} navtype
  *       index — {@code navtype(x,y,z)} is a single {@code & 0x3FF}, and the caller turns it into the full
- *       packed geometry descriptor with one more array index. 10 bits = 1024 navtypes (measured ~590, so
- *       ~1.7× headroom); {@link NavSectionBuilder} guards against the count outgrowing this budget.
+ *       packed geometry descriptor with one more array index. 10 bits addresses 1024 navtypes;
+ *       {@link NavSectionBuilder} guards against the live count outgrowing that budget. (Do NOT record
+ *       what the live count is — see the "Never hardcode a navtype count" note below.)
  *   <li><b>Flags</b> (high 6 bits): the precomputed neighbour-property bitmask (see {@link NavFlags}) —
  *       edit-hazard, walk-through hazard, 2-bit headroom, placeable-neighbour, through-slow — the
  *       multi-cell facts the movement layer would otherwise re-derive on every A* expansion. Computed once
