@@ -76,3 +76,8 @@ verdicts (§3–§6) that the shipped climb arc left behind.
 - §8 nav-grid cell encoding (RATIFIED s17): packed `short` = [6 NavFlags neighbour-property bits |
   10 navtype bits]; fluid+gravity merged into one RISKY_EDIT bit; work items built per consumer, not
   speculatively; the block-change hook wired via the mixin/overlay pattern.
+  - **Amended 2026-08-10/11 — "fluid" over-states what RISKY_EDIT carries.** The fluid half is
+    **LAVA-only and unconditional**: water never sets the bit, and lava sets it via a 1-cell dilation over
+    the 6 orthogonal neighbours with no flowing/impoundment test. Modelling vanilla's slope-distance
+    spread needs source-vs-flowing and level bits the 2-bit `NavBlock` fluid field does not store. See
+    `NavFlags`' lava-term section for the bytecode evidence.

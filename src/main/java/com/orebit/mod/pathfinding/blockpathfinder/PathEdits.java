@@ -39,7 +39,10 @@ public final class PathEdits {
      * The path OPENS a (hand-toggleable) door here (DOORS P2) — an <b>absolute-SET</b> edit: unlike {@link
      * #PLACED}/{@link #BROKEN} (which resolve to a constant geometry — cobblestone / air), a door-set resolves
      * to THAT door's own facing/hinge forced into the target OPEN state ({@link MovementContext#descriptorAt}
-     * reads the grid door and applies {@link com.orebit.mod.worldmodel.navblock.NavBlock#withDoorOpen}). Folds
+     * reads the grid cell and applies {@link com.orebit.mod.worldmodel.navblock.NavBlock#withOpenableOpen} —
+     * NOT {@code withDoorOpen}, corrected 2026-08-11: the SET kinds serve all three openable families, and the
+     * unified resolver dispatches on kind, so a trapdoor RE-DERIVES its toggled topY/shape/NARROW_TOP and a
+     * fence gate its geometry, where a bare bit-43 flip would be wrong for both). Folds
      * through the same latest-wins machinery ({@link #markIfAbsent}) with no parity/XOR: a {@code SET_OPEN} then
      * {@code SET_CLOSED} on one cell (the hallway-corner double-toggle) resolves — walking node→start,
      * first-seen-wins — to the edit CLOSEST to the node, exactly like a place-then-break.

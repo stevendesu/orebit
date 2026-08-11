@@ -37,8 +37,10 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  * </ul>
  *
  * <p><b>Body clearance via the resident bit.</b> The two body cells above a destination floor are checked
- * through the precomputed {@code HEADROOM} flag ({@link MovementContext#requireBodyClear}) — one grid read
- * instead of two {@code descriptorAt} probes — falling back to per-cell reads (which also fold breaks)
+ * through the precomputed {@code HEADROOM} flag ({@link MovementContext#requireBodyClear}) — <b>ZERO</b>
+ * extra grid reads instead of two {@code descriptorAt} probes (the flags ride the {@code packedAt} slot
+ * already resolved for the standability test, and {@code requireBodyClearToward} takes them as a
+ * parameter) — falling back to per-cell reads (which also fold breaks)
  * only when the bit can't be trusted near a section face or when the bot must mine its way through. The
  * fallback applies the §4 residual rules face-aware (DESIGN-trapdoors.md): the dest floor's real
  * {@code topY} is threaded so a ≤3/16 plate floor skips its head cell and a slab floor admits a flush
@@ -62,9 +64,13 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  * four cardinal directions it resolves that direction's maximal uniform {@link Cuboid}
  * ({@link NavGridCuboidsView#cuboidAt}) and lets {@link MacroJump#steps} bound the jump length {@code J}
  * (box edge, goal projection, and the cost-normalised escape-hedge of NON-NEGOTIABLE 2). The {@code J}
- * per-step floor/body requirements are then folded into one {@link EditScratch} by re-running the SAME
- * micro checks ({@link EditScratch#requireFloor} under each cell, {@link MovementContext#requireBodyClear}
- * for each cell's body) at step {@code k = 1..J}; the first failing step clamps {@code J} (conservative —
+ * per-step floor/body requirements are then folded into one {@link EditScratch} at step {@code k = 1..J}:
+ * {@link EditScratch#requireFloor} under each cell, then the body via TWO direct
+ * {@link EditScratch#requireAirToward} calls ({@code y+1}, {@code y+2}). <b>This is NOT the micro emit's
+ * body check</b> — the macro run does not go through {@link MovementContext#requireBodyClear}, so it never
+ * reaches the {@code HEADROOM} zero-read fast path and pays two descriptor reads per step (recorded
+ * 2026-08-11; this previously claimed the SAME micro checks were re-run, which mis-states macro read
+ * cost). The first failing step clamps {@code J} (conservative —
  * an under-jump is always safe, a plain A* step fills the gap). The single emitted candidate costs
  * {@code J × per-step + Σ per-cell pass-through surcharge + e.extraCost()} — exactly the {@code N ×
  * per-step} of MACRO-MOVEMENTS §3b (the slow-FLOOR term rides the per-step cost, uniform over the run by
