@@ -292,6 +292,28 @@ loom {
             project.findProperty("orebit.swim.bleed")?.let { vmArg("-Dorebit.swim.bleed=$it") }
             isIdeConfigGenerated = false
         }
+        // Medium-aware STATION-KEEPING diagnostic: a superflat server that arms the common-src
+        // SwimMineCourse hook (-Dorebit.swimmine) in its own run dir (run/swimmine). Builds a sealed
+        // bedrock water tank whose only route is a break performed while the bot floats with nothing
+        // beneath it, so the pre-fix zero-input hold sinks out of the Traverse's band and the post-fix
+        // depth autopilot holds. Launch: ./gradlew :fabric:1.21.11:runSwimMine (after
+        // scripts/run-swimmine.ps1 preps the run dir with a FLAT server.properties + a
+        // mine-on/place-off/breath-off orebit.properties). Mirrors the gate/shaft config exactly.
+        create("swimMine") {
+            server()
+            configName = "Orebit SwimMine ($minecraft)"
+            runDir = "../../../run/swimmine"
+            vmArg("-Dorebit.swimmine=true")
+            for (key in listOf("debug")) {
+                val v = project.findProperty("orebit.swimmine.$key")
+                if (v != null) vmArg("-Dorebit.swimmine.$key=$v")
+            }
+            // Swim cruise-strategy + ground drive-strategy selectors ride through for the A/B passes:
+            //   ./gradlew :fabric:1.21.11:runSwimMine "-Porebit.swim.bleed=servo"
+            project.findProperty("orebit.swim.bleed")?.let { vmArg("-Dorebit.swim.bleed=$it") }
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
+            isIdeConfigGenerated = false
+        }
     }
 }
 

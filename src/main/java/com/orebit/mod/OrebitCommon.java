@@ -313,5 +313,14 @@ public final class OrebitCommon {
         // the 2026-08-10 wedge where the bot ends a climb grounded one block ABOVE the Ascend's intended
         // landing and fail->holds. Same inert-unless-armed discipline (-Dorebit.staircase).
         StaircaseCourse.register(events);
+
+        // Headless MEDIUM-AWARE STATION-KEEPING diagnostic (the :fabric:<ver>:runSwimMine run config): a
+        // sealed bedrock tank whose only route east is a flat Traverse out of OPEN WATER — the bot floating
+        // with eight cells of water and nothing standable beneath it — through two stone cells it must mine
+        // from that float. The live physics proof that SteerControl.stationKeep's fluid branch (the depth
+        // autopilot) actually holds a submerged bot for the ~282 ticks the break takes, where the old
+        // zero-input hold sank it out of the Traverse's admitted band in ~40. Plus a ladder-hang plug
+        // control for the climbable branch. Same inert-unless-armed discipline (-Dorebit.swimmine).
+        SwimMineCourse.register(events);
     }
 }
