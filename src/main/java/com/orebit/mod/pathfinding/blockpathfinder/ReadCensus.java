@@ -330,18 +330,23 @@ public final class ReadCensus {
      * can skew the last few counts, which is immaterial at the sample sizes this instrument is used at.
      */
     public static String dump(java.io.File file) {
-        Census m = merge();
-        StringBuilder sb = new StringBuilder(1 << 16);
-        writeReport(sb, m);
-        try (java.io.BufferedWriter w = new java.io.BufferedWriter(new java.io.FileWriter(file))) {
-            w.write(sb.toString());
-        } catch (java.io.IOException e) {
-            return "census dump FAILED: " + e;
+        // Broad catch on purpose: this is a diagnostic invoked from a command on the server thread, and a
+        // formatting or arithmetic slip in the (cold, run-once) report must never take the server down
+        // mid-session. The counting hooks above are the code that has to be right; this is reporting.
+        try {
+            Census m = merge();
+            StringBuilder sb = new StringBuilder(1 << 16);
+            writeReport(sb, m);
+            try (java.io.BufferedWriter w = new java.io.BufferedWriter(new java.io.FileWriter(file))) {
+                w.write(sb.toString());
+            }
+            double perPop = m.pops == 0 ? 0 : (double) m.totalCalls / m.pops;
+            double amp = m.totalDistinct == 0 ? 0 : (double) m.totalCalls / m.totalDistinct;
+            return String.format("%d pops / %d reads (%.1f per pop, %.2fx amplification) -> %s",
+                    m.pops, m.totalCalls, perPop, amp, file.getName());
+        } catch (Throwable t) {
+            return "census dump FAILED: " + t;
         }
-        double perPop = m.pops == 0 ? 0 : (double) m.totalCalls / m.pops;
-        double amp = m.totalDistinct == 0 ? 0 : (double) m.totalCalls / m.totalDistinct;
-        return String.format("%d pops / %d reads (%.1f per pop, %.2fx amplification) -> %s",
-                m.pops, m.totalCalls, perPop, amp, file.getName());
     }
 
     private static Census merge() {
