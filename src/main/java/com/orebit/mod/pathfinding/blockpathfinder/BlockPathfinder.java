@@ -898,13 +898,25 @@ public final class BlockPathfinder {
             // This is the ENTIRE shared per-pop prologue and its whole cost: two path-edit-aware descriptor
             // reads (y+1, y+2). Every movement below re-reads the floor/feet/head itself — candidates()
             // takes bare ints, so nothing else is shared between them.
+            // Read-census pop boundary (ReadCensus — counts only, erased when the instrument is off). Opened
+            // BEFORE the prologue so its two descriptor reads are attributed to the prologue slot rather than
+            // to whichever movement happens to run first.
+            if (ReadCensus.ENABLED) ReadCensus.beginPop(cx, cy, cz, !pathEdits.isEmpty());
             ctx.setCurrentDoorEdge(cx, cy, cz);
             List<Movement> tier1 = MovementRegistry.TIER1;
             for (int mi = 0, mn = tier1.size(); mi < mn; mi++) {
                 relaxer.move = mi;
+                if (ReadCensus.ENABLED) ReadCensus.move(mi);
                 tier1.get(mi).candidates(ctx, cx, cy, cz, relaxer);
             }
+            if (ReadCensus.ENABLED) ReadCensus.endPop();
         }
+
+        // Defensive close + the per-search tally. Today every opened pop is closed by the loop's own endPop
+        // (the goal/budget breaks all sit ABOVE beginPop), but a future early-exit inside the movement loop
+        // would otherwise strand a pop's scratch; endPop is a no-op when none is open, and beginPop closes a
+        // stranded one anyway, so double-counting is impossible either way.
+        if (ReadCensus.ENABLED) { ReadCensus.endPop(); ReadCensus.endSearch(); }
 
         LAST_EXPANSIONS_TL.get()[0] = expansions; // instrumentation seam — the just-finished search's node count
         LAST_BUDGET_HIT_TL.get()[0] = budgetHit;  // telemetry: was the search bound by its node/time cap

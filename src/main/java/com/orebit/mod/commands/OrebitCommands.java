@@ -48,6 +48,7 @@ public final class OrebitCommands {
             new RegionTraceCommand(),
             new ProbeCommand(),
             new ConfigCommand(),
+            new CensusCommand(),
             new DebugCommand());
 
     /** Subscribe to the seam's command-registration hook; called from {@code OrebitCommon.init}. */
