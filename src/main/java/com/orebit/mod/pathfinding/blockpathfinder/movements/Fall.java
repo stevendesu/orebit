@@ -897,7 +897,37 @@ public final class Fall implements Movement {
         plan.resetWhen(b -> b.grounded()
                 && atWaypoint(b, fx, fromFootY, fz));
         // WALKOFF: line-track the takeoff→landing segment and hold forward, striding off the lip (the legacy
-        // grounded branch — steerTowards, not the medium-aware drive). Advance the moment the bot is airborne.
+        // grounded branch — steerTowards, not the medium-aware drive). Advance the moment the bot is airborne
+        // — UNLESS it is HANGING short of the landing column, which is the cling below.
+        //
+        // CLIMBABLE CLING (the (80,103,202) wp6 wedge, 2026-08-11). A Fall entered FROM A HANG has no
+        // step-off at all: {@code grounded()} is already false on a climbable, so this phase's advance fired
+        // on its very first drive tick and the drop began from wherever the vine happened to be. That is
+        // fatal for a Fall carrying a LATERAL component, because a hanging bot arrives with no momentum to
+        // spend — the previous step's servo re-centres on its OWN column and emits exact zero inside
+        // COLUMN_DEADBAND — and air control alone cannot buy the offset back. Measured on wp6: 8 air ticks,
+        // entry v=0.003, a=0.0255, drag 0.91 → Σ ≈ 0.70 blocks against the 1.05 the move needed, so even a
+        // PERFECT airborne servo touches down at the far cell edge. It landed one cell SHORT, ground-walked
+        // in, and handed off to a Parkour at the lip with −0.059 b/t of along-jump velocity.
+        //
+        // So do what Descend's CLEAR/STEP already does: keep the stance while the bot is off-column, let the
+        // lateral servo walk it there INSIDE the climbable, and release into a purely vertical drop — which
+        // removes the lateral demand from the fall entirely rather than trying to satisfy it with air
+        // control. The hold is {@link SteerControl#holdUntilOverTargetColumn}, which self-disables three
+        // ways: off a climbable, with support underneath (the ratified lateral rule — sneak arms vanilla's
+        // maybeBackOffFromEdge only where something is holding the bot up, so a standable below means walk
+        // off, don't sneak), and once inside COLUMN_DEADBAND of the target. Its release threshold IS
+        // arriveOnTarget's recentre deadband, so the hold ends on exactly the tick the lateral drive stops
+        // thrusting.
+        //
+        // Every ordinary walk-off is byte-identical: the hold returns false while grounded, and in free air
+        // there is no climbable, so `clinging` is false and the advance stays the plain `!grounded()` it has
+        // always been. A hang ALREADY over its column is likewise unchanged — it releases on tick 0.
+        //
+        // The latch is the established per-plan pattern (Descend's `left`, Parkour's `airborneOnce`), and it
+        // cannot be read stale: PhaseRunner drives THEN tests shouldAdvance, and its carry-arrest gate
+        // returns before the drive, so advanceWhen is only ever reached on a tick whose drive just ran.
+        final boolean[] clinging = new boolean[1];
         plan.phase("walkoff")
                 // Align before striding off the lip: a Fall entered with cross-axis carry leaves the edge
                 // off-line and drops down the wrong column, where the airborne drop-control can no longer
@@ -910,8 +940,16 @@ public final class Fall implements Movement {
                 // coast, so the walk-off runs at full throttle and simply steps off the lip; the tick the bot
                 // is airborne the projection flips to the AIR coast and the air-brake arrests the carry. The
                 // interim steppingOff variant that pre-braked on the ground is REJECTED — see arriveOnTarget.
-                .drive(SteerControl::arriveOnTarget)
-                .advanceWhen(b -> !b.grounded());
+                .drive((b, v) -> {
+                    // Stance BEFORE the lateral servo — Descend's STEP ordering. Safe in either order today
+                    // (nothing in SteerControl ever clears sneak), but the hold is the precondition for the
+                    // translation, so it reads in that order.
+                    clinging[0] = SteerControl.holdUntilOverTargetColumn(b, v);
+                    // On a climbable this short-circuits to recenterOn(tx,tz) — the LANDING column — which is
+                    // exactly the translation the cling exists to allow. Logged as `src=recenter`.
+                    SteerControl.arriveOnTarget(b, v);
+                })
+                .advanceWhen(b -> !b.grounded() && !clinging[0]);
         // FALL: airborne drop-control — arriveOnTarget aims the bot's PROJECTED stopping point at the landing
         // column centre, braking with reverse input the moment that projection overshoots, so held step-off
         // momentum can't carry the bot off a 1-wide landing (or, as measured 2026-08-06, park it at the far
