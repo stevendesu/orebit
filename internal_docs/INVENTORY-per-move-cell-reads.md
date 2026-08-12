@@ -599,3 +599,39 @@ count by more than a wider flag word plausibly could.
 - **No claim that fewer reads = faster.** The historical record here is explicit: the Hilbert-curve
   indexing and the neighbour-prefetch stencil both reduced apparent work and regressed. Every item in
   §6/§7 is a hypothesis for the A/B protocol, not a conclusion.
+
+### 10.1 The companion instrument — `ReadCensus`
+
+The first two gaps above are closed by **`pathfinding/blockpathfinder/ReadCensus.java`**, which counts the
+real thing on real terrain rather than bounding it statically. Arm it for the JVM and drive a scenario:
+
+```
+JAVA_TOOL_OPTIONS=-Dorebit.readcensus=true      # static final gate; off, the JIT erases every hook
+/bot census reset                                # start a measurement window
+...drive the scenario...
+/bot census dump                                 # -> <run dir>/orebit-read-census.txt
+```
+
+The headless autotest dumps automatically at server stop (it has no chat surface), so
+`scripts/run-autotest.ps1 -MasterWorld …` is a reproducible real-terrain census scenario. Note its config
+template pins `pathing.async=false`, so that census is single-threaded and deterministic.
+
+What it reports, mapped onto this document:
+
+| Report section | Answers |
+|---|---|
+| Repeat tax | the real counterpart to §5's 3.52x — and the hard ceiling on what any read-once scheme recovers |
+| Per-offset table | §4's contended set, measured; carries `calls/pop` **and** `popCover%` |
+| Prefetch-envelope scoring | sizes the prism §7 proposes — fill/pop vs saved/pop for five candidate shapes |
+| Path-edit layer | decomposes the 2–3x edit multiplier into empty / bbox-reject / probe-miss / probe-HIT |
+| By accessor, By movement | attribution, against §3's per-move tables |
+
+**Read the two together, not interchangeably.** The inventory says which cells a movement *can* read and
+*why* — the semantics no counter recovers. The census says how often that actually happens. Neither
+measures TIME: with the census armed every read pays bucket arithmetic, so ns/node from a census run is
+meaningless. Timing stays with JMH under the paired-interleaved A/B protocol.
+
+The decisive column is `popCover%`. An offset with high traffic **and** high coverage is a prefetch
+candidate; high traffic with LOW coverage is a memo candidate instead, because an eager fill is wasted on
+every pop that never asks. The reverted neighbour-prefetch stencil failed on exactly that distinction —
+it paid a membership test on every read to serve a set of cells it had not proven were usually wanted.
