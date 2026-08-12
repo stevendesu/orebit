@@ -7,6 +7,7 @@ import com.orebit.mod.commands.OrebitCommands;
 import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.pathfinding.async.PlanExecutor;
 import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
+import com.orebit.mod.pathfinding.blockpathfinder.ReadCensus;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPlaceModel;
 import com.orebit.mod.platform.PlatformEvents;
 import com.orebit.mod.platform.Worlds;
@@ -130,6 +131,18 @@ public final class OrebitCommon {
         // matching the RegionGrid.clear/HpaMaintenance.clear server-stop teardown idiom. flushAll already
         // removes each level from DIRTY_SHARDS/COARSE_DIRTY but leaves TICKS_SINCE_FLUSH; clear() drops all three.
         events.onServerStopping(server -> RegionPersistence.clear());
+
+        // Read census auto-dump (ReadCensus — armed only by -Dorebit.readcensus=true, otherwise this lambda's
+        // body is a constant-false branch). Exists so the HEADLESS autotest is a usable census scenario: it
+        // drives real frozen-master terrain reproducibly but has no chat surface to run `/bot census dump`
+        // from, so without a stop hook its numbers would die with the JVM. Interactive sessions can still
+        // dump on demand (and mid-session, which the stop hook cannot do) via the command.
+        events.onServerStopping(server -> {
+            if (ReadCensus.ENABLED) {
+                LOGGER.info("[Orebit] read census: {}",
+                        ReadCensus.dump(new java.io.File("orebit-read-census.txt")));
+            }
+        });
 
         // SLOWTICK telemetry heartbeat (SlowTickMonitor) — a DIAGNOSIS instrument, no behaviour change. Registered
         // FIRST among the onWorldTickEnd hooks (loader seams fire them in registration order) so it rolls the
