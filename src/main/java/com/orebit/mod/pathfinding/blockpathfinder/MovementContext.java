@@ -910,6 +910,7 @@ public final class MovementContext {
      * live geometry; this only answers "is it loaded enough to trust."
      */
     public boolean built(int x, int y, int z) {
+        if (ReadCensus.ENABLED) ReadCensus.readBuilt(x, y, z);
         return grid.built(x, y, z);
     }
 
@@ -918,6 +919,8 @@ public final class MovementContext {
      * navtype grid (a live block read only as a fallback outside the built area).
      */
     public long descriptorAt(int x, int y, int z) {
+        if (ReadCensus.ENABLED) ReadCensus.readDescriptorAt(x, y, z,
+                ReadCensus.editOutcome(pathEdits, x, y, z, pathEdits.kindAt(x, y, z)));
         if (!pathEdits.isEmpty()) {
             int kind = pathEdits.kindAt(x, y, z);
             if (kind == PathEdits.PLACED) return PLACED_DESC;
@@ -944,6 +947,7 @@ public final class MovementContext {
      * #descriptorOf} (which still layers the path-edit diff).
      */
     public int packedAt(int x, int y, int z) {
+        if (ReadCensus.ENABLED) ReadCensus.readPacked(x, y, z);
         return grid.packedAt(x, y, z);
     }
 
@@ -959,6 +963,8 @@ public final class MovementContext {
      * second section resolve and no live-block fallback ({@code packed} is already proven built).
      */
     public long descriptorOf(int x, int y, int z, int packed) {
+        if (ReadCensus.ENABLED) ReadCensus.readDescriptorOf(x, y, z,
+                ReadCensus.editOutcome(pathEdits, x, y, z, pathEdits.kindAt(x, y, z)));
         if (!pathEdits.isEmpty()) {
             int kind = pathEdits.kindAt(x, y, z);
             if (kind == PathEdits.PLACED) return PLACED_DESC;
@@ -985,6 +991,7 @@ public final class MovementContext {
 
     /** The raw 6-bit {@link NavFlags} bitmask at floor cell {@code (x,y,z)} (0 where unbuilt). */
     public int flagsAt(int x, int y, int z) {
+        if (ReadCensus.ENABLED) ReadCensus.readFlags(x, y, z);
         return grid.flagsAt(x, y, z);
     }
 
@@ -1001,6 +1008,7 @@ public final class MovementContext {
      * full resolve. Both are correct; only the cost reasoning differs.
      */
     public int floorGapAt(int x, int y, int z) {
+        if (ReadCensus.ENABLED) ReadCensus.readFloorGap(x, y, z);
         return grid.floorGapAt(x, y, z);
     }
 

@@ -208,6 +208,17 @@ public final class PathEdits {
         return kindAt(BlockPos.asLong(x, y, z));
     }
 
+    /**
+     * Whether cell {@code (x,y,z)} lies inside the edits' {@linkplain #minX bounding box} — the exact
+     * six-compare test {@link #kindAt(int, int, int)} performs before paying its hash + probe, exposed so
+     * {@link ReadCensus} can decompose a read's edit-layer cost into "empty / bbox-rejected / probed"
+     * without re-running the probe (which would change what it measures). Undefined-but-harmless when the
+     * diff is empty: the box is inverted, so every cell reports outside.
+     */
+    public boolean boxContains(int x, int y, int z) {
+        return x >= minX && x <= maxX && y >= minY && y <= maxY && z >= minZ && z <= maxZ;
+    }
+
     /** The planned edit kind at a packed-{@code BlockPos.asLong} cell, or {@link #NONE}. */
     public int kindAt(long pos) {
         if (size == 0) return NONE;
