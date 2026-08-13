@@ -337,6 +337,36 @@ public final class RegionGrid {
     }
 
     /**
+     * Label EVERY cell of level-0 leaf {@code (rx,ry,rz)} with its kept fragment id into {@code out} (4096
+     * cells, indexed {@code ((wy-minY)&15)<<8 | (wz&15)<<4 | (wx&15)}) — the whole-region form of
+     * {@link #startFragmentByFlood}, one flood instead of one flood per queried cell. {@code false} (and
+     * {@code out} untouched) when the section isn't resident or this is a headless grid.
+     *
+     * <p>The caller owns the slab and decides its lifetime. That is the point: a slab taken at a known moment
+     * is a SNAPSHOT of the region's fragmentation, and a snapshot is exactly what the two-tier driver needs.
+     * The skeleton's per-step fragment ids are themselves a snapshot (taken when the region search ran), and
+     * ids are only stable while the passable mask is unchanged — {@link FragmentLeafComputer#fragmentContaining}
+     * reproduces {@code build}'s flood over the SAME mask, so an edit that rebuilds the leaf may REASSIGN them.
+     * A driver that re-floods live would therefore drift out of agreement with its own skeleton; a driver
+     * holding a slab cut at window-commit time stays consistent with it by construction, and a bot that digs
+     * two fragments together still reads the pre-dig label of the cell it arrives in — which is precisely the
+     * "the fragments are now joined, slide the window" trigger.
+     *
+     * @param out caller-owned slab of at least 4096 cells, fully overwritten on success
+     */
+    public boolean labelRegionFragments(int rx, int ry, int rz, byte[] out) {
+        if (level == null && sections == null) {
+            return false;
+        }
+        NavSection[] column = columnCached(rx, rz);
+        if (column == COL_MISSING || ry < 0 || ry >= column.length || column[ry] == null) {
+            return false;
+        }
+        FragmentLeafComputer.labelFragments(column[ry], out);
+        return true;
+    }
+
+    /**
      * The fragment of node {@code (level, rx,ry,rz)} that <b>contains</b> world cell {@code (wx,wy,wz)} —
      * exact at every level, the coarse generalization of {@link #startFragmentByFlood}: level-0 flood
      * membership walked upward through the merge's own containment ({@link
