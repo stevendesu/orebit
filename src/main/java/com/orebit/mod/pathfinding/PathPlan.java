@@ -21,6 +21,7 @@ import com.orebit.mod.pathfinding.regionpathfinder.RegionPathfinder;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPlaceModel;
 import com.orebit.mod.platform.LevelBounds;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
+import com.orebit.mod.worldmodel.hpa.RegionFragments;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
@@ -263,14 +264,40 @@ public final class PathPlan {
     /** Furthest skeleton index the bot has committed to (HPA-IMPLEMENTATION.md §9, the wiggle anchor). */
     int committedIndex;
 
-    // ---- fragment-model per-tick scratch (HPA-FRAGMENTS.md §S4) ---------------------------------------
-    /**
-     * Reused 3-int scratch buffers for {@link RegionPathfinder#fragmentOf} (centroid + per-face temporary), so
-     * resolving the bot's current fragment in {@link #botFragmentAt} every tick allocates nothing (the
-     * fragment-model commit key — HOT-PATH-NO-ALLOC). Only touched when the skeleton is a fragment-model plan.
-     */
-    private final int[] fragScratchA = new int[3];
-    private final int[] fragScratchB = new int[3];
+    /** Diagnostic ONLY (debug builds): the last (from -> to) pair whose forward slide the wiggle guard
+     *  refused, so the per-tick refusal logs once per distinct pair instead of once per tick. Never read by
+     *  logic; {@code -1} means "nothing refused yet". */
+    private int lastRefusedFrom = -1;
+    private int lastRefusedTo = -1;
+
+    // ---- window fragment-label slabs (the commit key's membership source) ----------------------------
+    /** Max distinct level-0 regions a window's slabs cover; a window is a handful of steps. */
+    private static final int SLAB_MAX = 12;
+    /** Cells per level-0 leaf slab (16³), indexed {@code ly<<8 | lz<<4 | lx}. */
+    private static final int SLAB_CELLS = 16 * 16 * 16;
+    /** Sentinel: the region has a single fragment identity — every cell answers {@code 0}, no flood cut. */
+    private static final byte[] SLAB_UNIFORM = new byte[0];
+    /** Sentinel: the section was not resident when the slab was cut — membership is unprovable, answer -1. */
+    private static final byte[] SLAB_UNKNOWN = new byte[0];
+    private final long[] slabKeys = new long[SLAB_MAX];
+    private final byte[][] slabVals = new byte[SLAB_MAX][];
+    /** Per-slot pooled 4096-cell slabs, reused across cuts so a re-cut allocates nothing after warm-up. */
+    private final byte[][] slabPool = new byte[SLAB_MAX][];
+    private int slabCount;
+    /** The (skeleton identity, window) the slabs were cut for — the self-validating cache key. */
+    private RegionPathPlan slabSkeleton;
+    private int slabWindowStart = Integer.MIN_VALUE;
+    private int slabWindowLast = Integer.MIN_VALUE;
+
+    /** Diagnostic ONLY: whether the last {@link #forwardIndexOf} scan saw a step in the bot's REGION whose
+     *  fragment did not match and therefore REFUSED it. Never read by logic — it exists so the slide logs
+     *  distinguish "the bot is nowhere on the route" from "the bot is in a region the route visits, but in
+     *  the wrong pocket of it" (the latter is the interesting one: a stale skeleton id, or a genuine dip into
+     *  an unplanned fragment). */
+    private boolean lastMatchRegionOnly;
+
+    // (The nearest-centroid scratch buffers that lived here are gone with the centroid commit key itself —
+    //  membership now comes from the window's label slabs above, which need no per-call scratch.)
     /** Reused 2-long scratch for the cascade's blocked-hop repair ({@link #repairBlocked}); no per-repair alloc. */
     private final long[] repairHopScratch = new long[2];
 
@@ -495,12 +522,40 @@ public final class PathPlan {
         if (maybeProactiveBoxedIn()) {
             return; // FAILED + boxedInProven set; no optimistic skeleton
         }
+        dumpSkeleton("initial");
+        replanBlock();
+    }
+
+    /**
+     * Region-tier diagnostics for ONE skeleton. Called from EVERY site that (re)assigns {@link #skeleton}.
+     *
+     * <p><b>Why it is a method</b> (2026-08-12). The dump used to be an inline {@code Debug.ENABLED} block at
+     * the INITIAL build only, so the two cascade re-derive sites — the extension shift and the SWAPPED
+     * re-plan — replaced the L0 skeleton silently. That was not a small gap: a full flagship run logged ONE
+     * skeleton while its window swaps referenced steps up to {@code S17}, which cannot exist on the 9-step
+     * skeleton that was dumped. Every skeleton after the first was invisible, including whichever one chose
+     * the route the bot actually took.
+     *
+     * <p>Two channels, deliberately gated differently:
+     * <ul>
+     *   <li>the full multi-level dump stays behind {@link Debug#ENABLED} — it is tens of lines per call;</li>
+     *   <li>{@link SkeletonDump#unbuiltSummary} logs UNCONDITIONALLY, but only when the count is non-zero.
+     *       Planning through terrain the nav layer has never seen is rare, high-signal, and the thing that
+     *       silently bends a route to the surface preference, so it must be visible in an ordinary run — the
+     *       headless autotest does not set {@code -BotDebug} by default. A fully-built plan logs nothing.</li>
+     * </ul>
+     * Cold path: one call per skeleton (re)derive, never per search or per tick.
+     */
+    private void dumpSkeleton(String why) {
+        final String unbuilt = SkeletonDump.unbuiltSummary(this);
+        if (unbuilt != null) {
+            OrebitCommon.LOGGER.info("[Orebit] UNBUILT-IN-PLAN ({}) {}", why, unbuilt);
+        }
         if (Debug.ENABLED) {
             // HPA-tier visibility: dump the whole region skeleton + per-step portal/center built-standable probe
             // (a [SOLID/buried] portal is the §6 buried-target bug). Counterpart to the block tier's /bot trace.
-            OrebitCommon.LOGGER.info("[Orebit] {}", describeSkeleton());
+            OrebitCommon.LOGGER.info("[Orebit] [skeleton:{}] {}", why, describeSkeleton());
         }
-        replanBlock();
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -652,7 +707,7 @@ public final class PathPlan {
         // (region, fragment), so resolve which fragment of its region the bot occupies (alloc-free). Center-
         // model plans (flag off / coarse branch) skip this entirely and behave exactly as before.
         final boolean fragModel = skeleton.isFragmentModel();
-        final int botFrag = fragModel ? botFragmentAt(botFloor) : 0;
+        final int botFrag = fragModel ? windowFragmentAt(botFloor) : 0;
 
         final int last = windowLast();
         final int curRegion = forwardIndexOf(botFloor, botFrag, committedIndex, last);
@@ -667,7 +722,8 @@ public final class PathPlan {
                     && skeleton.rx(curRegion) == skeleton.rx(committedIndex)
                     && skeleton.ry(curRegion) == skeleton.ry(committedIndex)
                     && skeleton.rz(curRegion) == skeleton.rz(committedIndex);
-            if ((sameRegionDig || committed(curRegion)) && !lastPlanPartial) {
+            final boolean wiggleOk = sameRegionDig || committed(curRegion);
+            if (wiggleOk && !lastPlanPartial) {
                 // A real forward step: the path no longer revisits any region in [committedIndex, curRegion).
                 // FOLLOW-TO-TERMINUS (#5 partial-invalidation): gated on !lastPlanPartial. While the current
                 // window plan is a best-effort PARTIAL (it did NOT reach its target), do not slide/re-search
@@ -680,14 +736,35 @@ public final class PathPlan {
                     final boolean goalInWindow = skeleton.reachedGoalRegion() && last == skeleton.size() - 1;
                     OrebitCommon.LOGGER.info(
                             "[Orebit] block re-search: site=forward-slide commit {}->{} goalInWindow={} "
-                                    + "planWasPartial={} bot=({},{},{})",
-                            committedIndex, curRegion, goalInWindow, lastPlanPartial,
-                            botFloor.getX(), botFloor.getY(), botFloor.getZ());
+                                    + "planWasPartial={} sameRegionDig={} regionOnlyRefused={}bot=({},{},{}) "
+                                    + "botKey={} span={}",
+                            committedIndex, curRegion, goalInWindow, lastPlanPartial, sameRegionDig,
+                            lastMatchRegionOnly,
+                            botFloor.getX(), botFloor.getY(), botFloor.getZ(),
+                            SkeletonDump.botKey(minY, botFloor, botFrag),
+                            SkeletonDump.stepSpan(this, committedIndex, curRegion));
                 }
                 committedIndex = curRegion;
                 windowStart = curRegion;
                 replanBlock();
                 return;
+            }
+            // A slide the guard REFUSED. Logged once per distinct (from -> to) pair, because the refusal
+            // repeats every tick while it holds and an unbounded line would drown the run. The pair is the
+            // whole diagnostic: it says the cursor WANTED to move and what stopped it, which is the other
+            // half of the multi-step-slide question (a 4->7 slide is only mysterious if 4->5 and 4->6 were
+            // never offered — this line proves whether they were).
+            if (Debug.ENABLED && (curRegion != lastRefusedTo || committedIndex != lastRefusedFrom)) {
+                lastRefusedFrom = committedIndex;
+                lastRefusedTo = curRegion;
+                OrebitCommon.LOGGER.info(
+                        "[Orebit] forward-slide REFUSED {}->{} wiggleOk={} sameRegionDig={} regionOnlyRefused={}"
+                                + "planWasPartial={} bot=({},{},{}) botKey={} span={}",
+                        committedIndex, curRegion, wiggleOk, sameRegionDig, lastMatchRegionOnly,
+                        lastPlanPartial,
+                        botFloor.getX(), botFloor.getY(), botFloor.getZ(),
+                        SkeletonDump.botKey(minY, botFloor, botFrag),
+                        SkeletonDump.stepSpan(this, committedIndex, curRegion));
             }
         }
         // (No debounce fallback: its inconclusive case — a null/empty block plan at commit time — no longer
@@ -738,18 +815,35 @@ public final class PathPlan {
             this.skeleton = hier.l0Skeleton();
             final int shift = hier.lastExtensionShift();
             if (shift > 0) {
+                // A head-drop RENUMBERS every skeleton index. Without this line, cursor values logged on
+                // either side of an extension are silently measured against different skeletons — which is
+                // how "commit 0->1, 1->2 ... commit 0->3" reads as a cursor resetting for no reason. Log the
+                // shift with the before/after cursors so index-valued diagnostics stay comparable.
+                if (Debug.ENABLED) {
+                    OrebitCommon.LOGGER.info(
+                            "[Orebit] skeleton EXTENDED: headDrop={} committed {}->{} windowStart {}->{} "
+                                    + "targetStep {}->{} newSize={}",
+                            shift, committedIndex, Math.max(0, committedIndex - shift),
+                            windowStart, Math.max(0, windowStart - shift),
+                            windowTargetStep, Math.max(0, windowTargetStep - shift),
+                            skeleton == null ? -1 : skeleton.size());
+                }
                 windowStart = Math.max(0, windowStart - shift);
                 committedIndex = Math.max(0, committedIndex - shift);
                 windowTargetStep = Math.max(0, windowTargetStep - shift);
                 blockedWindowStart = Math.max(0, blockedWindowStart - shift);
                 blockedTargetStep = Math.max(0, blockedTargetStep - shift);
+                lastRefusedFrom = -1; // refusal dedup keys on indices; they just moved
+                lastRefusedTo = -1;
             }
+            dumpSkeleton("extended");
             return false; // fall through: T2's commit logic replans over the now-un-clamped window
         }
         // SWAPPED — a genuine re-derive (deviation, exhaustion, flood-widen, top-collapse) or FAILED.
         // Telemetry: a re-derivation ran (L0 changed) — count a flood if its region search tripped the guard.
         if (stats != null && RegionPathfinder.lastWasFlood()) stats.onRegionFlood();
         this.skeleton = hier.l0Skeleton();
+        dumpSkeleton("swapped");
         if (skeleton == null || skeleton.isEmpty()) {
             this.blockPlan = null;
             this.status = PathStatus.FAILED;
@@ -1696,6 +1790,7 @@ public final class PathPlan {
             return false;
         }
         this.skeleton = hier.l0Skeleton();
+        dumpSkeleton("rederived");
         if (skeleton == null || skeleton.isEmpty()) {
             harvestBoxedInProof();
             this.blockPlan = null;
@@ -2034,47 +2129,160 @@ public final class PathPlan {
      * {@code committedIndex} (unchanged) if none match — a forward-only search (the bot only advances).
      *
      * <p>Center-model plan: matches on level-0 region coords and returns the first such index (the original
-     * behaviour, byte-for-byte). Fragment-model plan (HPA-FRAGMENTS.md §S4): prefers the step whose
-     * {@code (region, fragment)} both equal the bot's — so two steps sharing a region but not a fragment (an
-     * intra-region mine edge) are distinguished — and falls back to the first region-only match if no step
-     * matches the bot's fragment (the nearest-centroid signal is approximate; falling back to region-only is
-     * never worse than the center model and never stalls forward progress).
+     * behaviour, byte-for-byte). Fragment-model plan (HPA-FRAGMENTS.md §S4): requires the step whose
+     * {@code (region, fragment)} BOTH equal the bot's, so two steps sharing a region but not a fragment (an
+     * intra-region mine edge) are distinguished.
+     *
+     * <p><b>No region-only fallback</b> (owner ruling 2026-08-13). A step matching only on region is REFUSED:
+     * fragments are disconnected components, so committing there declares the bot to be at a node it cannot
+     * reach without digging, and {@code committedIndex} is monotone — the misidentification is permanent.
+     * Holding is safe and self-correcting: the window target is a fragment FACE, so a bot taking a cheaper
+     * block-tier route through an unplanned pocket must eventually enter a fragment the skeleton names, and
+     * the slide happens then. Dips into unplanned fragments are expected and fine — the block tier prices
+     * terrain better than the region tier does, and near a region seam stepping one cell into the next region
+     * to walk around a puddle beats swimming through it. This matches the CASCADE's matcher
+     * ({@code HierarchicalRegionPlan}), which already refuses region-only matches; the two commit matchers
+     * now agree. Measured motivation: three commits in the flagship run advanced through this fallback with
+     * the bot provably in a different fragment than the step it committed to.
+     *
+     * <p>RESIDUAL (watch the {@code regionOnlyRefused=true} logs): the skeleton's fragment ids are snapshotted
+     * at search time, so an edit that MERGES two fragments can leave a step naming an id that no longer
+     * denotes the same set. Under the old fallback that mismatch slid anyway; now it holds. If a run shows
+     * the window ceasing to slide while the bot makes real progress, suspect stale ids, not this rule.
      */
     private int forwardIndexOf(BlockPos floor, int botFrag, int lo, int hi) {
         final int frx = RegionAddress.regionX(floor.getX(), 0);
         final int fry = RegionAddress.regionY(floor.getY(), 0, minY);
         final int frz = RegionAddress.regionZ(floor.getZ(), 0);
         final boolean fragModel = skeleton.isFragmentModel();
-        int regionFallback = committedIndex;
-        boolean haveRegion = false;
+        lastMatchRegionOnly = false;
         for (int i = lo; i <= hi; i++) {
             if (skeleton.rx(i) == frx && skeleton.ry(i) == fry && skeleton.rz(i) == frz) {
                 if (!fragModel || skeleton.fragmentId(i) == botFrag) {
                     return i; // exact (region[, fragment]) match
                 }
-                if (!haveRegion) { // remember the first region-only match as the fallback
-                    regionFallback = i;
-                    haveRegion = true;
-                }
+                lastMatchRegionOnly = true; // diagnostic: a region-only match we deliberately refused
             }
         }
-        return haveRegion ? regionFallback : committedIndex;
+        return committedIndex; // no node of the route holds the bot — do NOT advance
     }
 
     /**
-     * The fragment of the bot's current level-0 region the world floor cell {@code floor} sits in (the
-     * fragment-model commit key, HPA-FRAGMENTS.md §S4). Lazily ensures the leaf is built and delegates to
-     * {@link RegionPathfinder#fragmentOf} with the reused {@link #fragScratchA}/{@link #fragScratchB} buffers,
-     * so the per-tick resolution allocates nothing. {@code 0} for a uniform/collapsed/unbuilt region (its
-     * single synthetic fragment). Only called for fragment-model skeletons.
+     * The bot's fragment <b>as the current window's skeleton labels it</b> — the fragment-model commit key
+     * (HPA-FRAGMENTS.md §S4). {@code -1} when the bot's region is not one the window visits, or its cell has
+     * no label there; {@link #forwardIndexOf} then matches nothing and the cursor holds.
+     *
+     * <p><b>Snapshot slabs, not a live probe</b> (owner ruling 2026-08-13). Membership is read from per-region
+     * label slabs cut when the window was committed ({@link #ensureWindowSlabs}), not by re-flooding the live
+     * world each tick. Three things fall out of that, and the first two were the actual bugs:
+     *
+     * <ul>
+     *   <li><b>Exact, never a guess.</b> The predecessor asked {@link RegionPathfinder#fragmentOf} for the
+     *       fragment whose CENTROID is nearest. A bot low in a tall winding fragment is nearer a small
+     *       sibling pocket's centroid than its own fragment's face-averaged centroid, so the driver reported
+     *       a fragment the bot was not in and the matcher committed through its region-only fallback into a
+     *       DISCONNECTED sub-region. Measured: the last three commits before the (208,-8,58) wedge all did
+     *       this ({@code botKey=(12,3,3:1)} against {@code S7(12,3,3:0)}).
+     *   <li><b>Stable across edits.</b> Fragment ids are only stable while the passable mask is unchanged —
+     *       {@link com.orebit.mod.worldmodel.hpa.FragmentBuilder#fragmentContaining} reproduces {@code build}'s
+     *       flood over the SAME mask, so an edit that rebuilds the leaf may REASSIGN them. The skeleton's
+     *       per-step ids are themselves a snapshot from when the region search ran, so a live probe drifts out
+     *       of agreement with the very skeleton it is matching against. A slab cut with the window agrees with
+     *       it by construction.
+     *   <li><b>It IS the intra-region dig trigger.</b> When the bot digs two fragments together they become
+     *       one component, and a live re-flood would report the merged id — losing the distinction the plan is
+     *       built on. The slab still carries the pre-dig labels, so a bot tunnelling out of fragment A into a
+     *       cell that WAS fragment B reads {@code B} and the window slides. Cells that were solid at cut time
+     *       (the tunnel itself) read {@code -1}: not in any fragment, so no spurious slide while mid-dig.
+     * </ul>
+     *
+     * <p>Cost is one flood per distinct window region per window, then an array read per tick — replacing a
+     * full 16³ re-flood on every settled tick. Cells are addressed exactly as
+     * {@code RegionGrid.labelRegionFragments} documents, and the feet-cell seed with floor-cell fallback
+     * mirrors {@code containedFragment} verbatim (a floor at local y=15 has its feet in the region above,
+     * whose ids belong to a different node; a swimming bot's floor cell is itself passable).
      */
-    private int botFragmentAt(BlockPos floor) {
-        final int rx = RegionAddress.regionX(floor.getX(), 0);
-        final int ry = RegionAddress.regionY(floor.getY(), 0, minY);
-        final int rz = RegionAddress.regionZ(floor.getZ(), 0);
-        regionGrid.ensureLeaf(rx, ry, rz);
-        return RegionPathfinder.fragmentOf(regionGrid, rx, ry, rz,
-                floor.getX(), floor.getY(), floor.getZ(), fragScratchA, fragScratchB);
+    private int windowFragmentAt(BlockPos floor) {
+        ensureWindowSlabs();
+        final long key = regionSlabKey(RegionAddress.regionX(floor.getX(), 0),
+                RegionAddress.regionY(floor.getY(), 0, minY),
+                RegionAddress.regionZ(floor.getZ(), 0));
+        for (int i = 0; i < slabCount; i++) {
+            if (slabKeys[i] != key) {
+                continue;
+            }
+            final byte[] v = slabVals[i];
+            if (v == SLAB_UNIFORM) {
+                return 0; // one fragment identity — every cell of the region is it
+            }
+            if (v == SLAB_UNKNOWN) {
+                return -1; // section not resident when the slab was cut — prove nothing, advance nothing
+            }
+            final int lx = floor.getX() & 15, lz = floor.getZ() & 15;
+            final int lyFloor = (floor.getY() - minY) & 15;
+            final boolean feetInRegion = lyFloor != 15;
+            int f = v[(feetInRegion ? lyFloor + 1 : lyFloor) << 8 | (lz << 4) | lx];
+            if (f < 0 && feetInRegion) {
+                f = v[(lyFloor << 8) | (lz << 4) | lx];
+            }
+            return f;
+        }
+        return -1; // the bot is in a region this window never visits — nothing to match
+    }
+
+    /**
+     * Cut one fragment-label slab per DISTINCT level-0 region of the current window, if the window (or the
+     * skeleton object) changed since the last cut. Steps sharing a region share a slab — an intra-region mine
+     * edge puts two steps in one region and they differ only by fragment id, which the slab already
+     * distinguishes — so this floods once per region, not once per step.
+     *
+     * <p>Self-validating on {@code (skeleton identity, windowStart, windowLast)} rather than an explicit
+     * invalidate call at every mutation site, so a new commit/slide/extension path cannot forget to
+     * invalidate. O(1) when nothing moved.
+     */
+    private void ensureWindowSlabs() {
+        final int last = windowLast();
+        if (slabSkeleton == skeleton && slabWindowStart == windowStart && slabWindowLast == last) {
+            return;
+        }
+        slabSkeleton = skeleton;
+        slabWindowStart = windowStart;
+        slabWindowLast = last;
+        slabCount = 0;
+        if (skeleton == null || !skeleton.isFragmentModel()) {
+            return;
+        }
+        for (int i = Math.max(0, windowStart); i <= last && slabCount < SLAB_MAX; i++) {
+            final int rx = skeleton.rx(i), ry = skeleton.ry(i), rz = skeleton.rz(i);
+            final long key = regionSlabKey(rx, ry, rz);
+            boolean seen = false;
+            for (int j = 0; j < slabCount; j++) {
+                if (slabKeys[j] == key) { seen = true; break; }
+            }
+            if (seen) {
+                continue;
+            }
+            regionGrid.ensureLeaf(rx, ry, rz);
+            final RegionFragments rf = regionGrid.fragmentRecord(0, rx, ry, rz);
+            byte[] v;
+            if (rf == null || rf.isUniform() || rf.fragmentCount() <= 1) {
+                v = SLAB_UNIFORM; // no flood needed: a single identity answers every cell
+            } else {
+                byte[] slab = slabPool[slabCount];
+                if (slab == null) {
+                    slab = slabPool[slabCount] = new byte[SLAB_CELLS];
+                }
+                v = regionGrid.labelRegionFragments(rx, ry, rz, slab) ? slab : SLAB_UNKNOWN;
+            }
+            slabKeys[slabCount] = key;
+            slabVals[slabCount] = v;
+            slabCount++;
+        }
+    }
+
+    /** Pack a level-0 region address into a slab-cache key (21 bits per axis, well past the ±30M world). */
+    private static long regionSlabKey(int rx, int ry, int rz) {
+        return ((rx & 0x1FFFFFL) << 42) | ((ry & 0x1FFFFFL) << 21) | (rz & 0x1FFFFFL);
     }
 
     /**

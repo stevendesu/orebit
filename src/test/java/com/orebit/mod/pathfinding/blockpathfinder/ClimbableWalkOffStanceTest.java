@@ -133,7 +133,13 @@ class ClimbableWalkOffStanceTest {
          * for any absolute comparison. Getting that wrong is off-by-exactly-one-block and was the measured
          * 2026-08-02 bug, so these fixtures state the frame rather than leaving it implied.
          */
-        double sy = FOOT_Y;
+        // FEET CELL + 1.0, per the frame stated above and built by SegmentCursor (BotNavigator:1658-1659):
+        // these bots stand in feet cell FOOT_Y (171), so the segment origin is 172.0. It read FOOT_Y until
+        // 2026-08-12 — one block low, which put floorY a block under the bot and made every fixture here look
+        // aboveBand. Harmless while holdClimbableStance gated its correction on the step INTENT (these are
+        // Δy==0 segments, so dy was forced to 0.0 and the absolute comparison never ran); live once the band
+        // decides. See the same correction in CarryArrestGateTest.Level.
+        double sy = FOOT_Y + 1.0;
         Seg(double tx, double ty, double tz) { this.tx = tx; this.ty = ty; this.tz = tz; }
         Seg from(double sy) { this.sy = sy; return this; }
         @Override public double sx() { return FOOT_X + 0.5; }
@@ -148,9 +154,17 @@ class ClimbableWalkOffStanceTest {
         @Override public double nz() { return 0; }
     }
 
-    /** The witnessed step: lateral travel to the target column centre x=60.5, target feet y=171.00. */
+    /**
+     * The witnessed step: lateral travel to the target column centre x=60.5, target feet y=171.00.
+     *
+     * <p>{@code ty} is TARGET_FEET_Y + 1 because SegmentCursor's frame is feet-cell + 1.0
+     * (BotNavigator:1658-1659) and TARGET_FEET_Y is the feet CELL (171). That yields
+     * {@code floorY = ty - 1.0 = 171.0}, so the witnessed botY=171.022 sits 0.022 into the settled band —
+     * which is exactly what this file's own header comment claims ("only 0.022 BELOW the witnessed botY,
+     * inside the 0.05 margin") and what the old, one-block-low value contradicted.
+     */
     private static Seg lateralSeg() {
-        return new Seg(FOOT_X + 0.5, TARGET_FEET_Y, FOOT_Z + 0.5);
+        return new Seg(FOOT_X + 0.5, TARGET_FEET_Y + 1, FOOT_Z + 0.5);
     }
 
     // ---- CASE A: the witnessed wedge --------------------------------------------------------------

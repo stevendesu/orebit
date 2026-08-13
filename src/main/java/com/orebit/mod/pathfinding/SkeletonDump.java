@@ -3,6 +3,7 @@ package com.orebit.mod.pathfinding;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import com.orebit.mod.pathfinding.regionpathfinder.RegionPathPlan;
+import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.RegionFragments;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
@@ -18,6 +19,44 @@ import net.minecraft.core.BlockPos;
 final class SkeletonDump {
 
     private SkeletonDump() {
+    }
+
+    /**
+     * The bot's own <b>commit key</b> — {@code (rx,ry,rz:frag)} — in the same notation the skeleton steps are
+     * printed in, so a slide line can be read as a straight key comparison instead of a coordinate conversion
+     * done by hand. {@code frag} is the caller's already-resolved {@code botFragmentAt} value (a
+     * nearest-CENTROID membership signal, deliberately not re-derived here).
+     */
+    static String botKey(int minY, BlockPos floor, int frag) {
+        return "(" + RegionAddress.regionX(floor.getX(), 0)
+                + "," + RegionAddress.regionY(floor.getY(), 0, minY)
+                + "," + RegionAddress.regionZ(floor.getZ(), 0)
+                + ":" + frag + ")";
+    }
+
+    /**
+     * The skeleton steps in {@code [lo, hi]} as {@code S<i>(rx,ry,rz:frag)}, for the forward-slide logs.
+     *
+     * <p><b>Why the whole span and not just the endpoints.</b> A multi-step slide has two very different
+     * causes that the endpoints alone cannot separate: the bot really crossed several regions, or the
+     * intervening steps SHARE the committed step's region and differ only by fragment (an intra-region MINE
+     * edge). {@link PathPlan#forwardIndexOf} returns the FIRST exact {@code (region, fragment)} match, so in
+     * the second case one fragment re-resolution advances the cursor several steps without the bot leaving
+     * its region — and that path bypasses the wiggle guard entirely ({@code sameRegionDig}). Printing the
+     * span makes the two cases distinguishable at a glance.
+     */
+    static String stepSpan(PathPlan plan, int lo, int hi) {
+        final RegionPathPlan sk = plan.skeleton;
+        if (sk == null) return "none";
+        final int a = Math.max(0, Math.min(lo, hi));
+        final int b = Math.min(sk.size() - 1, Math.max(lo, hi));
+        final StringBuilder sb = new StringBuilder();
+        for (int i = a; i <= b; i++) {
+            if (sb.length() > 0) sb.append(' ');
+            sb.append('S').append(i).append('(').append(sk.rx(i)).append(',').append(sk.ry(i))
+                    .append(',').append(sk.rz(i)).append(':').append(sk.fragmentId(i)).append(')');
+        }
+        return sb.length() == 0 ? "none" : sb.toString();
     }
 
     /** The implementation behind {@link PathPlan#describeSkeleton} — see that method's Javadoc. */
@@ -105,6 +144,85 @@ final class SkeletonDump {
             sb.append("  center=").append(compactPos(c)).append(probe(grid, c));
         }
         return sb.toString();
+    }
+
+    /**
+     * One-line summary of how much of this plan rides on terrain the nav layer has <b>never seen</b>, or
+     * {@code null} when every step of every level is built (the overwhelmingly common case, so the caller
+     * logs nothing at all).
+     *
+     * <p><b>Why this is worth its own log line</b> (owner request 2026-08-12). An UNBUILT region has no
+     * measured cost, so the region tier prices it optimistically and its portals get placed at the surface
+     * preference (≈y 63) rather than wherever the real cave is. A plan that crosses a RUN of them therefore
+     * reads as "climb to daylight and walk", which is correct if the terrain really is open and badly wrong
+     * if it is not — and it is invisible in the block tier's logs, because each individual window search
+     * succeeds. Measured on the headless flagship the same day: L1 steps 8..16 were all {@code [unbuilt]}
+     * with portals pinned at y=64/63, and the bot duly climbed from y≈56 back to y≈104 chasing them, while
+     * the manual run over identical terrain had ZERO unbuilt steps and stayed in the caves. The difference
+     * was chunk residency, not pathing — which is exactly the class of problem this line exists to expose.
+     *
+     * <p>Counts a step as unbuilt if EITHER its portal cell or its centre cell has no nav data, matching
+     * {@link #probe}'s {@code [unbuilt]} test, and reports the first offending index per level so the run
+     * can be correlated against the full dump.
+     */
+    static String unbuiltSummary(PathPlan plan) {
+        final RegionPathPlan skeleton = plan.skeleton;
+        if (skeleton == null || skeleton.isEmpty()) {
+            return null;
+        }
+        final NavGridView grid = new NavGridView(plan.level);
+        final StringBuilder sb = new StringBuilder();
+        int total = 0;
+        if (plan.hier != null) {
+            for (int L = plan.hier.topLevel(); L >= 1; L--) {
+                final RegionPathPlan sk = plan.hier.skeletonAt(L);
+                if (sk == null) {
+                    continue;
+                }
+                int n = 0;
+                int first = -1;
+                for (int i = 0; i < sk.size(); i++) {
+                    if (stepUnbuilt(grid, sk, i)) {
+                        n++;
+                        if (first < 0) {
+                            first = i;
+                        }
+                    }
+                }
+                if (n > 0) {
+                    total += n;
+                    sb.append("  L").append(L).append('=').append(n).append('/').append(sk.size())
+                            .append(" from L").append(L).append('.').append(first);
+                }
+            }
+        }
+        int n0 = 0;
+        int first0 = -1;
+        for (int i = 0; i < skeleton.size(); i++) {
+            if (stepUnbuilt(grid, skeleton, i)) {
+                n0++;
+                if (first0 < 0) {
+                    first0 = i;
+                }
+            }
+        }
+        if (n0 > 0) {
+            total += n0;
+            sb.append("  L0=").append(n0).append('/').append(skeleton.size()).append(" from S").append(first0);
+        }
+        return total == 0 ? null : "unbuilt steps in plan —" + sb;
+    }
+
+    /** A step rides unbuilt nav data when its portal OR its centre has none — {@link #probe}'s test. */
+    private static boolean stepUnbuilt(NavGridView grid, RegionPathPlan sk, int i) {
+        if (sk.hasPortal(i)) {
+            final BlockPos p = sk.portalCell(i);
+            if (!grid.built(p.getX(), p.getY(), p.getZ())) {
+                return true;
+            }
+        }
+        final BlockPos c = sk.centerOf(i);
+        return !grid.built(c.getX(), c.getY(), c.getZ());
     }
 
     /**
