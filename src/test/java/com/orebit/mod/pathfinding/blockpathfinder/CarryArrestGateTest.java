@@ -35,6 +35,15 @@ class CarryArrestGateTest {
         boolean climbable, climbBelow;
         boolean jumping, sprinting, sneaking;
         float forward;
+        /**
+         * The commanded thrust DIRECTION. Recorded because {@link SteerControl#stepOffGate}'s whole output is
+         * {@code faceHorizontally(err) + setForward(+)} — the sign of the correction lives ONLY here, and this
+         * double used to discard it ({@code faceHorizontally(dx,dz) { }}). Every arrest assertion in this file
+         * therefore checked THAT an arrest happened and never WHICH WAY it pushed, which is exactly the gap a
+         * 2026-08-12 flagship wedge fell through: the servo's own {@code crossErr} put the centreline 0.424 to
+         * −x and the bot accelerated +x across the region boundary it had just crossed.
+         */
+        double faceDx = Double.NaN, faceDz = Double.NaN;
 
         CarryBot at(double x, double y, double z) { this.x = x; this.y = y; this.z = z; return this; }
         CarryBot vel(double vx, double vz) { this.vx = vx; this.vz = vz; return this; }
@@ -54,7 +63,7 @@ class CarryArrestGateTest {
         @Override public boolean prone() { return false; }
         @Override public boolean onClimbable() { return climbable; }
         @Override public boolean climbableBelow() { return climbBelow; }
-        @Override public void faceHorizontally(double dx, double dz) { }
+        @Override public void faceHorizontally(double dx, double dz) { faceDx = dx; faceDz = dz; }
         @Override public void faceTowards(double dx, double dy, double dz) { }
         @Override public void setForward(float zza) { forward = zza; }
         @Override public void setSprinting(boolean s) { sprinting = s; }
@@ -218,12 +227,25 @@ class CarryArrestGateTest {
     // for ~12000 ticks, invisible to every envelope because it is never settled.
 
     /** A level segment (no descent) for the stance tests. */
+    /**
+     * FRAME (corrected 2026-08-12): {@code sy}/{@code ty} are the "feet-cell + 1.0" values
+     * {@link com.orebit.mod.BotNavigator}'s {@code SegmentCursor} builds — {@code sy = start.getY() + 1.0},
+     * {@code ty = target.getY() + 1.0} over FEET cells (BotNavigator:1658-1659). These bots sit at
+     * {@code y == 10}, i.e. feet cell 10, so the segment values must be <b>11.0</b>, not 10.0.
+     *
+     * <p>They read 10.0 until now, which put {@code floorY = ty - 1.0 = 9.0} and made every bot here look a
+     * FULL BLOCK above its target. That was invisible while {@code holdClimbableStance} gated its height
+     * correction on the step's INTENT: these are Δy==0 segments, so {@code dy} collapsed to 0.0 and the
+     * absolute comparison was never evaluated. Once the band decides (the (61,169,253) lateral-Climb wedge),
+     * the error becomes live and these fixtures would assert a release instead of the hold they exist to pin.
+     * Corrected here rather than in the servo: the servo agrees with production, the fixtures did not.
+     */
     private static final class Level implements SteerView {
         @Override public double sx() { return 0.5; }
-        @Override public double sy() { return 10.0; }
+        @Override public double sy() { return 11.0; }
         @Override public double sz() { return 0.5; }
         @Override public double tx() { return 3.5; }
-        @Override public double ty() { return 10.0; }
+        @Override public double ty() { return 11.0; }
         @Override public double tz() { return 0.5; }
         @Override public boolean hasNext() { return false; }
         @Override public double nx() { return 0; }
@@ -264,6 +286,59 @@ class CarryArrestGateTest {
         SteerControl.drive(b, new Level());
         assertTrue(b.sneaking, "lateral cling inside a curtain must hold sneak to hold height");
         assertFalse(b.jumping, "holding jump inside a curtain climbs, it does not hold position");
+    }
+
+    /**
+     * THE (207,−9,58) BACKPEDAL (2026-08-12) — an arrest must push TOWARD the lane centreline.
+     *
+     * <p>Witnessed on the headless flagship: the bot finished a −x Traverse and entered cell 207 at
+     * {@code x=207.924}. That crossing is a REGION boundary (L0 cells are 16 wide, so 208 starts region 13),
+     * which triggered a replan; the new first step was a {@code Descend (207,−8,58) → (207,−9,57)}, i.e. a
+     * −z move, so {@code x} became the CROSS axis and the bot's fresh-entry offset of 0.424 became a lane
+     * violation. The gate correctly fired — but the bot then accelerated {@code +x} to 208.004, back across
+     * the boundary it had just crossed, and the Descend's validity envelope fail→HELD it there for the rest
+     * of the run.
+     *
+     * <p>Hand-computed for this pose: {@code crossUx=+1}, {@code crossErr = 207.5 − 207.924 = −0.424},
+     * {@code predictedOffset = +0.420} against the {@code 0.5 − PARKOUR_CELL_MARGIN = 0.2} threshold, so the
+     * gate fires; {@code desiredCross = clamp(0.75 × −0.424, ±0.13) = −0.13} and
+     * {@code errx = −0.13 − (−0.0018) = −0.128}. The commanded thrust is unambiguously −x. Back-solving the
+     * observed velocities through ground friction gives an APPLIED impulse of ≈{@code (+0.082, −0.049)} — a
+     * near-exact 180° negation of what was commanded.
+     *
+     * <p>This assertion could not have existed before: {@code CarryBot.faceHorizontally} discarded its
+     * arguments, so every arrest test in this file checked THAT the gate fired and none checked WHICH WAY it
+     * pushed. If this test passes, the servo is correct and the inversion lives downstream of
+     * {@link SteerControl} (the {@code faceHorizontally} → yaw → forward path in the entity layer); if it
+     * fails, the sign error is here.
+     */
+    @Test
+    void arrestPushesTowardTheCentrelineNotAwayFromIt() {
+        // The exact witnessed pose: mid-cell-entry, x-carry already bled, still travelling −z.
+        CarryBot b = new CarryBot().at(207.924, -8.0, 58.829).vel(-0.0018, -0.0699);
+        final SteerView seg = new SteerView() {
+            @Override public double sx() { return 207.5; }
+            @Override public double sy() { return -8.0; }
+            @Override public double sz() { return 58.5; }
+            @Override public double tx() { return 207.5; }
+            @Override public double ty() { return -9.0; }
+            @Override public double tz() { return 57.5; }
+            @Override public boolean hasNext() { return false; }
+            @Override public double nx() { return 0; }
+            @Override public double ny() { return 0; }
+            @Override public double nz() { return 0; }
+        };
+
+        final boolean arrested = SteerControl.stepOffGate(b, seg);
+
+        assertTrue(arrested,
+                "cross offset 0.424 exceeds 0.5 - PARKOUR_CELL_MARGIN (0.2), so the gate must take the tick");
+        assertTrue(b.forward > 0.0f, "an arrest drives the correction; it does not idle");
+        assertTrue(b.faceDx < 0.0,
+                "the centreline x=207.5 lies 0.424 blocks in -x, so the commanded thrust must be -x. "
+                        + "A +x command is the inversion that carried the bot to 208.004, back over the "
+                        + "region boundary, and out of its own validity envelope. commanded dx="
+                        + b.faceDx + " dz=" + b.faceDz);
     }
 
     @Test

@@ -1926,7 +1926,15 @@ public final class SteerControl {
 
     /** Record the drive branch for {@link #lastDrive}; diagnostic-only, so it can be called freely. Public so a
      *  movement that writes inputs directly (e.g. {@code Descend}'s column deadband) can name itself too. */
-    public static void tag(String branch) { lastDrive = branch; }
+    public static void tag(String branch) { lastDrive = "#" + (++driveCalls) + " " + branch; }
+
+    /** Diagnostic ONLY: call counter for {@link #lastDrive}, mirroring {@link #stanceCalls}. A drive tag is a
+     *  STATIC last-writer-wins slot, so a tick on which NO servo ran reprints the previous tick's branch
+     *  verbatim — indistinguishable, without a counter, from that branch having genuinely run again. A
+     *  repeated {@code #N} across two consecutive {@code exec} lines proves the second line's {@code src},
+     *  {@code yaw} and heading are STALE, not a fresh decision. (2026-08-12: an apparent 180-degree facing
+     *  inversion on a replan tick was read off exactly such a duplicated line.) */
+    private static int driveCalls;
 
     /** Diagnostic ONLY: call counter, so a log line can prove {@link #lastStance} is THIS tick's decision and
      *  not a stale one left by an earlier call (the difference between "the branch didn't press" and "the
@@ -1962,9 +1970,42 @@ public final class SteerControl {
         // because it measured against the cell FLOOR rather than asking whether the feet were in the cell.
         final boolean aboveBand = b.y() > floorY + SETTLE_BAND;
         final boolean belowFloor = b.y() < floorY;
-        final double dy = (intent > RISE_EPS && belowFloor) ? err
-                : (intent < -RISE_EPS && aboveBand) ? err
-                : 0.0;
+        // THE BAND DECIDES, NOT THE STEP'S INTENT (owner ruling 2026-08-12, the (61,169,253) lateral-Climb
+        // wedge). The three inputs a climbable affords — jump RISES, sneak HOLDS, nothing FALLS — are chosen
+        // by comparing where the feet ARE against where they should BE, targeting the settled band
+        // [floorY, floorY + SETTLE_BAND]: below the floor is potentially fatal (out the bottom of the column
+        // with nothing left to grab), above the band is simply not arrived yet.
+        //
+        // The gate this replaces read the STEP's vertical intent ({@code intent > RISE_EPS && belowFloor},
+        // {@code intent < -RISE_EPS && aboveBand}), which meant a LATERAL step — intent == 0, the ledge→vine
+        // transfer and the ladder-plate crossing — could never take either corrective branch: dy collapsed to
+        // 0.0 for EVERY height error, so the HOLD branch below pressed sneak unconditionally and the bot
+        // arrested wherever it happened to be. Measured on the flagship 2026-08-12, Climb
+        // (61,168,254)->(61,168,253): the jump-grab entry launched a real 0.42 arc off a placed cobble,
+        // crossed into the target column 0.078 below its apex, and the vine caught the feet at botY=170.122 —
+        // foot cell (61,170,253), a FULL CELL above the target (61,169,253). From there the servo read
+        // int=0.00, err=-1.12, dy=0.00 and pressed sneak for 253+ consecutive ticks: the hold actively
+        // suppressed the -0.15/t slide that was the only thing which could have corrected the error, `done`
+        // (footY == 169) could never fire, and the move wedged permanently. hcol was false on every tick —
+        // this was NOT the horizontalCollision ratchet the same failure shape usually implies.
+        //
+        // Dropping the gate restores the rule exactly as the owner stated it on 2026-08-02 ("if we're on a
+        // climbable and our Y is below the Y we want, hold jump; if it's above, hold nothing; if it's AT the
+        // Y we want, hold sneak") — that rule never mentioned the step's direction, and direction is
+        // precisely what a lateral step does not have. `intent` now survives only in the diagnostic below.
+        //
+        // The vine-sag case the old gate was written for is UNAFFECTED, and its fixture PROVES that rather
+        // than merely tolerating it: ClimbSteerTest.lateralClingHoldsSneak puts a Δy==0 bot at botY=177.2
+        // against ty=178.0, i.e. floorY=177.0 — belowFloor false, aboveBand false (177.2 > 177.20 is false).
+        // It sits INSIDE the band, so the band rule holds sneak there for the same reason the gate did. The
+        // gate was never what made that test pass; it merely also suppressed every case the band would catch.
+        //
+        // The two non-lateral corners this newly reaches are both corrections TOWARD the band, in the
+        // direction the ruling already argues for: a RISE that overshot above the band now releases instead
+        // of holding high, and a DESCENT that sank below the floor now climbs back instead of arresting below
+        // its own target (the "potentially deadly" side). Inside the band every intent still holds, unchanged,
+        // and the RISE_EPS deadband still swallows a sub-0.05 error so no step chatters on arrival.
+        final double dy = belowFloor ? err : aboveBand ? err : 0.0;
         lastStance = String.format("#%d int=%.2f err=%.2f dy=%.2f clb=%b stb=%b tr=%b grd=%b",
                 ++stanceCalls, intent, err, dy, b.onClimbable(), b.standableBelow(), translating, b.grounded());
         if (dy > RISE_EPS) {

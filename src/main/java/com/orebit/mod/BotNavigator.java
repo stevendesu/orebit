@@ -922,7 +922,12 @@ final class BotNavigator {
             final RegionPathPlan sk = pathPlan.skeletonPlan();
             final String hop = (sk == null || step < 0 || step >= sk.size())
                     ? "?"
-                    : "S" + step + "(" + sk.rx(step) + "," + sk.ry(step) + "," + sk.rz(step) + ")";
+                    // frag is HALF THE COMMIT KEY (PathPlan.forwardIndexOf matches on (region, fragment)), so a
+                    // hop line without it cannot distinguish two skeleton steps that share a region — an
+                    // intra-region MINE edge. Printing region alone is how a sequence spanning a re-derive was
+                    // once misread as a within-skeleton loop. Print what the cursor actually keys on.
+                    : "S" + step + "(" + sk.rx(step) + "," + sk.ry(step) + "," + sk.rz(step)
+                            + ":" + sk.fragmentId(step) + ")";
             OrebitCommon.LOGGER.info("[Orebit] window-swap bot={} goal={} target={} kind={} hop={}",
                     AllyBotEntity.compact(bot.blockPosition()), AllyBotEntity.compact(goalFloor),
                     wt == null ? "?" : AllyBotEntity.compact(wt), pathPlan.windowTargetKind(), hop);
@@ -1904,7 +1909,7 @@ final class BotNavigator {
         // measured. Everything it said is in latest.log, better.
         OrebitCommon.LOGGER.info(
                 "[Orebit] exec {} wp{} -> {} ({}) phase={}/{} botFoot=({},{},{}) botY={} grounded={}"
-                        + " climbable={} reached={} targetY={} x={} z={} vel=({},{})"
+                        + " climbable={} reached={} targetY={} seg=({},{})->({},{}) x={} z={} vel=({},{})"
                         + " sneak={} jump={} fwd={} str={} src={} yaw={} head=({},{}) hcol={} dm=({},{},{})"
                         + " stance[{}]",
                 move, waypointIndex, AllyBotEntity.compact(wp), medium,
@@ -1913,6 +1918,15 @@ final class BotNavigator {
                 bot.grounded(), bot.onClimbable(),
                 movement.reached(bot, wp.getX(), wp.getY(), wp.getZ()),
                 String.format("%.2f", wp.getY() + 1.0),
+                // THE STEERED SEGMENT (2026-08-12). Every servo derives its along/cross axes from
+                // (sx,sz)->(tx,tz), so without it a logged yaw/head/fwd triple cannot be checked against what
+                // the servo was actually asked to do. Reconstructing it from the PLAN line's from/to floors is
+                // NOT equivalent and was measurably wrong: on the (207,-9,58) arrest the assumed pure-(-z)
+                // segment forces emag >= 0.0699 and therefore fwd == 1.00, while the log shows fwd=0.98 — so
+                // the real segment differs and a unit fixture built on the assumption tests nothing. Two
+                // formatted doubles on a cold per-tick diagnostic line that already carries twenty.
+                String.format("%.3f", cursor.sx()), String.format("%.3f", cursor.sz()),
+                String.format("%.3f", cursor.tx()), String.format("%.3f", cursor.tz()),
                 String.format("%.3f", bot.getX()), String.format("%.3f", bot.getZ()),
                 String.format("%.4f", bot.velX()), String.format("%.4f", bot.velZ()),
                 sneak, jump, String.format("%.2f", fwd),
