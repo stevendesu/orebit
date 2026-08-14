@@ -1183,22 +1183,47 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         return !solidAt(x, y, z);
     }
 
-    // The bot's body corridor THROUGH a cell (block-local 0..1 coords), keyed on the step's horizontal movement
-    // direction — the "test the geometry against the movement route" primitive. The corridor spans the FULL cell
-    // ALONG the travel axis (so a panel ACROSS the path is caught) but only the 0.6-wide CENTRED band on the
-    // PERPENDICULAR axis (so a panel running ALONG one side is missed) — and always ABOVE the auto-step in Y (so a
-    // low floor block is missed). That geometry is exactly what distinguishes, with NO per-block-type gate:
+    // The bot's body corridor INTO a cell (block-local 0..1 coords), keyed on the step's horizontal movement
+    // direction — the "test the geometry against the movement route" primitive. The corridor spans the ENTRY
+    // HALF of the cell along the travel axis (entry face → cell CENTRE), the 0.6-wide CENTRED band on the
+    // PERPENDICULAR axis (so a panel running ALONG one side is missed), and always ABOVE the auto-step in Y (so
+    // a low floor block is missed). That geometry distinguishes, with NO per-block-type gate:
     //   • an OPEN door / open trapdoor — thin panel PARALLEL to travel, against a side → outside corridor → pass;
-    //   • a CLOSED door — thin panel ACROSS the doorway → spans the corridor → mine (an iron door break still works);
+    //   • a CLOSED door ACROSS the ENTRY — panel in the near half → spans the corridor → mine (iron still breaks);
+    //   • a CLOSED door across the FAR face — outside the corridor → pass, the planner owns the exit (see below);
     //   • a carpet / pressure plate / bottom slab / snow layer under the feet — collision below the step → pass;
     //   • a full block (or fence post / wall reaching the centred column) → mine.
     // Blocks with EMPTY collision (ladders, signs, buttons, plants, open fence gates) short-circuit before this.
+    //
+    // ENTRY HALF, NOT THE WHOLE CELL (owner ruling 2026-08-14, the (216,-26,6) copper-door wedge). The planner
+    // reasons CENTRE-TO-CENTRE: a step's contract is "get to the middle of the destination cell", and how to
+    // LEAVE it is the next step's problem. `MovementContext.doorEntryClear` encodes exactly that — a door whose
+    // blocked edge is not the ENTRY edge is free passage, folding no toggle, and the exit toggle is folded by
+    // the following step via `exitDoorDecision`/`foldExitDoorToggle`. Testing the FULL cell here made the
+    // executor one face stricter than the planner: entering a north-facing closed door from the north is free
+    // by the plan (its panel is on the SOUTH face) but the full-cell corridor saw that panel, raised Need.AIR
+    // on a cell no toggle was owed for — so `isOpenableCell` could not shield it — and fell through to mining a
+    // door that `mining.protectedBlocks` protects by default. The result was a silent 1960-tick hold with one
+    // deduped `mine REFUSED` line to show for it. Every other link in that chain was behaving as designed.
+    //
+    // Deliberately NOT terminus-aware (same ruling): "is this cell only being passed through?" is exactly the
+    // question that recreates the wedge, because the bot WILL later traverse straight on through this door and
+    // the executor would block it again. The half-cell rule is unconditional — the executor asks only whether
+    // the bot can reach the centre, and the planner is trusted to open the door when it is time.
     private static final double C0 = 0.2, C1 = 0.8;              // the 0.6-wide centred footprint band
+    private static final double MID = 0.5;                       // the cell centre — the step's real contract
     private static final double STEP_UP = 9.0 / 16.0;           // auto-step height (STEP_ASSIST_MAX_RISE)
     private static final VoxelShape CORRIDOR_VERT = Shapes.box(C0, STEP_UP, C0, C1, 1.0, C1); // dx==0 && dz==0
-    private static final VoxelShape CORRIDOR_X    = Shapes.box(0.0, STEP_UP, C0, 1.0, 1.0, C1); // along ±X
-    private static final VoxelShape CORRIDOR_Z    = Shapes.box(C0, STEP_UP, 0.0, C1, 1.0, 1.0); // along ±Z
-    private static final VoxelShape CORRIDOR_DIAG = Shapes.box(0.0, STEP_UP, 0.0, 1.0, 1.0, 1.0); // diagonal (both)
+    // Along one axis: from the entry face to the centre. The SIGN of the travel delta picks which half.
+    private static final VoxelShape CORRIDOR_XP = Shapes.box(0.0, STEP_UP, C0, MID, 1.0, C1); // travelling +X
+    private static final VoxelShape CORRIDOR_XN = Shapes.box(MID, STEP_UP, C0, 1.0, 1.0, C1); // travelling −X
+    private static final VoxelShape CORRIDOR_ZP = Shapes.box(C0, STEP_UP, 0.0, C1, 1.0, MID); // travelling +Z
+    private static final VoxelShape CORRIDOR_ZN = Shapes.box(C0, STEP_UP, MID, C1, 1.0, 1.0); // travelling −Z
+    // Diagonal: the entry QUADRANT, corner → centre, indexed [dx>0][dz>0].
+    private static final VoxelShape CORRIDOR_D_PP = Shapes.box(0.0, STEP_UP, 0.0, MID, 1.0, MID);
+    private static final VoxelShape CORRIDOR_D_PN = Shapes.box(0.0, STEP_UP, MID, MID, 1.0, 1.0);
+    private static final VoxelShape CORRIDOR_D_NP = Shapes.box(MID, STEP_UP, 0.0, 1.0, 1.0, MID);
+    private static final VoxelShape CORRIDOR_D_NN = Shapes.box(MID, STEP_UP, MID, 1.0, 1.0, 1.0);
 
     /**
      * Whether the block at {@code (x,y,z)} genuinely OBSTRUCTS the bot's body moving through the cell along the
@@ -1208,10 +1233,17 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      * shape actually intrudes into the direction-keyed body corridor (see the CORRIDOR_* fields), not merely
      * because it has SOME collision. This lets the bot walk THROUGH an already-open door / open trapdoor and
      * stand ON a carpet / plate / slab without swinging at them — matching a player — while still clearing a
-     * closed door across the path or a full-block wall. {@code (dx,dz)} need only be non-zero-or-not per axis
-     * (signum or raw delta); {@code (0,0)} is a vertical move (Pillar/MineDown) → the centred footprint column.
-     * Reads the LIVE level (reflects the bot's own just-made breaks/places), like {@link #solidAt}; the local
-     * collision shape and the corridor share the 0..1 frame, so no world offset is needed.
+     * closed door across the ENTRY or a full-block wall. The corridor covers the ENTRY HALF of the cell only —
+     * the step's contract is to reach the CENTRE, and leaving is the next step's business (see the derivation
+     * on the CORRIDOR_* fields).
+     *
+     * <p><b>{@code (dx,dz)} must be SIGNED</b> — it selects which half/quadrant of the cell is the entry side.
+     * Any non-zero-per-axis form works (signum or raw delta) as long as the sign is the real direction of
+     * travel, which is what {@link com.orebit.mod.pathfinding.blockpathfinder.MovePlan#moveDir} records from
+     * the step's from/to cells. {@code (0,0)} is a vertical move (Pillar/MineDown) → the centred footprint
+     * column, unchanged. Reads the LIVE level (reflects the bot's own just-made breaks/places), like
+     * {@link #solidAt}; the local collision shape and the corridor share the 0..1 frame, so no world offset is
+     * needed.
      */
     @Override
     public boolean movementBlockedAt(int x, int y, int z, int dx, int dz) {
@@ -1219,9 +1251,17 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         BlockPos p = new BlockPos(x, y, z);
         VoxelShape shape = level.getBlockState(p).getCollisionShape(level, p);
         if (shape.isEmpty()) return false;
-        VoxelShape corridor = dx != 0
-                ? (dz != 0 ? CORRIDOR_DIAG : CORRIDOR_X)
-                : (dz != 0 ? CORRIDOR_Z : CORRIDOR_VERT);
+        final VoxelShape corridor;
+        if (dx != 0 && dz != 0) {
+            corridor = dx > 0 ? (dz > 0 ? CORRIDOR_D_PP : CORRIDOR_D_PN)
+                              : (dz > 0 ? CORRIDOR_D_NP : CORRIDOR_D_NN);
+        } else if (dx != 0) {
+            corridor = dx > 0 ? CORRIDOR_XP : CORRIDOR_XN;
+        } else if (dz != 0) {
+            corridor = dz > 0 ? CORRIDOR_ZP : CORRIDOR_ZN;
+        } else {
+            corridor = CORRIDOR_VERT;
+        }
         return Shapes.joinIsNotEmpty(shape, corridor, BooleanOp.AND);
     }
 
