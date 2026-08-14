@@ -131,24 +131,41 @@ public final class ParkourEnvelope {
         return best;
     }
 
-    private static double vInf(double gsf) {
+    /** TERMINAL sprint speed — the run-up length this whole table ASSUMES ({@code A_G/(1−QG·gsf)}). */
+    static double vInf(double gsf) {
         return A_G / (1.0 - QG * gsf);
     }
 
-    private static double vJump(double gsf) {
-        return vInf(gsf) * QG * gsf + BOOST + A_G;   // jump-tick speed (incoming stored vel drags on the floor)
+    /** One tick of grounded sprint from {@code v}: the stored velocity drags on the floor, then the tick's
+     *  input accelerates. {@link #vInf} is this recurrence's fixed point. Exposed so a SHORT run-up can be
+     *  integrated against the same physics the table is baked from, rather than a hand-copy of it. */
+    static double vGroundStep(double v, double gsf) {
+        return v * QG * gsf + A_G;
     }
 
-    private static double vPost(double gsf) {
-        return vJump(gsf) * QG * gsf + A_A;           // jump-tick trailing drag (still on the slow floor)
+    private static double vJump(double gsf) {
+        return vJumpFrom(vInf(gsf), gsf);            // the table's assumption: arriving at terminal speed
+    }
+
+    /** Jump-tick speed reached from an arbitrary incoming ground speed (incoming velocity drags on the
+     *  floor, then the sprint boost and this tick's input are added). */
+    static double vJumpFrom(double vIn, double gsf) {
+        return vIn * QG * gsf + BOOST + A_G;
     }
 
     /** Cumulative centre travel after {@code T} ticks (tick 1 = jump); {@code occH} scales the whole budget. */
     static double X(int T, double gsf, double occH) {
+        return xFrom(T, vJump(gsf), gsf, occH);
+    }
+
+    /** {@link #X} parameterised on the jump-tick speed, so a run-up shorter than the assumed one is priced
+     *  through the IDENTICAL arc integrator. {@code X} delegates here, so production stays byte-identical. */
+    static double xFrom(int T, double vJump0, double gsf, double occH) {
         if (T < 1) return 0.0;
         double m = A_A / (1.0 - QH);
-        double base = vJump(gsf) + (T - 1) * m
-                + (vPost(gsf) - m) * (1.0 - Math.pow(QH, T - 1)) / (1.0 - QH);
+        double vPost0 = vJump0 * QG * gsf + A_A;      // jump-tick trailing drag (still on the slow floor)
+        double base = vJump0 + (T - 1) * m
+                + (vPost0 - m) * (1.0 - Math.pow(QH, T - 1)) / (1.0 - QH);
         return occH * base;
     }
 
