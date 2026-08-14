@@ -1853,7 +1853,14 @@ final class BotNavigator {
      */
     private void logVerbose(Movement movement, BlockPos wp) {
         String move = movement.getClass().getSimpleName();
-        String medium = bot.isInWater() ? "water" : (EntityState.onGround(bot) ? "ground" : "air");
+        // The medium tag carries the FLUID DEPTH at the bot's own feet cell beside the boolean, because the
+        // boolean lies in shallow fluid and cost a whole debugging round on 2026-08-14: a bot standing in
+        // 0.556 blocks of water at (247,51,16) reported `ground` 706 times against `water` 8 and `air` 5,
+        // stationary the whole time. `isInWater()` is vanilla's `wasTouchingWater`; `fl` is the world's own
+        // answer (FluidState.getHeight). When they disagree, believe `fl` — it is what the swim reach test
+        // and its surface clamp are built on. Debug-only path, so the extra live read is free in production.
+        String medium = (bot.isInWater() ? "water" : (EntityState.onGround(bot) ? "ground" : "air"))
+                + String.format("/fl%.3f", bot.fluidTopAt(bot.footX(), bot.footY(), bot.footZ()));
         // The line prints the WAYPOINT it is driving toward; without the bot's own cell you cannot tell a
         // step that arrived from one still short of its target (the 2026-08-01 vine-Ascend re-jump: the
         // grounded tick was ambiguous between "on the landing stand" and "still in the from column"). So the
