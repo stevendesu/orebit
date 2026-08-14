@@ -320,8 +320,15 @@ public final class SteerControl {
         recenterOn(b, p.tx(), p.tz());
     }
 
-    /** Shared column servo: proportional walk toward {@code (cx0,cz0)}, exact zero inside {@link #COLUMN_DEADBAND}. */
-    private static void recenterOn(BotSteering b, double cx0, double cz0) {
+    /**
+     * Shared column servo: proportional walk toward {@code (cx0,cz0)}, exact zero inside
+     * {@link #COLUMN_DEADBAND}.
+     *
+     * @return {@code true} once the bot is INSIDE the deadband, i.e. centred on {@code (cx0,cz0)} — the
+     *         signal {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour}'s run-up uses to
+     *         end a re-centre and start accelerating. Callers that only want the input may ignore it.
+     */
+    public static boolean recenterOn(BotSteering b, double cx0, double cz0) {
         double cx = cx0 - b.x();
         double cz = cz0 - b.z();
         double d = Math.sqrt(cx * cx + cz * cz);
@@ -329,10 +336,11 @@ public final class SteerControl {
             tag("recenter");
             b.faceHorizontally(cx, cz);
             b.setForward((float) Math.min(1.0, d));
-        } else {
-            tag("recenter:dead");
-            b.setForward(0.0f); // aligned — exact zero input; see COLUMN_DEADBAND
+            return false;
         }
+        tag("recenter:dead");
+        b.setForward(0.0f); // aligned — exact zero input; see COLUMN_DEADBAND
+        return true;
     }
 
     /**
