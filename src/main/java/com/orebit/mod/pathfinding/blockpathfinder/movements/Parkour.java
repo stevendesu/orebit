@@ -1110,8 +1110,19 @@ public final class Parkour implements Movement {
         // the first gap-floor cell is a takeoff hazard (magma/lava/honey), switch to the PREDICTIVE
         // early trigger so the center never crosses the lip onto it on a grounded tick. ONE predicate
         // shared by the runup's advance AND its hot-entry press below, so the two can never disagree.
+        // BACKWARDS HOT ENTRY — the re-centre latch (owner ruling 2026-08-14, the (158,112,114) gap-4 wedge).
+        // Armed on the first grounded runup tick when the trigger ALREADY reads true and the bot's along-line
+        // velocity is ≤ 0; cleared the tick the bot is re-centred on the takeoff cell. While armed the trigger
+        // is suppressed, so neither the advance nor the hot-entry press can fire.
+        final boolean[] recentring = {false};
+        // Takeoff trigger: grounded AND the bot's along-axis progress past the start-cell centre
+        // reaches TAKEOFF_EDGE — jump as late as possible without stepping off the lip. Fix 3: when
+        // the first gap-floor cell is a takeoff hazard (magma/lava/honey), switch to the PREDICTIVE
+        // early trigger so the center never crosses the lip onto it on a grounded tick. ONE predicate
+        // shared by the runup's advance AND its hot-entry press below, so the two can never disagree.
         final Predicate<BotSteering> takeoffTrigger = b -> {
             if (!b.grounded()) return false;
+            if (recentring[0]) return false;   // re-centring — no takeoff until the run-up has room
             double proj = ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5));
             if (b.gapFloorHazardAt(gapX, fy, gapZ)) {
                 double vAlong = ux * b.velX() + uz * b.velZ();
@@ -1132,6 +1143,44 @@ public final class Parkour implements Movement {
         plan.phase("runup")
                 .drive((b, v) -> {
                     airborneOnce[0] = false; // re-attempt begins → disarm until the next arc is live
+                    // A hot entry says the bot is already past the takeoff point. The latch above splits it by
+                    // the sign of the ALONG-LINE velocity, which is what the 2026-07-31 ruling actually assumed
+                    // and never tested. Moving FORWARD (vAlong > 0) the bot really is about to coast off the
+                    // lip, so waiting a tick loses the jump — press now, unchanged. Moving BACKWARD or standing
+                    // (vAlong ≤ 0) nothing is carrying it off, and jumping now is the worst option available:
+                    // ParkourEnvelope.MAX_GAP is derived from closed-form physics at a SPRINT takeoff, and the
+                    // follower had no gate making that assumption true.
+                    //
+                    // Measured on the flagship at (158,112,114)→(158,111,109): a Diagonal handed off across the
+                    // takeoff cell's −z corner at z=114.029, so proj = 0.471 ≥ TAKEOFF_EDGE on the very first
+                    // grounded tick while the velocity was (+0.053,+0.052) — i.e. vAlong = −0.052, moving INTO
+                    // the cell. Both phases fired in two ticks with no run-up at all, the sprint boost launched
+                    // from the wrong sign at vz = −0.142 instead of ~−0.28, and the bot covered 2.68 of the 4.53
+                    // blocks it needed. It grounded two cells short and the envelope fail→HELD it.
+                    //
+                    // The fix is to give the run-up its run-up: re-centre in the takeoff cell, then take off on
+                    // the normal trigger. That is ~0.5 blocks of runway — HALF a cell, and the CENTRE is the
+                    // only safe place to stand (owner ruling 2026-08-14, rejecting a full-cell run-up to the
+                    // far edge): the bot is 0.6 wide, so parking it at the far edge puts 0.3 of the hitbox in
+                    // the NEIGHBOURING column, which we cannot prove is either safe (it may be fire or lava)
+                    // or free (it may be solid). Neither a death nor a wedge is an acceptable price for a
+                    // parkour PRECONDITION. Centre-to-centre is also the assumption the whole planner is
+                    // written on; every deviation from it in the follower is either incidental (holding a
+                    // perfect centre is impossible) or a deliberate speed/realism trade (stuttering onto every
+                    // cell centre across an open plain looks absurd), never a place to park on purpose.
+                    //
+                    // Bounded to the takeoff cell (which failWhen already admits), purely positional, one-way
+                    // (the latch never re-arms), and no timers. If something blocks the re-centre the move
+                    // simply stalls in place, which is the sanctioned outcome under the no-recovery rule.
+                    if (!recentring[0] && !hadNormalRunupTick[0] && takeoffTrigger.test(b)
+                            && ux * b.velX() + uz * b.velZ() <= 0.0) {
+                        recentring[0] = true;
+                    }
+                    if (recentring[0]) {
+                        b.setSprinting(false);   // you cannot sprint backwards; the run-up re-sprints below
+                        if (SteerControl.recenterOn(b, fx + 0.5, fz + 0.5)) recentring[0] = false;
+                        return;
+                    }
                     SteerControl.steerTowards(b, v);
                     b.setSprinting(sprint);
                     if (takeoffTrigger.test(b)) {

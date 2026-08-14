@@ -226,25 +226,36 @@ public final class Descend implements Movement {
                                            // the runner arrests BEFORE this drive, same tick, same predicate
                 .drive((b, v) -> {
                     if (!b.grounded() || b.footX() != fx || b.footZ() != fz) left[0] = true; // left start → arm
-                    // COLUMN DEADBAND (owner ruling 2026-07-31, the vine-bounce fix): once over the target
-                    // column, stop shoving — zero forward lets gravity (or the −0.15 climbable clamp beside
-                    // a trunk vine) settle the bot straight down onto the floor, where done fires. Within
-                    // the deadband the bot's box is fully inside the target cell, so it CANNOT still be
-                    // standing on the from cell — this can never stall the step-off itself; and no box
-                    // contact with a neighbour means no horizontalCollision → no involuntary +0.2 climb
-                    // ratchet → no bounce (SteerControl.COLUMN_DEADBAND's derivation).
-                    double ox = v.tx() - b.x(), oz = v.tz() - b.z();
-                    if (Math.sqrt(ox * ox + oz * oz) <= SteerControl.COLUMN_DEADBAND) {
-                        SteerControl.tag("descend:dead");
-                        b.setForward(0.0f);
-                        return;
-                    }
-                    // Still short of the target column. From a HANG that means the drop must wait: releasing
+                    // From a HANG the drop must wait until the bot is over the DESTINATION column: releasing
                     // here falls down the CURRENT column, not the destination (the (55,173,256) two-block
                     // drop into the bot's own placed cobble). No-op off a climbable, so the ordinary
                     // ground step-off is unchanged.
                     SteerControl.holdUntilOverTargetColumn(b, v);
-                    SteerControl.drive(b, v);                  // medium-aware (walk on land, swim if submerged)
+                    if (b.inWater()) {
+                        // Fluid keeps the medium-aware drive: the upright swim servo + holdDepth own a wet
+                        // descend, and arriveOnTarget's drag model is the AIR/GROUND pair, not water's.
+                        SteerControl.drive(b, v);
+                        return;
+                    }
+                    SteerControl.holdClimbableStance(b, v, true);
+                    // ARRIVE, not a position deadband (owner ruling 2026-08-14, the (105,91,170) 5-mm miss).
+                    // This phase used to zero forward inside COLUMN_DEADBAND of the target and drive at full
+                    // throttle outside it. That disc is centred on the target, so it suppresses thrust only
+                    // while the bot is NEAR the column — and the tick momentum carries it out the FAR side the
+                    // servo re-engages and shoves it further out. Measured on the flagship: the bot left the
+                    // lip at −0.113 b/t, took two `descend:dead` ticks with the momentum at its largest, then
+                    // thrust for one more tick before the servo reversed, and grounded at z=169.995 — five
+                    // millimetres outside its own target cell, at the right height, on good ground. The
+                    // envelope correctly fail→HOLDs that, so a coin-flip on tick phase wedges the bot.
+                    //
+                    // arriveOnTarget servos the PROJECTED stopping point (position + coast × velocity) instead
+                    // of the position, so it brakes from the first airborne tick — where the same 0.15 disc
+                    // was commanding exactly zero. Re-simulated on the convicted sequence: full reverse from
+                    // the first airborne tick, touchdown ≈ 170.23 instead of 169.995. This is the servo Fall
+                    // already runs on both its walkoff and fall phases; Descend was simply left behind when
+                    // it landed (2026-08-06). The vine-bounce ruling is preserved untouched — arriveOnTarget
+                    // short-circuits to recenterOn (deadband and all) whenever the bot is on a climbable.
+                    SteerControl.arriveOnTarget(b, v);
                 })
                 // SETTLED, not grounded (owner ruling 2026-08-03, the (58,171,254) vine wedge). A waypoint is
                 // a STAND cell and reaching it means being SUPPORTED there — which on a climbable means
