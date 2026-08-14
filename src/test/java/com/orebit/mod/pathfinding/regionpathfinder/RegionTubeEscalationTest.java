@@ -201,47 +201,25 @@ public class RegionTubeEscalationTest {
     }
 
     // ===================================================================================================
-    // T3 — onBotMoved parity: a deviation whose re-derive tube-drains must ALSO escalate (the old
-    // rederiveFromOrCoarser blamed nothing and false-FAILED directly). Same fixture; deviate the bot
-    // off-window near the wall so the suffix re-derive runs and its tubed refinement drains.
+    // T3 — REMOVED 2026-08-13 (owner ruling), and deliberately not replaced.
+    //
+    // It pinned onBotMoved-entry parity with T2: walking the bot at the wall used to make some suffix
+    // re-derive's tubed L0 refinement DRAIN, and escalation had to blame rather than false-FAIL. The drain
+    // was an artifact of the L0 search FLOODING the unbuilt void around the wall until it exhausted itself.
+    // The unbuilt-SHELL bound (RegionPathfinder.MAX_UNBUILT_SHELL_DEPTH) removed the flood: L0 now finds the
+    // same shell path L1 found and returns a skeleton, so there is no drain and nothing to blame. Measured
+    // here: L1 size=40 reachedGoal=true, L0 size=29, coarseEscRows=0.
+    //
+    // The fixture cannot be rescued by LENGTHENING the wall — the shell route around it stays valid at any
+    // length, merely longer, and the fixture seeds ~10 real 4096-cell FragmentBuilder floods per rx, so a
+    // wall long enough to matter costs minutes. Only geometry with NO unbuilt cell within the shell depth
+    // would drain L0, and no such geometry lets L1 succeed where L0 fails — which is the whole point: the
+    // escalation was compensating for a limitation of the search that no longer exists.
+    //
+    // Escalation itself is still pinned, on this same fixture, by tubedDrain_escalatesInsteadOfFalseFailing
+    // (the onBlocked entry) and realizedBlame_landsOnUnrealizedHop_notJustCommitted. Do NOT restore this
+    // test by weakening the shell bound.
     // ===================================================================================================
-    @Test
-    void onBotMoved_tubedDrain_escalatesToo() {
-        // The sealed-connector wall (no honest route exists anywhere; the coarse tiers offer only optimistic
-        // corridors through unbuilt space or bogus synthetic crossings). Build from the far-west start: the
-        // initial windows sit over the open corridor, so the build needs NO escalation and the crossing
-        // memory starts EMPTY — every blame below is attributable to the onBotMoved entry alone.
-        buildWallFixture(W, true);
-        BlockPos start = feet(-12, 1, 0);
-        BlockPos goal = feet(0, 1, 2);
-
-        HierarchicalRegionPlan h = HierarchicalRegionPlan.build(grid, MINY, start, goal, CAPS,
-                RegionMineModel.DEFAULT, inv());
-        assertFalse(h.isFailed());
-        assertEquals(0, escalationRowsAtCoarse(grid.crossingMemory()),
-                "the far-west build must need no blames, so the memory baseline is empty");
-
-        // Walk the bot east along the corridor via onBotMoved (onRoute=false — no block plan vouches). As the
-        // windows and the collapsing top close on the wall, some re-derive's tubed refinement drains (its
-        // corridor has no real refinement — the connectors are sealed) — the old rederiveFromOrCoarser blamed
-        // nothing there and false-FAILED the plan directly; the escalation path must blame and keep routing
-        // (the honest give-up stays with the blocked-proof loop, T5b).
-        int walked = 0;
-        for (int rx = -11; rx <= 12; rx++) {
-            h.onBotMoved(feet(rx, 1, 0), false);
-            walked = rx;
-            assertFalse(h.isFailed(),
-                    "a re-derive that tube-drains (bot at rx=" + rx + ") must escalate, not false-fail");
-            if (escalationRowsAtCoarse(grid.crossingMemory()) >= 1) break;
-        }
-        dump("T3 after walking to rx=" + walked, h);
-
-        assertFalse(h.isFailed(), "the walked plan never false-fails on a tubed drain");
-        assertNotNull(h.l0Skeleton(), "the re-derived cascade still has a level-0 skeleton");
-        assertTrue(escalationRowsAtCoarse(grid.crossingMemory()) >= 1,
-                "an onBotMoved re-derive facing the wall must have recorded escalation blames (parity with "
-                        + "the onBlocked path — the old code false-FAILED without blaming anything)");
-    }
 
     // ===================================================================================================
     // T5 — honest give-up is PRESERVED. (a) a sealed pocket start with the goal in another pocket, close

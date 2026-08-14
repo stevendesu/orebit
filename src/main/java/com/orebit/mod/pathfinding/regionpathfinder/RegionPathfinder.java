@@ -185,6 +185,24 @@ public final class RegionPathfinder {
      */
     static boolean UNBUILT_Y_BANDED = true;
 
+    /**
+     * The §? unbuilt-EXCURSION bound: an unbuilt→unbuilt edge is admitted only while {@code h(to) <= hEntry}
+     * (the {@code h} at which this excursion entered unbuilt space) — see {@link #relaxFrag}. {@code false}
+     * restores the pre-2026-08-13 behaviour byte-for-byte, so a behavioural A/B needs no rebuild of the rest.
+     */
+    static boolean UNBUILT_EXCURSION_BOUND = true;
+
+    /**
+     * How deep into unbuilt space an excursion may go when it is NOT descending toward the goal — the
+     * thickness of the explorable boundary shell, in regions. {@code 2} is the geometric minimum that lets a
+     * route round a corner: hugging any built obstacle keeps every cell face-adjacent to it (depth 1), and
+     * only the diagonal step that leaves one face before reaching the next costs 2. Raising it widens the
+     * shell (and the flood) without unlocking any new SHAPE of route; the one thing it would unlock is
+     * crossing a gap between two separate built blobs in a direction that does not lower {@code h}, which is
+     * exactly the speculation this bound exists to refuse.
+     */
+    static int MAX_UNBUILT_SHELL_DEPTH = 2;
+
     // ---------------------------------------------------------------------------------------------------
     // Derived edge-cost constants (HPA-FRAGMENTS.md §2.2) — universal, per-block, NOT stored. Each is the
     // per-block ticks of one motion; an edge cost is the geometry (octile / Manhattan span / Δy) times these.
@@ -674,6 +692,14 @@ public final class RegionPathfinder {
                 srx, sry, srz, startFrag, ENTRY_START, VIRTUAL_START_FRAG);
         nodes.g[startRow] = 0f;
         nodes.f[startRow] = HEURISTIC.estimate(srx, sry, srz, grx, gry, grz) * hScale;
+        // Seed the shell bookkeeping. LEVEL, not 0: srx/sry/srz are region coords AT THIS SEARCH'S LEVEL, so
+        // probing level 0 with them reads an unrelated leaf and mislabels every coarse search's start row.
+        nodes.unbuilt[startRow] = grid.fragmentRecord(level, srx, sry, srz) == null;
+        nodes.h[startRow] = nodes.f[startRow]; // g == 0 at the start, so f IS h here
+        // Depth 0 in the built world. A bot standing in the void anchors its OWN shell at 1: its position is
+        // a fact, not speculation, so it gets the same budget as any shell cell — and the descent clause
+        // still carries a long bridge toward a distant goal from there.
+        nodes.depth[startRow] = nodes.unbuilt[startRow] ? 1 : 0;
         nodes.portalX[startRow] = NO_PORTAL;
         nodes.portalY[startRow] = NO_PORTAL;
         nodes.portalZ[startRow] = NO_PORTAL;
@@ -1498,7 +1524,8 @@ public final class RegionPathfinder {
                 float edge = mineCost(level, rfN, fragA, fragC, minY, crx, cry, crz, wa, wb, wc, mine);
                 // wa/wb now hold fragA/fragC centroids; wb is the mine-edge portal target.
                 boolean ok = relaxFrag(nodes, current, gCur, edge, crx, cry, crz, fragC,
-                        wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, ENTRY_INTERIOR, false, bound, tube, dijkstra);
+                        wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, ENTRY_INTERIOR, false, bound, tube,
+                        dijkstra, false, grid, level); // intra-region sibling: same record, and an unbuilt region has none
                 if (TRACE) {
                     traceCand("mine-sibling", crx, cry, crz, fragC, edge, wb[0], wb[1], wb[2], ok);
                     mineSpans(wa[0], wa[1], wa[2], wb[0], wb[1], wb[2], level, wc);
@@ -1541,7 +1568,8 @@ public final class RegionPathfinder {
                     mineSpans(wa[0], wa[1], wa[2], wb[0], wb[1], wb[2], level, wc);
                     float edge = digCost(wc[0], wc[1], mine.unitsPerBlock(rfN.avgSolidHardness()));
                     boolean ok = relaxFrag(nodes, current, gCur, edge, dmx, dmy, dmz, 0,
-                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, dOpp, buried, bound, tube, dijkstra);
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, dOpp, buried, bound, tube,
+                            dijkstra, rfDig == null, grid, level);
                     if (TRACE) {
                         traceCand("dig-through", dmx, dmy, dmz, 0, edge, wb[0], wb[1], wb[2], ok);
                         traceBreakdown("dig-through: " + digBreakdown(wc[0], wc[1],
@@ -1583,7 +1611,8 @@ public final class RegionPathfinder {
                         mry, minY);
                 footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
                 boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
-                        wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, tube, dijkstra);
+                        wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, tube,
+                        dijkstra, rfM == null, grid, level); // a null record IS the unbuilt neighbour
                 if (TRACE) traceCand(uniformKindLabel(rfM, f), mrx, mry, mrz, 0, edge,
                         wb[0], wb[1], wb[2], ok);
                 continue;
@@ -1627,7 +1656,8 @@ public final class RegionPathfinder {
                     float edge = transitCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, typeA, canPlace, safeFall, dijkstra, pillarField)
                             + transitCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], typeB, canPlace, safeFall, dijkstra, pillarField);
                     boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, fb,
-                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, tube, dijkstra);
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, tube,
+                            dijkstra, false, grid, level); // MIXED neighbour — a record exists, so never unbuilt
                     if (TRACE) {
                         traceCand("walk", mrx, mry, mrz, fb, edge, wb[0], wb[1], wb[2], ok);
                         traceBreakdown("traverse[" + transitBreakdown(wa[0] - entX, wa[1] - entY, wa[2] - entZ,
@@ -1649,7 +1679,8 @@ public final class RegionPathfinder {
                     float edge = walkCost(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2], canPlace, safeFall, dijkstra, pillarField)
                             + digCost(WALL_MINE_BLOCKS, 0, mineUnit);
                     boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, bestFrag,
-                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, tube, dijkstra);
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, tube,
+                            dijkstra, false, grid, level); // MIXED neighbour — a record exists, so never unbuilt
                     if (TRACE) {
                         traceCand("mine-fallback", mrx, mry, mrz, bestFrag, edge, wb[0], wb[1], wb[2], ok);
                         traceBreakdown("walk[" + walkBreakdown(wb[0] - wa[0], wb[1] - wa[1], wb[2] - wa[2],
@@ -1661,7 +1692,8 @@ public final class RegionPathfinder {
                     footprintCenterWorld(level, minY,mrx, mry, mrz, oppF, RegionFragments.NO_FACE, wb);
                     float edge = digCost(RegionAddress.sideOf(level), 0, mineUnit);
                     boolean ok = relaxFrag(nodes, current, gCur, edge, mrx, mry, mrz, 0,
-                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, tube, dijkstra);
+                            wb[0], wb[1], wb[2], grx, gry, grz, hScale, blacklist, oppF, false, bound, tube,
+                            dijkstra, false, grid, level); // MIXED neighbour — a record exists, so never unbuilt
                     if (TRACE) traceCand("mine-solid", mrx, mry, mrz, 0, edge, wb[0], wb[1], wb[2], ok);
                 }
             }
@@ -1672,12 +1704,39 @@ public final class RegionPathfinder {
      * Relax the edge into {@code (mrx,mry,mrz,mFrag)} via {@code curRow}. The edge cost is floored at
      * {@link #WALK_PER_BLOCK} so every boundary crossing costs ≥ one tick — so g grows monotonically even for
      * perfectly-aligned portals (and for the free unbuilt transit), keeping the search well-ordered.
+     *
+     * <p><b>The unbuilt-excursion bound</b> (owner ruling 2026-08-13), {@code toUnbuilt} + {@link Nodes#hEntry}.
+     * An unbuilt→unbuilt edge is admitted only while {@code h(to) <= hEntry} — the excursion may wander
+     * laterally as far as it likes, but may never reach a cell FURTHER from the goal than the point at which
+     * it entered unbuilt space. Built→unbuilt entry and unbuilt→built exit are unrestricted.
+     *
+     * <p><b>Why it is sound.</b> {@link #uniformTransitCost}'s unbuilt branch prices a crossing purely by exit
+     * face direction and the neighbour's Y-band — it is POSITION-INDEPENDENT. So a longer unbuilt path never
+     * buys options a shorter one lacks, and no optimal route ever needs to travel deeper into unknown space
+     * than the boundary shell between the built world and the void. Everything beyond that shell is pure
+     * speculation, and speculation is what produced the flood: unbuilt lateral transit is priced as a plain
+     * walk while real rock is priced by the mine model, so unknown space is systematically cheaper than known
+     * space and an expensive goal makes the search prefer to route around through the void — including past
+     * the goal, since the only pre-existing spatial bound (the §3a guard) is Chebyshev-from-the-START and has
+     * no relationship to where the goal is.
+     *
+     * <p><b>What it gives up, and why that is fine.</b> This is a PRUNING rule, not an admissible restriction:
+     * it can miss a route whose cheap entrance lies past the goal and is reachable only by travelling outward
+     * through unknown terrain. It binds only UNBUILT space, though — as the bot approaches, that terrain comes
+     * inside render distance and becomes BUILT, at which point it leaves this rule entirely and routes without
+     * restriction. So the pruned route is recovered exactly when evidence for it exists, which is what the
+     * §6 online-optimism model promises and what the reveal-triggered re-derive
+     * ({@code HierarchicalRegionPlan}) now actually delivers. The two changes are a pair.
+     *
+     * <p>Forward A* only ({@code !dijkstra}): the goal-rooted field has no {@code h}, and it is already
+     * confined by its {@link RegionBox}.
      */
     private static boolean relaxFrag(Nodes nodes, int curRow, float gCur, float edge,
                                      int mrx, int mry, int mrz, int mFrag,
                                      int px, int py, int pz, int grx, int gry, int grz,
                                      float hScale, RegionEdgeBlacklist blacklist,
-                                     int entryFace, boolean dig, RegionBox bound, RegionTube tube, boolean dijkstra) {
+                                     int entryFace, boolean dig, RegionBox bound, RegionTube tube,
+                                     boolean dijkstra, boolean toUnbuilt, RegionGrid grid, int level) {
         // Bounded search (goal-rooted Dijkstra field): reject a target outside the search box BEFORE interning,
         // so out-of-box nodes never enter the table / heap (the field is confined to its bbox). Record the
         // reject (S1): a component that reaches the box edge is not proven complete WITHIN the box, so any
@@ -1695,6 +1754,31 @@ public final class RegionPathfinder {
                         nodes.frag[curRow]), physKey)) {
             return false;
         }
+        // Unbuilt shell bound. h is computed EARLY only when the rule can actually fire (both ends unbuilt,
+        // forward search) so the common built-region relax keeps computing it lazily below, after the g test
+        // has already rejected most candidates. Likewise the 6 face probes run ONLY on an unbuilt->unbuilt
+        // edge that the descent clause did not already admit.
+        final boolean gated = UNBUILT_EXCURSION_BOUND && !dijkstra && toUnbuilt && nodes.unbuilt[curRow];
+        float hv = 0f;
+        boolean haveH = false;
+        int toDepth = 0;
+        if (gated) {
+            hv = HEURISTIC.estimate(mrx, mry, mrz, grx, gry, grz) * hScale;
+            haveH = true;
+            if (hv >= nodes.h[curRow]) {
+                // Not descending toward the goal, so it must stay within the shell to be worth exploring.
+                toDepth = shellAdjacent(grid, level, mrx, mry, mrz) ? 1 : nodes.depth[curRow] + 1;
+                if (toDepth > MAX_UNBUILT_SHELL_DEPTH) {
+                    return false;
+                }
+            } else {
+                toDepth = shellAdjacent(grid, level, mrx, mry, mrz) ? 1 : nodes.depth[curRow] + 1;
+            }
+        } else if (toUnbuilt) {
+            // Entered from a BUILT node across a face, so the target is face-adjacent to the built world by
+            // construction — depth 1 with no probing needed.
+            toDepth = 1;
+        }
         float tentative = gCur + Math.max(edge, WALK_PER_BLOCK);
         // The SEARCH node folds entryFace AND from-fragment into the key (§0.5) so "fragment entered from north"
         // ≠ "…from south" AND "…reached via H1" ≠ "…via H2". CRITICAL: the reverse cost-field (dijkstra=true) MUST
@@ -1704,8 +1788,15 @@ public final class RegionPathfinder {
         final int cfrom = dijkstra ? VIRTUAL_START_FRAG : nodes.frag[curRow];
         int row = nodes.intern(searchKey(physKey, entryFace, cfrom), mrx, mry, mrz, mFrag, entryFace, cfrom);
         if (tentative >= nodes.g[row]) return false; // new rows start at +inf → first visit admitted
+        if (!dijkstra && !haveH) {
+            hv = HEURISTIC.estimate(mrx, mry, mrz, grx, gry, grz) * hScale;
+        }
         nodes.g[row] = tentative;
-        nodes.f[row] = dijkstra ? tentative : tentative + HEURISTIC.estimate(mrx, mry, mrz, grx, gry, grz) * hScale;
+        nodes.f[row] = dijkstra ? tentative : tentative + hv;
+        // Shell bookkeeping travels WITH the path, so a decrease-key re-parent re-stamps it.
+        nodes.h[row] = hv;
+        nodes.unbuilt[row] = toUnbuilt;
+        nodes.depth[row] = toDepth;
         nodes.parent[row] = curRow;
         nodes.frag[row] = mFrag;
         nodes.portalX[row] = px;
@@ -1714,6 +1805,23 @@ public final class RegionPathfinder {
         nodes.dig[row] = dig;
         nodes.push(row);
         return true;
+    }
+
+    /**
+     * Whether unbuilt node {@code (rx,ry,rz)} touches the BUILT world across any of its six faces — depth 1,
+     * the explorable shell. A pure pyramid READ (never {@code ensureLeaf}/{@code ensureLevel}: forcing a build
+     * here would erase the distinction being measured). Vertical faces are skipped above the octree→quadtree
+     * transition, where there is no ±Y neighbour, exactly as the edge loop does.
+     */
+    private static boolean shellAdjacent(RegionGrid grid, int level, int rx, int ry, int rz) {
+        for (int f = 0; f < 6; f++) {
+            if (level >= RegionAddress.OCTREE_TOP && (f == 2 || f == 3)) continue;
+            if (grid.fragmentRecord(level, RegionAddress.neighborRX(rx, f), RegionAddress.neighborRY(ry, f),
+                    RegionAddress.neighborRZ(rz, f)) != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ---------------------------------------------------------------------------------------------------
@@ -2580,6 +2688,18 @@ public final class RegionPathfinder {
         boolean[] dig;          // parent edge is a Fix-1 dig-through (buried crossing cell) — §5 consumer tag
         int[] portalX, portalY, portalZ; // world portal cell of the parent edge (NO_PORTAL on the start node)
         float[] g, f;
+        /** Whether this node's REGION carries no fragment record — i.e. UNBUILT. The FROM half of the
+         *  unbuilt-excursion gate (see {@link RegionPathfinder#relaxFrag}); written per relax, like g/f. */
+        boolean[] unbuilt;
+        /** Distance from the BUILT world, in regions: {@code 0} on a built row, {@code 1} on an unbuilt row
+         *  with a built face-neighbour (the shell), {@code depth(from)+1} deeper in. Distance from the built
+         *  world — NOT hops since the last built node: hugging an impassable wall is unbuilt the whole way,
+         *  so a hop counter would climb 1,2,3… and cut the route off after {@link #MAX_UNBUILT_SHELL_DEPTH}
+         *  even though it never left the boundary layer. */
+        int[] depth;
+        /** This row's heuristic term, stored so the shell rule can test {@code h(to) < h(from)} exactly
+         *  rather than reconstructing it as {@code f - g} and inheriting the subtraction's rounding. */
+        float[] h;
         int[] parent;           // predecessor row, -1 at the start
         boolean[] closed;       // settled marker — costToGoalField bookkeeping only (the forward A* never reads it)
         int count;
@@ -2627,6 +2747,9 @@ public final class RegionPathfinder {
             portalZ = new int[nodeHint];
             g = new float[nodeHint];
             f = new float[nodeHint];
+            unbuilt = new boolean[nodeHint];
+            depth = new int[nodeHint];
+            h = new float[nodeHint];
             parent = new int[nodeHint];
             closed = new boolean[nodeHint];
             mapKey = new long[mapCap];
@@ -2681,6 +2804,9 @@ public final class RegionPathfinder {
             portalX[n] = NO_PORTAL; portalY[n] = NO_PORTAL; portalZ[n] = NO_PORTAL;
             g[n] = Float.POSITIVE_INFINITY;
             f[n] = Float.POSITIVE_INFINITY;
+            unbuilt[n] = false;
+            depth[n] = 0;
+            h[n] = 0f;
             parent[n] = -1;
             closed[n] = false;
             count = n + 1;
@@ -2744,6 +2870,9 @@ public final class RegionPathfinder {
             portalZ = Arrays.copyOf(portalZ, cap);
             g = Arrays.copyOf(g, cap);
             f = Arrays.copyOf(f, cap);
+            unbuilt = Arrays.copyOf(unbuilt, cap);
+            depth = Arrays.copyOf(depth, cap);
+            h = Arrays.copyOf(h, cap);
             parent = Arrays.copyOf(parent, cap);
             closed = Arrays.copyOf(closed, cap);
         }
