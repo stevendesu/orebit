@@ -482,7 +482,22 @@ public final class HierarchicalRegionPlan {
             final boolean reachedEnd = sk.reachedGoalRegion() && far == sk.size() - 1;
             final boolean exhausted = !reachedEnd && lp.committedIndex >= far;
             final boolean deviated = !inWindow && !onRoute;
-            if (exited == -1 && (exhausted || deviated)) {
+            // REVEAL: a step this plan priced with the optimistic unbuilt model has since been BUILT, so the
+            // assumption it rests on is now checkable — re-derive against what we actually know. Gated on the
+            // level's cursor having advanced THIS tick (a region crossing): crossing is what loads chunks, and
+            // a chunk load is what produces a NavGrid build, so a crossing is the natural evaluation point and
+            // it ties re-planning to real bot progress rather than a clock. KNOWN RESIDUAL: builds are
+            // throttled (pathing.chunkBuildsPerTick), so a build completing mid-drain waits for the NEXT
+            // crossing. Loads happen a full render distance ahead of the bot — far beyond the window's reach —
+            // so the lag should be invisible; if it is not, evaluate on queue-drain as well (a state change,
+            // not a timer).
+            final boolean revealed = lp.committedIndex > committedBefore && anyRevealed(L, lp);
+            if (revealed && Debug.ENABLED) {
+                OrebitCommon.LOGGER.info(
+                        "[Orebit] REVEALED unbuilt->built on L{} skeleton (committed {}->{}) — re-deriving",
+                        L, committedBefore, lp.committedIndex);
+            }
+            if (exited == -1 && (exhausted || deviated || revealed)) {
                 exited = L;
                 exitedExhausted = exhausted; // exhausted takes precedence in the demux; else it was a deviation
                 if (L == 0 && exhausted) {
@@ -632,6 +647,7 @@ public final class HierarchicalRegionPlan {
         final int drop = Math.min(lp.committedIndex, Math.max(0, driverWindowStart)); // §4.2/D3 head-drop bound
         final int oldSize = sk.size();
         lp.skeleton = RegionPathPlan.splice(sk, drop, suffix);
+        snapshotOptimism(0, lp); // the splice RENUMBERS every step — re-cut, never shift, the unbuilt marks
         lp.committedIndex -= drop; // shift, never reset (INV-1)
         lp.degraded = false;
         lastExtendShift = drop;
@@ -827,6 +843,7 @@ public final class HierarchicalRegionPlan {
                 return L;
             }
             levels[L].skeleton = skel;
+            snapshotOptimism(L, levels[L]);
             levels[L].committedIndex = 0;
             levels[L].degraded = false; // a fresh skeleton clears the §7 degraded interim (rolling, §7)
             if (L == 0) {
@@ -1007,9 +1024,84 @@ public final class HierarchicalRegionPlan {
     /** One level of the cascade: its skeleton (region coords at {@link RegionPathPlan#level}) + commit cursor
      *  + the rolling §7 degraded-interim flag (extension search failed; cleared by any rolling commit advance
      *  or a fresh skeleton at this level — DESIGN-rolling-skeleton.md §7, increment-A interim). */
+    /**
+     * Record, per step of {@code lp}'s freshly-installed skeleton, HOW MUCH of that node was real terrain when
+     * the plan was priced — {@link RegionGrid#builtChildCount}. Steps that were already fully built are marked
+     * {@code -1} and never watched again. A pure READ of the pyramid: deliberately not
+     * {@code ensureLeaf}/{@code ensureLevel}, because forcing a build here would erase the very distinction
+     * being recorded.
+     *
+     * <p>The predecessor recorded a BOOLEAN "had no fragment record", which turned out to be nearly useless:
+     * {@code combineFragments} marks a coarse node built as soon as ONE of its children is, while still
+     * folding the other seven in as synthetic optimistic open space. So a 1-of-8 node never looked unbuilt,
+     * never got watched, and could never fire a reveal even as the rest of it materialised and its costs
+     * changed completely. Measured: one reveal in a 12,000-tick run whose frontier visibly advanced.
+     */
+    private void snapshotOptimism(int level, LevelPlan lp) {
+        final RegionPathPlan sk = lp.skeleton;
+        lp.builtChildrenAtDerive = null;
+        if (sk == null || sk.isEmpty()) {
+            return;
+        }
+        final int full = RegionGrid.childCountAt(level);
+        int[] c = null;
+        for (int i = 0; i < sk.size(); i++) {
+            final int k = grid.builtChildCount(level, sk.rx(i), sk.ry(i), sk.rz(i));
+            if (k < full) {
+                if (c == null) {
+                    c = new int[sk.size()];
+                    java.util.Arrays.fill(c, -1); // -1 = fully real, nothing to watch
+                }
+                c[i] = k;
+            }
+        }
+        lp.builtChildrenAtDerive = c;
+    }
+
+    /**
+     * Whether any step this plan priced as UNBUILT has since become built — the §6 online-optimism correction
+     * point (owner ruling 2026-08-13).
+     *
+     * <p>{@link RegionPathfinder#uniformTransitCost} prices an unbuilt region off worldgen priors and rests
+     * its admissibility on "chunks load on approach → the leaf builds → a replan corrects to the real
+     * terrain". Nothing observed that build, so the correction only ever happened by accident, when the bot's
+     * motion happened to exhaust a window — which is how a route through 9 optimistically-priced steps could
+     * survive six later re-derives unchanged. This closes it: reality arriving is itself a re-plan trigger.
+     *
+     * <p>Each step clears the first time it is seen built, so a reveal fires exactly ONE re-derive, and the
+     * fresh skeleton re-cuts its own marks. No timer: the bound is structural.
+     */
+    private boolean anyRevealed(int level, LevelPlan lp) {
+        final int[] c = lp.builtChildrenAtDerive;
+        final RegionPathPlan sk = lp.skeleton;
+        if (c == null || sk == null) {
+            return false;
+        }
+        final int full = RegionGrid.childCountAt(level);
+        boolean any = false;
+        final int n = Math.min(c.length, sk.size());
+        for (int i = 0; i < n; i++) {
+            if (c[i] < 0) {
+                continue; // already fully real
+            }
+            final int now = grid.builtChildCount(level, sk.rx(i), sk.ry(i), sk.rz(i));
+            if (now > c[i]) {
+                c[i] = (now >= full) ? -1 : now; // re-baseline, so each ADVANCE fires once
+                any = true;
+            }
+        }
+        return any;
+    }
+
     private static final class LevelPlan {
         RegionPathPlan skeleton;
         int committedIndex;
         boolean degraded;
+        /** Per-step: how many of that node's direct children were BUILT when the skeleton was derived — how
+         *  much of the step was real terrain rather than the §6 optimistic default. {@code -1} marks a step
+         *  that was already fully real and is no longer watched; {@code null} when EVERY step was — the
+         *  common case on a route through explored ground, and the reason the reveal test costs nothing
+         *  there. Re-baselined on each advance so every increase fires one re-derive. */
+        int[] builtChildrenAtDerive;
     }
 }

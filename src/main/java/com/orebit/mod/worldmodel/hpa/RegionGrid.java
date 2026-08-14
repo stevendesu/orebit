@@ -300,6 +300,44 @@ public final class RegionGrid {
      * tests. A node with no built child stays unbuilt ⇒ the planner reads the §6 optimistic default. No-op for
      * {@code level <= 0} (use {@link #ensureLeaf}).
      */
+    /**
+     * How many of node {@code (level, rx,ry,rz)}'s direct children are BUILT — i.e. how much of this node is
+     * real terrain rather than assumption. {@code level <= 0} answers {@code 1}/{@code 0} for the leaf itself.
+     * A pure pyramid read; never merges or builds anything.
+     *
+     * <p><b>Why a COUNT and not the built flag.</b> {@link PyramidMerger#combineFragments} sets a parent's
+     * {@code built} flag as soon as ANY ONE child is built, while still folding every UNBUILT child in as a
+     * synthetic full-face optimistic item. So a 1-of-8 node has a non-null record and reads as "built" even
+     * though seven eighths of its fragments — and therefore its costs — are still the §6 optimistic default.
+     * The built flag flips once and never moves again; the count is what actually tracks how presumptive a
+     * node's cost is, and it is the signal the driver watches to know a plan needs re-deriving
+     * ({@code HierarchicalRegionPlan}'s reveal trigger).
+     */
+    public int builtChildCount(int level, int rx, int ry, int rz) {
+        if (level <= 0) {
+            final int row = pyramid.rowIfPresent(0, rx, ry, rz);
+            return (row != -1 && pyramid.isBuilt(0, row)) ? 1 : 0;
+        }
+        final int childLevel = level - 1;
+        final int children = RegionAddress.childCount(level);
+        int n = 0;
+        for (int i = 0; i < children; i++) {
+            final int crx = RegionAddress.childRX(rx, i);
+            final int crz = RegionAddress.childRZ(rz, i);
+            final int cry = RegionAddress.childRY(ry, i, level);
+            final int row = pyramid.rowIfPresent(childLevel, crx, cry, crz);
+            if (row != -1 && pyramid.isBuilt(childLevel, row)) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /** The number of direct children {@link #builtChildCount} counts against — the "fully real" mark. */
+    public static int childCountAt(int level) {
+        return level <= 0 ? 1 : RegionAddress.childCount(level);
+    }
+
     public void ensureLevel(int level, int rx, int ry, int rz) {
         if (level <= 0) {
             return;
