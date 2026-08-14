@@ -461,6 +461,21 @@ public interface BotSteering {
     boolean bubbleUpAt(int x, int y, int z);
 
     /**
+     * The <b>fluid surface height</b> in cell {@code (x,y,z)}, in blocks above the cell's base — vanilla's
+     * {@code FluidState.getHeight}, which reports {@code 1.0} for any cell whose neighbour ABOVE holds the
+     * same fluid and the fluid's own partial height otherwise. Dry cells read {@code 0.0}.
+     *
+     * <p>Read by {@code Swim.reachedSwim} to bound the ride height a swim waypoint can actually be held at.
+     * The swim reach model assumes a buoyant bot rises until it breaches, i.e. settles a full block above its
+     * feet cell's base; a PARTIAL top cell makes that hydrostatically unreachable, exactly as a ceiling makes
+     * it geometrically unreachable. Live read, the {@link #swimHazardAt}/{@link #slipperinessAt} pattern.
+     *
+     * <p>The default is {@code 1.0} — "assume a full column" — so every existing caller and test double is
+     * byte-identical without implementing it, and the clamp it feeds can only ever be a no-op.
+     */
+    default double fluidTopAt(int x, int y, int z) { return 1.0; }
+
+    /**
      * The vanilla surface FRICTION (slipperiness) of the block at {@code (x,y,z)} — {@code 0.6} for ordinary
      * ground, {@code 0.98} for ice / packed ice / frosted ice, {@code 0.989} for blue ice, {@code 0.8} for
      * slime. This is the same per-block factor vanilla reads from the block a mover stands ON to size its

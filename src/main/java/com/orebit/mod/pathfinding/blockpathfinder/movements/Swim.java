@@ -251,7 +251,20 @@ public final class Swim implements Movement {
         // A Swim cruise waypoint is a MODE_STANDING (upright) node — symmetric with SprintSwim.reached: only
         // "reached" once the bot is NOT prone, so the cursor can't skip past the pose transition on the way
         // out of a dive. Either fluid counts, since every rung is now medium-agnostic.
-        return !b.prone() && (b.inWater() || b.inLava()) && reachedSwim(b, wx, wy, wz);
+        //
+        // The medium test is a WORLD fact, not the ENTITY's state (owner ruling 2026-08-14, the (247,51,16)
+        // waterfall-apron livelock). It used to ask `b.inWater() || b.inLava()`, and vanilla answers that
+        // question with `wasTouchingWater` — which reads FALSE for a bot standing on the floor of a thin
+        // apron, and reads it inconsistently: 706 `ground` against 8 `water` and 5 `air` on one STATIONARY
+        // bot in 0.556 blocks of water, measured over the stall. By the AABB test it should have been
+        // touching throughout (box bottom 51.001 against a surface at 51.556); that discrepancy is real,
+        // unexplained, and tracked separately — it is not something this predicate should be built on.
+        //
+        // `fluidTopAt` is the same read the surface clamp in reachedSwim already trusts, and it answers the
+        // question the waypoint actually cares about: does this CELL hold fluid. A dry cell still refuses,
+        // so the clause keeps its meaning; it simply stops depending on an entity flag that disagrees with
+        // the world it is derived from. Either fluid still counts — getFluidState is medium-agnostic.
+        return !b.prone() && b.fluidTopAt(wx, wy, wz) > 0.0 && reachedSwim(b, wx, wy, wz);
     }
 
     /**
@@ -334,6 +347,32 @@ public final class Swim implements Movement {
             double height = b.prone() ? PRONE_HEIGHT : STANDING_HEIGHT;
             target = Math.min(target, (wy + 2) - height);
         }
+        // THE SURFACE CLAMP — the hydrostatic mirror of the ceiling clamp above (owner ruling 2026-08-14,
+        // the (247,51,16) waterfall-apron livelock). A ceiling caps how high the bot can float; the WATER
+        // ITSELF caps it just as hard, and for the same reason: `wy + 1` is a RIDE height that assumes a
+        // buoyant bot rising until it breaches, and a PARTIAL top cell has no such height to offer. The bot
+        // settles on the floor at `wy + 0.0`, a full block under the target and 0.4 outside REACHED_Y, so
+        // neither this test nor the phase `done` built on it can ever fire.
+        //
+        // Convicted at the base of a waterfall, where the spreading apron is thin: feet cell
+        // water[level=3] (surface ~0.56 up the cell) over stone at (247,50,16), air above. The bot swam
+        // down and grounded at botY=51.000 on its OWN waypoint cell — atWaypoint and settled() both
+        // satisfied — then held for 5200 ticks in a 6-tick limit cycle with NO `step FAILED` to show for
+        // it, because this predicate is not an envelope and nothing logs when it merely stays false.
+        //
+        // FluidState.getHeight already encodes exactly the rule needed: 1.0 wherever the same fluid
+        // continues above, the partial own-height only in a top cell. So every mid-column node, every full
+        // block, and every case this function was tuned on is BYTE-IDENTICAL (the min does nothing), and
+        // the clamp bites only where the geometry genuinely cannot deliver the nominal ride height. Like
+        // the ceiling clamp it only ever LOWERS the bar, so it cannot break a bot that DOES float: one
+        // breached at wy+1 sits (1 - surface) from the lowered target, still inside the window, and one
+        // riding the surface lands dead on it.
+        //
+        // RESIDUAL, deliberately not chased: a partial cell whose surface is >= REACHED_Y (a nearly-full
+        // top block) still fails for a bot resting on the floor rather than riding it. Closing that band
+        // needs the reach test to become an INTERVAL (floor .. surface) instead of a point, which would
+        // widen the stacked-waypoint guard REACHED_Y exists to hold. Revisit only with a repro in it.
+        target = Math.min(target, wy + b.fluidTopAt(wx, wy, wz));
         return b.footX() == wx && b.footZ() == wz && Math.abs(b.y() - target) < REACHED_Y;
     }
 
