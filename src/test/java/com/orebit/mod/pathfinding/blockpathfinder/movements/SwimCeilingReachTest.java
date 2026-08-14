@@ -83,13 +83,53 @@ class SwimCeilingReachTest {
                 "a 0.6-tall body has room to spare under this ceiling; the clamp must not bind on it");
     }
 
-    /** Minimal BotSteering fake: position, pose, and a single solid ceiling row. */
+    // ---- The SURFACE clamp: the hydrostatic mirror, added 2026-08-14 ----------------------------------
+    //
+    // Same predicate, same failure, other axis. At the BASE of a waterfall the spreading apron is thin:
+    // (247,51,16) is water[level=3] — surface ~0.56 up the cell — over stone at (247,50,16), air above. The
+    // bot swam down and grounded on its OWN waypoint at botY=51.000, satisfying atWaypoint and settled(),
+    // then held 5200 ticks. `wy + 1` is a RIDE height and a partial top cell has no such height to offer,
+    // exactly as the tuff overhead had none. Nothing logged, because this predicate is not an envelope.
+    private static final int SX = 247, SY = 51, SZ = 16;
+
+    @Test
+    void aBotRestingOnTheFloorOfAThinApronHasArrived() {
+        Bot b = new Bot(SX + 0.5, 51.000, SZ + 0.5);
+        b.surface = 5.0 / 9.0;                               // water[level=3] -> amount 5 -> 5/9 of a block
+        assertTrue(Swim.reachedSwim(b, SX, SY, SZ),
+                "the nominal ride height is hydrostatically unreachable here; resting on the floor IS arrival");
+    }
+
+    @Test
+    void theSurfaceClampIsANoOpInAFullColumn() {
+        // getHeight() reports 1.0 wherever the same fluid continues above, so every mid-column node keeps
+        // the old target to the digit — the byte-identity guard for the tuned open-water climb cadence.
+        Bot b = new Bot(SX + 0.5, 51.000, SZ + 0.5);         // surface stays 1.0
+        assertFalse(Swim.reachedSwim(b, SX, SY, SZ),
+                "a full column still demands the ride height — the bot can reach it, so it must keep rising");
+    }
+
+    @Test
+    void theLoweredTargetStillAdmitsABotThatDoesFloat() {
+        // The clamp only ever LOWERS the bar, so a breached bot cannot be locked out by it.
+        Bot b = new Bot(SX + 0.5, 51.900, SZ + 0.5);
+        b.surface = 5.0 / 9.0;
+        assertTrue(Swim.reachedSwim(b, SX, SY, SZ),
+                "breached at wy+0.9 against a target lowered to wy+0.56 — still inside REACHED_Y");
+    }
+
+    /** Minimal BotSteering fake: position, pose, a solid ceiling row, and the feet cell's fluid surface. */
     private static final class Bot implements BotSteering {
         double x, y, z;
         boolean prone;
         int ceiling = Integer.MIN_VALUE;
+        /** Feet-cell fluid surface height. {@code 1.0} == "full column", the default that makes the SURFACE
+         *  clamp a no-op — which is why every ceiling test above is unaffected by it. */
+        double surface = 1.0;
 
         Bot(double x, double y, double z) { this.x = x; this.y = y; this.z = z; }
+
+        @Override public double fluidTopAt(int bx, int by, int bz) { return surface; }
 
         @Override public double x() { return x; }
         @Override public double y() { return y; }

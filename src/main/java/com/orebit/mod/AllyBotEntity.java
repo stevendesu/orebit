@@ -1249,6 +1249,18 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         return s.is(Blocks.BUBBLE_COLUMN) && !s.getValue(BubbleColumnBlock.DRAG_DOWN);
     }
 
+    /** Live fluid-surface probe (see {@link BotSteering#fluidTopAt}). {@code FluidState.getHeight} already
+     *  encodes the rule the swim clamp needs — 1.0 when the same fluid continues above, the partial
+     *  {@code getOwnHeight} otherwise — so no arithmetic lives here. Range-stable 1.17+ (the
+     *  {@link #swimHazardAt}/{@link #slipperinessAt} direct-call precedent); if a pre-1.17 target is ever
+     *  added, route it through a {@code platform/} seam. */
+    @Override
+    public double fluidTopAt(int x, int y, int z) {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        scratchPos.set(x, y, z);
+        return level.getFluidState(scratchPos).getHeight(level, scratchPos);
+    }
+
     /**
      * Live landing-surface friction (see {@link BotSteering#slipperinessAt}) — the vanilla per-block
      * slipperiness the parkour airborne servo reads to shape its air-brake. PORTABILITY: {@code
