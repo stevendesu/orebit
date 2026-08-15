@@ -476,6 +476,22 @@ public interface BotSteering {
     default double fluidTopAt(int x, int y, int z) { return 1.0; }
 
     /**
+     * The collision top surface (SIXTEENTHS) of the block at {@code (x,y,z)} as seen from a body travelling
+     * {@code (dx,dz)} — the live-world twin of {@code MovementContext.directionalTopY}, which it delegates to
+     * so there is exactly one copy of the rule.
+     *
+     * <p>Only a BOTTOM stair makes this direction-dependent: its raised step occupies the half on its FACING
+     * side, so crossing TOWARD the facing reads {@code 16} and crossing away reads {@code 8}. Everything else
+     * reads its plain {@code topY}. {@code Parkour}'s run-up needs this live, because the tall half ends at
+     * the cell CENTRE and its launch point is measured from there — see the run-up derivation in
+     * {@code Parkour.plan}.
+     *
+     * <p>Default {@code 16} ("assume a full block") so every existing implementation and test double is
+     * byte-identical without implementing it.
+     */
+    default int surfaceTopYToward(int x, int y, int z, int dx, int dz) { return 16; }
+
+    /**
      * The vanilla surface FRICTION (slipperiness) of the block at {@code (x,y,z)} — {@code 0.6} for ordinary
      * ground, {@code 0.98} for ice / packed ice / frosted ice, {@code 0.989} for blue ice, {@code 0.8} for
      * slime. This is the same per-block factor vanilla reads from the block a mover stands ON to size its

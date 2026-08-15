@@ -1301,6 +1301,17 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         return level.getFluidState(scratchPos).getHeight(level, scratchPos);
     }
 
+    /** Live directional surface probe (see {@link BotSteering#surfaceTopYToward}) — classifies the live block
+     *  and defers to the planner's own {@code directionalTopY}, so the executor and the search can never hold
+     *  different opinions about which half of a stair a crossing launches from. */
+    @Override
+    public int surfaceTopYToward(int x, int y, int z, int dx, int dz) {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        scratchPos.set(x, y, z);
+        return MovementContext.directionalTopY(
+                NavBlock.descriptorFor(level.getBlockState(scratchPos)), dx, dz);
+    }
+
     /**
      * Live landing-surface friction (see {@link BotSteering#slipperinessAt}) — the vanilla per-block
      * slipperiness the parkour airborne servo reads to shape its air-brake. PORTABILITY: {@code
