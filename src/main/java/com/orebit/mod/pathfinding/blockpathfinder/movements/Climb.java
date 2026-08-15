@@ -194,8 +194,13 @@ public final class Climb implements Movement {
      * off the ledge it just reached, one tick before the move reported success.
      */
     private static boolean landsOnGround(BotSteering b, SteerView path) {
+        // Value-preserving across the 2026-08-15 SteerView frame change: this read `floor(path.ty()) - 1`
+        // while ty() was the feet cell's ceiling, which is the same cell index this now yields directly.
+        // (The cell it probes is the landing FEET cell, not the block beneath it, which reads oddly for a
+        // method named landsOnGround — but that is a pre-existing question about the CELL, independent of the
+        // frame, and changing it here would smuggle a behaviour change into a mechanical rebase.)
         return b.solidAt((int) Math.floor(path.tx()),
-                (int) Math.floor(path.ty()) - 1,
+                (int) Math.floor(path.ty()),
                 (int) Math.floor(path.tz()));
     }
 
@@ -610,13 +615,16 @@ public final class Climb implements Movement {
         plan.phase("climb")
                 .arrestCarryFrom(fx, fz)
                 .drive(this::steer)                             // the convicted six-regime servo, unchanged
-                .done(b -> reached(b, tx, toFootY, tz));        // == reached, incl. the curtain top-out
+                // null successor by design: `done` asks whether THIS move finished. The teed-up-for-the-next
+                // clause is the follower's business and is applied at its own reached() call site.
+                .done(b -> reached(b, tx, toFootY, tz, null)); // == reached, incl. the curtain top-out
         return plan;
     }
 
     @Override
-    public boolean reached(BotSteering b, int wx, int wy, int wz) {
-        return (b.settled() || b.climbableBelow()) && atWaypoint(b, wx, wy, wz);
+    public boolean reached(BotSteering b, int wx, int wy, int wz, Movement next) {
+        return (b.settled() || b.climbableBelow()) && atWaypoint(b, wx, wy, wz)
+                && Movement.teedUp(b, wx, wy, wz, next);
     }
 
     /**

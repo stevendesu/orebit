@@ -188,14 +188,15 @@ public final class RideBubbleColumn implements Movement {
     }
 
     @Override
-    public boolean reached(BotSteering b, int wx, int wy, int wz) {
+    public boolean reached(BotSteering b, int wx, int wy, int wz, Movement next) {
         // Arrived only once at the exit cell AND vertically settled. The settle test is MEDIUM-AWARE: a grounded
         // land exit is settled BY being grounded (like every other ground move — a resting bot's velY stays at
         // gravity×drag ≈ −0.078, never zeroed by ground collision, so a |velY|<SETTLE_VELY gate would NEVER fire
         // on a dry bank and freeze the follower); the velY-stillness gate applies ONLY to the buoyant in-water
         // float-out (velY oscillates ±0.04 while bobbing). Y is not block-matched — a water exit bobs.
         return b.footX() == wx && b.footZ() == wz
-                && (b.grounded() || (b.inWater() && Math.abs(b.velY()) < SETTLE_VELY));
+                && (b.grounded() || (b.inWater() && Math.abs(b.velY()) < SETTLE_VELY))
+                && Movement.teedUp(b, wx, wy, wz, next);
     }
 
     @Override
@@ -250,5 +251,12 @@ public final class RideBubbleColumn implements Movement {
             b.setForward(0.0f);
         }
         b.setSprinting(false);
+    }
+
+    /** Permissive entry: this move's servo establishes its own stance, so it accepts any pose (see
+     *  {@link Movement#entryReady}). Also exactly the pre-2026-08-15 behaviour, where no entry test existed. */
+    @Override
+    public boolean entryReady(BotSteering b, int wx, int wy, int wz) {
+        return true;
     }
 }

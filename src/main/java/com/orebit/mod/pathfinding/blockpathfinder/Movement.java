@@ -72,10 +72,49 @@ public interface Movement {
      * a cell the bot had only fallen past, ending in a permanent fail→HOLD at (44,149,244). The gate delays
      * a legitimate advance by zero ticks in every medium, because arrival IS support.
      *
-     * <p>Swim overrides it with a vertical tolerance because a floating bot's Y bobs with buoyancy.
+     * <h2>Arrival means the NEXT move is teed up (owner ruling, 2026-08-15)</h2>
+     * {@code reached} is not "my movement finished" — it is "the bot is positioned and aligned for what comes
+     * next". So it takes {@code next}, the movement that will execute FROM this waypoint ({@code null} at the
+     * end of the plan), and asks it whether this pose is an acceptable entry via {@link #entryReady}.
+     *
+     * <p>This exists because arrival tests kept omitting a dimension and the error surfaced one step later, on
+     * whatever move DID check it. Every such omission has been in the vertical: five of the eight overrides
+     * advanced the cursor without ever testing the feet cell's Y, and all five were fluid moves — precisely
+     * the moves that can leave the bot at an unconstrained height. Asking the successor closes them as a class
+     * instead of one patch at a time.
+     *
+     * <p>Byte-identical wherever the current move's own test already implies {@link #atWaypoint} (the default,
+     * {@code Ascend}, {@code Climb}, {@code Pillar}, and — since the {@code SWIM_RIDE} change — {@code Swim},
+     * {@code SprintSwim} and {@code EndSprintSwim}): the clause simply re-asks a question already answered.
+     * It bites on exactly the two that still omit Y, {@code StartSprintSwim} and {@code RideBubbleColumn}, and
+     * only when a GROUND move follows — a fluid successor declares itself permissive because its own servo
+     * establishes its entry.
      */
-    default boolean reached(BotSteering b, int wx, int wy, int wz) {
-        return b.settled() && atWaypoint(b, wx, wy, wz);
+    default boolean reached(BotSteering b, int wx, int wy, int wz, Movement next) {
+        return b.settled() && atWaypoint(b, wx, wy, wz) && teedUp(b, wx, wy, wz, next);
+    }
+
+    /**
+     * The shared handoff clause: the successor accepts this pose as its entry. No successor (the plan's last
+     * waypoint) means there is nothing to tee up, so the arrival stands on the current move's test alone.
+     */
+    static boolean teedUp(BotSteering b, int wx, int wy, int wz, Movement next) {
+        return next == null || next.entryReady(b, wx, wy, wz);
+    }
+
+    /**
+     * Would this movement accept the bot's CURRENT pose as its starting stance, standing at feet cell
+     * {@code (wx,wy,wz)}? Asked of the SUCCESSOR by {@link #reached}, never of the move itself.
+     *
+     * <p>The default is {@link #atWaypoint} — a ground move's whole plan is framed on that feet cell, so
+     * being anywhere else is not an entry. Moves whose servo establishes its own entry override this to be
+     * permissive: the swim family (which drives to depth regardless of where it starts, including from a dry
+     * lip) and {@code RideBubbleColumn} (a conveyor — requiring a particular cell to board it would wedge the
+     * very moves it exists for). Permissive is also exactly today's behaviour, since no entry test existed at
+     * all before this, so those moves cannot regress.
+     */
+    default boolean entryReady(BotSteering b, int wx, int wy, int wz) {
+        return atWaypoint(b, wx, wy, wz);
     }
 
     /**

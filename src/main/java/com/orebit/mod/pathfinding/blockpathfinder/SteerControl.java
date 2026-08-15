@@ -55,15 +55,53 @@ public final class SteerControl {
     /** Dead-band (blocks) around the planned depth inside which {@link #holdDepth} presses neither rise nor
      *  sink — bang-bang controller hysteresis so a bot at its target depth doesn't chatter jump on/off. */
     static final double WATER_RISE_DEADBAND = 0.2;
+
     /**
-     * How far (blocks) below the planned depth a PRONE-pose move rides ({@link #holdDepth}'s {@code bias} for
-     * the sprint-swim moves). The prone hitbox is only ~0.6 tall, so at a surface-level planned depth the
-     * {@link #WATER_RISE_DEADBAND} up-slack would float the whole hitbox clear of the water and vanilla would
-     * drop {@code Pose.SWIMMING} (its continuation rule needs {@code isInWater()}), degrading the fast
-     * sprint-swim to the slow surface swim. Sinking the ride ~0.5 keeps the hitbox wet while staying under
-     * {@code Swim.REACHED_Y} (0.6) so the swim cursor still advances. Standing water moves pass bias 0.
+     * <b>The swim ride height inside the waypoint's own feet cell</b> (owner ruling 2026-08-15). A swim
+     * waypoint is a FEET cell like every other waypoint, and this says where in that cell the depth autopilot
+     * parks the bot: {@code wy + 0.2} — the top of the ground SETTLE BAND.
+     *
+     * <p><b>Why 0.2 and not the cell centre.</b> The band is {@code [wy, wy+0.2]} because the bot is 1.8 tall:
+     * at {@code +0.20} its head still occupies exactly the headroom cells the planner assumed, and anything
+     * higher risks fouling a ceiling the search never checked — aiming at the centre would wedge a bot in a
+     * tight cave. With {@link #WATER_RISE_DEADBAND} also 0.2 the bang-bang controller then oscillates over
+     * {@code [wy+0.0, wy+0.4]}, entirely inside the feet cell, so the ride can never round to a neighbour.
+     *
+     * <p><b>Three other places already computed this exact number.</b> {@code Swim.reachedSwim}'s ceiling
+     * clamp evaluated {@code (wy+2) - 1.8 == wy+0.2}; the ground settle band's top is {@code wy+0.2}; and
+     * {@link #SUBMERGE_BIAS} was 0.8, which pulled the old {@code wy+1.0} prone ride to {@code wy+0.2} as
+     * well. Adopting it universally turns the formerly-special ceiling case into the DEFAULT, which is why
+     * both of {@code reachedSwim}'s clamps could be deleted outright rather than reworked.
+     *
+     * <p>The consequence that matters most: a swim rung now rests in the SAME band a ground move is framed
+     * from, so a swim&rarr;ground handoff no longer has a block of disagreement to bridge.
      */
-    public static final double SUBMERGE_BIAS = 0.8;
+    public static final double SWIM_RIDE = 0.2;
+
+    /**
+     * The depth set-point for a swim waypoint — the {@link #SWIM_RIDE ride height} inside the waypoint's feet
+     * cell, less the pose {@code bias}. Kept as ONE expression so the four pitch servos and {@link #holdDepth}
+     * cannot drift apart; they all used to spell it {@code p.ty() - bias}, back when {@code ty()} meant the
+     * feet cell's ceiling.
+     */
+    static double swimDepthTarget(SteerView p, double bias) {
+        return p.ty() + SWIM_RIDE - bias;
+    }
+
+    /**
+     * Extra sink (blocks) for a PRONE-pose move — <b>now identity, and deliberately kept as the seam</b>.
+     *
+     * <p>It was 0.8, and its entire job was to drag the old {@code wy + 1.0} ride down to a depth that kept
+     * the ~0.6-tall prone hitbox wet: {@code (wy+1.0) - 0.8 == wy + 0.2}. {@link #SWIM_RIDE} now puts BOTH
+     * poses at {@code wy + 0.2} directly, so the correction has nothing left to correct — prone rides at
+     * byte-identical height to before, and only the UPRIGHT swim actually moves. At {@code wy+0.2} a 0.6-tall
+     * prone hitbox tops out at {@code wy+0.8}, still comfortably inside its own (wet) cell, so vanilla keeps
+     * {@code Pose.SWIMMING} exactly as the old bias arranged.
+     *
+     * <p>Left in place rather than deleted because the per-pose bias is a real seam and removing it would
+     * churn every swim move's {@code steer} plus {@code reachedSwim}'s overload for no behavioural gain.
+     */
+    public static final double SUBMERGE_BIAS = 0.0;
     /**
      * Corner-brake throttle-off distance (blocks): inside this range of the turn waypoint centre the
      * {@link #swimPitchedCentered} corner brake cuts the forward key to a COAST so the bot bleeds its cruise
@@ -856,7 +894,7 @@ public final class SteerControl {
         if (G.segLen < EPS) {
             swimPitchedCentered(b, p, bias);   // pure vertical: hold the column; pitch + holdDepth own the climb
         } else {
-            double dy = (p.ty() - bias) - b.y();
+            double dy = swimDepthTarget(p, bias) - b.y();
             b.faceTowards(G.qx - b.x(), dy, G.qz - b.z());
             b.setForward(1.0f);
         }
@@ -875,7 +913,7 @@ public final class SteerControl {
     public static void swimPitchedCentered(BotSteering b, SteerView p, double bias) {
         double cx = p.tx() - b.x();               // toward the waypoint CENTER (not a look-ahead)
         double cz = p.tz() - b.z();
-        double dy = (p.ty() - bias) - b.y();       // depth pitch (same as swimPitched)
+        double dy = swimDepthTarget(p, bias) - b.y();       // depth pitch (same as swimPitched)
         double d  = Math.sqrt(cx * cx + cz * cz);
         if (d < EPS) {
             b.faceTowards(0.0, dy, 0.0);
@@ -917,7 +955,7 @@ public final class SteerControl {
         }
         double cx = aimx - b.x();                  // vector bot → arrive point
         double cz = aimz - b.z();
-        double dy = (p.ty() - bias) - b.y();       // depth pitch (same as swimPitched)
+        double dy = swimDepthTarget(p, bias) - b.y();       // depth pitch (same as swimPitched)
         double d  = Math.sqrt(cx * cx + cz * cz);
         if (d < EPS) {
             b.faceTowards(0.0, dy, 0.0);
@@ -991,7 +1029,7 @@ public final class SteerControl {
      */
     public static void swimServo(BotSteering b, SteerView p, double bias) {
         computeGeom(b, p, SWIM_CTE_GAIN);
-        double dy = (p.ty() - bias) - b.y();               // depth pitch target (same as swimPitched)
+        double dy = swimDepthTarget(p, bias) - b.y();               // depth pitch target (same as swimPitched)
         if (G.segLen < EPS) {                              // pure vertical: hold the column while diving/rising
             double ox = p.tx() - b.x(), oz = p.tz() - b.z();
             double od = Math.sqrt(ox * ox + oz * oz);
@@ -1683,7 +1721,12 @@ public final class SteerControl {
         F.ux = cdx / cl; F.uz = cdz / cl;
         F.cx = (int) Math.floor(p.tx());
         F.cz = (int) Math.floor(p.tz());
-        F.cy = (int) Math.floor(p.ty()) - 1;   // waypoint floor cell (feet cell is water above)
+        // The waypoint's FEET cell. Value-preserving across the 2026-08-15 frame change: this read
+        // `floor(p.ty()) - 1` when ty() was the feet cell's ceiling, which evaluated to the same cell index
+        // this now yields directly. (NOTE the old comment called it the "floor cell"; the arithmetic said
+        // otherwise then and says otherwise now. Left as-is deliberately — correcting the CELL would be a
+        // behaviour change, not a frame change, and belongs in its own commit with its own evidence.)
+        F.cy = (int) Math.floor(p.ty());
         return true;
     }
 
@@ -1836,7 +1879,7 @@ public final class SteerControl {
      * (s52: relocated from the follower's cross-cutting water rule — movements own their controls.)
      */
     public static void holdDepth(BotSteering b, SteerView p, double bias) {
-        holdDepthAt(b, p.ty() - bias);
+        holdDepthAt(b, swimDepthTarget(p, bias));
     }
 
     /**
@@ -2015,13 +2058,13 @@ public final class SteerControl {
         // the error instead misclassified exactly that case (ClimbSteerTest.lateralClingHoldsSneak). The
         // environment tests below stay live and per-tick; it is only the INTENT that is fixed by the plan.
         final double intent = p.ty() - p.sy();   // which way the STEP wants to go: -1 / 0 / +1
-        // The live error, IN THE BOT'S FRAME. SteerView's y is the "feet-cell-plus-one" frame (SegmentCursor
-        // adds +1.0 to a feet cell) and its javadoc is explicit that y may be consumed only as a segment
-        // DELTA — `intent` above is such a delta and is frame-free. An ABSOLUTE comparison must first drop
-        // back into the bot's own frame, or it is off by exactly one block: measured 2026-08-02 as
-        // `err=0.95` on a bot that was sitting exactly on its target (ty=170.0 for feet cell 169,
-        // botY=169.055), which read as "still a block short" forever and never let the stance arrest.
-        final double floorY = p.ty() - 1.0;      // the target FEET CELL's floor, in the bot's own frame
+        // The live error, IN THE BOT'S FRAME. Since 2026-08-15 SteerView's y IS the bot's frame — the base of
+        // the feet cell — so this is now a plain read. It used to be the "feet-cell-plus-one" frame and had to
+        // subtract the block straight back off; getting that wrong was measured 2026-08-02 as `err=0.95` on a
+        // bot sitting exactly on its target (ty=170.0 for feet cell 169, botY=169.055), which read as "still a
+        // block short" forever and never let the stance arrest. That whole hazard is gone with the frame.
+        // (`intent` above is a segment DELTA and was frame-free either way.)
+        final double floorY = p.ty();            // the target FEET CELL's floor, in the bot's own frame
         final double err = floorY - b.y();
         // SETTLED IS A BAND, NOT A POINT (owner ruling, 2026-08-03). "Settled on the floor of a cell" is
         // [X.00, X.20] inclusive: the bot is 1.8 tall, so at X.20 its head still occupies exactly the headroom

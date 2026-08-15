@@ -9,6 +9,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.movements.Diagonal;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalSprintSwim;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.EndSprintSwim;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.ExitWater;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Fall;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.MineDown;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour;
@@ -49,6 +50,9 @@ public final class MovementRegistry {
     public static final Movement DIAGONAL_SPRINT_SWIM = new DiagonalSprintSwim();
     public static final Movement RIDE_BUBBLE_COLUMN = new RideBubbleColumn();
     public static final Movement END_SPRINT_SWIM = new EndSprintSwim();
+    /** The UPRIGHT water exit ({@link Surface} is the prone one). Restores the shape {@code Ascend}'s R1 gate
+     *  removed from a fluid stance on 2026-08-01 — as its own class, so R1 stays intact. */
+    public static final Movement EXIT_WATER = new ExitWater();
 
     /**
      * Tier 1 (ground + water): walk + step-assist, diagonal walk, jump-up-1, step-down-1, safe drop, the
@@ -74,5 +78,5 @@ public final class MovementRegistry {
     public static final List<Movement> TIER1 =
             List.of(TRAVERSE, DIAGONAL, ASCEND, DESCEND, FALL, PILLAR, MINE_DOWN, SWIM, SPRINT_SWIM,
                     START_SPRINT_SWIM, SURFACE, CLIMB, PARKOUR, DIAGONAL_PARKOUR, WALK_OFF,
-                    DIAGONAL_SPRINT_SWIM, RIDE_BUBBLE_COLUMN, END_SPRINT_SWIM);
+                    DIAGONAL_SPRINT_SWIM, RIDE_BUBBLE_COLUMN, END_SPRINT_SWIM, EXIT_WATER);
 }
