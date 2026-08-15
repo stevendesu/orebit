@@ -241,11 +241,13 @@ class CarryArrestGateTest {
      * Corrected here rather than in the servo: the servo agrees with production, the fixtures did not.
      */
     private static final class Level implements SteerView {
+        // Verticals are the BASE of the feet cell (SegmentCursor's frame since 2026-08-15). These bots stand
+        // in feet cell 10, so both ends read 10.0; they read 11.0 under the old feet-cell + 1.0 frame.
         @Override public double sx() { return 0.5; }
-        @Override public double sy() { return 11.0; }
+        @Override public double sy() { return 10.0; }
         @Override public double sz() { return 0.5; }
         @Override public double tx() { return 3.5; }
-        @Override public double ty() { return 11.0; }
+        @Override public double ty() { return 10.0; }
         @Override public double tz() { return 0.5; }
         @Override public boolean hasNext() { return false; }
         @Override public double nx() { return 0; }

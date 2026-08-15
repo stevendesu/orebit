@@ -136,12 +136,13 @@ public class SprintSwim implements Movement {
     }
 
     @Override
-    public boolean reached(BotSteering b, int wx, int wy, int wz) {
+    public boolean reached(BotSteering b, int wx, int wy, int wz, Movement next) {
         // A SprintSwim cruise waypoint is a MODE_PRONE node: it is only truly "reached" once the bot has
         // actually established the prone pose. Without this gate the follower's END->START cursor scan reports
         // a downstream cruise node reached while the bot is still upright at the surface, skipping PAST the
         // StartSprintSwim initiation waypoint (whose prone() gate then never runs) — so the bot never dives.
-        return b.prone() && Swim.reachedSwim(b, wx, wy, wz, SteerControl.SUBMERGE_BIAS);
+        return b.prone() && Swim.reachedSwim(b, wx, wy, wz, SteerControl.SUBMERGE_BIAS)
+                && Movement.teedUp(b, wx, wy, wz, next);
     }
 
     /**
@@ -176,5 +177,12 @@ public class SprintSwim implements Movement {
                 })
                 .done(b -> Swim.reachedSwim(b, tx, ty + 1, tz, SteerControl.SUBMERGE_BIAS));
         return plan;
+    }
+
+    /** Permissive entry: this move's servo establishes its own stance, so it accepts any pose (see
+     *  {@link Movement#entryReady}). Also exactly the pre-2026-08-15 behaviour, where no entry test existed. */
+    @Override
+    public boolean entryReady(BotSteering b, int wx, int wy, int wz) {
+        return true;
     }
 }

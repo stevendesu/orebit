@@ -319,8 +319,8 @@ public final class Ascend implements Movement {
      * fluid-extended done/failWhen governs the step itself.)
      */
     @Override
-    public boolean reached(BotSteering b, int wx, int wy, int wz) {
-        return b.grounded() && atWaypoint(b, wx, wy, wz);
+    public boolean reached(BotSteering b, int wx, int wy, int wz, Movement next) {
+        return b.grounded() && atWaypoint(b, wx, wy, wz) && Movement.teedUp(b, wx, wy, wz, next);
     }
 
     /**

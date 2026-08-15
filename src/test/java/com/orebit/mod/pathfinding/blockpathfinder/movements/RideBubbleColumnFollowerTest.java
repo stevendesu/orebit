@@ -33,7 +33,7 @@ class RideBubbleColumnFollowerTest {
         b.grounded = true;
         b.inWater = false;
         b.velY = -0.078;
-        assertTrue(RIDE.reached(b, WX, WY, WZ),
+        assertTrue(RIDE.reached(b, WX, WY, WZ, null),
                 "a grounded land exit is reached BY being grounded, despite the resting gravity×drag velY");
     }
 
@@ -44,7 +44,7 @@ class RideBubbleColumnFollowerTest {
         b.grounded = false;
         b.inWater = true;
         b.velY = 0.04;
-        assertTrue(RIDE.reached(b, WX, WY, WZ), "an in-water exit with a bled (still) velY is reached");
+        assertTrue(RIDE.reached(b, WX, WY, WZ, null), "an in-water exit with a bled (still) velY is reached");
     }
 
     @Test
@@ -55,7 +55,7 @@ class RideBubbleColumnFollowerTest {
         b.grounded = false;
         b.inWater = true;
         b.velY = 0.5;
-        assertFalse(RIDE.reached(b, WX, WY, WZ), "a still-ejecting in-water bot has not settled");
+        assertFalse(RIDE.reached(b, WX, WY, WZ, null), "a still-ejecting in-water bot has not settled");
     }
 
     @Test
@@ -65,7 +65,7 @@ class RideBubbleColumnFollowerTest {
         b.grounded = true;
         b.inWater = false;
         b.velY = -0.078;
-        assertFalse(RIDE.reached(b, WX, WY, WZ), "not at the exit cell → never reached");
+        assertFalse(RIDE.reached(b, WX, WY, WZ, null), "not at the exit cell → never reached");
     }
 
     @Test
@@ -75,7 +75,7 @@ class RideBubbleColumnFollowerTest {
         b.grounded = false;
         b.inWater = false;
         b.velY = -0.02; // even a small velY: no medium to settle in
-        assertFalse(RIDE.reached(b, WX, WY, WZ), "airborne at the exit cell is not settled in any medium");
+        assertFalse(RIDE.reached(b, WX, WY, WZ, null), "airborne at the exit cell is not settled in any medium");
     }
 
     /** Minimal {@link BotSteering} double: settable pose/velocity/medium; the reached() test reads only

@@ -111,18 +111,18 @@ class ParkourValidityEnvelopeTest {
         PoseBot bot = new PoseBot();
         // Feet block exactly on the waypoint stand cell, but mid-air (the P1 ballistic-transit transient).
         bot.at(5, 81, 5, /*grounded=*/false);
-        assertFalse(MovementRegistry.PARKOUR.reached(bot, 5, 81, 5),
+        assertFalse(MovementRegistry.PARKOUR.reached(bot, 5, 81, 5, null),
                 "a mid-air feet-block transit must not advance a Parkour step");
-        assertFalse(MovementRegistry.DIAGONAL_PARKOUR.reached(bot, 5, 81, 5),
+        assertFalse(MovementRegistry.DIAGONAL_PARKOUR.reached(bot, 5, 81, 5, null),
                 "a mid-air feet-block transit must not advance a DiagonalParkour step");
-        assertFalse(MovementRegistry.WALK_OFF.reached(bot, 5, 81, 5),
+        assertFalse(MovementRegistry.WALK_OFF.reached(bot, 5, 81, 5, null),
                 "a mid-air feet-block transit must not advance a WalkOff step");
 
         // The legitimate landing IS grounded — the gate delays a real advance by zero ticks.
         bot.at(5, 81, 5, /*grounded=*/true);
-        assertTrue(MovementRegistry.PARKOUR.reached(bot, 5, 81, 5),
+        assertTrue(MovementRegistry.PARKOUR.reached(bot, 5, 81, 5, null),
                 "a grounded exact match still advances (touchdown tick)");
-        assertTrue(MovementRegistry.DIAGONAL_PARKOUR.reached(bot, 5, 81, 5),
+        assertTrue(MovementRegistry.DIAGONAL_PARKOUR.reached(bot, 5, 81, 5, null),
                 "a grounded exact match still advances (touchdown tick)");
     }
 
@@ -139,22 +139,22 @@ class ParkourValidityEnvelopeTest {
     @Test
     void ballisticFlyThroughNeverMatches_forReversibleMovesToo() {
         PoseBot bot = new PoseBot().at(5, 81, 5, /*grounded=*/false); // airborne, no medium — pure transit
-        assertFalse(MovementRegistry.TRAVERSE.reached(bot, 5, 81, 5),
+        assertFalse(MovementRegistry.TRAVERSE.reached(bot, 5, 81, 5, null),
                 "a reversible move must not match a cell the bot is merely falling through");
-        assertFalse(MovementRegistry.DESCEND.reached(bot, 5, 81, 5),
+        assertFalse(MovementRegistry.DESCEND.reached(bot, 5, 81, 5, null),
                 "the flagship specimen: a Descend stand cell transited mid-fall is NOT reached");
-        assertFalse(MovementRegistry.FALL.reached(bot, 5, 81, 5),
+        assertFalse(MovementRegistry.FALL.reached(bot, 5, 81, 5, null),
                 "even Fall must not match while still ballistic — it has not landed yet");
     }
 
     @Test
     void everyLegitimateArrivalMediumStillMatches() {
         // The gate must not cost a real arrival a single tick, in ANY medium a step can end in.
-        assertTrue(MovementRegistry.TRAVERSE.reached(new PoseBot().at(5, 81, 5, true), 5, 81, 5),
+        assertTrue(MovementRegistry.TRAVERSE.reached(new PoseBot().at(5, 81, 5, true), 5, 81, 5, null),
                 "grounded arrival — the ordinary case");
-        assertTrue(MovementRegistry.FALL.reached(new PoseBot().afloat(5, 81, 5), 5, 81, 5),
+        assertTrue(MovementRegistry.FALL.reached(new PoseBot().afloat(5, 81, 5), 5, 81, 5, null),
                 "Fall's buoyant-water landing is never grounded but IS settled");
-        assertTrue(MovementRegistry.FALL.reached(new PoseBot().hanging(5, 81, 5), 5, 81, 5),
+        assertTrue(MovementRegistry.FALL.reached(new PoseBot().hanging(5, 81, 5), 5, 81, 5, null),
                 "Fall's arrested climbable HANG landing is settled too");
     }
 

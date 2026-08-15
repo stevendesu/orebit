@@ -220,8 +220,8 @@ public final class Pillar implements Movement {
      * the step alive until the footing is placed and landed on (the natural place-at-apex, then settle order).
      */
     @Override
-    public boolean reached(BotSteering b, int wx, int wy, int wz) {
-        return b.grounded() && atWaypoint(b, wx, wy, wz);
+    public boolean reached(BotSteering b, int wx, int wy, int wz, Movement next) {
+        return b.grounded() && atWaypoint(b, wx, wy, wz) && Movement.teedUp(b, wx, wy, wz, next);
     }
 
     /**

@@ -199,8 +199,9 @@ public final class Swim implements Movement {
     }
 
     /** A cell the bot can swim in — either fluid, priced by which one it is. Bubble columns are excluded
-     *  upstream by {@link MovementContext#water} (their own move owns them). */
-    private static boolean fluid(MovementContext ctx, long d) {
+     *  upstream by {@link MovementContext#water} (their own move owns them). Package-private since
+     *  2026-08-15 so {@link ExitWater} shares this one definition rather than restating it. */
+    static boolean fluid(MovementContext ctx, long d) {
         return ctx.water(d) || ctx.lava(d);
     }
 
@@ -247,7 +248,7 @@ public final class Swim implements Movement {
     }
 
     @Override
-    public boolean reached(BotSteering b, int wx, int wy, int wz) {
+    public boolean reached(BotSteering b, int wx, int wy, int wz, Movement next) {
         // A Swim cruise waypoint is a MODE_STANDING (upright) node — symmetric with SprintSwim.reached: only
         // "reached" once the bot is NOT prone, so the cursor can't skip past the pose transition on the way
         // out of a dive. Either fluid counts, since every rung is now medium-agnostic.
@@ -264,7 +265,8 @@ public final class Swim implements Movement {
         // question the waypoint actually cares about: does this CELL hold fluid. A dry cell still refuses,
         // so the clause keeps its meaning; it simply stops depending on an entity flag that disagrees with
         // the world it is derived from. Either fluid still counts — getFluidState is medium-agnostic.
-        return !b.prone() && b.fluidTopAt(wx, wy, wz) > 0.0 && reachedSwim(b, wx, wy, wz);
+        return !b.prone() && b.fluidTopAt(wx, wy, wz) > 0.0 && reachedSwim(b, wx, wy, wz)
+                && Movement.teedUp(b, wx, wy, wz, next);
     }
 
     /**
@@ -297,91 +299,51 @@ public final class Swim implements Movement {
     }
 
     /**
-     * Vertical reach tolerance for the swim cursor (blocks of continuous Y). Kept under 1 so a vertical rung's
-     * stacked waypoints (1 block apart) can't both be "reached" at once — that was the {@code ±1} block
-     * tolerance's "drop two cells at a time" leapfrog — while still wide enough to absorb the buoyancy bob.
-     */
-    static final double REACHED_Y = 0.6;
-
-    /**
-     * Swim cursor-advance test (shared with {@link SprintSwim}): horizontal cell match plus the bot's
-     * <i>continuous</i> feet Y within {@link #REACHED_Y} of the depth the move actually holds, minus the
-     * pose's submersion {@code bias}. A PRONE move rides {@link SteerControl#SUBMERGE_BIAS} below the planned
-     * feet height to keep the short hitbox wet, so its reach window must centre on the depth it holds —
-     * otherwise a submerged bot never lands inside the window and stalls. Upright moves pass bias 0 (the
-     * 3-arg overload). Using continuous Y rather than a ±1 <i>block</i> tolerance keeps a vertical rung
-     * advancing one waypoint at a time instead of leapfrogging the column.
+     * Swim cursor-advance test (shared with {@link SprintSwim}): the bot's feet CELL is the waypoint cell.
+     * Nothing more — no continuous-Y band, no clamps, and the {@code bias} parameter is vestigial (kept only
+     * so the swim moves' call sites stay uniform; {@link SteerControl#SUBMERGE_BIAS} is now identity).
      *
-     * <h2>The target is clamped to what the geometry actually permits</h2>
-     * The nominal target is {@code wy + 1 - bias}: a floating bot rises until it breaches, so it settles near
-     * the TOP of its feet cell, a full block above the cell's base. <b>A ceiling can make that height
-     * physically unreachable</b>, and then the test can never pass however long the bot swims.
+     * <h2>Why this collapsed to a cell test (2026-08-15)</h2>
+     * It used to be {@code |b.y() - target| < REACHED_Y} with {@code REACHED_Y = 0.6} around a nominal target
+     * of {@code wy + 1 - bias}, plus two clamps that pulled that target back down — a CEILING clamp
+     * ({@code min(target, (wy+2) - height)}) and a SURFACE clamp ({@code min(target, wy + fluidTopAt(...))}).
+     * All of it existed to cope with a set-point that was wrong: {@code wy + 1.0} is the feet cell's CEILING,
+     * so the window {@code (target-0.6, target+0.6)} straddled the cell boundary and the test could fire with
+     * the feet a whole cell away from {@code wy}.
      *
-     * <p>Convicted 2026-08-07 on the flagship, at the top of the very waterfall this design set out to climb.
-     * The bot arrived correctly at the last swim node — feet cell {@code (154,-7,103)}, the top water cell,
-     * head in the air cell above, the {@code Diagonal} exit onto its deepslate ledge one step away — and then
-     * held for 378 ticks. Tuff at {@code (154,-5,103)} caps a 1.8-tall body at {@code botY = -6.800}, while
-     * the test demanded {@code botY > -6.6}: short by 0.2 blocks, permanently. The telemetry signature is
-     * unmistakable and worth recognising again — {@code dm.y} pinned at exactly {@code -0.0050} every tick
-     * (vanilla's in-fluid gravity with the jump impulse consumed by a vertical collision) while
-     * {@code holdDepth} dutifully held jump forever.
+     * <p>Two failures were caused by exactly that. The flagship {@code Diagonal} at {@code (154,-8,103)}: tuff
+     * at {@code (154,-5,103)} clamped the target to {@code -6.8}, the window opened at {@code -7.4}, and the
+     * bot was accepted at {@code botY = -7.289} — feet cell {@code -8}, one BELOW the waypoint's {@code -7} —
+     * so the following {@code Diagonal}, framed for {@code -7}, failed its envelope on its first tick. And in
+     * the SwimCourse {@code cross} entry, the surface clamp put the target at {@code 160.889} and the bot was
+     * accepted at {@code 161.000} while still standing DRY on the lip, one cell ABOVE. Same defect, both
+     * directions.
      *
-     * <p>So the ceiling is folded into the target rather than special-cased around: when the cell above the
-     * body is solid, the highest attainable feet height is that cell's floor minus the pose's height. This is
-     * <b>byte-identical wherever there is headroom</b> (the {@code min} does nothing), so the tuned open-water
-     * behaviour — and the 7-to-9-tick-per-cell climb cadence the same flagship run demonstrated — is
-     * untouched; it only ever LOWERS the bar, and only to a height the bot has already proven it can hold.
-     * A partial ceiling (a TOP slab, whose real underside sits mid-cell) clamps conservatively low, which
-     * stays inside {@link #REACHED_Y} rather than overshooting it.
+     * <p>{@link SteerControl#SWIM_RIDE} now parks the bot at {@code wy + 0.2} with a {@code ±0.2} dead-band,
+     * i.e. {@code [wy+0.0, wy+0.4]} — entirely inside the feet cell. So "is the ride at the right height" and
+     * "is the bot in the right cell" became the same question, and the cell test is the honest spelling of it.
+     * Both clamps computed heights inside that same cell and are simply gone; the ceiling clamp in particular
+     * evaluated {@code (wy+2) - 1.8 == wy + 0.2}, which IS the new set-point, so its case is now the default
+     * rather than a correction. {@code REACHED_Y}'s stacked-waypoint guard ("a vertical rung's waypoints are
+     * 1 block apart, so the window must stay under 1") is satisfied by construction: one cell, one waypoint.
      *
-     * <p><b>Note the historical trap in the parameter.</b> This helper's contract used to describe {@code wy}
-     * as the FLOOR cell ("feet on top of the floor cell"), and callers pass the WAYPOINT — which is the
-     * <i>feet</i> cell ({@link Movement#atWaypoint} tests {@code footY() == wy}). The {@code + 1} is
-     * therefore a ride-height convention, NOT a floor-to-feet conversion, and reading it as the latter is
-     * what hid this bug: mid-column the bot rises straight through the threshold, so the target being a block
-     * high is invisible everywhere except against a ceiling.
+     * <p>The residual the surface clamp left open — a nearly-full top cell where a bot resting on the floor
+     * sits further than {@code REACHED_Y} from the ride height — is closed by the same collapse, since resting
+     * on that floor puts the feet in the waypoint cell.
      */
     static boolean reachedSwim(BotSteering b, int wx, int wy, int wz, double bias) {
-        double target = wy + 1.0 - bias;
-        if (b.solidAt(wx, wy + 2, wz)) {                 // first cell above the body — the float ceiling
-            double height = b.prone() ? PRONE_HEIGHT : STANDING_HEIGHT;
-            target = Math.min(target, (wy + 2) - height);
-        }
-        // THE SURFACE CLAMP — the hydrostatic mirror of the ceiling clamp above (owner ruling 2026-08-14,
-        // the (247,51,16) waterfall-apron livelock). A ceiling caps how high the bot can float; the WATER
-        // ITSELF caps it just as hard, and for the same reason: `wy + 1` is a RIDE height that assumes a
-        // buoyant bot rising until it breaches, and a PARTIAL top cell has no such height to offer. The bot
-        // settles on the floor at `wy + 0.0`, a full block under the target and 0.4 outside REACHED_Y, so
-        // neither this test nor the phase `done` built on it can ever fire.
-        //
-        // Convicted at the base of a waterfall, where the spreading apron is thin: feet cell
-        // water[level=3] (surface ~0.56 up the cell) over stone at (247,50,16), air above. The bot swam
-        // down and grounded at botY=51.000 on its OWN waypoint cell — atWaypoint and settled() both
-        // satisfied — then held for 5200 ticks in a 6-tick limit cycle with NO `step FAILED` to show for
-        // it, because this predicate is not an envelope and nothing logs when it merely stays false.
-        //
-        // FluidState.getHeight already encodes exactly the rule needed: 1.0 wherever the same fluid
-        // continues above, the partial own-height only in a top cell. So every mid-column node, every full
-        // block, and every case this function was tuned on is BYTE-IDENTICAL (the min does nothing), and
-        // the clamp bites only where the geometry genuinely cannot deliver the nominal ride height. Like
-        // the ceiling clamp it only ever LOWERS the bar, so it cannot break a bot that DOES float: one
-        // breached at wy+1 sits (1 - surface) from the lowered target, still inside the window, and one
-        // riding the surface lands dead on it.
-        //
-        // RESIDUAL, deliberately not chased: a partial cell whose surface is >= REACHED_Y (a nearly-full
-        // top block) still fails for a bot resting on the floor rather than riding it. Closing that band
-        // needs the reach test to become an INTERVAL (floor .. surface) instead of a point, which would
-        // widen the stacked-waypoint guard REACHED_Y exists to hold. Revisit only with a repro in it.
-        target = Math.min(target, wy + b.fluidTopAt(wx, wy, wz));
-        return b.footX() == wx && b.footZ() == wz && Math.abs(b.y() - target) < REACHED_Y;
+        return b.footX() == wx && b.footY() == wy && b.footZ() == wz;
     }
-
-    /** Vanilla hitbox heights, the clamp's only inputs beyond the ceiling cell (upright / {@code Pose.SWIMMING}). */
-    private static final double STANDING_HEIGHT = 1.8;
-    private static final double PRONE_HEIGHT = 0.6;
 
     /** Upright (bias-free) swim reach test — delegates to the bias-aware form with bias 0.0. */
     static boolean reachedSwim(BotSteering b, int wx, int wy, int wz) {
         return reachedSwim(b, wx, wy, wz, 0.0);
+    }
+
+    /** Permissive entry: this move's servo establishes its own stance, so it accepts any pose (see
+     *  {@link Movement#entryReady}). Also exactly the pre-2026-08-15 behaviour, where no entry test existed. */
+    @Override
+    public boolean entryReady(BotSteering b, int wx, int wy, int wz) {
+        return true;
     }
 }

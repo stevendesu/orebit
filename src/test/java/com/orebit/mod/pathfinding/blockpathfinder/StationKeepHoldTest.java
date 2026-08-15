@@ -212,14 +212,14 @@ class StationKeepHoldTest {
         b.climbBelow = true;
         b.x = 3.5; b.y = 10; b.z = 4.5;
 
-        assertTrue(MovementRegistry.CLIMB.reached(b, 3, 10, 4),
+        assertTrue(MovementRegistry.CLIMB.reached(b, 3, 10, 4, null),
                 "a top-out waypoint must be reachable, or the climb livelocks bouncing on the boundary");
 
         assertFalse(b.settled(),
                 "but settled() must STAY strict: it is shared with the plan-anchor rule, and climbableBelow "
                         + "is also true for a bot in ballistic flight OVER a vine — widening it fired reached "
                         + "mid-parkour-arc at botY=113.905 and advanced the waypoint in mid-air");
-        assertFalse(MovementRegistry.TRAVERSE.reached(b, 3, 10, 4),
+        assertFalse(MovementRegistry.TRAVERSE.reached(b, 3, 10, 4, null),
                 "every other movement keeps the strict ballistic test");
     }
 
