@@ -139,17 +139,42 @@ class StairCollisionTruthTest {
         System.out.println("=== BOTTOM stair surface per edge vs NavBlock.stairFacing ("
                 + checked + " states, " + stairs().size() + " stair blocks) ===");
         table.forEach(System.out::println);
-        System.out.println("  MovementContext.directionalTopY returns 16 ONLY toward the facing edge and 8 "
-                + "toward the other three. Against the table above that is EXACT on the facing edge and on "
-                + "the opposite (low) edge — the two that matter for an along-axis crossing — and "
-                + "deliberately CONSERVATIVE on the two perpendicular edges, where vanilla actually has 16 "
-                + "(the 'straight-stair approximation, corners ignored per v1 scope' its javadoc declares). "
-                + "Under-reporting a surface only ever makes a rise look bigger, so it cannot admit a step "
-                + "the bot can't make.");
-
         assertTrue(mismatches.isEmpty(),
                 "vanilla's low (8/16) edge is not the one opposite NavBlock.stairFacing:\n"
                         + String.join("\n", mismatches));
+    }
+
+    /**
+     * The planner's own {@code directionalTopY} must equal vanilla on EVERY edge, not just the two that lie
+     * along the facing axis. It used to report 8 on the two PERPENDICULAR edges, described as a conservative
+     * approximation — which it is for the START of a move (a bigger apparent rise) and is NOT for the
+     * DESTINATION, where a smaller apparent rise admits a step the bot cannot make. That is what walked the
+     * flagship bot into the side of a stair at {@code (205,-38,57)}; see the corrected javadoc there.
+     */
+    @Test
+    void directionalTopYMatchesVanillaOnEveryEdge() {
+        List<String> bad = new ArrayList<>();
+        for (Block block : stairs()) {
+            String id = BuiltInRegistries.BLOCK.getKey(block).getPath();
+            for (Direction facing : Direction.Plane.HORIZONTAL) {
+                for (Half half : Half.values()) {
+                    BlockState st = state(block, facing, half, StairsShape.STRAIGHT);
+                    VoxelShape shape = st.getCollisionShape(null, null);
+                    long d = NavBlock.descriptorFor(st);
+                    for (int e = 0; e < 4; e++) {
+                        int vanilla = surfaceAtEdge(shape, e);
+                        int ours = com.orebit.mod.pathfinding.blockpathfinder.MovementContext
+                                .directionalTopY(d, DX[e], DZ[e]);
+                        if (vanilla != ours) {
+                            bad.add(id + " " + facing + "/" + half + " edge " + NAME[e]
+                                    + ": vanilla=" + vanilla + " ours=" + ours);
+                        }
+                    }
+                }
+            }
+        }
+        assertTrue(bad.isEmpty(),
+                "directionalTopY disagrees with vanilla's collision surface:\n" + String.join("\n", bad));
     }
 
     /** A TOP stair has a flat full-height top, so every edge reads 16 and directionalTopY's stair branch is
