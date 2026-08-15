@@ -504,12 +504,12 @@ public final class SteerControl {
      *       MovePlan#failWhen} fired, and {@code BotMining}'s reactive progress (a break continues only
      *       while the mover keeps asking for the SAME cell) reset with the block unbroken. The station-keep
      *       is {@link #holdDepthAt} — the same depth autopilot every swim move and {@link #drive}'s
-     *       in-water branch already press — aimed at the CENTRE of the bot's own feet cell, the vertical
-     *       twin of this method's own-column re-centre. Deadband {@code ±}{@link #WATER_RISE_DEADBAND}
-     *       around {@code footY+0.5} keeps the whole hold inside {@code [footY+0.3, footY+0.7]}, so the
-     *       foot cell is unreachable from either side however long the break takes ({@code failWhen} is
-     *       purely POSITIONAL — no tick budget — so an arbitrarily slow break is fine once the bot is
-     *       actually still).</li>
+     *       in-water branch already press — aimed at the bot's own feet cell, the vertical twin of this
+     *       method's own-column re-centre. Deadband {@code ±}{@link #WATER_RISE_DEADBAND} keeps the whole
+     *       hold inside one cell, so the foot cell is unreachable from either side however long the break
+     *       takes ({@code failWhen} is purely POSITIONAL — no tick budget — so an arbitrarily slow break
+     *       is fine once the bot is actually still). <b>WHICH height inside the cell is chosen by
+     *       {@link BotSteering#standableBelow}</b> — see the floor rule below.</li>
      *   <li><b>Climbable</b> — sneak, as before: vanilla's {@code handleOnClimbable} zeroes the
      *       {@code -0.15}/t slide for a sneaking Player.</li>
      * </ul>
@@ -534,6 +534,54 @@ public final class SteerControl {
      * therefore presses nothing and lets the bot rest on the next deck plate (which makes it
      * {@code grounded}, the medium that needs no input at all). {@link BotSteering#scaffoldingBelow} is the
      * existing seam read for this — the same one {@code Climb}'s sink-in step uses.
+     *
+     * <h2>In fluid, a FLOOR beats buoyancy — settle on it (owner ruling, 2026-08-15)</h2>
+     * The fluid hold above answers "what holds me up in water", and buoyancy was treated as the only
+     * available answer. It is not: when a standable block sits under the feet cell, <b>resting on it is
+     * also a hold</b> — a strictly better one, because it costs no input, cannot drift, and makes the bot
+     * {@code onGround}. That last part is worth a factor of five in mining rate and nothing else in the
+     * system can buy it back: vanilla's {@code Player.getDestroySpeed} divides by 5 for {@code !onGround}
+     * and multiplies by the submerged-mining attribute (0.2 without Aqua Affinity) for an eye in water,
+     * and {@code BotMining} accumulates {@code BlockState.getDestroyProgress}, so both land on the bot.
+     * Floating to mine therefore pays <b>25×</b> where standing pays 5× — and the 5× is unavoidable
+     * (the eye stays wet either way) while the other 5× is pure self-harm.
+     *
+     * <p><b>Measured</b> on the vd=16 flagship, 2026-08-15: a {@code MineDown} shaft at {@code (195,·,68)}
+     * held {@code hold:depth} for <b>5,121 ticks — 43% of the entire 12,000-tick budget</b> — bobbing
+     * between {@code botY -13.67} and {@code -13.72} with {@code grounded=false}, while a full deepslate
+     * block sat at {@code (195,-15,68)} whose top face was 0.30 below the feet. One block per ~1,200
+     * ticks; the run failed on budget with 14 blocks still to descend.
+     *
+     * <p><b>The change is the depth TARGET, not a new branch</b>: the same autopilot is aimed at the cell
+     * FLOOR ({@code footY}) instead of its centre ({@code footY + 0.5}). Above the deadband it presses
+     * sink, so the bot descends the last third of a block under its own power; the block stops it; and
+     * from the next tick the {@code grounded} short-circuit at the top of the chain takes over and presses
+     * nothing at all — the medium that needs no input, which is the whole point of the ordering.
+     *
+     * <p>That target is <b>one-sided by construction</b>, which is what makes it safe to press: {@code
+     * footY()} is derived from the bot's own position, so {@code y() >= footY()} always holds and {@link
+     * #holdDepthAt}'s rise branch is unreachable. The floor hold can only SINK — it can never swim the bot
+     * back off the block it just settled on and fight the grounded short-circuit. The corollary is its
+     * honest limit: nothing in the servo arrests a descent, so if the floor is a lie the bot keeps sinking
+     * a cell at a time. Deliberate — {@code standableBelow} is a live world read, and for {@code MineDown}
+     * the floor breaking underfoot IS the movement.
+     *
+     * <p><b>Why {@link BotSteering#standableBelow} is the right probe.</b> It is the existing "is there a
+     * floor under my feet" answer, read live off the level through {@link
+     * com.orebit.mod.worldmodel.navblock.NavBlock#isStandable} — the SEARCH's own floor bit — across the
+     * columns the bounding box actually overlaps. It is the same seam {@code holdClimbableStance} already
+     * consults for the same underlying question. Its {@code false} default leaves every headless double,
+     * and therefore every existing test, byte-identical.
+     *
+     * <p><b>The partial-floor case is a broken state, not a case to handle.</b> A bottom slab under the
+     * feet cell would seat the bot at {@code footY-0.5}, i.e. in the cell BELOW — which would move the
+     * foot cell and could trip a {@code failWhen}. That geometry cannot arise from a healthy plan: the
+     * planner's {@code fromFootY} is topY-aware, so a slab floor frames the step at the SLAB's cell, not
+     * one above it. Reaching the hold with a partial floor a full block under the feet therefore already
+     * means the grid disagrees with the world, and the fix for that is grid freshness, not a servo
+     * special case. Note also that a bot which is ALREADY grounded on such a slab gets zero vertical hold
+     * today (the {@code grounded} short-circuit), so this makes no new state reachable — it only lets the
+     * bot arrive at one the code already treats as normal.
      */
     public static void stationKeep(BotSteering b, SteerView p) {
         recenterOn(b, Math.floor(b.x()) + 0.5, Math.floor(b.z()) + 0.5);
@@ -557,8 +605,17 @@ public final class SteerControl {
             if (b.inWater() || b.inLava()) {
                 // Fluid FIRST: vanilla's fluid travel branch never runs the climbable clamp, so on a
                 // ladder in water sneak does nothing and only the depth autopilot can hold the bot.
-                tag("hold:depth");
-                holdDepthAt(b, b.footY() + 0.5);   // the centre of MY OWN cell, never the step's target
+                //
+                // A FLOOR BEATS BUOYANCY (see the class doc's floor rule). Both targets are inside MY OWN
+                // cell — never the step's target — so the foot cell is safe either way; the choice is only
+                // WHERE in the cell. With something to stand on, aim at the cell floor: the sink press
+                // closes the last fraction of a block, the block stops it, and the grounded short-circuit
+                // above then holds the bot for free — worth 5x the mining rate over floating. With
+                // nothing to stand on, buoyancy is the only hold there is, so keep the cell centre, which
+                // is the height furthest from either cell boundary.
+                boolean floor = b.standableBelow();
+                tag(floor ? "hold:floor" : "hold:depth");
+                holdDepthAt(b, floor ? b.footY() : b.footY() + 0.5);
                 return;
             }
             if (b.onClimbable()) {

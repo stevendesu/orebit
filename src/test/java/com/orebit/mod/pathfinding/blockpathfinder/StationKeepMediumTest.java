@@ -22,9 +22,13 @@ import org.junit.jupiter.api.Test;
  * <h2>What these tests pin</h2>
  * The hold is a per-tick "what holds me HERE" question with three answers and no timer:
  * <ul>
- *   <li><b>fluid</b> &rarr; {@link SteerControl#holdDepthAt} at the centre of the bot's OWN feet cell (the
- *       vertical twin of the own-column re-centre) — never the step's planned depth, which would drive the
- *       bot toward the cell it has just been stopped from entering;</li>
+ *   <li><b>fluid</b> &rarr; {@link SteerControl#holdDepthAt} inside the bot's OWN feet cell (the vertical
+ *       twin of the own-column re-centre) — never the step's planned depth, which would drive the bot
+ *       toward the cell it has just been stopped from entering. WHICH height in the cell is decided by
+ *       {@link BotSteering#standableBelow}: with a floor under the feet the target is the cell FLOOR, so
+ *       the bot settles onto it and becomes {@code grounded} (5&times; the mining rate — see the
+ *       floor-beats-buoyancy tests); with nothing to stand on it is the cell CENTRE, the height furthest
+ *       from either boundary, because buoyancy is then the only hold there is;</li>
  *   <li><b>climbable</b> &rarr; sneak, <b>except scaffolding</b>, which vanilla excludes from the sneak-hold
  *       by name and whose deck shape a sneak deletes outright;</li>
  *   <li><b>ground</b> &rarr; nothing at all, byte-identical to before.</li>
@@ -45,7 +49,7 @@ class StationKeepMediumTest {
     /** A configurable-medium bot that records every input the hold presses. */
     private static final class MediumBot implements BotSteering {
         double x = X + 0.5, y = FOOT_Y + 0.5, z = Z + 0.5;
-        boolean grounded, water, lava, climbable, scaffoldBelow, climbBelow;
+        boolean grounded, water, lava, climbable, scaffoldBelow, climbBelow, standBelow;
         boolean jumping, sneaking;
         int sank;
         float forward = Float.NaN;
@@ -53,6 +57,8 @@ class StationKeepMediumTest {
 
         MediumBot atY(double y) { this.y = y; return this; }
         MediumBot submerged() { this.water = true; return this; }
+        /** A standable block directly under the feet cell — the shaft floor a MineDown stands on. */
+        MediumBot overAFloor() { this.standBelow = true; return this; }
 
         @Override public double x() { return x; }
         @Override public double y() { return y; }
@@ -70,6 +76,7 @@ class StationKeepMediumTest {
         @Override public boolean onClimbable() { return climbable; }
         @Override public boolean climbableBelow() { return climbBelow; }
         @Override public boolean scaffoldingBelow() { return scaffoldBelow; }
+        @Override public boolean standableBelow() { return standBelow; }
         @Override public void faceHorizontally(double dx, double dz) { }
         @Override public void faceTowards(double dx, double dy, double dz) { }
         @Override public void setForward(float zza) { forward = zza; }
@@ -79,9 +86,14 @@ class StationKeepMediumTest {
         @Override public void sinkInWater() { sank++; }
         @Override public boolean solidAt(int bx, int by, int bz) { return true; }
         @Override public boolean airAt(int bx, int by, int bz) { return true; }
-        /** Only the destination's lower body cell obstructs — the live geometry that makes the runner hold. */
+        /** Exactly one cell obstructs — the live geometry that makes the runner hold. Defaults to the
+         *  witnessed submerged wall (the destination's lower body cell); a shaft test points it downward. */
+        int blockX = X + 1, blockY = FOOT_Y, blockZ = Z;
+        MediumBot obstructedAt(int bx, int by, int bz) {
+            blockX = bx; blockY = by; blockZ = bz; return this;
+        }
         @Override public boolean movementBlockedAt(int bx, int by, int bz, int dx, int dz) {
-            return bx == X + 1 && by == FOOT_Y && bz == Z;
+            return bx == blockX && by == blockY && bz == blockZ;
         }
         @Override public void mine(int bx, int by, int bz) { minedX = bx; minedY = by; minedZ = bz; }
         @Override public void place(int bx, int by, int bz) { }
@@ -195,6 +207,97 @@ class StationKeepMediumTest {
                 "a grounded bot needs no vertical input, and pressing jump in water would swim it OFF its own floor");
         assertEquals(0, b.sank);
         assertFalse(b.sneaking);
+    }
+
+    // ---- FLUID: a FLOOR beats buoyancy (2026-08-15) ------------------------------------------------------
+    //
+    // Underwater mining pays TWO vanilla penalties, and only one of them is forced. Player.getDestroySpeed
+    // divides by 5 for !onGround and multiplies by the submerged-mining attribute (0.2 without Aqua
+    // Affinity) for an eye in water; BotMining accumulates BlockState.getDestroyProgress, so both land on
+    // the bot. Floating to mine therefore costs 25x, standing costs 5x, and the eye stays wet either way —
+    // so the whole difference is whether the hold chooses to stand when it could.
+    //
+    // Measured on the vd=16 flagship, 2026-08-15: a MineDown shaft at (195,.,68) held `hold:depth` for
+    // 5,121 ticks — 43% of a 12,000-tick budget — bobbing between botY -13.67 and -13.72, grounded=false,
+    // with a full deepslate block 0.30 below the feet. One block per ~1,200 ticks, and it ran out of
+    // budget with 14 still to go.
+
+    @Test
+    void submergedHoldOverAFloorSettlesOntoItInsteadOfFloating() {
+        MediumBot b = new MediumBot().submerged().overAFloor().atY(FOOT_Y + 0.5);
+        SteerControl.stationKeep(b, lateral());
+
+        assertEquals(1, b.sank,
+                "with something to stand on, the hold aims at the cell FLOOR, not its centre — the last "
+                        + "third of a block is closed under its own power and the block stops it");
+        assertFalse(b.jumping, "and it must never press jump, which would swim the bot back off its floor");
+    }
+
+    @Test
+    void theSameHoldWithoutAFloorStillFloatsAtTheCellCentre() {
+        // The contrast that makes the rule a rule: identical pose, identical medium, no floor. Buoyancy is
+        // then the ONLY hold available, so the target stays the centre — the height furthest from either
+        // cell boundary, which is what keeps an arbitrarily slow break inside the foot cell.
+        MediumBot b = new MediumBot().submerged().atY(FOOT_Y + 0.5);
+        SteerControl.stationKeep(b, lateral());
+
+        assertEquals(0, b.sank, "no floor: hold the centre, exactly as before");
+        assertFalse(b.jumping);
+    }
+
+    @Test
+    void onceOnTheFloorTheHoldIsQuiet() {
+        MediumBot b = new MediumBot().submerged().overAFloor().atY(FOOT_Y + 0.05);
+        SteerControl.stationKeep(b, lateral());
+
+        assertEquals(0, b.sank, "inside the deadband around the cell floor the bang-bang controller must not chatter");
+        assertFalse(b.jumping);
+        assertEquals(0.0f, b.forward, 1e-6f, "and the own-column re-centre is still exact zero");
+    }
+
+    @Test
+    void theFloorHoldIsONE_SIDED_itCanOnlySink() {
+        // The property that makes the floor target safe to press, and it is structural rather than tuned:
+        // the target is footY(), which is derived from the bot's OWN position, so `y() >= footY()` holds by
+        // construction and holdDepthAt's rise branch is UNREACHABLE here. The floor hold can therefore only
+        // ever press SINK — it can never swim the bot back up off the block it has just settled on, which
+        // is the one way a "settle on the floor" rule could have fought the grounded short-circuit above it.
+        //
+        // The corollary is the honest limit of this rule: nothing in the SERVO stops a descent. If the floor
+        // is a lie the bot keeps sinking a cell at a time. That is deliberate — standableBelow() is a live
+        // world read, and for MineDown the floor breaking underfoot IS the movement.
+        for (double f = 0.0; f < 1.0; f += 0.05) {
+            MediumBot b = new MediumBot().submerged().overAFloor().atY(FOOT_Y + f);
+            SteerControl.stationKeep(b, lateral());
+            assertFalse(b.jumping, "the floor hold must never press jump — at footY + " + f);
+        }
+    }
+
+    @Test
+    void lavaSettlesOntoAFloorToo() {
+        MediumBot b = new MediumBot().overAFloor().atY(FOOT_Y + 0.5);
+        b.lava = true;
+        SteerControl.stationKeep(b, lateral());
+
+        assertEquals(1, b.sank, "the rule is fluid-general, like the autopilot it retargets");
+    }
+
+    @Test
+    void theSubmergedShaftHoldMinesTheBlockItIsStandingOn() {
+        // MineDown's own shape, end to end: the bot stands on the block its plan declares AIR, so the hold
+        // must issue the break AND settle onto that very block on the same tick. (It breaks a moment later
+        // and the bot drops — that IS the movement.)
+        MovePlan plan = new MovePlan();
+        plan.phase("descend").need(MovePlan.Need.AIR, X, FOOT_Y - 1, Z);
+        PhaseRunner runner = new PhaseRunner();
+        runner.begin(plan);
+
+        MediumBot b = new MediumBot().submerged().overAFloor()
+                .obstructedAt(X, FOOT_Y - 1, Z).atY(FOOT_Y + 0.5);
+        assertFalse(runner.run(b, seg(FOOT_Y, FOOT_Y - 1)), "the shaft floor is unmet — the move cannot complete");
+        assertEquals(X, b.minedX, "the hold must still issue the break on the block underfoot");
+        assertEquals(FOOT_Y - 1, b.minedY);
+        assertEquals(1, b.sank, "the hold settles the bot onto the block it is breaking, where it mines 5x faster");
     }
 
     // ---- CLIMBABLE: scaffolding is exempt ---------------------------------------------------------------
