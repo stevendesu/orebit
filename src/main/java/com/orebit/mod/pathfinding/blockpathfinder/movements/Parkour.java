@@ -457,6 +457,22 @@ public final class Parkour implements Movement {
      * byte-identical. */
     public static final double HAZARD_TAKEOFF_LOOKAHEAD = 0.35;
 
+    /**
+     * Takeoff bound on a LOW-HALF STAIR launch (see the derivation in {@link #plan}): the 0.6-wide box stops
+     * overlapping the stair's tall half once its centre passes {@code 0.80} from the near edge, i.e.
+     * {@code 0.30} past centre. Firing at {@code 0.25} leaves {@code 0.05} of box still supported on the tick
+     * the jump is written, which is what makes vanilla convert it into an impulse instead of dropping it.
+     */
+    public static final double STAIR_TAKEOFF_EDGE = 0.25;
+
+    /**
+     * Rear limit of a stair run-up, as an along-line projection from the cell centre: {@code 0.30} from the
+     * near edge is the furthest back a 0.6-wide box fits WITHOUT overhanging the neighbouring column, which
+     * may be fire, lava, or simply solid — none of which is safe to assume for a jump PRECONDITION.
+     * {@code 0.30 → 0.75} is the {@link ParkourEnvelope#RUNUP_BLOCKS} window.
+     */
+    public static final double STAIR_BACK_PROJ = -0.20;
+
     /** Fix 3 predictive lookahead multiplier on the along-axis velocity (see {@link #HAZARD_TAKEOFF_LOOKAHEAD}
      *  — the measured trigger→last-grounded latency is ~3 ticks). */
     public static final double HAZARD_TAKEOFF_TICKS = 3.0;
@@ -1115,6 +1131,28 @@ public final class Parkour implements Movement {
         // velocity is ≤ 0; cleared the tick the bot is re-centred on the takeoff cell. While armed the trigger
         // is suppressed, so neither the advance nor the hot-entry press can fire.
         final boolean[] recentring = {false};
+        // LOW-HALF STAIR TAKEOFF (owner ruling 2026-08-14, the (211,-37,11) wedge). Probed LIVE and once, on
+        // the first runup tick, via BotSteering.surfaceTopYToward — the executor's twin of the planner's
+        // MovementContext.directionalTopY, so both read the same rule off the same block.
+        //
+        // A BOTTOM stair's raised step occupies the half on its FACING side, so a jump travelling AWAY from
+        // the facing launches over the 8/16 half and the FULL-height support ENDS AT THE CELL CENTRE. A
+        // 0.6-wide box is still supported at full height while its centre is under 0.80 — but TAKEOFF_EDGE
+        // fires at 0.85, a third of a block past that, and the runner drives-then-advances so the jump input
+        // is written a tick later still. Vanilla only turns `jumping` into the +0.42 impulse while onGround,
+        // so the press was SWALLOWED: the whole measured descent was free-fall (−0.078, −0.156, −0.230,
+        // −0.304), never a launch, and the bot dropped into the gap one cell along.
+        //
+        // That is structural, not a near miss: with a 0.35 edge such a jump can NEVER fire. So the trigger is
+        // capped at 0.25 past centre here (launch at 0.75, keeping 0.05 of box still over the tall half), and
+        // the re-centre latch below aims at the rear lip instead of the cell centre, giving the run-up the
+        // 0.30 → 0.75 window ParkourEnvelope.RUNUP_BLOCKS is baked from. Non-stair takeoffs read 16 and every
+        // constant below is untouched.
+        final int[] takeoffSurface = {-1};                  // sixteenths; −1 = not yet probed
+        final Predicate<BotSteering> lowHalfStair = b -> {
+            if (takeoffSurface[0] < 0) takeoffSurface[0] = b.surfaceTopYToward(fx, fy, fz, lipSx, lipSz);
+            return takeoffSurface[0] < 16;
+        };
         // Takeoff trigger: grounded AND the bot's along-axis progress past the start-cell centre
         // reaches TAKEOFF_EDGE — jump as late as possible without stepping off the lip. Fix 3: when
         // the first gap-floor cell is a takeoff hazard (magma/lava/honey), switch to the PREDICTIVE
@@ -1128,7 +1166,7 @@ public final class Parkour implements Movement {
                 double vAlong = ux * b.velX() + uz * b.velZ();
                 return proj + HAZARD_TAKEOFF_TICKS * vAlong >= HAZARD_TAKEOFF_LOOKAHEAD;
             }
-            return proj >= TAKEOFF_EDGE;
+            return proj >= (lowHalfStair.test(b) ? STAIR_TAKEOFF_EDGE : TAKEOFF_EDGE);
         };
         // HOT-ENTRY latch (owner ruling 2026-07-31): true once the runup has had a normal grounded tick
         // (trigger not yet met). A chained hand-off (a Descend's inbound sprint momentum) can ground the
@@ -1172,13 +1210,22 @@ public final class Parkour implements Movement {
                     // Bounded to the takeoff cell (which failWhen already admits), purely positional, one-way
                     // (the latch never re-arms), and no timers. If something blocks the re-centre the move
                     // simply stalls in place, which is the sanctioned outcome under the no-recovery rule.
+                    //
+                    // A LOW-HALF STAIR takeoff arms this unconditionally on a hot entry, whatever the sign of
+                    // the velocity: its launch window is only 0.25..0.30 past centre, so a hot entry has very
+                    // likely already overshot the last supported tick, and pressing jump there is the
+                    // swallowed press this whole branch exists to prevent. Its re-centre also aims further
+                    // back — the rear lip, not the cell centre — to open the 0.30 → 0.75 run-up.
                     if (!recentring[0] && !hadNormalRunupTick[0] && takeoffTrigger.test(b)
-                            && ux * b.velX() + uz * b.velZ() <= 0.0) {
+                            && (lowHalfStair.test(b) || ux * b.velX() + uz * b.velZ() <= 0.0)) {
                         recentring[0] = true;
                     }
                     if (recentring[0]) {
                         b.setSprinting(false);   // you cannot sprint backwards; the run-up re-sprints below
-                        if (SteerControl.recenterOn(b, fx + 0.5, fz + 0.5)) recentring[0] = false;
+                        double back = lowHalfStair.test(b) ? STAIR_BACK_PROJ : 0.0;
+                        if (SteerControl.recenterOn(b, fx + 0.5 + ux * back, fz + 0.5 + uz * back)) {
+                            recentring[0] = false;
+                        }
                         return;
                     }
                     SteerControl.steerTowards(b, v);

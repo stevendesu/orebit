@@ -119,7 +119,10 @@ public final class MovementContext {
      * NavBlock#topY} — so every non-stair call is byte-identical to the old scalar {@code topYOf}, and the
      * stair branch is gated behind one predictable {@link NavBlock#isStair} test on the hot path.
      */
-    public int directionalTopY(long d, int edgeDx, int edgeDz) {
+    // STATIC (2026-08-14): it reads no instance state, and the EXECUTOR needs the identical rule for a LIVE
+    // block ({@code AllyBotEntity.surfaceTopYToward}) rather than a second hand-copy of it. Existing
+    // {@code ctx.directionalTopY(...)} call sites compile unchanged.
+    public static int directionalTopY(long d, int edgeDx, int edgeDz) {
         if (NavBlock.isStair(d) && NavBlock.stairHalf(d) == 0) {
             int f = NavBlock.stairFacing(d);
             return (edgeDx == FACING_DX[f] && edgeDz == FACING_DZ[f]) ? 16 : 8;
