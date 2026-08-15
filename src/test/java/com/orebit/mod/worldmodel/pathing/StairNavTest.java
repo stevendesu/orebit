@@ -82,8 +82,13 @@ class StairNavTest {
 
         assertEquals(16, ctx.directionalTopY(eastBottom, 1, 0), "+X edge (FACING side) is the 16/16 high half");
         assertEquals(8, ctx.directionalTopY(eastBottom, -1, 0), "-X edge (low front) is the 8/16 half");
-        assertEquals(8, ctx.directionalTopY(eastBottom, 0, 1), "a perpendicular edge is the low 8/16 (straight approx)");
-        assertEquals(8, ctx.directionalTopY(eastBottom, 0, -1), "the other perpendicular edge is the low 8/16 too");
+        // CORRECTED 2026-08-14: the perpendicular edges are HIGH, not low. The raised step spans the cell's
+        // FULL WIDTH, so only the edge OPPOSITE the facing reads 8 — measured against vanilla's collision
+        // body for every stair block in StairCollisionTruthTest. The old "straight approx" 8 was described as
+        // conservative and is not: on a DESTINATION cell a smaller apparent rise ADMITS a step the bot cannot
+        // make, which walked the flagship bot into the side of a stair at (205,-38,57).
+        assertEquals(16, ctx.directionalTopY(eastBottom, 0, 1), "a perpendicular edge is the FULL 16/16 step");
+        assertEquals(16, ctx.directionalTopY(eastBottom, 0, -1), "the other perpendicular edge is 16/16 too");
 
         // The climb rise a +X step-assist onto this stair sees: from a full block (16) one level up onto the
         // stair's -X low front (8) is 16 + 8 - 16 = 8 <= STEP_ASSIST_MAX_RISE (a walk, not a jump).
