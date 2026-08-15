@@ -131,7 +131,8 @@ public final class ParkourEnvelope {
         return best;
     }
 
-    /** TERMINAL sprint speed — the run-up length this whole table ASSUMES ({@code A_G/(1−QG·gsf)}). */
+    /** TERMINAL sprint speed ({@code A_G/(1−QG·gsf)}) — what this table USED to assume, kept for
+     *  {@link #vRunup} to be measured against and for the reach report. */
     static double vInf(double gsf) {
         return A_G / (1.0 - QG * gsf);
     }
@@ -143,8 +144,40 @@ public final class ParkourEnvelope {
         return v * QG * gsf + A_G;
     }
 
+    /**
+     * The run-up the follower can actually GUARANTEE, in blocks (owner ruling 2026-08-14).
+     *
+     * <p>The table used to bake in {@link #vInf} — terminal sprint speed, i.e. an unbounded run-up — and
+     * nothing ever delivered that. The planner's own contract is centre-to-centre: a move puts the bot in
+     * the MIDDLE of its cell, so a jump that follows a Fall/Descend/Traverse starts its run-up from there,
+     * not from some prior straightaway. On a BOTTOM stair crossed toward its low half the bound is exactly
+     * this too: the bot may sit at {@code 0.30} (the furthest back a 0.6-wide box fits without overhanging
+     * a neighbour that may be fire, lava or solid) and must launch by {@code 0.80} (the last tick the box
+     * still overlaps the tall half), which is {@code 0.50} of run-up.
+     *
+     * <p><b>It costs almost nothing</b>, because MC ground acceleration is steep and the jump tick is
+     * dominated by {@code BOOST + A_G}: 0.5 blocks from a standstill reaches 83.7% of terminal ground speed
+     * but <b>94.8%</b> of the terminal jump-tick speed. The only admission that changes is {@code fall-1},
+     * 4 → 3 (measured in {@code StairRunupReachTest}). What it buys is that the emitted envelope is one the
+     * follower can actually realise from a standing start, instead of one that assumed a run-up the geometry
+     * never provides.
+     */
+    static final double RUNUP_BLOCKS = 0.5;
+
+    /** Ground speed after accelerating from REST across {@link #RUNUP_BLOCKS}, integrated with the same
+     *  {@link #vGroundStep} recurrence {@link #vInf} is the fixed point of. Cold — static-init only. */
+    static double vRunup(double gsf) {
+        double v = 0.0;
+        double travelled = 0.0;
+        for (int t = 0; t < 200 && travelled < RUNUP_BLOCKS; t++) {
+            v = vGroundStep(v, gsf);
+            travelled += v;
+        }
+        return v;
+    }
+
     private static double vJump(double gsf) {
-        return vJumpFrom(vInf(gsf), gsf);            // the table's assumption: arriving at terminal speed
+        return vJumpFrom(vRunup(gsf), gsf);          // a run-up the follower can actually deliver
     }
 
     /** Jump-tick speed reached from an arbitrary incoming ground speed (incoming velocity drags on the

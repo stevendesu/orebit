@@ -198,17 +198,30 @@ class ParkourLandingsTest {
     }
 
     @Test
-    void fallingFourGapIsOpenByDefault() {
-        // 4-gap, drop 1 — the owner-verified maximum, in the DEFAULT envelope after the flip (was
-        // aggressive-gated).
+    void fallingFourGapIsRefusedUnderTheHalfBlockRunup() {
+        // 4-gap, drop 1. This WAS offered, and the owner verified it in-game — but with a FULL block of
+        // run-up. The 2026-08-14 re-bake prices the envelope at the run-up the follower can actually
+        // GUARANTEE ({@code ParkourEnvelope.RUNUP_BLOCKS} = 0.5: centre-to-centre for a chained move, and
+        // 0.30→0.80 off a bottom stair), which drops the fall-1 row from 4 to 3. A half-block run-up cannot
+        // make this jump, so the planner must stop offering it.
+        //
+        // Owner ruling: accept the loss. Longer run-ups are frequent but NOT guaranteed, and pricing them
+        // would need the arrival SPEED in the A* node identity — (x,y,z,mode) → (x,y,z,mode,speed) — an
+        // order-of-magnitude expansion blow-up bought for a handful of marginal gaps.
         NavGridView grid = buildCourse(4, 4, null);
-        BlockPathPlan plan = BlockPathfinder.findPath(grid, START, new BlockPos(10, 4, 8),
+        assertNull(BlockPathfinder.findPath(grid, START, new BlockPos(10, 4, 8), BotCaps.DEFAULT, CORRIDOR),
+                "a falling 4-gap needs more run-up than the follower can guarantee");
+    }
+
+    @Test
+    void fallingThreeGapIsTheNewFallOneMaximum() {
+        // The boundary the row moved to: one gap shorter, still a single Parkour waypoint.
+        NavGridView grid = buildCourse(3, 4, null);
+        BlockPathPlan plan = BlockPathfinder.findPath(grid, START, new BlockPos(9, 4, 8),
                 BotCaps.DEFAULT, CORRIDOR);
-        assertNotNull(plan, "the owner-verified falling 4-gap should be offered with default flags");
+        assertNotNull(plan, "a falling 3-gap is inside the half-block-run-up envelope");
         assertEquals(1, count(plan, MovementRegistry.PARKOUR),
-                "the 4-gap falling jump should still be a single Parkour waypoint");
-        assertEquals(new BlockPos(9, 5, 8), waypointOf(plan, MovementRegistry.PARKOUR),
-                "stand position above the −1 landing floor at the far side of the 4-gap");
+                "the 3-gap falling jump should be a single Parkour waypoint");
     }
 
     @Test
