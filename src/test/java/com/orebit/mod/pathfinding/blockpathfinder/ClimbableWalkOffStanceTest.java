@@ -127,19 +127,17 @@ class ClimbableWalkOffStanceTest {
     private static final class Seg implements SteerView {
         final double tx, ty, tz;
         /**
-         * The step's ORIGIN height, in the SAME "feet-cell + 1.0" frame {@code BotNavigator.SegmentCursor}
-         * builds — i.e. a step standing at feet cell 169 has {@code sy == 170.0}. The servo reads vertical
-         * INTENT as the frame-free delta {@code ty - sy}, and drops back to the bot's frame ({@code ty - 1.0})
-         * for any absolute comparison. Getting that wrong is off-by-exactly-one-block and was the measured
-         * 2026-08-02 bug, so these fixtures state the frame rather than leaving it implied.
+         * The step's ORIGIN height, in the SAME frame {@code BotNavigator.SegmentCursor} builds — since
+         * 2026-08-15 that is the BASE of the feet cell, so a step standing at feet cell 169 has
+         * {@code sy == 169.0}. It was feet-cell + 1.0 until then, and the servo had to subtract the block back
+         * off for any absolute comparison; getting that wrong was off-by-exactly-one-block and was the measured
+         * 2026-08-02 bug. The frame now IS the bot's frame, so no correction is applied anywhere.
          */
-        // FEET CELL + 1.0, per the frame stated above and built by SegmentCursor (BotNavigator:1658-1659):
-        // these bots stand in feet cell FOOT_Y (171), so the segment origin is 172.0. It read FOOT_Y until
-        // 2026-08-12 — one block low, which put floorY a block under the bot and made every fixture here look
-        // aboveBand. Harmless while holdClimbableStance gated its correction on the step INTENT (these are
-        // Δy==0 segments, so dy was forced to 0.0 and the absolute comparison never ran); live once the band
-        // decides. See the same correction in CarryArrestGateTest.Level.
-        double sy = FOOT_Y + 1.0;
+        // THE FEET CELL itself, per the frame stated above and built by SegmentCursor: these bots stand in
+        // feet cell FOOT_Y (171), so the segment origin is 171.0. (History: this read FOOT_Y before 2026-08-12,
+        // was raised to FOOT_Y + 1.0 to match the then-current +1 frame, and came back to FOOT_Y when that frame
+        // was scrapped on 2026-08-15 — the value is the same as the original, for a now-correct reason.)
+        double sy = FOOT_Y;
         Seg(double tx, double ty, double tz) { this.tx = tx; this.ty = ty; this.tz = tz; }
         Seg from(double sy) { this.sy = sy; return this; }
         @Override public double sx() { return FOOT_X + 0.5; }
@@ -157,14 +155,12 @@ class ClimbableWalkOffStanceTest {
     /**
      * The witnessed step: lateral travel to the target column centre x=60.5, target feet y=171.00.
      *
-     * <p>{@code ty} is TARGET_FEET_Y + 1 because SegmentCursor's frame is feet-cell + 1.0
-     * (BotNavigator:1658-1659) and TARGET_FEET_Y is the feet CELL (171). That yields
-     * {@code floorY = ty - 1.0 = 171.0}, so the witnessed botY=171.022 sits 0.022 into the settled band —
-     * which is exactly what this file's own header comment claims ("only 0.022 BELOW the witnessed botY,
-     * inside the 0.05 margin") and what the old, one-block-low value contradicted.
+     * <p>{@code ty} IS TARGET_FEET_Y: SegmentCursor's vertical is the base of the feet cell, so
+     * {@code floorY == ty == 171.0} and the witnessed botY=171.022 sits 0.022 into the settled band — exactly
+     * what this file's header comment claims ("only 0.022 BELOW the witnessed botY, inside the 0.05 margin").
      */
     private static Seg lateralSeg() {
-        return new Seg(FOOT_X + 0.5, TARGET_FEET_Y + 1, FOOT_Z + 0.5);
+        return new Seg(FOOT_X + 0.5, TARGET_FEET_Y, FOOT_Z + 0.5);
     }
 
     // ---- CASE A: the witnessed wedge --------------------------------------------------------------
@@ -277,12 +273,12 @@ class ClimbableWalkOffStanceTest {
         b.climbable = true;
         b.vy = -0.15;
         // Feet cell exactly ON the waypoint — the fly-through: position matches, support does not.
-        assertFalse(MovementRegistry.TRAVERSE.reached(b, b.footX(), b.footY(), b.footZ()),
+        assertFalse(MovementRegistry.TRAVERSE.reached(b, b.footX(), b.footY(), b.footZ(), null),
                 "position alone must never advance the cursor: the falling bot's feet block merely TRANSITS "
                         + "this stand cell");
 
         b.vy = 0.0;                     // the measured held-hang reading (see aBotHangingOnAVineIsSettled)
-        assertTrue(MovementRegistry.TRAVERSE.reached(b, b.footX(), b.footY(), b.footZ()),
+        assertTrue(MovementRegistry.TRAVERSE.reached(b, b.footX(), b.footY(), b.footZ(), null),
                 "…and the same cell DOES count once the hang has arrested — otherwise the cursor never "
                         + "advances off a step the bot has actually completed, and it holds there forever");
     }
@@ -299,7 +295,7 @@ class ClimbableWalkOffStanceTest {
         for (double y : new double[] { 173.00, 173.10, 173.20 }) {
             VineBot b = new VineBot().at(61.5, y);
             b.standable = false;                    // a hang: nothing under the feet to catch it
-            SteerControl.drive(b, new Seg(61.5, 174.00, 253.5).from(175.00)); // intent: descend
+            SteerControl.drive(b, new Seg(61.5, 173.00, 253.5).from(174.00)); // intent: descend
             assertTrue(b.sneaking,
                     "y=" + y + " is settled on cell 173's floor — the servo must hold, not keep descending");
         }
@@ -310,7 +306,7 @@ class ClimbableWalkOffStanceTest {
         VineBot b = new VineBot().at(61.5, 173.425);  // the measured overshoot tick
         b.standable = false;
         b.vy = -0.15;                                  // clamped rate: next tick 173.275, still above band
-        SteerControl.drive(b, new Seg(61.5, 174.00, 253.5).from(175.00));
+        SteerControl.drive(b, new Seg(61.5, 173.00, 253.5).from(174.00));
         assertFalse(b.sneaking,
                 "0.425 above the floor is NOT settled — holding here strands the bot high, which is the "
                         + "Descend bad-frame bug we just fixed coming back the other way");
@@ -323,7 +319,7 @@ class ClimbableWalkOffStanceTest {
         VineBot b = new VineBot().at(61.5, 173.425);
         b.standable = false;
         b.vy = -0.45;
-        SteerControl.drive(b, new Seg(61.5, 174.00, 253.5).from(175.00));
+        SteerControl.drive(b, new Seg(61.5, 173.00, 253.5).from(174.00));
 
         assertTrue(b.sneaking,
                 "a tick that would carry the feet below the target cell's floor must tap sneak NOW — "
@@ -338,7 +334,7 @@ class ClimbableWalkOffStanceTest {
         b.climbBelow = false;
         b.standable = false;
         b.vy = -0.45;
-        SteerControl.drive(b, new Seg(61.5, 174.00, 253.5).from(175.00));
+        SteerControl.drive(b, new Seg(61.5, 173.00, 253.5).from(174.00));
         assertFalse(b.sneaking, "off a climbable there is nothing to arrest against; the drop is the plan's "
                 + "own business and pressing sneak would only arm the ledge edge-guard");
     }
@@ -357,7 +353,7 @@ class ClimbableWalkOffStanceTest {
         b.standable = false;                            // (61,168,253) is a vine — nothing to catch it
         // feet cell 169 -> 170, in the +1 frame: sy=170, ty=171. Δy intent = +1, and the bot at 169.055 is
         // genuinely a block short of it ((171-1) - 169.055 = +0.945).
-        SteerControl.drive(b, new Seg(61.5, 171.00, 252.5).from(170.00));
+        SteerControl.drive(b, new Seg(61.5, 170.00, 252.5).from(169.00));
 
         assertTrue(b.jumping, "a step whose feet target is a block ABOVE the bot is a CLIMB: jump is the "
                 + "climb input on a climbable. This is the measured (61,169,253) wedge — the old single "
@@ -372,7 +368,7 @@ class ClimbableWalkOffStanceTest {
         b.climbable = false;
         b.climbBelow = false;
         b.standable = true;
-        SteerControl.drive(b, new Seg(61.5, 171.00, 252.5).from(170.00));
+        SteerControl.drive(b, new Seg(61.5, 170.00, 252.5).from(169.00));
 
         assertTrue(b.jumping, "off a climbable the same +1 intent is an ordinary jump — one press covers both "
                 + "media, so the rise case needs no medium test at all");
@@ -383,7 +379,7 @@ class ClimbableWalkOffStanceTest {
         for (boolean climbable : new boolean[] { true, false }) {
             VineBot b = new VineBot().at(61.5, 171.022);
             b.climbable = climbable;
-            SteerControl.drive(b, new Seg(61.5, FOOT_Y - 3, 253.5).from(FOOT_Y)); // step intent: a DESCEND
+            SteerControl.drive(b, new Seg(61.5, FOOT_Y - 4, 253.5).from(FOOT_Y - 1)); // step intent: a DESCEND
 
             assertFalse(b.sneaking, "a descend must hold nothing: on a climbable the -0.15/t slide IS the "
                     + "climb-down (climbable=" + climbable + ")");
@@ -513,7 +509,7 @@ class ClimbableWalkOffStanceTest {
     void anHonestDescentStillReleasesTheStance() {
         VineBot b = new VineBot();
         b.standable = false;                // would otherwise sneak — the descending guard must still win
-        SteerControl.holdClimbableStance(b, new Seg(FOOT_X + 0.5, FOOT_Y - 3, FOOT_Z + 0.5));
+        SteerControl.holdClimbableStance(b, new Seg(FOOT_X + 0.5, FOOT_Y - 4, FOOT_Z + 0.5));
 
         assertFalse(b.sneaking,
                 "the segment genuinely wants to go DOWN, the one case where sinking IS the intent — the "

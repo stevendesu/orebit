@@ -1310,7 +1310,9 @@ final class BotNavigator {
                 phaseRunner.active() && !lastPhaseDone && !phaseRunner.doneNow(bot);
         for (int j = path.size() - 1; !phaseOwnsCompletion && j >= waypointIndex; j--) {
             BlockPos w = path.waypoint(j);
-            if (path.movement(j).reached(bot, w.getX(), w.getY(), w.getZ())) {
+            // The successor is what makes arrival mean "teed up" (Movement#reached); null past the end.
+            Movement nextMove = (j + 1 < path.size()) ? path.movement(j + 1) : null;
+            if (path.movement(j).reached(bot, w.getX(), w.getY(), w.getZ(), nextMove)) {
                 if (Debug.VERBOSE && j > waypointIndex) {
                     bot.vlog("advance SKIPPED " + (j - waypointIndex) + " step(s): " + waypointIndex + "→" + (j + 1)
                             + " — skipped steps' edits/phases never ran");
@@ -1659,12 +1661,14 @@ final class BotNavigator {
         private double sx, sy, sz, tx, ty, tz, nx, ny, nz;
         private boolean hasNext;
 
+        /** Vertical is the BASE of the feet cell (2026-08-15) — see {@link SteerView}'s coordinate-frame note
+         *  for why the old {@code + 1.0} (the feet cell's CEILING) was scrapped. Horizontal is unchanged. */
         void set(BlockPos start, BlockPos target, BlockPos next) {
-            sx = start.getX() + 0.5; sy = start.getY() + 1.0; sz = start.getZ() + 0.5;
-            tx = target.getX() + 0.5; ty = target.getY() + 1.0; tz = target.getZ() + 0.5;
+            sx = start.getX() + 0.5; sy = start.getY(); sz = start.getZ() + 0.5;
+            tx = target.getX() + 0.5; ty = target.getY(); tz = target.getZ() + 0.5;
             hasNext = next != null;
             if (hasNext) {
-                nx = next.getX() + 0.5; ny = next.getY() + 1.0; nz = next.getZ() + 0.5;
+                nx = next.getX() + 0.5; ny = next.getY(); nz = next.getZ() + 0.5;
             }
         }
 
@@ -1923,7 +1927,8 @@ final class BotNavigator {
                 phaseRunner.phase(), phaseRunner.phases(),
                 bot.footX(), bot.footY(), bot.footZ(), String.format("%.3f", bot.getY()),
                 bot.grounded(), bot.onClimbable(),
-                movement.reached(bot, wp.getX(), wp.getY(), wp.getZ()),
+                movement.reached(bot, wp.getX(), wp.getY(), wp.getZ(),
+                        (waypointIndex + 1 < path.size()) ? path.movement(waypointIndex + 1) : null),
                 String.format("%.2f", wp.getY() + 1.0),
                 // THE STEERED SEGMENT (2026-08-12). Every servo derives its along/cross axes from
                 // (sx,sz)->(tx,tz), so without it a logged yaw/head/fwd triple cannot be checked against what

@@ -96,7 +96,14 @@ public final class EndSprintSwim implements Movement {
      * convicted {@link Surface}'s missing Y term on the flagship waterfall.
      */
     @Override
-    public boolean reached(BotSteering b, int wx, int wy, int wz) {
-        return !b.prone() && Swim.reachedSwim(b, wx, wy, wz);
+    public boolean reached(BotSteering b, int wx, int wy, int wz, Movement next) {
+        return !b.prone() && Swim.reachedSwim(b, wx, wy, wz) && Movement.teedUp(b, wx, wy, wz, next);
+    }
+
+    /** Permissive entry: this move's servo establishes its own stance, so it accepts any pose (see
+     *  {@link Movement#entryReady}). Also exactly the pre-2026-08-15 behaviour, where no entry test existed. */
+    @Override
+    public boolean entryReady(BotSteering b, int wx, int wy, int wz) {
+        return true;
     }
 }

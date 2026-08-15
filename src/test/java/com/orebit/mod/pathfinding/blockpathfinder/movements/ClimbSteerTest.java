@@ -89,7 +89,7 @@ class ClimbSteerTest {
     @Test
     void climbDownGivesNoSneakAndNoJump() {
         // Segment: start feet-cell 177 → target feet-cell 176 (cursor frame: +1 on each).
-        View seg = new View(55.5, 178.0, 256.5, 55.5, 177.0, 256.5);
+        View seg = new View(55.5, 177.0, 256.5, 55.5, 176.0, 256.5);
         FakeBot bot = new FakeBot(55.5, 177.0, 256.29); // perched on the lip, slightly off-centre
         MovementRegistry.CLIMB.steer(bot, seg);
         assertFalse(bot.sneaking, "a descent must NOT sneak — the sneak edge-guard pins the bot on any lip");
@@ -100,7 +100,7 @@ class ClimbSteerTest {
     /** The HANGING lateral cling — the stance the sneak exists for (it suppresses the −0.15/t slide). */
     @Test
     void lateralClingHoldsSneak() {
-        View seg = new View(55.5, 178.0, 256.5, 56.5, 178.0, 256.5); // Δy == 0: ease across the surface
+        View seg = new View(55.5, 177.0, 256.5, 56.5, 177.0, 256.5); // Δy == 0: ease across the surface
         FakeBot bot = new FakeBot(55.5, 177.2, 256.5); // sagging below the feet target (the vine sag)
         bot.grounded = false;   // mid-gap hang — nothing under the box
         bot.onClimbable = true;
@@ -117,7 +117,7 @@ class ClimbSteerTest {
      *  sneak already engaged (airborne), so the slide suppression arrests in-cell. */
     @Test
     void lateralEntryFromLedgeJumpGrabs() {
-        View seg = new View(55.5, 178.0, 256.5, 56.5, 178.0, 256.5); // Δy == 0: the entry grab
+        View seg = new View(55.5, 177.0, 256.5, 56.5, 177.0, 256.5); // Δy == 0: the entry grab
         FakeBot bot = new FakeBot(55.5, 177.0, 256.5); // standing on the takeoff ledge at the lip
         MovementRegistry.CLIMB.steer(bot, seg);        // grounded (default), feet cell not climbable
         assertFalse(bot.sneaking, "a grounded entry lateral must NOT sneak — the edge-guard pins the lip");
@@ -129,7 +129,7 @@ class ClimbSteerTest {
      *  (the same edge-guard), no jump (an in-climbable grounded jump is a truncated 0.2 hop). */
     @Test
     void lateralOnLadderPlateWalksPlain() {
-        View seg = new View(55.5, 178.0, 256.5, 56.5, 178.0, 256.5); // Δy == 0: plate to plate
+        View seg = new View(55.5, 177.0, 256.5, 56.5, 177.0, 256.5); // Δy == 0: plate to plate
         FakeBot bot = new FakeBot(55.5, 177.0, 256.5); // standing ON the 3/16 plate
         bot.onClimbable = true;                        // feet cell IS the ladder
         MovementRegistry.CLIMB.steer(bot, seg);
@@ -140,7 +140,7 @@ class ClimbSteerTest {
 
     @Test
     void climbUpHoldsJump() {
-        View seg = new View(55.5, 177.0, 256.5, 55.5, 178.0, 256.5); // Δy = +1
+        View seg = new View(55.5, 176.0, 256.5, 55.5, 177.0, 256.5); // Δy = +1
         FakeBot bot = new FakeBot(55.5, 176.0, 256.5);
         MovementRegistry.CLIMB.steer(bot, seg);
         assertTrue(bot.jumping, "an ascent holds jump — vanilla climbs at +0.2/t while jumping");
@@ -151,7 +151,7 @@ class ClimbSteerTest {
      *  stand-on-top shape. (NOTES-movement-physics.md §5.) */
     @Test
     void sinkThroughScaffoldDeckSneaks() {
-        View seg = new View(55.5, 178.0, 256.5, 55.5, 177.0, 256.5); // Δy = −1
+        View seg = new View(55.5, 177.0, 256.5, 55.5, 176.0, 256.5); // Δy = −1
         FakeBot bot = new FakeBot(55.5, 177.0, 256.5);
         bot.scaffoldBelow = true; // grounded on the deck, feet cell open
         MovementRegistry.CLIMB.steer(bot, seg);
@@ -163,7 +163,7 @@ class ClimbSteerTest {
      *  edge-guard-pin the bot ON the 3/16 plate; the recenter + gravity perform the sink instead. */
     @Test
     void ladderPlateSinkDoesNotSneak() {
-        View seg = new View(55.5, 178.0, 256.5, 55.5, 177.0, 256.5); // Δy = −1
+        View seg = new View(55.5, 177.0, 256.5, 55.5, 176.0, 256.5); // Δy = −1
         // Standing ON the 3/16 plate strip means the bot's centre sits near the cell edge — well outside
         // the column deadband — so the re-centre must still push it off the strip toward the centre.
         FakeBot bot = new FakeBot(55.5, 177.0, 256.2);
@@ -178,7 +178,7 @@ class ClimbSteerTest {
      *  climb ratchet beside a trunk vine. */
     @Test
     void alignedDescendGivesExactZeroForward() {
-        View seg = new View(55.5, 178.0, 256.5, 55.5, 177.0, 256.5); // Δy = −1
+        View seg = new View(55.5, 177.0, 256.5, 55.5, 176.0, 256.5); // Δy = −1
         FakeBot bot = new FakeBot(55.5, 177.5, 256.4); // 0.1 off centre — inside the 0.15 deadband
         MovementRegistry.CLIMB.steer(bot, seg);
         assertTrue(bot.forward == 0.0f, "aligned: exact zero forward, not an eased push; was " + bot.forward);
@@ -190,7 +190,7 @@ class ClimbSteerTest {
      *  −0.15 clamp carries the descent (the pre-arc regime, unchanged). */
     @Test
     void hangDescendStaysInputFree() {
-        View seg = new View(55.5, 178.0, 256.5, 55.5, 177.0, 256.5); // Δy = −1
+        View seg = new View(55.5, 177.0, 256.5, 55.5, 176.0, 256.5); // Δy = −1
         FakeBot bot = new FakeBot(55.5, 177.5, 256.5);
         bot.onClimbable = true;
         bot.scaffoldBelow = true; // even with scaffolding below: in-column descent needs NO sneak

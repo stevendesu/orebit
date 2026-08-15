@@ -58,6 +58,19 @@ public final class SwimCourse {
 
     /** Water-surface / lip / platform level: solid platform & wall tops and the top water layer all sit at S,
      *  so a bot stands at S+1 and steps DOWN one cell into the surface (the realistic contained-pool lip). */
+    /**
+     * <b>MEASURED, UNEXPLAINED: the course is sensitive to its absolute Y</b> (2026-08-15). Relocating every
+     * tile by moving S from 160 to 172 left 15 of 17 verdicts character-identical but flipped two in OPPOSITE
+     * directions — {@code gap} PASS&rarr;FAIL and {@code sidegapwet} FAIL&rarr;PASS. The tested hypothesis
+     * (that {@code S=160} sits on a level-0 region Y seam — it does; {@link
+     * com.orebit.mod.worldmodel.hpa.RegionAddress#LEAF_SIZE} is 16 over a world floor of -64, so rows break at
+     * {@code y = 0 (mod 16)}) was REFUTED as the cause: not one of the nine "nav gave up" surface cards
+     * changed verdict. Left at 160 because 172 bought nothing and cost {@code gap}.
+     *
+     * <p>Do not read this as a knob to tune. The positional sensitivity is a real unexplained signal and the
+     * two flipped cards are the only handle on it; changing S again without a mechanism just reshuffles which
+     * card is broken.
+     */
     private static final int S = 160;
     private static final int BASE_X = 8;
     private static final int BASE_Z = 8;
@@ -65,6 +78,15 @@ public final class SwimCourse {
      *  inside the loaded+built nav bubble). */
     private static final int COLS = 4;
     private static final int STRIDE = 22; // grid cell size (> the longest tile span so tiles never touch)
+
+    /** Vertical-shaft geometry shared by {@link Kind#SIDE_GAP_WET} / {@link Kind#SIDE_GAP_DRY}: the shaft's
+     *  topmost and bottom-most carved cells, and the FEET level of the 2-tall side pocket. The pocket sits
+     *  mid-column on purpose — with carved cells both above and below it, {@code fluidTop} at the pocket
+     *  level is 1.0 and {@code solidAt(wy+2)} is false, so NEITHER of {@code reachedSwim}'s two clamps fires
+     *  and its target stays the unmodified {@code wy + 1.0}. That is the whole point of the fixture. */
+    private static final int SHAFT_TOP_Y = S - 2;
+    private static final int SHAFT_BOTTOM_Y = S - 10;
+    private static final int SIDE_GAP_Y = S - 6;
 
     private static final int WARMUP_TICKS = 120;
     private static final int SETTLE_TICKS = 40;
@@ -139,6 +161,21 @@ public final class SwimCourse {
                         //   pool BOTTOM directly adjacent → the first in-water move is a DOWN dive, not a
                         //   lateral step; reproduces the lip-stuck bug (dry-perch, cursor advances past the
                         //   water-entry waypoint, bot tries to swim down while still dry and stalls)
+        SIDE_GAP_WET,   // a sealed 1x1 vertical water SHAFT with a 2-tall SUBMERGED side pocket (solid floor,
+                        //   solid cap) partway up. The bot swims up the column, stops level with the pocket, and
+                        //   steps LATERALLY out of the water column onto the pocket floor — a Swim -> Traverse
+                        //   handoff (Traverse.candidates never requires a standable START floor, so it emits the
+                        //   edge straight off a floating node). THE DEADLOCK PROBE: the pocket level has water
+                        //   above AND below it, so fluidTop == 1.0 and nothing is solid at wy+2 — neither the
+                        //   ceiling clamp nor the surface clamp fires, and reachedSwim's target stays the full
+                        //   wy + 1.0, i.e. feet cell wy+1 while the Traverse is framed for wy. Fully sealed, so
+                        //   there is no fluid flow and the fixture is bit-stable.
+        SIDE_GAP_DRY,   // the owner's SWS/SWA/SWA/SWS shape with a genuinely DRY pocket. Sealed geometry cannot
+                        //   express it — a water source beside air floods it — so the column is a WATERFALL: a
+                        //   source at the top over an open shaft draining into a wide shallow basin. Vanilla's
+                        //   flowing-down rule then suppresses lateral spread and the pocket stays dry, which is
+                        //   exactly why (154,-7,103) held water while (155,-7,103) read fl0.000 on the flagship.
+                        //   Same handoff as SIDE_GAP_WET, plus the water -> air medium change on the way out.
         SWIM_TURN,      // a SUBMERGED 1-wide sprint-swim tunnel (stone ceiling → prone the whole way) that runs
                         //   a LONG +X approach, then turns 90° to +Z; an UP-bubble-column sits STRAIGHT AHEAD of
                         //   the corner (the +X-overshoot cell). The only route is +X→turn→+Z (the column is
@@ -219,6 +256,19 @@ public final class SwimCourse {
                 this.startY = S + 1;                 // feet on top of the honey lip
                 this.startZ = zc + 0.5;
                 this.goal = new BlockPos(poolX0, yFloor + 1, zc);
+                return;
+            }
+
+            if (kind == Kind.SIDE_GAP_WET || kind == Kind.SIDE_GAP_DRY) {
+                // Vertical shaft (see buildSideGap). Start submerged at the BOTTOM of the column so the approach
+                // to the pocket is a genuine swim RISE — the direction the flagship failed in — and the goal is
+                // the far end of the pocket, which is only reachable by leaving the water column sideways at
+                // exactly the pocket's feet level. Nothing else in the tile is passable, so an off-by-one-cell
+                // handoff cannot be walked off; the bot either exits at the right height or never exits.
+                this.startX = baseX + 2 + 0.5;
+                this.startY = SHAFT_BOTTOM_Y;
+                this.startZ = zc + 0.5;
+                this.goal = new BlockPos(baseX + 6, SIDE_GAP_Y, zc);
                 return;
             }
 
@@ -333,6 +383,8 @@ public final class SwimCourse {
             add("lipdown",     Kind.LIP_DOWN,      4, 6);
             add("swimturn",    Kind.SWIM_TURN,     4, 8);
             add("swimmaze",    Kind.SWIM_MAZE,     4, 8);
+            add("sidegapwet",  Kind.SIDE_GAP_WET, 10, 8);
+            add("sidegapdry",  Kind.SIDE_GAP_DRY, 10, 8);
         }
 
         void add(String name, Kind kind, int depth, int poolLen) {
@@ -578,6 +630,8 @@ public final class SwimCourse {
             if (tr.kind == Kind.GAP_1X1_ANGLE) { buildAngleGap(tr); return; }
             if (tr.kind == Kind.SWIM_TURN)     { buildSwimTurn(tr); return; }
             if (tr.kind == Kind.SWIM_MAZE)     { buildSwimMaze(tr); return; }
+            if (tr.kind == Kind.SIDE_GAP_WET)  { buildSideGap(tr, false); return; }
+            if (tr.kind == Kind.SIDE_GAP_DRY)  { buildSideGap(tr, true); return; }
             buildTank(tr);
             switch (tr.kind) {
                 case BUBBLE_UP:   floorFeature(tr, SOUL_SAND); break; // upward bubble column in the shaft
@@ -733,6 +787,70 @@ public final class SwimCourse {
             for (int x = tr.baseX + 7; x <= tr.baseX + 8; x++) {       // dry bank (floor stays stone at yB-1)
                 set(x, yB, z, AIR);
                 set(x, yB + 1, z, AIR);
+            }
+        }
+
+        /**
+         * The owner's {@code SWS / SWA / SWA / SWS} shape (2026-08-15): a 1-wide vertical water column with a
+         * 2-tall side pocket partway up, carved out of one solid stone block. The bot starts submerged at the
+         * BOTTOM of the column, swims up, and must leave the column SIDEWAYS at exactly the pocket's feet level.
+         *
+         * <p><b>What it isolates.</b> The lateral escape is a {@link
+         * com.orebit.mod.pathfinding.blockpathfinder.movements.Traverse Traverse}, not a swim move — {@code
+         * Traverse.candidates} reads {@code startTopY = standable(startDesc) ? topYOf : 16} and so never requires
+         * a standable START floor, which lets it emit the edge straight off a floating node. So the tile is a
+         * pure <b>swim &rarr; ground handoff</b>, and the pocket is deliberately mid-column so that neither of
+         * {@code Swim.reachedSwim}'s clamps applies: water above the pocket level means {@code fluidTop == 1.0}
+         * (no surface clamp) and a carved cell at {@code wy+2} means {@code solidAt} is false (no ceiling clamp).
+         * The swim's ride target therefore stays the full {@code wy + 1.0} — feet cell {@code wy+1} — while the
+         * Traverse is framed for feet cell {@code wy}. That is the off-by-one-cell handoff, with nothing masking
+         * it. The flagship's {@code (154,-8,103)} failure is the SAME defect seen through the ceiling clamp,
+         * which happens to pull the target back down into the correct cell there.
+         *
+         * <p><b>No walk-off.</b> Every cell in the tile that is not the shaft or the pocket is solid, so a bot
+         * that leaves the column at the wrong height has nowhere to go — it cannot accidentally recover by
+         * wandering. The trial either exits at the right level or times out with the trace showing why.
+         *
+         * <p><b>Why {@code dry} needs a waterfall.</b> Sealed geometry cannot express {@code SWA}: a water source
+         * beside air floods it. Vanilla only leaves a dry cell next to water when the water is FLOWING DOWN,
+         * which suppresses lateral spread (see the fluid-spread model notes) — which is precisely why the
+         * flagship's {@code (154,-7,103)} held water while {@code (155,-7,103)} logged {@code fl0.000}. So the
+         * dry variant is a real waterfall: one source at {@link #SHAFT_TOP_Y} over an OPEN shaft that drains into
+         * a wide shallow basin below. The basin is sized inside water's 7-block spread limit in every direction,
+         * so it stabilises about one block deep and never backs the column up — the column keeps falling, and the
+         * pocket stays dry, for the whole trial. The wet variant is fully sealed and has no fluid motion at all,
+         * which makes it the bit-stable oracle of the pair; the dry one is the faithful reproduction.
+         */
+        void buildSideGap(Trial tr, boolean dry) {
+            final int x0 = tr.baseX + 1, x1 = tr.baseX + 8;
+            final int z0 = tr.zc - 2, z1 = tr.zc + 2;
+            final int yBase = SHAFT_BOTTOM_Y - 2;   // solid floor under the basin
+            final int sx = tr.baseX + 2;            // the shaft column
+            final int zc = tr.zc;
+
+            for (int x = x0; x <= x1; x++) {        // one solid block; everything below is carved out of it
+                for (int z = z0; z <= z1; z++) {
+                    for (int y = yBase; y <= S + 1; y++) set(x, y, z, STONE);
+                }
+            }
+
+            // The vertical column. WET fills it with sources (sealed, static); DRY carves it open and puts a
+            // single source at the top so vanilla runs it as a falling column.
+            for (int y = SHAFT_BOTTOM_Y; y <= SHAFT_TOP_Y; y++) {
+                set(sx, y, zc, dry ? AIR : WATER);
+            }
+            if (dry) {
+                set(sx, SHAFT_TOP_Y, zc, WATER);                    // the waterfall's only source
+                for (int x = x0; x <= x1; x++) {                    // drain basin: one open layer under the shaft
+                    for (int z = z0; z <= z1; z++) set(x, SHAFT_BOTTOM_Y - 1, z, AIR);
+                }
+            }
+
+            // The 2-tall side pocket: feet at SIDE_GAP_Y, head one above. Its floor (SIDE_GAP_Y-1) and cap
+            // (SIDE_GAP_Y+2) are simply the surrounding stone, left untouched — that is the S in SWS.
+            for (int x = tr.baseX + 3; x <= tr.baseX + 6; x++) {
+                set(x, SIDE_GAP_Y, zc, dry ? AIR : WATER);
+                set(x, SIDE_GAP_Y + 1, zc, dry ? AIR : WATER);
             }
         }
 

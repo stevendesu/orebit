@@ -76,7 +76,15 @@ public final class StartSprintSwim implements Movement {
     }
 
     @Override
-    public boolean reached(BotSteering b, int wx, int wy, int wz) {
-        return b.prone() && b.footX() == wx && b.footZ() == wz;
+    public boolean reached(BotSteering b, int wx, int wy, int wz, Movement next) {
+        return b.prone() && b.footX() == wx && b.footZ() == wz
+                && Movement.teedUp(b, wx, wy, wz, next);
+    }
+
+    /** Permissive entry: this move's servo establishes its own stance, so it accepts any pose (see
+     *  {@link Movement#entryReady}). Also exactly the pre-2026-08-15 behaviour, where no entry test existed. */
+    @Override
+    public boolean entryReady(BotSteering b, int wx, int wy, int wz) {
+        return true;
     }
 }
