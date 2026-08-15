@@ -99,7 +99,8 @@ class StairRunupReachTest {
                 "a 0.5-block sprint from rest should reach well over half terminal speed; got " + vLip);
         org.junit.jupiter.api.Assertions.assertEquals(
                 ParkourEnvelope.X(8, GSF, OCC),
-                ParkourEnvelope.xFrom(8, ParkourEnvelope.vJumpFrom(vTerm, GSF), GSF, OCC), 1e-12,
-                "X must delegate to xFrom at the terminal jump speed — the refactor is behaviour-preserving");
+                ParkourEnvelope.xFrom(8, ParkourEnvelope.vJumpFrom(
+                        ParkourEnvelope.vRunup(GSF), GSF), GSF, OCC), 1e-12,
+                "X must delegate to xFrom at the RUN-UP jump speed — that is what the table now bakes");
     }
 }

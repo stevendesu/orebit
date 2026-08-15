@@ -19,18 +19,36 @@ class ParkourEnvelopeTest {
 
     // Row order: {flat, rise, fall1, fall2, fall3, diag} (ParkourEnvelope.FLAT..DIAG).
 
+    // ---- The 2026-08-14 re-bake: HALF A BLOCK of run-up, not an unbounded one --------------------------
+    //
+    // The table used to assume {@code ParkourEnvelope.vInf} — TERMINAL sprint speed, i.e. a run-up long
+    // enough to reach it — and nothing ever delivered that. The follower's guarantee is centre-to-centre: a
+    // move puts the bot in the MIDDLE of its cell, so a chained Fall→Parkour starts from there; and on a
+    // bottom stair the bot may sit at 0.30 and must launch by 0.80, which is the same 0.50. RUNUP_BLOCKS
+    // now bakes exactly that.
+    //
+    // Owner ruling: keep it pessimistic rather than model the arrival speed. Longer run-ups are frequent but
+    // NOT guaranteed, and pricing them would change the A* node identity from (x,y,z,mode) to
+    // (x,y,z,mode,SPEED) — an order-of-magnitude expansion blow-up bought for a few marginal gaps.
+    //
+    // It costs 5% of jump-tick speed (94.8% of terminal) and exactly four admissions, all accepted: base
+    // fall-1 4→3, slab diag 2→1, berry fall-2 3→2, and the falling 4-gap in ParkourLandingsTest — which the
+    // owner had verified in-game with a FULL block of run-up, so it was never a half-block jump.
+
     @Test
-    void baseRowIsFlat3Rise2Fall444Diag2() {
+    void baseRowIsFlat3Rise2Fall344Diag2() {
         // Full-block takeoff (topY 16), normal floor, no slow body — the reference envelope.
-        assertArrayEquals(new int[] {3, 2, 4, 4, 4, 2}, ParkourEnvelope.MAX_GAP[16][0][0],
-                "BASE row must be flat 3 / rise 2 / fall 4/4/4 / diag 2 (rise-3, flat-4, diag-3 excluded)");
+        assertArrayEquals(new int[] {3, 2, 3, 4, 4, 2}, ParkourEnvelope.MAX_GAP[16][0][0],
+                "BASE row must be flat 3 / rise 2 / fall 3/4/4 / diag 2 (rise-3, flat-4, diag-3 excluded; "
+                        + "fall-1 is 3 under the half-block run-up, was 4 under the terminal-speed fiction)");
     }
 
     @Test
     void slabTakeoffRowIsTighter() {
-        // Slab takeoff (topY 8): the +0.5 effective rise eats the flat and rise reach.
-        assertArrayEquals(new int[] {2, 0, 3, 4, 4, 2}, ParkourEnvelope.MAX_GAP[8][0][0],
-                "slab takeoff row must be flat 2 / rise 0 / fall 3/4/4 / diag 2");
+        // Slab takeoff (topY 8): the +0.5 effective rise eats the flat and rise reach, and under the
+        // half-block run-up the diagonal goes with them.
+        assertArrayEquals(new int[] {2, 0, 3, 4, 4, 1}, ParkourEnvelope.MAX_GAP[8][0][0],
+                "slab takeoff row must be flat 2 / rise 0 / fall 3/4/4 / diag 1");
     }
 
     @Test
@@ -43,8 +61,9 @@ class ParkourEnvelopeTest {
     @Test
     void berryBodyRowIsTighter() {
         // A LIGHT through-slow body cell (berry) scales the whole horizontal arc.
-        assertArrayEquals(new int[] {2, 0, 2, 3, 3, 1}, ParkourEnvelope.MAX_GAP[16][0][1],
-                "berry-body takeoff row must be flat 2 / rise 0 / fall 2/3/3 / diag 1");
+        assertArrayEquals(new int[] {2, 0, 2, 2, 3, 1}, ParkourEnvelope.MAX_GAP[16][0][1],
+                "berry-body takeoff row must be flat 2 / rise 0 / fall 2/2/3 / diag 1 (fall-2 dropped 3→2 "
+                        + "with the half-block run-up)");
     }
 
     @Test
@@ -71,10 +90,12 @@ class ParkourEnvelopeTest {
     void landingTicksAndBudgetsMatchTheModel() {
         // The airtime / reach values printed by parkour_envelope_params.py — pin them so a constant edit
         // is caught before it shifts a table cell.
+        // Airtime is untouched by the run-up re-bake (it is vertical); the REACH budgets shrank ~3.5% with
+        // the jump-tick speed (0.4806 → 0.4557). Old values were 3.3442 / 3.9140 under terminal speed.
         assertEquals(11, ParkourEnvelope.tForDy(0.0, 1.0), "flat airtime is 11 ticks");
-        assertEquals(3.3442, ParkourEnvelope.X(11, 1.0, 1.0), 1e-3, "flat reach budget ~3.344 blocks");
+        assertEquals(3.2269, ParkourEnvelope.X(11, 1.0, 1.0), 1e-3, "flat reach budget ~3.227 blocks");
         assertEquals(13, ParkourEnvelope.tForDy(-1.0, 1.0), "fall-1 airtime is 13 ticks");
-        assertEquals(3.9140, ParkourEnvelope.X(13, 1.0, 1.0), 1e-3, "fall-1 reach budget ~3.914 blocks");
+        assertEquals(3.7868, ParkourEnvelope.X(13, 1.0, 1.0), 1e-3, "fall-1 reach budget ~3.787 blocks");
     }
 
     @Test
