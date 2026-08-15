@@ -112,12 +112,27 @@ public final class MovementContext {
     /**
      * The collision top surface (sixteenths) of floor descriptor {@code d} as seen from the horizontal
      * edge {@code (edgeDx,edgeDz)} — the direction from THIS cell toward the neighbour whose transition is
-     * being priced. For a BOTTOM stair this is the DIRECTIONAL surface: {@code 16} when the high 16/16 half
-     * is on that edge (i.e. the edge points along the stair's FACING — see {@link NavBlock#stairFacing}),
-     * else {@code 8} (the low 8/16 front, and both perpendicular edges — the straight-stair approximation,
-     * corners ignored per v1 scope). For a TOP stair (flat 16/16 top) or any non-stair this is simply {@link
-     * NavBlock#topY} — so every non-stair call is byte-identical to the old scalar {@code topYOf}, and the
-     * stair branch is gated behind one predictable {@link NavBlock#isStair} test on the hot path.
+     * being priced. For a BOTTOM stair this is the DIRECTIONAL surface: the raised step spans the cell's
+     * FULL WIDTH on its facing side, so only the edge OPPOSITE the facing reads the low {@code 8}; the
+     * facing edge and BOTH perpendicular edges read {@code 16}. For a TOP stair (flat 16/16 top) or any
+     * non-stair this is simply {@link NavBlock#topY} — so every non-stair call is byte-identical to the old
+     * scalar {@code topYOf}, and the stair branch is gated behind one predictable {@link NavBlock#isStair}
+     * test on the hot path.
+     *
+     * <p><b>Corrected 2026-08-14 — the perpendicular edges used to read 8</b>, documented as a conservative
+     * "straight-stair approximation, corners ignored per v1 scope". It is not conservative, and
+     * {@code StairCollisionTruthTest} measures vanilla saying so:
+     * <pre>
+     *     facing=north | N=16 E=16 S= 8 W=16
+     *     facing=east  | N=16 E=16 S=16 W= 8
+     * </pre>
+     * Under-reporting a surface is only safe for the START of a move, where it makes the rise look BIGGER.
+     * On the DESTINATION it makes the rise look SMALLER and admits a step the bot cannot make: {@code
+     * Traverse} asks {@code directionalTopY(dest, −d)}, so a SOUTH-facing stair entered from the WEST
+     * reported 8, the rise gate saw {@code 0.5 ≤ STEP_ASSIST_MAX_RISE} instead of a full {@code 1.0}, and
+     * the walk was emitted into the SIDE of the step. Convicted on the flagship at {@code (205,-38,57)}:
+     * the bot pressed {@code fwd=1.00} into that face with {@code hcol=true} for 3400 ticks, one block below
+     * where its own plan believed it stood, with no envelope to catch it (owner-diagnosed).
      */
     // STATIC (2026-08-14): it reads no instance state, and the EXECUTOR needs the identical rule for a LIVE
     // block ({@code AllyBotEntity.surfaceTopYToward}) rather than a second hand-copy of it. Existing
@@ -125,7 +140,8 @@ public final class MovementContext {
     public static int directionalTopY(long d, int edgeDx, int edgeDz) {
         if (NavBlock.isStair(d) && NavBlock.stairHalf(d) == 0) {
             int f = NavBlock.stairFacing(d);
-            return (edgeDx == FACING_DX[f] && edgeDz == FACING_DZ[f]) ? 16 : 8;
+            // Low only ACROSS FROM the facing; the step's full width keeps both perpendicular edges high.
+            return (edgeDx == -FACING_DX[f] && edgeDz == -FACING_DZ[f]) ? 8 : 16;
         }
         return NavBlock.topY(d);
     }
