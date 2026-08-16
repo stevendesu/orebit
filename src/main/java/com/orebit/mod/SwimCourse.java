@@ -15,6 +15,7 @@ import com.orebit.mod.platform.BotTeleport;
 import com.orebit.mod.platform.ConfigDir;
 import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.PlatformEvents;
+import com.orebit.mod.platform.Worlds;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.tags.FluidTags;
@@ -483,7 +484,7 @@ public final class SwimCourse {
             bot.clearFire();
             // A mazeportal wall clip left the bot in the END last trial — setPos below is same-level only, so
             // bring it back through the cross-dimension seam first (platform/BotTeleport, both era flavors).
-            if (bot.level() != level) {
+            if (Worlds.of(bot) != level) {
                 BotTeleport.to(bot, level, tr.startX, tr.startY, tr.startZ, tr.startYaw, 0f);
             }
             bot.setMode(AllyBotEntity.Mode.STAY);
@@ -534,7 +535,7 @@ public final class SwimCourse {
             // box-clip of a wall cell moves the bot to the End the same tick. Checked FIRST — every later
             // read (distance, water state) is meaningless about a bot in another dimension. enter() recovers
             // the bot cross-dimension for the next trial.
-            if (bot.level() != level) {
+            if (Worlds.of(bot) != level) {
                 record(tr, "FAIL", "teleported out of the course dimension (clipped a portal wall)");
                 return;
             }
