@@ -76,10 +76,12 @@ class SubmergedMiningStanceTest {
     // ---- The four stance quadrants, read directly off the context ---------------------------------
 
     /**
-     * One chunk, four columns at z=8, floor level y=4 (stone fill below):
-     * x=2 dry grounded; x=4 grounded under 3-deep water (feet+head wet); x=6 floating in a 4-deep water
-     * column (node cell itself is water); x=8 grounded in a 1-deep pool (feet wet, head dry — eye above
-     * the surface).
+     * One chunk, five columns at z=8, floor level y=4 (stone fill below):
+     * x=2 dry grounded; x=4 grounded under 3-deep water (head wet); x=6 floating in a 4-deep water
+     * column (node cell itself is water); x=8 grounded in a 1-deep pool (feet wet, head dry — the eye is
+     * above the surface, so NO submerged penalty); x=10 grounded with water at the HEAD cell only (feet
+     * dry) — owner-verified in-game 2026-08-16: still 5×, because vanilla tests the EYE, which sits ~1.62
+     * above the feet inside the head cell.
      */
     @Test
     void stanceQuadrantsPriceAtVanillaMultipliers() {
@@ -105,6 +107,10 @@ class SubmergedMiningStanceTest {
         ctx.setNode(8, 4, 8);
         assertEquals(base, ctx.breakCost(stone), 0f,
                 "1-deep pool: feet wet but the eye is above the surface — no penalty (and grounded)");
+
+        ctx.setNode(10, 4, 8);
+        assertEquals(5f * base, ctx.breakCost(stone), 0f,
+                "head-only water: the eye is IN the head cell, so feet-dry still pays the 5x");
     }
 
     // ---- The BROKEN_WATER diff read ---------------------------------------------------------------
@@ -227,7 +233,7 @@ class SubmergedMiningStanceTest {
 
     // ---- Substrates -------------------------------------------------------------------------------
 
-    /** Four stance columns at z=8 (see the quadrant test), one chunk field at (0,0). */
+    /** Five stance columns at z=8 (see the quadrant test), one chunk field at (0,0). */
     private static NavGridView buildQuadrantWorld() {
         BlockState air = Blocks.AIR.defaultBlockState();
         BlockState stone = Blocks.STONE.defaultBlockState();
@@ -246,6 +252,8 @@ class SubmergedMiningStanceTest {
         for (int yy = 4; yy <= 7; yy++) states.set(6, yy, 8, water);   // floating: node cell itself is water
         states.set(8, 4, 8, stone);                                    // grounded, 1-deep pool
         states.set(8, 5, 8, water);
+        states.set(10, 4, 8, stone);                                   // grounded, head-cell water only…
+        states.set(10, 6, 8, water);                                   // …feet (y=5) dry, eye submerged
 
         NavSection floor = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(states, false, floor.getTraversalGrid());
