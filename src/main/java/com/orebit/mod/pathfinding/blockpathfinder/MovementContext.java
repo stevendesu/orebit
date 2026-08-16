@@ -1867,9 +1867,11 @@ public final class MovementContext {
      *   <li><b>ungrounded ×5</b> — the node's floor cell is not {@link #standable}: the bot digs while
      *       floating in a fluid or hanging on a climbable. Every ground move stands on a standable floor
      *       by construction, so this term is latent today and arms any future fluid/climb-mode fold;</li>
-     *   <li><b>submerged ×5</b> — feet ({@code y+1}) AND head ({@code y+2}) cells hold water (the
-     *       eye-under-the-surface proxy, owner-specified). Water only, matching vanilla ({@code
-     *       isEyeInFluid(FluidTags.WATER)}); a lava-swimming dig pays the ungrounded term instead.</li>
+     *   <li><b>submerged ×5</b> — the HEAD cell ({@code y+2}) holds water. The eye sits ~1.62 above the
+     *       feet, inside the head cell, so head-wet alone submerges it — owner-verified in-game
+     *       2026-08-16: feet dry + head wet still mines at 5× (vanilla {@code
+     *       isEyeInFluid(FluidTags.WATER)} tests the EYE, never the feet). Water only; a lava-swimming
+     *       dig pays the ungrounded term instead.</li>
      * </ul>
      * The executor matches both terms: {@code BotMining} pays the live vanilla penalties, and the servo's
      * floor-settle ({@code SteerControl.stationKeep}) makes a bot with a standable floor genuinely
@@ -1879,8 +1881,7 @@ public final class MovementContext {
     float breakStanceMult() {
         if (!stanceKnown) {
             float m = standable(descriptorAt(nodeX, nodeY, nodeZ)) ? 1f : UNGROUNDED_MINING_MULT;
-            if (water(descriptorAt(nodeX, nodeY + 1, nodeZ))
-                    && water(descriptorAt(nodeX, nodeY + 2, nodeZ))) {
+            if (water(descriptorAt(nodeX, nodeY + 2, nodeZ))) {
                 m *= SUBMERGED_MINING_MULT;
             }
             stanceMult = m;
