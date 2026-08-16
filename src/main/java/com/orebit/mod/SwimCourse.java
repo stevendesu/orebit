@@ -11,6 +11,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 import com.mojang.authlib.GameProfile;
+import com.orebit.mod.platform.BotTeleport;
 import com.orebit.mod.platform.ConfigDir;
 import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.PlatformEvents;
@@ -124,6 +125,17 @@ public final class SwimCourse {
     /** Cobweb in the body cells above the honey lip: crushes the bot's speed to ~zero so it perches DRY on
      *  the lip (the arrival-with-no-momentum precondition of the lip-stuck bug). */
     private static final BlockState COBWEB = Blocks.COBWEB.defaultBlockState();
+    /** End portal BLOCK (no frame): teleports on any box contact (Portal transition time 0), persists
+     *  frameless, and is planner-avoided via PORTAL_BIT — the SWIM_MAZE_PORTAL wall material. */
+    private static final BlockState END_PORTAL = Blocks.END_PORTAL.defaultBlockState();
+    /** OPEN oak fence gate: collisionless (FenceGateBlock.getCollisionShape returns Shapes.empty() when OPEN
+     *  — javap-verified 1.21.11), so a bot carried upward passes straight through into the lava resting above;
+     *  the gate cell still holds the lava up, because a fluid can never flow into an OCCUPIED cell. CLOSED was
+     *  tried first and refuted by the owner (2026-08-16): a closed gate's wall ARRESTS the typical seam-clip
+     *  below the lava — it protects the bot instead of convicting it. */
+    private static final BlockState GATE_OPEN =
+            Blocks.OAK_FENCE_GATE.defaultBlockState().setValue(BlockStateProperties.OPEN, true);
+    private static final BlockState LAVA = Blocks.LAVA.defaultBlockState();
 
     public static void register(PlatformEvents events) {
         if (System.getProperty("orebit.swim") == null) {
@@ -183,7 +195,7 @@ public final class SwimCourse {
                         //   SprintSwim drives full setForward(1.0), so carried-forward momentum should COAST the
                         //   bot straight past the corner into the column (drift off the planned path). Repro of
                         //   the cruise-overshoot; walls seal every diagonal so the corner can't be cut.
-        SWIM_MAZE       // a SUBMERGED bubble-column SERPENTINE: a 1-wide safe STONE-floored channel winds
+        SWIM_MAZE,      // a SUBMERGED bubble-column SERPENTINE: a 1-wide safe STONE-floored channel winds
                         //   boustrophedon (+X leg, one lane over, -X leg, one lane over, +X leg) through a tank
                         //   whose every OTHER water cell is a SOUL_SAND up-bubble-column (the maze "walls" — the
                         //   inverse of the centre-column trials). At each turn the cell straight ahead along the
@@ -191,7 +203,38 @@ public final class SwimCourse {
                         //   the bot into an impassable column. Only the FIRST leg is roofed (kept submerged/prone
                         //   for the opening cruise); over every later leg the sky is OPEN, so a column clip EJECTS
                         //   the bot out of the water (loses the prone Pose.SWIMMING) with no ceiling to hold it
-                        //   down — the lethality mechanism. Repro of momentum-overshoot-into-a-bubble-column.
+                        //   down — the lethality mechanism. Designed as the momentum-overshoot repro, but the
+                        //   walls are LEGAL vanilla movement: since 2026-08-15 the planner rides one over the
+                        //   wall (RideBubbleColumn) and this card verifies the MULTI-COLUMN RIDE instead — the
+                        //   serpentine-cruise duty moved to the two sibling kinds below.
+        SWIM_MAZE_PORTAL, // the serpentine with END-PORTAL-block walls — the CRUISE verifier the ride shortcut
+                        //   took away from SWIM_MAZE. End portal is the one block that punishes a wall clip
+                        //   INSTANTLY and catastrophically (all javap-verified on 1.21.11): its Portal transition
+                        //   time is the interface default 0 (nether portals wait the ~80-tick gamerule for
+                        //   survival players — a drive-by clip does nothing), entityInside fires on any box
+                        //   intersection, and a frameless setblock persists (NetherPortalBlock.updateShape pops
+                        //   to AIR; EndPortalBlock has no frame check). The planner needs no fixture-side help:
+                        //   PORTAL_BIT is walker-avoidance ("routes AROUND every portal, never occupies one
+                        //   mid-path") and a portal cell is not bubbleUp, so no ride edges exist — the serpentine
+                        //   is the ONLY plannable route, and any overshoot clip teleports the bot to the End,
+                        //   caught by the dimension tripwire. Owner-designed 2026-08-16.
+        SWIM_MAZE_LAVA  // the serpentine under an OPEN-FENCE-GATE ceiling with a LAVA blanket resting on it —
+                        //   keeps the cruise lethal under a ceiling, which neither a stone roof NOR a closed
+                        //   gate can do (the swimturn lesson: a solid roof turns a column clip into a
+                        //   recoverable pin, and a CLOSED gate's wall was owner-refuted 2026-08-16 for the same
+                        //   reason — it arrests the conveyed bot below the lava). An OPEN gate is collisionless
+                        //   (getCollisionShape returns Shapes.empty() when OPEN, javap-verified), so a clipped
+                        //   bot conveyed upward passes straight through into the lava — burn damage is the clip
+                        //   verdict (health tripwire; survival.takesDamage is ON in this course) — while the
+                        //   gate cell still HOLDS the lava, because a fluid can never flow into an occupied
+                        //   cell. MEASURED SURPRISE (first run, 2026-08-16): the open gate reads as air to the
+                        //   model, so the planner DOES still offer the surface ride — and executing it is SAFE:
+                        //   the settle exits the column laterally at feet 159-160, and the vanilla surface FLING
+                        //   never fires because the cell above the column is occupied (even collisionless) —
+                        //   the swimturn any-ceiling-pins-the-column lesson generalizing to non-solid ceilings.
+                        //   So the card verifies cruise + corners + a safe under-ceiling ride; the burn tripwire
+                        //   stays armed for genuine wall clips, whose ballistic pop through the collisionless
+                        //   gate CAN cross into the lava. Owner-designed 2026-08-16.
     }
 
     /** One water challenge: a kind + its tank dimensions, with start/goal geometry precomputed from its base. */
@@ -288,12 +331,13 @@ public final class SwimCourse {
                 return;
             }
 
-            if (kind == Kind.SWIM_MAZE) {
-                // Submerged bubble-column serpentine (see buildSwimMaze). Start submerged at the WEST end of the
-                // first +X leg, facing +X, so the bot is already prone-sprint-swimming before the first turn
-                // (this tests the CRUISE, not the initiation). Three ~9-cell legs (boustrophedon: +X at z=zc,
-                // -X at z=zc+2, +X at z=zc+4) build real momentum; each turn has an up-bubble-column straight
-                // ahead (the overshoot cell). Goal at the EAST end of leg 3, with a column one cell past it.
+            if (kind == Kind.SWIM_MAZE || kind == Kind.SWIM_MAZE_PORTAL || kind == Kind.SWIM_MAZE_LAVA) {
+                // Submerged serpentine (see buildMazeCore) — same frame for all three wall materials. Start
+                // submerged at the WEST end of the first +X leg, facing +X, so the bot is already
+                // prone-sprint-swimming before the first turn (this tests the CRUISE, not the initiation).
+                // Three ~9-cell legs (boustrophedon: +X at z=zc, -X at z=zc+2, +X at z=zc+4) build real
+                // momentum; each turn has a wall cell straight ahead (the overshoot cell). Goal at the EAST
+                // end of leg 3, with a wall one cell past it.
                 int xW = baseX + 2;                  // west channel end
                 int xE = baseX + 10;                 // east channel end
                 this.startX = xW + 0.5;
@@ -385,6 +429,8 @@ public final class SwimCourse {
             add("swimmaze",    Kind.SWIM_MAZE,     4, 8);
             add("sidegapwet",  Kind.SIDE_GAP_WET, 10, 8);
             add("sidegapdry",  Kind.SIDE_GAP_DRY, 10, 8);
+            add("mazeportal",  Kind.SWIM_MAZE_PORTAL, 4, 8);
+            add("mazelava",    Kind.SWIM_MAZE_LAVA,   4, 8);
         }
 
         void add(String name, Kind kind, int depth, int poolLen) {
@@ -434,6 +480,12 @@ public final class SwimCourse {
             buildTile(tr);
             bot.reviveIfDead();
             bot.setHealth(bot.getMaxHealth());
+            bot.clearFire();
+            // A mazeportal wall clip left the bot in the END last trial — setPos below is same-level only, so
+            // bring it back through the cross-dimension seam first (platform/BotTeleport, both era flavors).
+            if (bot.level() != level) {
+                BotTeleport.to(bot, level, tr.startX, tr.startY, tr.startZ, tr.startYaw, 0f);
+            }
             bot.setMode(AllyBotEntity.Mode.STAY);
             bot.setPos(tr.startX, tr.startY, tr.startZ);
             bot.setDeltaMovement(Vec3.ZERO);
@@ -476,6 +528,29 @@ public final class SwimCourse {
 
             attemptTicks++;
             trace(tr);
+
+            // DIMENSION TRIPWIRE (all trials — no card legitimately changes dimension): an end-portal wall
+            // teleports on CONTACT (Portal transition time 0, javap-verified), so on the mazeportal card a
+            // box-clip of a wall cell moves the bot to the End the same tick. Checked FIRST — every later
+            // read (distance, water state) is meaningless about a bot in another dimension. enter() recovers
+            // the bot cross-dimension for the next trial.
+            if (bot.level() != level) {
+                record(tr, "FAIL", "teleported out of the course dimension (clipped a portal wall)");
+                return;
+            }
+
+            // BURN TRIPWIRE (mazelava): the lava blanket is unreachable from the channel — the ONLY way to
+            // touch it is a wall-column clip conveying the bot up between the gate walls. Any health loss is
+            // therefore the clip verdict, long before the burn would kill. Card-gated: bubbledown DESIGNS
+            // magma damage in (see the properties header), so a course-wide health oracle would convict it.
+            if (tr.kind == Kind.SWIM_MAZE_LAVA && bot.getHealth() < bot.getMaxHealth() - 1.0e-3f) {
+                // Mechanism-neutral on purpose: the lava is reachable two ways — a wall-column clip conveying
+                // the bot up, or the PLANNED RideBubbleColumn ride whose surface launch crosses into the
+                // blanket (the current red: the planner prices no hazard on the launch corridor). Either way,
+                // touching the ceiling is the failure; the trace names which mechanism.
+                record(tr, "FAIL", "burned (reached the lava ceiling)");
+                return;
+            }
 
             if (!bot.isAlive()) {
                 record(tr, "FAIL", "died");
@@ -581,10 +656,17 @@ public final class SwimCourse {
                             swim ? "STAND->PRONE" : "PRONE->STAND", y, v.y, inW ? 1 : 0, subm ? 1 : 0, spr ? 1 : 0));
                 }
                 trace.write(String.format(Locale.ROOT,
-                        "T %-12s %3d  %.3f %.3f %.3f | %.4f %.4f | %d %d %d %d %d | %s | drive=%s wp=%d/%d fwd=%.2f\n",
+                        "T %-12s %3d  %.3f %.3f %.3f | %.4f %.4f | %d %d %d %d %d | %s | drive=%s wp=%d/%d fwd=%.2f"
+                                + " | lava=%d fire=%d inv=%d hp=%.1f\n",
                         tr.name, attemptTicks, x, y, z, v.y, spd,
                         grnd ? 1 : 0, inW ? 1 : 0, subm ? 1 : 0, swim ? 1 : 0, spr ? 1 : 0, move,
-                        nav.driveState(), nav.waypointIndex(), nav.pathSize(), bot.zza));
+                        nav.driveState(), nav.waypointIndex(), nav.pathSize(), bot.zza,
+                        // Mortality probe (2026-08-16, the lava-immunity dig): what the GAME thinks — is the
+                        // bot in lava, is it on fire, is the abilities-level shield up, and the live health.
+                        // These four disambiguate "effects chain dead" (lava=1, fire=0) from "damage blocked"
+                        // (fire>0 or lava=1 with inv=1) from "never actually touched lava" (lava=0 throughout).
+                        bot.isInLava() ? 1 : 0, bot.getRemainingFireTicks(),
+                        bot.getAbilities().invulnerable ? 1 : 0, bot.getHealth()));
                 // GEO: vanilla ground-truth Y-indexing probe (additive; DIAGNOSTIC ONLY — no behavior change).
                 // Only the three named trials, to keep the trace compact. Logs bot.getY() vs the REAL AABB
                 // extent vs the REAL world block states straddling the hitbox, plus footY and the waypoint Y —
@@ -641,6 +723,8 @@ public final class SwimCourse {
             if (tr.kind == Kind.GAP_1X1_ANGLE) { buildAngleGap(tr); return; }
             if (tr.kind == Kind.SWIM_TURN)     { buildSwimTurn(tr); return; }
             if (tr.kind == Kind.SWIM_MAZE)     { buildSwimMaze(tr); return; }
+            if (tr.kind == Kind.SWIM_MAZE_PORTAL) { buildMazePortal(tr); return; }
+            if (tr.kind == Kind.SWIM_MAZE_LAVA)   { buildMazeLava(tr); return; }
             if (tr.kind == Kind.SIDE_GAP_WET)  { buildSideGap(tr, false); return; }
             if (tr.kind == Kind.SIDE_GAP_DRY)  { buildSideGap(tr, true); return; }
             buildTank(tr);
@@ -913,19 +997,61 @@ public final class SwimCourse {
             for (int y = yFloor + 1; y <= yTop; y++) set(xBubble, y, zc, WATER);
         }
 
-        /** The momentum-overshoot-into-a-column repro: a submerged bubble-column SERPENTINE. The tank water is
-         *  4-deep (floor at yFloor = S-4, water yFloor+1..S). A 1-wide safe CHANNEL winds boustrophedon through
-         *  it — a +X leg at z=zc, one lane over in +Z, a -X leg at z=zc+2, one more lane over, a +X leg at
-         *  z=zc+4 — its floor plain STONE (no column). EVERY other water cell has a SOUL_SAND floor → an UP
-         *  bubble-column (the maze "walls"; the INVERSE of the usual centre-column trials, where the columns are
-         *  the walls and the safe path is the gaps between them). Adjacent lanes on either side of the channel
-         *  are columns, so at each turn the cell STRAIGHT AHEAD along the incoming leg is a column: cruise
-         *  momentum that fails to brake into the turn drifts the bot into an impassable column. Only the FIRST
-         *  leg is roofed (STONE ceiling at S+1) — it pins the bot submerged/prone through the opening +X cruise;
-         *  over every LATER leg the sky is OPEN, so a column clip EJECTS the bot fully out of the water
-         *  (isInWater false → loses the prone Pose.SWIMMING) with no ceiling to hold it down. Cells outside the
-         *  water region are solid stone (walls) so the corners can't be cut diagonally. */
+        /** The bubble-column serpentine (SWIM_MAZE): walls = SOUL_SAND-floored water columns → vanilla forms an
+         *  UP-bubble-column in each. Historically the momentum-overshoot repro; since the 2026-08-15 planned-
+         *  column ride fix the planner legally RIDES a wall column over the maze, so this card now verifies the
+         *  multi-column ride — the serpentine-cruise duty lives in {@link #buildMazePortal}/{@link #buildMazeLava}. */
         void buildSwimMaze(Trial tr) {
+            buildMazeCore(tr, SOUL_SAND, WATER, true);
+        }
+
+        /** The end-portal serpentine (SWIM_MAZE_PORTAL): walls = frameless END_PORTAL columns on stone floors.
+         *  Planner-impassable (PORTAL_BIT walker avoidance) and not bubbleUp → no ride edges: the serpentine is
+         *  the ONLY plannable route. Physically, any box-clip of a wall cell teleports INSTANTLY (Portal
+         *  transition time 0 — javap-verified, see the Kind doc), so an overshoot is caught by the course's
+         *  dimension tripwire the tick it happens. The cruise verifier the ride shortcut took from SWIM_MAZE. */
+        void buildMazePortal(Trial tr) {
+            buildMazeCore(tr, STONE, END_PORTAL, true);
+        }
+
+        /** The lava-ceiling serpentine (SWIM_MAZE_LAVA): the bubble maze under an OPEN-fence-gate layer at S+1
+         *  with a LAVA blanket at S+2 (stone rim ring containing it). The open gates are collisionless
+         *  (Shapes.empty() when OPEN — a closed gate's wall would ARREST the conveyed bot below the lava and
+         *  protect it, owner-refuted 2026-08-16), so a wall-column clip conveys the bot straight through into
+         *  the lava: burn damage (the course's health tripwire) is the clip verdict — which a plain stone roof
+         *  cannot deliver (the swimturn lesson: a roofed column clip is a recoverable pin). The lava is static
+         *  because a fluid can never flow into an OCCUPIED cell. See the Kind doc for the model tension this
+         *  deliberately creates with RideBubbleColumn's surface exit (open gate = model air). */
+        void buildMazeLava(Trial tr) {
+            buildMazeCore(tr, SOUL_SAND, WATER, false);
+            int yTop = S;
+            int rx0 = tr.baseX + 1, rx1 = tr.baseX + 11;
+            int rz0 = tr.zc,        rz1 = tr.zc + 4;
+            // Containment rim FIRST (so the lava sources are born enclosed), then the gate layer, then the lava.
+            for (int x = rx0 - 1; x <= rx1 + 1; x++) {
+                for (int z = rz0 - 1; z <= rz1 + 1; z++) {
+                    boolean rim = x < rx0 || x > rx1 || z < rz0 || z > rz1;
+                    if (rim) { set(x, yTop + 1, z, STONE); set(x, yTop + 2, z, STONE); }
+                }
+            }
+            for (int x = rx0; x <= rx1; x++) {
+                for (int z = rz0; z <= rz1; z++) set(x, yTop + 1, z, GATE_OPEN);
+            }
+            for (int x = rx0; x <= rx1; x++) {
+                for (int z = rz0; z <= rz1; z++) set(x, yTop + 2, z, LAVA);
+            }
+        }
+
+        /** Shared serpentine-tank core. The tank water is 4-deep (floor at yFloor = S-4, water yFloor+1..S). A
+         *  1-wide safe CHANNEL winds boustrophedon through it — a +X leg at z=zc, one lane over in +Z, a -X leg
+         *  at z=zc+2, one more lane over, a +X leg at z=zc+4 — its floor plain STONE, its body WATER. EVERY
+         *  other rectangle cell is a WALL: floor {@code wallFloor}, body {@code wallFill} (soul-sand+water →
+         *  bubble columns; stone+end-portal → teleport walls). Adjacent lanes on either side of the channel are
+         *  walls, so at each turn the cell STRAIGHT AHEAD along the incoming leg is a wall: cruise momentum that
+         *  fails to brake into the turn drifts the bot into it. {@code roofFirstLeg} pins the bot submerged/
+         *  prone through the opening +X cruise (STONE at S+1 over leg 1 only); later legs are left open-sky.
+         *  Cells outside the water region are solid stone so the corners can't be cut diagonally. */
+        void buildMazeCore(Trial tr, BlockState wallFloor, BlockState wallFill, boolean roofFirstLeg) {
             int zc = tr.zc;
             int yFloor = tr.yFloor;              // = S - 4
             int yTop = S;                        // top water layer
@@ -935,7 +1061,7 @@ public final class SwimCourse {
             int z1 = zc + 2;                     // leg 2 lane (-X)
             int z2 = zc + 4;                     // leg 3 lane (+X)
 
-            // Water region (holds the channel + every column "wall"), and the surrounding stone margin.
+            // Water region (holds the channel + every wall), and the surrounding stone margin.
             int rx0 = tr.baseX + 1, rx1 = tr.baseX + 11;   // x span of the water rectangle
             int rz0 = z0,           rz1 = z2;              // z span (zc .. zc+4)
 
@@ -949,29 +1075,36 @@ public final class SwimCourse {
                 }
             }
 
-            // (2) Carve every water-rectangle cell into a 4-deep water column with a SOUL_SAND floor → vanilla
-            //     forms an UP-bubble-column in each (the default; the safe channel overrides its floor below).
+            // (2) Carve every water-rectangle cell into a WALL column (the default; the safe channel overrides
+            //     both floor and body below).
             for (int x = rx0; x <= rx1; x++) {
                 for (int z = rz0; z <= rz1; z++) {
-                    set(x, yFloor, z, SOUL_SAND);
-                    for (int y = yFloor + 1; y <= yTop; y++) set(x, y, z, WATER);
+                    set(x, yFloor, z, wallFloor);
+                    for (int y = yFloor + 1; y <= yTop; y++) set(x, y, z, wallFill);
                 }
             }
 
-            // (3) Stamp the safe serpentine channel: its floor is plain STONE (no bubble). Boustrophedon —
-            //     leg 1 (+X) at z0, turn up to z1, leg 2 (-X) at z1, turn up to z2, leg 3 (+X) at z2. The turn
-            //     connectors run through the intermediate column lanes (zc+1 / zc+3) at the leg ends, so the
-            //     only way across is a genuine 90° corner (the overshoot cell straight ahead stays a column).
-            for (int x = xW; x <= xE; x++) set(x, yFloor, z0, STONE);   // leg 1: +X at z0
-            for (int z = z0; z <= z1; z++)  set(xE, yFloor, z, STONE);  // turn 1: +Z at the east end (z0 -> z1)
-            for (int x = xW; x <= xE; x++) set(x, yFloor, z1, STONE);   // leg 2: -X at z1
-            for (int z = z1; z <= z2; z++)  set(xW, yFloor, z, STONE);  // turn 2: +Z at the west end (z1 -> z2)
-            for (int x = xW; x <= xE; x++) set(x, yFloor, z2, STONE);   // leg 3: +X at z2
+            // (3) Stamp the safe serpentine channel: STONE floor, WATER body. Boustrophedon — leg 1 (+X) at z0,
+            //     turn up to z1, leg 2 (-X) at z1, turn up to z2, leg 3 (+X) at z2. The turn connectors run
+            //     through the intermediate wall lanes (zc+1 / zc+3) at the leg ends, so the only way across is
+            //     a genuine 90° corner (the overshoot cell straight ahead stays a wall).
+            for (int x = xW; x <= xE; x++) stampChannel(x, z0, yFloor, yTop);   // leg 1: +X at z0
+            for (int z = z0; z <= z1; z++)  stampChannel(xE, z, yFloor, yTop);  // turn 1: +Z at the east end
+            for (int x = xW; x <= xE; x++) stampChannel(x, z1, yFloor, yTop);   // leg 2: -X at z1
+            for (int z = z1; z <= z2; z++)  stampChannel(xW, z, yFloor, yTop);  // turn 2: +Z at the west end
+            for (int x = xW; x <= xE; x++) stampChannel(x, z2, yFloor, yTop);   // leg 3: +X at z2
 
-            // (4) Roof ONLY the first leg (STONE ceiling at S+1) so the bot stays pinned submerged/prone through
-            //     the opening +X cruise. Over every later leg the sky is left OPEN (a column clip ejects the bot
-            //     out of the water) — the lethality mechanism.
-            for (int x = xW; x <= xE; x++) set(x, yTop + 1, z0, STONE);
+            // (4) Optionally roof the first leg (STONE ceiling at S+1) so the bot stays pinned submerged/prone
+            //     through the opening +X cruise; later legs stay open unless the variant adds its own ceiling.
+            if (roofFirstLeg) {
+                for (int x = xW; x <= xE; x++) set(x, yTop + 1, z0, STONE);
+            }
+        }
+
+        /** One channel cell: plain STONE floor, plain WATER body (yFloor+1..yTop). */
+        private void stampChannel(int x, int z, int yFloor, int yTop) {
+            set(x, yFloor, z, STONE);
+            for (int y = yFloor + 1; y <= yTop; y++) set(x, y, z, WATER);
         }
 
         void set(int x, int y, int z, BlockState state) {

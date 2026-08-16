@@ -529,6 +529,23 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         if (abilitiesDirty) {
             this.onUpdateAbilities();
         }
+        // Teleport-handshake completion (2026-08-16, the mazelava lava-immunity dig). A cross-dimension
+        // teleport sets ServerPlayer.isChangingDimension, and vanilla clears it in EXACTLY one place:
+        // handleAcceptTeleportPacket — the client's acknowledgment. While set, isInvulnerableTo returns
+        // true for EVERY damage source on EVERY supported version (javap: 1.17.1's and 1.21.11's both
+        // gate on it), so a clientless bot that ever crosses a dimension — portal FOLLOW, cross-dim
+        // restore, a course teleport — is PERMANENTLY unhurtable. Trace-convicted on the mazelava card:
+        // one trial after an End round-trip, 45 ticks in lava, LAVA_IGNITE landing (fire=300) and
+        // hp=20.0 flat. The fake client completes every client handshake instantly (the platform/
+        // ClientLoad join-load precedent — its sibling latch, clientLoadedTimeoutTimer, self-heals via
+        // tickClientLoadTimeout; THIS one has no timeout, only the ack). Range-stable direct call: both
+        // methods are public and identical 1.17.1→1.21.11, the swimHazardAt direct-call precedent.
+        // NOTE the third sibling is NOT handled here: ServerPlayer.die() latches waitingForRespawn on the
+        // connection, cleared only by the client's PERFORM_RESPAWN — a died-then-revived bot keeps
+        // hasClientLoaded()==false on 1.21.11+. Separate arc; see the session notes.
+        if (this.isChangingDimension()) {
+            this.hasChangedDimension();
+        }
 
         if (owner == this) {
             super.tick();
@@ -1265,8 +1282,14 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         return Shapes.joinIsNotEmpty(shape, corridor, BooleanOp.AND);
     }
 
-    /** Live swim overshoot-hazard test: a bubble column (vertical drag breaches/ejects a prone swimmer) or
-     *  lava (damaging fluid). Reads the live level — the follower's hazard-aware corner brake affords it. */
+    /** Live swim overshoot-hazard test: a bubble column (vertical drag breaches/ejects a prone swimmer),
+     *  lava (damaging fluid), or a teleport portal (one box-clip relocates the bot — an end portal's Portal
+     *  transition time is 0, javap-verified 1.21.11). The portal entry keeps the follower's never-touch set
+     *  consistent with the planner's: PORTAL_BIT is walker-avoidance ("routes AROUND every portal, never
+     *  occupies one mid-path" — NavBlock), so the corner brake must not treat a portal-walled turn as
+     *  harmless — found by SwimCourse {@code mazeportal}, where full-cruise carry overshot ~0.7 blocks into
+     *  an end-portal wall the brake never armed for (2026-08-16). Reads the live level — the follower's
+     *  hazard-aware corner brake affords it. */
     @Override
     public boolean swimHazardAt(int x, int y, int z) {
         ServerLevel level = (ServerLevel) Worlds.of(this);
@@ -1274,6 +1297,9 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         BlockState s = level.getBlockState(scratchPos);
         if (s.is(Blocks.BUBBLE_COLUMN)) return true;                  // the drag column itself
         if (s.is(Blocks.MAGMA_BLOCK) || s.is(Blocks.SOUL_SAND)) return true; // its source under the water
+        if (s.is(Blocks.NETHER_PORTAL) || s.is(Blocks.END_PORTAL) || s.is(Blocks.END_GATEWAY)) {
+            return true;                                              // teleport portals (planner-avoided too)
+        }
         return level.getFluidState(scratchPos).is(FluidTags.LAVA);   // damaging fluid
     }
 
