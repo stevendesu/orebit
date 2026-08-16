@@ -205,9 +205,19 @@ public final class RideBubbleColumn implements Movement {
         // land exit is settled BY being grounded (like every other ground move — a resting bot's velY stays at
         // gravity×drag ≈ −0.078, never zeroed by ground collision, so a |velY|<SETTLE_VELY gate would NEVER fire
         // on a dry bank and freeze the follower); the velY-stillness gate applies ONLY to the buoyant in-water
-        // float-out (velY oscillates ±0.04 while bobbing). Y is not block-matched — a water exit bobs.
+        // float-out (velY oscillates ±0.04 while bobbing).
+        //
+        // The GROUNDED arm block-matches Y; the WATER arm does not (a water exit bobs across the cell seam).
+        // Y-matching the grounded arm is the 2026-08-16 rim-landing fix: the open-sky surface launch scatters
+        // the ballistic landing by ±1 block, and one landing put the bot GROUNDED on the tank's rim wall — the
+        // right x/z but a full cell ABOVE the waypoint, dry, with the next move (a prone-in-water transition)
+        // teed up on footing its plan never had. An unmatched grounded arm declared that arrival; the cursor
+        // advanced, and the course's eject guard convicted the walk back to the water because the ride's
+        // exemption had ended with the move. A legitimate BANK exit stands exactly at the waypoint's feet cell,
+        // so footY == wy costs it nothing; a rim landing stays un-reached, the settle keeps recentring, and the
+        // bot walks off the lip into the lane still owned by this move.
         return b.footX() == wx && b.footZ() == wz
-                && (b.grounded() || (b.inWater() && Math.abs(b.velY()) < SETTLE_VELY))
+                && ((b.grounded() && b.footY() == wy) || (b.inWater() && Math.abs(b.velY()) < SETTLE_VELY))
                 && Movement.teedUp(b, wx, wy, wz, next);
     }
 
@@ -236,12 +246,14 @@ public final class RideBubbleColumn implements Movement {
                 .drive((b, v) -> holdColumn(b))
                 .advanceWhen(b -> b.footY() >= ty || !b.bubbleUpAt(b.footX(), b.footY(), b.footZ()));
         // SETTLE: steer laterally to the exit cell; done once there AND vertically settled. Medium-aware, mirror
-        // of reached(): a grounded land exit settles on grounded(); the |velY|<SETTLE_VELY stillness gate is
-        // water-only (a resting bank bot's velY ≈ −0.078 never bleeds below SETTLE_VELY).
+        // of reached(): a grounded land exit settles on grounded() AT the planned feet cell (the Y-match is the
+        // rim-landing fix — see reached()); the |velY|<SETTLE_VELY stillness gate is water-only (a resting bank
+        // bot's velY ≈ −0.078 never bleeds below SETTLE_VELY).
         plan.phase("settle")
                 .drive((b, v) -> { b.setSprinting(false); SteerControl.recenterOnTarget(b, v); })
                 .done(b -> b.footX() == tx && b.footZ() == tz
-                        && (b.grounded() || (b.inWater() && Math.abs(b.velY()) < SETTLE_VELY)));
+                        && ((b.grounded() && b.footY() == toFootY)
+                                || (b.inWater() && Math.abs(b.velY()) < SETTLE_VELY)));
         return plan;
     }
 
