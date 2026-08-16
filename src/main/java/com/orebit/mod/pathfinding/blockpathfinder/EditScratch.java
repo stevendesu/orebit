@@ -28,6 +28,9 @@ public final class EditScratch {
 
     // Small fixed buffers: a Tier 1 move touches ≤ ~3 body cells and places ≤ 1 floor; grown defensively.
     private long[] breaks = new long[6];
+    // Parallel to breaks: whether water floods the broken cell once mined (the wet-above rule, decided at
+    // fold time in addBreak) — carried out to StepEdits so the diff reads it as BROKEN_WATER, not air.
+    private boolean[] breakWet = new boolean[6];
     private int breakCount;
     private long[] places = new long[3];
     private int placeCount;
@@ -255,6 +258,18 @@ public final class EditScratch {
      * the cell's EFFECTIVE descriptor, as {@link #requireAirToward}.
      */
     public long requireAirVertical(int x, int y, int z) {
+        return requireAirVertical(x, y, z, 0f);
+    }
+
+    /**
+     * {@link #requireAirVertical(int, int, int)} with an EXPLICIT mining-stance multiplier for the break
+     * fold ({@code stanceMult ≤ 0} = the node's own per-pop stance, the plain form's behaviour). The one
+     * caller that needs it is {@code MineDown}'s macro shaft: the collapsed jump folds breaks the bot
+     * performs from positions BELOW the expanding node (standing one cell above each successive floor it
+     * digs), so the per-pop stance is only right for level 1 — deeper levels dig grounded, submerged
+     * exactly when the column floods (the wet-column latch, see {@code MineDown.candidates}).
+     */
+    public long requireAirVertical(int x, int y, int z, float stanceMult) {
         if (!valid) return MovementContext.AIR_DESC;
         long d = ctx.descriptorAt(x, y, z);
         if (ctx.bodyPassable(d)) return d;
@@ -264,7 +279,7 @@ public final class EditScratch {
             if (!ctx.bodyPassable(toggled)) valid = false; // always-true today; parity with the other arms
             return toggled;
         }
-        foldBreakOrFail(x, y, z, d);
+        foldBreakOrFail(x, y, z, d, stanceMult);
         return valid ? MovementContext.AIR_DESC : d;
     }
 
@@ -298,15 +313,58 @@ public final class EditScratch {
     }
 
     /** Shared tail of {@link #requireAir}/{@link #requireAirToward}: fold a break of a breakable blocked cell
-     *  (adding its mining cost) when edits are allowed, else invalidate the move. */
+     *  (adding its mining cost at the node's per-pop stance) when edits are allowed, else invalidate the move. */
     private void foldBreakOrFail(int x, int y, int z, long d) {
+        foldBreakOrFail(x, y, z, d, 0f);
+    }
+
+    /** {@link #foldBreakOrFail(int, int, int, long)} with an explicit mining-stance multiplier
+     *  ({@code stanceMult ≤ 0} = the node's per-pop stance) — the macro-shaft seam, see
+     *  {@link #requireAirVertical(int, int, int, float)}. */
+    private void foldBreakOrFail(int x, int y, int z, long d, float stanceMult) {
         if (allowEdits && ctx.breakable(d)) {
-            breaks = push(breaks, breakCount, x, y, z);
-            breakCount++;
-            extraCost += ctx.breakCost(d);
+            addBreak(x, y, z);
+            extraCost += stanceMult > 0f ? ctx.breakCost(d, stanceMult) : ctx.breakCost(d);
         } else {
             valid = false; // blocked, and either the bot can't break it or an edit here is forbidden (risky)
         }
+    }
+
+    /**
+     * Record a break of cell {@code (x,y,z)}, deciding at fold time whether water floods the opened cell —
+     * the <b>wet-above rule</b> (owner-ratified 2026-08-16): vanilla falling water ALWAYS fills the cell
+     * below it, so a break is wet exactly when the cell directly above reads water ({@link
+     * MovementContext#water} — the swimmable-water source of truth) — through the path diff, AND through
+     * this scratch's own earlier folds (a macro shaft's level {@code k} sits under level {@code k−1}'s
+     * in-scratch break, invisible to {@code descriptorAt} until the edge is accepted; the flood chains down
+     * the column through the in-scratch flags). An own-fold PLACE above seals the cell instead (dry).
+     * Lateral water is deliberately NOT consulted: only the certain vertical flood is baked into the diff
+     * (a wrong wet guess has no correcting NavGrid update; a wrong dry guess self-corrects — see {@link
+     * PathEdits#BROKEN_WATER}).
+     */
+    private void addBreak(int x, int y, int z) {
+        boolean wet = wetFromAbove(x, y, z);
+        if (breakCount == breaks.length) {
+            breaks = Arrays.copyOf(breaks, breaks.length * 2);
+            breakWet = Arrays.copyOf(breakWet, breaks.length);
+        }
+        breaks[breakCount] = BlockPos.asLong(x, y, z);
+        breakWet[breakCount] = wet;
+        breakCount++;
+    }
+
+    /** Whether the cell directly above {@code (x,y,z)} holds water — own-scratch folds first (an earlier
+     *  in-candidate break's wet flag chains the flood; an own place seals it dry), then the path-edit-aware
+     *  grid read. Linear scans over the tiny per-candidate buffers, only on the rare break fold. */
+    private boolean wetFromAbove(int x, int y, int z) {
+        long above = BlockPos.asLong(x, y + 1, z);
+        for (int i = 0; i < breakCount; i++) {
+            if (breaks[i] == above) return breakWet[i];
+        }
+        for (int i = 0; i < placeCount; i++) {
+            if (places[i] == above) return false; // own-fold place seals the column above
+        }
+        return ctx.water(ctx.descriptorAt(x, y + 1, z));
     }
 
     /**
@@ -505,8 +563,7 @@ public final class EditScratch {
      * would otherwise add. Package-private: only the context's transit vocabulary emits these.
      */
     void breakThrough(int x, int y, int z, float cost) {
-        breaks = push(breaks, breakCount, x, y, z);
-        breakCount++;
+        addBreak(x, y, z);
         extraCost += cost;
     }
 
@@ -595,7 +652,8 @@ public final class EditScratch {
      * recycled arena slot cannot leak a previous edge's clutch onto this one.
      */
     void copyInto(StepEdits e) {
-        e.load(breaks, breakCount, places, placeCount, doors, doorOpens, doorCount, clutchKind, clutchCell);
+        e.load(breaks, breakWet, breakCount, places, placeCount, doors, doorOpens, doorCount,
+               clutchKind, clutchCell);
     }
 
     private static long[] push(long[] buf, int count, int x, int y, int z) {

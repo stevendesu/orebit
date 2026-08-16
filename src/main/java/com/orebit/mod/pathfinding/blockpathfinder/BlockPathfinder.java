@@ -893,6 +893,7 @@ public final class BlockPathfinder {
             int curMode = nodes.mode[current];
             relaxer.currentMode = curMode; // default dest mode for ordinary (mode-preserving) accepts
             ctx.setMode(curMode);          // surfaced to each movement's candidates() for mode-gating
+            ctx.setNode(cx, cy, cz);       // seeds the lazy mining-stance derivation (diff rebuilt above)
             // §2b exit-openable verdict for Traverse/Ascend/Descend: registers an intact door (OPEN *or*
             // CLOSED) or an open trapdoor in the feet cell, plus an open trapdoor panel in the HEAD cell.
             // This is the ENTIRE shared per-pop prologue and its whole cost: two path-edit-aware descriptor
@@ -1388,6 +1389,7 @@ public final class BlockPathfinder {
     private static void logRoot(MovementContext ctx, Relaxer relaxer, GoalForcedCost.Forced forced,
                                 int sx, int sy, int sz, int startMode, float hWeight, int gx, int gy, int gz) {
         ctx.setMode(startMode); // match the real root expansion's mode so the emitted candidates are the same set
+        ctx.setNode(sx, sy, sz); // and its mining stance, so logged break prices match the real expansion's
         final float sOct = octile(sx, sy, sz, gx, gy, gz, hWeight);
         final float sPrem = GoalForcedCost.premium(forced, sx, sy, sz, gx, gy, gz);
         final StringBuilder sb = new StringBuilder();
@@ -1655,12 +1657,15 @@ public final class BlockPathfinder {
             }
         }
         long[] bk = null;
+        boolean[] bkWet = null;
         int bn = 0;
         for (int i = 0, c = all.breakCount(); i < c; i++) {
             long pos = all.breakAt(i);
             if (pos == body1 || pos == body2) {
-                if (bk == null) bk = new long[c];
-                bk[bn++] = pos;
+                if (bk == null) { bk = new long[c]; bkWet = new boolean[c]; }
+                bk[bn] = pos;
+                bkWet[bn] = all.breakWetAt(i); // the flood flag rides the slice (splice baselines read it)
+                bn++;
             }
         }
         // Door-sets at this step's body cells (DOORS P2): a macro flat run clamps at a non-uniform door, so a
@@ -1680,7 +1685,8 @@ public final class BlockPathfinder {
         }
         if (pn == 0 && bn == 0 && dn == 0) return null;
         StepEdits s = new StepEdits();
-        s.load(bk == null ? NO_CELLS : bk, bn, pl == null ? NO_CELLS : pl, pn,
+        s.load(bk == null ? NO_CELLS : bk, bkWet == null ? NO_FLAGS : bkWet, bn,
+               pl == null ? NO_CELLS : pl, pn,
                dr == null ? NO_CELLS : dr, drOpen == null ? NO_FLAGS : drOpen, dn,
                ClutchModel.NONE, 0L); // no macro movement clutches — see the method doc
         return s;

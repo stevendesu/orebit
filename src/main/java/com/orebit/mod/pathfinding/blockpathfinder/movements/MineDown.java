@@ -101,11 +101,21 @@ public final class MineDown implements Movement {
         }
 
         // ---- Macro path: collapse the uniform shaft into one jump. ----
+        // Wet-column latch (owner-ratified 2026-08-16): with water in the feet cell, EVERY level below the
+        // first digs flooded — vanilla falling water always fills the opened cell, so the water column
+        // follows the shaft down (the flagship's pool-entry dig). Level 1 prices at the node's own per-pop
+        // stance (its eye may still be dry); levels ≥2 dig grounded (standing on the level they break) and
+        // submerged exactly when the column is wet. EditScratch.addBreak's wet-above rule records the same
+        // chain as BROKEN_WATER folds, so the diff and the price agree.
+        boolean wetColumn = ctx.water(ctx.descriptorAt(x, y + 1, z));
+        float deepMult = wetColumn ? MovementContext.SUBMERGED_MINING_MULT : 1f;
+
         // Per-step move cost = base move + the break folded onto each level. Use the REAL break cost of the
         // column substrate (the floor cell the bot is currently standing on), not a literal — cheap moves
         // get large jumps, expensive ones small (NON-NEGOTIABLE 2). The shaft is uniform by construction
-        // (the cuboid certifies one navtype), so the start cell's break cost is the per-step edit cost.
-        float moveCost = COST + ctx.breakCost(ctx.descriptorAt(x, y, z));
+        // (the cuboid certifies one navtype), so the start cell's break cost is the per-step edit cost —
+        // priced at the DEEP-level stance, which dominates any jump worth collapsing (J ≥ 2).
+        float moveCost = COST + ctx.breakCost(ctx.descriptorAt(x, y, z), deepMult);
 
         Cuboid box = ctx.cuboidScratch();
         cuboids.cuboidAt(x, y, z, Axes.AXIS_Y, -1, box); // travel -Y (digs straight down)
@@ -122,7 +132,10 @@ public final class MineDown implements Movement {
             // don't undermine a gravity stack / tap a fluid mid-shaft just because the START cell was safe.
             // The start level (k==1) was already gated by the reset() above. Clamp the jump above a risky cell.
             if (k > 1 && MovementContext.risksEdit(ctx.flagsAt(x, by, z))) { J = k - 1; break; }
-            e.requireAirVertical(x, by, z);  // break — or §5-toggle a closed hatch — the step-k floor
+            // Break — or §5-toggle a closed hatch — the step-k floor. Level 1 digs at the node's own stance;
+            // deeper levels at the wet-column-latched deep stance (the explicit-stance overload).
+            if (k == 1) e.requireAirVertical(x, by, z);
+            else e.requireAirVertical(x, by, z, deepMult);
             if (!e.valid()) {                // this level can't be broken — clamp to the last valid step
                 J = k - 1;
                 break;

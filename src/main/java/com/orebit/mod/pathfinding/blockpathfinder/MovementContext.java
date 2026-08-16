@@ -366,6 +366,10 @@ public final class MovementContext {
     /** Geometry a path-broken cell reads as — air. Package-visible for the same effective-descriptor
      *  threading (a break-folded body cell reads as air within the folding candidate). */
     static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
+    /** Geometry a path-broken cell that FLOODS reads as — a water source ({@link PathEdits#BROKEN_WATER},
+     *  the wet-above rule): downstream reads see honest water (swimmable, not standable, submerged-stance
+     *  mining) instead of the phantom air that made an underwater shaft price as a dry dig. */
+    static final long WATER_DESC = NavBlock.descriptorFor(Blocks.WATER.defaultBlockState());
 
     private final NavGridView grid;
     private final BotCaps caps;
@@ -413,6 +417,22 @@ public final class MovementContext {
      * read by a movement's {@code candidates} to gate itself. Defaults to {@link #MODE_STANDING}.
      */
     private int currentMode = MODE_STANDING;
+
+    /**
+     * The node currently being expanded (its FLOOR cell — feet {@code y+1}, head {@code y+2}), seeded per
+     * pop by {@link BlockPathfinder} via {@link #setNode} alongside {@link #setMode}. Consumed only by the
+     * lazy {@link #breakStanceMult() mining-stance} derivation, so a context that never sees {@code setNode}
+     * (grid-less tests, cold diagnostics) keeps the neutral stance below.
+     */
+    private int nodeX, nodeY, nodeZ;
+    /**
+     * Lazily-computed vanilla mining-stance multiplier for breaks folded from the current node (see
+     * {@link #breakStanceMult()}). {@code stanceKnown} starts TRUE with the neutral 1× so un-seeded
+     * contexts never probe cells; {@link #setNode} invalidates it once per pop, and only a pop that
+     * actually folds a break pays the three descriptor reads.
+     */
+    private float stanceMult = 1f;
+    private boolean stanceKnown = true;
 
     /**
      * The blocked-edge ordinal of the intact OPENABLE the bot is STANDING IN at the node being expanded (its
@@ -488,6 +508,19 @@ public final class MovementContext {
     /** Set the current node's mode before its expansion (called by {@link BlockPathfinder} per popped node). */
     public void setMode(int mode) {
         this.currentMode = mode;
+    }
+
+    /**
+     * Seed the node (FLOOR cell) about to be expanded — called once per popped node by
+     * {@link BlockPathfinder} beside {@link #setMode}, AFTER the per-pop {@link PathEdits} rebuild (the
+     * stance reads are diff-aware). Invalidates the lazy {@link #breakStanceMult() mining-stance} so it is
+     * re-derived at most once per pop, and only on the (rare) pops that fold a break.
+     */
+    public void setNode(int x, int y, int z) {
+        nodeX = x;
+        nodeY = y;
+        nodeZ = z;
+        stanceKnown = false;
     }
 
     /** The blocked-edge ordinal of an intact open door in the current node's feet cell, or {@link #EDGE_NONE}. */
@@ -944,6 +977,7 @@ public final class MovementContext {
             int kind = pathEdits.kindAt(x, y, z);
             if (kind == PathEdits.PLACED) return PLACED_DESC;
             if (kind == PathEdits.BROKEN) return AIR_DESC;
+            if (kind == PathEdits.BROKEN_WATER) return WATER_DESC; // the flood follows the dig (wet-above rule)
             // An openable-set resolves against THIS cell's own descriptor (unlike PLACED's universal
             // constant): read the grid cell and force it into the target OPEN/CLOSED state via the unified
             // resolver — a door is a bare bit-43 flip (blocked edge follows its own facing/hinge), a
@@ -988,6 +1022,7 @@ public final class MovementContext {
             int kind = pathEdits.kindAt(x, y, z);
             if (kind == PathEdits.PLACED) return PLACED_DESC;
             if (kind == PathEdits.BROKEN) return AIR_DESC;
+            if (kind == PathEdits.BROKEN_WATER) return WATER_DESC; // the flood follows the dig (wet-above rule)
             // Openable-set: resolve the built navtype forced into its target state (see descriptorAt —
             // door = bit flip, trapdoor = geometry re-derivation, dispatched by the unified resolver).
             if (kind == PathEdits.SET_OPEN || kind == PathEdits.SET_CLOSED)
@@ -1808,6 +1843,52 @@ public final class MovementContext {
         return NavBlock.isOpenForPlace(d); // precomputed: replaceable/empty, no fluid
     }
 
+    // ---- Mining stance (vanilla Player.getDestroySpeed parity, owner-ratified 2026-08-16) -----------
+    // javap-verified on 1.20.1 AND 1.21.11 (identical): getDestroySpeed applies two INDEPENDENT /5
+    // penalties — eye in water without Aqua Affinity, and !onGround() — stacking to /25. The executor
+    // (BotMining) pays them for real because it accumulates the live getDestroyProgress; until now the
+    // planner priced every break at the dry grounded rate, a 5–25× model/reality divergence (the "x25
+    // mining-cost lie"). Nothing in the bot models Aqua Affinity, so the multiplier is only ever ≥ 1 —
+    // which is exactly what keeps GoalForcedCost's stance-blind dig-face premium an admissible lower
+    // bound untouched. If Aqua Affinity (a DISCOUNT) is ever modelled, that premium must apply the same
+    // best-case factor or it stops under-estimating.
+
+    /** Vanilla mining penalty for digging while not on the ground (floating in a fluid, climbing):
+     *  {@code getDestroySpeed}'s {@code if (!onGround()) f /= 5.0F}. */
+    public static final float UNGROUNDED_MINING_MULT = 5f;
+    /** Vanilla mining penalty for digging with the eye under water (no Aqua Affinity):
+     *  {@code getDestroySpeed}'s submerged factor (0.2×). */
+    public static final float SUBMERGED_MINING_MULT = 5f;
+
+    /**
+     * The mining-stance multiplier for breaks folded from the CURRENT node — derived lazily, at most once
+     * per pop, from the node's own column through the path diff:
+     * <ul>
+     *   <li><b>ungrounded ×5</b> — the node's floor cell is not {@link #standable}: the bot digs while
+     *       floating in a fluid or hanging on a climbable. Every ground move stands on a standable floor
+     *       by construction, so this term is latent today and arms any future fluid/climb-mode fold;</li>
+     *   <li><b>submerged ×5</b> — feet ({@code y+1}) AND head ({@code y+2}) cells hold water (the
+     *       eye-under-the-surface proxy, owner-specified). Water only, matching vanilla ({@code
+     *       isEyeInFluid(FluidTags.WATER)}); a lava-swimming dig pays the ungrounded term instead.</li>
+     * </ul>
+     * The executor matches both terms: {@code BotMining} pays the live vanilla penalties, and the servo's
+     * floor-settle ({@code SteerControl.stationKeep}) makes a bot with a standable floor genuinely
+     * {@code onGround} while it mines. Neutral 1× (bit-identical costs) on dry grounded nodes and on
+     * contexts never seeded with a node (grid-less tests, diagnostics).
+     */
+    float breakStanceMult() {
+        if (!stanceKnown) {
+            float m = standable(descriptorAt(nodeX, nodeY, nodeZ)) ? 1f : UNGROUNDED_MINING_MULT;
+            if (water(descriptorAt(nodeX, nodeY + 1, nodeZ))
+                    && water(descriptorAt(nodeX, nodeY + 2, nodeZ))) {
+                m *= SUBMERGED_MINING_MULT;
+            }
+            stanceMult = m;
+            stanceKnown = true;
+        }
+        return stanceMult;
+    }
+
     /** Real mining-time cost (ticks) to fold one break of cell {@code (x,y,z)} in. */
     public float breakCost(int x, int y, int z) {
         return breakCost(descriptorAt(x, y, z));
@@ -1830,22 +1911,39 @@ public final class MovementContext {
      * <p>The callers ({@link EditScratch#requireAir}, the break-through fold) only reach here after {@link
      * #breakable}/{@link #breakableThrough} has proven the block mineable, so the table never returns
      * {@link MiningModel#UNMINEABLE} on this path.
+     *
+     * <p>The mining time is scaled by the node's {@link #breakStanceMult() mining-stance multiplier}
+     * (vanilla {@code getDestroySpeed} parity: ×5 ungrounded, ×5 eye-under-water, stacking) — 1× on every
+     * dry grounded node, where the cost is bit-identical to the historical value.
      */
     public float breakCost(long d) {
+        return breakCost(d, breakStanceMult());
+    }
+
+    /**
+     * {@link #breakCost(long)} at an EXPLICIT {@linkplain #breakStanceMult() mining-stance} multiplier —
+     * for the one caller whose break is not performed from the expanding node's stance ({@code MineDown}'s
+     * macro shaft: deeper levels dig from successively lower positions, wet-column latched). The stance
+     * scales only the MINING-TIME term, exactly as vanilla scales destroy speed; the flat
+     * {@code mining.breakBaseCost} surcharge is a behavioral reluctance-to-edit knob, not time, and stays
+     * un-scaled. At 1× this is bit-identical to the historical cost.
+     */
+    public float breakCost(long d, float stanceMult) {
         InventoryView inv = inventory;
         // A vanilla-unbreakable block (reachable only via the mining.allowUnbreakable arm of breakable/
         // breakableThrough) has NO physical mining time — the resident tables hold the UNMINEABLE sentinel —
         // so it is priced at the tool-derived stand-in the executor's grind actually spends (parity in time,
         // not just permission): mining.unbreakableHardness through the pickaxe formula at the bot's best
-        // pickaxe tier, so a diamond pick prices cheaper than a stone one. No snapshot (headless/trace) ⇒
-        // bare-hand tier. One extract + compare, only on the (rare) break-folding path.
+        // pickaxe tier, so a diamond pick prices cheaper than a stone one. The grind accumulates the live
+        // getDestroyProgress too, so the stance multiplier applies to it the same way. No snapshot
+        // (headless/trace) ⇒ bare-hand tier. One extract + compare, only on the (rare) break-folding path.
         if (NavBlock.hardness(d) == UNBREAKABLE_HARDNESS) {
             int tier = inv != null ? inv.mining().bestTierOrdinal(NavBlock.Tool.PICKAXE.ordinal())
                                    : MiningModel.Tier.BARE.ordinal();
-            return MiningModel.unbreakableTicks(tier) + (inv != null ? inv.breakBaseCost() : 0f);
+            return stanceMult * MiningModel.unbreakableTicks(tier) + (inv != null ? inv.breakBaseCost() : 0f);
         }
-        return inv == null ? MiningModel.bareHandTicks(d)
-                : inv.mining().ticksFor(d) + inv.breakBaseCost();
+        return inv == null ? stanceMult * MiningModel.bareHandTicks(d)
+                : stanceMult * inv.mining().ticksFor(d) + inv.breakBaseCost();
     }
 
     /**
