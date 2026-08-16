@@ -35,6 +35,16 @@ a behavioral "reluctance to edit the world" that biases the bot toward detouring
 digging without forbidding anything (the mining-side mirror of the placement
 reluctance below).
 
+The planner also prices vanilla's **mining-stance penalties**: digging with the eye
+under water costs 5× (no Aqua Affinity), and digging while not on the ground —
+floating in a fluid, hanging on a ladder — costs another 5×, stacking to 25×. These
+are the exact `getDestroySpeed` divisors the bot really pays while mining, so an
+underwater shaft now prices at its true cost and the bot prefers a dry dig a few
+steps away when one exists. Relatedly, a block broken **directly beneath water** is
+planned as flooding — the opened cell reads as water, not air, for the rest of the
+plan — because falling water always fills the cell below; sideways spread is never
+assumed (if it happens anyway, the world update triggers a replan on its own).
+
 ## Placing
 
 Placing is near-instant in-game, so the planner's placement cost is **behavioral, not

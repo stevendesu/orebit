@@ -51,6 +51,17 @@ public final class PathEdits {
     /** The path CLOSES a (hand-toggleable) door here (DOORS P2) — the absolute-SET counterpart of {@link
      *  #SET_OPEN}; resolves the door forced into the target CLOSED state. */
     public static final int SET_CLOSED = 4;
+    /**
+     * The path breaks the block here <b>and water floods the opened cell</b> — reads as water, not air
+     * (owner-ratified 2026-08-16). Recorded when the cell directly above the break holds water at fold time
+     * ({@link EditScratch}'s wet-above rule): vanilla falling water ALWAYS fills the cell below, so unlike a
+     * speculative lateral-spread guess this flood is a physical certainty and safe to bake into the diff —
+     * downstream reads see honest water (swim moves offered, {@code standable} false, and the submerged
+     * mining stance priced) instead of phantom air. A wrongly-dry assumption self-corrects (the real flood
+     * triggers a NavGrid update + replan); a wrongly-wet one would not, which is why ONLY the certain
+     * above-cell rule ever sets this kind.
+     */
+    public static final int BROKEN_WATER = 5;
 
     // Open-addressing long→kind table (linear probing, power-of-two capacity). The kind itself is the
     // occupancy marker: a slot is empty iff its value is NONE (0), which PLACED/BROKEN never are — so no
@@ -172,7 +183,8 @@ public final class PathEdits {
             growPlaceBox(se.placeAt(i));
             markIfAbsent(se.placeAt(i), (byte) PLACED);
         }
-        for (int i = 0, n = se.breakCount(); i < n; i++) markIfAbsent(se.breakAt(i), (byte) BROKEN);
+        for (int i = 0, n = se.breakCount(); i < n; i++)
+            markIfAbsent(se.breakAt(i), (byte) (se.breakWetAt(i) ? BROKEN_WATER : BROKEN));
         for (int i = 0, n = se.doorSetCount(); i < n; i++)
             markIfAbsent(se.doorSetAt(i), (byte) (se.doorSetOpenAt(i) ? SET_OPEN : SET_CLOSED));
     }
@@ -190,7 +202,8 @@ public final class PathEdits {
             growPlaceBox(s.placeAt(i));
             markIfAbsent(s.placeAt(i), (byte) PLACED);
         }
-        for (int i = 0, n = s.breakCount(); i < n; i++) markIfAbsent(s.breakAt(i), (byte) BROKEN);
+        for (int i = 0, n = s.breakCount(); i < n; i++)
+            markIfAbsent(s.breakAt(i), (byte) (s.breakWetAt(i) ? BROKEN_WATER : BROKEN));
         for (int i = 0, n = s.doorSetCount(); i < n; i++)
             markIfAbsent(s.doorSetAt(i), (byte) (s.doorSetOpenAt(i) ? SET_OPEN : SET_CLOSED));
     }

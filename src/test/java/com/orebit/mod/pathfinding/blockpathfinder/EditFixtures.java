@@ -17,26 +17,50 @@ public final class EditFixtures {
     /** A {@link PathEdits} holding exactly the given PLACED cells (packed {@code BlockPos.asLong}). */
     public static PathEdits withPlaced(long... placedCells) {
         StepEdits se = new StepEdits();
-        se.load(NO_CELLS, 0, placedCells, placedCells.length, NO_CELLS, NO_FLAGS, 0, ClutchModel.NONE, 0L);
+        se.load(NO_CELLS, NO_FLAGS, 0, placedCells, placedCells.length, NO_CELLS, NO_FLAGS, 0,
+                ClutchModel.NONE, 0L);
         PathEdits edits = new PathEdits();
         edits.add(se);
         return edits;
     }
 
-    /** A {@link PathEdits} holding exactly the given BROKEN cells (packed {@code BlockPos.asLong}). */
+    /** A {@link PathEdits} holding exactly the given (dry) BROKEN cells (packed {@code BlockPos.asLong}). */
     public static PathEdits withBroken(long... brokenCells) {
+        PathEdits edits = new PathEdits();
+        edits.add(step(brokenCells, NO_CELLS));
+        return edits;
+    }
+
+    /** A {@link PathEdits} holding exactly the given BROKEN_WATER cells — breaks the wet-above rule decided
+     *  will flood (packed {@code BlockPos.asLong}). */
+    public static PathEdits withBrokenWater(long... brokenCells) {
         StepEdits se = new StepEdits();
-        se.load(brokenCells, brokenCells.length, NO_CELLS, 0, NO_CELLS, NO_FLAGS, 0, ClutchModel.NONE, 0L);
+        boolean[] wet = new boolean[brokenCells.length];
+        java.util.Arrays.fill(wet, true);
+        se.load(brokenCells, wet, brokenCells.length, NO_CELLS, 0, NO_CELLS, NO_FLAGS, 0,
+                ClutchModel.NONE, 0L);
         PathEdits edits = new PathEdits();
         edits.add(se);
         return edits;
     }
 
-    /** A single {@link StepEdits} holding the given BROKEN and PLACED cells — the per-step form the
+    /** A single {@link StepEdits} whose breaks are all WET (the wet-above flood rule) — folds as
+     *  {@link PathEdits#BROKEN_WATER} through {@link PathEdits#add}. */
+    public static StepEdits wetBreakStep(long... brokenCells) {
+        StepEdits se = new StepEdits();
+        boolean[] wet = new boolean[brokenCells.length];
+        java.util.Arrays.fill(wet, true);
+        se.load(brokenCells, wet, brokenCells.length, NO_CELLS, 0, NO_CELLS, NO_FLAGS, 0,
+                ClutchModel.NONE, 0L);
+        return se;
+    }
+
+    /** A single {@link StepEdits} holding the given (dry) BROKEN and PLACED cells — the per-step form the
      *  own-edit acknowledgement reads back off a {@link BlockPathPlan} ({@code PathPlanOwnEditTest}). */
     public static StepEdits step(long[] brokenCells, long[] placedCells) {
         StepEdits se = new StepEdits();
-        se.load(brokenCells, brokenCells.length, placedCells, placedCells.length, NO_CELLS, NO_FLAGS, 0, ClutchModel.NONE, 0L);
+        se.load(brokenCells, new boolean[brokenCells.length], brokenCells.length,
+                placedCells, placedCells.length, NO_CELLS, NO_FLAGS, 0, ClutchModel.NONE, 0L);
         return se;
     }
 
@@ -46,7 +70,7 @@ public final class EditFixtures {
         StepEdits se = new StepEdits();
         boolean[] opens = new boolean[doorCells.length];
         java.util.Arrays.fill(opens, open);
-        se.load(NO_CELLS, 0, NO_CELLS, 0, doorCells, opens, doorCells.length, ClutchModel.NONE, 0L);
+        se.load(NO_CELLS, NO_FLAGS, 0, NO_CELLS, 0, doorCells, opens, doorCells.length, ClutchModel.NONE, 0L);
         return se;
     }
 }
