@@ -2005,12 +2005,20 @@ public final class PathPlan {
      * ringed by solid is a seal visible only at a COARSER level. So the check scans {@code MAX_COARSE_LEVEL → 0},
      * flooding the goal's caps-legal component in a SMALL box centered on the goal at each level
      * ({@link RegionPathfinder#isSealedWithin}). A CLOSED flood at any level proves the goal SEALED within that
-     * box — unreachable from anywhere, so the bot's position is irrelevant (no {@code around(bot,goal)} span, so
-     * the cost is distance-INDEPENDENT: a 100k-away goal probes as cheaply as a near one, sidestepping the L0
-     * bot↔goal array-bill). The proof is monotone (a coarse seal admits no finer escape), so the FIRST close
-     * wins; a not-closed level means the component reaches beyond its small box, so descend — a finer, smaller
-     * seal may still close. L0 is the precise floor. A seal larger than the L6 box (~7k blocks) is left to the
-     * give-up backstop / super-long-range handling (#8).
+     * box. The box is centered on the GOAL, not spanned across {@code around(bot,goal)}, so the cost is
+     * distance-INDEPENDENT: a 100k-away goal probes as cheaply as a near one, sidestepping the L0 bot↔goal
+     * array-bill. The proof is monotone (a coarse seal admits no finer escape), so the FIRST close wins; a
+     * not-closed level means the component reaches beyond its small box, so descend — a finer, smaller seal may
+     * still close. L0 is the precise floor. A seal larger than the L6 box (~7k blocks) is left to the give-up
+     * backstop / super-long-range handling (#8).
+     *
+     * <p><b>The bot's position is NOT irrelevant</b> — this Javadoc used to claim it was, and the claim cost a
+     * bug (fixed 2026-08-15). Sealed means nothing crosses the seal, so it implies unreachable only for a bot
+     * OUTSIDE it; a bot in the same chamber as the goal walks right over. So {@code botFloor} is threaded into
+     * the probe as its inside observer and a component containing the bot never reports sealed. Cheap in the
+     * right direction too: the reachable case now exits the flood the moment it touches the bot's fragment,
+     * where before it drained the whole box to conclude the opposite. Before the bot's position is known
+     * ({@code botFloor == null}) no probe is passed, which is the pre-fix behaviour.
      *
      * <p>Gate 1 — the goal region must be BUILT at L0 (an unbuilt goal is OPTIMISTIC, §6: never claim boxed-in
      * over unclassified terrain; MC only builds nav sections for loaded chunks). Gate 2 — re-run only when the
@@ -2039,7 +2047,8 @@ public final class PathPlan {
         for (int lvl = RegionAddress.MAX_COARSE_LEVEL; lvl >= 0; lvl--) {
             boolean sealed;
             try {
-                sealed = RegionPathfinder.isSealedWithin(regionGrid, minY, goalFloor, lvl, caps.boxedInScanRadius(),
+                sealed = RegionPathfinder.isSealedWithin(regionGrid, minY, goalFloor, botFloor, lvl,
+                        caps.boxedInScanRadius(),
                         caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), regionMine, regionPlace);
             } catch (Throwable t) {
                 sealed = false; // a sealed-probe backs a give-up, never gates it: inconclusive ⇒ descend/proceed
@@ -2049,9 +2058,9 @@ public final class PathPlan {
                 // enough to audit it in one glance (the drifted-world vine-jungle false positive was
                 // invisible precisely because this branch FAILed silently; owner ruling 2026-07-31).
                 OrebitCommon.LOGGER.info(
-                        "[Orebit] boxed-in PROVEN: goal={} sealed at level {} (radius {}, canBreak={} "
+                        "[Orebit] boxed-in PROVEN: goal={} sealed at level {} (radius {}, bot={}, canBreak={} "
                                 + "canPlace={}) — giving up honestly",
-                        goalFloor, lvl, caps.boxedInScanRadius(), caps.canBreak(), caps.canPlace());
+                        goalFloor, lvl, caps.boxedInScanRadius(), botFloor, caps.canBreak(), caps.canPlace());
                 this.boxedInProven = true;
                 this.skeleton = null;
                 this.blockPlan = null;
