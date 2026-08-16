@@ -1142,6 +1142,39 @@ public final class RegionPathfinder {
                                                   boolean canBreak, boolean canPlace, int safeFall,
                                                   RegionMineModel mine, RegionPlaceModel place, RegionBox bound,
                                                   boolean harvest, int level) {
+        return costToGoalField(grid, minY, goalFloor, startFloor, canBreak, canPlace, safeFall,
+                mine, place, bound, harvest, level, null);
+    }
+
+    /**
+     * As the 12-arg level overload, with the <b>inside probe</b> — the fix for the sealed-goal false positive
+     * (2026-08-15). A CLOSED flood proves the goal's component is sealed within the box, which makes it
+     * unreachable <i>from outside that component</i>. It says NOTHING about an observer already inside it: a bot
+     * standing in the same sealed chamber as the goal can walk straight to it. When {@code insideProbe} is
+     * non-null, its (region, fragment) is resolved once up front and every settle is tested against it; a hit
+     * BREAKS the flood and forces {@code closedFlood == false}, so {@link #isSealedWithin} reports NOT sealed and
+     * the caller proceeds to a real search.
+     *
+     * <p>Fragment granularity, not region: a region routinely holds several disconnected fragments, so a
+     * region-only test would report "reachable" across a wall. A settled (region, fragment) is by construction
+     * connected to the goal through caps-legal edges, which is the whole claim.
+     *
+     * <p>This is a SEPARATE break from the fat-skeleton {@code earlyExit} above, deliberately. Arming the
+     * existing start path under {@code harvest} would have been the smaller diff and is wrong twice over: it
+     * suppresses the full drain that {@link RegionCostField#markInfinite} requires, and the other
+     * {@code harvest == true} caller ({@code PathPlan.harvestBoxedIn}) already passes a {@code startFloor} — it
+     * would silently lose its INFINITE harvest. The probe costs one {@code anchorFragment} plus four int compares
+     * per settle, and only when non-null; every existing caller passes null and stays byte-identical.
+     *
+     * <p>The probe is CONSERVATIVE in the safe direction. Region edges are priced from the FROM-node's geometry,
+     * so a goal-rooted flood reaching the bot proves goal→bot connectivity, not strictly bot→goal (one-way falls
+     * exist). Being wrong here costs a search that then fails honestly; being wrong the other way is the bug
+     * under repair — a terminal "walled off" on a goal the bot is standing next to.
+     */
+    public static RegionCostField costToGoalField(RegionGrid grid, int minY, BlockPos goalFloor, BlockPos startFloor,
+                                                  boolean canBreak, boolean canPlace, int safeFall,
+                                                  RegionMineModel mine, RegionPlaceModel place, RegionBox bound,
+                                                  boolean harvest, int level, BlockPos insideProbe) {
         // Bracket the whole field build so ensureLeaf/rebuildLeaf/startFragmentByFlood box each chunk key at most
         // once per build instead of once per edge-relaxation (RegionGrid per-search column cache).
         final long colTok = grid.beginColumnCache();
@@ -1205,6 +1238,21 @@ public final class RegionPathfinder {
                 armed = true;
             }
         }
+        // Inside probe: resolve the observer's (region, fragment) once, cold. Out-of-box ⇒ don't probe — a settled
+        // node is always in-box, so an out-of-box observer can never hit, and resolving it would force a leaf
+        // build on a far region for nothing.
+        int prx = 0, pry = 0, prz = 0, probeFrag = -1;
+        boolean probing = false;
+        if (insideProbe != null) {
+            prx = RegionAddress.regionX(insideProbe.getX(), level);
+            pry = RegionAddress.regionY(insideProbe.getY(), level, minY);
+            prz = RegionAddress.regionZ(insideProbe.getZ(), level);
+            if (bound.contains(prx, pry, prz)) {
+                if (level == 0) grid.ensureLeaf(prx, pry, prz); else grid.ensureLevel(level, prx, pry, prz);
+                probeFrag = anchorFragment(grid, level, prx, pry, prz, insideProbe);
+                probing = true;
+            }
+        }
         final int dimX = bound.maxRx - bound.minRx + 1;
         final int dimY = bound.maxRy - bound.minRy + 1;
         final int dimZ = bound.maxRz - bound.minRz + 1;
@@ -1212,6 +1260,7 @@ public final class RegionPathfinder {
         int pendingMarked = 0;     // reached-but-unsettled rows in marked regions (phase-2 termination gate)
         boolean earlyExit = false;
         boolean backstopHit = false; // S1: the 20k expansion backstop tripped (⇒ NOT a closed flood)
+        boolean insideHit = false;   // the inside probe's fragment settled (⇒ NOT a closed flood)
 
         final RegionCostField field = new RegionCostField(bound, minY, grx, gry, grz,
                 goalFloor.getX(), goalFloor.getY(), goalFloor.getZ());
@@ -1236,6 +1285,12 @@ public final class RegionPathfinder {
             settles++;
             if (nodes.g[current] > maxSettled) maxSettled = nodes.g[current];
             if (marking && regionMarked(nodes, bound, dimX, dimZ, crx, cry, crz)) pendingMarked--;
+            // The observer's own fragment just settled: the goal is connected to it, so whatever the box looks
+            // like from outside, THIS observer is not walled off. Stop — the verdict is already decided.
+            if (probing && crx == prx && cry == pry && crz == prz && fragA == probeFrag) {
+                insideHit = true;
+                break;
+            }
             if (++expansions > MAX_REGION_EXPANSIONS) { backstopHit = true; break; }
             final int rowsBefore = nodes.count;
             expandNode(nodes, current, expansions, grid, level, minY, grx, gry, grz,
@@ -1277,7 +1332,10 @@ public final class RegionPathfinder {
         // fat-skeleton early exit — suppressed under harvest — nor the 20k backstop broke the loop) AND never
         // rejected an out-of-box target. Only then is the reached set the COMPLETE caps-conditioned goal
         // component within the box, so an in-box BUILT UNREACHED region is provably disconnected.
-        final boolean exhausted = !earlyExit && !backstopHit;
+        // An inside-probe hit is a THIRD way to break the loop, and like the other two it disqualifies the close:
+        // the reached set is a prefix, not the component. It also makes the seal verdict moot — see the probe's
+        // contract on the 13-arg overload.
+        final boolean exhausted = !earlyExit && !backstopHit && !insideHit;
         final boolean closedFlood = exhausted && !nodes.outOfBoxRejected;
         // Harvest the INFINITE (negative-reachability) set only under a closed flood; on any open flood
         // (early-exit / backstop / out-of-box reject) harvest NOTHING — every unreached region stays optimistic
@@ -1292,6 +1350,7 @@ public final class RegionPathfinder {
         stats[2] = nodes.outOfBoxRejected ? 1 : 0;
         stats[3] = backstopHit ? 1 : 0;
         stats[4] = closedFlood ? 1 : 0;
+        stats[5] = insideHit ? 1 : 0;
         return field;
         } finally {
             grid.endColumnCache(colTok);
@@ -1301,7 +1360,7 @@ public final class RegionPathfinder {
     /** Diagnostics for the last {@link #costToGoalField} build on this thread: [0] = settles, [1] = early exit,
      *  [2] = out-of-box reject fired, [3] = 20k backstop hit, [4] = CLOSED flood (S1 — exhausted, no backstop,
      *  no out-of-box reject). */
-    private static final ThreadLocal<int[]> LAST_FIELD_STATS = ThreadLocal.withInitial(() -> new int[5]);
+    private static final ThreadLocal<int[]> LAST_FIELD_STATS = ThreadLocal.withInitial(() -> new int[6]);
 
     /** Settled-pop count of this thread's last {@link #costToGoalField} build (bench/test diagnostics). */
     static int lastFieldSettles() {
@@ -1329,27 +1388,43 @@ public final class RegionPathfinder {
         return LAST_FIELD_STATS.get()[4] != 0;
     }
 
+    /** Whether this thread's last {@link #costToGoalField} build stopped because the inside probe's fragment
+     *  settled — the observer shares the goal's component, so any seal around it is one they are inside. */
+    static boolean lastFieldInsideHit() {
+        return LAST_FIELD_STATS.get()[5] != 0;
+    }
+
     /**
      * Multi-level boxed-in probe (#4 rework, DESIGN-boxed-in-reachability §14): flood the goal's caps-legal
      * component within a small {@code radius}-region box centered on the goal at pyramid {@code level}, and
      * report whether that flood was CLOSED — it drained to heap exhaustion WITHOUT ever leaving the box (no
      * out-of-box reject, no expansion backstop). A closed flood proves the goal's component is SEALED within the
-     * box at this level: no caps-legal move leaves it, so nothing exterior can reach the goal and vice-versa —
-     * the goal is unreachable from ANY outside cell regardless of the bot's position. The proof is monotone
-     * across levels (a coarse seal admits no finer escape), so the caller scans coarse→fine and takes the first
-     * close. An OPEN flood (left the box / hit the backstop) is inconclusive at this level — the component
-     * reaches beyond the box, so descend to a finer level where a smaller seal may close. An unbuilt in-box
-     * region reads optimistically (uniform air), so a goal bordered by unbuilt terrain never closes — exploration
-     * stays legitimate (the §6 optimism boundary). VERDICT-ONLY: no field is consumed.
+     * box at this level: no caps-legal move leaves it, so nothing exterior can reach the goal and vice-versa.
+     * The proof is monotone across levels (a coarse seal admits no finer escape), so the caller scans coarse→fine
+     * and takes the first close. An OPEN flood (left the box / hit the backstop) is inconclusive at this level —
+     * the component reaches beyond the box, so descend to a finer level where a smaller seal may close. An
+     * unbuilt in-box region reads optimistically (uniform air), so a goal bordered by unbuilt terrain never
+     * closes — exploration stays legitimate (the §6 optimism boundary). VERDICT-ONLY: no field is consumed.
+     *
+     * <p><b>{@code observerFloor} is REQUIRED, and this is the whole subtlety</b> (fixed 2026-08-15). "Sealed"
+     * is a claim about crossing the seal, so it only implies "unreachable" for an observer OUTSIDE it. This
+     * method used to take no observer and its caller read a close as an unconditional give-up, which made the bot
+     * declare "I can't reach you — you're walled off" about a goal in the chamber it was standing in. The
+     * SwimCourse {@code sidegapwet} card is exactly that shape: a sealed stone shell containing both the bot's
+     * shaft and the goal's pocket. The observer is threaded into the flood as its inside probe, so a component
+     * containing the observer reports NOT sealed whatever the seal's shape — L, U, or a shell — because
+     * membership is decided by the flood itself and never by a bounding-box proxy. Pass the bot's floor cell.
      */
-    public static boolean isSealedWithin(RegionGrid grid, int minY, BlockPos goalFloor, int level, int radius,
+    public static boolean isSealedWithin(RegionGrid grid, int minY, BlockPos goalFloor, BlockPos observerFloor,
+                                         int level, int radius,
                                          boolean canBreak, boolean canPlace, int safeFall,
                                          RegionMineModel mine, RegionPlaceModel place) {
         final int grx = RegionAddress.regionX(goalFloor.getX(), level);
         final int gry = RegionAddress.regionY(goalFloor.getY(), level, minY);
         final int grz = RegionAddress.regionZ(goalFloor.getZ(), level);
         final RegionBox box = RegionBox.around(grx, gry, grz, grx, gry, grz, radius);
-        costToGoalField(grid, minY, goalFloor, null, canBreak, canPlace, safeFall, mine, place, box, true, level);
+        costToGoalField(grid, minY, goalFloor, null, canBreak, canPlace, safeFall, mine, place, box, true, level,
+                observerFloor);
         return LAST_FIELD_STATS.get()[4] != 0; // [4] = closedFlood
     }
 

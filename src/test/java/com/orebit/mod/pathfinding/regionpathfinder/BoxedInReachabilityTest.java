@@ -40,6 +40,10 @@ public class BoxedInReachabilityTest {
 
     private RegionGrid grid;
 
+    /** An observer far outside any goal-centered probe box: out-of-box ⇒ the inside probe never arms, which is
+     *  the "bot elsewhere in the world" case these seal tests are about. */
+    private static final BlockPos OUTSIDE = new BlockPos(1_000_000, MINY + 17, 1_000_000);
+
     private static int idx(int x, int y, int z) { return (y << 8) | (z << 4) | x; }
 
     @BeforeEach
@@ -224,7 +228,7 @@ public class BoxedInReachabilityTest {
     @Test
     void isSealedWithin_L0_sealedGoal_true() {
         sealedGoalAndPocket();
-        assertTrue(RegionPathfinder.isSealedWithin(grid, MINY, feet(0, 1, 0), 0, 3,
+        assertTrue(RegionPathfinder.isSealedWithin(grid, MINY, feet(0, 1, 0), OUTSIDE, 0, 3,
                         /*canBreak*/ false, /*canPlace*/ false, /*safeFall*/ 3,
                         RegionMineModel.DEFAULT, RegionPlaceModel.DEFAULT),
                 "a goal sealed on all six built faces ⇒ closed flood ⇒ sealed at L0");
@@ -233,7 +237,7 @@ public class BoxedInReachabilityTest {
     @Test
     void isSealedWithin_L0_connectedCorridor_false() {
         seedFloor(0, 1, 0); seedFloor(1, 1, 0); seedFloor(2, 1, 0); seedFloor(3, 1, 0);
-        assertFalse(RegionPathfinder.isSealedWithin(grid, MINY, feet(0, 1, 0), 0, 3,
+        assertFalse(RegionPathfinder.isSealedWithin(grid, MINY, feet(0, 1, 0), OUTSIDE, 0, 3,
                         false, false, 3, RegionMineModel.DEFAULT, RegionPlaceModel.DEFAULT),
                 "an open corridor reaches unbuilt neighbours and leaves the box ⇒ not sealed");
     }
@@ -245,7 +249,7 @@ public class BoxedInReachabilityTest {
         seedSolid(0, 2, 0); seedSolid(0, 0, 0);
         seedSolid(0, 1, 1); seedSolid(0, 1, -1);
         // +X (1,1,0) left UNBUILT — an optimistic escape hatch (§6: never claim boxed-in over unbuilt terrain).
-        assertFalse(RegionPathfinder.isSealedWithin(grid, MINY, feet(0, 1, 0), 0, 3,
+        assertFalse(RegionPathfinder.isSealedWithin(grid, MINY, feet(0, 1, 0), OUTSIDE, 0, 3,
                         false, false, 3, RegionMineModel.DEFAULT, RegionPlaceModel.DEFAULT),
                 "a goal bordered by unbuilt terrain reads optimistically ⇒ escapes ⇒ not sealed");
     }
@@ -261,10 +265,10 @@ public class BoxedInReachabilityTest {
         seedSolid(1, 0, 0); seedSolid(0, 1, 0); seedSolid(1, 1, 0);
         seedSolid(0, 0, 1); seedSolid(1, 0, 1); seedSolid(0, 1, 1); seedSolid(1, 1, 1);
         BlockPos goal = pocketFeet(0, 0, 0);
-        assertTrue(RegionPathfinder.isSealedWithin(grid, MINY, goal, 0, 3,
+        assertTrue(RegionPathfinder.isSealedWithin(grid, MINY, goal, OUTSIDE, 0, 3,
                         false, false, 3, RegionMineModel.DEFAULT, RegionPlaceModel.DEFAULT),
                 "interior pocket ⇒ closed flood ⇒ sealed at L0");
-        assertTrue(RegionPathfinder.isSealedWithin(grid, MINY, goal, 1, 3,
+        assertTrue(RegionPathfinder.isSealedWithin(grid, MINY, goal, OUTSIDE, 1, 3,
                         false, false, 3, RegionMineModel.DEFAULT, RegionPlaceModel.DEFAULT),
                 "interior pocket rolls up sealed ⇒ sealed at the coarse L1 too");
     }
@@ -300,11 +304,43 @@ public class BoxedInReachabilityTest {
         seed(0, 1, 0, passable, standable, STONE);
         seedFloor(-1, 1, 0);                       // the corridor's -X escape into open (then unbuilt) terrain
         BlockPos goal = new BlockPos(11, MINY + 16 + 1, 8); // feet ON the corridor floor, mid-region
-        assertFalse(RegionPathfinder.isSealedWithin(grid, MINY, goal, 0, 3,
+        assertFalse(RegionPathfinder.isSealedWithin(grid, MINY, goal, OUTSIDE, 0, 3,
                         /*canBreak*/ false, /*canPlace*/ false, /*safeFall*/ 3,
                         RegionMineModel.DEFAULT, RegionPlaceModel.DEFAULT),
                 "the goal's CONTAINING corridor fragment must seed the flood (containment/faced-only beats "
                         + "the faceless pocket's region-center centroid) ⇒ escapes ⇒ not sealed");
+    }
+
+    // ---- INSIDE PROBE: "sealed" is a claim about crossing the seal, not about the bot ---------------------
+    //
+    // The SwimCourse `sidegapwet` false positive (2026-08-15). A stone shell held BOTH the bot's water shaft and
+    // the goal's side pocket; the flood closed (correctly — nothing crosses the shell) and the caller read that
+    // as "walled off", so the bot refused a four-step route it was standing next to. The flood was never wrong;
+    // the INFERENCE from it was. These two pin both directions, on the same authored world, distinguished only
+    // by which sealed chamber the observer stands in.
+
+    @Test
+    void isSealedWithin_observerInsideTheSeal_notSealed() {
+        sealedGoalAndPocket();
+        assertFalse(RegionPathfinder.isSealedWithin(grid, MINY, feet(0, 1, 0), feet(0, 1, 0), 0, 3,
+                        /*canBreak*/ false, /*canPlace*/ false, /*safeFall*/ 3,
+                        RegionMineModel.DEFAULT, RegionPlaceModel.DEFAULT),
+                "an observer sharing the goal's sealed component can walk to it ⇒ must NOT report sealed");
+        assertTrue(RegionPathfinder.lastFieldInsideHit(),
+                "the verdict must come from the inside probe settling, not from an unrelated open flood");
+    }
+
+    @Test
+    void isSealedWithin_observerInADIFFERENTSealedPocket_stillSealed() {
+        sealedGoalAndPocket();
+        // The pocket at (3,1,0) IS inside the goal-centered radius-3 box, so the probe ARMS — and still never
+        // hits, because the pocket is a different fragment walled off from the goal. This is the guard that the
+        // fix tests component membership (via the flood) and not mere box containment: a box-containment proxy
+        // would call this reachable and silently un-prove every real seal near the bot.
+        assertTrue(RegionPathfinder.isSealedWithin(grid, MINY, feet(0, 1, 0), feet(3, 1, 0), 0, 3,
+                        false, false, 3, RegionMineModel.DEFAULT, RegionPlaceModel.DEFAULT),
+                "an observer sealed in a DIFFERENT pocket is still genuinely walled off ⇒ sealed");
+        assertFalse(RegionPathfinder.lastFieldInsideHit(), "the probe must not hit across a wall");
     }
 
     // ---- seed helpers (real FragmentBuilder flood; the RegionFloodGuardTest idiom) ----------------------
