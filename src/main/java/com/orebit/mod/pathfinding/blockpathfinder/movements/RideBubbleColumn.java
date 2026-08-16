@@ -76,9 +76,21 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  * The conveyor drives the vertical velocity; the follower must NOT fight it (an input-based {@code holdDepth}'s
  * ±0.04 can't overcome the push — that is exactly why bubble cells are walled off). So the plan is:
  * <ul>
- *   <li><b>ENTER</b> — swim laterally into the adjacent up-column (scan the feet-level cardinals via {@link
- *       BotSteering#bubbleUpAt}, face + forward). Advances once the bot is in water and its own feet cell is an
- *       up-column (it is being carried).</li>
+ *   <li><b>ENTER</b> — swim laterally into <b>the column the PLAN committed to</b>, aimed at its cell centre.
+ *       The ride column is derivable from data the plan already carries: it is a cardinal neighbour of the
+ *       start node that the exit cell is cardinal-adjacent to (the candidate emit geometry above), so
+ *       {@link #plan} precomputes those geometric candidates (pure math, ≤ 2 in practice) and the drive steers
+ *       into the first that is a LIVE up-column ({@link BotSteering#bubbleUpAt}). Advances only once the bot's
+ *       own feet cell IS one of those planned columns and is carrying it — never a merely-adjacent one.
+ *       <p><b>Why targeted, not first-found (the 2026-08-15 swimmaze fix).</b> The original ENTER scanned the
+ *       feet-level cardinals in fixed order and drove into the FIRST adjacent up-column. With ONE column nearby
+ *       (the soul-sand-elevator shape, the {@code bubbleup}/{@code bubbledown} cards) the scan happens to be
+ *       right; in a world with several adjacent columns it is a coin toss weighted by scan order. SwimCourse
+ *       {@code swimmaze} is the proof: at the ride's start node the +X neighbour (a maze WALL column, scanned
+ *       first) and the +Z neighbour (the planned ride) are both up-columns, so the bot accelerated +X into the
+ *       wall column, box-clipped it, was conveyed to the open-sky surface and ejected at ~1.7 blocks above the
+ *       water — trace-convicted tick by tick (x drift 18.5→19.3 while the segment was pure +Z). The plan always
+ *       knew the right column; the drive just never asked it.</li>
  *   <li><b>RIDE</b> — hold horizontal centre on the bot's OWN block column (it is inside the column now), press
  *       NO jump/sink, and let the conveyor lift. Advances once the bot has risen to the exit level or left the
  *       column (feet no longer an up-column).</li>
@@ -203,11 +215,21 @@ public final class RideBubbleColumn implements Movement {
     public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
         // Bubble-column nodes are in fluid (non-standable floor) → feetYOf returns floorY+1; fromFootY/toFootY
         // == fy+1/ty+1 (the partial-floor frame does not apply here).
+        //
+        // The ride column, recovered from the candidate emit geometry (see the class doc's ENTER note): a
+        // cardinal neighbour of the start node that the exit cell is cardinal-adjacent to. Pure math on plan
+        // data — the drive filters these against the live grid (bubbleUpAt), so a candidate that is not
+        // actually a column (possible only for a diagonal or same-cell exit, where the geometry admits two)
+        // is skipped at drive time. If two candidates are BOTH live columns the first is taken — either one
+        // is a column the exit cell adjoins, and the A* itself cannot name which it priced at this seam.
+        final int[][] rideCols = rideColumnCandidates(fx, fz, tx, tz);
         MovePlan plan = new MovePlan();
-        // ENTER: swim laterally into the adjacent up-column. Done once carried (in water + feet in the column).
+        // ENTER: swim into the PLANNED column (cell-centre aim). Done once the bot's own feet cell IS one of
+        // the planned columns and is carrying it — a merely-adjacent wall column must not advance the phase.
         plan.phase("enter")
-                .drive((b, v) -> driveIntoColumn(b))
-                .advanceWhen(b -> b.inWater() && b.bubbleUpAt(b.footX(), b.footY(), b.footZ()));
+                .drive((b, v) -> driveIntoColumn(b, rideCols))
+                .advanceWhen(b -> b.inWater() && isPlannedColumn(rideCols, b.footX(), b.footZ())
+                        && b.bubbleUpAt(b.footX(), b.footY(), b.footZ()));
         // RIDE: hold horizontal centre on the bot's own column; NO jump/sink — the conveyor drives velY. Done
         // once risen to the exit level or out of the column (feet no longer an up-column).
         plan.phase("ride")
@@ -223,19 +245,55 @@ public final class RideBubbleColumn implements Movement {
         return plan;
     }
 
-    /** ENTER drive: face + forward toward the up-column found at a feet-level cardinal neighbour (state probe,
-     *  no timer); nothing found (drifted) → hold. Never sprints (a slow, controlled entry into the conveyor). */
-    private static void driveIntoColumn(BotSteering b) {
-        int bx = b.footX(), by = b.footY(), bz = b.footZ();
+    /**
+     * The ride-column candidates for a planned {@code (fx,fz) → (tx,tz)} transition: cardinal neighbours of the
+     * start node the exit cell is cardinal-adjacent to. For the common straight-through exit (target 2 cells
+     * away on one axis) this is UNIQUE; a diagonal exit admits 2 and a ride that steps back onto its own start
+     * column admits 4 — the drive's live {@code bubbleUpAt} filter resolves those against the world.
+     */
+    private static int[][] rideColumnCandidates(int fx, int fz, int tx, int tz) {
+        int[][] out = new int[4][];
+        int n = 0;
         for (int[] d : CARDINALS) {
-            if (b.bubbleUpAt(bx + d[0], by, bz + d[1])) {
-                b.faceHorizontally(d[0], d[1]);
-                b.setForward(1.0f);
+            int cx = fx + d[0], cz = fz + d[1];
+            if (Math.abs(tx - cx) + Math.abs(tz - cz) == 1) out[n++] = new int[]{cx, cz};
+        }
+        int[][] trimmed = new int[n][];
+        System.arraycopy(out, 0, trimmed, 0, n);
+        return trimmed;
+    }
+
+    /** Whether {@code (x,z)} is one of the plan's ride-column candidates. */
+    private static boolean isPlannedColumn(int[][] cols, int x, int z) {
+        for (int[] c : cols) {
+            if (c[0] == x && c[1] == z) return true;
+        }
+        return false;
+    }
+
+    /** ENTER drive: face + forward toward the CENTRE of the plan's ride column — the first candidate that is a
+     *  live up-column at the bot's feet level (state probe, no timer). Aiming at the cell centre (not the bare
+     *  cardinal axis) pulls lateral drift back onto the seam crossing; the proportional pull (same shape as
+     *  {@link #holdColumn}) makes an already-centred bot degenerate to a hold instead of a random-facing push.
+     *  None live (grid changed) → hold rather than wander. Never sprints (a slow, controlled conveyor entry). */
+    private static void driveIntoColumn(BotSteering b, int[][] cols) {
+        int by = b.footY();
+        for (int[] c : cols) {
+            if (b.bubbleUpAt(c[0], by, c[1])) {
+                double dx = (c[0] + 0.5) - b.x();
+                double dz = (c[1] + 0.5) - b.z();
+                double dist = Math.sqrt(dx * dx + dz * dz);
+                if (dist > 1.0e-4) {
+                    b.faceHorizontally(dx, dz);
+                    b.setForward((float) Math.min(1.0, dist));
+                } else {
+                    b.setForward(0.0f);
+                }
                 b.setSprinting(false);
                 return;
             }
         }
-        b.setForward(0.0f); // no adjacent column at feet level — hold rather than wander
+        b.setForward(0.0f); // no live planned column at feet level — hold rather than wander
     }
 
     /** RIDE drive: hold horizontal centre on the bot's OWN block column (it is inside the column) with a
