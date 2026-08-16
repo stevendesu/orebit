@@ -98,6 +98,45 @@ class RideBubbleColumnTest {
     }
 
     @Test
+    void surfaceLaunchCorridorWithLavaIsPricedIntoTheRide() {
+        // The mazelava conviction (2026-08-16): a surface-terminated column launches its rider ballistically,
+        // and a lava blanket above the surface burned the bot because the launch corridor was unpriced. Same
+        // bank-exit geometry as ridesToTopBankExitAtSurface, plus LAVA two cells above the top bubble in the
+        // ride column. The corridor charge is 2× the flat damaging-cell HP charge (up + back
+        // down; floorHazardCost form — cellTransitCost's HP term is passable-gated and skips fluids), which
+        // buries the ride against any
+        // comparable route while staying a PRICE, not a refusal.
+        NavGridView grid = build(s -> {
+            upColumn(s, CX, CZ, BASE, TOP);
+            s.set(4, TOP, 8, Blocks.STONE.defaultBlockState());          // the bank
+            s.set(CX, TOP + 2, CZ, Blocks.LAVA.defaultBlockState());     // the blanket, in the launch corridor
+        });
+        Capture cap = expand(grid, MovementContext.MODE_STANDING);
+
+        assertTrue(cap.has(4, TOP, 8), "the bank exit is still OFFERED — priced, never refused");
+        float expectedExtra = 2f * BotCaps.DEFAULT.costPerHitpoint(); // flat damaging-cell HP charge, x2 passes
+        assertEquals(EXPECTED_COST + expectedExtra, cap.costOf(4, TOP, 8), 1e-2f,
+                "the ride carries the launch corridor's lava charge (2× flat HP: up and back down)");
+    }
+
+    @Test
+    void aSolidLidEndsTheLaunchCorridorScan() {
+        // A stone lid one cell above the surface bonks the launch; lava resting ABOVE that lid is unreachable
+        // and must NOT be charged (the scan stops at the first non-passable cell).
+        NavGridView grid = build(s -> {
+            upColumn(s, CX, CZ, BASE, TOP);
+            s.set(4, TOP, 8, Blocks.STONE.defaultBlockState());          // the bank
+            s.set(CX, TOP + 2, CZ, Blocks.STONE.defaultBlockState());    // the lid (air at TOP+1 keeps aboveAir)
+            s.set(CX, TOP + 3, CZ, Blocks.LAVA.defaultBlockState());     // unreachable above the lid
+        });
+        Capture cap = expand(grid, MovementContext.MODE_STANDING);
+
+        assertTrue(cap.has(4, TOP, 8), "bank exit offered");
+        assertEquals(EXPECTED_COST, cap.costOf(4, TOP, 8), 1e-3f,
+                "lava above a solid lid is unreachable by the launch and must not be charged");
+    }
+
+    @Test
     void ridesToTopFloatOutWhenColumnTerminatesMidWater() {
         // Mid-water termination: plain (non-bubble) water directly above the top bubble. A lateral neighbour
         // whose feet cell is swimmable water → float up off the last bubble and swim out sideways at topY+1.

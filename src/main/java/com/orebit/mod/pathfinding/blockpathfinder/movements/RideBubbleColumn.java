@@ -6,6 +6,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
+import com.orebit.mod.worldmodel.navblock.NavBlock;
 
 /**
  * Ride an <b>UP bubble column</b> — the soul-sand conveyor (MOVEMENT-DESIGN.md, Tier 1 water; owner-ratified
@@ -126,6 +127,19 @@ public final class RideBubbleColumn implements Movement {
      */
     public static final float RIDE_BASE = 4f;
 
+    /**
+     * How many cells ABOVE the top bubble the surface-launch hazard scan covers ({@link #launchCorridorCost}).
+     * A surface-terminated column LAUNCHES its rider ballistically above the water, and the bot's 1.8-tall BOX
+     * is what takes damage: measured on the open-sky swimmaze launches (nothing arrested them), the feet apex
+     * is {@code topY+3.5} and the box top sweeps into {@code topY+5} (exit vy 0.62–0.71, tick-sum verified).
+     * One cell of margin for exit-speed variance (the one-cell above-column boost adds +0.1/tick while
+     * transited, so a slow exit lingers and leaves faster) gives 6. Deliberately an EMPIRICAL bound, not a
+     * closed form — a closed form would model the launch parabola inside the planner, which the ratified
+     * fall-is-not-vertical rule forbids; the follower makes reality match, the planner prices a documented
+     * envelope. (2026-08-16, the mazelava lava-blanket card.)
+     */
+    static final int LAUNCH_SCAN = 6;
+
     /** Vertical-velocity threshold (blocks/tick) below which the top ejection is treated as SETTLED —
      *  <b>the WATER-only stillness gate</b>. It applies ONLY to the buoyant in-water float-out exit, whose velY
      *  oscillates ±0.04 while the bot bobs; sized just above that ±0.04 increment so a floating bot reads settled
@@ -159,6 +173,17 @@ public final class RideBubbleColumn implements Movement {
             boolean aboveWater = builtAbove && ctx.water(aboveDesc);                    // mid-water termination
             boolean aboveAir = builtAbove && ctx.passable(aboveDesc) && !ctx.water(aboveDesc); // surface reached
 
+            // A surface-terminated column LAUNCHES its rider through the cells above it — whatever exit is
+            // taken (bank exits ride to the top and launch too). Price the ride column's launch corridor into
+            // the base ride cost (each exit adds its own column's corridor below — the measured launch drifts
+            // ~1.5 blocks laterally toward the exit). PRICED, not refused: an immune bot pays only the transit
+            // surcharges and may legally ride a lava-capped column; a mortal bot's flat-HP charges bury the
+            // ride against any comparable route. Found by the mazelava card: the planner rode into the lava
+            // blanket (tick 106, hp 20 -> 16) because this corridor was free.
+            if (aboveAir) {
+                rideCost += launchCorridorCost(ctx, cx, topY, cz);
+            }
+
             for (int[] e : CARDINALS) {
                 int ex = cx + e[0], ez = cz + e[1];
 
@@ -168,8 +193,11 @@ public final class RideBubbleColumn implements Movement {
                     if (ctx.standable(floorDesc)
                             && ctx.passable(ex, topY + 1, ez) && ctx.passable(ex, topY + 2, ez)) {
                         // Bank: solid footing flush with the column top + two clear body cells (feet air).
-                        out.accept(ex, topY, ez, rideCost + ctx.floorHazardCost(floorDesc),
-                                MovementContext.MODE_STANDING);
+                        // A surface-terminated ride launches before the step-out, so the bank column's launch
+                        // corridor is priced too (a mid-water termination has no launch — aboveAir is false).
+                        float bankCost = rideCost + ctx.floorHazardCost(floorDesc)
+                                + (aboveAir ? launchCorridorCost(ctx, ex, topY, ez) : 0f);
+                        out.accept(ex, topY, ez, bankCost, MovementContext.MODE_STANDING);
                     } else if (aboveWater && ctx.water(ex, topY + 1, ez)) {
                         // Mid-water float-out: the column tops into water and the neighbour feet is swimmable
                         // (feet water — mutually exclusive with the bank case). Head free (Surface / StartSprintSwim take over).
@@ -179,14 +207,40 @@ public final class RideBubbleColumn implements Movement {
 
                 // Exit B — surface float-out at feet layer topY (node floor = topY-1), only when the column
                 // reached the surface (open air above the top bubble). A same-Y lateral swim-out into the
-                // surrounding surface pool: neighbour feet swimmable water, head open air.
+                // surrounding surface pool: neighbour feet swimmable water, head open air. The exit column's
+                // own launch corridor is priced per-exit (the launch drifts laterally toward the exit).
                 if (aboveAir && ctx.built(ex, topY, ez) && ctx.built(ex, topY + 1, ez)
                         && ctx.water(ex, topY, ez)
                         && ctx.passable(ex, topY + 1, ez) && !ctx.water(ex, topY + 1, ez)) {
-                    out.accept(ex, topY - 1, ez, rideCost, MovementContext.MODE_STANDING);
+                    out.accept(ex, topY - 1, ez, rideCost + launchCorridorCost(ctx, ex, topY, ez),
+                            MovementContext.MODE_STANDING);
                 }
             }
         }
+    }
+
+    /**
+     * The surface-launch hazard price of one column: the flat damaging-cell charge
+     * ({@link MovementContext#floorHazardCost(long)} — 1 HP in the {@code costPerHitpoint} currency, mortal
+     * bots only, MEDIA-AGNOSTIC) summed over the {@link #LAUNCH_SCAN} cells above the top bubble, ×2 because
+     * the ballistic pass crosses each cell twice (up and back down). NOT {@code cellTransitCost}: its HP term
+     * is gated on {@code isPassable}, which excludes fluids — exactly the lava blanket this scan exists to
+     * price (measured: the gate let the mazelava charge silently drop to zero). The flat charge understates
+     * lava's real ~8–15 HP launch bill, but one charged cell already outprices any comparable route — the
+     * established safe-direction convention — and an immune bot pays nothing and keeps the ride: PRICED,
+     * never refused. The scan STOPS at the first COLLISION cell (a solid lid bonks the launch; everything
+     * above it is unreachable — {@code passable} would wrongly stop at enterable fluids) and at the first
+     * unbuilt cell (optimistic air, the §6 boundary).
+     */
+    private static float launchCorridorCost(MovementContext ctx, int x, int topY, int z) {
+        float c = 0f;
+        for (int i = 1; i <= LAUNCH_SCAN; i++) {
+            if (!ctx.built(x, topY + i, z)) break;          // unbuilt reads optimistic — never charge it
+            long d = ctx.descriptorAt(x, topY + i, z);
+            if (NavBlock.hasCollision(d)) break;            // a solid lid ends the launch; above is unreachable
+            c += ctx.floorHazardCost(d);
+        }
+        return 2f * c;
     }
 
     /**
