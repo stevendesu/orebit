@@ -491,10 +491,21 @@ public final class SwimCourse {
             // column shoots it out). Only armed once the bot has actually been in water (so a dry-start trial
             // like lipdown doesn't false-fire), debounced over EJECT_CONSECUTIVE_TICKS (so a 1-tick surface bob
             // doesn't trip it), and gated on dist > ARRIVE_DIST (so exiting onto a bank AT the goal is a PASS).
+            //
+            // A tick steered by RideBubbleColumn is EXEMPT (2026-08-15): riding an open-sky surface column
+            // LAUNCHES the rider ~1.7 blocks above the water for ~10-15 airborne ticks — vanilla physics, and
+            // the move's own documented contract ("strong enough to eject the rider above the surface"). The
+            // guard predates that move ever being planned mid-route; convicting the one move whose PLAN includes
+            // an airborne window turns a correct ride into a FAIL (swimmaze died at z=103.99, one tick of arc
+            // from the exit water). The exemption window is exactly the ride: lastSteerMove stays
+            // RideBubbleColumn until its reached() fires, which requires the bot settled back IN water (or
+            // grounded). Every cruise move remains fully guarded — a drift-clip into a wall column mid-
+            // SprintSwim still convicts, which is this course's whole lethality mechanism.
+            boolean plannedLaunch = "RideBubbleColumn".equals(bot.lastSteerMove);
             if (bot.isInWater()) {
                 everInWater = true;
                 ejectTicks = 0;
-            } else if (everInWater) {
+            } else if (everInWater && !plannedLaunch) {
                 ejectTicks++;
                 if (ejectTicks >= EJECT_CONSECUTIVE_TICKS && dist > BotNavigator.ARRIVE_DIST) {
                     record(tr, "FAIL", "ejected (left water mid-route, lost prone)");
