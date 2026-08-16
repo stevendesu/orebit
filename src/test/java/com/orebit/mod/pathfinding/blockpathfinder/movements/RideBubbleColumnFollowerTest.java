@@ -143,6 +143,20 @@ class RideBubbleColumnFollowerTest {
     }
 
     @Test
+    void groundedAboveTheWaypoint_rimLanding_notReached() {
+        // THE RIM-LANDING CASE (2026-08-16): the open-sky launch scattered the bot onto the tank's rim — right
+        // x/z, GROUNDED, but a full cell ABOVE the waypoint's feet cell, dry. Pre-fix the grounded arm ignored
+        // Y and declared arrival there, handing a prone-in-water successor dry footing its plan never had (and
+        // ending the course's ride exemption mid-recovery). Grounded must match the planned feet cell exactly.
+        FakeBot b = new FakeBot(WX + 0.5, WY + 1, WZ + 0.5);
+        b.grounded = true;
+        b.inWater = false;
+        b.velY = -0.078;
+        assertFalse(RIDE.reached(b, WX, WY, WZ, null),
+                "grounded a cell above the waypoint (a rim landing) is NOT the planned arrival");
+    }
+
+    @Test
     void notAtExitCell_neverReached() {
         // Off the exit column entirely — grounded and settled, but the wrong x/z, so not reached.
         FakeBot b = new FakeBot(WX + 2.5, WY, WZ + 0.5);

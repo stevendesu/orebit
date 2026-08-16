@@ -41,6 +41,15 @@ public final class SteerControl {
      * converging gently. This is the tight 1-wide-lane hold the bubble-column channels need (a graze of a flank
      * up-column ejects the bot). Ground steering keeps gain 0 (fixed look-ahead) — this is swim-only. */
     static final double SWIM_CTE_GAIN = 6.0;
+    /**
+     * Swim lane-admission bound (blocks): the cross-track error above which the HAZARD-scoped pursuit clamp
+     * ({@code computeGeom}'s {@code laneGate}) gives up its along-advance and aims at the perpendicular foot
+     * point on the line — pure recentring until the bot's BOX is back inside the current segment's 1-wide
+     * lane. Geometry: the 0.6-wide box is fully inside a 1-wide lane iff |cte| ≤ 0.5 − 0.3 = 0.2; 0.05 of
+     * margin gives 0.15. Applied ONLY when the corner/flank is a swim hazard (see swimServo): on open water,
+     * cte above this bound is ordinary geometry (the rise card's diagonal zig-zag lives there by design and
+     * livelocked under an unscoped clamp — 2026-08-16). */
+    static final double LANE_ADMIT = 0.15;
     /** How many cells past a turn waypoint the hazard-aware corner brake probes along the CURRENT travel
      *  direction to decide whether an overshoot would carry the bot into a hazard (bubble column / lava). */
     static final int HAZARD_LOOKAHEAD = 2;
@@ -263,6 +272,19 @@ public final class SteerControl {
      * the look-ahead collapses toward the on-line point as cross-track grows, tightening the lane hold.
      */
     private static void computeGeom(BotSteering b, SteerView p, double cteGain) {
+        computeGeom(b, p, cteGain, false);
+    }
+
+    /**
+     * As the 3-arg overload, with the swim <b>lane-admission clamp</b> ({@code laneGate}): while the bot's box
+     * is not fully inside the current segment's 1-wide lane ({@code cte > }{@link #LANE_ADMIT}), the pursuit
+     * gives up its along-advance and aims at the perpendicular foot point — pure recentring until admitted.
+     * HAZARD-SCOPED by the caller ({@code swimServo} passes its hazardCorner verdict): off-line pursuit is
+     * NORMAL swim geometry on open water (the rise card's diagonal zig-zag holds cte > LANE_ADMIT by design
+     * and livelocked under an unscoped clamp), but against a lethal flank the along-component of an off-lane
+     * pursuit is exactly what cuts the inside corner (the mazeportal 0.026 graze → teleport).
+     */
+    private static void computeGeom(BotSteering b, SteerView p, double cteGain, boolean laneGate) {
         double ax = p.sx(), az = p.sz();
         double tx = p.tx(), tz = p.tz();
         double px = b.x(), pz = b.z();
@@ -286,6 +308,13 @@ public final class SteerControl {
         double cte = Math.sqrt(cx * cx + cz * cz);
         G.cte = cte;
         double lookahead = LOOKAHEAD / (1.0 + cteGain * cte);   // swim: shrink as cross-track grows
+        // LANE ADMISSION (2026-08-16, the mazeportal corner graze; hazard-scoped via laneGate — see the
+        // 4-arg overload doc): off-lane, zero the along-advance so the pursuit aims at the PERPENDICULAR foot
+        // point. The cte-shrunken lookahead above softens the diagonal but never eliminates it: at the
+        // measured corner handoff (cte 0.39) it still left a 0.45 along-component whose diagonal put the box
+        // corner 0.026 into the inside wall cell — survivable against a bubble column, a teleport against an
+        // end-portal wall.
+        if (laneGate && cte > LANE_ADMIT) lookahead = 0.0;
         double q = Math.min(along + lookahead, len);
         G.qx = ax + ux * q; G.qz = az + uz * q;                 // pursuit point ahead on the line
     }
@@ -1028,7 +1057,14 @@ public final class SteerControl {
      * match) can never fire off-column. Centred, that reduces to a pure depth pitch.
      */
     public static void swimServo(BotSteering b, SteerView p, double bias) {
-        computeGeom(b, p, SWIM_CTE_GAIN);
+        // HAZARD corner? Decided FIRST (2026-08-16): it gates BOTH the racing-line blend below AND the
+        // pursuit's lane-admission clamp (computeGeom's laneGate) — the two corner-precision measures are
+        // deliberately hazard-scoped, because off-line pursuit is NORMAL swim geometry elsewhere: the rise
+        // card's DiagonalSprintSwim zig-zag holds cte > LANE_ADMIT chronically by design, and an unscoped
+        // admission clamp livelocked it (800-tick hover, measured same day). Where nothing lethal flanks the
+        // lane, the plain cte-shrunken pursuit converges fine — 19 cards' worth of evidence.
+        boolean hazardCorner = overshootHazard(b, p) || (flankHazard(b, p) && crossTrack(b, p) > FLANK_DRIFT);
+        computeGeom(b, p, SWIM_CTE_GAIN, hazardCorner);
         double dy = swimDepthTarget(p, bias) - b.y();               // depth pitch target (same as swimPitched)
         if (G.segLen < EPS) {                              // pure vertical: hold the column while diving/rising
             double ox = p.tx() - b.x(), oz = p.tz() - b.z();
@@ -1052,10 +1088,21 @@ public final class SteerControl {
         if (dl < EPS) { b.faceTowards(0.0, dy, 0.0); b.setForward(0.0f); return; }
         dirx /= dl; dirz /= dl;
 
+        double cruise = SERVO_CRUISE;
+
         // Smooth DIAGONAL corner: as the bot nears the turn waypoint, rotate the desired direction from this
         // segment toward the NEXT one, with an OUTSIDE racing-line bias so it rounds WIDE and keeps the hitbox
         // off the inside flank column (the clip = the ejection). Weight grows with proximity to the corner.
-        if (p.hasNext()) {
+        //
+        // SUPPRESSED AT A HAZARD CORNER (2026-08-16, the mazeportal pre-turn drift): the blend's next-leg
+        // component outweighs its outward bias (z-weight w(1 − BIAS) > 0), so the net effect is an INSIDE
+        // pull — measured ticks 59-68: cte 0.00 → 0.12 with +0.034/tick cross velocity built BEFORE the
+        // cursor even advanced, momentum the corner had no room to forgive against a lethal wall.
+        // blendLeavesLane's bound (0.5 − PARKOUR_CELL_MARGIN ≈ 0.4) is parkour-lane semantics and lets all
+        // of that through. A racing line is a SPEED optimization for open water; a hazard corner is priced
+        // for correctness — square it: hold the centerline to the arrive point, then turn. Open-water
+        // corners keep the blend untouched.
+        if (p.hasNext() && !hazardCorner) {
             double ndx = p.nx() - p.tx(), ndz = p.nz() - p.tz();
             double nl = Math.sqrt(ndx * ndx + ndz * ndz);
             if (nl > EPS) {                                // next leg horizontal (a vertical dive doesn't blend)
@@ -1084,8 +1131,6 @@ public final class SteerControl {
         // ramp to a creep FLOOR so a maze channel of consecutive corners holds a crawl instead of stalling at
         // each. The tight centerline pursuit above is the correctness lever (don't clip the column); the speed
         // ramp just prevents an overshoot-through, and the floor keeps the corner from a full re-accel stall.
-        double cruise = SERVO_CRUISE;
-        boolean hazardCorner = overshootHazard(b, p) || (flankHazard(b, p) && crossTrack(b, p) > FLANK_DRIFT);
         if (hazardCorner) {
             double segx = p.tx() - p.sx(), segz = p.tz() - p.sz();
             double sl = Math.sqrt(segx * segx + segz * segz);
