@@ -29,7 +29,8 @@ class EditSnapshotTest {
 
     private static StepEdits step(long[] breaks, long[] places) {
         StepEdits se = new StepEdits();
-        se.load(breaks, breaks.length, places, places.length, new long[0], new boolean[0], 0, ClutchModel.NONE, 0L);
+        se.load(breaks, new boolean[breaks.length], breaks.length, places, places.length,
+                new long[0], new boolean[0], 0, ClutchModel.NONE, 0L);
         return se;
     }
 
@@ -42,6 +43,30 @@ class EditSnapshotTest {
     }
 
     // ---- EditSnapshot.fromRemainingSteps -------------------------------------------------------------
+
+    @Test
+    void wetBreakFlagsSurviveTheSnapshotAndFoldAsBrokenWater() {
+        // A wet break (the wet-above flood rule) must stay wet through the splice baseline: the seeded
+        // search reads the flooded shaft as WATER, not phantom air — else it re-prices the dig as dry.
+        StepEdits se = new StepEdits();
+        se.load(new long[] { CELL_A, CELL_B }, new boolean[] { true, false }, 2,
+                new long[0], 0, new long[0], new boolean[0], 0, ClutchModel.NONE, 0L);
+        EditSnapshot s = EditSnapshot.fromRemainingSteps(planOf(se), 0);
+
+        assertEquals(2, s.breakCount());
+        boolean sawWet = false;
+        boolean sawDry = false;
+        for (int i = 0; i < s.breakCount(); i++) {
+            if (s.breakAt(i) == CELL_A) { assertTrue(s.breakWetAt(i)); sawWet = true; }
+            if (s.breakAt(i) == CELL_B) { assertFalse(s.breakWetAt(i)); sawDry = true; }
+        }
+        assertTrue(sawWet && sawDry);
+
+        PathEdits edits = new PathEdits();
+        edits.addSnapshot(s);
+        assertEquals(PathEdits.BROKEN_WATER, edits.kindAt(CELL_A), "wet break folds as BROKEN_WATER");
+        assertEquals(PathEdits.BROKEN, edits.kindAt(CELL_B), "dry break folds as plain BROKEN");
+    }
 
     @Test
     void latestStepWinsAcrossSteps() {

@@ -26,6 +26,9 @@ public final class StepEdits {
 
     /** Cells to clear (mine), packed {@link BlockPos#asLong}; only the first {@link #breakCount} are live. */
     private long[] breaks;
+    /** Parallel to {@link #breaks}: whether water floods the {@code i}-th broken cell (the wet-above rule —
+     *  {@link PathEdits#BROKEN_WATER}); the diff then reads it as water rather than air. */
+    private boolean[] breakWet;
     private int breakCount;
     /** Cells to fill (place a throwaway block on), packed {@link BlockPos#asLong}; first {@link #placeCount}. */
     private long[] places;
@@ -71,16 +74,18 @@ public final class StepEdits {
     /** A poolable, initially-empty edit set; {@link #load} fills it (growing the buffers as needed). */
     StepEdits() {
         this.breaks = new long[4];
+        this.breakWet = new boolean[4];
         this.places = new long[2];
         this.doorSets = new long[2];
         this.doorSetOpen = new boolean[2];
         this.clutchKind = ClutchModel.NONE;
     }
 
-    private StepEdits(long[] breaks, int breakCount, long[] places, int placeCount,
+    private StepEdits(long[] breaks, boolean[] breakWet, int breakCount, long[] places, int placeCount,
                       long[] doorSets, boolean[] doorSetOpen, int doorSetCount,
                       int clutchKind, long clutchCell) {
         this.breaks = breaks;
+        this.breakWet = breakWet;
         this.breakCount = breakCount;
         this.places = places;
         this.placeCount = placeCount;
@@ -99,11 +104,15 @@ public final class StepEdits {
      * counts — that is what keeps a RECYCLED pool slot from leaking a previous edge's clutch onto a step that
      * chose none ({@link ClutchModel#NONE} is written, not skipped).
      */
-    void load(long[] srcBreaks, int bn, long[] srcPlaces, int pn,
+    void load(long[] srcBreaks, boolean[] srcBreakWet, int bn, long[] srcPlaces, int pn,
               long[] srcDoors, boolean[] srcDoorOpen, int dn,
               int clutch, long clutchAt) {
-        if (breaks.length < bn) breaks = new long[Math.max(bn, breaks.length << 1)];
+        if (breaks.length < bn) {
+            breaks = new long[Math.max(bn, breaks.length << 1)];
+            breakWet = new boolean[breaks.length];
+        }
         System.arraycopy(srcBreaks, 0, breaks, 0, bn);
+        System.arraycopy(srcBreakWet, 0, breakWet, 0, bn);
         breakCount = bn;
         if (places.length < pn) places = new long[Math.max(pn, places.length << 1)];
         System.arraycopy(srcPlaces, 0, places, 0, pn);
@@ -121,7 +130,7 @@ public final class StepEdits {
 
     /** An arena-independent, exact-size copy — for the final path's edits handed to a {@link BlockPathPlan}. */
     StepEdits copy() {
-        return new StepEdits(Arrays.copyOf(breaks, breakCount), breakCount,
+        return new StepEdits(Arrays.copyOf(breaks, breakCount), Arrays.copyOf(breakWet, breakCount), breakCount,
                              Arrays.copyOf(places, placeCount), placeCount,
                              Arrays.copyOf(doorSets, doorSetCount), Arrays.copyOf(doorSetOpen, doorSetCount),
                              doorSetCount, clutchKind, clutchCell);
@@ -140,6 +149,13 @@ public final class StepEdits {
     /** The {@code i}-th cell to break, as a packed {@link BlockPos#asLong} (no allocation). */
     public long breakAt(int i) {
         return breaks[i];
+    }
+
+    /** Whether water floods the {@code i}-th broken cell once mined (the wet-above rule) — the diff reads it
+     *  as {@link PathEdits#BROKEN_WATER water} instead of air. Planner-side metadata only: the executor mines
+     *  the cell identically either way (the real flood then arrives on its own). */
+    public boolean breakWetAt(int i) {
+        return breakWet[i];
     }
 
     /** Number of cells this move places. */
