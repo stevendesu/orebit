@@ -92,7 +92,7 @@ public final class ProbeCommand implements BotCommand {
                     + " CLEARABLE_HAZARD=" + NavFlags.clearableHazard(flags)
                     + " SLOW_TRANSIT=" + NavFlags.slowTransit(flags)
                     + " RISKY_EDIT=" + NavFlags.risksEdit(flags)
-                    + " PLACEABLE_NEIGHBOR=" + NavFlags.placeableNeighbor(flags));
+                    + " HAS_FLUID_NEIGHBOR=" + NavFlags.hasFluidNeighbor(flags));
             // The two body cells a walker transits standing on this floor, each priced individually, then
             // the flags-gated aggregate a Traverse/Diagonal into this column actually charges. If a body
             // cell's own cellTransitCost is > 0 but bodyTransitCost is 0, the floor's prefilter bits are

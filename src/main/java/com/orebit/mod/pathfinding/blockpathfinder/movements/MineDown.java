@@ -8,6 +8,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.PathEdits;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 import com.orebit.mod.pathfinding.blockpathfinder.cuboid.Axes;
@@ -31,7 +32,29 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  * following move.
  *
  * <p><b>Caps.</b> Requires {@link BotCaps#canBreak}; a non-breaking bot emits nothing. The floor must be
- * actually breakable (not bedrock/fluid) and not {@code RISKY_EDIT} (don't undermine sand / dig beside lava).
+ * actually breakable (not bedrock/fluid) and not {@code RISKY_EDIT} (don't undermine a gravity stack —
+ * strictly gravity since DESIGN-fluid-flow-prediction.md §4.1; a dig that would flood is PRICED through
+ * the {@link EditScratch} fold funnel's verdict, never refused).
+ *
+ * <h2>Lava exposure (DESIGN-fluid-flow-prediction.md §6, the 2026-08-17 adversarial-review correction)</h2>
+ * MineDown is the one move whose own dig CREATES the lava it then stands in: a {@code BROKEN_LAVA} fold
+ * verdict (lava above the break, or the lateral funnel's tie) writes lava into the diff at the very cell
+ * the bot drops its feet into before digging the next level. That diff-created lava is invisible to the
+ * flags-based transit prefilters ({@code flagsAt} never layers {@code PathEdits}) and MineDown calls no
+ * transit pricing — so without an explicit term the verdict would choose the edit KIND while adding ZERO
+ * cost, and a mortal bot would price a lava-flooding shaft identically to a dry one (a free lethal
+ * offer). The fix is the per-level <b>lava-exposure term</b> ({@link #lavaExposure}): each dig level
+ * whose FEET cell reads lava through scratch+diff — the mouth pool for level 1, an earlier level's
+ * {@code BROKEN_LAVA} chained down the shaft for the rest — charges that level's real mining ticks ×
+ * {@link MovementContext#LAVA_HP_PER_TICK} × {@code costPerHitpoint}
+ * ({@link MovementContext#lavaExposureCost}), gated on {@link BotCaps#takesDamage}. Physically derived
+ * (the bot genuinely burns for the whole dig duration at vanilla's 4-HP-per-10-tick immersion rate), in
+ * the one damage currency, and macro == micro exactly: the micro chain's deeper nodes see their
+ * ancestors' {@code BROKEN_LAVA} through the diff, the macro loop sees its own earlier folds through the
+ * scratch — same cells, same per-level mining ticks, same sum. An immune bot, a dry shaft and a
+ * water-flooding shaft (water damages nothing) all add exactly nothing — bit-identical to the term not
+ * existing. Lava never joins the submerged mining STANCE (vanilla's eye test is {@code FluidTags.WATER}
+ * — the stance stays 1×); exposure is a separate damage term, not a speed penalty.
  *
  * <p><b>Trapdoors — the hatch-drop toggle arm (DESIGN-trapdoors.md §5).</b> The floor cell rides {@link
  * com.orebit.mod.pathfinding.blockpathfinder.EditScratch#requireAirVertical}: when the block stood on is a
@@ -83,7 +106,8 @@ public final class MineDown implements Movement {
         if (!ctx.standable(ctx.descriptorOf(x, dy, z, packed))) return; // must land on solid ground
 
         // Break the block the bot currently stands on so it can drop into it. RISKY_EDIT on that cell
-        // forbids the break (don't undermine a gravity stack / open a fluid); unbreakable floor → invalid.
+        // forbids the break (don't undermine a gravity stack — strictly gravity, DESIGN-fluid-flow-
+        // prediction.md §4.1); unbreakable floor → invalid.
         int flags = ctx.flagsAt(x, y, z);
 
         // ---- Micro fallback: macros off, no cuboid seam (legacy unbounded search), OR (Option B) this
@@ -96,26 +120,47 @@ public final class MineDown implements Movement {
             // The floor stood on: break it — or, when it is a toggleable CLOSED trapdoor, fold the §5
             // SET_OPEN instead (the hatch-drop; class doc) and drop through the opened wall panel.
             e.requireAirVertical(x, y, z);
-            if (e.valid()) out.accept(x, dy, z, COST + e.extraCost(), e);
+            if (e.valid()) {
+                // Lava-exposure term (see the class doc's "Lava exposure" section): this node digs with
+                // its FEET in a cell reading lava (the mouth pool, or an ancestor's BROKEN_LAVA via the
+                // diff) — charge the mining time × the vanilla immersion rate in the one damage currency.
+                // Dry/water feet, or an immune bot, add exactly nothing (bit-identical costs).
+                out.accept(x, dy, z, COST + e.extraCost() + lavaExposure(ctx, e, x, y, z, 0f), e);
+            }
             return;
         }
 
         // ---- Macro path: collapse the uniform shaft into one jump. ----
-        // Wet-column latch (owner-ratified 2026-08-16): with water in the feet cell, EVERY level below the
-        // first digs flooded — vanilla falling water always fills the opened cell, so the water column
-        // follows the shaft down (the flagship's pool-entry dig). Level 1 prices at the node's own per-pop
-        // stance (its eye may still be dry); levels ≥2 dig grounded (standing on the level they break) and
-        // submerged exactly when the column is wet. EditScratch.addBreak's wet-above rule records the same
-        // chain as BROKEN_WATER folds, so the diff and the price agree.
-        boolean wetColumn = ctx.water(ctx.descriptorAt(x, y + 1, z));
-        float deepMult = wetColumn ? MovementContext.SUBMERGED_MINING_MULT : 1f;
+        // Per-level flood-aware stance (DESIGN-fluid-flow-prediction.md §7, superseding the 2026-08-16
+        // one-shot wet-column latch): EditScratch.addBreak's fold funnel decides per broken level whether
+        // the opened cell floods (vertical certainty AND the lateral tier-1/2 prediction), and the chain of
+        // in-scratch BROKEN_WATER/BROKEN_LAVA kinds is what each deeper level's stance is derived from —
+        // so the diff and the price agree level for level, including a shaft that only STARTS flooding at
+        // some mid-depth lateral pool. Level 1 prices at the node's own per-pop stance (its eye may still
+        // be dry); each level k ≥ 2 digs grounded (standing on the level it breaks) and submerged exactly
+        // when ITS head cell — level k−2's already-folded break, or the original mouth for k == 2 — reads
+        // water scratch-first (EditScratch.readsWater; lava does not submerge the eye).
+        EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
 
         // Per-step move cost = base move + the break folded onto each level. Use the REAL break cost of the
         // column substrate (the floor cell the bot is currently standing on), not a literal — cheap moves
         // get large jumps, expensive ones small (NON-NEGOTIABLE 2). The shaft is uniform by construction
         // (the cuboid certifies one navtype), so the start cell's break cost is the per-step edit cost —
-        // priced at the DEEP-level stance, which dominates any jump worth collapsing (J ≥ 2).
-        float moveCost = COST + ctx.breakCost(ctx.descriptorAt(x, y, z), deepMult);
+        // priced at the DEEP-level stance (pre-queried from the funnel's no-fold probe: a flooding level-1
+        // break chains water down the whole shaft), which dominates any jump worth collapsing (J ≥ 2).
+        int deepKind = e.peekBreakKind(x, y, z);
+        float deepMult = deepKind == PathEdits.BROKEN_WATER
+                ? MovementContext.SUBMERGED_MINING_MULT : 1f;
+        long shaftDesc = ctx.descriptorAt(x, y, z);
+        float moveCost = COST + ctx.breakCost(shaftDesc, deepMult);
+        // A lava-flooding shaft's per-step price is DOMINATED by the lava-exposure term (class doc "Lava
+        // exposure"): a level-1 BROKEN_LAVA verdict chains lava down the whole shaft exactly as water
+        // chains the submerged stance, so include the deep-level exposure in the jump sizing — the
+        // escape-hedge must see the real per-step price or it over-jumps a cheaper sideways exit
+        // (NON-NEGOTIABLE 2). Zero for an immune bot and on every non-lava shaft (sizing unchanged).
+        if (deepKind == PathEdits.BROKEN_LAVA) {
+            moveCost += ctx.lavaExposureCost(ctx.breakCost(shaftDesc, deepMult) - ctx.breakBaseCost());
+        }
 
         Cuboid box = ctx.cuboidScratch();
         cuboids.cuboidAt(x, y, z, Axes.AXIS_Y, -1, box); // travel -Y (digs straight down)
@@ -125,26 +170,62 @@ public final class MineDown implements Movement {
         // Fold the J per-step breaks into the scratch, replaying the SAME per-step requirement the micro
         // move checks (requireAir at the level broken on step k). Clamp J to the last valid step — an
         // over-claimed jump must SHRINK, never grow (conservative-only, MACRO-MOVEMENTS §3b).
-        EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+        float exposure = 0f; // Σ per-level lava-exposure (class doc "Lava exposure"); 0 on dry/water shafts
         for (int k = 1; k <= J; k++) {
             int by = y - (k - 1); // the floor cell broken on step k
             // Re-evaluate RISKY_EDIT per level (the micro move does, since each shaft cell is its own node):
-            // don't undermine a gravity stack / tap a fluid mid-shaft just because the START cell was safe.
-            // The start level (k==1) was already gated by the reset() above. Clamp the jump above a risky cell.
+            // don't undermine a gravity stack mid-shaft just because the START cell was safe. The start
+            // level (k==1) was already gated by the reset() above. Clamp the jump above a risky cell.
             if (k > 1 && MovementContext.risksEdit(ctx.flagsAt(x, by, z))) { J = k - 1; break; }
             // Break — or §5-toggle a closed hatch — the step-k floor. Level 1 digs at the node's own stance;
-            // deeper levels at the wet-column-latched deep stance (the explicit-stance overload).
-            if (k == 1) e.requireAirVertical(x, by, z);
-            else e.requireAirVertical(x, by, z, deepMult);
+            // each deeper level at ITS OWN flood-latched stance (the explicit-stance overload): grounded,
+            // submerged exactly when the level's head cell (by+2) reads water through the scratch chain.
+            float mult = 0f; // ≤ 0 = the node's own per-pop stance (level 1's, matching the micro chain)
+            if (k == 1) {
+                e.requireAirVertical(x, by, z);
+            } else {
+                mult = e.readsWater(x, by + 2, z) ? MovementContext.SUBMERGED_MINING_MULT : 1f;
+                e.requireAirVertical(x, by, z, mult);
+            }
             if (!e.valid()) {                // this level can't be broken — clamp to the last valid step
                 J = k - 1;
                 break;
             }
+            // Per-level lava exposure (class doc "Lava exposure"): step k digs with its feet in the cell
+            // level k−1 opened (or the original mouth for k == 1) — its BROKEN_LAVA kind is in THIS
+            // scratch, which is why the read must be scratch-first (readsLava), exactly like the stance
+            // read above. Charged at step k's own mining ticks, so macro == micro level for level.
+            exposure += lavaExposure(ctx, e, x, by, z, mult);
         }
         if (J < 1) return; // nothing valid — not even the first step
 
         int dz = Axes.stepY(Axes.AXIS_Y, -1) * J; // = -J (the Y delta of a straight-down jump)
-        out.accept(x, y + dz, z, J * COST + e.extraCost(), e);
+        out.accept(x, y + dz, z, J * COST + e.extraCost() + exposure, e);
+    }
+
+    /**
+     * The per-level <b>lava-exposure</b> term (DESIGN-fluid-flow-prediction.md §6, the 2026-08-17
+     * adversarial-review correction — see also the class doc's "Lava exposure" section): the damage cost
+     * of digging the level whose floor is {@code (x,by,z)} while the bot's FEET cell {@code (x,by+1,z)}
+     * reads lava through this candidate's own scratch first, then the path diff
+     * ({@link EditScratch#readsLava}). Zero — with no further reads — for an immune bot or a non-lava
+     * feet cell, so dry, water-only and damage-immune searches are bit-identical to the term not
+     * existing. When it fires, the exposed time is the level's REAL mining ticks — the same
+     * {@link MovementContext#breakCost} the fold just charged ({@code stanceMult ≤ 0} = the node's
+     * per-pop stance, the {@link EditScratch#requireAirVertical(int, int, int, float)} convention) minus
+     * the non-time {@code mining.breakBaseCost} surcharge — priced at
+     * {@link MovementContext#lavaExposureCost}'s vanilla immersion rate. A level that folds NO break (a
+     * diff-opened cell passed free, or a §5 hatch-toggle) spends no mining time standing still and
+     * charges nothing, matching the fold's own zero mining cost for that level.
+     */
+    private static float lavaExposure(MovementContext ctx, EditScratch e, int x, int by, int z,
+                                      float stanceMult) {
+        if (!ctx.caps().takesDamage() || !e.readsLava(x, by + 1, z)) return 0f;
+        long fd = ctx.descriptorAt(x, by, z); // the pre-break level cell (scratch folds are invisible here)
+        if (ctx.bodyPassable(fd) || ctx.trapdoorSetClearsVertical(fd)) return 0f; // no mining at this level
+        float miningTicks = (stanceMult > 0f ? ctx.breakCost(fd, stanceMult) : ctx.breakCost(fd))
+                - ctx.breakBaseCost();
+        return ctx.lavaExposureCost(miningTicks);
     }
 
     /**

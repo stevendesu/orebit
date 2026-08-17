@@ -51,7 +51,10 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *
  * <p><b>The only number worth writing down is the CAP: 1024.</b> {@code TraversalGrid} packs the navtype
  * into <b>10 bits</b> of its per-cell {@code short}, so 1024 is a hard structural limit — exceeding it
- * would truncate indices and silently corrupt the grid, which is why {@code intern} fails loudly instead.
+ * would truncate indices and silently corrupt the grid. {@code intern} itself does NOT enforce the cap
+ * (it silently doubles its table past 1024); the alarms live where truncation would bite — {@code
+ * NavSectionBuilder}'s static-init check against {@code TraversalGrid.NAVTYPE_CAPACITY}, and {@link
+ * #applyProtected}'s post-split re-check — and both are {@code LOGGER.error}-only, neither throws.
  * The live count sits in the low hundreds (400–600 territory) but is <b>deliberately not pinned here</b>:
  * it moves with the Minecraft version (new blocks, new state properties), with any new discriminator added
  * to {@link #fingerprint}, and at runtime with {@link #applyProtected} (each protected entry SPLITS the
@@ -125,7 +128,7 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           0.989) — a servo gain, not a class, so it can never consume a grid bit. The field
  *                           stays 2 BITS ON PURPOSE: narrowing it would either leave a hole at bit 19 or
  *                           renumber every field above it, and freeing descriptor bits is not scarce here
- *                           (52–63 are free). Keeping the width makes this an assignment-only change with a
+ *                           (54–63 are free). Keeping the width makes this an assignment-only change with a
  *                           byte-identical layout.
  *   20      1   climbable
  *   21      1   gravity     falling block (sand/gravel/concrete-powder)
@@ -201,7 +204,21 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           precision-LANDING moves (Parkour/DiagonalParkour) refuse it as a target —
  *                           landing square on a post the bot's whole body overhangs is shaolin parkour a
  *                           human can't reasonably follow (owner ruling 2026-07-31). A base identity
- *                           field. Bits 52–63 remain wholly unused.
+ *                           field.
+ *   52      1   fluidSource the cell's {@link FluidState} is a SOURCE ({@code isSource()}, amount 8) — always
+ *                           lateral-spread-eligible, the eligibility fact the flood funnel's tier 1 reads per
+ *                           fluid neighbour (DESIGN-fluid-flow-prediction.md §1.1/§3). Set for waterlogged
+ *                           states too (their fluid state IS a water source — see {@link #isFluidSource}), so
+ *                           the bit does NOT imply an open water cell. A base identity field: splits water and
+ *                           lava navtypes into source vs flowing variants.
+ *   53      1   fluidMinLevel the fluid is at MINIMUM level ({@code getAmount() == 1}) — one more lateral
+ *                           step yields amount 0, so the cell can never spread (the funnel's cheapest tier-1
+ *                           continue). Deliberately fluid-agnostic: exact for water and nether lava (dropOff
+ *                           1), merely conservative for overworld lava at amount 2 (assumed able to spread
+ *                           when it cannot — errs wet, the safe direction for lava). Do NOT make it
+ *                           dimension-aware; the descriptor is interned globally, not per-dimension
+ *                           (DESIGN-fluid-flow-prediction.md §3). A base identity field. Bits 54–63 remain
+ *                           wholly unused.
  * </pre>
  */
 public final class NavBlock {
@@ -287,7 +304,9 @@ public final class NavBlock {
     // the 2-bit portal field (any-portal / is-nether, see below); bits 13 and 43 were freed when the portal
     // marker moved down into 11–12, and were then CLAIMED by the door encoding below (13 = hinge, 43 = open)
     // — this comment claimed both were still free long after they were not, so do not read it as a free list.
-    // THE FREE BITS ARE 52–63; the highest bit in use is NARROW_TOP (51). The trapdoor arc added ZERO bits:
+    // THE FREE BITS ARE 54–63; the highest bit in use is FLUID_MIN_LEVEL (53) — the fluid-flow arc claimed
+    // 52–53 (FLUID_SOURCE / FLUID_MIN_LEVEL, DESIGN-fluid-flow-prediction.md §3, owner-ratified 2026-08-17).
+    // The trapdoor arc added ZERO bits:
     // facing/half/open/hand-toggleable are all SHARED fields discriminated by the openable kind (14–15) —
     // DESIGN-trapdoors.md §2, owner-ratified 2026-08-08. Adding a descriptor bit needs explicit owner
     // sign-off (retroactive ruling after handToggleable@50).
@@ -344,6 +363,12 @@ public final class NavBlock {
     private static final int FALLSOFT_SHIFT = 48, FALLSOFT_MASK = 0x03; // landing fall-damage class (base field)
     private static final long HAND_TOGGLEABLE_BIT = 1L << 50;          // hand-openable door/trapdoor, not iron
     private static final long NARROW_TOP_BIT = 1L << 51;                // narrow-post collision top (base field)
+    // Fluid spread facts (DESIGN-fluid-flow-prediction.md §3, owner-ratified 2026-08-17): the two
+    // per-blockstate facts vanilla's spread logic needs that the 2-bit fluid field cannot express —
+    // sourcehood and minimum level. Base identity fields (they SPLIT water/lava navtypes into
+    // source/flowing/min variants), read by the flood funnel's tier 1 at candidate-emission time.
+    private static final long FLUID_SOURCE_BIT    = 1L << 52;           // FluidState is a source (amount 8)
+    private static final long FLUID_MIN_LEVEL_BIT = 1L << 53;           // fluid at minimum level (amount 1)
 
     // ---- Precomputed predicate bits (37+) ----------------------------------------------------
     // Each is a PURE function of the fields above, so it adds ZERO navtypes (a function of existing bits
@@ -484,6 +509,15 @@ public final class NavBlock {
         d |= (long) (shapeClass & SHAPE_MASK) << SHAPE_SHIFT;
         d |= (long) (openable & OPEN_MASK) << OPEN_SHIFT;
         d |= (long) (fluid & FLUID_MASK) << FLUID_SHIFT;
+        // Fluid spread facts (DESIGN-fluid-flow-prediction.md §3), read off the same FluidState as the
+        // fluid field: sourcehood (amount 8 — waterlogged states qualify, their fluid state IS a water
+        // source) and minimum level (amount 1, fluid-agnostic — see the bit-layout notes on bit 53).
+        // Guarded like the fluid ternary above: an EmptyFluid answers false/0 anyway, but the guard keeps
+        // the reads mirror-symmetric with the field derivation.
+        if (!fs.isEmpty()) {
+            if (fs.isSource())       d |= FLUID_SOURCE_BIT;
+            if (fs.getAmount() == 1) d |= FLUID_MIN_LEVEL_BIT;
+        }
         d |= (long) (surface & SURF_MASK) << SURF_SHIFT;
         if (isClimbable(block))               d |= CLIMB_BIT;
         if (block instanceof FallingBlock)    d |= GRAVITY_BIT;
@@ -632,8 +666,9 @@ public final class NavBlock {
         // air is a degenerate config nobody should write; it would just make the cell unfillable.)
         // FLUIDS ARE OPEN (owner ruling, s52b): water and lava are vanilla-replaceable — placing into
         // them is completely valid (sealing a lava source with cobble is a standard technique). The old
-        // noFluid conjunct wrongly barred every fluid cell. (NOTE: the NavFlags RISKY_EDIT fold gate
-        // still refuses edits whose body space borders fluid — a separate, break-motivated guard.)
+        // noFluid conjunct wrongly barred every fluid cell. (Since 2026-08-17 no flag gate refuses
+        // fluid-adjacent edits at all: RISKY_EDIT is strictly gravity and a fluid-admitting break is
+        // PRICED by the fold funnel — DESIGN-fluid-flow-prediction.md §4.1/§4.2.)
         if ((isReplaceable(d) || shape == SHAPE_EMPTY) && !isProtected(d))           d |= OPEN_PLACE_BIT;
         if (solid && noFluid)                                                d |= COLLISION_BIT;
         return d;
@@ -1140,6 +1175,26 @@ public final class NavBlock {
     public static boolean isFluid(long d)  { return (d & ((long) 1 << FLUID_SHIFT)) != 0; }
     /** Lava specifically — the high fluid bit. */
     public static boolean isLava(long d)   { return (d & ((long) 2 << FLUID_SHIFT)) != 0; }
+    /**
+     * The cell's fluid is a SOURCE ({@code FluidState.isSource()}, amount 8) — always lateral-spread-eligible
+     * (DESIGN-fluid-flow-prediction.md §1.1/§3), the eligibility fact the flood funnel's tier 1 reads per
+     * fluid neighbour.
+     * <p><b>Waterlogged states carry this bit too</b>: a waterlogged block's {@code getFluidState()} IS a
+     * water source (the fluid field already reads waterlogged as water), so the bit does NOT imply an open
+     * water cell. The funnel is safe only because its tier-1 first clause excludes non-genuine-open fluid
+     * cells before consulting sourcehood (§8.2); any consumer outside the funnel must gate on open geometry
+     * itself, never on this bit alone.
+     */
+    public static boolean isFluidSource(long d)   { return (d & FLUID_SOURCE_BIT) != 0; }
+    /**
+     * The cell's fluid is at MINIMUM level ({@code FluidState.getAmount() == 1}) — one more lateral step
+     * yields amount 0, so the cell can never spread (the flood funnel's cheapest tier-1 continue,
+     * DESIGN-fluid-flow-prediction.md §3/§5). Deliberately fluid-agnostic: exact for water and nether lava
+     * (dropOff 1), merely conservative for overworld lava at amount 2 (assumed able to spread when it
+     * cannot — errs wet, the safe direction for lava). Do not make it dimension-aware; the descriptor is
+     * interned globally, not per-dimension.
+     */
+    public static boolean isFluidMinLevel(long d) { return (d & FLUID_MIN_LEVEL_BIT) != 0; }
     /** Surface: 0 none, 1 slow (2–3 unused; the SLIPPERY class was removed 2026-08-10 — see the bit layout). */
     public static int surface(long d)      { return (int) (d >>> SURF_SHIFT) & SURF_MASK; }
     public static boolean isClimbable(long d)   { return (d & CLIMB_BIT) != 0; }

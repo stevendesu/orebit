@@ -40,10 +40,23 @@ under water costs 5× (no Aqua Affinity), and digging while not on the ground �
 floating in a fluid, hanging on a ladder — costs another 5×, stacking to 25×. These
 are the exact `getDestroySpeed` divisors the bot really pays while mining, so an
 underwater shaft now prices at its true cost and the bot prefers a dry dig a few
-steps away when one exists. Relatedly, a block broken **directly beneath water** is
-planned as flooding — the opened cell reads as water, not air, for the rest of the
-plan — because falling water always fills the cell below; sideways spread is never
-assumed (if it happens anyway, the world update triggers a replan on its own).
+steps away when one exists.
+
+Beyond the stance, the planner **predicts whether a dig will flood at all**, by
+mirroring vanilla's own fluid-spread decision. A block broken directly beneath water
+or lava is planned as flooding — falling fluid always fills the cell below. A block
+broken *beside* fluid runs the full spread check: the fluid must be spread-eligible
+(a source, or flowing fluid at rest — a mid-fall column and a minimum-level trickle
+never spread sideways), the opened cell must tie or beat every other direction in
+vanilla's drain-seeking slope search (fluid beelines to a hole it can see within
+five blocks, so a visible drain elsewhere means the dig stays dry), and dry partial
+blocks like slabs and stairs act as the walls they really are. A predicted flood is
+never forbidden — the opened cell simply reads as water or lava, not air, for the
+rest of the plan, so every later dig in the shaft is priced at its true submerged
+cost, and a lava flood carries its full damage price (a fire-immune bot may still
+take the swim; a mortal one routes around it). In practice this is why the bot digs
+**diagonal** to a pool rather than beside it: the adjacent column floods sideways,
+the diagonal one provably stays dry.
 
 ## Placing
 

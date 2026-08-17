@@ -45,14 +45,16 @@ public class NavSectionBuildTest {
         assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(airGrid.flags(15, 15, 15)), "open air bypass (far corner)");
         assertEquals(NavBlock.AIR & 0xFFFF, airGrid.navtype(8, 8, 8), "air bypass navtype");
 
-        // --- Real read+classify path: a stone floor plane at y=4, air above.
+        // --- Real read+classify path: a stone floor plane at y=4, air above, one water cell over it.
         PalettedContainer<BlockState> c = newSection();
         BlockState stone = Blocks.STONE.defaultBlockState();
+        BlockState water = Blocks.WATER.defaultBlockState();
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) {
                 c.getAndSet(x, 4, z, stone);
             }
         }
+        c.getAndSet(2, 5, 2, water);
 
         TraversalGrid g = new TraversalGrid();
         NavSectionBuilder.classifyInto(c, false, g);
@@ -60,13 +62,20 @@ public class NavSectionBuildTest {
         // Standing on the stone plane with clear headroom -> JUMP, and the cell carries stone's navtype.
         assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(g.flags(8, 4, 8)), "stone floor headroom");
         assertEquals(NavBlock.navtypeFor(stone) & 0xFFFF, g.navtype(8, 4, 8), "stone floor navtype");
-        // The air cell directly above the floor can bridge from the block below.
-        assertTrue(NavFlags.placeableNeighbor(g.flags(8, 5, 8)), "air above floor is bridgeable");
         // The air cell directly beneath the floor has stone in its headroom -> NONE.
         assertEquals(NavFlags.HEADROOM_NONE, NavFlags.headroom(g.flags(8, 3, 8)), "air under floor (stone headroom)");
-        // High open air with no support and nothing to attach to -> full headroom, nothing to bridge.
+        // High open air -> full headroom.
         assertEquals(NavFlags.HEADROOM_JUMP, NavFlags.headroom(g.flags(8, 10, 8)), "open air high above");
-        assertFalse(NavFlags.placeableNeighbor(g.flags(8, 10, 8)), "open air high above has no face");
+
+        // HAS_FLUID_NEIGHBOR (bit 4) stays CLEAR through classifyInto — even orthogonally beside the water
+        // cell. The bit is SCATTER-owned (NavSectionBuilder.computeDepth, the column pipeline;
+        // DESIGN-fluid-flow-prediction.md §4), and this single-section entry point runs only
+        // classify + computeFlags, never the depth pass — so headless single-section grids keep the bit
+        // clear by design (the funnel's tier-0 reads "clear ⇒ cannot flood": correctness-by-fallback,
+        // erring dry). The scatter itself is proven by FluidScatterIdentityTest.
+        assertFalse(NavFlags.hasFluidNeighbor(g.flags(1, 5, 2)), "classifyInto never scatters the fluid bit (lateral)");
+        assertFalse(NavFlags.hasFluidNeighbor(g.flags(2, 6, 2)), "classifyInto never scatters the fluid bit (above)");
+        assertFalse(NavFlags.hasFluidNeighbor(g.flags(8, 10, 8)), "open air far from fluid carries no fluid bit");
     }
 
     /**
