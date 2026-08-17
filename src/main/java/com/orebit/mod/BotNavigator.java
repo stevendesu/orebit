@@ -27,7 +27,6 @@ import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
-import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 import com.orebit.mod.worldmodel.pathing.NavStore;
 import net.minecraft.core.BlockPos;
@@ -127,7 +126,6 @@ final class BotNavigator {
     private BlockPathPlan path;
     private int waypointIndex;
     private int blockRefreshTicks; // terrain-recheck debounce countdown (see TERRAIN_RECHECK_TICKS)
-    private int lastRefreshEditEpoch; // NavGridUpdater.editEpoch at this plan's last window search
     // The current drive's planner goal tolerance (set per driveToward call) and the tolerance the active
     // plan was BUILT with — a mismatch on the same goal region forces a fresh plan (s52, reached-vs-done).
     private int goalTolXZ = BlockPathfinder.DEFAULT_GOAL_TOL_XZ;
@@ -988,7 +986,6 @@ final class BotNavigator {
         this.settledFloor = startFloor;   // the commit/replan anchor starts at the fresh plan's start cell
         this.stuckTicks = 0; // fresh plan → fresh diagnostic window (the counter is observation-only)
         this.lastRepairedBlockedGen = 0; // fresh PathPlan → its BLOCKED-result generation restarts at 0
-        this.lastRefreshEditEpoch = NavGridUpdater.editEpoch(level); // this plan's search saw the world as-of now
         this.startDeadReported = false; // fresh goal → fresh start-dead episode
         this.planGoalTolXZ = goalTolXZ; // the tolerance this plan was built with (a change forces a fresh plan)
         this.planGoalTolY = goalTolY;

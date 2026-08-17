@@ -26,10 +26,13 @@ class EditSnapshotTest {
     private static final long CELL_A = BlockPos.asLong(10, 64, 10);
     private static final long CELL_B = BlockPos.asLong(11, 64, 10);
     private static final long CELL_C = BlockPos.asLong(12, 64, 10);
+    private static final long CELL_D = BlockPos.asLong(13, 64, 10);
 
     private static StepEdits step(long[] breaks, long[] places) {
         StepEdits se = new StepEdits();
-        se.load(breaks, new boolean[breaks.length], breaks.length, places, places.length,
+        byte[] kinds = new byte[breaks.length];
+        Arrays.fill(kinds, (byte) PathEdits.BROKEN); // dry breaks — the kind is stored verbatim now
+        se.load(breaks, kinds, breaks.length, places, places.length,
                 new long[0], new boolean[0], 0, ClutchModel.NONE, 0L);
         return se;
     }
@@ -46,10 +49,11 @@ class EditSnapshotTest {
 
     @Test
     void wetBreakFlagsSurviveTheSnapshotAndFoldAsBrokenWater() {
-        // A wet break (the wet-above flood rule) must stay wet through the splice baseline: the seeded
-        // search reads the flooded shaft as WATER, not phantom air — else it re-prices the dig as dry.
+        // A wet break (the fold funnel's flood verdict) must stay wet through the splice baseline: the
+        // seeded search reads the flooded shaft as WATER, not phantom air — else it re-prices the dig dry.
         StepEdits se = new StepEdits();
-        se.load(new long[] { CELL_A, CELL_B }, new boolean[] { true, false }, 2,
+        se.load(new long[] { CELL_A, CELL_B },
+                new byte[] { (byte) PathEdits.BROKEN_WATER, (byte) PathEdits.BROKEN }, 2,
                 new long[0], 0, new long[0], new boolean[0], 0, ClutchModel.NONE, 0L);
         EditSnapshot s = EditSnapshot.fromRemainingSteps(planOf(se), 0);
 
@@ -57,8 +61,8 @@ class EditSnapshotTest {
         boolean sawWet = false;
         boolean sawDry = false;
         for (int i = 0; i < s.breakCount(); i++) {
-            if (s.breakAt(i) == CELL_A) { assertTrue(s.breakWetAt(i)); sawWet = true; }
-            if (s.breakAt(i) == CELL_B) { assertFalse(s.breakWetAt(i)); sawDry = true; }
+            if (s.breakAt(i) == CELL_A) { assertEquals(PathEdits.BROKEN_WATER, s.breakKindAt(i)); sawWet = true; }
+            if (s.breakAt(i) == CELL_B) { assertEquals(PathEdits.BROKEN, s.breakKindAt(i)); sawDry = true; }
         }
         assertTrue(sawWet && sawDry);
 
@@ -66,6 +70,43 @@ class EditSnapshotTest {
         edits.addSnapshot(s);
         assertEquals(PathEdits.BROKEN_WATER, edits.kindAt(CELL_A), "wet break folds as BROKEN_WATER");
         assertEquals(PathEdits.BROKEN, edits.kindAt(CELL_B), "dry break folds as plain BROKEN");
+    }
+
+    @Test
+    void lavaBreakKindSurvivesTheSliceAndFoldsAsBrokenLava() {
+        // The BROKEN_LAVA thread (DESIGN-fluid-flow-prediction.md §4.2/§6): a lava-verdict break is
+        // not water to any consumer — different damage, different transit slow — so the splice must
+        // carry each break's own fold kind verbatim. Mixed kinds in ONE plan step, behind an executed
+        // prefix step the slice must drop: every surviving break keeps its kind, none bleed into a
+        // neighbour's.
+        StepEdits executed = step(new long[] { CELL_D }, new long[0]); // the follower already applied this
+        StepEdits mixed = new StepEdits();
+        mixed.load(new long[] { CELL_A, CELL_B, CELL_C },
+                new byte[] { (byte) PathEdits.BROKEN_LAVA, (byte) PathEdits.BROKEN_WATER,
+                        (byte) PathEdits.BROKEN }, 3,
+                new long[0], 0, new long[0], new boolean[0], 0, ClutchModel.NONE, 0L);
+        EditSnapshot s = EditSnapshot.fromRemainingSteps(planOf(executed, mixed), 1);
+
+        assertEquals(3, s.breakCount(), "only the unexecuted suffix's breaks survive the slice");
+        assertEquals(PathEdits.BROKEN_LAVA, kindOf(s, CELL_A), "the lava kind survives the slice");
+        assertEquals(PathEdits.BROKEN_WATER, kindOf(s, CELL_B), "the water kind survives beside it");
+        assertEquals(PathEdits.BROKEN, kindOf(s, CELL_C), "the dry kind survives beside both");
+
+        PathEdits edits = new PathEdits();
+        edits.addSnapshot(s);
+        assertEquals(PathEdits.BROKEN_LAVA, edits.kindAt(CELL_A), "lava break folds as BROKEN_LAVA");
+        assertEquals(PathEdits.BROKEN_WATER, edits.kindAt(CELL_B), "water break folds as BROKEN_WATER");
+        assertEquals(PathEdits.BROKEN, edits.kindAt(CELL_C), "dry break folds as plain BROKEN");
+        assertEquals(PathEdits.NONE, edits.kindAt(CELL_D), "the executed prefix's cell must not fold");
+    }
+
+    /** The snapshot's kind at {@code cell}, failing outright when the cell is absent (so a kind
+     *  assertion can never pass vacuously on a missing break). */
+    private static byte kindOf(EditSnapshot s, long cell) {
+        for (int i = 0; i < s.breakCount(); i++) {
+            if (s.breakAt(i) == cell) return s.breakKindAt(i);
+        }
+        throw new AssertionError("cell not in snapshot: " + cell);
     }
 
     @Test

@@ -3,6 +3,7 @@ package com.orebit.mod.pathfinding.blockpathfinder;
 import java.util.Arrays;
 
 import com.orebit.mod.worldmodel.navblock.NavBlock;
+import com.orebit.mod.worldmodel.pathing.NavFlags;
 
 import net.minecraft.core.BlockPos;
 
@@ -28,9 +29,10 @@ public final class EditScratch {
 
     // Small fixed buffers: a Tier 1 move touches ≤ ~3 body cells and places ≤ 1 floor; grown defensively.
     private long[] breaks = new long[6];
-    // Parallel to breaks: whether water floods the broken cell once mined (the wet-above rule, decided at
-    // fold time in addBreak) — carried out to StepEdits so the diff reads it as BROKEN_WATER, not air.
-    private boolean[] breakWet = new boolean[6];
+    // Parallel to breaks: each break's fold verdict as a PathEdits kind — BROKEN (dry), BROKEN_WATER or
+    // BROKEN_LAVA (the fluidVerdict funnel, decided at fold time in addBreak) — carried out to StepEdits
+    // verbatim, so the diff reads the mined cell as air / water / lava.
+    private byte[] breakKind = new byte[6];
     private int breakCount;
     private long[] places = new long[3];
     private int placeCount;
@@ -64,9 +66,11 @@ public final class EditScratch {
     /**
      * Clear the accumulator for a fresh candidate. When {@code allowEdits} is false, no break or place is
      * folded — a blocked/empty required cell makes the move <i>invalid</i> instead of editing through it.
-     * Movements pass {@code false} to honour the {@code RISKY_EDIT} flag: editing at/next to this cell could
-     * disturb LAVA or drop a gravity block, so the bot must reach it without editing or not
-     * at all. Returns {@code this} for fluent use.
+     * Movements pass {@code false} to honour the {@code RISKY_EDIT} flag: editing at/next to this cell
+     * could drop a GRAVITY block onto the bot — strictly gravity since the lava term migrated off bit 0
+     * (DESIGN-fluid-flow-prediction.md §4.1; a fluid-adjacent dig is now PRICED by the {@link #fluidVerdict
+     * fold funnel}, never refused here) — so the bot must reach it without editing or not at all. Returns
+     * {@code this} for fluent use.
      */
     public EditScratch reset(boolean allowEdits) {
         breakCount = 0;
@@ -267,7 +271,8 @@ public final class EditScratch {
      * caller that needs it is {@code MineDown}'s macro shaft: the collapsed jump folds breaks the bot
      * performs from positions BELOW the expanding node (standing one cell above each successive floor it
      * digs), so the per-pop stance is only right for level 1 — deeper levels dig grounded, submerged
-     * exactly when the column floods (the wet-column latch, see {@code MineDown.candidates}).
+     * exactly when THAT level's head cell reads water through the diff and this scratch's own earlier
+     * folds (the per-level stance, see {@code MineDown.candidates} and {@link #readsWater}).
      */
     public long requireAirVertical(int x, int y, int z, float stanceMult) {
         if (!valid) return MovementContext.AIR_DESC;
@@ -331,40 +336,288 @@ public final class EditScratch {
     }
 
     /**
-     * Record a break of cell {@code (x,y,z)}, deciding at fold time whether water floods the opened cell —
-     * the <b>wet-above rule</b> (owner-ratified 2026-08-16): vanilla falling water ALWAYS fills the cell
-     * below it, so a break is wet exactly when the cell directly above reads water ({@link
-     * MovementContext#water} — the swimmable-water source of truth) — through the path diff, AND through
-     * this scratch's own earlier folds (a macro shaft's level {@code k} sits under level {@code k−1}'s
-     * in-scratch break, invisible to {@code descriptorAt} until the edge is accepted; the flood chains down
-     * the column through the in-scratch flags). An own-fold PLACE above seals the cell instead (dry).
-     * Lateral water is deliberately NOT consulted: only the certain vertical flood is baked into the diff
-     * (a wrong wet guess has no correcting NavGrid update; a wrong dry guess self-corrects — see {@link
-     * PathEdits#BROKEN_WATER}).
+     * Record a break of cell {@code (x,y,z)}, deciding at fold time whether fluid floods the opened cell —
+     * the {@linkplain #fluidVerdict evaluation funnel} (DESIGN-fluid-flow-prediction.md §5). The verdict is
+     * stored as the break's {@link PathEdits} kind and carried verbatim out to {@link StepEdits}, so every
+     * later read of the cell — this candidate's own tiers ({@link #scratchDescriptorAt}), later pops on
+     * this path ({@code descriptorAt}), spliced searches ({@link EditSnapshot}) and the invalidation
+     * seam's expectation arm — sees the same air / water / lava answer the fold's price was computed from.
      */
     private void addBreak(int x, int y, int z) {
-        boolean wet = wetFromAbove(x, y, z);
+        byte kind = fluidVerdict(x, y, z);
         if (breakCount == breaks.length) {
             breaks = Arrays.copyOf(breaks, breaks.length * 2);
-            breakWet = Arrays.copyOf(breakWet, breaks.length);
+            breakKind = Arrays.copyOf(breakKind, breaks.length);
         }
         breaks[breakCount] = BlockPos.asLong(x, y, z);
-        breakWet[breakCount] = wet;
+        breakKind[breakCount] = kind;
         breakCount++;
     }
 
-    /** Whether the cell directly above {@code (x,y,z)} holds water — own-scratch folds first (an earlier
-     *  in-candidate break's wet flag chains the flood; an own place seals it dry), then the path-edit-aware
-     *  grid read. Linear scans over the tiny per-candidate buffers, only on the rare break fold. */
-    private boolean wetFromAbove(int x, int y, int z) {
-        long above = BlockPos.asLong(x, y + 1, z);
+    // ---- The fluid-flow evaluation funnel (DESIGN-fluid-flow-prediction.md §5) ----------------------
+    // "Will breaking this cell admit fluid?" — answered lazily, at fold time, never at classify time (§2:
+    // drain distance is a property of the neighbourhood and cannot be a bit). Vanilla facts it mirrors are
+    // §1's bytecode-verified FlowingFluid.spread(); constants below are the fluid spread parameters.
+
+    /** Lateral neighbour offsets in the {@code NavFlags.SIX}-table order with the vertical entries dropped:
+     *  x−, x+, z−, z+. Tier 1 scans candidates in this order and the FIRST fluid verdict wins (§5's
+     *  accepted arbitrary tie-break when water and lava both border the break — vanilla would convert
+     *  blocks, out of scope §10). Index {@code i ^ 1} is the opposite direction (the backtrack). */
+    private static final int[] LAT_DX = {-1, 1, 0, 0};
+    private static final int[] LAT_DZ = {0, 0, -1, 1};
+
+    /** Vanilla's "no hole found within slopeFind" sentinel — every direction that finds nothing ties here,
+     *  which is what makes the blind band (§1.1: water reaches 6–7 but detects only to 5) spread-everywhere. */
+    private static final int SLOPE_UNFOUND = 1000;
+    /** The unified {@code getSlopeFindDistance()} for BOTH fluids — detects a hole to distance 5
+     *  (recursion starts at depth 1). Exact for water everywhere and for nether lava; for lava this is
+     *  the <b>NETHER pin</b> (owner-ratified 2026-08-17, DESIGN-fluid-flow-prediction.md §5): dimension
+     *  identity is unreachable from candidate emission ({@code NavGridView.level} is null on planner
+     *  threads), so one constant must serve both dimensions — and the tie arithmetic decides which. Ties
+     *  win, so a SMALLER slope-find can only remove drain detections, which can only flip verdicts toward
+     *  WET: pinning overworld's 2 would predict floods in the nether that real nether lava (slope-find 4)
+     *  drains away — phantom fluid, the one §8-unrecoverable error class. Pinning 4 instead errs DRY in
+     *  the overworld: a drain at slope distance 4–5 is visible here but not to real overworld lava, so
+     *  the dig is predicted dry and real lava floods in — recoverable (the arrival is a real block change
+     *  → invalidation → replan, with lava's 30-tick spread delay, §1.4, as escape margin). */
+    private static final int SLOPE_FIND = 4;
+
+    /**
+     * The <b>evaluation funnel</b>: will breaking cell {@code (x,y,z)} admit fluid, and which — the fold
+     * verdict as a {@link PathEdits} kind: {@link PathEdits#BROKEN} (dry), {@link PathEdits#BROKEN_WATER},
+     * or {@link PathEdits#BROKEN_LAVA} (DESIGN-fluid-flow-prediction.md §5–§6). No verdict refuses the
+     * break — there is no feasibility case here at all (§6: a predicted flood is PRICED, via the stance
+     * multiplier and the fluid cell the diff then reports; lava's damage pricing already exists §4.2).
+     *
+     * <p><b>Read discipline (§5, owner-ratified):</b> every read at every tier goes through
+     * {@link #scratchDescriptorAt} — this candidate's own in-scratch folds FIRST (they are invisible to
+     * {@code descriptorAt} until the edge is accepted — a macro shaft's level {@code k} sits under level
+     * {@code k−1}'s in-scratch break; a {@code Traverse} folds two breaks per step and the second cell's
+     * verdict must see the first's), then the {@link PathEdits}-layered grid. <b>No memoisation</b>
+     * (owner-ratified §5): the slope search reads through the path's own edits, which differ per BRANCH of
+     * the search, not per search — a cached verdict shared across branches could err WET, the one
+     * unrecoverable direction (§8). Recursion is pure primitives — depth ≤ {@link #SLOPE_FIND},
+     * branching ≤ 3, no allocation, no visited set (vanilla has none; backtrack exclusion only).
+     *
+     * <p><b>Tier 0a — the certain vertical rule, per-fluid</b> (free — one read). Vanilla falling fluid
+     * ALWAYS fills the cell below, water and lava alike, so fluid directly above the break is the most
+     * certain flood there is: swimmable water above ⇒ {@code BROKEN_WATER}, swimmable lava above ⇒
+     * {@code BROKEN_LAVA} (the per-fluid generalisation of the shipped 2026-08-16 water-only wet-above
+     * rule, whose lava hole — digging under lava folded plain {@code BROKEN} — this closes). Read
+     * scratch-first, so an own-fold break above chains ITS kind down a shaft, and an own-fold PLACE above
+     * seals the column — which no longer returns dry outright but <b>falls THROUGH to the lateral
+     * tiers</b> (a sealed column can still flood sideways; deliberate improvement over the old early
+     * return). Accepted inexactness, errs dry: a bubble column or a waterlogged solid above reads dry
+     * ({@code isSwimmableWater/Lava} exclude both), though a vanilla bubble cell IS water and would flood.
+     *
+     * <p><b>Tier 0b — the flag early-out</b> (the common exit). {@code HAS_FLUID_NEIGHBOR} clear at the
+     * broken cell (cell-centred frame — §4: read AT the cell actually broken, never a floor/body frame) ⇒
+     * dry, done. Exact against COMMITTED state and deliberately blind to plan-created fluid
+     * ({@code flagsAt} never layers {@code PathEdits} — §8 table row, errs dry, KNOWN AND DEFERRED to the
+     * PathEdits-scatter workflow; do not fix here). On fluid-free terrain every break exits here with the
+     * verdict — and the folded kinds and prices — it always had.
+     *
+     * <p><b>Tier 1 — spread eligibility per lateral neighbour W</b> (~4–6 reads each, §1.1's steady-state
+     * table): only a {@code genuineOpenFluidCell} counts (swimmable water/lava — waterlogged partials
+     * excluded, §8.2's owner-ratified inexactness, errs dry); a min-level cell ({@code isFluidMinLevel})
+     * cannot spread at all; a cell that {@linkplain #canFlowDown can flow down} (below reads genuinely
+     * empty through scratch+diff — the plan's own earlier breaks are what open that path) spreads
+     * laterally only as a near-source ({@code sourceNeighborCount ≥ 3}); otherwise it spreads iff it is a
+     * source or is not already draining into a hole ({@code isSource || !isHole}, the isSame-first vanilla
+     * shape). Eligible is necessary, not sufficient — every survivor still faces tier 2.
+     *
+     * <p><b>Tier 2 — the slope-distance tie test</b> (rare, bounded): does the broken cell's direction tie
+     * or beat the minimum slope distance over W's other candidate directions (§1.1 — {@code <=}, TIES ALL
+     * WIN; we never compute the winning direction or the flood shape)? Mirrors {@code getSlopeDistance}:
+     * shortest path over passable cells, backtrack excluded, depth-capped at the unified
+     * {@link #SLOPE_FIND} (the nether pin — see its note for the accepted overworld-lava errs-dry
+     * consequence). The broken cell itself reads as OPEN in this competition (it is the
+     * candidate being evaluated) and, per §1.5, is never a hole at the moment of its own break UNLESS the
+     * scratch/diff already opened the cell below it — the honest below-read gives exactly that. A tying W
+     * returns its fluid's kind; a losing W keeps the scan going; all lose ⇒ dry. Cascades past the first
+     * cell are not modelled (§10 — errs dry, recoverable).
+     */
+    private byte fluidVerdict(int x, int y, int z) {
+        // Tier 0a — the certain vertical rule, per-fluid, scratch-first (an own place falls through).
+        long above = scratchDescriptorAt(x, y + 1, z);
+        if (NavBlock.isSwimmableWater(above)) return (byte) PathEdits.BROKEN_WATER;
+        if (NavBlock.isSwimmableLava(above)) return (byte) PathEdits.BROKEN_LAVA;
+
+        // Tier 0b — the flag early-out at the BROKEN cell (cell-centred; committed state only).
+        if (!NavFlags.hasFluidNeighbor(ctx.flagsAt(x, y, z))) return (byte) PathEdits.BROKEN;
+
+        // Tiers 1–2 — the lateral funnel, first fluid verdict in LAT (SIX-lateral) order wins.
+        for (int i = 0; i < 4; i++) {
+            int wx = x + LAT_DX[i], wz = z + LAT_DZ[i];
+            long dW = scratchDescriptorAt(wx, y, wz);
+            boolean isWater = NavBlock.isSwimmableWater(dW);
+            if (!isWater && !NavBlock.isSwimmableLava(dW)) continue; // not a genuine open fluid cell (§8.2)
+            if (NavBlock.isFluidMinLevel(dW)) continue;             // one more step yields amount 0
+            int fluidCode = NavBlock.fluid(dW);
+            boolean eligible;
+            if (canFlowDown(wx, y, wz)) {
+                // The down-branch is live: lateral spread happens only beside ≥3 same-fluid sources.
+                eligible = sourceNeighborCount(wx, y, wz, fluidCode) >= 3;
+            } else {
+                eligible = NavBlock.isFluidSource(dW) || !isHole(wx, y, wz, fluidCode);
+            }
+            if (!eligible) continue;
+            if (slopeTieAdmits(wx, y, wz, i, SLOPE_FIND, fluidCode, x, z)) {
+                return (byte) (isWater ? PathEdits.BROKEN_WATER : PathEdits.BROKEN_LAVA);
+            }
+        }
+        return (byte) PathEdits.BROKEN;
+    }
+
+    /**
+     * The funnel's read seam: cell {@code (x,y,z)}'s effective descriptor, this candidate's own scratch
+     * FIRST — an own-fold break reads as its verdict's constant ({@code AIR_DESC} /
+     * {@code WATER_DESC} / {@code LAVA_DESC}, the same constants {@code descriptorAt} resolves the
+     * accepted edge to), an own-fold place as {@code PLACED_DESC} — then the {@link PathEdits}-layered
+     * {@link MovementContext#descriptorAt}. Linear scans over the tiny per-candidate buffers, reached only
+     * on the rare fold path. In-scratch door SETs are deliberately NOT consulted (same as the shipped
+     * wet-above read this generalises): a toggled openable is neither fluid nor a seal the funnel's
+     * verdicts care about, and the accepted edge's diff resolves it properly downstream.
+     */
+    private long scratchDescriptorAt(int x, int y, int z) {
+        long cell = BlockPos.asLong(x, y, z);
         for (int i = 0; i < breakCount; i++) {
-            if (breaks[i] == above) return breakWet[i];
+            if (breaks[i] == cell) {
+                byte k = breakKind[i];
+                if (k == PathEdits.BROKEN_WATER) return MovementContext.WATER_DESC;
+                if (k == PathEdits.BROKEN_LAVA) return MovementContext.LAVA_DESC;
+                return MovementContext.AIR_DESC;
+            }
         }
         for (int i = 0; i < placeCount; i++) {
-            if (places[i] == above) return false; // own-fold place seals the column above
+            if (places[i] == cell) return MovementContext.PLACED_DESC;
         }
-        return ctx.water(ctx.descriptorAt(x, y + 1, z));
+        return ctx.descriptorAt(x, y, z);
+    }
+
+    /** Vanilla's down-branch gate mirrored (§1.1): the cell below {@code (wx,y,wz)} is genuinely empty —
+     *  passable SHAPE holding no fluid — through the diff and this scratch's own folds (the plan's earlier
+     *  breaks are what open the path; in practice near-unreachable for the bot, modelled anyway — §5). */
+    private boolean canFlowDown(int wx, int y, int wz) {
+        long db = scratchDescriptorAt(wx, y - 1, wz);
+        return NavBlock.isPassable(db) && NavBlock.fluid(db) == 0;
+    }
+
+    /** How many of {@code (wx,y,wz)}'s four lateral neighbours are genuine-open SAME-fluid sources
+     *  ({@code sourceNeighborCount} mirrored — the ≥3 near-source test of §1.1's down-branch). */
+    private int sourceNeighborCount(int wx, int y, int wz, int fluidCode) {
+        int n = 0;
+        for (int i = 0; i < 4; i++) {
+            long d = scratchDescriptorAt(wx + LAT_DX[i], y, wz + LAT_DZ[i]);
+            if (NavBlock.fluid(d) == fluidCode && NavBlock.isPassable(d) && NavBlock.isFluidSource(d)) n++;
+        }
+        return n;
+    }
+
+    /** Vanilla {@code isWaterHole} mirrored, isSame-first (§1.1): the cell below {@code (cx,y,cz)} holds
+     *  the SAME fluid, or is open (passable shape) to receive it — read honestly through scratch+diff, so
+     *  the broken cell becomes a hole only once the plan itself opened the cell beneath it (§1.5). */
+    private boolean isHole(int cx, int y, int cz, int fluidCode) {
+        long db = scratchDescriptorAt(cx, y - 1, cz);
+        return NavBlock.fluid(db) == fluidCode || NavBlock.isPassable(db);
+    }
+
+    /** Vanilla {@code canMaybePassThrough} mirrored (§1.2, geometry reduced to the descriptor's passable
+     *  shape — per-face occlusion is §8.2's accepted loss): the cell admits lateral spread flow unless
+     *  solid or an already-source of this fluid. The broken cell {@code (bx,·,bz)} reads OPEN
+     *  unconditionally — it is the candidate being evaluated (§5; every tier-2 read is at the break's own
+     *  {@code y}, so the XZ compare identifies it exactly). */
+    private boolean canPassInto(int cx, int y, int cz, int fluidCode, int bx, int bz) {
+        if (cx == bx && cz == bz) return true;
+        long d = scratchDescriptorAt(cx, y, cz);
+        if (!NavBlock.isPassable(d)) return false;
+        return !(NavBlock.fluid(d) == fluidCode && NavBlock.isFluidSource(d));
+    }
+
+    /**
+     * Tier 2's verdict for one eligible fluid neighbour {@code W = (wx,y,wz)}: does the direction from
+     * {@code W} toward the broken cell {@code (bx,·,bz)} tie or beat ({@code <=} — ties all win, §1.1) the
+     * minimum slope distance over {@code W}'s other candidate directions? {@code dirBtoW} is the LAT index
+     * that took the funnel from the break to {@code W}, so {@code dirBtoW ^ 1} is the direction back —
+     * which by construction lands exactly on the broken cell.
+     */
+    private boolean slopeTieAdmits(int wx, int y, int wz, int dirBtoW, int slopeFind, int fluidCode,
+                                   int bx, int bz) {
+        int backToB = dirBtoW ^ 1;
+        int distB = SLOPE_UNFOUND;
+        int minOther = SLOPE_UNFOUND;
+        for (int i = 0; i < 4; i++) {
+            int nx = wx + LAT_DX[i], nz = wz + LAT_DZ[i];
+            if (!canPassInto(nx, y, nz, fluidCode, bx, bz)) continue; // excluded from the spread map (§1.2)
+            int dist = isHole(nx, y, nz, fluidCode) ? 0
+                    : slope(nx, y, nz, 1, i ^ 1, slopeFind, fluidCode, bx, bz);
+            if (i == backToB) distB = dist;         // (nx,nz) == (bx,bz) exactly here
+            else if (dist < minOther) minOther = dist;
+        }
+        return distB <= minOther;
+    }
+
+    /** Vanilla {@code getSlopeDistance} mirrored over scratch+diff reads: the smallest depth at which a
+     *  lateral walk from {@code (cx,y,cz)} (which sits at depth {@code depth}, backtrack {@code backtrack}
+     *  excluded) finds a hole, recursing only while {@code depth < slopeFind}; {@link #SLOPE_UNFOUND} when
+     *  none. Pure primitives — depth ≤ 4, branching ≤ 3, no allocation, no visited set (§5). */
+    private int slope(int cx, int y, int cz, int depth, int backtrack, int slopeFind, int fluidCode,
+                      int bx, int bz) {
+        int min = SLOPE_UNFOUND;
+        for (int i = 0; i < 4; i++) {
+            if (i == backtrack) continue;
+            int nx = cx + LAT_DX[i], nz = cz + LAT_DZ[i];
+            if (!canPassInto(nx, y, nz, fluidCode, bx, bz)) continue;
+            if (isHole(nx, y, nz, fluidCode)) return depth; // any deeper find is ≥ depth+1 — this IS the min
+            if (depth < slopeFind) {
+                int d = slope(nx, y, nz, depth + 1, i ^ 1, slopeFind, fluidCode, bx, bz);
+                if (d < min) min = d;
+            }
+        }
+        return min;
+    }
+
+    /**
+     * The funnel's verdict for a hypothetical break of {@code (x,y,z)} <b>without folding anything</b> —
+     * a {@link PathEdits} kind, computed against this scratch's current folds exactly as {@link #addBreak}
+     * would compute it. The one caller is {@code MineDown}'s macro jump-sizing (its per-step
+     * {@code moveCost} wants level 1's flood verdict before the fold loop runs); public because the
+     * movements live in a subpackage. Call on a freshly {@link #reset} scratch (or mid-fold, if the
+     * already-folded state is the intended baseline) — the verdict is relative to whatever is in the
+     * scratch, like every funnel read.
+     */
+    public int peekBreakKind(int x, int y, int z) {
+        return fluidVerdict(x, y, z);
+    }
+
+    /**
+     * Whether cell {@code (x,y,z)} reads as swimmable WATER through this candidate's own folds first, then
+     * the path diff ({@link #scratchDescriptorAt}) — the read {@code MineDown}'s macro shaft derives each
+     * deep level's mining stance from (DESIGN-fluid-flow-prediction.md §7): level {@code k}'s head cell is
+     * a known earlier-folded cell (level {@code k−2}'s break — whose {@code BROKEN_WATER} kind chains the
+     * flood down the shaft) or the original mouth, and water there is exactly vanilla's eye-under-water
+     * 5×. Water only, matching {@code breakStanceMult} — a lava-flooded head does not submerge the eye
+     * (vanilla tests {@code FluidTags.WATER}); the lava is priced through the cell's damage/transit facts
+     * instead. Public because the movements live in a subpackage.
+     */
+    public boolean readsWater(int x, int y, int z) {
+        return NavBlock.isSwimmableWater(scratchDescriptorAt(x, y, z));
+    }
+
+    /**
+     * Whether cell {@code (x,y,z)} reads as swimmable LAVA through this candidate's own folds first, then
+     * the path diff ({@link #scratchDescriptorAt}) — the lava sibling of {@link #readsWater}, read by
+     * {@code MineDown}'s per-level <b>lava-exposure</b> term (DESIGN-fluid-flow-prediction.md §6, the
+     * 2026-08-17 adversarial-review correction): a dig level whose FEET cell reads lava — the mouth pool
+     * for level 1, or an earlier level's {@code BROKEN_LAVA} fold chained down the shaft — burns the bot
+     * for that level's whole mining duration, priced via
+     * {@link MovementContext#lavaExposureCost}. Deliberately NOT folded into the mining-stance multiplier:
+     * lava does not submerge the eye (vanilla tests {@code FluidTags.WATER}), so the stance stays 1× and
+     * the exposure is a separate damage term in the one {@code costPerHitpoint} currency. Public because
+     * the movements live in a subpackage.
+     */
+    public boolean readsLava(int x, int y, int z) {
+        return NavBlock.isSwimmableLava(scratchDescriptorAt(x, y, z));
     }
 
     /**
@@ -652,7 +905,7 @@ public final class EditScratch {
      * recycled arena slot cannot leak a previous edge's clutch onto this one.
      */
     void copyInto(StepEdits e) {
-        e.load(breaks, breakWet, breakCount, places, placeCount, doors, doorOpens, doorCount,
+        e.load(breaks, breakKind, breakCount, places, placeCount, doors, doorOpens, doorCount,
                clutchKind, clutchCell);
     }
 

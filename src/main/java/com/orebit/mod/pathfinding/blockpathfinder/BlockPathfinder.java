@@ -1273,8 +1273,9 @@ public final class BlockPathfinder {
      * for place, {@code p}=passable, {@code .}=blocked. A breakable solid is suffixed {@code k}; a solid the
      * search WON'T dig is suffixed with {@link MovementContext#breakBlockedReason the reason} in parens
      * (e.g. {@code s(unbreakable)}) — the diagnostic for a "mine-up walled by a ceiling the search thinks it
-     * can't break". A cell whose edit is hazardous ({@code RISKY_EDIT} — adjacent LAVA or a gravity cascade,
-     * which disables Pillar/place edits there) is suffixed {@code r}.
+     * can't break". A cell whose edit is hazardous ({@code RISKY_EDIT} — a gravity cascade; strictly
+     * gravity since the lava term migrated to pricing, DESIGN-fluid-flow-prediction.md §4.1 — which
+     * disables Pillar/place edits there) is suffixed {@code r}.
      */
     private static void dumpColumn(MovementContext ctx, RegionBound bound, String label, int x, int z,
                                    int y0, int y1) {
@@ -1621,8 +1622,9 @@ public final class BlockPathfinder {
         return 1;
     }
 
-    /** Empty buffer for an edit-set with no breaks/places on one of its axes. */
+    /** Empty buffers for an edit-set with no breaks/places on one of its axes. */
     private static final long[] NO_CELLS = new long[0];
+    private static final byte[] NO_KINDS = new byte[0];
     private static final boolean[] NO_FLAGS = new boolean[0];
 
     /**
@@ -1657,14 +1659,14 @@ public final class BlockPathfinder {
             }
         }
         long[] bk = null;
-        boolean[] bkWet = null;
+        byte[] bkKind = null;
         int bn = 0;
         for (int i = 0, c = all.breakCount(); i < c; i++) {
             long pos = all.breakAt(i);
             if (pos == body1 || pos == body2) {
-                if (bk == null) { bk = new long[c]; bkWet = new boolean[c]; }
+                if (bk == null) { bk = new long[c]; bkKind = new byte[c]; }
                 bk[bn] = pos;
-                bkWet[bn] = all.breakWetAt(i); // the flood flag rides the slice (splice baselines read it)
+                bkKind[bn] = all.breakKindAt(i); // the flood verdict rides the slice (splice baselines read it)
                 bn++;
             }
         }
@@ -1685,7 +1687,7 @@ public final class BlockPathfinder {
         }
         if (pn == 0 && bn == 0 && dn == 0) return null;
         StepEdits s = new StepEdits();
-        s.load(bk == null ? NO_CELLS : bk, bkWet == null ? NO_FLAGS : bkWet, bn,
+        s.load(bk == null ? NO_CELLS : bk, bkKind == null ? NO_KINDS : bkKind, bn,
                pl == null ? NO_CELLS : pl, pn,
                dr == null ? NO_CELLS : dr, drOpen == null ? NO_FLAGS : drOpen, dn,
                ClutchModel.NONE, 0L); // no macro movement clutches — see the method doc

@@ -359,8 +359,9 @@ public final class Traverse implements Movement {
             int cx = x + Axes.stepX(axis, sign) * k;
             int cz = z + Axes.stepZ(axis, sign) * k;
             // Re-evaluate RISKY_EDIT per cell (the start cell k==1 was gated by reset above): don't fold a
-            // body break/footing place at a cell whose edit risks a fluid/gravity cascade just because the
+            // body break/footing place at a cell whose edit risks a GRAVITY cascade just because the
             // run's leading edge was safe — the micro move re-checks per node. Clamp the run before it.
+            // (Strictly gravity since the lava term migrated to pricing — DESIGN-fluid-flow-prediction.md §4.1.)
             int cellFlags = k == 1 ? startFlags : ctx.flagsAt(cx, y, cz);
             if (k > 1 && MovementContext.risksEdit(cellFlags)) { valid = k - 1; break; }
             // Footing under the k-th cell (already standable for a flat run; placeable fallback for a bridge

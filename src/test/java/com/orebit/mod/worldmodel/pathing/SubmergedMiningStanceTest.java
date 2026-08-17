@@ -15,9 +15,11 @@ import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.EditFixtures;
+import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.blockpathfinder.MiningModel;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementRegistry;
+import com.orebit.mod.pathfinding.blockpathfinder.PathEdits;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
 
@@ -27,6 +29,7 @@ import net.minecraft.server.Bootstrap;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.Strategy;
 
@@ -42,8 +45,9 @@ import net.minecraft.world.level.chunk.Strategy;
  * <p>Three layers: the four stance quadrants read directly off a {@link MovementContext}; the
  * BROKEN/BROKEN_WATER diff reads; and two full searches — an all-wet shaft whose cost exceeds the dry
  * shaft by exactly the 5× deep-level surcharge (micro/macro parity included), and the flagship shape: a
- * bot standing in a 1×1 pool steps OUT of the water and digs the dry column instead of paying the 5×
- * flooded shaft. Lives in this package for {@link NavGridView}'s package-private synthetic constructor.
+ * bot standing in a settled surface pool steps OUT of the water and digs a dry column — clear of the
+ * pool AND of every column under its spread — instead of paying the 5× flooded shaft. Lives in this
+ * package for {@link NavGridView}'s package-private synthetic constructor.
  */
 class SubmergedMiningStanceTest {
 
@@ -71,6 +75,12 @@ class SubmergedMiningStanceTest {
      *  commits to 150-tick digs, so an open plateau floods straight past the node budget). */
     private static final BotCaps BREAK_ONLY = new BotCaps(
             1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, true, BotCaps.DEFAULT_COST_PER_HITPOINT,
+            true, false, BotCaps.UNBREAKABLE, false, BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT);
+
+    /** {@link #BREAK_ONLY} with {@code takesDamage=false} — identical on every other axis, so any cost
+     *  difference between the two on the SAME world is the damage pricing alone (the lava-exposure gate). */
+    private static final BotCaps IMMUNE_BREAK_ONLY = new BotCaps(
+            1, BotCaps.DEFAULT_SAFE_FALL, BotCaps.DEFAULT_MAX_FALL, false, BotCaps.DEFAULT_COST_PER_HITPOINT,
             true, false, BotCaps.UNBREAKABLE, false, BotCaps.DEFAULT_MAX_NODES, BotCaps.DEFAULT_GREEDY_WEIGHT);
 
     // ---- The four stance quadrants, read directly off the context ---------------------------------
@@ -160,9 +170,9 @@ class SubmergedMiningStanceTest {
             BlockPathfinder.MACRO_MOVES = false;
 
             BlockPathPlan dry = BlockPathfinder.findPath(
-                    buildChimneyWorld(false), start, goal, BREAK_ONLY, corridor);
+                    buildChimneyWorld(Blocks.AIR.defaultBlockState()), start, goal, BREAK_ONLY, corridor);
             BlockPathPlan wet = BlockPathfinder.findPath(
-                    buildChimneyWorld(true), start, goal, BREAK_ONLY, corridor);
+                    buildChimneyWorld(Blocks.WATER.defaultBlockState()), start, goal, BREAK_ONLY, corridor);
             assertNotNull(dry);
             assertNotNull(wet);
 
@@ -177,7 +187,7 @@ class SubmergedMiningStanceTest {
             // Macro parity: the collapsed shaft (wet-column latch) must price exactly like the micro chain.
             BlockPathfinder.MACRO_MOVES = true;
             BlockPathPlan wetMacro = BlockPathfinder.findPath(
-                    buildChimneyWorld(true), start, goal, BREAK_ONLY, corridor);
+                    buildChimneyWorld(Blocks.WATER.defaultBlockState()), start, goal, BREAK_ONLY, corridor);
             assertNotNull(wetMacro);
             assertEquals(wet.cost(), wetMacro.cost(), 1e-3f,
                     "macro wet-column latch == micro per-node stance, level for level");
@@ -188,10 +198,110 @@ class SubmergedMiningStanceTest {
     }
 
     /**
-     * The flagship shape: the bot stands in a 1×1 pool (feet wet) over the same buried goal. Digging in
-     * place floods every deep level at 5×; one sideways step reaches a dry column and digs at 1×. The
-     * planner must now walk out of the water first — before this change both options priced identically
-     * and the bot dug the flooded shaft it happened to be standing in.
+     * The LAVA twin of the water chimney — the pin for the per-level <b>lava-exposure term</b>
+     * (DESIGN-fluid-flow-prediction.md §6, the 2026-08-17 adversarial-review correction: without it a
+     * {@code BROKEN_LAVA} verdict chooses the {@code PathEdits} kind while adding ZERO cost, and a mortal
+     * bot prices a lava-flooding shaft identically to a dry one — a free lethal offer). Same 1×1 bedrock
+     * chimney, LAVA at the mouth: the tier-0a vertical rule chains {@code BROKEN_LAVA} down the whole
+     * shaft, and EVERY level digs with its feet in lava — level 1's feet stand in the mouth pool itself
+     * (unlike water's dry-eye level 1), each deeper level's feet cell is the previous level's lava-flooded
+     * break. Lava never submerges the eye (vanilla tests {@code FluidTags.WATER}), so mining time stays
+     * the dry 1× {@code T} per level and the exposure is a pure damage term:
+     *
+     * <pre>  mortal cost == dry cost + digs × T × LAVA_HP_PER_TICK × costPerHitpoint</pre>
+     *
+     * exact arithmetic ({@code T} = the bare-hand stone break, rate = vanilla's 4 HP per 10-tick
+     * immersion window). Three companion pins: an immune bot's cost equals the dry cost EXACTLY (the
+     * §4.2 priced-not-forbidden split — bit-identical, not merely close); the macro collapse reproduces
+     * the micro arithmetic (macro == micro level for level); and the plan's diff records the flood
+     * honestly ({@code BROKEN_LAVA} at the mouth-column break).
+     */
+    @Test
+    void lavaChimneyChargesTheImmersionExposurePerLevelForAMortalBotOnly() {
+        BlockPos start = new BlockPos(8, 8, 8);
+        BlockPos goal = new BlockPos(8, 2, 8);
+        RegionBound corridor = new RegionBound(-16, 16, 0, 33, -16, 16);
+        float stoneTicks = MiningModel.bareHandTicks(desc(Blocks.STONE));
+        BlockState lava = Blocks.LAVA.defaultBlockState();
+        BlockState air = Blocks.AIR.defaultBlockState();
+
+        boolean savedMacro = BlockPathfinder.MACRO_MOVES;
+        boolean savedPartial = BlockPathfinder.PARTIAL_PATH;
+        try {
+            BlockPathfinder.PARTIAL_PATH = false;
+            BlockPathfinder.MACRO_MOVES = false;
+
+            BlockPathPlan dry = BlockPathfinder.findPath(
+                    buildChimneyWorld(air), start, goal, BREAK_ONLY, corridor);
+            BlockPathPlan mortal = BlockPathfinder.findPath(
+                    buildChimneyWorld(lava), start, goal, BREAK_ONLY, corridor);
+            BlockPathPlan immune = BlockPathfinder.findPath(
+                    buildChimneyWorld(lava), start, goal, IMMUNE_BREAK_ONLY, corridor);
+            assertNotNull(dry);
+            assertNotNull(mortal);
+            assertNotNull(immune);
+
+            int digs = countMineDowns(dry);
+            assertTrue(digs >= 2, "the scenario must actually dig a multi-level shaft; got " + digs);
+            assertEquals(digs, countMineDowns(mortal), "same geometry, same shaft depth");
+            assertEquals(digs, countMineDowns(immune), "same geometry, same shaft depth");
+
+            // Every level digs feet-in-lava at the dry 1x mining time — the exposure is per-level mining
+            // ticks x the vanilla immersion rate x the one damage currency, digs levels of it.
+            float exposure = digs * stoneTicks
+                    * MovementContext.LAVA_HP_PER_TICK * BotCaps.DEFAULT_COST_PER_HITPOINT;
+            assertEquals(dry.cost() + exposure, mortal.cost(), 0.1f,
+                    "a mortal bot pays the lava-exposure term on every level of the flooding shaft"
+                            + " (tolerance is float32 rounding at the ~10^4-tick scale, ~3 ppm)");
+
+            // The §4.2 split: an immune bot charges NOTHING for the lava — bit-identical to the dry dig.
+            assertEquals(dry.cost(), immune.cost(), 0f,
+                    "an immune bot's lava shaft is bit-identical to the dry shaft (exposure gated on"
+                            + " takesDamage, multiply-by-nothing)");
+
+            // The diff is honest: the mouth-column level-1 break records the lava flood (tier 0a).
+            PathEdits folded = new PathEdits();
+            folded.addSnapshot(EditSnapshot.fromRemainingSteps(mortal, 0));
+            assertEquals(PathEdits.BROKEN_LAVA, folded.kindAt(8, 8, 8),
+                    "level 1's break sits under the mouth pool — BROKEN_LAVA via the vertical rule");
+
+            // Macro parity: the collapsed lava shaft must reproduce the micro chain's exposure exactly.
+            BlockPathfinder.MACRO_MOVES = true;
+            BlockPathPlan mortalMacro = BlockPathfinder.findPath(
+                    buildChimneyWorld(lava), start, goal, BREAK_ONLY, corridor);
+            assertNotNull(mortalMacro);
+            assertEquals(mortal.cost(), mortalMacro.cost(), 0.1f,
+                    "macro per-level lava exposure == micro per-node exposure, level for level");
+        } finally {
+            BlockPathfinder.MACRO_MOVES = savedMacro;
+            BlockPathfinder.PARTIAL_PATH = savedPartial;
+        }
+    }
+
+    /**
+     * The flagship shape, strengthened for the fluid-flow arc (DESIGN-fluid-flow-prediction.md §5/§9):
+     * the bot stands in the SOURCE cell of a settled surface pool — centre source, min-level arms on the
+     * four laterals — over the same buried goal. Digging in place floods every deep level at 5×; so does
+     * digging any LATERALLY-ADJACENT column, because the arm water sits directly above its first break
+     * (the tier-0a vertical rule) and the flood then chains down that shaft too. The cheapest dry dig is
+     * therefore DIAGONAL (or further) from the pool — the diagonal-dig behaviour the whole arc exists to
+     * produce — followed by a short dry tunnel back to the goal at depth.
+     *
+     * <p>Two assertions, both tie-robust:
+     * <ul>
+     *   <li>every surface-level dig (floor y=8 — the level at which the column CHOICE is made) is at
+     *       Manhattan distance ≥ 2 from the pool centre: neither the pool column nor any arm column.
+     *       Deeper digs are deliberately unconstrained — once below ground, cut-over variants through
+     *       already-broken dry cells tie on cost and the tie-break may pick any of them;</li>
+     *   <li>no edit anywhere in the plan folds {@code BROKEN_WATER}: the chosen plan is entirely dry,
+     *       which is the actual claim (any plan touching a wet column at the surface pays the 5× chain
+     *       and is strictly costlier, so no optimal variant folds wet).</li>
+     * </ul>
+     *
+     * <p>The substrate is built through the FULL column pipeline (see {@link #buildSlabWorld}) so the
+     * scatter-owned {@code HAS_FLUID_NEIGHBOR} flag exists and the funnel's lateral tiers run for real —
+     * on a {@code classifyInto} grid the flag is permanently clear and tier 0b would short-circuit every
+     * lateral verdict to dry (the synthetic-grid trap).
      */
     @Test
     void plannerStepsOutOfThePoolToDigDry() {
@@ -213,10 +323,24 @@ class SubmergedMiningStanceTest {
                 if (plan.movement(i) != MovementRegistry.MINE_DOWN) continue;
                 anyDig = true;
                 BlockPos floor = plan.floor(i);
-                assertFalse(floor.getX() == 8 && floor.getZ() == 8,
-                        "every dig must happen OUTSIDE the flooded start column; dug at " + floor);
+                if (floor.getY() == 8) { // the surface plane — where the dig column is chosen
+                    int manhattan = Math.abs(floor.getX() - 8) + Math.abs(floor.getZ() - 8);
+                    assertTrue(manhattan >= 2,
+                            "a surface dig must be neither the pool column nor laterally adjacent to it"
+                                    + " (the arm water floods those shafts via the vertical rule); dug at "
+                                    + floor);
+                }
             }
             assertTrue(anyDig, "the plan must still reach the buried goal by digging");
+
+            // The dry-plan pin: no break anywhere in the chosen plan folds BROKEN_WATER — the whole
+            // route, tunnel-back included, digs dry (kinds ride EditSnapshot verbatim).
+            PathEdits folded = new PathEdits();
+            folded.addSnapshot(EditSnapshot.fromRemainingSteps(plan, 0));
+            for (int i = 0; i < folded.editCount(); i++) {
+                assertFalse(folded.kindAt(folded.editAt(i)) == PathEdits.BROKEN_WATER,
+                        "the chosen plan must be entirely dry; wet fold at packed cell " + folded.editAt(i));
+            }
         } finally {
             BlockPathfinder.MACRO_MOVES = savedMacro;
             BlockPathfinder.PARTIAL_PATH = savedPartial;
@@ -270,16 +394,16 @@ class SubmergedMiningStanceTest {
 
     /**
      * A 1×1 dig chimney in a single chunk: bedrock everywhere from y=0..9 except the start column (world
-     * {@code (8,*,8)}), which is stone y=0..8 with the mouth at y=9 holding water ({@code wet}) or air.
-     * Every lateral dig is refused (bedrock is unbreakable at these caps), so the ONLY route down is the
-     * straight MineDown shaft — exact-arithmetic cost assertions with no tie-break dependence. The bot can
-     * still hop onto the 16×16 bedrock roof, which is deliberately tiny (single chunk) so exhausting it
-     * costs a few hundred expansions, not the budget.
+     * {@code (8,*,8)}), which is stone y=0..8 with the mouth at y=9 holding the given state — water/lava
+     * (the flooding fixtures) or air (the dry baseline). Every lateral dig is refused (bedrock is
+     * unbreakable at these caps), so the ONLY route down is the straight MineDown shaft —
+     * exact-arithmetic cost assertions with no tie-break dependence. The bot can still hop onto the 16×16
+     * bedrock roof, which is deliberately tiny (single chunk) so exhausting it costs a few hundred
+     * expansions, not the budget.
      */
-    private static NavGridView buildChimneyWorld(boolean wet) {
+    private static NavGridView buildChimneyWorld(BlockState mouth) {
         BlockState air = Blocks.AIR.defaultBlockState();
         BlockState stone = Blocks.STONE.defaultBlockState();
-        BlockState water = Blocks.WATER.defaultBlockState();
         BlockState bedrock = Blocks.BEDROCK.defaultBlockState();
 
         PalettedContainer<BlockState> states = new PalettedContainer<>(
@@ -290,7 +414,7 @@ class SubmergedMiningStanceTest {
             }
         }
         for (int yy = 0; yy <= 8; yy++) states.set(8, yy, 8, stone);
-        states.set(8, 9, 8, wet ? water : air);
+        states.set(8, 9, 8, mouth);
 
         NavSection chimney = NavSection.create(BlockPos.ZERO);
         NavSectionBuilder.classifyInto(states, false, chimney.getTraversalGrid());
@@ -298,13 +422,23 @@ class SubmergedMiningStanceTest {
     }
 
     /**
-     * The flagship shape in a single chunk: an open stone slab (y=0..8) under air, with a 1×1 pool at the
-     * start column's feet cell (8,9,8) only — one sideways step reaches a dry column.
+     * The flagship shape in a single chunk: an open stone slab (y=0..8) under air, with a settled surface
+     * pool at the start column's feet level — a SOURCE at (8,9,8) with MIN-LEVEL flowing arms
+     * ({@code amount == 1}, the spent edge of a spread that can flow no further) on its four laterals.
+     * The arms are what make the "laterally adjacent" half of the flagship assertion bite: their water
+     * sits directly above the adjacent columns' first break, so those shafts flood by the tier-0a
+     * vertical rule exactly like the pool column itself.
+     *
+     * <p>Built through the FULL column pipeline ({@link #assembleFlaggedWorld}) — not {@code classifyInto}
+     * — so the scatter-owned {@code HAS_FLUID_NEIGHBOR} flag is populated and the fold funnel's lateral
+     * tiers (DESIGN-fluid-flow-prediction.md §5, tier 0b) run against real flags in this fixture.
      */
     private static NavGridView buildSlabWorld() {
         BlockState air = Blocks.AIR.defaultBlockState();
         BlockState stone = Blocks.STONE.defaultBlockState();
-        BlockState water = Blocks.WATER.defaultBlockState();
+        BlockState source = Blocks.WATER.defaultBlockState();
+        BlockState minLevel = Blocks.WATER.defaultBlockState()
+                .setValue(BlockStateProperties.LEVEL, 7); // amount 1 — cannot spread further
 
         PalettedContainer<BlockState> states = new PalettedContainer<>(
                 air, Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
@@ -313,15 +447,27 @@ class SubmergedMiningStanceTest {
                 for (int yy = 0; yy <= 8; yy++) states.set(x, yy, z, stone);
             }
         }
-        states.set(8, 9, 8, water); // the 1×1 pool the bot starts in
+        states.set(8, 9, 8, source);   // the pool the bot starts in…
+        states.set(7, 9, 8, minLevel); // …and its settled spread arms
+        states.set(9, 9, 8, minLevel);
+        states.set(8, 9, 7, minLevel);
+        states.set(8, 9, 9, minLevel);
 
-        NavSection section = NavSection.create(BlockPos.ZERO);
-        NavSectionBuilder.classifyInto(states, false, section.getTraversalGrid());
-        return assembleWorld(section);
+        return assembleFlaggedWorld(states);
     }
 
-    /** A SINGLE-chunk world — chunk (0,0) only, {@code section} at y 0..15 under three air sections (world
-     *  y 0..63). Everything outside the chunk is UNBUILT, which confines the search frontier. */
+    /**
+     * A SINGLE-chunk world — chunk (0,0) only, {@code section} at y 0..15 under three air sections (world
+     * y 0..63). Everything outside the chunk is UNBUILT, which confines the search frontier.
+     *
+     * <p>{@code classifyInto}-built (flags gathered, depth UNKNOWN, NO scatter): the chimney fixtures stay
+     * on this path deliberately, and it is verified safe for their exact-arithmetic pins — their water is
+     * only ever DIRECTLY ABOVE the dug column inside bedrock walls, so every wet fold fires through the
+     * funnel's tier-0a vertical rule, which reads descriptors and never consults the scatter-owned
+     * {@code HAS_FLUID_NEIGHBOR} flag. The (5−1)×T×(digs−1) surcharge and the macro==micro parity are
+     * therefore identical with or without the column pipeline; lateral digs (the only reads tier 0b
+     * gates) are refused by the bedrock regardless.
+     */
     private static NavGridView assembleWorld(NavSection section) {
         PalettedContainer<BlockState> airStates = new PalettedContainer<>(
                 Blocks.AIR.defaultBlockState(), Strategy.createForBlockStates(Block.BLOCK_STATE_REGISTRY));
@@ -330,6 +476,37 @@ class SubmergedMiningStanceTest {
 
         ConcurrentHashMap<Long, NavSection[]> chunks = new ConcurrentHashMap<>();
         chunks.put(NavStore.key(0, 0), new NavSection[] { section, airSection, airSection, airSection });
+        return new NavGridView(0, chunks);
+    }
+
+    /**
+     * The FULL-column-pipeline counterpart of {@link #assembleWorld}: {@code classifyNavtypes} per
+     * section, {@code computeFlags} with the above-grid overscan, then {@code computeDepth} over the
+     * whole column — exactly as {@code ChunkNavBuilder} drives it live. This is the only build path that
+     * populates the scatter-owned {@code HAS_FLUID_NEIGHBOR} flag the fold funnel's tier 0b reads
+     * (DESIGN-fluid-flow-prediction.md §4); the {@code classifyInto} one-liner never runs
+     * {@code computeDepth}, leaving such a grid's flag permanently clear (the synthetic-grid trap).
+     */
+    private static NavGridView assembleFlaggedWorld(PalettedContainer<BlockState> states) {
+        NavSection s0 = NavSection.create(BlockPos.ZERO);
+        boolean air0 = NavSectionBuilder.classifyNavtypes(states, false, s0.getTraversalGrid(), null);
+        NavSection[] col = new NavSection[4];
+        boolean[] allAir = { air0, true, true, true };
+        col[0] = s0;
+        for (int i = 1; i < col.length; i++) {
+            col[i] = NavSection.create(BlockPos.ZERO);
+            NavSectionBuilder.classifyNavtypes((PalettedContainer<BlockState>) null, true,
+                    col[i].getTraversalGrid(), null);
+        }
+        for (int i = 0; i < col.length; i++) {
+            TraversalGrid above = (i + 1 < col.length && !allAir[i + 1])
+                    ? col[i + 1].getTraversalGrid() : null;
+            NavSectionBuilder.computeFlags(col[i].getTraversalGrid(), allAir[i], above);
+        }
+        NavSectionBuilder.computeDepth(col);
+
+        ConcurrentHashMap<Long, NavSection[]> chunks = new ConcurrentHashMap<>();
+        chunks.put(NavStore.key(0, 0), col);
         return new NavGridView(0, chunks);
     }
 }

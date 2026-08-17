@@ -23,17 +23,19 @@ import net.minecraft.world.level.chunk.PalettedContainer;
 import net.minecraft.world.level.chunk.Strategy;
 
 /**
- * <b>Correctness proof for the lava RISKY_EDIT re-dilation on the LIVE-EDIT (patch) path</b>
- * (PERF-DESIGN-navgrid-build §C1). The build path owns the lava RISKY_EDIT term as a SCATTER in
- * {@link NavSectionBuilder#computeDepth}; {@link NavFlags#compute} never produces it. So
+ * <b>Correctness proof for the HAS_FLUID_NEIGHBOR re-dilation on the LIVE-EDIT (patch) path</b>
+ * (PERF-DESIGN-navgrid-build §C1; DESIGN-fluid-flow-prediction.md §4, §9's "Flag" bullets). The build path
+ * owns the any-fluid HAS_FLUID_NEIGHBOR term as a SCATTER in {@link NavSectionBuilder#computeDepth};
+ * {@link NavFlags#compute} never produces it. So
  * {@link NavSectionBuilder#patchCell}/{@link NavSectionBuilder#patchCells} — which recompute flags via
  * {@code recomputeWindow → NavFlags.compute} — must re-derive it themselves, authoritatively, via the
- * {@link NavFlags#risksLavaEdit} gather plus the two section-seam reads the descriptor scratch cannot serve.
+ * {@link NavFlags#hasFluidNeighborGather} gather plus the two section-seam reads the descriptor scratch
+ * cannot serve.
  *
  * <p>The proof shape: a live-edited grid must be <b>byte-for-byte identical to a full from-scratch rebuild
- * of the post-edit block states</b>. The full rebuild is the oracle (its RISKY_EDIT comes from the build
- * scatter, itself proven equal to an independent gather by {@code FluidScatterIdentityTest}); the patch path
- * must land on exactly those bits.
+ * of the post-edit block states</b>. The full rebuild is the oracle (its HAS_FLUID_NEIGHBOR comes from the
+ * build scatter, itself proven equal to an independent gather by {@code FluidScatterIdentityTest}); the
+ * patch path must land on exactly those bits.
  *
  * <p>Two independent subjects are compared to the same oracle:
  * <ul>
@@ -44,22 +46,24 @@ import net.minecraft.world.level.chunk.Strategy;
  *
  * <p>The edit set deliberately exercises every transition the re-dilation must handle:
  * <ol>
- *   <li><b>ADD</b> lava beside floor cells (RISKY must be SET where it was clear);</li>
- *   <li><b>REMOVE</b> lava so its neighbours lose their only lava neighbour (RISKY must be CLEARED — the
+ *   <li><b>ADD</b> lava beside floor cells (bit 4 must be SET where it was clear — and bit 0 must NOT be:
+ *       RISKY_EDIT is strictly gravity since the §4.1 migration);</li>
+ *   <li><b>REMOVE</b> lava so its neighbours lose their only fluid neighbour (bit 4 must be CLEARED — the
  *       authoritative-not-additive case);</li>
- *   <li><b>GRAVITY OVERLAP</b> — remove lava beside a cell that ALSO has a gravity block above it: RISKY
- *       must STAY (proves the lava clear doesn't stomp the gravity term);</li>
- *   <li><b>WATER</b> add and remove — must be completely inert for RISKY_EDIT (the owner ruling: water no
- *       longer scatters at all);</li>
- *   <li><b>SEAM DOWN</b> — add and remove lava at a section's row 0, whose {@code y-1} neighbour is the
- *       section BELOW's row 15 (the pre-existing below-seam window);</li>
- *   <li><b>SEAM UP</b> — add and remove lava at a section's row 15, whose {@code y+1} neighbour is the
- *       section ABOVE's row 0. This direction is new with the 6-neighbour dilation: no flag ever read
- *       DOWNWARD across a section face before, so the patch path grew an above-seam window for it. The
- *       REMOVE half is the one that would fail an OR-only fix.</li>
+ *   <li><b>GRAVITY OVERLAP</b> — remove lava beside a cell that ALSO has a gravity block above it: the two
+ *       facts now live on separate bits, so bit 4 clears with the lava while bit 0 (gravity) STAYS —
+ *       the authoritative window must rewrite both correctly;</li>
+ *   <li><b>WATER</b> add and remove — <b>no longer inert for bit 4</b> (any-fluid, 2026-08-17): each must
+ *       move HAS_FLUID_NEIGHBOR exactly as lava does, while staying completely inert for bit 0 (water has
+ *       never been, and must never become, a RISKY_EDIT term);</li>
+ *   <li><b>SEAM DOWN</b> — add and remove fluid at a section's row 0, whose {@code y-1} neighbour is the
+ *       section BELOW's row 15 (the pre-existing below-seam window) — lava and water each;</li>
+ *   <li><b>SEAM UP</b> — add and remove fluid at a section's row 15, whose {@code y+1} neighbour is the
+ *       section ABOVE's row 0 (the above-seam window the patch path grew for the fluid term's downward
+ *       read; the REMOVE half is the one that would fail an OR-only fix) — again both fluids.</li>
  * </ol>
- * A second test asserts the seam bits directly, so a regression names the failing direction instead of
- * surfacing as an opaque array mismatch.
+ * A second test asserts the transitions as named bits directly, so a regression names the failing
+ * direction instead of surfacing as an opaque array mismatch.
  */
 class FluidPatchIdentityTest {
 
@@ -91,21 +95,24 @@ class FluidPatchIdentityTest {
     private record Edit(int x, int wy, int z, BlockState state) { }
 
     /**
-     * The edited neighbourhood exercising every lava-RISKY transition (see the class doc). All cells sit in
-     * chunk (0,0) with {@code 2 <= x,z <= 13}, so no lateral chunk face is involved and
+     * The edited neighbourhood exercising every HAS_FLUID_NEIGHBOR transition (see the class doc). All
+     * cells sit in chunk (0,0) with {@code 2 <= x,z <= 13}, so no lateral chunk face is involved and
      * {@code EdgeFluidScatter} (not driven here) has nothing to contribute.
      */
     private static List<Edit> edits() {
         List<Edit> e = new ArrayList<>();
-        e.add(new Edit(10, 1, 10, LAVA));   // ADD lava over the stone floor
-        e.add(new Edit(8, 1, 8, AIR));      // REMOVE lava (its neighbours lose their RISKY)
-        e.add(new Edit(5, 10, 4, AIR));     // GRAVITY OVERLAP: remove the lava; sand above keeps (4,10,4) risky
-        e.add(new Edit(2, 5, 2, AIR));      // WATER remove — must change nothing
-        e.add(new Edit(12, 5, 12, WATER));  // WATER add — must change nothing
+        e.add(new Edit(10, 1, 10, LAVA));   // ADD lava over the stone floor (bit 4 set, bit 0 untouched)
+        e.add(new Edit(8, 1, 8, AIR));      // REMOVE lava (its neighbours lose their fluid bit)
+        e.add(new Edit(5, 10, 4, AIR));     // GRAVITY OVERLAP: remove the lava; (4,10,4) keeps bit 0 (sand
+                                            //   above), loses bit 4 (the fluid went away)
+        e.add(new Edit(2, 5, 2, AIR));      // WATER remove — clears bit 4 around it, bit 0 untouched
+        e.add(new Edit(12, 5, 12, WATER));  // WATER add — sets bit 4 around it, bit 0 untouched
         e.add(new Edit(9, 16, 9, LAVA));    // SEAM DOWN add  (s1 row 0  -> marks s0 row 15)
         e.add(new Edit(13, 16, 13, AIR));   // SEAM DOWN remove (s0 row 15 must LOSE its bit)
         e.add(new Edit(7, 15, 7, LAVA));    // SEAM UP add    (s0 row 15 -> marks s1 row 0)
         e.add(new Edit(11, 15, 11, AIR));   // SEAM UP remove (s1 row 0 must LOSE its bit)
+        e.add(new Edit(3, 16, 3, WATER));   // WATER SEAM add (s1 row 0 -> marks s0 row 15 — water crosses too)
+        e.add(new Edit(6, 15, 6, AIR));     // WATER SEAM remove (s1 row 0 must LOSE its water-fed bit)
         return e;
     }
 
@@ -119,18 +126,20 @@ class FluidPatchIdentityTest {
         for (int x = 0; x < 16; x++) {
             for (int z = 0; z < 16; z++) put(secs, x, 0, z, STONE);
         }
-        // REMOVE case: lava over the floor (its 6 neighbours carry RISKY initially).
+        // REMOVE case: lava over the floor (its 6 neighbours carry the fluid bit initially).
         put(secs, 8, 1, 8, LAVA);
-        // WATER case: a water cell that will be removed (and must never have mattered).
+        // WATER case: a water cell that will be removed (its neighbours carry bit 4 — and never bit 0).
         put(secs, 2, 5, 2, WATER);
-        // GRAVITY-OVERLAP case: sand (gravity) at y12 above the cell (4,10,4) — that alone makes (4,10,4)
-        // risky — plus lava at (5,10,4), its x+1 neighbour, so BOTH terms are set before the edit.
+        // GRAVITY-OVERLAP case: sand (gravity) at y12 above the cell (4,10,4) — that alone sets bit 0
+        // there — plus lava at (5,10,4), its x+1 neighbour, so bit 4 is ALSO set before the edit.
         put(secs, 4, 12, 4, SAND);
         put(secs, 5, 10, 4, LAVA);
         // SEAM DOWN remove case: lava at the s1 bottom row (y16), marking s0's (13,15,13) across the seam.
         put(secs, 13, 16, 13, LAVA);
         // SEAM UP remove case: lava at the s0 top row (y15), marking s1's (11,16,11) across the seam.
         put(secs, 11, 15, 11, LAVA);
+        // WATER SEAM remove case: water at the s0 top row (y15), marking s1's (6,16,6) across the seam.
+        put(secs, 6, 15, 6, WATER);
         return secs;
     }
 
@@ -178,11 +187,15 @@ class FluidPatchIdentityTest {
     void seamAndWaterTransitionsLandOnTheRightBits() {
         NavSection[] g = fullBuild(initialStates());
 
-        // Pre-edit: both seam bits are set by the BUILD scatter, in both directions.
-        assertTrue(risky(g, 13, 15, 13), "pre-edit: s1 row-0 lava marks s0 row 15 (downward seam)");
-        assertTrue(risky(g, 11, 16, 11), "pre-edit: s0 row-15 lava marks s1 row 0 (upward seam)");
-        assertTrue(risky(g, 4, 10, 4), "pre-edit: gravity + lava both mark (4,10,4)");
-        assertFalse(risky(g, 2, 6, 2), "pre-edit: water marks nothing");
+        // Pre-edit: the BUILD scatter set the fluid bit in both seam directions, for both fluids — and the
+        // gravity/fluid facts sit on their separate bits at the overlap cell.
+        assertTrue(fluidNeighbor(g, 13, 15, 13), "pre-edit: s1 row-0 lava marks s0 row 15 (downward seam)");
+        assertTrue(fluidNeighbor(g, 11, 16, 11), "pre-edit: s0 row-15 lava marks s1 row 0 (upward seam)");
+        assertTrue(fluidNeighbor(g, 6, 16, 6), "pre-edit: s0 row-15 water marks s1 row 0 (upward water seam)");
+        assertTrue(risky(g, 4, 10, 4), "pre-edit: gravity (sand above) sets RISKY_EDIT at (4,10,4)");
+        assertTrue(fluidNeighbor(g, 4, 10, 4), "pre-edit: the adjacent lava sets HAS_FLUID_NEIGHBOR at (4,10,4)");
+        assertTrue(fluidNeighbor(g, 2, 6, 2), "pre-edit: water dilates the fluid bit");
+        assertFalse(risky(g, 2, 6, 2), "pre-edit: water never touches RISKY_EDIT");
 
         ConcurrentHashMap<Long, NavSection[]> chunks = new ConcurrentHashMap<>();
         chunks.put(NavStore.key(0, 0), g);
@@ -193,35 +206,47 @@ class FluidPatchIdentityTest {
         }
         NavGridUpdater.drain(queue, 0, chunks);
 
-        // ADD / REMOVE, interior.
-        assertTrue(risky(g, 10, 2, 10), "ADD: the cell above the new lava is risky");
-        assertTrue(risky(g, 9, 1, 10), "ADD: the lateral neighbour of the new lava is risky");
-        assertFalse(risky(g, 8, 2, 8), "REMOVE: the old lava's neighbour is no longer risky");
-        assertFalse(risky(g, 7, 1, 8), "REMOVE: the old lava's lateral neighbour is no longer risky");
+        // ADD / REMOVE, interior — the fluid fact moves on bit 4; bit 0 never fires (no gravity involved,
+        // and adjacent lava no longer sets RISKY_EDIT anywhere — strictly gravity, §4.1).
+        assertTrue(fluidNeighbor(g, 10, 2, 10), "ADD: the cell above the new lava carries the fluid bit");
+        assertTrue(fluidNeighbor(g, 9, 1, 10), "ADD: the lateral neighbour of the new lava carries the fluid bit");
+        assertFalse(risky(g, 10, 2, 10), "ADD: adjacent lava never sets RISKY_EDIT (strictly gravity)");
+        assertFalse(risky(g, 9, 1, 10), "ADD: adjacent lava never sets RISKY_EDIT laterally either");
+        assertFalse(fluidNeighbor(g, 8, 2, 8), "REMOVE: the old lava's neighbour loses the fluid bit");
+        assertFalse(fluidNeighbor(g, 7, 1, 8), "REMOVE: the old lava's lateral neighbour loses the fluid bit");
 
-        // GRAVITY OVERLAP — the lava term cleared, the gravity term survives.
-        assertTrue(risky(g, 4, 10, 4), "gravity keeps the bit after its lava neighbour is removed");
+        // GRAVITY OVERLAP — separate bits now: bit 4 clears with the lava, bit 0 (gravity) survives.
+        assertTrue(risky(g, 4, 10, 4), "gravity keeps RISKY_EDIT after the lava neighbour is removed");
+        assertFalse(fluidNeighbor(g, 4, 10, 4), "...while HAS_FLUID_NEIGHBOR clears with the lava");
 
-        // WATER is inert in both directions.
-        assertFalse(risky(g, 12, 6, 12), "water ADD sets nothing");
-        assertFalse(risky(g, 2, 6, 2), "water REMOVE changes nothing");
+        // WATER moves bit 4 in both directions — and stays inert for bit 0 in both.
+        assertTrue(fluidNeighbor(g, 12, 6, 12), "water ADD sets the fluid bit");
+        assertFalse(risky(g, 12, 6, 12), "water ADD never sets RISKY_EDIT");
+        assertFalse(fluidNeighbor(g, 2, 6, 2), "water REMOVE clears the fluid bit");
+        assertFalse(risky(g, 2, 6, 2), "water REMOVE leaves RISKY_EDIT clear");
 
-        // Section seams, both directions, both transitions.
-        assertTrue(risky(g, 9, 15, 9), "SEAM DOWN add: new s1 row-0 lava marks s0 row 15");
-        assertFalse(risky(g, 13, 15, 13), "SEAM DOWN remove: s0 row 15 loses the bit");
-        assertTrue(risky(g, 7, 16, 7), "SEAM UP add: new s0 row-15 lava marks s1 row 0");
-        assertFalse(risky(g, 11, 16, 11), "SEAM UP remove: s1 row 0 loses the bit");
+        // Section seams, both directions, both transitions, both fluids.
+        assertTrue(fluidNeighbor(g, 9, 15, 9), "SEAM DOWN add: new s1 row-0 lava marks s0 row 15");
+        assertFalse(fluidNeighbor(g, 13, 15, 13), "SEAM DOWN remove: s0 row 15 loses the bit");
+        assertTrue(fluidNeighbor(g, 7, 16, 7), "SEAM UP add: new s0 row-15 lava marks s1 row 0");
+        assertFalse(fluidNeighbor(g, 11, 16, 11), "SEAM UP remove: s1 row 0 loses the bit");
+        assertTrue(fluidNeighbor(g, 3, 15, 3), "WATER SEAM add: new s1 row-0 water marks s0 row 15");
+        assertFalse(fluidNeighbor(g, 6, 16, 6), "WATER SEAM remove: s1 row 0 loses the water-fed bit");
     }
 
     private static boolean risky(NavSection[] col, int x, int wy, int z) {
         return NavFlags.risksEdit(col[wy >> 4].getFlags(x, wy & 15, z));
     }
 
+    private static boolean fluidNeighbor(NavSection[] col, int x, int wy, int z) {
+        return NavFlags.hasFluidNeighbor(col[wy >> 4].getFlags(x, wy & 15, z));
+    }
+
     private static void assertColumnEquals(String what, NavSection[] expected, NavSection[] actual) {
         for (int i = 0; i < expected.length; i++) {
             assertArrayEquals(expected[i].getTraversalGrid().raw(), actual[i].getTraversalGrid().raw(),
                     what + ": section " + i + " packed navtype/flag shorts diverged from the full rebuild "
-                            + "(lava RISKY_EDIT re-dilation wrong)");
+                            + "(HAS_FLUID_NEIGHBOR re-dilation wrong)");
             assertArrayEquals(expected[i].getTraversalGrid().depthRaw(), actual[i].getTraversalGrid().depthRaw(),
                     what + ": section " + i + " depth nibble bytes diverged from the full rebuild");
         }

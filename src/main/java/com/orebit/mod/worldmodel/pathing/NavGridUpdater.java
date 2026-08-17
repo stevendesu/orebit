@@ -2,6 +2,7 @@ package com.orebit.mod.worldmodel.pathing;
 
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.platform.BlockChangeEvents;
 import com.orebit.mod.platform.LevelBounds;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
@@ -171,9 +172,11 @@ public final class NavGridUpdater {
     }
 
     /**
-     * Per-chunk-column count of <b>FOREIGN</b> grid-visible changes — every change EXCEPT the one mutation the
-     * follower announced it was about to make ({@link #expectChange}). This, not {@link #CHUNK_VERSION}, is
-     * what a plan snapshots to decide whether the world diverged from it.
+     * Per-chunk-column count of <b>FOREIGN</b> grid-visible changes — every change EXCEPT one the follower
+     * announced ({@link #expectChange}, {@link #expectFloodedBreak}, {@link #expectToggle}) or the predicted
+     * fluid arrival of an earlier fluid-folded break (the pending-flood residual — see
+     * {@link #observePendingFlood}). This, not {@link #CHUNK_VERSION}, is what a plan snapshots to decide
+     * whether the world diverged from it.
      *
      * <p><b>Why identity and not a count</b> (owner ruling 2026-08-06). The first cut let a plan tolerate N
      * version bumps in a column, N being the number of edits it had executed there. That is sound only while
@@ -206,6 +209,9 @@ public final class NavGridUpdater {
     private static ServerLevel expectLevel;
     private static long expectPos;
     private static boolean expectAir;
+    /** {@link #FLOOD_NONE} for a plain single-phase arm, else the fluid a {@link #expectFloodedBreak
+     *  fluid-folded break} predicted will follow the air — the slot's widened payload. */
+    private static byte expectFluid;
     private static boolean expectArmed;
 
     /**
@@ -215,8 +221,13 @@ public final class NavGridUpdater {
      *
      * <p>Armed immediately before the edit and consumed by the change it predicts, both on the server tick
      * thread, so the window is a single synchronous call. That is what makes it exact rather than a heuristic:
-     * a cascading change the edit triggers (gravel falling into the hole, water flowing in) arrives AFTER the
-     * slot is spent, at a different cell, and is correctly counted as foreign — the plan never modelled it.
+     * a cascading change the edit triggers (gravel falling into the hole, a neighbour's fluid flowing in)
+     * arrives AFTER the slot is spent, and is counted as foreign — the plan never modelled it. Exactly ONE
+     * cascade is exempt from that rule: a break the plan folded as {@code BROKEN_WATER}/{@code BROKEN_LAVA}
+     * <i>predicted</i> its own flood, so the fluid's later arrival is the documented second half of a
+     * two-phase edit, not the world diverging — such a break is armed through {@link #expectFloodedBreak}
+     * instead, and its arrival is forgiven via the pending-flood residual there
+     * (DESIGN-fluid-flow-prediction.md §8.3). Every other cascade stays foreign.
      *
      * <p>One slot, not a set: an edit is a single block mutation and is consumed on the same tick it is armed,
      * so a second arm can only mean the first never fired (a refused place, a break vanilla declined). Arming
@@ -231,15 +242,177 @@ public final class NavGridUpdater {
         expectLevel = level;
         expectPos = pos.asLong();
         expectAir = toAir;
+        expectFluid = FLOOD_NONE;
         expectArmed = true;
     }
 
-    /** Whether {@code (pos, newState)} is the mutation the follower just announced — and consume the slot. */
+    // ---- The TWO-PHASE expectation a fluid-folded break arms (DESIGN-fluid-flow-prediction.md §8.3) ----
+
+    /** No predicted flood — the classic single-phase expectation ({@link #expectChange}). */
+    public static final byte FLOOD_NONE = 0;
+    /** The armed break was folded as water-flooded ({@code PathEdits.BROKEN_WATER}): the cell is expected
+     *  to become AIR and then, ≥5 ticks later, open WATER (DESIGN-fluid-flow-prediction.md §1.4, §6). */
+    public static final byte FLOOD_WATER = 1;
+    /** The lava analog ({@code PathEdits.BROKEN_LAVA}): AIR, then — ≥30 ticks later overworld — open LAVA. */
+    public static final byte FLOOD_LAVA = 2;
+
+    /**
+     * Announce a break the CURRENT PLAN folded as fluid-flooded ({@code PathEdits.BROKEN_WATER} /
+     * {@code BROKEN_LAVA}): cell {@code pos} is about to be mined out, and the planner already predicted that
+     * the opened cell floods with {@code fluid} ({@link #FLOOD_WATER}/{@link #FLOOD_LAVA} —
+     * DESIGN-fluid-flow-prediction.md §6). The expectation is therefore a <b>set of two states</b>,
+     * {air, that fluid}, not a single direction, because vanilla delivers the edit in TWO PHASES (§1.4/§8.3):
+     * the break writes air immediately, and the fluid arrives on its own spread schedule — ≥5 ticks later for
+     * water, ≥30 for overworld lava, plus ~one delay per cell of travel. Before this arm existed the arrival
+     * was classified as a foreign "cascading change", so every flooded break the plan itself prescribed cost
+     * one guaranteed invalidation + re-search — and that re-search planned against the transient AIR state,
+     * deriving affordances (walk/fall through the hole) that the arriving fluid then revoked with a second
+     * invalidation (§8.3's churn analysis; lava's 30-tick lag sits outside the 40-tick terrain-recheck
+     * debounce, guaranteeing the re-searches are distinct).
+     *
+     * <p><b>Consumption is split across the phases.</b> The very next change at the cell spends the one-shot
+     * slot as usual: observed AIR (the normal mined break) consumes it and deposits a per-level, per-cell
+     * <b>pending-flood residual</b> that the fluid's later arrival consumes on match; observed {@code fluid}
+     * IMMEDIATELY consumes it outright with no residual — the WATERLOGGED-break case, where vanilla's
+     * {@code destroyBlock} leaves the fluid's legacy block in place of air, which the old direction-only
+     * match read as a false foreign change from the bot's own prescribed break; any other observed state is
+     * foreign, exactly as before ({@link #observeFloodedBreak} is the match rule). The residual is released
+     * by STATE only — consumed by the matching arrival, superseded by any other change at its cell, dropped
+     * with its level — never by a tick countdown ({@code no-arbitrary-timers}; §8.3 pins "state-based, not a
+     * timer": the expectation describes what the cell WILL hold, not when).
+     *
+     * <p>Same caller contract as {@link #expectChange}: armed immediately before the mutation, server thread,
+     * only for a break the CURRENT PLAN prescribed with that fold kind ({@code PathPlan.expectOwnEdit}
+     * recovers the kind from the plan's own {@code StepEdits} and routes here).
+     */
+    public static void expectFloodedBreak(ServerLevel level, BlockPos pos, byte fluid) {
+        expectLevel = level;
+        expectPos = pos.asLong();
+        expectAir = true;
+        expectFluid = fluid;
+        expectArmed = true;
+    }
+
+    /**
+     * Per-level pending-flood residuals — {@code packed BlockPos → FLOOD_*} for every fluid-folded break
+     * whose AIR phase has landed but whose predicted fluid has not yet arrived
+     * (DESIGN-fluid-flow-prediction.md §8.3, §11.4). Unlike the one-shot slots beside it this must be a
+     * MULTI-ENTRY, per-level table: the arrival lag outlives the synchronous arm→mutate→consume call stack,
+     * several breaks can be in flight at once (a MineDown macro folds one flooded break per column level),
+     * and multiple bots' plans hold expectations concurrently. Entries are released by STATE only (see
+     * {@link #observePendingFlood}), with {@link #PENDING_FLOOD_CAP} as the documented hard backstop. Keyed
+     * weakly by level — the same {@code WeakHashMap} idiom as every other per-level map here — so an
+     * unloading level drops its residuals wholesale. Tick-thread cold path (touched per grid-visible block
+     * change, never per-A*-node), so a plain boxed {@code HashMap} is acceptable; the hot-path allocation
+     * rules do not bind.
+     */
+    private static final java.util.WeakHashMap<ServerLevel, java.util.HashMap<Long, Byte>> PENDING_FLOOD =
+            new java.util.WeakHashMap<>();
+
+    /**
+     * Hard SAFETY BACKSTOP on a level's pending-flood residuals — deliberately NOT an eviction policy
+     * (release stays state-based only). A residual persists past its usefulness only when the predicted
+     * fluid never arrives AND nothing else ever changes at its cell (an errs-wet verdict at a cell the world
+     * then leaves alone forever); the cap merely bounds that leak. At the cap new deposits are REFUSED and
+     * logged ({@link #observeFloodedBreak}), which errs toward invalidation — the un-deposited arrival reads
+     * foreign and costs one re-search, exactly the pre-arc behavior — never toward forgiving a change no
+     * plan predicted.
+     */
+    static final int PENDING_FLOOD_CAP = 4096;
+
+    /**
+     * The fluid-armed slot's MATCH-AND-DEPOSIT rule, level-free (the {@link #changesGrid} pattern: the slot
+     * machinery around it is welded to a live {@code ServerLevel}, so the arm→observe logic a unit test
+     * drives lives here against a plain map + {@code BlockState}). Returns whether the observed state is
+     * forgiven:
+     * <ul>
+     *   <li><b>AIR</b> — phase 1 of the two-phase edit: forgiven, and the predicted fluid is deposited as a
+     *       pending-flood residual at the cell (overwriting a stale one; refused + logged past
+     *       {@link #PENDING_FLOOD_CAP}).</li>
+     *   <li><b>the predicted fluid</b> — the waterlogged-break case (vanilla leaves the fluid block
+     *       immediately; there is no air phase): forgiven outright, no residual.</li>
+     *   <li><b>anything else</b> — foreign, and any stale residual at the cell is superseded (removed): the
+     *       cell no longer holds what the old prediction described.</li>
+     * </ul>
+     */
+    static boolean observeFloodedBreak(byte fluid, BlockState newState,
+                                       java.util.HashMap<Long, Byte> floods, long posKey) {
+        if (newState.isAir()) {
+            if (floods.size() >= PENDING_FLOOD_CAP && !floods.containsKey(posKey)) {
+                OrebitCommon.LOGGER.warn(
+                        "[Orebit] pending-flood residual cap ({}) hit — the flood at ({},{},{}) will read as"
+                                + " a foreign change (one wasted-but-correct re-search)",
+                        PENDING_FLOOD_CAP, BlockPos.getX(posKey), BlockPos.getY(posKey), BlockPos.getZ(posKey));
+            } else {
+                floods.put(posKey, fluid);
+            }
+            return true;
+        }
+        floods.remove(posKey);
+        return isPredictedFluid(fluid, newState);
+    }
+
+    /**
+     * The pending-flood residual's release rule, level-free and STATE-BASED
+     * (DESIGN-fluid-flow-prediction.md §8.3): the FIRST change of any kind at a residual's cell resolves it —
+     * the entry is removed on sight, then forgiven only when the new state IS the predicted open fluid
+     * ({@link #isPredictedFluid}). The fluid arriving consumes the entry (not foreign); anything else
+     * supersedes it AND classifies foreign, because the world genuinely diverged from what the plan folded.
+     * No entry at the cell ⇒ plain foreign classification, semantics untouched. There is deliberately no
+     * timer and no age field: a residual whose cell never changes again simply rests until its level unloads
+     * ({@link #PENDING_FLOOD_CAP} bounds the accumulation).
+     */
+    static boolean observePendingFlood(java.util.HashMap<Long, Byte> floods, long posKey, BlockState newState) {
+        final Byte kind = floods.remove(posKey);
+        return kind != null && isPredictedFluid(kind, newState);
+    }
+
+    /**
+     * Whether {@code state} IS the open fluid a {@code FLOOD_*} expectation predicted — the arrival match of
+     * the two-phase edit. Uses the descriptor's OPEN-fluid tests ({@code isSwimmableWater} /
+     * {@code isSwimmableLava}: fluid present AND passable), not the bare fluid field, so a waterlogged SOLID
+     * appearing at the cell (someone places a waterlogged stair there) is not mistaken for the predicted
+     * flood — what vanilla actually delivers, in both the lagged-arrival and the waterlogged-break case, is
+     * the plain fluid block. Pure function of the state (descriptor interning), level-free.
+     */
+    static boolean isPredictedFluid(byte fluid, BlockState state) {
+        final long d = NavBlock.descriptorFor(state);
+        return fluid == FLOOD_WATER ? NavBlock.isSwimmableWater(d)
+                : fluid == FLOOD_LAVA && NavBlock.isSwimmableLava(d);
+    }
+
+    /** Level-welded wrapper over {@link #observePendingFlood}: resolve {@code level}'s residual table (a
+     *  missing/empty table is the common case and costs one map probe). Consulted at the classification site
+     *  only after the one-shot and toggle slots MISS — which also keeps it behind {@code onBlockChanged}'s
+     *  untracked-chunk early-out, so off-thread worldgen fires never reach the table. */
+    private static boolean consumePendingFlood(ServerLevel level, BlockPos pos, BlockState newState) {
+        final java.util.HashMap<Long, Byte> floods = PENDING_FLOOD.get(level);
+        if (floods == null || floods.isEmpty()) {
+            return false;
+        }
+        return observePendingFlood(floods, pos.asLong(), newState);
+    }
+
+    /** Whether {@code (pos, newState)} is the mutation the follower just announced — and consume the slot. A
+     *  fluid-armed slot ({@link #expectFloodedBreak}) matches against its two-state expectation set instead
+     *  of the single direction, and its AIR phase leaves the pending-flood residual behind. */
     private static boolean consumeExpected(ServerLevel level, BlockPos pos, BlockState newState) {
         if (!expectArmed || expectLevel != level || expectPos != pos.asLong()) {
             return false;
         }
         expectArmed = false;
+        if (expectFluid != FLOOD_NONE) {
+            return observeFloodedBreak(expectFluid, newState,
+                    PENDING_FLOOD.computeIfAbsent(level, l -> new java.util.HashMap<>()), pos.asLong());
+        }
+        // A single-phase own edit landing at this cell supersedes any stale pending-flood residual there —
+        // the plan re-edited the cell, so the old flood prediction no longer describes it. Same state-based
+        // release discipline as the residual's own rules (observePendingFlood); removed whether or not the
+        // direction below matches, because either way the cell's state moved past the prediction.
+        final java.util.HashMap<Long, Byte> floods = PENDING_FLOOD.get(level);
+        if (floods != null && !floods.isEmpty()) {
+            floods.remove(pos.asLong());
+        }
         // The STATE must match the announced direction too, so a vine growing into the very cell we were
         // about to mine is not forgiven just because the position lines up.
         return expectAir == newState.isAir();
@@ -371,10 +544,14 @@ public final class NavGridUpdater {
         recordChange(server, pos, oldState, newState);
         // Classify it. Only a change the follower did NOT announce moves the foreign version — the counter a
         // plan actually snapshots. This is the whole own-edit gate: our own prescribed break/place — or
-        // prescribed door/trapdoor TOGGLE (the state-toggle slot) — is the plan executing, not the world
-        // diverging from it (see FOREIGN_VERSION).
+        // prescribed door/trapdoor TOGGLE (the state-toggle slot), or the PREDICTED FLUID ARRIVAL of an
+        // earlier fluid-folded break (the pending-flood residual, DESIGN-fluid-flow-prediction.md §8.3) —
+        // is the plan executing, not the world diverging from it (see FOREIGN_VERSION). The residual is
+        // consulted last, only after both one-shot slots miss, so a slot armed for this very cell always
+        // resolves first (and, on a fluid arm's AIR phase, is what deposits the residual).
         if (!consumeExpected(server, pos, newState)
-                && !consumeExpectedToggle(server, pos, oldState, newState)) {
+                && !consumeExpectedToggle(server, pos, oldState, newState)
+                && !consumePendingFlood(server, pos, newState)) {
             FOREIGN_VERSION.computeIfAbsent(server, l -> new java.util.HashMap<>())
                     .computeIfAbsent(NavStore.key(pos.getX() >> 4, pos.getZ() >> 4), k -> new int[1])[0]++;
         }
@@ -428,8 +605,8 @@ public final class NavGridUpdater {
         pendingGlobal -= n;
         final int minY = LevelBounds.minY(level);
         final ConcurrentHashMap<Long, NavSection[]> chunks = NavStore.chunksOf(level);
-        // DURABLE cross-chunk lava edge fold (#7 step 3): the drain's authoritative recomputeWindow rewrites
-        // each edge cell's flags from the LOCAL scratch, dropping the cross-face lava RISKY_EDIT term. Note
+        // DURABLE cross-chunk fluid edge fold (#7 step 3): the drain's authoritative recomputeWindow rewrites
+        // each edge cell's flags from the LOCAL scratch, dropping the cross-face fluid-neighbour term. Note
         // which faces the batch touches BEFORE the drain clears the queue, then re-derive that term
         // authoritatively (both sides) AFTER — resolving the lateral neighbour from the same live store. This
         // sits OUTSIDE drain() deliberately: BatchDrainIdentityTest drives drain() directly against a

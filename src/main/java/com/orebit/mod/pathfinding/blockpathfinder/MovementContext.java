@@ -366,10 +366,20 @@ public final class MovementContext {
     /** Geometry a path-broken cell reads as — air. Package-visible for the same effective-descriptor
      *  threading (a break-folded body cell reads as air within the folding candidate). */
     static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
-    /** Geometry a path-broken cell that FLOODS reads as — a water source ({@link PathEdits#BROKEN_WATER},
-     *  the wet-above rule): downstream reads see honest water (swimmable, not standable, submerged-stance
-     *  mining) instead of the phantom air that made an underwater shaft price as a dry dig. */
+    /** Geometry a path-broken cell that FLOODS with water reads as ({@link PathEdits#BROKEN_WATER}, the
+     *  {@link EditScratch} funnel's verdict): downstream reads see honest water (swimmable, not standable,
+     *  submerged-stance mining) instead of the phantom air that made an underwater shaft price as a dry
+     *  dig. Built from {@code defaultBlockState()} — the SOURCE state — <b>deliberately</b>
+     *  (DESIGN-fluid-flow-prediction.md §6, owner-ratified 2026-08-17): a diff-flooded cell claims
+     *  sourcehood to later tier-1 evaluations on the same path, which errs wet (a source is always
+     *  spread-eligible) — the conservative direction, and often literally correct (vanilla's
+     *  2-adjacent-sources infinite-water rule). Do not "fix" by swapping in a flowing state. */
     static final long WATER_DESC = NavBlock.descriptorFor(Blocks.WATER.defaultBlockState());
+    /** Geometry a path-broken cell that FLOODS with lava reads as ({@link PathEdits#BROKEN_LAVA} —
+     *  DESIGN-fluid-flow-prediction.md §4.2: lava is priced, not forbidden): honest lava to every
+     *  downstream read — damaging, {@code TRANSIT_FLUID} slow, not standable, never prone. Like
+     *  {@link #WATER_DESC} it is the SOURCE state on purpose (§6). */
+    static final long LAVA_DESC = NavBlock.descriptorFor(Blocks.LAVA.defaultBlockState());
 
     private final NavGridView grid;
     private final BotCaps caps;
@@ -977,7 +987,8 @@ public final class MovementContext {
             int kind = pathEdits.kindAt(x, y, z);
             if (kind == PathEdits.PLACED) return PLACED_DESC;
             if (kind == PathEdits.BROKEN) return AIR_DESC;
-            if (kind == PathEdits.BROKEN_WATER) return WATER_DESC; // the flood follows the dig (wet-above rule)
+            if (kind == PathEdits.BROKEN_WATER) return WATER_DESC; // the predicted flood follows the dig (§6)
+            if (kind == PathEdits.BROKEN_LAVA) return LAVA_DESC;   // same, lava-flavoured (§4.2)
             // An openable-set resolves against THIS cell's own descriptor (unlike PLACED's universal
             // constant): read the grid cell and force it into the target OPEN/CLOSED state via the unified
             // resolver — a door is a bare bit-43 flip (blocked edge follows its own facing/hinge), a
@@ -1022,7 +1033,8 @@ public final class MovementContext {
             int kind = pathEdits.kindAt(x, y, z);
             if (kind == PathEdits.PLACED) return PLACED_DESC;
             if (kind == PathEdits.BROKEN) return AIR_DESC;
-            if (kind == PathEdits.BROKEN_WATER) return WATER_DESC; // the flood follows the dig (wet-above rule)
+            if (kind == PathEdits.BROKEN_WATER) return WATER_DESC; // the predicted flood follows the dig (§6)
+            if (kind == PathEdits.BROKEN_LAVA) return LAVA_DESC;   // same, lava-flavoured (§4.2)
             // Openable-set: resolve the built navtype forced into its target state (see descriptorAt —
             // door = bit flip, trapdoor = geometry re-derivation, dispatched by the unified resolver).
             if (kind == PathEdits.SET_OPEN || kind == PathEdits.SET_CLOSED)
@@ -1087,10 +1099,12 @@ public final class MovementContext {
         return NavFlags.headroom(flags);
     }
 
-    /** Whether editing at/next to this floor risks a gravity cascade, or disturbs LAVA (from {@code flags}).
-     *  NOT "a fluid flow" (corrected 2026-08-11): since the 2026-08-10 ruling water never sets the bit and
-     *  lava sets it unconditionally — the fluid half means "a lava cell is one of my six orthogonal
-     *  neighbours", with no flowing/impoundment test at all. See {@code NavFlags}' lava-term section. */
+    /** Whether editing at/next to this floor risks dropping a GRAVITY block onto the bot (from
+     *  {@code flags}) — STRICTLY the gravity term since the 2026-08-17 migration
+     *  (DESIGN-fluid-flow-prediction.md §4.1): the lava keep-away that used to ride this bit under OR
+     *  moved to {@code NavFlags.HAS_FLUID_NEIGHBOR}, where the {@link EditScratch} funnel PRICES the
+     *  predicted flood instead of forbidding the edit (§4.2). Existing {@code reset(!risksEdit(...))}
+     *  call sites are unchanged in text; their semantics narrowed to gravity-only. */
     public static boolean risksEdit(int flags) {
         return NavFlags.risksEdit(flags);
     }
@@ -1554,9 +1568,9 @@ public final class MovementContext {
      * section read the section above — see {@code NavFlags} "Boundary handling"), so the prefilter is
      * EXACT for this method: a hazard just across a section's top face IS flagged and charged. (The old
      * within-section computation left the top ~3 floor rows of every section stale-CLEAR — this zero-read
-     * fast path then transited a seam-row berry-bush maze for free, lethally. Of the LATERALLY-read bits,
-     * RISKY_EDIT's lava term is now folded across chunk faces by {@code EdgeFluidScatter}; only
-     * PLACEABLE_NEIGHBOR remains air-optimistic there. Neither is read here.) Solid damaging blocks (cactus / magma / campfire) in the body space also set the
+     * fast path then transited a seam-row berry-bush maze for free, lethally. The one LATERALLY-read bit,
+     * {@code HAS_FLUID_NEIGHBOR}, is folded across chunk faces by {@code EdgeFluidScatter} and is not
+     * read here.) Solid damaging blocks (cactus / magma / campfire) in the body space also set the
      * hazard bit, but {@link #cellTransitCost} charges only passable cells, so a folded BREAK of such a
      * block is priced by its mining ticks alone.
      *
@@ -1603,6 +1617,42 @@ public final class MovementContext {
     /** Flat HP charged per lava cell swum by a mortal bot (immersion + burn; derivation on
      *  {@link #lavaSwimCellCost}). */
     public static final float LAVA_HP_PER_CELL = 10f;
+
+    /**
+     * HP per <b>tick</b> of lava immersion for a mortal bot — the per-tick rate underlying
+     * {@link #LAVA_HP_PER_CELL}: vanilla lava contact ({@code Entity.lavaHurt}) deals 4 HP per hurt
+     * event, and the entity's ~10-tick post-hurt invulnerability window paces events while immersed, so
+     * sustained immersion runs at {@code 4 HP / 10 ticks = 0.4 HP/tick}. Consistency with the per-cell
+     * flat charge: {@code LAVA_HP_PER_CELL (10) ≈ 0.4 × ~23} ticks-per-lava-cell {@code (9.2) + burn
+     * aftermath} — one physical rate, two integration windows. The burn tail is deliberately NOT added
+     * here: it is a bounded few-seconds aftermath already amortised into the per-cell constant, and
+     * against a multi-hundred-tick mining exposure it is noise in the conservative direction that
+     * matters least (the immersion term already prices the dig as ruinous).
+     */
+    public static final float LAVA_HP_PER_TICK = 0.4f;
+
+    /**
+     * The <b>lava-exposure</b> term (DESIGN-fluid-flow-prediction.md §6, the 2026-08-17
+     * adversarial-review correction): the damage cost of spending {@code exposedTicks} with the bot's
+     * occupied cell reading lava — {@code exposedTicks × }{@link #LAVA_HP_PER_TICK}{@code ×
+     * costPerHitpoint}, zero for an immune bot ({@link BotCaps#takesDamage} off — the §4.2
+     * priced-not-forbidden split preserved: an immune bot's costs stay bit-identical to a world with no
+     * lava at all). The one currency ({@code pathing.costPerHitpoint}) and the one physical rate above;
+     * no new unit is invented.
+     *
+     * <p><b>Why it exists:</b> transit through COMMITTED lava is already priced (the swim family's
+     * {@link #lavaSwimCellCost}, the ground moves' {@link #cellTransitCost} damage term), but
+     * DIFF-CREATED lava — a {@link PathEdits#BROKEN_LAVA} fold — is invisible to the flags-based transit
+     * prefilters ({@code flagsAt} never layers {@code PathEdits}), and {@code MineDown} calls no transit
+     * pricing at all. Without this term a {@code BROKEN_LAVA} verdict would choose the edit <i>kind</i>
+     * while adding <b>zero</b> cost, and a mortal bot would price a lava-flooding shaft identically to a
+     * dry one — a free lethal offer. {@code MineDown} charges it per dig level whose feet cell reads
+     * lava through scratch+diff, {@code exposedTicks} = that level's real mining ticks (the time the bot
+     * genuinely stands burning while it digs).
+     */
+    public float lavaExposureCost(float exposedTicks) {
+        return caps.takesDamage() ? exposedTicks * LAVA_HP_PER_TICK * caps.costPerHitpoint() : 0f;
+    }
 
     /** A swimmable LAVA cell ({@link NavBlock#isSwimmableLava}) — read-once descriptor form. */
     public boolean lava(long d) {

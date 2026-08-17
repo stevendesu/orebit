@@ -9,14 +9,17 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
 import net.minecraft.core.BlockPos;
 
 /**
- * <b>Step 3 of the lava RISKY_EDIT arc — the DURABLE cross-chunk (lateral) edge fold</b>
- * (PERF-DESIGN-navgrid-build §C1). Steps 1/2 handle the intra-chunk lava RISKY_EDIT: the build SCATTER
- * ({@link NavSectionBuilder#computeDepth}) and the patch re-dilation ({@code NavSectionBuilder.recomputeWindow}
- * via {@link NavFlags#risksLavaEdit}). Both are <b>lateral-air-optimistic</b> — a lava cell on a
- * section's 4 side faces ({@code x==0/15}, {@code z==0/15}) does not scatter into the neighbour CHUNK, and an
- * edge cell does not pick up RISKY_EDIT from lava just across the chunk boundary — because the
- * scatter's {@code x±1}/{@code z±1} reads cross a chunk at a side face and the neighbour may not be built at
- * the time. This class closes that gap in BOTH directions at BOTH sites, on the tick thread.
+ * <b>Step 3 of the HAS_FLUID_NEIGHBOR arc — the DURABLE cross-chunk (lateral) edge fold</b>
+ * (PERF-DESIGN-navgrid-build §C1; DESIGN-fluid-flow-prediction.md §4). Steps 1/2 handle the intra-chunk
+ * fluid term: the build SCATTER ({@link NavSectionBuilder#computeDepth}) and the patch re-dilation
+ * ({@code NavSectionBuilder.recomputeWindow} via {@link NavFlags#hasFluidNeighborGather}). Both are
+ * <b>lateral-air-optimistic</b> — a fluid cell on a section's 4 side faces ({@code x==0/15},
+ * {@code z==0/15}) does not scatter into the neighbour CHUNK, and an edge cell does not pick up
+ * HAS_FLUID_NEIGHBOR from fluid just across the chunk boundary — because the scatter's
+ * {@code x±1}/{@code z±1} reads cross a chunk at a side face and the neighbour may not be built at
+ * the time. This class closes that gap in BOTH directions at BOTH sites, on the tick thread. The fluid
+ * predicate is ANY fluid — {@link NavBlock#isFluid}, water and lava alike (widened from the lava-only
+ * RISKY_EDIT term this class was born folding — DESIGN-fluid-flow-prediction.md §4.1).
  *
  * <p><b>Only the 4 LATERAL offsets of the 6-neighbour dilation reach this class.</b> The vertical pair
  * ({@code y±1}) never leaves the chunk column — it is entirely {@link NavSectionBuilder}'s business (build
@@ -24,40 +27,41 @@ import net.minecraft.core.BlockPos;
  *
  * <h2>Why a plain monotone OR into a live neighbour grid is safe</h2>
  * Build and patch are strictly tick-thread single-writer; the planner pool workers only ever READ
- * ({@code PlanExecutor}: "N workers are N readers"). RISKY_EDIT is a break/place hazard prefilter, OR-composed
- * from independent terms (gravity, intra-lava, cross-lava — see {@link NavFlags}), so folding the
- * cross-chunk term into a neighbour's already-built grid with {@link TraversalGrid#orFlags} (navtype
- * untouched, no volatile/epoch/copy) is exactly the pattern {@code NavSectionBuilder.patchCells} already uses
- * to write flags into a live BELOW section that planners read.
+ * ({@code PlanExecutor}: "N workers are N readers"). HAS_FLUID_NEIGHBOR is an adjacency prefilter,
+ * OR-composed from independent contributions (the intra-chunk dilation and this cross-chunk fold — see
+ * {@link NavFlags}), so folding the cross-chunk term into a neighbour's already-built grid with
+ * {@link TraversalGrid#orFlags} (navtype untouched, no volatile/epoch/copy) is exactly the pattern
+ * {@code NavSectionBuilder.patchCells} already uses to write flags into a live BELOW section that planners
+ * read.
  *
  * <h2>Column-Y frame</h2>
  * Both chunks of a shared face are the SAME level's stacked sections — identical section count and identical
  * world-Y bands — so this class works in a chunk-local <i>column-Y</i> frame ({@code colY = sectionIndex*16 +
- * localRow}, {@code 0} = bottom section row 0). Since the dilation is a plain 1-cell lateral step, a lava cell
- * at {@code colY} marks the cell at the SAME {@code colY} across the face — no row offset at all (the old
- * flowing model's {@code colY-1}/{@code colY-2} rows are gone with it). Column access
- * ({@link #descAt}/{@link #orRisky}/{@link #lavaAt}) resolves the section by {@code colY >>> 4}, so a face
- * lane is walked as one continuous column regardless of where the section seams fall.
+ * localRow}, {@code 0} = bottom section row 0). Since the dilation is a plain 1-cell lateral step, a fluid
+ * cell at {@code colY} marks the cell at the SAME {@code colY} across the face — no row offset at all (the
+ * old flowing model's {@code colY-1}/{@code colY-2} rows are gone with it). Column access
+ * ({@link #descAt}/{@link #orFluidNeighbor}/{@link #fluidAt}) resolves the section by {@code colY >>> 4}, so
+ * a face lane is walked as one continuous column regardless of where the section seams fall.
  *
  * <h2>Two hooks</h2>
  * <ul>
  *   <li><b>Build</b> ({@link #reconcileBuild}) — after a chunk's sections are built + stored, scatter each of
- *       its 4 lateral neighbours' face lava into it AND its own into each neighbour (pure additive OR,
+ *       its 4 lateral neighbours' face fluid into it AND its own into each neighbour (pure additive OR,
  *       since at build the target cells' local flags are already final). A one-time first-build cost absorbed
  *       by the adaptive chunk-build budget; it only fires when a neighbour is already loaded. Bumps each
  *       neighbour actually modified.</li>
  *   <li><b>Patch</b> ({@link #collect} + {@link #reconcile}) — a live edit's authoritative window recompute
  *       ({@code recomputeWindow}) rewrites edge-cell flags from the LOCAL scratch only, dropping the cross-face
- *       lava term. After the drain, this re-derives it over the <b>bounded footprint of each edited edge
+ *       fluid term. After the drain, this re-derives it over the <b>bounded footprint of each edited edge
  *       cell</b> (never the whole face plane): the local face cells the window cleared get their cross term
- *       re-OR-ed (drain reset them to {@code gravity|local}, so the OR is authoritative), and — only when the
+ *       re-OR-ed (drain reset them to local-terms-only, so the OR is authoritative), and — only when the
  *       edit sits ON a face, so it could change a cross SOURCE — the neighbour's ONE reading cell (the cell
  *       directly across, same {@code colY}) is re-derived authoritatively
  *       ({@code compute | local-gather | cross-gather}). Corner cells (on two faces) check both neighbours via
- *       {@link #crossLava}. Gated so an interior-only batch does zero work.</li>
+ *       {@link #crossFluid}. Gated so an interior-only batch does zero work.</li>
  * </ul>
  * The two hooks agree because the build SCATTER and the patch GATHER express the same 6-neighbour dilation of
- * the lava set (the {@code FluidScatterIdentityTest} identity, extended across the face) — proven by
+ * the fluid set (the {@code FluidScatterIdentityTest} identity, extended across the face) — proven by
  * {@code CrossChunkFluidScatterTest}.
  */
 final class EdgeFluidScatter {
@@ -85,10 +89,10 @@ final class EdgeFluidScatter {
         return NavBlock.descriptor((short) s.getTraversalGrid().navtype(x, colY & 15, z));
     }
 
-    /** OR RISKY_EDIT into {@code (x, colY, z)} of {@code col}; returns true iff the bit was newly set (a real
-     *  modification — the neighbour-bump signal). No-op (returns false) below the world floor or above the
-     *  built column. */
-    private static boolean orRisky(NavSection[] col, int x, int colY, int z) {
+    /** OR HAS_FLUID_NEIGHBOR into {@code (x, colY, z)} of {@code col}; returns true iff the bit was newly
+     *  set (a real modification — the neighbour-bump signal). No-op (returns false) below the world floor or
+     *  above the built column. */
+    private static boolean orFluidNeighbor(NavSection[] col, int x, int colY, int z) {
         if (colY < 0) return false;
         int si = colY >> 4;
         if (si >= col.length) return false;
@@ -96,15 +100,16 @@ final class EdgeFluidScatter {
         if (s == null) return false;
         TraversalGrid g = s.getTraversalGrid();
         int cy = colY & 15;
-        boolean was = (g.flags(x, cy, z) & NavFlags.RISKY_EDIT) != 0;
-        g.orFlags(x, cy, z, NavFlags.RISKY_EDIT);
+        boolean was = (g.flags(x, cy, z) & NavFlags.HAS_FLUID_NEIGHBOR) != 0;
+        g.orFlags(x, cy, z, NavFlags.HAS_FLUID_NEIGHBOR);
         return !was;
     }
 
-    /** Whether {@code col} holds LAVA at {@code (x, colY, z)} — the exact unconditional
-     *  {@link NavBlock#isLava} test the intra-chunk scatter uses. Water is never risky. */
-    private static boolean lavaAt(NavSection[] col, int x, int colY, int z) {
-        return NavBlock.isLava(descAt(col, x, colY, z));
+    /** Whether {@code col} holds ANY fluid at {@code (x, colY, z)} — the exact unconditional
+     *  {@link NavBlock#isFluid} test the intra-chunk scatter uses (water and lava alike —
+     *  DESIGN-fluid-flow-prediction.md §4). */
+    private static boolean fluidAt(NavSection[] col, int x, int colY, int z) {
+        return NavBlock.isFluid(descAt(col, x, colY, z));
     }
 
     // ==============================================================================================
@@ -113,7 +118,7 @@ final class EdgeFluidScatter {
 
     /**
      * Reconcile chunk {@code (cx,cz)}'s 4 lateral faces against whichever neighbours are currently built:
-     * scatter each present neighbour's face LAVA into this chunk AND this chunk's into the neighbour.
+     * scatter each present neighbour's face FLUID into this chunk AND this chunk's into the neighbour.
      * {@code bump} is invoked with the {@link NavStore#key packed key} of every NEIGHBOUR whose grid this
      * actually changed (this chunk's own bump is the caller's — a fresh build already bumps it). Called on the
      * tick thread right after {@code NavStore.put} for the chunk.
@@ -140,10 +145,10 @@ final class EdgeFluidScatter {
     }
 
     /**
-     * For every LAVA cell in {@code srcCol}'s face column ({@code x==srcFixed} for an X-face, else
-     * {@code z==srcFixed}), OR RISKY_EDIT into {@code dstCol}'s opposite face at the SAME column row — the
-     * lateral step of the 6-neighbour dilation, with no row offset and no carried state (the lava predicate
-     * is unconditional). Returns true iff any {@code dstCol} bit was newly set.
+     * For every FLUID cell in {@code srcCol}'s face column ({@code x==srcFixed} for an X-face, else
+     * {@code z==srcFixed}), OR HAS_FLUID_NEIGHBOR into {@code dstCol}'s opposite face at the SAME column
+     * row — the lateral step of the 6-neighbour dilation, with no row offset and no carried state (the fluid
+     * predicate is unconditional). Returns true iff any {@code dstCol} bit was newly set.
      */
     private static boolean scatterFace(NavSection[] srcCol, int srcFixed, NavSection[] dstCol, int dstFixed,
             boolean xAxis, int nSections) {
@@ -156,8 +161,8 @@ final class EdgeFluidScatter {
                 if (s == null) continue; // absent source section (a chunk hole): nothing to scatter
                 TraversalGrid g = s.getTraversalGrid();
                 for (int ly = 0; ly < 16; ly++) {
-                    if (NavBlock.isLava(NavBlock.descriptor((short) g.navtype(sx, ly, sz)))) {
-                        mod |= orRisky(dstCol, dx, (si << 4) | ly, dz);
+                    if (NavBlock.isFluid(NavBlock.descriptor((short) g.navtype(sx, ly, sz)))) {
+                        mod |= orFluidNeighbor(dstCol, dx, (si << 4) | ly, dz);
                     }
                 }
             }
@@ -210,14 +215,14 @@ final class EdgeFluidScatter {
      * <ul>
      *   <li><b>Local re-OR</b> (triggers whenever a face is within window-reach): the drain's
      *       {@code recomputeWindow} rewrote this chunk's face cells in the box {@code (lx±1, colY-3..colY+1,
-     *       lz±1)} to {@code gravity|local}, dropping their cross term. Re-OR the (unchanged) neighbour cross
+     *       lz±1)} to its LOCAL terms only, dropping their cross term. Re-OR the (unchanged) neighbour cross
      *       term over exactly that box — authoritative because each cell was just reset and cross is additive.
-     *       {@link #crossLava} checks every face a cell lies on, so corner cells keep both contributions.
+     *       {@link #crossFluid} checks every face a cell lies on, so corner cells keep both contributions.
      *       (That box still bounds the drain's writes under the 6-neighbour dilation: the drain's below-seam
      *       pass writes {@code colY-3..colY-1} and its above-seam pass writes {@code colY+1}, both inside
      *       it.)</li>
      *   <li><b>Neighbour re-derive</b> (triggers only when the edit sits ON a face — {@code lx==0/15} or
-     *       {@code lz==0/15} — so its column's lava changed): the neighbour's ONE reading cell (same
+     *       {@code lz==0/15} — so its column's fluid changed): the neighbour's ONE reading cell (same
      *       {@code colY}, same lane — the lateral dilation has no row offset) is re-derived authoritatively
      *       ({@code compute | local-gather | cross-gather}), covering both an ADD and a REMOVE of the cross
      *       source. The neighbour saw no edit, so a full re-derive is idempotent for its unchanged
@@ -232,7 +237,7 @@ final class EdgeFluidScatter {
         NavSection[] gCol = chunks.get(NavStore.key(cx, cz));
         if (gCol == null) return;
 
-        // --- Local re-OR over the drain's cleared box (only face cells carry a cross term; crossLava
+        // --- Local re-OR over the drain's cleared box (only face cells carry a cross term; crossFluid
         //     returns false for the interior ones, so the whole box is safe to walk). ---
         boolean gMod = false;
         for (int cy = colY - 3; cy <= colY + 1; cy++) {
@@ -241,7 +246,7 @@ final class EdgeFluidScatter {
                 for (int dx = lx - 1; dx <= lx + 1; dx++) {
                     if (dx < 0 || dx > 15) continue;
                     if (dx != 0 && dx != 15 && dz != 0 && dz != 15) continue; // interior cell: no cross term
-                    if (crossLava(chunks, cx, cz, dx, cy, dz)) gMod |= orRisky(gCol, dx, cy, dz);
+                    if (crossFluid(chunks, cx, cz, dx, cy, dz)) gMod |= orFluidNeighbor(gCol, dx, cy, dz);
                 }
             }
         }
@@ -284,46 +289,49 @@ final class EdgeFluidScatter {
 
     /**
      * Re-derive one face cell's flags authoritatively: the local {@code recomputeWindow} body ({@code compute}
-     * + the local 6-neighbour lava gather, plus the {@code y-1} read across a section seam that the
-     * upward-only scratch cannot serve) then OR the cross-chunk lava term. Returns true iff the stored flags
+     * + the local 6-neighbour fluid gather, plus the {@code y-1} read across a section seam that the
+     * upward-only scratch cannot serve) then OR the cross-chunk fluid term. Both gathers land in
+     * {@link NavFlags#HAS_FLUID_NEIGHBOR} (bit 4 — DESIGN-fluid-flow-prediction.md §4); {@code compute}
+     * supplies the strictly-gravity RISKY_EDIT and every other bit. Returns true iff the stored flags
      * changed. Navtype stays resident.
      */
     private static boolean rederiveCell(ConcurrentHashMap<Long, NavSection[]> chunks, int cx, int cz,
             TraversalGrid grid, TraversalGrid below, long[] desc, int x, int ly, int z, int colY) {
         int before = grid.flags(x, ly, z);
         int flags = NavFlags.compute(desc, x, ly, z);
-        if (NavFlags.risksLavaEdit(desc, x, ly, z)
+        if (NavFlags.hasFluidNeighborGather(desc, x, ly, z)
                 || (ly == 0 && below != null
-                        && NavBlock.isLava(NavBlock.descriptor((short) below.navtype(x, 15, z))))) {
-            flags |= NavFlags.RISKY_EDIT;
+                        && NavBlock.isFluid(NavBlock.descriptor((short) below.navtype(x, 15, z))))) {
+            flags |= NavFlags.HAS_FLUID_NEIGHBOR;
         }
-        if (crossLava(chunks, cx, cz, x, colY, z)) flags |= NavFlags.RISKY_EDIT;
+        if (crossFluid(chunks, cx, cz, x, colY, z)) flags |= NavFlags.HAS_FLUID_NEIGHBOR;
         grid.set(x, ly, z, grid.navtype(x, ly, z), flags);
         return flags != before;
     }
 
     /**
-     * Whether LAVA in a LATERAL-neighbour chunk marks the cell at {@code (x, colY, z)} — a lava cell directly
-     * across, at the SAME column row, on whichever of the (up to two, for a corner) chunk-boundary faces this
-     * cell touches. The cross-chunk counterpart of {@link NavFlags#risksLavaEdit}'s 4 lateral offsets.
+     * Whether FLUID in a LATERAL-neighbour chunk marks the cell at {@code (x, colY, z)} — a fluid cell
+     * directly across, at the SAME column row, on whichever of the (up to two, for a corner) chunk-boundary
+     * faces this cell touches. The cross-chunk counterpart of {@link NavFlags#hasFluidNeighborGather}'s 4
+     * lateral offsets.
      */
-    private static boolean crossLava(ConcurrentHashMap<Long, NavSection[]> chunks, int cx, int cz,
+    private static boolean crossFluid(ConcurrentHashMap<Long, NavSection[]> chunks, int cx, int cz,
             int x, int colY, int z) {
         if (x == 0) {
             NavSection[] w = chunks.get(NavStore.key(cx - 1, cz));
-            if (w != null && lavaAt(w, 15, colY, z)) return true;
+            if (w != null && fluidAt(w, 15, colY, z)) return true;
         }
         if (x == 15) {
             NavSection[] e = chunks.get(NavStore.key(cx + 1, cz));
-            if (e != null && lavaAt(e, 0, colY, z)) return true;
+            if (e != null && fluidAt(e, 0, colY, z)) return true;
         }
         if (z == 0) {
             NavSection[] n = chunks.get(NavStore.key(cx, cz - 1));
-            if (n != null && lavaAt(n, x, colY, 15)) return true;
+            if (n != null && fluidAt(n, x, colY, 15)) return true;
         }
         if (z == 15) {
             NavSection[] s = chunks.get(NavStore.key(cx, cz + 1));
-            if (s != null && lavaAt(s, x, colY, 0)) return true;
+            if (s != null && fluidAt(s, x, colY, 0)) return true;
         }
         return false;
     }

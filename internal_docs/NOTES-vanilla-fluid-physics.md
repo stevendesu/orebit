@@ -297,6 +297,12 @@ the `HP_per_hit` term must come from the hazard, not be a constant.
 
 ## §6 Code pointers
 
+**Scope note (2026-08-16):** this document covers the **entity-side** fluid model — how a body moves,
+poses and takes damage *in* a fluid. It says nothing about how fluid itself **spreads**. That is a
+disjoint subsystem (`FlowingFluid.spread`/`getSpread`/`getSlopeDistance`, the waterlogging and
+face-occlusion rules, and the block-update/BUD scheduling that makes a settled world stay settled), and
+it lives in **`DESIGN-fluid-flow-prediction.md` §1**, bytecode-verified to the same standard.
+
 | Fact | Lives in |
 |---|---|
 | §1 water rise/sink cost derivation (inline) | `pathfinding/blockpathfinder/movements/Swim.java` — `FLUID_DRAG`/`FLUID_GRAVITY`/`SWIM_IMPULSE`, `UP_COST`/`DOWN_COST` |

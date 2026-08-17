@@ -32,13 +32,15 @@ public final class EditSnapshot {
 
     /** The no-edits baseline — seeding with this is exactly a non-seeded search (lazy-splice mode). */
     public static final EditSnapshot EMPTY =
-            new EditSnapshot(new long[0], new boolean[0], new long[0], new long[0], new boolean[0]);
+            new EditSnapshot(new long[0], new byte[0], new long[0], new long[0], new boolean[0]);
 
     /** Cells the earlier plan breaks (packed {@code BlockPos.asLong}) — the seeded search reads air. */
     private final long[] breaks;
-    /** Parallel to {@link #breaks}: whether water floods the broken cell (the wet-above rule) — the seeded
-     *  search then reads it as {@link PathEdits#BROKEN_WATER water} instead of air. */
-    private final boolean[] breakWet;
+    /** Parallel to {@link #breaks}: each break's fold verdict as a {@link PathEdits} kind —
+     *  {@link PathEdits#BROKEN} / {@link PathEdits#BROKEN_WATER} / {@link PathEdits#BROKEN_LAVA}
+     *  (DESIGN-fluid-flow-prediction.md §6) — so the seeded search reads a predicted-flooded cell as its
+     *  fluid instead of phantom air. */
+    private final byte[] breakKind;
     /** Cells the earlier plan places — the seeded search reads solid footing. */
     private final long[] places;
     /** Cells whose (hand-toggleable) door the earlier plan opens/closes (DOORS P2) — the seeded search reads
@@ -46,9 +48,9 @@ public final class EditSnapshot {
     private final long[] doors;
     private final boolean[] doorOpens;
 
-    private EditSnapshot(long[] breaks, boolean[] breakWet, long[] places, long[] doors, boolean[] doorOpens) {
+    private EditSnapshot(long[] breaks, byte[] breakKind, long[] places, long[] doors, boolean[] doorOpens) {
         this.breaks = breaks;
-        this.breakWet = breakWet;
+        this.breakKind = breakKind;
         this.places = places;
         this.doors = doors;
         this.doorOpens = doorOpens;
@@ -69,7 +71,7 @@ public final class EditSnapshot {
         // Tiny accumulators (a window plan is ≤ ~48 steps of a few cells each) — linear-scan dedup is
         // cheaper and simpler than any map at this size, and this is cold code.
         long[] brk = new long[8];
-        boolean[] brkWet = new boolean[8];
+        byte[] brkKind = new byte[8];
         int brkN = 0;
         long[] plc = new long[8];
         int plcN = 0;
@@ -92,10 +94,10 @@ public final class EditSnapshot {
                 if (!contains(brk, brkN, cell) && !contains(plc, plcN, cell) && !contains(dr, drN, cell)) {
                     if (brkN == brk.length) {
                         brk = Arrays.copyOf(brk, brkN << 1);
-                        brkWet = Arrays.copyOf(brkWet, brkN << 1);
+                        brkKind = Arrays.copyOf(brkKind, brkN << 1);
                     }
                     brk[brkN] = cell;
-                    brkWet[brkN] = se.breakWetAt(j);
+                    brkKind[brkN] = se.breakKindAt(j);
                     brkN++;
                 }
             }
@@ -110,7 +112,7 @@ public final class EditSnapshot {
             }
         }
         if (brkN == 0 && plcN == 0 && drN == 0) return EMPTY;
-        return new EditSnapshot(Arrays.copyOf(brk, brkN), Arrays.copyOf(brkWet, brkN), Arrays.copyOf(plc, plcN),
+        return new EditSnapshot(Arrays.copyOf(brk, brkN), Arrays.copyOf(brkKind, brkN), Arrays.copyOf(plc, plcN),
                                 Arrays.copyOf(dr, drN), Arrays.copyOf(drOpen, drN));
     }
 
@@ -136,10 +138,11 @@ public final class EditSnapshot {
         return breaks[i];
     }
 
-    /** Whether water floods the {@code i}-th broken cell (the wet-above rule) — folds as
-     *  {@link PathEdits#BROKEN_WATER} instead of {@link PathEdits#BROKEN}. */
-    public boolean breakWetAt(int i) {
-        return breakWet[i];
+    /** The {@code i}-th break's fold verdict as a {@link PathEdits} kind ({@link PathEdits#BROKEN} /
+     *  {@link PathEdits#BROKEN_WATER} / {@link PathEdits#BROKEN_LAVA}) — folded verbatim by
+     *  {@link PathEdits#addSnapshot}. */
+    public byte breakKindAt(int i) {
+        return breakKind[i];
     }
 
     /** Number of cells the baseline places. */
