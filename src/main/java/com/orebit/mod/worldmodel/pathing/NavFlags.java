@@ -19,20 +19,21 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * the floor; {@code (x,y+1,z)}…{@code (x,y+3,z)} are the body/clearance space above. (Same convention the
  * movement layer uses — an A* node IS a floor cell. A cell's <i>own</i> geometry — standable, slow,
  * damaging floor, fluid — stays in the navtype descriptor, read via {@code descriptorAt}; only the
- * neighbour-derived facts live here.)
+ * neighbour-derived facts live here.) The one exception is {@code HAS_FLUID_NEIGHBOR}, which is
+ * deliberately CELL-CENTRED, not floor-framed — see its entry.
  *
  * <h2>The bitmask (all 6 bits used)</h2>
  * <pre>
- *   bit 0     RISKY_EDIT         breaking/placing at/next to this cell could drop a gravity block onto the
- *                                bot or disturb LAVA — a BREAK/PLACE gate, NOT a walk gate (walking
- *                                through is fine). Merges the design's separate risksFluidFlow +
- *                                risksGravityFall: both mean "don't edit here", and the precise
- *                                cascade check happens in the fine layer (descriptorAt) at break
- *                                time, so one prefilter bit suffices. The GRAVITY term is computed here per
- *                                cell ({@link #compute}); the LAVA term is SCATTERED from each lava cell in
- *                                {@link NavSectionBuilder#computeDepth}
- *                                (PERF-DESIGN-navgrid-build §C1) and OR-ed into this bit — the two terms
- *                                compose under OR, so either may set it independently.
+ *   bit 0     RISKY_EDIT         breaking/placing at/next to this cell could drop a GRAVITY block onto
+ *                                the bot — a BREAK/PLACE gate, NOT a walk gate (walking through is
+ *                                fine). STRICTLY the gravity term: gravity above the body space, or an
+ *                                unsupported gravity block at/above the feet the edit would undercut,
+ *                                computed here per cell ({@link #compute}). The LAVA term that used to
+ *                                ride this bit under OR migrated to HAS_FLUID_NEIGHBOR
+ *                                (DESIGN-fluid-flow-prediction.md §4.1, owner-ratified 2026-08-17); the
+ *                                gain is that each fact now has ONE coherent frame — gravity is
+ *                                body-space-framed, the fluid fact cell-centred — where the shared bit
+ *                                made the frame mismatch unfixable.
  *   bit 1     CLEARABLE_HAZARD   a walk-through damaging block in the body space (fire, berry bush,
  *                                powder snow) — adds cost, not blocked. (A damaging FLOOR — lava/magma/
  *                                cactus — is intrinsic to the navtype via NavBlock.isDamaging, so it needs
@@ -43,17 +44,19 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *                                3 jump. A cell counts as clear iff it's passable AND fluid-free, so the
  *                                value matches the walk-passable test the ground movements use (water in
  *                                the body space is NOT clearance for a walker — swim is a later movement).
- *   bit 4     PLACEABLE_NEIGHBOR a solid (non-fluid) face among the six neighbours to bridge a placed
- *                                block against. COMPUTED AND MAINTAINED, BUT CURRENTLY UNREAD BY THE
- *                                SEARCH PATH (recorded 2026-08-11 — the bit is under review, not deleted).
- *                                Its only consumer in src/main is the diagnostic {@code /bot probe}
- *                                (ProbeCommand). The placement path does NOT use it:
- *                                {@code MovementContext.placeable} runs its own 6-neighbour
- *                                {@code descriptorAt} fan-out, and on a DIFFERENT predicate — the movement
- *                                layer asks "not vanilla-REPLACEABLE" (so torches/grass/dripstone support a
- *                                placement), while this bit asks "not passable AND fluid-free". The two are
- *                                not interchangeable, so swapping the fan-out for a bit test would be a
- *                                behavior change, not an optimization.
+ *   bit 4     HAS_FLUID_NEIGHBOR any fluid (water OR lava — {@code NavBlock.isFluid}) among the six
+ *                                orthogonal neighbours of THIS cell — the cell-centred "breaking this
+ *                                cell may admit fluid" prefilter (DESIGN-fluid-flow-prediction.md §4).
+ *                                Clear ⇒ a break here cannot flood (the evaluation funnel's tier-0
+ *                                early-out, §5); set ⇒ the funnel's tier-1/2 logic decides. SCATTER-OWNED:
+ *                                the build scatter + patch gather in {@link NavSectionBuilder} maintain
+ *                                it, and {@link #compute} never writes it — see the section below.
+ *                                Every consumer must read it AT THE CELL IT ACTUALLY BREAKS, never at a
+ *                                floor/body frame (§4's "do not create a fourth frame" rule). Repurposes
+ *                                {@code PLACEABLE_NEIGHBOR}'s slot (retired 2026-08-17: maintained since
+ *                                s17 but unread by the search path, and its predicate disagreed in both
+ *                                directions with the "not vanilla-REPLACEABLE" fan-out the placement
+ *                                path actually runs — §4).
  *   bit 5     SLOW_TRANSIT       a through-slow passable block in the body space (cobweb / berry bush /
  *                                powder snow — NavBlock.transitSlow != 0): moving through costs extra
  *                                regardless of damage caps (physics slows everyone). Like
@@ -61,33 +64,42 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *                                body descriptors for the exact per-cell magnitude only when it's set.
  * </pre>
  *
- * <h2>RISKY_EDIT's fluid term: LAVA-ONLY, unconditional, 6-directional (owner ruling 2026-08-10)</h2>
- * The term used to be a <i>flowing-fluid</i> dilation: "a fluid cell whose own cell-below is dry is
- * flowing", scattered onto the 4 horizontal neighbours at rows {@code y-1} and {@code y-2}. Bytecode
- * analysis of vanilla {@code FlowingFluid.spread} showed that predicate is close to ANTI-correlated with
- * reality — a fluid cell that CAN flow down does not spread sideways, while impoundment (water behind a
- * wall, every cell with fluid below it) never matched yet always floods on a break. Modelling vanilla's
- * slope-distance algorithm properly needs source-vs-flowing and fluid-level bits the 2-bit
- * {@link NavBlock} fluid field does not store, so the term was re-scoped instead:
+ * <h2>HAS_FLUID_NEIGHBOR: ANY fluid, unconditional, 6-directional (DESIGN-fluid-flow-prediction.md §4)</h2>
+ * The fact is a pure adjacency DILATION of the fluid set — no flowing test, no cell-below read, no
+ * impoundment logic; {@link NavBlock#isFluid}, a single mask test on the already-decoded descriptor:
  * <ul>
- *   <li><b>WATER never sets RISKY_EDIT.</b> Breaking near water is not treated as risky at all — a flood
- *       is survivable and the bot swims. Nothing about water reaches this bit any more.</li>
- *   <li><b>LAVA sets it unconditionally</b> — no flowing test, no cell-below read, no impoundment logic.
- *       Lava is a blunt keep-away zone: {@code NavBlock.isLava(d)}, a single mask test on the
- *       already-decoded descriptor.</li>
+ *   <li><b>Water and lava both set it.</b> The bit is a FACT ("fluid touches this cell"), not a refusal:
+ *       whether a break actually floods is the evaluation funnel's question (§5 — tier 1 filters by
+ *       source/level/geometry, tier 2 runs the slope-distance tie test), and a predicted flood is PRICED,
+ *       never forbidden (§4.2 — lava's damage cost already makes it ruinous for a mortal bot and merely
+ *       slow for a fireproof one). History: the fact was born 2026-08-10 as RISKY_EDIT's lava-only
+ *       keep-away term; the 2026-08-17 migration widened the predicate to any fluid and moved it here,
+ *       leaving bit 0 strictly gravity (§4.1).</li>
+ *   <li><b>Waterlogged states count</b> — {@code NavBlock.isFluid} is set for them — although a dry
+ *       waterloggable partial cannot actually emit lateral flow (§1.2). Errs wet, the conservative
+ *       direction: the funnel's tier-1 {@code genuineOpenFluidCell} test is what excludes them (§8.2),
+ *       not this prefilter.</li>
  *   <li><b>The geometry is a 1-cell dilation over the 6 orthogonal neighbours</b> — {@code x±1},
  *       {@code y±1}, {@code z±1} (the {@link #SIX} table). Equivalently, as a GATHER:
- *       {@link #risksLavaEdit} — a cell is risky iff any of its 6 orthogonal neighbours is lava. The lava
- *       cell ITSELF is deliberately not marked by this term (a dilation of the 6-offset structuring
- *       element, centre excluded); a lava cell is not a floor the bot stands on, and its own hazards are
- *       intrinsic to its navtype ({@code NavBlock.isDamaging}).</li>
+ *       {@link #hasFluidNeighborGather} — a cell carries the bit iff any of its 6 orthogonal neighbours
+ *       is fluid. The fluid cell ITSELF is deliberately not marked by the dilation (centre excluded); its
+ *       own hazards are intrinsic to its navtype ({@code NavBlock.isDamaging},
+ *       {@code NavBlock.fluid}).</li>
  * </ul>
  * The build SCATTER ({@link NavSectionBuilder#computeDepth}) and the patch GATHER
- * ({@code NavSectionBuilder.recomputeWindow} via {@link #risksLavaEdit}) express exactly this dilation, so
- * a patched grid stays byte-identical to a rebuild — pinned by {@code FluidScatterIdentityTest} /
- * {@code FluidPatchIdentityTest}.
+ * ({@code NavSectionBuilder.recomputeWindow} via {@link #hasFluidNeighborGather}) express exactly this
+ * dilation, so a patched grid stays byte-identical to a rebuild — pinned by
+ * {@code FluidScatterIdentityTest} / {@code FluidPatchIdentityTest}.
  *
- * <h2>Boundary handling — vertical (upward) overscan; lateral lava folded cross-chunk (§8)</h2>
+ * <p><b>Why the bit is scatter-owned and {@link #compute} never writes it:</b> the descriptor scratch
+ * handed to {@code compute} overscans UPWARD only, so an in-{@code compute} gather would be blind to
+ * fluid below a section's row 0 and across every lateral chunk face. The build therefore scatters from
+ * each fluid cell in {@code computeDepth} (which crosses the vertical section seam through the real
+ * neighbour grids), and the patch path re-derives the term authoritatively beside its {@code compute}
+ * call. A {@code compute}-side write would also break {@code computeDepth}'s write-into-above safety
+ * argument (pass 2 must be the only flags AUTHOR before the depth sweep's OR-only scatter runs).
+ *
+ * <h2>Boundary handling — vertical (upward) overscan; lateral fluid folded cross-chunk (§8)</h2>
  * The scratch handed to {@link #compute} may carry {@link #OVERSCAN_ROWS} extra rows ABOVE the section
  * ({@code y = 16..18}, indices {@code 4096..}{@link #SCRATCH_SIZE}{@code -1} — the canonical
  * {@code (y<<8)|(z<<4)|x} formula extends naturally), filled from the section directly above in the same
@@ -100,18 +112,18 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * section (and a legacy 4096-length scratch — {@link #at} bounds on {@code desc.length}) resolves the
  * overscan rows to air, which is correct there.
  *
- * <p><b>Lateral faces — the lava term is CLOSED.</b> The scatter's {@code x±1}/{@code z±1} reads cross
+ * <p><b>Lateral faces — the fluid term is CLOSED.</b> The scatter's {@code x±1}/{@code z±1} reads cross
  * CHUNKS at a section's side faces, and the neighbour may not be built when the scatter runs, so the
  * intra-chunk build scatter and patch re-dilation are each lateral-air-optimistic on their own.
  * {@link EdgeFluidScatter} (PERF-DESIGN-navgrid-build §C1 step 3) closes that in BOTH directions at BOTH
  * sites on the tick thread — wired from {@code ChunkNavLoader} (build) and {@code NavGridUpdater} (patch
- * drain) — so a lava cell just across a chunk face IS flagged. Proven by
+ * drain) — so a fluid cell just across a chunk face IS folded into the edge cell's bit. Proven by
  * {@code CrossChunkFluidScatterTest}.
  *
  * <p><b>The vertical SECTION seam — also closed, in BOTH directions.</b> The 6-neighbour dilation crosses a
- * section face both ways (lava in row 0 marks row 15 of the section below; lava in row 15 marks row 0 of
+ * section face both ways (fluid in row 0 marks row 15 of the section below; fluid in row 15 marks row 0 of
  * the section above), while the descriptor scratch reaches UPWARD only. The build scatter therefore writes
- * through the real neighbour grids rather than the scratch ({@code NavSectionBuilder.scatterLavaRisky}
+ * through the real neighbour grids rather than the scratch ({@code NavSectionBuilder.scatterFluidNeighbor}
  * takes both the below and the above grid), and the patch path mirrors it with an explicit below-grid read
  * for its row-0 cells plus an above-seam window pass for {@code ly == 15} edits — see
  * {@code NavSectionBuilder.recomputeWindow}/{@code patchCell}. Without both halves the build and the patch
@@ -119,27 +131,24 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *
  * <p><b>Still air-optimistic / stale (recorded, deferred):</b>
  * <ul>
- *   <li><b>{@code PLACEABLE_NEIGHBOR} at lateral faces</b> — it has no cross-chunk fold
- *       ({@link EdgeFluidScatter} is fluid-only), so a placeable face just across a chunk boundary is
- *       missed. Pessimistic only, and <i>inert</i> today: no route is affected, because nothing on the
- *       search path reads the bit at all (see its entry in the bitmask table above) — the optimism would
- *       only start to cost routes if a consumer were ever wired up.</li>
- *   <li><b>The downward face</b> — {@code y-1} reads at a section's bottom row ({@code unsupported},
- *       {@code hasPlaceableNeighbor}'s down face) resolve to air. Both err safe: RISKY_EDIT over-sets
- *       (a gravity block is assumed unsupported) and PLACEABLE_NEIGHBOR under-sets. The LAVA term is the
- *       one downward read that is NOT left optimistic — see the vertical-seam note above; it is supplied
- *       out-of-band from the real below grid, because a missed lava neighbour would UNDER-set a safety
- *       gate.</li>
- *   <li><b>Path edits are NOT layered onto these bits</b> (recorded 2026-08-11).
+ *   <li><b>The downward face</b> — the {@code y-1} read at a section's bottom row ({@code unsupported})
+ *       resolves to air, so RISKY_EDIT over-sets there (a gravity block is assumed unsupported) — errs
+ *       safe. The FLUID term is the one downward read that is NOT left optimistic — see the vertical-seam
+ *       note above; it is supplied out-of-band from the real below grid, because an optimistic read would
+ *       make patch and rebuild disagree at every 16th row and blind the funnel's tier-0 early-out to
+ *       fluid directly below the break.</li>
+ *   <li><b>Path edits are NOT layered onto these bits</b> (recorded 2026-08-11; reaffirmed for the fluid
+ *       bit by DESIGN-fluid-flow-prediction.md §8's table).
  *       {@code MovementContext.flagsAt} is a raw grid read. Unlike {@code descriptorAt}/{@code descriptorOf}
  *       (which layer the {@code PathEdits} diff) and {@code floorGapAt} (gated by
  *       {@code editsDisjointFromColumn}), this bitmask reflects COMMITTED world state for the whole search.
- *       So a break the plan ITSELF folded does not clear the RISKY_EDIT it invalidates — breaking a gravity
- *       block does not clear the gravity term on the cell below it, which stays "risky" for every later
- *       node even though the block that would have fallen is already gone. Over-conservative only (the bit
- *       gates EDITING, so a stale SET bit forbids a legal edit and never permits an illegal one), but it
- *       costs real routes: observed as a 3-break {@code Descend} detour chosen over continued
- *       {@code MineDown} through a gravel column.</li>
+ *       Two recorded consequences: a break the plan ITSELF folded does not clear the RISKY_EDIT it
+ *       invalidates (breaking a gravity block leaves the cell below "risky" for every later node —
+ *       over-conservative only, but it costs real routes: observed as a 3-break {@code Descend} detour
+ *       chosen over continued {@code MineDown} through a gravel column); and a folded
+ *       {@code BROKEN_WATER}/{@code BROKEN_LAVA} neighbour never SETS {@code HAS_FLUID_NEIGHBOR}, so the
+ *       funnel's tier-0 early-out is blind to plan-created fluid — errs dry, recoverable, KNOWN AND
+ *       DEFERRED to the PathEdits-scatter workflow (§8 table row; do not fix ad-hoc here).</li>
  * </ul>
  * The movement layer still treats {@code HEADROOM} as a prefilter (re-verifying via {@code descriptorAt}
  * near faces), so any residual optimism is caught in the fine layer, not trusted blindly.
@@ -153,7 +162,7 @@ public final class NavFlags {
     public static final int CLEARABLE_HAZARD   = 1 << 1;
     private static final int HEADROOM_SHIFT    = 2;
     public static final int HEADROOM_MASK      = 0x3 << HEADROOM_SHIFT; // bits 2-3
-    public static final int PLACEABLE_NEIGHBOR = 1 << 4;
+    public static final int HAS_FLUID_NEIGHBOR = 1 << 4;
     public static final int SLOW_TRANSIT       = 1 << 5;
 
     /** Headroom levels — the value of the 2-bit HEADROOM field (not pre-shifted). */
@@ -175,12 +184,11 @@ public final class NavFlags {
     private static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
 
     /**
-     * The six orthogonal neighbour offsets {@code (dx,dy,dz)} — the shared structuring element for BOTH
-     * 6-neighbour facts: "is there a face to place against" (PLACEABLE_NEIGHBOR, gathered in
-     * {@link #compute}) and the lava RISKY_EDIT dilation ({@link #risksLavaEdit} gathers it;
-     * {@code NavSectionBuilder.scatterLavaRisky} scatters it, reusing this same table so the two can never
-     * drift). Package-visible and READ-ONLY — it is iterated on the build hot path, so it must never be
-     * copied or allocated per cell.
+     * The six orthogonal neighbour offsets {@code (dx,dy,dz)} — the structuring element of the
+     * HAS_FLUID_NEIGHBOR dilation ({@link #hasFluidNeighborGather} gathers it;
+     * {@code NavSectionBuilder.scatterFluidNeighbor} scatters it, reusing this same table so the two can
+     * never drift). Package-visible and READ-ONLY — it is iterated on the build hot path, so it must never
+     * be copied or allocated per cell.
      */
     static final int[][] SIX = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
 
@@ -190,6 +198,11 @@ public final class NavFlags {
      * resolve to air) or a {@link #SCRATCH_SIZE}-length scratch whose rows {@code y = 16..18} hold the
      * section above's descriptors (vertical overscan; the index formula extends naturally). Reads outside
      * the scratch — lateral, below, or above the overscan — resolve to air (see boundary handling above).
+     *
+     * <p>Writes every bit EXCEPT {@link #HAS_FLUID_NEIGHBOR}, which is scatter-owned (see the class doc) —
+     * the caller that stores this result beside live data is responsible for OR-ing the fluid term back in
+     * ({@code NavSectionBuilder.recomputeWindow}, {@code EdgeFluidScatter.rederiveCell}) or scattering it
+     * afterwards ({@code NavSectionBuilder.computeDepth}).
      */
     public static int compute(long[] desc, int x, int y, int z) {
         long ground = at(desc, x, y, z);
@@ -219,21 +232,19 @@ public final class NavFlags {
             flags |= SLOW_TRANSIT;
         }
 
-        // RISKY_EDIT (gravity term only): an edit in the body space could drop a gravity block.
+        // RISKY_EDIT (strictly gravity — DESIGN-fluid-flow-prediction.md §4.1): an edit in the body space
+        // could drop a gravity block.
         //   - gravity above (would fall when disturbed), or a gravity block here/in-the-feet we'd undercut.
-        // The LAVA term (a lava cell among the six orthogonal neighbours) is NOT gathered here: it is
-        // SCATTERED from each lava cell in NavSectionBuilder.computeDepth (PERF-DESIGN-navgrid-build §C1),
-        // which crosses the vertical section seam in both directions and so cannot be expressed as a read of
-        // this (upward-only) scratch. RISKY_EDIT is OR-idempotent, so the two terms compose; the patch path
-        // re-derives the lava term via risksLavaEdit (+ an explicit below-grid read) beside this call.
+        // HAS_FLUID_NEIGHBOR (bit 4) is deliberately NOT written here: it is SCATTERED from each fluid cell
+        // in NavSectionBuilder.computeDepth (PERF-DESIGN-navgrid-build §C1), which crosses the vertical
+        // section seam in both directions and so cannot be expressed as a read of this (upward-only)
+        // scratch. The patch path re-derives it via hasFluidNeighborGather (+ an explicit below-grid read)
+        // beside this call.
         if (NavBlock.hasGravity(a2)
                 || (NavBlock.hasGravity(ground) && unsupported(desc, x, y, z))
                 || (NavBlock.hasGravity(a1) && unsupported(desc, x, y + 1, z))) {
             flags |= RISKY_EDIT;
         }
-
-        // PLACEABLE_NEIGHBOR: a solid face to bridge a placed block against (used at empty floor cells).
-        if (hasPlaceableNeighbor(desc, x, y, z)) flags |= PLACEABLE_NEIGHBOR;
 
         return flags;
     }
@@ -244,7 +255,9 @@ public final class NavFlags {
     public static boolean risksEdit(int flags)       { return (flags & RISKY_EDIT) != 0; }
     public static boolean clearableHazard(int flags) { return (flags & CLEARABLE_HAZARD) != 0; }
     public static boolean slowTransit(int flags)     { return (flags & SLOW_TRANSIT) != 0; }
-    public static boolean placeableNeighbor(int flags) { return (flags & PLACEABLE_NEIGHBOR) != 0; }
+    /** Any fluid among the six orthogonal neighbours of this cell — the funnel's tier-0 prefilter
+     *  (DESIGN-fluid-flow-prediction.md §5). Cell-centred: read it AT the cell being broken. */
+    public static boolean hasFluidNeighbor(int flags) { return (flags & HAS_FLUID_NEIGHBOR) != 0; }
 
     // ---- Neighbour scans (carried over from the prior classifier) ----------------------------
 
@@ -270,14 +283,15 @@ public final class NavFlags {
     }
 
     /**
-     * The GATHER form of the lava RISKY_EDIT dilation: one of the six orthogonal neighbours of
-     * {@code (x,y,z)} is LAVA. Water is deliberately not consulted — see the class doc's lava-term section.
+     * The GATHER form of the HAS_FLUID_NEIGHBOR dilation: one of the six orthogonal neighbours of
+     * {@code (x,y,z)} holds ANY fluid — {@link NavBlock#isFluid}, water and lava alike
+     * (DESIGN-fluid-flow-prediction.md §4; see the class doc's HAS_FLUID_NEIGHBOR section).
      *
-     * <p>The exact counterpart of {@code NavSectionBuilder.scatterLavaRisky} (same {@link #SIX} table, same
-     * unconditional {@link NavBlock#isLava} predicate), used by the patch path
+     * <p>The exact counterpart of {@code NavSectionBuilder.scatterFluidNeighbor} (same {@link #SIX} table,
+     * same unconditional {@link NavBlock#isFluid} predicate), used by the patch path
      * ({@code NavSectionBuilder.recomputeWindow}, {@code EdgeFluidScatter.rederiveCell}) and as the oracle
      * the identity tests build their reference grids from. NOT on the build hot path: the build scatters
-     * instead, so a lava-free cell costs nothing there.
+     * instead, so a fluid-free cell costs nothing there.
      *
      * <p><b>Reads that leave the scratch resolve to AIR</b> ({@link #at}) — which for this predicate means
      * the {@code y-1} read at row 0 and all four lateral reads at a section's side faces are blind. Both
@@ -285,21 +299,9 @@ public final class NavFlags {
      * {@code recomputeWindow}, the chunk faces by {@link EdgeFluidScatter}. The {@code y+1} read at row 15
      * needs no help — it lands in the vertical overscan rows.
      */
-    static boolean risksLavaEdit(long[] desc, int x, int y, int z) {
+    static boolean hasFluidNeighborGather(long[] desc, int x, int y, int z) {
         for (int[] o : SIX) {
-            if (NavBlock.isLava(at(desc, x + o[0], y + o[1], z + o[2]))) return true;
-        }
-        return false;
-    }
-
-    /** Any of the six neighbours offers a solid (non-fluid) face to place a bridging block against.
-     *  NOTE: this is NOT the predicate the placement path uses — {@code MovementContext.placeable} asks
-     *  "not vanilla-REPLACEABLE" over its own fan-out and never reads this bit. See the class doc's
-     *  {@code PLACEABLE_NEIGHBOR} entry. */
-    private static boolean hasPlaceableNeighbor(long[] desc, int x, int y, int z) {
-        for (int[] o : SIX) {
-            long n = at(desc, x + o[0], y + o[1], z + o[2]);
-            if (!NavBlock.isPassable(n) && NavBlock.fluid(n) == 0) return true;
+            if (NavBlock.isFluid(at(desc, x + o[0], y + o[1], z + o[2]))) return true;
         }
         return false;
     }

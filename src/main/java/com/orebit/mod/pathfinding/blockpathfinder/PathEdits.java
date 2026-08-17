@@ -52,16 +52,35 @@ public final class PathEdits {
      *  #SET_OPEN}; resolves the door forced into the target CLOSED state. */
     public static final int SET_CLOSED = 4;
     /**
-     * The path breaks the block here <b>and water floods the opened cell</b> — reads as water, not air
-     * (owner-ratified 2026-08-16). Recorded when the cell directly above the break holds water at fold time
-     * ({@link EditScratch}'s wet-above rule): vanilla falling water ALWAYS fills the cell below, so unlike a
-     * speculative lateral-spread guess this flood is a physical certainty and safe to bake into the diff —
-     * downstream reads see honest water (swim moves offered, {@code standable} false, and the submerged
-     * mining stance priced) instead of phantom air. A wrongly-dry assumption self-corrects (the real flood
-     * triggers a NavGrid update + replan); a wrongly-wet one would not, which is why ONLY the certain
-     * above-cell rule ever sets this kind.
+     * The path breaks the block here <b>and water floods the opened cell</b> — reads as water, not air.
+     * Decided at fold time by {@link EditScratch}'s evaluation funnel (DESIGN-fluid-flow-prediction.md §5,
+     * §6), which fires on either of two grounds: the <b>certain vertical rule</b> — water directly above
+     * the break, which vanilla falling fluid ALWAYS drops into the opened cell (tier 0a, the original
+     * owner-ratified 2026-08-16 wet-above rule) — or the <b>lateral spread prediction</b> — an adjacent
+     * eligible water cell whose slope-distance toward this cell ties-or-beats every other direction
+     * (tiers 1–2, mirroring vanilla {@code FlowingFluid.spread}). Downstream reads then see honest water
+     * (swim moves offered, {@code standable} false, the submerged mining stance priced) instead of phantom
+     * air. A wrongly-dry verdict self-corrects (the real flood is a block change → NavGrid update +
+     * replan); a wrongly-wet one would not (§8's principle), which is why the funnel's speculative tiers
+     * only ever err DRY.
      */
     public static final int BROKEN_WATER = 5;
+    /**
+     * The path breaks the block here <b>and lava floods the opened cell</b> — reads as lava, not air
+     * (DESIGN-fluid-flow-prediction.md §4.2, owner-ratified 2026-08-17: lava is PRICED, not forbidden).
+     * Set by the same {@link EditScratch} funnel as {@link #BROKEN_WATER} — the certain lava-above rule
+     * (tier 0a; digging directly under lava used to fold plain {@code BROKEN}, the water-only hole §5's
+     * per-fluid vertical rule closes) or the lateral tie test at the unified NETHER-pinned
+     * {@code SLOPE_FIND=4} (§5, owner-ratified 2026-08-17: a smaller slope-find could only remove drain
+     * detections and err WET — phantom nether lava, the §8-unrecoverable class; the 4-pin instead errs
+     * DRY in the overworld, recoverable — see {@code EditScratch.SLOPE_FIND}). A cell of this kind is
+     * lava to every consumer: different damage, different transit slow ({@code NavBlock.TRANSIT_FLUID}),
+     * no prone pose — and the dig path itself charges the immersion ({@code MineDown}'s per-level lava
+     * exposure in the {@code costPerHitpoint} currency), making it ruinous for a mortal bot and merely
+     * slow for a fireproof one — strictly more capable than the categorical keep-away it replaces
+     * (§4.2: "cross the lava, you are fireproof").
+     */
+    public static final int BROKEN_LAVA = 6;
 
     // Open-addressing long→kind table (linear probing, power-of-two capacity). The kind itself is the
     // occupancy marker: a slot is empty iff its value is NONE (0), which PLACED/BROKEN never are — so no
@@ -184,7 +203,7 @@ public final class PathEdits {
             markIfAbsent(se.placeAt(i), (byte) PLACED);
         }
         for (int i = 0, n = se.breakCount(); i < n; i++)
-            markIfAbsent(se.breakAt(i), (byte) (se.breakWetAt(i) ? BROKEN_WATER : BROKEN));
+            markIfAbsent(se.breakAt(i), se.breakKindAt(i)); // the fold verdict IS the stored kind (§6)
         for (int i = 0, n = se.doorSetCount(); i < n; i++)
             markIfAbsent(se.doorSetAt(i), (byte) (se.doorSetOpenAt(i) ? SET_OPEN : SET_CLOSED));
     }
@@ -203,7 +222,7 @@ public final class PathEdits {
             markIfAbsent(s.placeAt(i), (byte) PLACED);
         }
         for (int i = 0, n = s.breakCount(); i < n; i++)
-            markIfAbsent(s.breakAt(i), (byte) (s.breakWetAt(i) ? BROKEN_WATER : BROKEN));
+            markIfAbsent(s.breakAt(i), s.breakKindAt(i)); // the fold verdict IS the stored kind (§6)
         for (int i = 0, n = s.doorSetCount(); i < n; i++)
             markIfAbsent(s.doorSetAt(i), (byte) (s.doorSetOpenAt(i) ? SET_OPEN : SET_CLOSED));
     }

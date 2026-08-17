@@ -11,6 +11,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.ClutchModel;
 import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
+import com.orebit.mod.pathfinding.blockpathfinder.PathEdits;
 import com.orebit.mod.OrebitCommon;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
 import com.orebit.mod.pathfinding.regionpathfinder.HierarchicalRegionPlan;
@@ -949,14 +950,39 @@ public final class PathPlan {
      * StepEdits}: {@code /bot mine} and gather drive the same actuators, and forgiving one of those would
      * blind the gate for a change no plan predicted.
      *
-     * <p>Cascading changes are deliberately NOT forgiven: gravel falling because we broke its support, or
-     * water flowing into the hole, arrive after the one-shot slot is spent and at a different cell, so they
-     * count as foreign — which is right, because the plan never modelled them.
+     * <p>Cascading changes are NOT forgiven — gravel falling because we broke its support arrives after the
+     * one-shot slot is spent, at a different cell, and correctly counts as foreign, because the plan never
+     * modelled it — with exactly ONE carve-out (DESIGN-fluid-flow-prediction.md §8.3): a break this plan
+     * folded as {@code PathEdits.BROKEN_WATER}/{@code BROKEN_LAVA} <i>predicted</i> the fluid that later
+     * flows into the opened cell, so the expectation armed for it is the two-phase SET {air, that fluid}
+     * ({@link NavGridUpdater#expectFloodedBreak}), not the single to-air direction. The immediate air is
+     * phase 1; the fluid arriving on vanilla's spread schedule (≥5 ticks for water, ≥30 for overworld lava —
+     * §1.4) consumes a state-based pending-flood residual instead of bumping the foreign version; and a
+     * WATERLOGGED break — where vanilla leaves the water block with no air phase at all — is forgiven
+     * outright (previously a false foreign bump from the bot's own prescribed break). Any OTHER state
+     * observed at the cell stays foreign. The fold kind is recovered from this plan's own {@link StepEdits}
+     * ({@link #prescribedBreakKind}), so the carve-out is exactly as wide as what the plan actually
+     * predicted — a break folded dry still arms the plain direction, and its flood (a wrong dry verdict)
+     * still invalidates and replans, which is §8's recoverable errs-dry direction.
      */
     public void expectOwnEdit(int x, int y, int z, boolean toAir) {
         final BlockPathPlan bp = blockPlan;
         if (bp == null || !prescribesEdit(bp, x, y, z)) {
             return;   // not ours to forgive — let the change count as divergence
+        }
+        if (toAir) {
+            // A fluid-folded break arms the widened TWO-PHASE expectation {air, fluid} instead of the plain
+            // to-air direction — the §8.3 carve-out documented above. Gated on toAir so a place (or a clutch
+            // reclaim's fill direction) at a coordinate that also carries a folded break never mis-arms.
+            final int kind = prescribedBreakKind(bp, x, y, z);
+            if (kind == PathEdits.BROKEN_WATER) {
+                NavGridUpdater.expectFloodedBreak(level, new BlockPos(x, y, z), NavGridUpdater.FLOOD_WATER);
+                return;
+            }
+            if (kind == PathEdits.BROKEN_LAVA) {
+                NavGridUpdater.expectFloodedBreak(level, new BlockPos(x, y, z), NavGridUpdater.FLOOD_LAVA);
+                return;
+            }
         }
         NavGridUpdater.expectChange(level, new BlockPos(x, y, z), toAir);
     }
@@ -1036,6 +1062,38 @@ public final class PathPlan {
             }
         }
         return false;
+    }
+
+    /**
+     * The {@link PathEdits} fold kind of the break THIS plan folded at {@code (x,y,z)} —
+     * {@code BROKEN}, {@code BROKEN_WATER} or {@code BROKEN_LAVA} — or {@link PathEdits#NONE} when no step
+     * breaks that cell (the coordinate may still be prescribed as a place/doorSet/clutch cell;
+     * {@link #prescribesEdit} answers that broader question, and {@link #expectOwnEdit} always asks it
+     * first). This is how the executor's arm learns which expectation the planner's verdict calls for: a
+     * fluid kind arms the two-phase {air, fluid} set, everything else the plain to-air direction
+     * (DESIGN-fluid-flow-prediction.md §8.3). First match in step order wins, mirroring
+     * {@link #prescribesEdit}'s walk — a cell is not broken twice on one plan (once broken it stays open in
+     * the diff), so the first folded break at the coordinate is the only one. Cold: runs once per executed
+     * break, after {@link #prescribesEdit} already vouched for the cell.
+     *
+     * <p>Kind recovery deliberately does NOT weaken the coordinate-only concern split documented at
+     * {@link #prescribesEdit}: the kind chooses only WHICH expectation gets armed; the observed state is
+     * still matched per-mutation at the grid ({@code NavGridUpdater.consumeExpected} and the pending-flood
+     * residual's {@code observePendingFlood}), so a vine growing into the cell stays foreign either way.
+     * Package-private for the own-edit tests, beside the walk it mirrors.
+     */
+    static int prescribedBreakKind(BlockPathPlan bp, int x, int y, int z) {
+        for (int s = 0; s < bp.size(); s++) {
+            final StepEdits e = bp.edits(s);
+            if (e == null) {
+                continue;
+            }
+            for (int i = 0; i < e.breakCount(); i++) {
+                final BlockPos p = e.breakPos(i);
+                if (p.getX() == x && p.getY() == y && p.getZ() == z) return e.breakKindAt(i);
+            }
+        }
+        return PathEdits.NONE;
     }
 
     /** Diagnostic only: the chunk key whose version last tripped {@link #planImpacted}. */

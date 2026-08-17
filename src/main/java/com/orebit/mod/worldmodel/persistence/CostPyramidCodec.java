@@ -173,13 +173,20 @@ public final class CostPyramidCodec {
     // and goalDigSeeds' goal resolution change (a bare 1x1 ladder shaft now region-connects its two
     // ends). The constant stays 1 per the pre-release pin above; a stale dev cache carries the old
     // (ladder-blind) connectivity until its leaves are rebuilt from live or <world>/orebit/ is deleted.
+    // 2026-08-17 (fluid-flow arc classification split, DESIGN-fluid-flow-prediction.md §3): the
+    // FLUID_SOURCE / FLUID_MIN_LEVEL descriptor bits fan water and lava states into source / flowing /
+    // min-level navtypes (waterlogged states all read source, so they do not fan further). Flood output
+    // and standable verdicts are unchanged at every fluid cell (neither the region flood mask nor any
+    // standable predicate consults the new bits) — new navtypes appearing is normal per-boot churn, not
+    // a semantic change to persisted leaf data: the fence-gate precedent. No bump; the arc's
+    // planner-strength change lives in the INVAL_SIG_SCHEMA_VERSION history below (its v6 entry).
     // (The "v2" above is HISTORY, not the live value — see the pre-release pin note at the top.)
     static final short VERSION = 1;
 
     /** Invalidation-section sig schema (the {@code BotCaps.realizabilitySig} bit layout generation).
      *  <p><b>PINNED AT 1 PRE-RELEASE</b> (owner ruling 2026-08-09, same as {@code VERSION} above): zero wild
      *  installs, so schema-relevant changes add a dated entry to the history below instead of bumping; the
-     *  v2..v5 entries are that changelog, not the live value. Resume bump discipline at first release.
+     *  v2..v6 entries are that changelog, not the live value. Resume bump discipline at first release.
      *  Post-release rule: bump when a sig dimension is added/changed (breath, count buckets) or when old
      *  sections' verdicts become false; old sections then read as absent (re-learn).
      *  Reset to 1 on the 2026-07 packLevelKey repack; disk is a cache.
@@ -216,7 +223,17 @@ public final class CostPyramidCodec {
      *  change to persisted leaf data. (The parenthetical was superseded LATER the same day: the
      *  climbable-as-air follow-up ruling gave {@code NavBlock.floodPassable} the CLIMB disjunct, so
      *  ladder/scaffolding/vine cells ARE now flood-passable — see the 2026-08-09 climbable-as-air entry in
-     *  the {@code VERSION} history above. It stands here as what was true when v5 was recorded.) */
+     *  the {@code VERSION} history above. It stands here as what was true when v5 was recorded.)
+     *  <p>v6 (2026-08-17, DESIGN-fluid-flow-prediction.md §4.1–§4.2): no bit moved and no sig dimension
+     *  changed, but the planner got strictly STRONGER under unchanged caps — the RISKY_EDIT lava term
+     *  migrated from categorical refusal to pricing (grid flag bit 0 narrowed to strictly gravity; the
+     *  lava-adjacency fact moved to {@code HAS_FLUID_NEIGHBOR} and the flood funnel's {@code BROKEN_LAVA}
+     *  verdict, priced through the existing {@code costPerHitpoint} currency), so digs beside lava that
+     *  every earlier search categorically refused are now offered and priced. A v5 "unreachable" row
+     *  recorded under the lava-refusing planner can be plainly FALSE for the very caps sig it names, so
+     *  old negatives are over-pessimistic and the section is dropped (re-learn). The cost body's {@code
+     *  VERSION} is untouched — the arc's classification split is normal navtype churn (see the 2026-08-17
+     *  entry in the {@code VERSION} history above), not a semantic change to persisted leaf data. */
     static final int INVAL_SIG_SCHEMA_VERSION = 1;
     /** Invalidation-section region-graph class — 0 = "optimistic-v1", today's single symmetric/optimistic
      *  connectivity graph. A future capability-aware graph persists its own sections under a new id; rows never

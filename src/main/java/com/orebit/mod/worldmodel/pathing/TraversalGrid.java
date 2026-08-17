@@ -19,10 +19,10 @@ import java.util.Arrays;
  *       {@link NavSectionBuilder} guards against the live count outgrowing that budget. (Do NOT record
  *       what the live count is — see the "Never hardcode a navtype count" note below.)
  *   <li><b>Flags</b> (high 6 bits): the precomputed neighbour-property bitmask (see {@link NavFlags}) —
- *       edit-hazard, walk-through hazard, 2-bit headroom, placeable-neighbour, through-slow — the
+ *       gravity edit-hazard, walk-through hazard, 2-bit headroom, fluid-neighbour, through-slow — the
  *       multi-cell facts the movement layer would otherwise re-derive on every A* expansion. Computed once
- *       at build / block-update and read as one masked array access. (One of the six,
- *       {@code PLACEABLE_NEIGHBOR}, is maintained but currently read only by {@code /bot probe} — see
+ *       at build / block-update and read as one masked array access. ({@code HAS_FLUID_NEIGHBOR} is the
+ *       flood-prediction funnel's tier-0 prefilter — DESIGN-fluid-flow-prediction.md §4/§5; see
  *       {@link NavFlags}.)
  * </ul>
  *
@@ -123,7 +123,7 @@ public class TraversalGrid {
     /**
      * OR the given {@link NavFlags} bit(s) into this cell's flag field, preserving its navtype and any flags
      * already set. The build seam for a SCATTER pass that folds a neighbour-derived bit onto an
-     * already-computed cell (the lava RISKY_EDIT scatter in {@link NavSectionBuilder#computeDepth}).
+     * already-computed cell (the HAS_FLUID_NEIGHBOR scatter in {@link NavSectionBuilder#computeDepth}).
      */
     public void orFlags(int x, int y, int z, int flags) {
         data[getLinearIndex(x, y, z)] |= (short) ((flags & FLAGS_MASK) << FLAGS_SHIFT);

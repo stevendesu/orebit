@@ -1,6 +1,11 @@
 # DESIGN — Fluid-flow prediction ("will breaking this cell admit fluid?")
 
-Status: **drafted, not implemented** (owner brief 2026-08-16). Companion to
+Status: **IMPLEMENTED 2026-08-17** (ratified same day after a final review folded five owner-ratified
+amendments — no tier-2 memo, scratch-first reads, tier-0 diff-blindness deferred to the PathEdits-scatter
+workflow, source-reading diff constants, lava in the vertical rule; the nether slope pin §5 and the §6
+pricing correction were ratified/forced during implementation). Landed with 988 unit tests green; the two
+post-implementation addenda (§1.2 bytecode addendum, §6 correction) record what the adversarial review
+established. Companion to
 `NOTES-vanilla-fluid-physics.md` (which covers the ENTITY-side integrator, pose and damage — this doc
 covers fluid SPREAD, a disjoint subsystem) and to the underwater-mining arc that shipped the submerged
 mining stance (core `454c28c`, `c5fe3df`).
@@ -135,6 +140,18 @@ Lateral spread carries `getFlowing(amount - dropOff, false)`, whose type is `Flu
 
 *Owner-verified:* water stops dead at a bottom slab in a trench; an unwaterlogged trapdoor beside a
 source behaves exactly like a full block.
+
+**Post-implementation bytecode addendum (2026-08-17, adversarial review):** the wall property holds for
+the *entire slope competition*, not just entry. `getSpread`'s direction loop gates each candidate on
+`canMaybePassThrough` AND `canHoldSpecificFluid(getNewLiquid(...))` *before* `isHole`/`getSlopeDistance`
+ever run, and `getSlopeDistance`'s recursion gates every neighbour on `canPassThrough` =
+`canMaybePassThrough ∧ canHoldSpecificFluid(getFlowing())` — reference-identity-false for every
+`SimpleWaterloggedBlock`. So dry waterloggable partials never lower any direction's minimum, and the
+funnel's passable-shape reduction (`NavBlock.isPassable` in `canPassInto`) matches vanilla for them
+exactly. The residual divergence runs the OTHER way: `canHoldAnyFluid` excludes doors, signs, ladders,
+sugar cane, bubble columns and portals, which the descriptor reads as passable — the funnel can see a
+drain path vanilla cannot, predicting dry where vanilla floods. Errs dry, recoverable (already the §8
+zero-collision-décor row).
 
 ### §1.3 `canPassThroughWall` — face occlusion, both sides
 
@@ -286,10 +303,15 @@ geometry decides). Nearly every break exits at tier 0.
 
 **Tier 0 — free, from bits already read**
 
-- fluid directly above the break ⇒ **flows, certain.** Vanilla falling fluid always fills the cell below.
-  This is the EXISTING `PathEdits.BROKEN_WATER` rule (`EditScratch` wet-above); unchanged, and it stays a
-  direct descriptor read rather than folding into this bit (see §8.1).
-- `HAS_FLUID_NEIGHBOR` clear ⇒ **cannot flow.** Exact.
+- fluid directly above the break ⇒ **flows, certain — and per-fluid** (owner-ratified 2026-08-17).
+  Vanilla falling fluid always fills the cell below, water and lava alike. This generalizes the EXISTING
+  `PathEdits.BROKEN_WATER` rule (`EditScratch` wet-above): water above ⇒ `BROKEN_WATER`, **lava above ⇒
+  `BROKEN_LAVA`**. The shipped `wetFromAbove` tests `ctx.water` ONLY, so digging directly under lava
+  today folds plain `BROKEN` (air) — a real hole this design closes; lava-above is the most certain
+  flood there is. The rule stays a direct descriptor read rather than folding into this bit (see §8.1).
+- `HAS_FLUID_NEIGHBOR` clear ⇒ **cannot flow.** Exact against COMMITTED state — blind to fluid the
+  plan itself created (a folded `BROKEN_WATER`/`BROKEN_LAVA` neighbour never sets the flag; see the
+  §8 table row and its deferral).
 - target cell is not genuinely empty ⇒ **cannot receive.** Exact for full blocks and dry waterloggable
   partials (§1.2); errs dry for zero-collision décor (§8).
 
@@ -321,9 +343,41 @@ the other candidate directions (§1.1)? Ties win, so the test is `<=`, and no di
 selected — we never compute the flood shape or the path fluid takes.
 
 Mirror `getSlopeDistance` over the NavGrid: shortest path length through passable cells, backtrack
-excluded, depth-capped at the fluid's `slopeFind`. Bounded by construction — branching 3, depth 4 (water)
-or 2 (overworld lava), early exit on a hole or a non-passable cell (~100 reads worst case, typically far
-fewer). Memoise per search, keyed on the fluid cell.
+excluded, depth-capped at **one unified `slopeFind = 4` for BOTH fluids** (owner-ratified 2026-08-17;
+see the pin below). Bounded by construction — branching 3, depth 4, early exit on a hole or a
+non-passable cell (~100 reads worst case, typically far fewer).
+
+**The lava slope pin: NETHER's 4, not overworld's 2** (owner-ratified 2026-08-17). Dimension identity
+is unreachable from candidate emission (the planner-thread `NavGridView` nulls its level; threading a
+dimension fact would ripple through the `findPath` ladder or pollute the caps realizability sig), so
+one constant must serve both dimensions — and the tie arithmetic decides which. Ties win, so a SMALLER
+`slopeFind` can only remove drain detections, which can only flip verdicts toward WET: pinning
+overworld's 2 would predict floods in the nether that real nether lava (slopeFind 4) drains away —
+**phantom fluid, the §8-unrecoverable error class**. Pinning 4 instead errs DRY in the overworld
+(a drain at slope distance 4–5 is visible to the model but not to real overworld lava, so the dig is
+predicted dry and real lava floods in) — recoverable by §8's principle: the arrival is a real block
+change → invalidation → replan, with the 30-tick arrival lag as escape margin. Nether lava and all
+water are exact. Bonus: water and lava share one constant, so tier 2 has no per-fluid depth branch.
+
+**No memoisation** (owner-ratified 2026-08-17, reversing an earlier draft's per-search memo). Tier 2 is
+rare and bounded, so the memo bought little — and a memo keyed on the fluid cell is UNSOUND: the slope
+search reads through the path's own edits (below), which differ per *branch* of the search, not per
+search. Two pops on different branches with different folded breaks near the same fluid cell would share
+one cached verdict, and the stale answer can err WET — the unrecoverable direction by §8's own principle.
+
+**Read discipline — the funnel sees the diff AND the candidate's own scratch, at every tier**
+(owner-ratified 2026-08-17):
+
+- All reads go through `descriptorAt` (which layers `PathEdits`), never the raw grid — the plan's own
+  earlier breaks/places are what open and seal flow paths.
+- The candidate's own **in-scratch folds** must be consulted FIRST, before `descriptorAt` — in-scratch
+  edits are invisible to `descriptorAt` (the exact lesson that forced the MineDown macro wet-column
+  latch). A `Traverse` folds two breaks per step; the second cell's verdict must see the first's fold.
+  `wetFromAbove` already does scratch-first-then-descriptor reads; the lateral funnel follows the same
+  discipline.
+- The **broken cell itself reads as open** in its own slope competition (it is the candidate direction
+  being evaluated), while per §1.5 it is never a hole at the moment of its own break — the cell below it
+  is still solid when the verdict is computed.
 
 ---
 
@@ -344,11 +398,32 @@ the tier-2 test is `<=` and any tied direction returns fluid.
 lava is not water to any consumer — different damage, different transit slow, no prone pose, different
 spread constants.
 
+**The diff constants read as SOURCES, deliberately** (owner-ratified 2026-08-17). `WATER_DESC` (and the
+new `LAVA_DESC`) are built from `defaultBlockState()`, which is the source state — so once
+`FLUID_SOURCE` exists, every diff-flooded cell claims sourcehood to later tier-1 evaluations on the same
+path. This errs wet (a source is always spread-eligible), which is the conservative direction — and it
+is often literally CORRECT, not merely conservative: a broken cell with two adjacent source neighbours
+genuinely becomes a new source (vanilla's 2-adjacent-sources infinite-water rule, `canConvertToSource` —
+§11.3). Do not "fix" this by swapping in a flowing-state descriptor.
+
 **No verdict refuses the break — there is no feasibility case here at all.** Owner ruling, standing: *"a
 costing function does not subsume a correctness problem — there will always be an edge case where the high
 cost is worth it."* Digging while submerged is frequently the only route, and crossing lava is legitimate
-for a fireproof bot. Both are **priced**; neither is forbidden. The pricing machinery already exists
-(`costPerHitpoint`, `BotCaps.takesDamage`, the damaging bit) and needs no extension — see §4.2.
+for a fireproof bot. Both are **priced**; neither is forbidden.
+
+**Correction (2026-08-17, adversarial review): the existing pricing machinery does NOT cover the dig
+path — one extension is required.** The earlier claim that `costPerHitpoint`/`takesDamage`/the damaging
+bit "need no extension" is true only for *transit through committed lava* (the swim family's
+`lavaSwimCellCost`). Diff-created lava is invisible to the flags-based transit prefilters (`flagsAt`
+never layers `PathEdits` — the §8 deferred row), and `MineDown`/`Pillar` call no transit pricing at all
+— so without an explicit term, a `BROKEN_LAVA` verdict would choose the *kind* while adding **zero
+cost**, and a mortal bot would price a lava-flooding shaft identically to a dry one: a free lethal
+offer, strictly worse than the keep-away it replaced. The required extension is `MineDown`'s per-level
+**lava-exposure term**: for each dig level whose occupied cells read lava through scratch+diff, charge
+the level's mining ticks × the vanilla lava damage rate × `costPerHitpoint`, gated on
+`BotCaps.takesDamage` (an immune bot charges nothing — the §4.2 split preserved). Physically derived,
+macro==micro, and confined to the one move whose own dig creates the lava it then stands in; other
+moves' diff-fluid blindness stays with the deferred PathEdits-scatter row.
 
 ---
 
@@ -386,6 +461,8 @@ fires, and the stale belief persists until the bot physically fails (planning a 
 | cascades past the first cell not modelled | errs dry | ✅ |
 | water→lava conversion (stone/cobble/obsidian) not modelled | errs *solid*, not dry | ✅ a real block appears |
 | overworld lava at amount 2 treated as able to spread | errs wet, **lava only** | conservative by intent |
+| overworld lava beside a drain at slope distance 4–5 (the unified `slopeFind=4` nether pin, §5) sees a drain real overworld lava cannot | errs dry, **lava only** | ✅ the real flood is a block change → invalidation; 30-tick lag as escape margin |
+| tier-0 flag early-out blind to PLAN-created fluid (`flagsAt` never layers `PathEdits`, so a folded `BROKEN_WATER`/`BROKEN_LAVA` neighbour never sets `HAS_FLUID_NEIGHBOR`) | errs dry | ✅ the real flood is a block change → invalidation. **KNOWN AND DEFERRED to the PathEdits-scatter workflow** (underwater-mining backlog OPEN 3, still unimplemented) — do NOT fix ad-hoc here by scattering flags through the diff |
 
 ### §8.1 Keep the certain and the speculative in different mechanisms
 
@@ -489,14 +566,22 @@ HOLDS — the correct behaviour here, because the precondition becomes true on i
 - **Receiving side:** a dry slab/stair/trapdoor adjacent to a source refuses lateral flow (§1.2).
 - **Integration:** a `MineDown` column beside pooled water prices every level submerged; beside a
   *draining* stream it does not.
+- **Read discipline:** a verdict that depends on the plan's own earlier edits — e.g. an earlier folded
+  break opens the drain that flips a later break's verdict from `WATER` to `AIR` — resolves against the
+  diff, and against the SAME candidate's in-scratch folds (the two-break `Traverse` step). Pins the
+  no-memo ruling and the scratch-first rule (§5).
+- **Vertical rule, per-fluid:** digging directly under lava folds `BROKEN_LAVA` (today it folds plain
+  `BROKEN` — the shipped water-only `wetFromAbove` hole this design closes).
 - **Arrival lag (§8.3):** a fluid-verdict break followed immediately by a move that needs the fluid — assert
   fail→log→HOLD rather than a crash or a silent wrong-affordance, and assert the plan recovers once the
   fluid lands. **This test also covers the shipped vertical `BROKEN_WATER` rule, which currently has no
   coverage of its own lag window.**
-- **Lava:** a lava neighbour runs the same funnel as water and yields `LAVA` → `BROKEN_LAVA` (§4.2); the
-  slope search uses lava's `slopeFind=2` (detect-3), so a hole at 4 is NOT found where water's would be.
-  Assert a mortal bot's route avoids it on price alone and a `takesDamage=false` bot accepts it — the
-  behaviour a blanket refusal could not express.
+- **Lava:** a lava neighbour runs the same funnel as water and yields `LAVA` → `BROKEN_LAVA` (§4.2);
+  the slope search uses the unified `slopeFind=4` (the nether pin, §5), so a drain at 4 saves a lava
+  dig exactly as it saves a water dig — and the overworld errs-dry consequence of that pin is a
+  documented accepted inexactness, not a bug. Assert a mortal bot's route avoids an undrained lava dig
+  on price alone and a `takesDamage=false` bot accepts it — the behaviour a blanket refusal could not
+  express.
 - **Regression:** `PatchStorm` for grid-maintenance cost; the JMH suite under the paired-interleaved
   A/B protocol for the search itself, with `SHORT`/`MULTI` as the setup guards.
 
@@ -524,6 +609,9 @@ HOLDS — the correct behaviour here, because the precondition becomes true on i
 3. **`getNewLiquid`'s full body** was only partially read (the `amount - dropOff` arithmetic). Its
    source-conversion branch (`canConvertToSource`, the 2-adjacent-sources infinite-water rule) is
    unexamined and may matter for whether a broken cell becomes a *source* rather than flowing fluid.
+   Note the stakes are now low: §6's diff constants already read as sources (owner-ratified), which is
+   the direction `canConvertToSource` would produce — reading the branch can refine tier-1 exactness
+   but cannot break the model.
 4. **The per-cell edit-expectation set** (§8.3) is new machinery this design REQUIRES, not an optimisation.
    Today own-vs-foreign edit distinction is level-global (`editEpoch`); a fluid-folded break needs a
    per-cell expectation of `{air, fluid}` so neither phase invalidates. Scope it before implementing —

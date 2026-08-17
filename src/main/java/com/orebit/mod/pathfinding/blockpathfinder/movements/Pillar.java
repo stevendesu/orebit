@@ -158,8 +158,9 @@ public final class Pillar implements Movement {
         // break the scratch holds exactly the places for steps 1..k-1 — the emitted prefix's edit-set.
         for (int k = 1; k <= j; k++) {
             // Re-evaluate RISKY_EDIT per level (the start footing k==1 was gated by reset above): don't place
-            // into a cell whose body space risks a fluid/gravity cascade just because the start was safe — the
+            // into a cell whose body space risks a GRAVITY cascade just because the start was safe — the
             // micro move re-checks per node, so the macro must too. Clamp the jump below a risky cell.
+            // (Strictly gravity since the lava term migrated to pricing — DESIGN-fluid-flow-prediction.md §4.1.)
             if (k > 1 && MovementContext.risksEdit(ctx.flagsAt(x, y + k, z))) { j = k - 1; break; }
             e.requireFloor(x, y + k, z);
             if (!e.valid()) { j = k - 1; break; }

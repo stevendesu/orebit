@@ -15,10 +15,12 @@ public final class SpliceTestPlans {
 
     private SpliceTestPlans() {}
 
-    /** An {@link EditSnapshot} carrying exactly the given BROKEN + PLACED cells (packed asLong). */
+    /** An {@link EditSnapshot} carrying exactly the given (dry) BROKEN + PLACED cells (packed asLong). */
     public static EditSnapshot snapshotOf(long[] breaks, long[] places) {
         StepEdits se = new StepEdits();
-        se.load(breaks, new boolean[breaks.length], breaks.length, places, places.length,
+        byte[] kinds = new byte[breaks.length];
+        Arrays.fill(kinds, (byte) PathEdits.BROKEN); // dry breaks — the kind is stored verbatim now
+        se.load(breaks, kinds, breaks.length, places, places.length,
                 new long[0], new boolean[0], 0, ClutchModel.NONE, 0L);
         BlockPathPlan plan = new BlockPathPlan(
                 Arrays.asList(new BlockPos[] { BlockPos.ZERO }),
