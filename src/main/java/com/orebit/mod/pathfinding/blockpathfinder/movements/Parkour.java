@@ -44,10 +44,11 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *       exactly {@link Fall}'s model), only while some drop row's envelope still offers the current
  *       gap.</li>
  * </ul>
- * The transit prisms ({@code y+1..y+3} per gap column) are verified and priced <b>backwards over the
- * arc</b> only when a landing is actually found — the same lazy pattern the rising arc's {@code y+4} row
- * used from the start. The CANDIDATE SET is byte-identical to the eager scan (same cells verified, same
- * prices — only deferred):
+ * The transit prisms ({@code y+1..y+4} per gap column — the {@code y+4} apex head row since the
+ * 2026-08-17 head-clearance fix, see the derivation section below) are verified and priced <b>backwards
+ * over the arc</b> only when a landing is actually found — the same lazy pattern the rising arc's
+ * {@code y+4} row used from the start. The CANDIDATE SET is byte-identical to the eager scan (same cells
+ * verified, same prices — only deferred):
  * <ul>
  *   <li><b>Blocked prisms no longer terminate the walk eagerly.</b> The lazy walk scans node-level cells
  *       past a blocked prism (bounded by {@code maxGapAll}), and backwards verification rejects every
@@ -112,21 +113,50 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * the derived flat cap (default 3 = the base maximum; lower it to 2 for a more conservative flat row).
  *
  * <h2>Clearance cell sets (derivations)</h2>
- * <b>Flat</b> (v1): takeoff head {@code y+3}; per gap column the node-level cell open (the SHAPE_OTHER
+ * <b>Flat</b>: takeoff head {@code y+3}; per gap column the node-level cell open (the SHAPE_OTHER
  * fence exclusion — a fence at {@code y} pokes to {@code y+1.5}, into the transit space) + body prism
- * {@code y+1..y+3}; landing body {@code y+1..y+2}. <b>Rising</b>: the whole arc rides up to one block
- * higher (apex feet {@code y+2.25} ⇒ head top {@code y+4.05}), and the early arc still sweeps the low
- * prism (at gap column 1 the feet are only ~{@code y+1.4..1.8}), so the rising transit set is the UNION:
- * the full flat prism per gap column <b>plus</b> {@code y+4} over the takeoff column, every gap column,
- * and the landing column (grazed on entry); landing body {@code y+2..y+3}. Both the gap prisms and the
- * {@code y+4} row are lazily verified (backwards, on landing discovery). <b>Falling</b>: the arc never
- * rises above the flat arc, so gap columns need exactly the flat prism; the landing column additionally
- * needs every descended cell below node level down to the landing floor passable ({@link Fall}'s column
- * rule — the landing body cells are inside that span, read once during detection). Requiring the landing
- * column's full {@code y+1..y+3} prism too is a deliberate conservative simplification (a short falling
- * jump enters it near apex), retained verbatim by the lazy pass: the falling backwards verification spans
- * columns {@code 1..c} — the landing column's own prism included — exactly the set the eager scan had
- * proven before it could reach the down-scan.
+ * {@code y+1..y+4} (the apex head row, next section); landing body {@code y+1..y+2}. <b>Rising</b>: the
+ * whole arc rides up to one block higher (apex feet {@code y+2.25} ⇒ head top {@code y+4.05}), and the
+ * early arc still sweeps the low prism (at gap column 1 the feet are only ~{@code y+1.4..1.8}), so the
+ * rising transit set is the UNION: the full flat prism per gap column (whose {@code y+4} row it always
+ * had) <b>plus</b> {@code y+4} over the takeoff column and the landing column (grazed on entry); landing
+ * body {@code y+2..y+3}. All of it is lazily verified (backwards, on landing discovery). <b>Falling</b>:
+ * the arc never rises above the flat arc, so gap columns need exactly the flat prism; the landing column
+ * additionally needs every descended cell below node level down to the landing floor passable
+ * ({@link Fall}'s column rule — the landing body cells are inside that span, read once during
+ * detection). Requiring the landing column's full {@code y+1..y+4} prism too is a deliberate
+ * conservative simplification (a short falling jump enters it near apex), retained verbatim by the lazy
+ * pass: the falling backwards verification spans columns {@code 1..c} — the landing column's own prism
+ * included — exactly the set the eager scan had proven before it could reach the down-scan.
+ *
+ * <h2>The apex head row — {@code y+4} over every gap column (owner ruling, 2026-08-17)</h2>
+ * A vanilla sprint-jump apex is feet-rise {@code +1.2522} ({@link #JUMP_APEX}) and the bot is 1.8 tall,
+ * so the head-top reaches takeoff-feet {@code +3.0522} — five hundredths into the FOURTH cell layer
+ * above the takeoff feet, which in this move's node (floor-cell) coordinates is {@code y+4}. The
+ * original flat/falling prism stopped at {@code y+3}, so a ceiling at exactly takeoff-feet+3 beginning
+ * mid-gap was invisible to the planner: the bot jumped, its head-corner hit the ceiling block's face at
+ * the apex, vanilla zeroed the horizontal velocity ({@code hcol}), and it dropped into the gap
+ * (tick-verified on the jungle master world, gap-4 falling with jungle_leaves at takeoff-feet+3 over
+ * the far half of the gap). Ruling: <i>"The point of the parkour prism is supposed to ensure the full
+ * ballistic path is clear. If we're not properly checking head clearance at every position in the jump,
+ * that's a bug"</i> — refuse the jump, do NOT model the bonk/shortened arc.
+ *
+ * <p><b>Which columns need the row (closed-form arc math, {@link ParkourEnvelope}'s own model).</b> The
+ * head-top exceeds the {@code +3.0} feet-relative boundary exactly while feet-rise {@code > 1.2}: ticks
+ * 5–6 of the arc ({@code y(5)=1.2493}, {@code y(6)=1.2522}; {@code y(4)=1.1662} and {@code y(7)=1.1768}
+ * stay under). Over the admissible takeoff speeds — standstill hop {@code v(1)=0.3274} (hot-entry /
+ * re-centre launches) up to terminal-sprint carry-in {@code v(1)=0.4806} — and launch points (stair edge
+ * 0.25 / normal 0.35 / plus one sprinted tick of trigger overshoot), the 0.6-wide hitbox during that
+ * window spans roughly {@code [0.9, 2.9]} blocks past the takeoff centre: it touches gap columns 1–3 of
+ * every shape, never re-enters the takeoff column (whose {@code y+3} HEADROOM_JUMP check covers its
+ * sub-1.2-rise passage), and never reaches a 4th gap column's near face at 3.5. A per-(gap,class)
+ * column mask would therefore exempt exactly ONE column — the falling gap-4's last — and is not worth
+ * the table: the prism simply requires {@code y+4} over EVERY gap column, which is the simpler shape and
+ * only ADDS refusals (the ruling's safe direction), with zero new per-candidate math (one more
+ * descriptor read per column inside the existing lazy verification loops). Accepted consequence, per the
+ * ruling: a jump under a CONTINUOUS ceiling at takeoff-feet+3 (a 3-high tunnel) is refused even though
+ * vanilla would merely scrape — refusal over bonk-modelling. The landing column keeps its own
+ * landing-relative rules (the falling arm's {@code 1..c} span already folds it in conservatively).
  *
  * <h2>No edit folding — a hard validity rule (v1, unchanged)</h2>
  * You cannot mine or place mid-jump, so every landing class uses the plain edit-free {@code accept} (the
@@ -172,14 +202,14 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * (SprintSwim's 3.56 precedent).
  *
  * <h2>Hazard / through-slow pricing (v1 pattern, extended; unchanged VALUES under the lazy pass)</h2>
- * Gap-column body cells ({@code y+1..y+3}) are priced per cell as they are read — now during the
+ * Gap-column body cells ({@code y+1..y+4}) are priced per cell as they are read — now during the
  * backwards verification, off the same descriptors in the same column-ascending order, so every landing
  * carries the identical surcharge the eager scan computed. (The one bookkeeping difference: a falling
  * landing's descended-cell surcharges are accumulated during detection and added as their own subtotal,
  * so the final sum's float association can differ from the eager left-fold by an ulp when several
  * transited cells carry nonzero surcharges — immaterial, and exact in the overwhelmingly common all-zero
- * case.) A rising landing additionally prices the {@code y+4} cells over the gap
- * columns (read in the lazy sweep) and its landing body ({@code y+2..y+3}, descriptors in hand); the
+ * case.) A rising landing additionally prices its landing body ({@code y+2..y+3}, descriptors in hand;
+ * the gap columns' {@code y+4} row rides in the shared prism since the head-clearance fix); the
  * takeoff and landing columns' {@code y+4} are clearance-only, unpriced (the {@link Ascend} source-cell
  * precedent). A falling landing prices the landing column's prism + node-level cell + every descended
  * cell ({@link Fall}'s column pricing — the landing body rides inside that span, so nothing is
@@ -236,7 +266,8 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * arced over — rejecting it would kill the everyday "hop from a wide platform's edge cell", where the
  * lateral takeoff neighbour (0,1) IS the platform — while a fence's topY ≈ 24 pokes into the feet path
  * and rejects; geometry-only, unpriced, the node-level proxy rule) — and the transit prism
- * {@code y+1..y+3} must be passable, priced per cell (the aligned gap-column rule). The landing needs
+ * {@code y+1..y+4} must be passable, priced per cell (the aligned gap-column rule, apex head row
+ * included — the skewed arc peaks over its swept columns exactly like the aligned one). The landing needs
  * standable + body clear {@code y+1..y+2} + the flags-gated {@code bodyTransitCost} — exactly the flat
  * landing's checks. All of it is verified <b>backwards on emit</b> (landing-first, the tier-wide lazy
  * pattern): a probe pays ONE floor read per shape until a standable landing appears. Per side the NEAREST
@@ -691,7 +722,7 @@ public final class Parkour implements Movement {
                 // Triggered + body clear: treat this obstacle as an overflyable gap column and CONTINUE the
                 // landing-beyond search. Skip the rising/falling detection below — those model an OPEN
                 // node-level cell (you can neither rise from nor descend THROUGH a column plugged by this
-                // standable obstacle); its y+1..y+3 transit prism is proven by the eventual landing's
+                // standable obstacle); its y+1..y+4 transit prism is proven by the eventual landing's
                 // verifyPrisms exactly like any gap column, and a standable cell (topY<=16) is always
                 // overJumpable, so DIR_SAW_GAP is the only bookkeeping owed here.
                 found |= DIR_SAW_GAP;
@@ -701,7 +732,7 @@ public final class Parkour implements Movement {
             // collision top (overJumpable) — the same rule the offset/diagonal scans use. This deliberately
             // admits a fluid gap cell: a 1-wide lava/water pool has no collision box, so the sprint arc
             // clears it with the hitbox always above the fluid (zero contact). Only a fence/wall (topY ≈ 24)
-            // that pokes into the feet path blocks the jump. The body-arc prism (y+1..y+3) stays STRICT
+            // that pokes into the feet path blocks the jump. The body-arc prism (y+1..y+4) stays STRICT
             // passable below, so a TALL lava/water column is still rejected there — no wading through fluid.
             if (!ctx.overJumpable(fd)) return found;
             found |= DIR_SAW_GAP; // an OPEN gap column — arms the offset fallback if nothing ever emits
@@ -810,7 +841,8 @@ public final class Parkour implements Movement {
     /**
      * The lazy backwards arc verification (class Javadoc): extend the direction's verified-prism prefix
      * from {@code verified} through gap column {@code n}, proving each column's transit prism
-     * ({@code y+1..y+3}) passable and accruing its pass-through surcharge column-by-column (the exact
+     * ({@code y+1..y+4} — the {@code y+4} apex head row per the 2026-08-17 head-clearance ruling, class
+     * Javadoc) passable and accruing its pass-through surcharge column-by-column (the exact
      * eager summation order, so prices are unchanged). Returns the new cursor packed as
      * {@code (newVerified << 32) | floatBits(newTransit)} — primitives only, zero allocation — or
      * {@link #PRISM_BLOCKED} on a blocked/unbuilt cell (UNBUILT is as strict here as it was in the eager
@@ -821,7 +853,7 @@ public final class Parkour implements Movement {
      * <p><b>The no-re-read property holds only where the CALLER stores the returned cursor</b> (corrected
      * 2026-08-11). Today just the falling arm does; the two flat arms and both rising arms pass
      * {@code verified} in and throw the result away, so for them the monotone-prefix precondition never
-     * establishes itself and every demand re-walks {@code y+1..y+3} for columns {@code 1..n} from scratch.
+     * establishes itself and every demand re-walks {@code y+1..y+4} for columns {@code 1..n} from scratch.
      */
     private static long verifyPrisms(MovementContext ctx, int x, int y, int z, int dx, int dz,
             int verified, float transit, int n) {
@@ -842,8 +874,16 @@ public final class Parkour implements Movement {
             if (p3 == MovementContext.UNBUILT) return PRISM_BLOCKED;
             long d3 = ctx.descriptorOf(kx, y + 3, kz, p3);
             if (!ctx.arcPassable(d3)) return PRISM_BLOCKED;
+            // The apex head row (y+4): the arc's head-top reaches takeoff-feet +3.0522 at the apex, five
+            // hundredths into this layer — a ceiling here bonks the head and zeroes the jump's horizontal
+            // velocity mid-gap, so it REFUSES the jump (owner ruling 2026-08-17, class Javadoc).
+            int p4 = ctx.packedAt(kx, y + 4, kz);
+            if (p4 == MovementContext.UNBUILT) return PRISM_BLOCKED;
+            long d4 = ctx.descriptorOf(kx, y + 4, kz, p4);
+            if (!ctx.arcPassable(d4)) return PRISM_BLOCKED;
             // The column's body-prism surcharge, priced ONCE off the descriptors in hand (pure bit tests).
-            transit += ctx.cellTransitCost(d1) + ctx.cellTransitCost(d2) + ctx.cellTransitCost(d3);
+            transit += ctx.cellTransitCost(d1) + ctx.cellTransitCost(d2) + ctx.cellTransitCost(d3)
+                    + ctx.cellTransitCost(d4);
             verified++;
         }
         return ((long) verified << 32) | (Float.floatToRawIntBits(transit) & 0xFFFFFFFFL);
@@ -851,15 +891,16 @@ public final class Parkour implements Movement {
 
     /**
      * Verify + emit a rising(+1) landing found at column {@code c} (floor {@code y+1} standable there).
-     * The caller has already lazily verified the gap-column prisms via {@link #verifyPrisms} and passes
-     * their surcharge as {@code transit}; the landing body ({@code y+2..y+3}) and the raised-arc row
-     * ({@code y+4} over the takeoff column {@code k=0}, every gap column, and the landing column
-     * {@code k=c} — see the clearance derivation in the class Javadoc) are verified HERE, lazily and
-     * backwards, so a scan that never meets a rising ledge pays zero reads for the taller arc. The gap
-     * columns' {@code y+4} cells are priced as transited body cells; the takeoff and landing {@code y+4}
-     * are clearance-only, unpriced (Ascend precedent). Cold-ish (runs only when a rising floor actually
-     * terminates a gap run), still zero-allocation. Returns whether a candidate was actually accepted
-     * (feeds the caller's {@link #DIR_EMITTED} fallback bookkeeping).
+     * The caller has already lazily verified the gap-column prisms via {@link #verifyPrisms} — which,
+     * since the 2026-08-17 head-clearance fix, include the {@code y+4} apex head row (checked and priced
+     * per gap column there, so this method no longer touches the gap columns at all) — and passes their
+     * surcharge as {@code transit}; the landing body ({@code y+2..y+3}) and the raised arc's remaining
+     * {@code y+4} cells (the takeoff column {@code k=0} and the landing column {@code k=c}, grazed on
+     * entry — see the clearance derivation in the class Javadoc) are verified HERE, lazily and
+     * backwards, so a scan that never meets a rising ledge pays zero reads for the taller arc. The
+     * takeoff and landing {@code y+4} are clearance-only, unpriced (Ascend precedent). Cold-ish (runs
+     * only when a rising floor actually terminates a gap run), still zero-allocation. Returns whether a
+     * candidate was actually accepted (feeds the caller's {@link #DIR_EMITTED} fallback bookkeeping).
      */
     private static boolean emitRising(MovementContext ctx, CandidateSink out, int x, int y, int z,
             int dx, int dz, int c, int g, float transit, long landDesc) {
@@ -891,22 +932,20 @@ public final class Parkour implements Movement {
         if (p3 == MovementContext.UNBUILT) return false;
         long d3 = ctx.descriptorOf(cx, y + 3, cz, p3);
         if (!ctx.arcPassable(d3)) return false;
-        // The raised arc's extra row: y+4 clear over takeoff (k=0) through landing (k=c).
-        float riseTransit = 0f;
-        for (int k = 0; k <= c; k++) {
-            int kx = x + dx * k;
-            int kz = z + dz * k;
-            int p4 = ctx.packedAt(kx, y + 4, kz);
-            if (p4 == MovementContext.UNBUILT) return false;
-            long d4 = ctx.descriptorOf(kx, y + 4, kz, p4);
-            if (!ctx.arcPassable(d4)) return false;
-            if (k >= 1 && k < c) riseTransit += ctx.cellTransitCost(d4); // gap columns only
-        }
+        // The raised arc's remaining y+4 cells: the gap columns' y+4 row is already proven + priced by
+        // verifyPrisms (the shared apex head row, 2026-08-17); only the takeoff (k=0) and landing (k=c)
+        // columns are owed here — clearance-only, unpriced (the Ascend source-cell precedent).
+        int p4t = ctx.packedAt(x, y + 4, z);
+        if (p4t == MovementContext.UNBUILT) return false;
+        if (!ctx.arcPassable(ctx.descriptorOf(x, y + 4, z, p4t))) return false;
+        int p4l = ctx.packedAt(cx, y + 4, cz);
+        if (p4l == MovementContext.UNBUILT) return false;
+        if (!ctx.arcPassable(ctx.descriptorOf(cx, y + 4, cz, p4l))) return false;
         // Cost: the flat arc credited RISE_EARLY_TICKS (the +1 floor intercepts the arc early), plus the
-        // gap transit already accumulated, the raised row's transit, and the landing body priced off the
+        // gap transit already accumulated (y+1..y+4 per column), and the landing body priced off the
         // descriptors in hand (equivalent to the flags-gated bodyTransitCost, with zero extra reads).
         float cost = RUNUP_COST + (AIR_COST[g] - RISE_EARLY_TICKS) + COMMIT_PENALTY
-                + transit + riseTransit + ctx.cellTransitCost(d2) + ctx.cellTransitCost(d3)
+                + transit + ctx.cellTransitCost(d2) + ctx.cellTransitCost(d3)
                 + ctx.floorHazardCost(landDesc); // ISSUE-3: landing ON a damaging floor is priced too
         out.accept(cx, y + 1, cz, cost);
         return true;
@@ -965,7 +1004,8 @@ public final class Parkour implements Movement {
      * {@code y+1..y+2}; no break folding, a blocked/unbuilt cell kills the candidate — then the shape's
      * swept columns BACKWARDS over the arc via the static {@link #OFFSET_COVER} table: per column the
      * floor cell must be arc-safe ({@link MovementContext#overJumpable} — the corner rule; geometry-only,
-     * unpriced) and the transit prism {@code y+1..y+3} passable, priced per
+     * unpriced) and the transit prism {@code y+1..y+4} (apex head row included — the skewed arc peaks
+     * over its swept columns exactly like the aligned one; owner ruling 2026-08-17) passable, priced per
      * cell off the read-once descriptors in table order (a fixed summation order). UNBUILT stays strict
      * for every consulted cell. Cost is the precomputed displacement-interpolated {@link #OFFSET_COST}
      * plus the accrued transit plus the landing's flags-gated {@link MovementContext#bodyTransitCost}
@@ -1010,7 +1050,7 @@ public final class Parkour implements Movement {
             // Floor cell arc-safe: open/fluid, or solid no taller than a full block (arced over like flat
             // ground — the shared corner rule; a fence's topY ≈ 24 clips the feet path).
             if (!ctx.overJumpable(df)) return;
-            for (int k = 1; k <= 3; k++) {
+            for (int k = 1; k <= 4; k++) { // y+4 = the apex head row (owner ruling 2026-08-17)
                 int pk = ctx.packedAt(kx, y + k, kz);
                 if (pk == MovementContext.UNBUILT) return;
                 long dk = ctx.descriptorOf(kx, y + k, kz, pk);

@@ -375,6 +375,7 @@ class GateToggleTest {
             s.set(cx, 1, Z, air);
             s.set(cx, 2, Z, air);
             s.set(cx, 3, Z, air);
+            s.set(cx, 4, Z, air); // the arc's apex head row (takeoff-feet+3; head-clearance fix 2026-08-17)
         }
         for (int cx = TX + 1; cx <= TX + gap; cx++) s.set(cx, 0, Z, air); // bottomless gap columns
         s.set(TX + 1, 0, Z, gateState);

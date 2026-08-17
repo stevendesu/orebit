@@ -396,7 +396,7 @@ redefinition as decided.**
 ### 6.2 HEADROOM is exactly the parkour prism — and the answer is being thrown away
 
 `NavFlags` HEADROOM counts clear cells starting at `y+1`, with `HEADROOM_JUMP = 3` — i.e. **exactly
-`y+1..y+3`, exactly the parkour transit prism.**
+`y+1..y+4`, exactly the parkour transit prism (the apex head row `y+4` was added 2026-08-17 — the ballistic head-top reaches takeoff-feet+3.05, so per-column reads in this file are one higher than the older 3-row counts below).**
 
 | Site | Reads today | With the bit | Note |
 |---|---|---|---|

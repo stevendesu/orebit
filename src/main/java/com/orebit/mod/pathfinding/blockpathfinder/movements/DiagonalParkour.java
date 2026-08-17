@@ -48,9 +48,9 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *       the cheaper. A plain full non-damaging non-slow block triggers nothing → the scan terminates,
  *       byte-identical to v1 for ordinary diagonal terrain.</li>
  * </ul>
- * SAFETY: the overflown obstacle's OWN body prism {@code y+1..y+3} is proven strictly {@code passable} by
+ * SAFETY: the overflown obstacle's OWN body prism {@code y+1..y+4} is proven strictly {@code passable} by
  * the eventual landing's {@link #verifyArc} (each gap column {@code k = 1..g}), and each swept corner
- * column's {@code y+1..y+3} by {@link #cornerColumnCost}, so a 2-tall lava/water column (obstacle + hazard
+ * column's {@code y+1..y+4} by {@link #cornerColumnCost}, so a 2-tall lava/water column (obstacle + hazard
  * at {@code y+1}) — whether in the diagonal line or in a corner — rejects the whole jump. Landings are now
  * priced {@code + }{@link MovementContext#floorHazardCost} (caps-gated, {@code costPerHitpoint} currency),
  * matching the cardinal change.
@@ -58,14 +58,19 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * <h2>Clearance geometry — the transit prism + the corner pairs</h2>
  * Like cardinal {@link Parkour}, every gap cell needs its node-level cell {@link MovementContext#overJumpable
  * arc-safe} (open / fluid / a full-block top — see the jump-over section) and the body prism
- * {@code y+1..y+3} passable, and the first NON-triggering standable node-level cell ends the scan (never
+ * {@code y+1..y+4} passable ({@code y+4} is the apex head row — the head-top reaches takeoff-feet
+ * {@code +3.0522} at the apex, five hundredths into the fourth layer; owner ruling 2026-08-17, full
+ * derivation on cardinal {@link Parkour}'s class Javadoc), and the first NON-triggering standable
+ * node-level cell ends the scan (never
  * overfly a plain ledge; at {@code c == 1} that ledge is plain {@link Diagonal}'s job). ON TOP
  * of that, a diagonal transit clips <b>both corner columns of every cell-to-cell transition</b> — the
  * {@link Diagonal} corner rule extended along the whole jump: for the transition from diagonal cell
  * {@code t} to {@code t+1} the two columns {@code (x+dx·(t+1), z+dz·t)} and {@code (x+dx·t, z+dz·(t+1))}
- * are swept by the 0.6-wide hitbox. Because the sweep happens mid-arc (feet up to {@code y+1.25}, head to
- * {@code y+3.05}), each corner column must be clear over the full jump body {@code y+1..y+3} — one row
- * MORE than walking {@link Diagonal}'s {@code y+1..y+2} (a deliberate conservative widening). The corner
+ * are swept by the 0.6-wide hitbox. Because the sweep happens mid-arc (feet up to {@code y+1.25}, head
+ * top five hundredths INTO the {@code y+4} layer at the apex), each corner column must be clear over the
+ * full jump body {@code y+1..y+4} — two rows
+ * MORE than walking {@link Diagonal}'s {@code y+1..y+2} (the conservative mid-arc widening + the apex
+ * head row). The corner
  * NODE-level cell {@code y} is accepted when it is passable <b>or</b> its collision top is at most a full
  * block ({@code topY ≤ 16}): a solid floor corner is arced over exactly like flat ground (and rejecting
  * it would kill the common "cut the corner of a walkable ledge" jump), while a fence/wall there
@@ -278,7 +283,7 @@ public final class DiagonalParkour implements Movement {
                     }
                 }
                 // Overfly a triggering obstacle whose body above is clear (see the clear-gate comment): treat
-                // it as an overflyable gap column and CONTINUE the landing-beyond search. Its y+1..y+3 transit
+                // it as an overflyable gap column and CONTINUE the landing-beyond search. Its y+1..y+4 transit
                 // prism is re-proven by the eventual landing's verifyArc exactly like any gap column, and a
                 // standable cell is always overJumpable (topY <= 16), so nothing extra is owed here. FLAT
                 // only — no rising/falling detection (the column is plugged by this standable obstacle).
@@ -289,7 +294,7 @@ public final class DiagonalParkour implements Movement {
             // OR a no-taller-than-a-full-block collision top (overJumpable). This deliberately admits a FLUID
             // gap cell — a 1-wide lava/water pool has no collision box, so the sprint arc clears it with the
             // hitbox always above the fluid (zero contact) — the SLL/LLL/LLS nether course. Only a fence/wall
-            // (topY ≈ 24) that pokes into the feet path blocks the jump. The body-arc prism (y+1..y+3) above
+            // (topY ≈ 24) that pokes into the feet path blocks the jump. The body-arc prism (y+1..y+4) above
             // this cell stays STRICT passable in verifyArc, so a TALL lava/water column is still rejected
             // there (no wading through fluid); the corner columns' prisms are likewise proven in
             // cornerColumnCost, so a hazard column above a corner rejects too.
@@ -300,7 +305,8 @@ public final class DiagonalParkour implements Movement {
 
     /**
      * The lazy backwards arc verification: prove every gap column {@code k = 1..g}'s transit prism
-     * ({@code y+1..y+3}) passable and its crossed transition's corner pair clear, accruing the
+     * ({@code y+1..y+4} — the apex head row included, owner ruling 2026-08-17; derivation on cardinal
+     * {@link Parkour}) passable and its crossed transition's corner pair clear, accruing the
      * pass-through surcharge per column in the eager order ({@code corner + prism} per transition).
      * Returns the summed surcharge, or {@code NaN} when any consulted cell is blocked or unbuilt (a
      * float sentinel — no allocation, no boxing — checked via {@code Float.isNaN} since a surcharge sum
@@ -312,8 +318,10 @@ public final class DiagonalParkour implements Movement {
         for (int k = 1; k <= g; k++) {
             int kx = x + dx * k;
             int kz = z + dz * k;
-            // Transit prism (y+1..y+3) of the gap cell — read once, priced off the same descriptors.
+            // Transit prism (y+1..y+4) of the gap cell — read once, priced off the same descriptors.
             // arcPassable (owner ruling 2026-07-31): no vine/ladder anywhere the arc flies through.
+            // y+4 is the apex head row (owner ruling 2026-08-17): the head-top reaches takeoff-feet
+            // +3.0522 at the apex — a ceiling there bonks the head and zeroes the arc's velocity.
             int p1 = ctx.packedAt(kx, y + 1, kz);
             if (p1 == MovementContext.UNBUILT) return Float.NaN;
             long d1 = ctx.descriptorOf(kx, y + 1, kz, p1);
@@ -326,6 +334,10 @@ public final class DiagonalParkour implements Movement {
             if (p3 == MovementContext.UNBUILT) return Float.NaN;
             long d3 = ctx.descriptorOf(kx, y + 3, kz, p3);
             if (!ctx.arcPassable(d3)) return Float.NaN;
+            int p4 = ctx.packedAt(kx, y + 4, kz);
+            if (p4 == MovementContext.UNBUILT) return Float.NaN;
+            long d4 = ctx.descriptorOf(kx, y + 4, kz, p4);
+            if (!ctx.arcPassable(d4)) return Float.NaN;
 
             // The corner pair of the transition just crossed (cell k-1 → k).
             float corner = cornerPairCost(ctx, x + dx * k, z + dz * (k - 1),
@@ -333,16 +345,17 @@ public final class DiagonalParkour implements Movement {
             if (corner < 0f) return Float.NaN;
 
             transit += corner
-                    + ctx.cellTransitCost(d1) + ctx.cellTransitCost(d2) + ctx.cellTransitCost(d3);
+                    + ctx.cellTransitCost(d1) + ctx.cellTransitCost(d2) + ctx.cellTransitCost(d3)
+                    + ctx.cellTransitCost(d4);
         }
         return transit;
     }
 
     /**
      * Both corner columns of one diagonal transition: each needs its node-level cell arc-safe (passable,
-     * or solid no taller than a full block — see the class Javadoc) and its body {@code y+1..y+3}
-     * passable. Returns the summed pass-through surcharge of the six body cells, or {@code -1} when
-     * blocked (a float sentinel — no allocation, no boxing).
+     * or solid no taller than a full block — see the class Javadoc) and its body {@code y+1..y+4}
+     * (apex head row included) passable. Returns the summed pass-through surcharge of the eight body
+     * cells, or {@code -1} when blocked (a float sentinel — no allocation, no boxing).
      */
     private static float cornerPairCost(MovementContext ctx, int ax, int az, int bx, int bz, int y) {
         float a = cornerColumnCost(ctx, ax, y, az);
@@ -361,7 +374,7 @@ public final class DiagonalParkour implements Movement {
         // fence/wall (topY ≈ 24) pokes into the feet path and rejects. Geometry-only — unpriced.
         if (!ctx.overJumpable(d)) return -1f;
         float t = 0f;
-        for (int k = 1; k <= 3; k++) {
+        for (int k = 1; k <= 4; k++) { // y+4 = the apex head row (owner ruling 2026-08-17)
             int pk = ctx.packedAt(x, y + k, z);
             if (pk == MovementContext.UNBUILT) return -1f;
             long dk = ctx.descriptorOf(x, y + k, z, pk);

@@ -138,16 +138,17 @@ class ReducedJumpTest {
 
     /**
      * Parkour course: a solid stone section with a 1-wide corridor at z=8 (bodies + jump headroom carved
-     * y=6..8 for x=1..5), a bottomless air gap at x=3 (air y=0..5, below the grid unbuilt so Fall never
-     * lands), the source floor at (2,5,8), and a stone landing platform at (4,5,8). The source floor block
-     * is {@code sourceFloor}. Mirrors {@code ParkourTest.buildCourse(g=1)}.
+     * y=6..9 for x=1..5 — y=9 is the arc's apex head row, takeoff-feet+3, required clear since the
+     * 2026-08-17 head-clearance fix), a bottomless air gap at x=3 (air y=0..5, below the grid unbuilt so
+     * Fall never lands), the source floor at (2,5,8), and a stone landing platform at (4,5,8). The source
+     * floor block is {@code sourceFloor}. Mirrors {@code ParkourTest.buildCourse(g=1)}.
      */
     private static NavGridView parkourCourse(BlockState sourceFloor) {
         PalettedContainer<BlockState> s = solidStone();
         final int z = 8;
         BlockState air = Blocks.AIR.defaultBlockState();
         for (int x = 1; x <= 5; x++) {          // corridor: body + jump headroom over the platforms
-            for (int y = 6; y <= 8; y++) s.set(x, y, z, air);
+            for (int y = 6; y <= 9; y++) s.set(x, y, z, air);
         }
         for (int y = 0; y <= 5; y++) s.set(3, y, z, air); // the chasm: air to the section floor (bottomless)
         s.set(2, 5, z, sourceFloor);
