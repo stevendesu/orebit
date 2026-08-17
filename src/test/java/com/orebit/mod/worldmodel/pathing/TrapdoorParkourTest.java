@@ -139,8 +139,9 @@ class TrapdoorParkourTest {
     }
 
     /**
-     * The parkour runway: a 1-wide strip at z=Z with air body y=1..3 (arc prisms clear, stone ceiling
-     * y=4). Floor row y=0: {@code takeoff} at TX, {@code gap} bottomless AIR columns (TX+1..TX+gap), the
+     * The parkour runway: a 1-wide strip at z=Z with air body y=1..4 (arc prisms — incl. the y=4 apex
+     * head row, takeoff-feet+3, required clear since the 2026-08-17 head-clearance fix — clear; stone
+     * ceiling y=5). Floor row y=0: {@code takeoff} at TX, {@code gap} bottomless AIR columns (TX+1..TX+gap), the
      * {@code landing} at TX+gap+1, stone elsewhere (which correctly TERMINATES each direction's scan at
      * the first standable column past the strip).
      */
@@ -157,6 +158,7 @@ class TrapdoorParkourTest {
             s.set(cx, 1, Z, air);
             s.set(cx, 2, Z, air);
             s.set(cx, 3, Z, air);
+            s.set(cx, 4, Z, air); // the arc's apex head row (takeoff-feet+3; head-clearance fix 2026-08-17)
         }
         s.set(TX, 0, Z, takeoff);
         for (int cx = TX + 1; cx <= TX + gap; cx++) s.set(cx, 0, Z, air); // bottomless gap columns

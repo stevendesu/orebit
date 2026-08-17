@@ -106,7 +106,15 @@ loom {
             vmArg("-Dorebit.autotest=true")
             // CLI overrides ride gradle -P properties into the JVM:
             //   ./gradlew :fabric:1.21.11:runAutotest "-Porebit.autotest.budgetTicks=48000"
-            for (key in listOf("start", "goal", "budgetTicks", "startDelayTicks", "debug", "trace", "probeOnly", "barehanded", "rtrace")) {
+            // This list must cover EVERY -Porebit.autotest.* key run-autotest.ps1 forwards — a key
+            // missing here silently never reaches the JVM and the mod falls back to its default
+            // (found 2026-08-17: the s52+s53 fold recreated this file without the gather-era keys, so
+            // -Gather/-Tool/-Silk/-Count and friends had been silently inert since; restored + the
+            // goto warm-up pair added).
+            for (key in listOf("start", "goal", "budgetTicks", "startDelayTicks", "warmAtGoalTicks",
+                               "gotoTool", "debug", "trace", "probeOnly", "barehanded", "rtrace",
+                               "traceGoal", "gather", "craft", "give", "farm", "fight", "build",
+                               "count", "tool", "silk")) {
                 val v = project.findProperty("orebit.autotest.$key")
                 if (v != null) vmArg("-Dorebit.autotest.$key=$v")
             }

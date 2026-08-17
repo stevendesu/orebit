@@ -1293,7 +1293,7 @@ public final class MovementContext {
      * the feet path and is NOT jumpable.
      *
      * <p>This is deliberately LOOSER than {@link #passable} in exactly one way — it admits fluids — so it
-     * is correct for the floor OBSTACLE cell ONLY. The body-arc prism ({@code y+1..y+3}, the cells the
+     * is correct for the floor OBSTACLE cell ONLY. The body-arc prism ({@code y+1..y+4} since the apex-head-row fix, the cells the
      * hitbox actually flies through) must still be proven strictly {@link #passable} by the caller, or a
      * tall lava/water column would read as jumpable and the bot would path through it and take damage.
      * The collision-first / hazard-second rule: a floor cell blocks a jump only when its collision top
