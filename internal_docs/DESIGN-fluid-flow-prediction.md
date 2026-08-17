@@ -418,8 +418,9 @@ The existing model is only benign when the world ends up matching the diff. Here
 1. The bot breaks the block. The world writes **air**; the diff said **water**. That is an
    **unexpected edit** — the observed state does not match what the plan folded — so the plan invalidates
    and re-searches.
-2. That re-search plans with **air** in the cell. Air is *cheap* and *standable-adjacent*, so the new plan
-   may commit to a route straight through a cell that is about to become unswimmable water.
+2. That re-search plans with **air** in the cell — so the new plan may commit to a route straight through a
+   cell that is about to change, offering a different set of affordances than the ones it was planned on
+   (walk/parkour/fall through air, versus swim rungs, no sprint, and 5× mining once the water arrives).
 3. Five ticks later the water lands. Another unexpected edit → **a second invalidation**, discarding the
    plan built in step 2.
 
