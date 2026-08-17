@@ -10,6 +10,7 @@ import java.util.UUID;
 
 import com.mojang.authlib.GameProfile;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
+import com.orebit.mod.platform.BotTeleport;
 import com.orebit.mod.platform.ConfigDir;
 import com.orebit.mod.platform.ItemLookup;
 import com.orebit.mod.platform.PlatformEvents;
@@ -251,6 +252,31 @@ public final class HeadlessAutotest {
                 : cell("orebit.autotest.traceGoal", "0,0,0");
         /** True once the one-shot trace has been issued (it is terminal — the run halts right after). */
         boolean traceIssued;
+
+        // ---- GOTO warm-up (-Dorebit.autotest.warmAtGoalTicks=<n>): pre-load BOTH route ends ----
+        /**
+         * Ticks to hold the bot AT THE GOAL before returning it to the start (0 = off, the historical
+         * scenario byte-for-byte). When set, the GOTO poll runs a three-phase pre-sequence: teleport the
+         * bot to the goal (its player ticket loads the chunks and the nav grid + HPA data build around
+         * the goal), hold for this many ticks AND until nav readiness there (hard bail at 10×), teleport
+         * it back to the start, and only then start the normal {@code -StartDelay} countdown (counted
+         * from the RETURN tick via {@link #gotoGateTick}). Both route ends are then warm while the middle
+         * stays unloaded — the long-range navigate-through-unbuilt-terrain scenario. {@code STAY} is
+         * pinned before the first teleport so FOLLOW never paths the warm bot back across the world.
+         */
+        final int warmAtGoalTicks = Integer.getInteger("orebit.autotest.warmAtGoalTicks", 0);
+        /** Tool pre-equipped for GOTO mode ({@code -Dorebit.autotest.gotoTool}); the default preserves the
+         *  historical one-stone-pickaxe scenario every recorded goto baseline ran with. Distinct from
+         *  {@link #toolId}, the GATHER/CRAFT-mode tool. Ignored under {@code -barehanded}. */
+        final String gotoToolId = System.getProperty("orebit.autotest.gotoTool", "stone_pickaxe");
+        /** True once the warm-up teleport TO the goal has been sent. */
+        boolean warmSent;
+        /** True once the bot is back at the start (the warm-up is complete). */
+        boolean warmReturned;
+        /** Tick of the warm-up teleport (phase timing base). */
+        int warmPhaseTick;
+        /** The tick {@code -StartDelay} counts from: 0 (spawn — historical) or the warm-return tick. */
+        int gotoGateTick;
 
         MinecraftServer server;
         FakePlayerEntity owner;   // synthetic, never world-placed (see class javadoc)
@@ -497,9 +523,10 @@ public final class HeadlessAutotest {
                     return;
                 }
 
-                // ---- GOTO mode (unchanged): one stone pickaxe by default ----
+                // ---- GOTO mode: one stone pickaxe by default (-Dorebit.autotest.gotoTool overrides —
+                // the default preserves every recorded goto baseline) ----
                 if (!barehanded) {
-                    bot.getInventory().setItem(0, new ItemStack(Items.STONE_PICKAXE));
+                    bot.getInventory().setItem(0, new ItemStack(toolItem(gotoToolId)));
                 }
                 // Region-cascade trace seam (-Dorebit.autotest.rtrace=true): run the FULL-cascade rtrace toward
                 // the goal (what /bot goto's region tier evaluates for THIS scenario — e.g. the bare-handed +
@@ -662,11 +689,59 @@ public final class HeadlessAutotest {
                 return;
             }
 
+            // ---- GOTO warm-up (-Dorebit.autotest.warmAtGoalTicks): pre-load BOTH route ends ----
+            // Phase A: pin STAY (FOLLOW would path the warm bot back across the world toward the owner)
+            // and teleport to the goal — the bot's player ticket loads the chunks and the nav grid + HPA
+            // data build around the goal. Phase B: after warmAtGoalTicks AND nav readiness there (hard
+            // bail at 10×), teleport back to the start and start the -StartDelay countdown from the
+            // RETURN tick (gotoGateTick). setPos is the same-level repositioning idiom this harness
+            // already uses at spawn (a full teleport is only needed cross-dimension).
+            if (warmAtGoalTicks > 0 && !warmReturned) {
+                if (!warmSent) {
+                    bot.setMode(AllyBotEntity.Mode.STAY);
+                    // A REAL player teleport, not setPos: setPos never notifies the chunk source, so a
+                    // long-range jump parks the bot in ungenerated void where no tickets are ever issued
+                    // and nothing loads (observed: 2000t at the goal, zero chunks built). BotTeleport.to
+                    // is the version-selected ServerPlayer teleport the cross-dimension restore uses —
+                    // it re-centres chunk tracking so the destination loads around the parked bot.
+                    BotTeleport.to(bot, level, goal.getX() + 0.5, goal.getY(), goal.getZ() + 0.5,
+                            bot.getYRot(), bot.getXRot());
+                    warmSent = true;
+                    warmPhaseTick = ticks;
+                    OrebitCommon.LOGGER.info("[Orebit/autotest] warm-up: bot teleported to goal {} for {}t"
+                            + " (chunk + nav preload)", compact(goal), warmAtGoalTicks);
+                    return;
+                }
+                boolean waited = ticks - warmPhaseTick >= warmAtGoalTicks;
+                boolean bailed = ticks - warmPhaseTick >= warmAtGoalTicks * 10;
+                if (!waited || (!navReadyAround(level, goal) && !bailed)) {
+                    if (ticks % PROGRESS_LOG_TICKS == 0) {
+                        OrebitCommon.LOGGER.info("[Orebit/autotest] t={} warming at goal {} (navReady={})",
+                                ticks, compact(goal), navReadyAround(level, goal));
+                    }
+                    return;
+                }
+                if (!navReadyAround(level, goal)) {
+                    OrebitCommon.LOGGER.warn("[Orebit/autotest] warm-up: nav never built around goal after {}t"
+                            + " — returning to start anyway", ticks - warmPhaseTick);
+                }
+                // The return is a real teleport too — the start chunks may have unloaded while the bot
+                // was away (the synthetic owner is never world-placed, so nothing held them).
+                BotTeleport.to(bot, level, start.getX() + 0.5, start.getY(), start.getZ() + 0.5,
+                        bot.getYRot(), bot.getXRot());
+                warmReturned = true;
+                gotoGateTick = ticks;
+                OrebitCommon.LOGGER.info("[Orebit/autotest] warm-up: bot returned to start {} at t={};"
+                        + " goto follows in {}t + nav readiness", compact(start), ticks, startDelayTicks);
+                return;
+            }
+
             // Deferred goto: sit at spawn until -StartDelay has elapsed AND the nav grid around the start cell
             // has built (STEP 4), THEN issue the goal — so the plan/traced searches run on real terrain, never
-            // the tick-1 unbuilt-nav flood. Skip the arrival poll entirely until the goal exists.
+            // the tick-1 unbuilt-nav flood. Skip the arrival poll entirely until the goal exists. (With the
+            // warm-up active, the delay counts from the warm-return tick — gotoGateTick — not from spawn.)
             if (!goalIssued) {
-                if (ticks < startDelayTicks) {
+                if (ticks - gotoGateTick < startDelayTicks) {
                     return;
                 }
                 if (!navReadyAround(level, start)) {

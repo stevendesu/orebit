@@ -33,6 +33,15 @@ param(
     [string]$Goal = "",
     [int]$BudgetTicks = 0,
     [int]$StartDelay = 0,
+    # -WarmAtGoal <ticks>: GOTO warm-up — after spawn, teleport the bot TO THE GOAL, hold it there this
+    # many ticks (its player ticket loads the chunks and the nav grid builds around the goal), teleport
+    # it back to the start, and only then start the normal -StartDelay countdown before the goto. Both
+    # route ends are then warm; the middle stays unloaded (the long-range navigation under test). 0 = off.
+    [int]$WarmAtGoal = 0,
+    # -GotoTool <item_id>: the tool pre-equipped for GOTO mode (default: the historical single stone
+    # pickaxe — every recorded goto baseline used it; pass iron_pickaxe etc. for faster-mining scenarios).
+    # Ignored under -Barehanded. Distinct from -Tool, which is the GATHER/CRAFT-mode tool.
+    [string]$GotoTool = "",
     [switch]$BotDebug,
     # -Trace: dump EVERY A* search's full expansion trace to run/autotest/orebit-autotest-trace-<n>.txt
     # (one numbered file per search; analyze with internal_docs/trace_analysis.py). Trace runs are SLOW
@@ -162,6 +171,8 @@ if ($Start -ne "")    { $gradleArgs += "-Porebit.autotest.start=$Start" }
 if ($Goal -ne "")     { $gradleArgs += "-Porebit.autotest.goal=$Goal" }
 if ($BudgetTicks -gt 0) { $gradleArgs += "-Porebit.autotest.budgetTicks=$BudgetTicks" }
 if ($StartDelay -gt 0) { $gradleArgs += "-Porebit.autotest.startDelayTicks=$StartDelay" }
+if ($WarmAtGoal -gt 0) { $gradleArgs += "-Porebit.autotest.warmAtGoalTicks=$WarmAtGoal" }
+if ($GotoTool -ne "")  { $gradleArgs += "-Porebit.autotest.gotoTool=$GotoTool" }
 if ($BotDebug)        { $gradleArgs += "-Porebit.autotest.debug=true" }
 if ($Trace)           { $gradleArgs += "-Porebit.autotest.trace=true" }
 if ($ProbeOnly)       { $gradleArgs += "-Porebit.autotest.probeOnly=true" }
