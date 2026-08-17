@@ -188,6 +188,19 @@ public final class Descend implements Movement {
         // inRestingPose but would have failed this phase's settled()-and-in-band test, deadlocking a
         // water descend).
         MovePlan.Phase clear = plan.phase("clear");
+        // STALE-THRUST HANDOFF GAP (owner-ratified 2026-08-17; specimen: mineshaft-run3, the frozen-jungle
+        // Traverse(+z into (366,·,526)) → 90° Descend(+x to (367,62,526)) corner). Steering inputs are
+        // persistent key-state, and the predecessor Traverse's LAST tick had stepOffGate's full-reverse
+        // arrest pressed when its ~0.02-block boundary transient legitimately advanced the cursor
+        // (Movement.reached is foot-cell-exact). On terrain this phase's needs are already met and its
+        // advanceWhen is unconditional, so the handoff tick reaches the drive — which for a non-climbable
+        // bot writes NO inputs at all (holdUntilOverTargetColumn bails on !onClimbable). Vanilla physics
+        // then ticks under the predecessor's latched reverse thrust, shoving the bot back across the cell
+        // boundary and out of the foot-cell-exact envelope: a permanent fail→HOLD (step FAILED at
+        // bot=(366,64,525)). Arming the gate here makes the runner WRITE the centring arrest before this
+        // input-inert drive and hold in 'clear' until the friction-horizon prediction keeps the bot inside
+        // the lane — the same arm the STEP phase below already carries, one tick earlier.
+        clear.arrestCarryFrom(fx, fz);
         for (int cy = toFootY; cy <= fromFootY + 1; cy++) {
             clear.need(MovePlan.Need.AIR, tx, cy, tz);         // break: step-off transit column (new feet … step-off head)
         }

@@ -207,6 +207,86 @@ class CarryArrestGateTest {
         assertTrue(bot.jumping, "below the landing feet the climb still needs height — jump stays held");
     }
 
+    /**
+     * The STALE-THRUST HANDOFF GAP (owner-ratified 2026-08-17; specimen: mineshaft-run3, the frozen-jungle
+     * {@code Traverse(+z into (366,·,526))} → 90° {@code Descend(+x to (367,62,526))} corner). Steering
+     * inputs are persistent key-state; the predecessor Traverse's final tick left {@code stepOffGate}'s
+     * full-reverse arrest pressed when its ~0.02-block boundary transient advanced the cursor. Descend's
+     * phase-0 {@code clear} had met needs, an unconditional {@code advanceWhen}, and an input-inert drive
+     * ({@code holdUntilOverTargetColumn} bails off a climbable) — so the handoff tick wrote nothing, vanilla
+     * physics ran the latched reverse thrust, and the bot was shoved back across the boundary into a
+     * permanent fail→HOLD ({@code step FAILED ... bot=(366,64,525)}). The arm on {@code clear} makes the
+     * runner write the centring arrest on that very tick and HOLD the phase until the friction-horizon
+     * prediction is contained.
+     */
+    @Test
+    void descendClearPhaseArrestsTheStaleHandoffCarryInsteadOfAdvancing() {
+        // The witnessed handoff pose: entered (366,·,526) at z=526.019 (0.481 off the centreline the +x
+        // step needs), still moving +z. The position alone puts the predicted stop outside the 0.2 lane
+        // bound, so the gate must take the tick.
+        MovePlan plan = MovementRegistry.DESCEND.plan(366, 63, 526, 367, 62, 526, 64, 63);
+        PhaseRunner runner = new PhaseRunner();
+        runner.begin(plan);
+        CarryBot bot = new CarryBot().at(366.591, 64, 526.019).vel(-0.0225, 0.0222);
+
+        assertFalse(runner.run(bot, seg(366.5, 64, 526.5, 367.5, 63, 526.5)), "an arrested step is not done");
+        assertFalse(runner.failed(), "arresting is not an envelope failure — the move is still viable");
+        assertTrue(runner.phase() == 0,
+                "the gate must HOLD phase 0 (clear) while the carry is uncontained — advancing hands the "
+                        + "input-inert tick to the predecessor's latched keys. phase=" + runner.phase());
+        assertTrue(bot.forward > 0.0f,
+                "the arrest must WRITE inputs on the handoff tick — an input-inert tick is the whole bug");
+        assertTrue(bot.faceDz > 0.0,
+                "the lane centreline z=526.5 lies +z of the bot at 526.019, so the commanded thrust must "
+                        + "be +z (toward it). commanded dx=" + bot.faceDx + " dz=" + bot.faceDz);
+    }
+
+    @Test
+    void descendClearPhaseAdvancesCleanlyWithoutCarry() {
+        // Centred, no carry: the prediction is contained on the first tick, the gate is a no-op, and clear
+        // advances immediately exactly as before the arm (the common straight-chain case must cost nothing).
+        MovePlan plan = MovementRegistry.DESCEND.plan(366, 63, 526, 367, 62, 526, 64, 63);
+        PhaseRunner runner = new PhaseRunner();
+        runner.begin(plan);
+        CarryBot bot = new CarryBot().at(366.5, 64, 526.5).vel(0, 0);
+
+        runner.run(bot, seg(366.5, 64, 526.5, 367.5, 63, 526.5));
+        assertTrue(runner.phase() == 1,
+                "a clean, centred entry must advance clear -> step on its first tick. phase=" + runner.phase());
+    }
+
+    @Test
+    void descendClearGateReleasesOnceTheCarryIsBled() {
+        // Convergence (mirrors theGateReleasesOnceTheCarryIsBled): the same wedge pose commits once the
+        // carry is spent and the centreline recovered — the hold is transient by construction, never a freeze.
+        MovePlan plan = MovementRegistry.DESCEND.plan(366, 63, 526, 367, 62, 526, 64, 63);
+        PhaseRunner runner = new PhaseRunner();
+        runner.begin(plan);
+        CarryBot bot = new CarryBot().at(366.591, 64, 526.019).vel(-0.0225, 0.0222);
+        runner.run(bot, seg(366.5, 64, 526.5, 367.5, 63, 526.5));
+        assertTrue(runner.phase() == 0, "still carrying → held in clear");
+
+        bot.vel(0, 0).at(366.5, 64, 526.5); // carry bled, pulled back to the centreline
+        runner.run(bot, seg(366.5, 64, 526.5, 367.5, 63, 526.5));
+        assertTrue(runner.phase() == 1, "carry spent and back on the lane → clear advances to step");
+    }
+
+    /** A minimal segment view for the Descend fixtures (feet-cell-base frame, matching SegmentCursor). */
+    private static SteerView seg(double sx, double sy, double sz, double tx, double ty, double tz) {
+        return new SteerView() {
+            @Override public double sx() { return sx; }
+            @Override public double sy() { return sy; }
+            @Override public double sz() { return sz; }
+            @Override public double tx() { return tx; }
+            @Override public double ty() { return ty; }
+            @Override public double tz() { return tz; }
+            @Override public boolean hasNext() { return false; }
+            @Override public double nx() { return 0; }
+            @Override public double ny() { return 0; }
+            @Override public double nz() { return 0; }
+        };
+    }
+
     @Test
     void walkOffWithPerpendicularCarryDoesNotSprintOffTheLip() {
         // The irreversible member of the family: WalkOff leaves the lip SPRINTING, so an unbled cross carry
