@@ -32,8 +32,12 @@ if (canMaybePassThrough(DOWN) && belowFluid.canBeReplacedWith(...) && canHoldSpe
 if (state.isSource() || !isWaterHole(pos, ..., below, belowState)) spreadToSides(...);
 ```
 
-**Mechanism 1 — does lateral spread happen at all?** The down-gate is `canBeReplacedWith`, **not**
-"is there air below":
+**Mechanism 1 — is lateral spread ELIGIBLE?** This is a **necessary, not sufficient** condition: it
+decides only whether `spreadToSides` is *called at all*. A cell that passes still spreads to **no**
+direction, or to only one, depending entirely on mechanism 2. Nothing in this section ever means "fluid
+WILL arrive" — only mechanism 2 can say that, and only about a specific direction.
+
+The down-gate is `canBeReplacedWith`, **not** "is there air below":
 
 - `WaterFluid.canBeReplacedWith` = `direction == DOWN && !fluid.is(FluidTags.WATER)` → **false when
   water replaces water.** `EmptyFluid`'s returns `true` unconditionally.
@@ -46,11 +50,12 @@ if (state.isSource() || !isWaterHole(pos, ..., below, belowState)) spreadToSides
 
 | fluid cell | spreads laterally? |
 |---|---|
-| **source** | **always** — `isSource()` short-circuits |
-| flowing, same fluid directly below (mid-fall column) | **no** |
-| flowing, resting on solid | **yes** |
+| **source** | **eligible** — `isSource()` short-circuits |
+| flowing, same fluid directly below (mid-fall column) | **not eligible** |
+| flowing, resting on solid | **eligible** |
 
-A waterfall's *column* is inert; its *source* and its *pool* are not.
+A waterfall's *column* is inert; its *source* and its *pool* are eligible. "Eligible" is the whole claim —
+an eligible source with a drain three cells away sends fluid **only** toward that drain and nowhere else.
 
 `sourceNeighborCount` counts the **4 horizontal** neighbours that are **sources of this fluid**.
 
@@ -79,9 +84,14 @@ for (Direction d : horizontals) {
 1000 and it spreads everywhere. *Owner-measured independently* (hole ≤5 → flows only toward it; hole at
 6–7 → spreads laterally anyway).
 
-**No drain is remembered.** `SpreadContext` is `new`'d inside `getSpread`, holds only a `stateCache`/
-`holeCache` keyed by a short positional offset, and dies with the call. The gradient is recomputed from
-scratch every evaluation; the observed "beeline to a hole" is emergent, not stored.
+**Flow direction is not persisted to the blockstate.** The variables that dictate it — slope distances,
+hole positions, the winning direction — are recomputed from live geometry on every evaluation and stored
+nowhere. (`SpreadContext` is `new`'d inside `getSpread`, caches only block states and hole tests by
+positional offset, and dies with the call.) The observed "beeline to a hole" is emergent, not remembered.
+
+**⇒ Knowing whether fluid will flow in a given direction REQUIRES running the full decision logic.** There
+is no cheap stored fact to read instead, at any level of the game's own model. This is the reason §2
+concludes the search must be reimplemented rather than looked up.
 
 ### §1.2 What can RECEIVE flow
 
@@ -122,7 +132,21 @@ The fluid's **own** shape can wall it in — which is how a waterlogged partial 
 | `open=false` (horizontal, on the floor) | `box(0,0,0, 1, 3/16, 1)` | **fully covered** → no flow down | 3/16 strip → flows laterally |
 | `open=true` (vertical panel) | 3/16 thick, full height, one side | 3/16 strip → flows down | **fully covered** on the facing side → no flow that way |
 
-### §1.4 Fluid is event-driven (the BUD rule)
+### §1.4 Fluid arrives LATE — the spread delay
+
+`getSpreadDelay` returns `getTickDelay`, per fluid and dimension (bytecode-verified):
+
+| fluid | ticks per spread step |
+|---|---|
+| water | **5** |
+| lava, overworld | **30** |
+| lava, nether (ultrawarm) | 10 |
+
+So a predicted flood is **not** present the instant the block breaks: the cell is genuinely air for at
+least 5 ticks (water), and longer per cell of travel — fluid three cells away takes ~15. **The diff and
+the world therefore disagree for a bounded window after every `FLOWS` break.** Consequences in §8.3.
+
+### §1.5 Fluid is event-driven (the BUD rule)
 
 A fluid cell re-evaluates **only** on a scheduled tick or a neighbour block update, and block updates
 reach the **6 orthogonal neighbours** of the changed cell. *Owner-verified:* digging a hole beside a
@@ -199,19 +223,18 @@ it actually breaks**: `MineDown`/`Pillar` at their own target, `Traverse`'s `bre
 **not** at `F`. This is the explicit lesson of the `RISKY_EDIT` frame mismatch (underwater-mining backlog
 OPEN 2) — do not create a fourth frame.
 
-### §4.1 Migrating the lava term (owner-proposed — flagged for review)
+### §4.1 The lava term migrates — RATIFIED (owner, 2026-08-17)
 
-`RISKY_EDIT` (bit 0) currently carries **gravity ∪ lava**, OR-composed. Moving the lava half here does
-**not** free a bit; it narrows bit 0 to gravity-only. The gain is real but different: **it resolves half
-the frame mismatch**, because the gravity term is body-space-framed and the lava term cell-centred, and
-they currently share one bit.
+`RISKY_EDIT` (bit 0) currently carries **gravity ∪ lava**, OR-composed. The lava half moves here, leaving
+**bit 0 strictly gravity**. This does not free a bit; the gain is that it **resolves half the frame
+mismatch** (underwater-mining backlog OPEN 2) — the gravity term is body-space-framed and the lava term
+cell-centred, and sharing one bit is what made the three-frame problem unfixable. Each now has one
+coherent frame.
 
-**Risk to weigh before doing it.** The lava term today is a blunt unconditional keep-away — deliberately
-over-conservative because lava kills. Routing it through this funnel makes lava avoidance *tier-2
-dependent*: a bug in the funnel becomes a bot in lava, whereas today it is only a longer route. Error
-tolerance for lava is not the same as for water. **Recommendation: keep the lava keep-away as an
-unconditional tier-1 verdict** (fluid neighbour is lava ⇒ treat as "will flow", no search), and take the
-frame-mismatch win without taking the accuracy risk.
+**Lava never enters the search.** Its error tolerance is not water's: a wrong answer about water costs a
+replan, a wrong answer about lava costs the bot. So lava is the **first** check in the funnel and it
+short-circuits — a lava neighbour is an immediate DISALLOW, no eligibility test, no slope search. The
+blunt keep-away behaviour is preserved exactly; only its storage location changes.
 
 ---
 
@@ -229,17 +252,20 @@ geometry decides). Nearly every break exits at tier 0.
 - target cell is not genuinely empty ⇒ **cannot receive.** Exact for full blocks and dry waterloggable
   partials (§1.2); errs dry for zero-collision décor (§8).
 
-**Tier 1 — cheap, ~4–6 reads per fluid neighbour `W`**
+**Tier 1 — cheap, ~4–6 reads per fluid neighbour `W`.** Ordered cheapest-first, and **lava first of all**
+(§4.1) so it never reaches the search:
 
 ```
-if (!genuineOpenFluidCell(W))      continue;   // waterlogged partial — see §8.2
-if (FLUID_MIN_LEVEL(W))            continue;   // cannot spread at all
-if (isLava(W))                     return WILL_FLOW;        // §4.1 conservative shortcut
-if (canFlowDown(W))                                          // below-W empty, READ THROUGH PathEdits
-     spreads = sourceNeighborCount(W) >= 3;
-else spreads = FLUID_SOURCE(W) || !isWaterHole(W);
-if (!spreads)                      continue;
+if (isLava(W))                     return DISALLOW;   // §4.1 — short-circuit, lava is never searched
+if (!genuineOpenFluidCell(W))      continue;          // waterlogged partial — see §8.2
+if (FLUID_MIN_LEVEL(W))            continue;          // cannot spread at all
+if (canFlowDown(W))                                   // below-W empty, READ THROUGH PathEdits
+     eligible = sourceNeighborCount(W) >= 3;
+else eligible = FLUID_SOURCE(W) || !isWaterHole(W);
+if (!eligible)                     continue;
 ```
+
+`eligible` is necessary, not sufficient (§1.1) — every survivor still has to win tier 2.
 
 `canFlowDown` **must** read through `PathEdits`, not the raw grid — the plan's own earlier breaks are what
 open that path. (In practice the ≥3 branch is near-unreachable for the bot: mining takes many ticks and
@@ -255,16 +281,26 @@ fewer). Memoise per search, keyed on the fluid cell.
 
 ---
 
-## §6 Output: what the prediction writes
+## §6 Output: THREE return states
 
-**If the funnel says WILL FLOW, the break records `PathEdits.BROKEN_WATER` rather than `BROKEN`** — the
-cell reads as fluid, so later pops on that path see honest water: swim moves offered, `standable` false,
-and the submerged mining stance priced. This reuses the kind and the machinery that shipped for the
-vertical rule; no new edit kind, no new reader.
+The funnel is not a boolean. It returns one of:
 
-**It does not refuse the break.** Owner ruling, standing: *"a costing function does not subsume a
+| verdict | the break records | meaning |
+|---|---|---|
+| **`NO_FLOW`** | `PathEdits.BROKEN` (air) | nothing eligible, or nothing wins the direction tie |
+| **`FLOWS`** | `PathEdits.BROKEN_WATER` | the cell reads as fluid for every later pop on this path |
+| **`DISALLOW`** | *no candidate emitted* | a lava neighbour (§4.1) — the break is refused outright |
+
+`FLOWS` reuses the kind and the readers that shipped for the vertical rule — no new edit kind, no new
+consumer. Later pops see honest water: swim moves offered, `standable` false, submerged stance priced.
+
+**`FLOWS` does not refuse the break.** Owner ruling, standing: *"a costing function does not subsume a
 correctness problem — there will always be an edge case where the high cost is worth it."* Digging while
 submerged is frequently the only route; the model makes it **priced**, never forbidden.
+
+**`DISALLOW` is the deliberate exception**, and the only one. It is a *feasibility* verdict, not a price,
+because lava's failure mode is death rather than a detour (§4.1). It is exactly the blunt keep-away that
+`RISKY_EDIT`'s lava term performs today — preserved, not introduced.
 
 ---
 
@@ -316,6 +352,39 @@ surrounding open water dominates the prediction anyway. Excluding them errs dry,
 Accepted cost: a bot may mine beside a waterlogged stair and take an unexpected flood plus a replan. That
 is the cost of doing business, explicitly.
 
+### §8.3 The arrival lag — the diff leads the world by ≥5 ticks
+
+A `FLOWS` break writes fluid into `PathEdits` immediately, but vanilla delivers it 5 ticks later for water
+(30 for overworld lava), plus 5 more per cell of travel (§1.4). Two subsystems see the disagreement.
+
+**Replan churn — already absorbed, verify rather than build.** When the fluid lands it is a real block
+change, so `NavGridUpdater` advances `editEpoch` and `BotNavigator`'s window re-search fires. But that is
+the *existing, documented* behaviour for the bot's own edits — `BotNavigator:74` already records that
+"the bot's own plan edits also advance the epoch — those re-searches are redundant-but-correct (PathEdits
+already modelled them)", debounced by `TERRAIN_RECHECK_TICKS` (40). A predicted flood is the same case:
+the re-search re-derives a plan the diff already anticipated, so it should return the same route. **No new
+suppression machinery.** What to verify is that the flood does not arrive *late enough* to land outside
+the debounce and cause a second re-search — 5 ticks against a 40-tick window leaves ample margin, but
+lava's 30 and multi-cell travel do not, which is one more reason lava never reaches `FLOWS` (§4.1).
+
+**Executor — the real exposure, and it is NOT new.** A move that consumes the predicted fluid as an
+affordance can run while the cell is still air. Note this window **already exists in shipped code**: the
+vertical `BROKEN_WATER` rule (core `454c28c`, 2026-08-16) has exactly the same lag and, as far as this doc's
+author can tell, no test covers it. Grade the exposure by what the move wants the fluid *for*:
+
+| use | during the lag | severity |
+|---|---|---|
+| descend into the broken cell (MineDown) | a 1-block fall through air instead of water | harmless — the bot was moving there regardless |
+| swim UP / buoyancy out of the cell | the move cannot act; positional `failWhen` trips | recoverable — ratified fail→log→HOLD, then the fluid lands and the replan proceeds |
+| **fluid as a soft landing for `Fall`** | real fall damage the planner priced away | **the one genuinely harmful case — review before shipping** |
+
+**Do not fix this with a timer.** "Wait N ticks for the water" is exactly the tick-counter recovery the
+`no-arbitrary-timers` rule forbids, and the ratified alternative already covers it: per-move validity
+envelopes are POSITIONAL, so a move whose precondition is not yet met fails its envelope, logs once, and
+HOLDS — which is the correct behaviour here, because the precondition becomes true on its own. The only
+change worth considering is on the `Fall` row: whether predicted-but-unarrived fluid should be admissible
+as a landing softness at all. Flagged, unratified.
+
 ---
 
 ## §9 Tests
@@ -333,6 +402,12 @@ is the cost of doing business, explicitly.
 - **Receiving side:** a dry slab/stair/trapdoor adjacent to a source refuses lateral flow (§1.2).
 - **Integration:** a `MineDown` column beside pooled water prices every level submerged; beside a
   *draining* stream it does not.
+- **Arrival lag (§8.3):** a `FLOWS` break followed immediately by a move that needs the fluid — assert
+  fail→log→HOLD rather than a crash or a silent wrong-affordance, and assert the plan recovers once the
+  fluid lands. **This test also covers the shipped vertical `BROKEN_WATER` rule, which currently has no
+  coverage of its own lag window.**
+- **Lava:** a lava neighbour returns `DISALLOW` at tier 1 and never reaches the slope search (assert the
+  search is not entered — a counter or a fixture with a poisoned search path).
 - **Regression:** `PatchStorm` for grid-maintenance cost; the JMH suite under the paired-interleaved
   A/B protocol for the search itself, with `SHORT`/`MULTI` as the setup guards.
 
@@ -360,4 +435,6 @@ is the cost of doing business, explicitly.
 3. **`getNewLiquid`'s full body** was only partially read (the `amount - dropOff` arithmetic). Its
    source-conversion branch (`canConvertToSource`, the 2-adjacent-sources infinite-water rule) is
    unexamined and may matter for whether a broken cell becomes a *source* rather than flowing fluid.
-4. **The lava-term migration decision** (§4.1) is unratified.
+4. **`Fall` softness on predicted-but-unarrived fluid** (§8.3) — whether a `FLOWS` cell may count as a
+   soft landing during its lag window. The one arrival-lag case that can actually hurt the bot.
+   Unratified.
