@@ -1,5 +1,6 @@
 package com.orebit.mod.pathfinding.blockpathfinder;
 
+import java.util.Arrays;
 import java.util.List;
 
 import net.minecraft.core.BlockPos;
@@ -25,24 +26,28 @@ public final class BlockPathPlan {
     private final List<Movement> moves;     // moves.get(i) = the movement used to reach waypoints.get(i)
     private final List<StepEdits> edits;    // edits.get(i) = break/place folded into step i (null if none)
     private final int[] floorYs;            // floorYs[i] = the SEARCH-NATIVE floor-cell Y of step i (see floorY)
+    private final float[] stepCosts;        // stepCosts[i] = search cost (ticks) of the edge INTO step i (see stepCost)
     private final float cost;
 
     public BlockPathPlan(List<BlockPos> waypoints, List<Movement> moves, List<StepEdits> edits, int[] floorYs,
-                         float cost) {
+                         float[] stepCosts, float cost) {
         this.waypoints = waypoints;
         this.moves = moves;
         this.edits = edits;
         this.floorYs = floorYs;
+        this.stepCosts = stepCosts;
         this.cost = cost;
     }
 
     /**
      * Synthetic-plan convenience (tests / hand-built fixtures): derives each step's floor as {@code
-     * waypoint.below()} — the full-block common case. Production plans come from {@link BlockPathfinder}'s
-     * reconstruct, which passes the search's exact per-step floor Ys through the primary constructor.
+     * waypoint.below()} — the full-block common case — and spreads {@code cost} uniformly across the steps
+     * as the per-step costs. Production plans come from {@link BlockPathfinder}'s reconstruct, which passes
+     * the search's exact per-step floor Ys and per-edge g-deltas through the primary constructor.
      */
     public BlockPathPlan(List<BlockPos> waypoints, List<Movement> moves, List<StepEdits> edits, float cost) {
-        this(waypoints, moves, edits, deriveFullBlockFloors(waypoints), cost);
+        this(waypoints, moves, edits, deriveFullBlockFloors(waypoints), deriveUniformStepCosts(waypoints, cost),
+                cost);
     }
 
     private static int[] deriveFullBlockFloors(List<BlockPos> waypoints) {
@@ -51,6 +56,14 @@ public final class BlockPathPlan {
             ys[i] = waypoints.get(i).getY() - 1;
         }
         return ys;
+    }
+
+    private static float[] deriveUniformStepCosts(List<BlockPos> waypoints, float cost) {
+        float[] costs = new float[waypoints.size()];
+        if (costs.length > 0) {
+            Arrays.fill(costs, cost / costs.length);
+        }
+        return costs;
     }
 
     /** The stand position (feet block) of step {@code i}. */
@@ -79,6 +92,18 @@ public final class BlockPathPlan {
         BlockPos wp = waypoints.get(i);
         int fy = floorYs[i];
         return fy == wp.getY() ? wp : new BlockPos(wp.getX(), fy, wp.getZ());
+    }
+
+    /**
+     * The search cost, in ticks, of the move <b>arriving at</b> step {@code i} — the A* edge from step
+     * {@code i - 1} (or from the search start for {@code i == 0}), carried through {@link BlockPathfinder}'s
+     * reconstruct as the per-edge g-delta (DESIGN-replan-handoff.md §3). A macro edge re-expanded into
+     * {@code j} waypoints carries its one edge cost divided uniformly across them. Feeds the seam-selection
+     * horizon walk (which prefix-sums these against a search-budget tick count); the sum over all steps
+     * equals {@link #cost()} up to float rounding across macro divisions.
+     */
+    public float stepCost(int i) {
+        return stepCosts[i];
     }
 
     /** The movement used to reach step {@code i} (so the follower knows whether to jump, fall, …). */

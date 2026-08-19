@@ -4,7 +4,9 @@ import com.orebit.mod.pathfinding.async.PlanExecutor;
 import com.orebit.mod.pathfinding.async.PlanHandle;
 import com.orebit.mod.pathfinding.async.SearchRequest;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
+import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
+import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.splice.SpliceSeam;
 
 import net.minecraft.core.BlockPos;
@@ -38,8 +40,18 @@ final class AsyncWindowSearch {
         RETRY,
         /** A boundary-replan result was seam-accepted: adopt {@link #resultPlan()} /
          *  {@link #resultPartial()}. A {@code null} plan = BLOCKED, exactly the sync path's semantics. */
-        RESULT
+        RESULT,
+        /** A seam-SEEDED boundary result finished and was PARKED (DESIGN-replan-handoff.md §5) — nothing
+         *  installs at drain time; adoption runs through {@link #pollSeededParked}'s four ordered cases
+         *  at settled boundaries. */
+        PARKED
     }
+
+    /** Verdict of {@link #pollSeededParked} — the four-case adoption pump for a parked seam-SEEDED
+     *  boundary result (DESIGN-replan-handoff.md §5, R2–R4). {@code KEEP} covers case 1 (result stays
+     *  parked — the bot is not at the seam yet, or beyond the walk-outrun tolerance) and the not-ours
+     *  no-op; {@code ENTRY_REFUSED} is case 2's step-0 entry gate falling back to case 1. */
+    enum SeamVerdict { KEEP, ADOPT, FAST_FORWARD, ENTRY_REFUSED, PANIC }
 
     // ---- async in-flight state (all tick-thread-confined; meaningful only when executor != null) ----
     /** The outstanding search, or {@code null}. At most one per plan (latest-wins: superseders cancel). */
@@ -59,14 +71,35 @@ final class AsyncWindowSearch {
      *  {@code PathPlan.suspectSearchPending()} (DESIGN-async-step-safety.md §3). Routine searches
      *  (fresh plan, forward-slide, cascade re-derive, P4 pre-plan) submit {@code false}. */
     private boolean pendingSuspect;
+    /** Whether {@link #pending} is a seam-SEEDED mid-motion boundary replan (DESIGN-replan-handoff.md
+     *  §4): its start is a FUTURE settled cell of the executing plan (the horizon seam), so its result
+     *  PARKS on completion — it never installs at drain — and adopts only via {@link #pollSeededParked}'s
+     *  four ordered cases. */
+    private boolean pendingSeeded;
+    /** The seam's waypoint index on {@link #pendingSeededFrom} (the plan the §3 walk chose it on) — read
+     *  by the follower's rescoped CAUTION hold ({@link #pendingSeededSeamFor}) and carried onto the
+     *  parked slot as the §5 past-the-seam discriminator. */
+    private int pendingSeamIndex = -1;
+    private BlockPathPlan pendingSeededFrom;
     /** The suspect flag of the last handle {@link #drainPending} popped — a RETRY resubmit inherits it
      *  (a retried suspect search stays suspect; a retried routine one stays routine). */
     private boolean lastDrainSuspect;
-    // Parked pre-plan result: computed-but-not-yet-adopted (the bot hasn't reached the predicted start).
+    // Parked result: computed-but-not-yet-adopted (the bot hasn't reached the predicted start). ONE slot,
+    // two tenants discriminated by parkedSeeded: a P4 pre-plan (adopted via pollParked) or a seam-SEEDED
+    // boundary result (adopted via pollSeededParked's four cases — DESIGN-replan-handoff.md §5).
     private BlockPathPlan parkedPlan;
     private boolean parkedPartial;
     private BlockPos parkedStart;
     private BlockPos parkedTarget;
+    /** Parked slot holds a §5 seeded boundary result, not a P4 pre-plan. */
+    private boolean parkedSeeded;
+    /** The seeded search's REAL telemetry, carried through to {@code resultStatus} at adoption (a P4
+     *  park keeps its historical {@code Integer.MAX_VALUE}/false fills in {@link #pollParked}). */
+    private int parkedExpansions;
+    private boolean parkedBudgetHit;
+    /** The seam's index on {@link #parkedSeededFrom} — the §5 case-4 past-the-seam discriminator. */
+    private int parkedSeamIndex = -1;
+    private BlockPathPlan parkedSeededFrom;
     /** The window target the last pre-plan was attempted for — one attempt per target (churn guard). */
     private BlockPos preplanAttemptedTarget;
 
@@ -91,10 +124,16 @@ final class AsyncWindowSearch {
      * (latest-wins cancel), and a boundary replan ({@code !preplan}) drops the parked precompute — the
      * parked plan was predicated on the PREVIOUS plan's end cell and remaining edits, both stale once a
      * new search replaces that plan. Without this, a stale parked plan could later overwrite the fresh
-     * adoption (review finding).
+     * adoption (review finding). A seam-SEEDED boundary replan ({@code seeded}) rides the normal pending
+     * slot (DESIGN-replan-handoff.md §4) — the drop-parked rule above is exactly the "a parked P4 for the
+     * same target is dropped when a seeded boundary replan is submitted" interaction §4 names.
+     *
+     * @param seeded     whether this is a seam-seeded mid-motion replan (result PARKS — §5)
+     * @param seededFrom the executing plan the seam was walked on ({@code null} unless seeded)
+     * @param seamIndex  the seam's waypoint index on {@code seededFrom} ({@code -1} unless seeded)
      */
     void submit(SearchRequest request, BlockPos fromFloor, BlockPos target, boolean preplan,
-                boolean suspect) {
+                boolean suspect, boolean seeded, BlockPathPlan seededFrom, int seamIndex) {
         if (pending != null) pending.cancel();
         if (!preplan) parkedPlan = null;
         pending = executor.submit(request);
@@ -102,6 +141,9 @@ final class AsyncWindowSearch {
         pendingTarget = target;
         pendingPreplan = preplan;
         pendingSuspect = suspect;
+        pendingSeeded = seeded;
+        pendingSeededFrom = seededFrom;
+        pendingSeamIndex = seamIndex;
     }
 
     /** Whether the outstanding search (in flight OR finished-but-undrained — {@link #pending} lives
@@ -140,6 +182,9 @@ final class AsyncWindowSearch {
      *       searches for real when the bot arrives. Either way {@link Drain#NONE}.</li>
      *   <li><b>Rejected</b> handle (executor hiccup): {@link Drain#RETRY} for a boundary replan; for a
      *       pre-plan the attempt flag is cleared (the attempt didn't run; allow another) → NONE.</li>
+     *   <li><b>Seam-seeded</b> boundary result (DESIGN-replan-handoff.md §5): a found plan PARKS
+     *       ({@link Drain#PARKED}) for {@link #pollSeededParked}'s four-case adoption; a moved window
+     *       target → RETRY; a {@code null} plan → RESULT (BLOCKED — the repair owns it).</li>
      * </ul>
      */
     Drain drainPending(BlockPos actualFloor, BlockPos currentTarget, int startMode, boolean fluidAnchor) {
@@ -151,6 +196,9 @@ final class AsyncWindowSearch {
         final boolean preplan = pendingPreplan;
         final BlockPos from = pendingStart;
         final BlockPos toward = pendingTarget;
+        final boolean seeded = pendingSeeded;
+        final int seamIdx = pendingSeamIndex;
+        final BlockPathPlan seededFrom = pendingSeededFrom;
         lastDrainSuspect = pendingSuspect; // a RETRY resubmit inherits the drained search's suspicion
         if (done.wasRejected()) {
             if (preplan) {
@@ -165,8 +213,40 @@ final class AsyncWindowSearch {
                 parkedPartial = done.wasPartial();
                 parkedStart = from;
                 parkedTarget = toward;
+                parkedSeeded = false; // a P4 pre-plan park — pollParked owns it, as ever
             }
             return Drain.NONE;
+        }
+        if (seeded) {
+            // SEAM-SEEDED boundary result (DESIGN-replan-handoff.md §5): the search started from a FUTURE
+            // settled cell (the horizon seam), so the walk-outrun drift test below does not apply — the
+            // bot is legitimately still BEHIND the seam at drain time. A found plan PARKS; adoption runs
+            // through pollSeededParked's four ordered cases at settled boundaries. A moved window target
+            // makes the seed stale → RETRY (plan from where we really are, the standard recovery). A
+            // null plan carries no frame to park and passes through as a normal BLOCKED result — the
+            // repair owns it, exactly the sync path's semantics.
+            if (!toward.equals(currentTarget)) {
+                return Drain.RETRY;
+            }
+            if (done.plan() == null) {
+                resultPlan = null;
+                resultPartial = done.wasPartial();
+                resultExpansions = done.expansions();
+                resultBudgetHit = done.wasBudgetHit();
+                resultRealized = done.realizedCrossings();
+                resultStart = from;
+                return Drain.RESULT;
+            }
+            parkedPlan = done.plan();
+            parkedPartial = done.wasPartial();
+            parkedStart = from;
+            parkedTarget = toward;
+            parkedSeeded = true;
+            parkedExpansions = done.expansions();
+            parkedBudgetHit = done.wasBudgetHit();
+            parkedSeamIndex = seamIdx;
+            parkedSeededFrom = seededFrom;
+            return Drain.PARKED;
         }
         // Adoption-seam OUTER box scaled to the configured search budget (owner 2026-07-31): a bot that
         // keeps walking the old route during a long search legitimately covers ~sprint-speed × budget
@@ -211,6 +291,9 @@ final class AsyncWindowSearch {
         if (parkedPlan == null) {
             return false;
         }
+        if (parkedSeeded) {
+            return false; // a §5 seeded result adopts only via pollSeededParked's four ordered cases
+        }
         if (!currentTarget.equals(parkedTarget)) {
             parkedPlan = null; // the window moved on while we walked — stale precompute, drop it
             return false;
@@ -250,10 +333,19 @@ final class AsyncWindowSearch {
      * window rather than exact block-Y).
      */
     private static boolean onStartOrPlan(BlockPathPlan plan, BlockPos searchStart, BlockPos floor, int yTol) {
-        if (searchStart.getX() == floor.getX() && searchStart.getZ() == floor.getZ()
-                && Math.abs(searchStart.getY() - floor.getY()) <= yTol) {
-            return true;
-        }
+        return startMatches(searchStart, floor, yTol) || onPlanBody(plan, floor, yTol);
+    }
+
+    /** The "floor IS the searched start" arm — exact X/Z, Y within {@code yTol} (the §5 case-2 test:
+     *  the adopted plan's step-0 frame is exactly the bot's stand cell). */
+    private static boolean startMatches(BlockPos searchStart, BlockPos floor, int yTol) {
+        return searchStart.getX() == floor.getX() && searchStart.getZ() == floor.getZ()
+                && Math.abs(searchStart.getY() - floor.getY()) <= yTol;
+    }
+
+    /** The "floor lies ON the plan" arm — some step's search-native floor matches (the §5 case-3 test:
+     *  the follower's reached-scan enters mid-plan there on its first steer tick). */
+    private static boolean onPlanBody(BlockPathPlan plan, BlockPos floor, int yTol) {
         final int n = plan.size();
         for (int i = 0; i < n; i++) {
             final BlockPos wp = plan.waypoint(i);
@@ -263,6 +355,134 @@ final class AsyncWindowSearch {
             }
         }
         return false;
+    }
+
+    /**
+     * The §5 four-case adoption pump for a parked seam-SEEDED boundary result
+     * (DESIGN-replan-handoff.md §5, R2–R4) — the parked-P4 contract generalized. Run at every settled
+     * boundary; cases in order:
+     * <ol>
+     *   <li><b>PARK</b> (→ {@code KEEP}): the bot has not settled at the seam — outside the
+     *       budget-scaled Chebyshev tolerance (the walk-outrun bound, the same formula as
+     *       {@link #drainPending}'s), or inside it but still approaching along the old plan. The result
+     *       waits for a later boundary.</li>
+     *   <li><b>ADOPT</b>: the bot settled AT the seam ({@code actualFloor} IS the searched start,
+     *       fluid yTol ±1) — gated on the new plan's step-0 {@link Movement#entryReady} accepting the
+     *       bot's LIVE pose at the feet cell it actually occupies (settled at the seam floor, that IS
+     *       the plan's step-0 frame — provably always-true for the current movement set, §5; a future
+     *       directional/velocity entry test is honored automatically). Refusal →
+     *       {@code ENTRY_REFUSED}: stay parked one more boundary (fall back to case 1).</li>
+     *   <li><b>FAST_FORWARD</b>: past the seam but the floor lies ON the plan — install; the follower's
+     *       reached-scan enters mid-plan on its first steer tick ("advance SKIPPED").</li>
+     *   <li><b>PANIC</b>: past the seam and NOT on the plan — the parked result is dropped here; the
+     *       driver drops the incumbent plan too and resubmits from rest (R4).</li>
+     * </ol>
+     * A moved window target drops the stale result (the P4 rule). {@code ADOPT}/{@code FAST_FORWARD}
+     * fill the result out-fields — with the seeded search's REAL expansion telemetry — and clear the
+     * slot; the driver installs through {@code resultStatus} exactly like a drained result.
+     */
+    SeamVerdict pollSeededParked(BotSteering bot, BlockPos actualFloor, BlockPos currentTarget,
+                                 int startMode, boolean fluidAnchor, boolean pastSeam) {
+        if (parkedPlan == null || !parkedSeeded) {
+            return SeamVerdict.KEEP;
+        }
+        if (!currentTarget.equals(parkedTarget)) {
+            parkedPlan = null; // the window moved on while we walked — stale, drop (the P4 rule)
+            return SeamVerdict.KEEP;
+        }
+        final int yTol = fluidAnchor ? 1 : 0;
+        if (startMatches(parkedStart, actualFloor, yTol)) {
+            if (bot != null && !parkedPlan.isEmpty()
+                    && !parkedPlan.movement(0).entryReady(bot, bot.footX(), bot.footY(), bot.footZ())) {
+                return SeamVerdict.ENTRY_REFUSED;
+            }
+            adoptParkedSeeded();
+            return SeamVerdict.ADOPT;
+        }
+        final long budgetNanos = executor == null ? 0L : executor.budgetNanos();
+        final int adoptTol = Math.max(SpliceSeam.DEFAULT_TOLERANCE_CHEB,
+                (int) Math.ceil(budgetNanos * 1e-9 * 6.0)); // ~6 b/s — drainPending's walk-outrun bound
+        if (!new SpliceSeam(parkedStart, startMode, EditSnapshot.EMPTY, adoptTol).accepts(actualFloor)) {
+            return SeamVerdict.KEEP; // case 1 — not near the seam yet (or drifted wholly away)
+        }
+        // R3's precondition is LOAD-BEARING (owner ruling 2026-08-18): fast-forward is for a bot that has
+        // advanced PAST the seam, never before it. A seam-seeded plan legitimately DOUBLES BACK through the
+        // pre-seam cells the bot is still walking (the ReplanCourse reversal: seam (75), plan (74)->(73)->west
+        // over a bot at (73)), so a pre-seam body entry installs a cursor-0 step whose arrival planes straddle
+        // the bot mid-cell — no waypoint ever reads reached, the cursor pins at 0, and the follower stands in a
+        // yaw-flapping limit cycle (convicted by exec dump 2026-08-18: ±90° alternation at x≈73.87 for 858
+        // ticks). Pre-seam + on-plan = case 1: stay parked, walk the old plan to the seam, ADOPT there with the
+        // full-cell reversal runway of §2.
+        if (pastSeam && onPlanBody(parkedPlan, actualFloor, yTol)) {
+            adoptParkedSeeded();
+            return SeamVerdict.FAST_FORWARD;
+        }
+        if (pastSeam) {
+            parkedPlan = null; // case 4 — the driver nulls the incumbent and resubmits from rest
+            return SeamVerdict.PANIC;
+        }
+        return SeamVerdict.KEEP; // still BEFORE the seam (on the new plan's body or off it) — keep approaching
+    }
+
+    /** Fill the result out-fields from the parked SEEDED slot (real telemetry) and clear it. */
+    private void adoptParkedSeeded() {
+        resultPlan = parkedPlan;
+        resultPartial = parkedPartial;
+        resultExpansions = parkedExpansions;
+        resultBudgetHit = parkedBudgetHit;
+        resultRealized = null; // never null-plan ⇒ never BLOCKED ⇒ no blame input
+        resultStart = parkedStart;
+        parkedPlan = null;
+    }
+
+    /**
+     * Park a SYNC seeded result (DESIGN-replan-handoff.md §5): sync mode has no pending handle — the
+     * driver computed the plan inline — but a seeded result must still install only via the four ordered
+     * adoption cases at a settled boundary, never inline mid-move (the same-tick install under a bot
+     * still moving inside the settled cell IS the §1 wedge). So it enters the same parked slot the async
+     * drain fills. Null plans never come here (no frame to park — the driver installs them as BLOCKED
+     * inline, mirroring {@link #drainPending}'s null-plan pass-through).
+     */
+    void parkSeededResult(BlockPathPlan plan, boolean partial, int expansions, boolean budgetHit,
+                          BlockPos fromFloor, BlockPos target, BlockPathPlan seededFrom, int seamIndex) {
+        parkedPlan = plan;
+        parkedPartial = partial;
+        parkedStart = fromFloor;
+        parkedTarget = target;
+        parkedSeeded = true;
+        parkedExpansions = expansions;
+        parkedBudgetHit = budgetHit;
+        parkedSeamIndex = seamIndex;
+        parkedSeededFrom = seededFrom;
+    }
+
+    /** Whether the parked slot holds a §5 seeded boundary result (vs a P4 pre-plan). */
+    boolean seededParked() {
+        return parkedPlan != null && parkedSeeded;
+    }
+
+    /** The parked result's searched-from cell (the seam) — diagnostic read for the park log line. */
+    BlockPos parkedStartCell() {
+        return parkedStart;
+    }
+
+    /** The seam's waypoint index on {@link #parkedSeededFrom} — the §5 past-the-seam discriminator. */
+    int parkedSeamIndex() {
+        return parkedSeamIndex;
+    }
+
+    /** The executing plan the parked seeded result's seam was walked on (identity compare only). */
+    BlockPathPlan parkedSeededFrom() {
+        return parkedSeededFrom;
+    }
+
+    /** The seam index of the outstanding seam-SEEDED search (in flight or finished-but-undrained) whose
+     *  seam was walked on {@code plan}, or {@code -1} — the follower's rescoped CAUTION hold keys on
+     *  this (DESIGN-replan-handoff.md §7: the only step whose outcome a pending seeded search can
+     *  change is the committing step AT the seam). */
+    int pendingSeededSeamFor(BlockPathPlan plan) {
+        return pending != null && pendingSeeded && plan != null && pendingSeededFrom == plan
+                ? pendingSeamIndex : -1;
     }
 
     /** The plan of the last {@link Drain#RESULT} / accepted {@link #pollParked} ({@code null} ⇒ BLOCKED). */

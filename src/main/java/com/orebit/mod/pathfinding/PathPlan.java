@@ -8,6 +8,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
 import com.orebit.mod.pathfinding.async.PlanExecutor;
 import com.orebit.mod.pathfinding.async.SearchRequest;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
+import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.ClutchModel;
 import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
@@ -308,13 +309,33 @@ public final class PathPlan {
      *  the async result). */
     boolean lastPlanPartial;
     private PathStatus status;
-    /** The bot's last reported floor cell (the block-A* start for the next replan). */
+    /** The bot's last reported floor cell. The block-A* start for the next replan — EXCEPT a
+     *  seam-SEEDED mid-motion re-search, which starts from the horizon seam instead
+     *  (DESIGN-replan-handoff.md §4); every OTHER reader (the forward-slide tolerance test,
+     *  {@link WindowTargeting#target}, {@link #cuboidCapBox}, {@link #regionFieldFor}) stays
+     *  live-anchored on this cell. */
     BlockPos botFloor;
     /** The bot's current movement mode ({@link BlockPathfinder#MODE_AUTO} = derive from geometry, else the
      *  live pose STANDING/PRONE) — threaded into every windowed search so a replan mid-sprint-swim keeps the
      *  prone state instead of re-deriving STANDING from a buoyancy bob and re-initiating. Updated per tick by
      *  {@link #onBotMoved}. */
     private int startMode = BlockPathfinder.MODE_AUTO;
+    // ---- horizon-seam handoff (DESIGN-replan-handoff.md §3/§4/§5) — refreshed by every onBotMoved ----
+    /** The live bot's steering seam, for the case-2 adoption's step-0 {@code entryReady} gate (§5);
+     *  {@code null} for every headless/no-seam caller (the gate is then skipped — it is vacuously true
+     *  for the current movement set anyway). */
+    private BotSteering seamBot;
+    /** The plan the FOLLOWER is walking (identity guard: {@link #seamIndex} is meaningful only while
+     *  {@link #blockPlan} is this same object — an install between handoffs invalidates the walk) and
+     *  the §3 walk's seam waypoint index on it; {@code -1} = no walkable incumbent (planless/consumed)
+     *  → every launch site seeds from {@link #botFloor} exactly as before. */
+    private BlockPathPlan seamPlan;
+    private int seamIndex = -1;
+    /** The follower's first not-yet-applied step ({@code lastEditedIndex + 1}) — the lower bound of the
+     *  §4 SUB-RANGE baseline fold {@code EditSnapshot.fromSteps(plan, first, seam)}. */
+    private int seamFirstUnedited;
+    /** The follower's live waypoint cursor — the §5 case-4 past-the-seam discriminator. */
+    private int seamCursor = -1;
     /**
      * The current window's block target + corridor (set by {@link #replanBlock}), exposed via
      * {@link #currentWindowTarget()} / {@link #currentCorridor()} so {@code /bot trace} can re-run the SAME
@@ -648,6 +669,31 @@ public final class PathPlan {
      * region neither retreats {@code committedIndex} nor replans.
      */
     public void onBotMoved(BlockPos botFloor, int startMode, boolean fluidAnchor) {
+        onBotMoved(botFloor, startMode, fluidAnchor, null, null, -1, 0, -1, true);
+    }
+
+    /**
+     * As above, additionally carrying the follower's horizon-seam handoff (DESIGN-replan-handoff.md
+     * §3/§4/§5): {@code bot} is the live steering seam (the case-2 adoption's step-0 {@code entryReady}
+     * gate), {@code followerPlan}/{@code seamIndex} name the §3 walk's seam waypoint on the plan the
+     * follower is walking ({@code -1} = no walkable incumbent — planless or consumed — so every launch
+     * site seeds from {@code botFloor} exactly as before), {@code firstUneditedStep} is the follower's
+     * first not-yet-applied step (the §4 sub-range fold's lower bound), and {@code followerCursor} is
+     * the live waypoint cursor (the §5 case-4 past-the-seam discriminator). {@code restForLaunch} is the
+     * §10 rest gate ({@code BotSteering.atRest}): it gates ONLY the blocked-null (S3) relaunch below —
+     * the one launch in this method anchored at the live {@code botFloor} — deferring it until the bot's
+     * carry has stopped (the trigger, a null plan, persists; the follower re-anchors its settled floor
+     * at rest, so the deferred launch always re-fires). The three-arg form is the headless/no-seam entry
+     * and behaves byte-identically to before (rest {@code true}).
+     */
+    public void onBotMoved(BlockPos botFloor, int startMode, boolean fluidAnchor, BotSteering bot,
+                           BlockPathPlan followerPlan, int seamIndex, int firstUneditedStep,
+                           int followerCursor, boolean restForLaunch) {
+        this.seamBot = bot;
+        this.seamPlan = followerPlan;
+        this.seamIndex = seamIndex;
+        this.seamFirstUnedited = firstUneditedStep;
+        this.seamCursor = followerCursor;
         this.botFloor = botFloor;
         this.startMode = startMode; // the bot's live pose, used by the next windowed search (keeps PRONE while swimming)
 
@@ -657,8 +703,10 @@ public final class PathPlan {
 
         // Async result drain (DESIGN-background-pathfinding.md §5): the caller only invokes onBotMoved at
         // a settled boundary, so adopting here IS the boundary-gated adoption the design requires. No-op
-        // when sync or nothing is in flight (one null compare).
-        if (executor != null) {
+        // when sync or nothing is in flight (one null compare). A parked SEAM-SEEDED result also pumps in
+        // SYNC mode (DESIGN-replan-handoff.md §5 — the sync park is what closes the §1 wedge), which the
+        // seededParked() disjunct covers; a sync plan with nothing parked still never enters.
+        if (executor != null || async.seededParked()) {
             pollPending(botFloor, fluidAnchor);
         }
 
@@ -773,7 +821,11 @@ public final class PathPlan {
         // a null plan is BLOCKED, which the online repair owns. s52: COMMIT_TICKS deleted.)
 
         // Terrain changed under us (BLOCKED) — recompute the current window's block plan from where we are.
-        if (blockPlan == null) {
+        // §10 REST GATE (restForLaunch): this is the sync-and-async planless relaunch site — it seeds AND
+        // (sync) installs anchored at the live botFloor, so it defers until the bot is at rest. This is
+        // also PANIC's deferred resubmit (§10: PANIC nulls only; the follower's WAIT coasts the bot to
+        // rest, rest re-anchors the settled floor, and this site fires from the true rest cell).
+        if (blockPlan == null && restForLaunch) {
             if (Debug.ENABLED) {
                 OrebitCommon.LOGGER.info("[Orebit] block re-search: site=blocked-null bot=({},{},{})",
                         botFloor.getX(), botFloor.getY(), botFloor.getZ());
@@ -1339,6 +1391,31 @@ public final class PathPlan {
         // RETURNED null", never "a search is still running". A pending search toward this same target is
         // left alone (the 40-tick refresh timer would otherwise churn resubmits); anything else in flight
         // is superseded (latest-wins).
+        // SEAM SEEDING (DESIGN-replan-handoff.md §4): a re-search launched while an incumbent plan is
+        // executing starts from the horizon seam — the follower-chosen waypoint the bot settles on after
+        // a max-budget search completes (§3), carried as the plan's search start (blockPlanStart, no new
+        // identity concept) — with the §4 SUB-RANGE baseline fold: only the edits of steps up to and
+        // including the seam (the whole-suffix fold would inject phantom edits from steps the new plan
+        // never executes). The one condition implements the §4 per-site table: S1 (ctor — no incumbent),
+        // S3 (blocked-null), S6 (repair) and S5-consumed (follower hands seam -1) all seed from botFloor
+        // exactly as before; S2 forward-slide, S4 cascade-swap, S5-impacted and S7 retry seed from the
+        // seam. The identity guard (seamPlan == blockPlan) additionally un-seeds any launch after an
+        // install this tick already replaced the walked plan. botFloor's OTHER readers — the
+        // forward-slide tolerance above, WindowTargeting, cuboidCapBox, regionFieldFor — stay
+        // live-anchored: only the search start changes (the split P4 already demonstrates).
+        final boolean seeded = blockPlan != null && seamPlan == blockPlan
+                && seamIndex >= 0 && seamIndex < blockPlan.size();
+        final BlockPos searchStart = seeded ? blockPlan.floor(seamIndex) : botFloor;
+        final EditSnapshot searchBaseline = seeded
+                ? EditSnapshot.fromSteps(blockPlan, seamFirstUnedited, seamIndex)
+                : baseline;
+        if (Debug.ENABLED && seeded) {
+            OrebitCommon.LOGGER.info(
+                    "[Orebit] seam-seed: k={} start=({},{},{}) botFloor=({},{},{}) fold=[{}..{}]",
+                    seamIndex, searchStart.getX(), searchStart.getY(), searchStart.getZ(),
+                    botFloor.getX(), botFloor.getY(), botFloor.getZ(), seamFirstUnedited, seamIndex);
+        }
+
         if (executor != null) {
             if (async.pendingSearchToward(target)) {
                 // A boundary replan toward this same target is already in flight → skip. An in-flight
@@ -1346,29 +1423,54 @@ public final class PathPlan {
                 // 40-tick refresh timer would otherwise routinely kill the precompute — review finding;
                 // the seam-reject → replan-from-actual fallback covers a stall that invalidated the
                 // prediction, one round-trip later). Only a genuinely planless bot preempts a pre-plan.
+                // (This same skip is what keeps a SEEDED search alive through a consumed-plan
+                // refreshWindow at the terminus — DESIGN-replan-handoff.md §5, the consumed-before-
+                // landing race — and what makes the post-PANIC blocked-null firing harmless.)
                 if (!async.pendingIsPreplan() || blockPlan != null) return;
             }
             if (blockPlan != null && async.parkedFor(target)) {
                 return; // the precomputed result is already parked for this target — arrival adopts it
             }
-            submit(botFloor, target, cuboidCap, baseline, false, suspect);
+            submit(searchStart, target, cuboidCap, searchBaseline, false, suspect,
+                    seeded, seeded ? blockPlan : null, seeded ? seamIndex : -1);
             if (status != PathStatus.RUNNING) status = PathStatus.RUNNING;
             return;
         }
 
         // confineBound = null (unconfined), cuboidBound = the growth cap. startMode = the bot's live pose (so a
         // replan mid-sprint-swim stays PRONE instead of re-deriving STANDING from a bob and re-initiating).
-        // baseline = the splice seed (null for every non-spliced plan). The grid view is built HERE, below
-        // the async branch — in async mode the worker builds its own background view, so the tick thread
-        // must not pay the per-search view construction twice (SHORT-guard discipline).
+        // baseline = the splice seed (null for every non-spliced plan; the §4 sub-range fold when seeded).
+        // The grid view is built HERE, below the async branch — in async mode the worker builds its own
+        // background view, so the tick thread must not pay the per-search view construction twice
+        // (SHORT-guard discipline).
         final NavGridView grid = new NavGridView(level);
-        this.blockPlan = BlockPathfinder.findPath(grid, botFloor, target, caps, null, cuboidCap, inventory,
-                startMode, baseline, 0L, regionFieldFor(target), tolXZFor(target), tolYFor(target));
-        this.blockPlanStart = botFloor; // this plan's implicit step −1 (see the field's javadoc)
+        final BlockPathPlan found = BlockPathfinder.findPath(grid, searchStart, target, caps, null,
+                cuboidCap, inventory, startMode, searchBaseline, 0L, regionFieldFor(target),
+                tolXZFor(target), tolYFor(target));
+        if (seeded && found != null) {
+            // SYNC PARK (DESIGN-replan-handoff.md §5): a seeded result — sync exactly like async —
+            // installs only via the four ordered adoption cases at a settled boundary, never inline
+            // mid-move: the same-tick install under a bot still moving inside the settled cell IS the
+            // §1 wedge (the run was sync). The incumbent keeps walking; pollPending adopts at the seam.
+            // A null result carries no frame to park and falls through to the normal BLOCKED install
+            // below (the repair owns it) — the sync mirror of drainPending's null-plan pass-through.
+            async.parkSeededResult(found, BlockPathfinder.lastWasPartial(),
+                    BlockPathfinder.lastExpansions(), BlockPathfinder.lastWasBudgetHit(),
+                    searchStart, target, blockPlan, seamIndex);
+            if (Debug.ENABLED) {
+                OrebitCommon.LOGGER.info(
+                        "[Orebit] seam-park: sync seeded result parked seam=({},{},{}) {}wp",
+                        searchStart.getX(), searchStart.getY(), searchStart.getZ(), found.size());
+            }
+            if (status != PathStatus.RUNNING) status = PathStatus.RUNNING;
+            return;
+        }
+        this.blockPlan = found;
+        this.blockPlanStart = searchStart; // this plan's implicit step −1 (== botFloor unless seeded-null)
         this.lastPlanPartial = blockPlan != null && BlockPathfinder.lastWasPartial();
         this.status = resultStatus(blockPlan, BlockPathfinder.lastExpansions(),
                 BlockPathfinder.lastWasPartial(), BlockPathfinder.lastWasBudgetHit(),
-                blockPlan == null ? BlockPathfinder.lastRealizedCrossings() : null, botFloor);
+                blockPlan == null ? BlockPathfinder.lastRealizedCrossings() : null, searchStart);
         if (Debug.ENABLED && blockPlan != null) {
             logBlockPlan();
         }
@@ -1500,6 +1602,19 @@ public final class PathPlan {
         return executor != null && async.searchPending();
     }
 
+    /**
+     * The seam waypoint index of the outstanding seam-SEEDED window search (in flight or
+     * finished-but-undrained), or {@code -1} when none — identity-guarded against the CURRENT
+     * {@link #blockPlan}, so the index is only ever read against the plan the §3 walk chose it on.
+     * The follower's rescoped CAUTION hold keys on this (DESIGN-replan-handoff.md §7): the only step
+     * whose outcome a pending seeded search can change is the committing step AT the seam. Always
+     * {@code -1} in sync mode — a sync seeded search parks within its own tick, so no doubt window
+     * exists.
+     */
+    public int seededSearchPendingSeam() {
+        return executor != null ? async.pendingSeededSeamFor(blockPlan) : -1;
+    }
+
     /** The failing search's start region as {@code (rx,ry,rz)} (minY-rebased level-0 region coords, the
      *  skeleton convention), or {@code "?"} when unknown — diagnostic read for the repair log line. */
     public String blockedStartRegionDesc() {
@@ -1512,13 +1627,15 @@ public final class PathPlan {
     /** Build this submission's {@link SearchRequest} and hand it to the {@link AsyncWindowSearch mailbox}
      *  (which supersedes any in-flight search and, for a boundary replan, drops the parked pre-plan). */
     private void submit(BlockPos fromFloor, BlockPos target, RegionBound cuboidCap,
-                        EditSnapshot seed, boolean preplan, boolean suspect) {
+                        EditSnapshot seed, boolean preplan, boolean suspect,
+                        boolean seeded, BlockPathPlan seededFrom, int seamIdx) {
         // regionFieldFor(target): the snapshot must carry the field rooted at THIS submission's target —
         // covers both the boundary replan and the P4 pre-plan (which targets windowTargetPos, so the root
         // matches the cached field from the last replanBlock and this is a cheap equals hit).
         async.submit(new SearchRequest(level, fromFloor, target, caps, inventory, startMode,
                 cuboidCap, seed, executor.budgetNanos(), regionFieldFor(target),
-                tolXZFor(target), tolYFor(target)), fromFloor, target, preplan, suspect);
+                tolXZFor(target), tolYFor(target)), fromFloor, target, preplan, suspect,
+                seeded, seededFrom, seamIdx);
     }
 
     /** The goal-arrival tolerance for a search toward {@code target}: the caller's {@link #goalTolXZ} when
@@ -1553,6 +1670,9 @@ public final class PathPlan {
      *   <li><b>Pre-plan</b> result (P4): PARK it — the bot hasn't reached the predicted start yet. Each
      *       boundary visit re-tests the parked seam; on accept it's adopted with no search pause at all,
      *       on target-change it's dropped (the window moved on).</li>
+     *   <li><b>Seam-seeded</b> result (DESIGN-replan-handoff.md §5, sync AND async): PARKS at drain, then
+     *       each boundary runs the four ordered adoption cases — PARK / ADOPT-at-seam (step-0
+     *       {@code entryReady}-gated) / FAST-FORWARD / PANIC (drop plan+result, resubmit from rest).</li>
      * </ul>
      */
     private void pollPending(BlockPos actualFloor, boolean fluidAnchor) {
@@ -1561,6 +1681,15 @@ public final class PathPlan {
                 // Executor hiccup / drifted past seam tolerance / window moved — plan from where we
                 // really are (the mailbox never decides; see AsyncWindowSearch.Drain).
                 replanBlock(async.lastDrainSuspect()); // a retried suspect search stays suspect
+                break;
+            case PARKED:
+                // A seam-SEEDED boundary result finished and PARKED (DESIGN-replan-handoff.md §5, R2) —
+                // nothing installs now; the four-case pump below adopts it at the seam.
+                if (Debug.ENABLED) {
+                    final BlockPos ps = async.parkedStartCell();
+                    OrebitCommon.LOGGER.info("[Orebit] seam-park: seeded result parked seam=({},{},{})",
+                            ps.getX(), ps.getY(), ps.getZ());
+                }
                 break;
             case RESULT:
                 this.blockPlan = async.resultPlan();
@@ -1574,6 +1703,68 @@ public final class PathPlan {
                 break;
             default: // NONE — nothing finished / pre-plan parked or dropped internally
                 break;
+        }
+        if (async.seededParked()) {
+            // The four ordered adoption cases for a parked SEAM-SEEDED result (DESIGN-replan-handoff.md
+            // §5, R2–R4) — the geometric tests live in the mailbox (pollSeededParked); the DECISIONS
+            // (install / drop-and-resubmit) live here, keeping the driver the sole writer of
+            // blockPlan/lastPlanPartial/status. pastSeam is cursor-derived: the follower's live waypoint
+            // cursor has advanced beyond the seam's index on the SAME plan object the walk chose it on.
+            final boolean pastSeam = seamPlan != null && async.parkedSeededFrom() == seamPlan
+                    && seamCursor > async.parkedSeamIndex();
+            final AsyncWindowSearch.SeamVerdict verdict = async.pollSeededParked(seamBot, actualFloor,
+                    windowTargetPos, startMode, fluidAnchor, pastSeam);
+            switch (verdict) {
+                case ADOPT:        // §5 case 2 — settled AT the seam: standard window-swap install
+                case FAST_FORWARD: // §5 case 3 — past the seam but ON the plan: reached-scan enters mid-plan
+                    this.blockPlan = async.resultPlan();
+                    this.blockPlanStart = async.resultStart(); // the seam — see blockPlanStart's javadoc
+                    this.lastPlanPartial = async.resultPartial();
+                    this.status = resultStatus(blockPlan, async.resultExpansions(),
+                            async.resultPartial(), async.resultBudgetHit(), null, // parked plans are never null
+                            async.resultStart());
+                    if (Debug.ENABLED) {
+                        OrebitCommon.LOGGER.info("[Orebit] seam-adopt {}: bot=({},{},{}) seam=({},{},{})",
+                                verdict == AsyncWindowSearch.SeamVerdict.ADOPT ? "ADOPT" : "FAST-FORWARD",
+                                actualFloor.getX(), actualFloor.getY(), actualFloor.getZ(),
+                                async.resultStart().getX(), async.resultStart().getY(),
+                                async.resultStart().getZ());
+                        logBlockPlan();
+                    }
+                    snapshotPlanChunks(); // adopted a seeded result — re-baseline the plan-relevance snapshot
+                    break;
+                case ENTRY_REFUSED:
+                    // §5 case 2's step-0 entryReady gate refused the bot's pose — fall back to case 1:
+                    // stay parked one more boundary (provably unreachable for the current movement set).
+                    if (Debug.ENABLED) {
+                        OrebitCommon.LOGGER.info(
+                                "[Orebit] seam-adopt entryReady REFUSED at ({},{},{}) — staying parked",
+                                actualFloor.getX(), actualFloor.getY(), actualFloor.getZ());
+                    }
+                    break;
+                case PANIC:
+                    // §5 case 4 (R4), §10-amended: past the seam and NOT on the plan — the world told the
+                    // bot its heading is wrong AND it overshot the turn point. Drop the incumbent too and
+                    // stop THERE: null-only, NO immediate resubmit (the old same-tick replanBlock() here
+                    // installed/seeded from a floor the bot could still be sliding out of — the mid-slide
+                    // install hazard). The follower's existing planless WAIT zeroes forward, the bot
+                    // coasts to rest under vanilla physics, rest re-anchors its settled floor, and the
+                    // rest-gated blocked-null site relaunches from the true rest cell (§10 U5) — that IS
+                    // "resubmit from rest", now literally.
+                    this.blockPlan = null;
+                    this.lastPlanPartial = false;
+                    if (status != PathStatus.RUNNING) status = PathStatus.RUNNING;
+                    if (Debug.ENABLED) {
+                        OrebitCommon.LOGGER.info(
+                                "[Orebit] seam-adopt PANIC: bot=({},{},{}) past the seam and off the parked"
+                                        + " plan — dropped plan+result; rest-gated replan follows (§10)",
+                                actualFloor.getX(), actualFloor.getY(), actualFloor.getZ());
+                    }
+                    break;
+                default: // KEEP — §5 case 1: not at the seam yet (or beyond tolerance) — stay parked
+                    break;
+            }
+            return; // the parked slot was seeded — the P4 pump below must not run this tick
         }
         // Parked pre-plan adoption: the no-pause splice. Adopt only when the bot has actually arrived at
         // the predicted start (seam accept) and the window target is still the parked one.
@@ -1614,7 +1805,8 @@ public final class PathPlan {
         if (predictedFloor.equals(botFloor)) return;
         this.startMode = liveMode; // same per-tick pose refresh onBotMoved does; the search seeds from it
         async.markPreplanAttempt(windowTargetPos);
-        submit(predictedFloor, windowTargetPos, cuboidCapBox(windowTargetPos), remainingEdits, true, false);
+        submit(predictedFloor, windowTargetPos, cuboidCapBox(windowTargetPos), remainingEdits, true, false,
+                false, null, -1); // S8 unchanged (DESIGN-replan-handoff.md §4) — a P4 seed is not a seam seed
     }
 
     /**
@@ -1638,12 +1830,32 @@ public final class PathPlan {
         if (executor == null || blockPlan != null) return;
         if (status == PathStatus.COMPLETE || status == PathStatus.FAILED || skeleton == null) return;
         this.botFloor = liveFloor;
+        this.seamPlan = null; // planless: no incumbent to seed from (DESIGN-replan-handoff.md §4) — a
+        this.seamIndex = -1;  // RETRY resubmit from here searches the bot's LIVE cell, as before
         pollPending(liveFloor, fluidAnchor);
     }
 
     /** Stop caring about any in-flight search (the owner cleared/replaced this plan). */
     public void cancelPending() {
         async.cancel();
+    }
+
+    /**
+     * §10 prefix-integrity drop (DESIGN-replan-handoff.md §10, the follower's {@code dropWalkedPlan}
+     * twin): a world edit definitely broke the walked window plan — null it (the PANIC idiom: status
+     * stays RUNNING, nothing else moves) and kill every search anchored on its waypoints. The
+     * {@code async.cancel()} covers BOTH the pending slot (a seam-seeded or P4 search whose start is a
+     * waypoint of the dying plan — left alive it would veto the rest-gated relaunch via the
+     * pending-toward-target skip, then park a result whose seam the bot will never legitimately stand
+     * on) and the parked slot (same staleness, one step later). The relaunch is owned by the rest-gated
+     * planless machinery: WAIT → coast to rest → rest re-anchors the settled floor → the blocked-null
+     * site seeds from the live floor.
+     */
+    public void dropBlockPlan() {
+        this.blockPlan = null;
+        this.lastPlanPartial = false;
+        if (status != PathStatus.RUNNING) status = PathStatus.RUNNING;
+        async.cancel(); // pending AND parked die with the plan — both were anchored on its waypoints
     }
 
     /** Dump the returned block plan's SHAPE (see {@link SkeletonDump#logBlockPlan}). Cold, {@link Debug#ENABLED} only. */
@@ -1908,7 +2120,8 @@ public final class PathPlan {
      * don't replan everything" half: the skeleton is a committed S1→…→Sn route; only the local block path
      * between committed waypoints is re-searched. No-op once COMPLETE/FAILED or when no skeleton was produced.
      *
-     * <p>Drops any parked P4 precompute first (owner ruling 2026-07-30, review finding): a refresh fires
+     * <p>Drops any parked precompute first — P4 or seam-seeded alike (owner ruling 2026-07-30, review
+     * finding; a seeded result's staleness argument is identical — DESIGN-replan-handoff.md §5): a refresh fires
      * only on a CONSUMED or terrain-impacted plan, and this same tick's {@code onBotMoved} already gave the
      * parked plan its adoption test — so a still-parked plan here is one the settled bot can never adopt
      * (it settled off the predicted start and off the parked route) or one computed against stale terrain.
@@ -1931,6 +2144,36 @@ public final class PathPlan {
         if (skeleton == null || status == PathStatus.COMPLETE || status == PathStatus.FAILED) return;
         async.dropParked();
         replanBlock(suspect);
+    }
+
+    /**
+     * The §10 U1 PROMPT plan-impacted replan (DESIGN-replan-handoff.md §10): the follower's edit-epoch
+     * scan just proved a LATER step of the walking plan move-invalidated (U4), so the S5 plan-impacted
+     * re-search fires THE SAME TICK instead of waiting out the 40-tick terrain-recheck debounce — the
+     * exact {@link #refreshWindow refreshWindow(true)} path the debounced recheck drives, with a FRESH
+     * seam handoff (the caller's U2-clamped {@code horizonSeamIndex} walk at the just-advanced epoch, so
+     * the seeded search can never launch from at-or-past the broken step; the last boundary's stored
+     * handoff would be stale mid-move). Afterwards the plan-relevance snapshot is re-baselined —
+     * {@link #snapshotPlanChunks} — so the debounced backstop cannot double-fire on this same edit
+     * (the seeded/async launch paths inside {@link #replanBlock} return before the normal install-time
+     * re-baseline; on the sync non-seeded install the extra call is an idempotent no-op).
+     *
+     * <p>Parameters mirror {@link #onBotMoved}'s seam handoff: {@code botFloor} is the follower's
+     * settled anchor (the live-anchor reader set — targeting, cap box, forward-slide tolerance — keeps
+     * its existing split from the search start).
+     */
+    public void promptImpactedReplan(BlockPos botFloor, int startMode, BotSteering bot,
+                                     BlockPathPlan followerPlan, int seamIndex, int firstUneditedStep,
+                                     int followerCursor) {
+        this.seamBot = bot;
+        this.seamPlan = followerPlan;
+        this.seamIndex = seamIndex;
+        this.seamFirstUnedited = firstUneditedStep;
+        this.seamCursor = followerCursor;
+        this.botFloor = botFloor;
+        this.startMode = startMode;
+        refreshWindow(true);
+        snapshotPlanChunks(); // re-baseline: the debounced backstop must not re-fire on this same edit
     }
 
     /**
@@ -2102,6 +2345,22 @@ public final class PathPlan {
         }
         lastProactiveSignal = sig;
         proactiveSignalValid = true;
+        // COHERENCE at the probe's anchors (owner ruling 2026-08-18 — the ReplanCourse reversal false seal).
+        // The probe's two seeds (the goal anchor and the inside observer) resolve their fragment by
+        // re-flooding the LIVE NavSection (containedFragment → startFragmentByFlood), while the flood walks
+        // the STORED RegionFragments records — and an edit whose budgeted HpaMaintenance drain hasn't
+        // reached the leaf yet leaves the two a GENERATION apart. A fresh label read against a stale face
+        // table has no faces at all (touchesFace on an out-of-range index), so the flood "closes" at the
+        // seed and manufactures a sealed verdict: goal frag=2 against a 2-fragment record, convicted by the
+        // rtrace SEAL-VERDICT dump 2026-08-18. Maintenance stays BUDGETED for the bulk storms it exists for
+        // (24 regions/chunk × a view-distance edge of chunks); THIS is bounded — exactly the two anchored
+        // leaves, once per genuine probe (post-signal-gate) — so force them to the live generation here.
+        regionGrid.rebuildLeaf(goalRX, goalRY, goalRZ);
+        if (botFloor != null) {
+            regionGrid.rebuildLeaf(RegionAddress.regionX(botFloor.getX(), 0),
+                    RegionAddress.regionY(botFloor.getY(), 0, minY),
+                    RegionAddress.regionZ(botFloor.getZ(), 0));
+        }
         for (int lvl = RegionAddress.MAX_COARSE_LEVEL; lvl >= 0; lvl--) {
             boolean sealed;
             try {
