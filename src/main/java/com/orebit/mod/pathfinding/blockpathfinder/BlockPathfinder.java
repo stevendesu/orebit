@@ -1486,6 +1486,12 @@ public final class BlockPathfinder {
         // floor instead of lossily re-inverting the feet waypoint (which drifts +1 on a break-at-feet step
         // whose solid feet cell reads as a standable floor — PATHOLOGY P1B). X/Z ride the waypoint (equal).
         int[] floorYs = new int[16];
+        // Per-step SEARCH-NATIVE edge cost, parallel to `waypoints` (same growable-primitive pattern):
+        // stepCosts[i] = the g-delta of the A* edge arriving at waypoint i, i.e. the real-tick cost of the
+        // move from waypoint i-1 (or from the search start for i=0). A macro edge re-expanded below divides
+        // its one edge cost uniformly across its j waypoints (macro runs are uniform, so the division is
+        // exact in intent). Feeds the seam-selection horizon walk — DESIGN-replan-handoff.md §3.
+        float[] stepCosts = new float[16];
 
         // Each consecutive (p -> n) pair is one A* edge. A MACRO edge (Pillar/MineDown/Traverse collapsed a
         // uniform run of >1 step into one node, MACRO-IMPLEMENTATION.md §8) is re-expanded HERE into its N
@@ -1502,6 +1508,7 @@ public final class BlockPathfinder {
             int px = nodes.x[p], py = nodes.y[p], pz = nodes.z[p];
             int nx = nodes.x[n], ny = nodes.y[n], nz = nodes.z[n];
             int j = macroSteps(move, nx - px, ny - py, nz - pz);
+            float edgeCost = nodes.g[n] - nodes.g[p]; // per-edge g-delta (start row has g == 0)
 
             if (j <= 1) {
                 // Single waypoint (the historical behaviour): floor cell's top = the bot's stand position.
@@ -1521,21 +1528,24 @@ public final class BlockPathfinder {
                 // inject it into this step's MovePlan (the same route requireDoor takes).
                 edits.add(edge == null ? null : edge.copy());
                 floorYs = pushFloorY(floorYs, waypoints.size() - 1, ny);
+                stepCosts = pushStepCost(stepCosts, waypoints.size() - 1, edgeCost);
                 continue;
             }
 
             // Macro edge: re-expand to j stand positions, slicing the folded edit-set per step by position.
             int ux = Integer.signum(nx - px), uy = Integer.signum(ny - py), uz = Integer.signum(nz - pz);
+            float perStepCost = edgeCost / j; // uniform run → uniform per-step share
             for (int k = 1; k <= j; k++) {
                 int fx = px + ux * k, fy = py + uy * k, fz = pz + uz * k; // floor cell of step k
                 waypoints.add(new BlockPos(fx, feetYOf(grid, fx, fy, fz, edits, edge), fz)); // topY-aware stand position
                 moves.add(move);
                 edits.add(edge == null ? null : sliceStep(edge, fx, fy, fz));
                 floorYs = pushFloorY(floorYs, waypoints.size() - 1, fy);
+                stepCosts = pushStepCost(stepCosts, waypoints.size() - 1, perStepCost);
             }
         }
         return new BlockPathPlan(waypoints, moves, edits, Arrays.copyOf(floorYs, waypoints.size()),
-                nodes.g[reachedRow]);
+                Arrays.copyOf(stepCosts, waypoints.size()), nodes.g[reachedRow]);
     }
 
     /** Append {@code y} at index {@code i} of the growable floor-Y array (doubles on overflow); returns the
@@ -1543,6 +1553,14 @@ public final class BlockPathfinder {
     private static int[] pushFloorY(int[] arr, int i, int y) {
         if (i == arr.length) arr = Arrays.copyOf(arr, arr.length * 2);
         arr[i] = y;
+        return arr;
+    }
+
+    /** {@link #pushFloorY}'s float twin, for the per-step edge costs (DESIGN-replan-handoff.md §3). Cold —
+     *  one call per reconstructed waypoint. */
+    private static float[] pushStepCost(float[] arr, int i, float c) {
+        if (i == arr.length) arr = Arrays.copyOf(arr, arr.length * 2);
+        arr[i] = c;
         return arr;
     }
 

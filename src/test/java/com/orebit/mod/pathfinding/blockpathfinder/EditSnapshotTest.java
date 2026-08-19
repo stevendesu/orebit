@@ -157,6 +157,81 @@ class EditSnapshotTest {
         assertTrue(EditSnapshot.EMPTY.isEmpty());
     }
 
+    // ---- EditSnapshot.fromSteps (the seam-seed sub-range fold, DESIGN-replan-handoff.md §4) -----------
+
+    @Test
+    void subRangeExcludesPhantomEditsPastTheSeam() {
+        // latestStepWinsAcrossSteps' twin with the upper bound at the seam: a search seeded at waypoint 0
+        // must see step 0's BREAK, not step 1's later PLACE — step 1 lies past the seam and will never
+        // execute under the new plan (the phantom-edit exclusion, DESIGN-replan-handoff.md §4).
+        BlockPathPlan plan = planOf(
+                step(new long[] { CELL_A }, new long[0]),
+                step(new long[0], new long[] { CELL_A }));
+
+        EditSnapshot s = EditSnapshot.fromSteps(plan, 0, 0);
+
+        assertEquals(1, s.breakCount(), "the in-range step's BREAK must survive");
+        assertEquals(CELL_A, s.breakAt(0));
+        assertEquals(0, s.placeCount(), "the past-the-seam PLACE is a phantom edit");
+    }
+
+    @Test
+    void latestStepInRangeWinsAcrossTheRangeBoundary() {
+        // Steps 0 (break A) and 1 (place A) both in range, step 2 (break A again) excluded: the fold
+        // resolves A to the LATEST IN-RANGE edit — step 1's place — not step 2's.
+        BlockPathPlan plan = planOf(
+                step(new long[] { CELL_A }, new long[0]),
+                step(new long[0], new long[] { CELL_A }),
+                step(new long[] { CELL_A }, new long[0]));
+
+        EditSnapshot s = EditSnapshot.fromSteps(plan, 0, 1);
+
+        assertEquals(1, s.placeCount(), "step 1's PLACE is the latest edit IN RANGE");
+        assertEquals(CELL_A, s.placeAt(0));
+        assertEquals(0, s.breakCount());
+    }
+
+    @Test
+    void fromStepsEmptyAndClampedRanges() {
+        BlockPathPlan plan = planOf(
+                step(new long[] { CELL_A }, new long[0]),
+                step(new long[] { CELL_B }, new long[0]));
+        assertSame(EditSnapshot.EMPTY, EditSnapshot.fromSteps(null, 0, 0));
+        assertSame(EditSnapshot.EMPTY, EditSnapshot.fromSteps(plan, 1, 0), "inverted range");
+        assertSame(EditSnapshot.EMPTY, EditSnapshot.fromSteps(plan, 2, 5), "fromStep past the end");
+        // toStep past the end clamps to the last step — identical to fromRemainingSteps.
+        EditSnapshot clamped = EditSnapshot.fromSteps(plan, 0, 99);
+        assertEquals(2, clamped.breakCount(), "toStep clamps to size-1");
+    }
+
+    @Test
+    void fromStepsOverTheFullSuffixByteMatchesFromRemainingSteps() {
+        // fromSteps(plan, from, size()-1) IS fromRemainingSteps(plan, from) — same loop, same latest-wins
+        // dedup, same entry ORDER, same per-break fold kinds. Exercised over a suffix that carries a
+        // wet/dry kind mix, a place, and a cross-step duplicate cell (step 2 re-edits step 1's CELL_A),
+        // behind an executed prefix step both folds must drop.
+        StepEdits executed = step(new long[] { CELL_D }, new long[0]);
+        StepEdits mixed = new StepEdits();
+        mixed.load(new long[] { CELL_A, CELL_B },
+                new byte[] { (byte) PathEdits.BROKEN_WATER, (byte) PathEdits.BROKEN }, 2,
+                new long[] { CELL_C }, 1, new long[0], new boolean[0], 0, ClutchModel.NONE, 0L);
+        BlockPathPlan plan = planOf(executed, mixed, step(new long[0], new long[] { CELL_A }));
+
+        EditSnapshot full = EditSnapshot.fromRemainingSteps(plan, 1);
+        EditSnapshot ranged = EditSnapshot.fromSteps(plan, 1, plan.size() - 1);
+
+        assertEquals(full.breakCount(), ranged.breakCount(), "break counts must match");
+        for (int i = 0; i < full.breakCount(); i++) {
+            assertEquals(full.breakAt(i), ranged.breakAt(i), "break cell + order at " + i);
+            assertEquals(full.breakKindAt(i), ranged.breakKindAt(i), "break fold kind at " + i);
+        }
+        assertEquals(full.placeCount(), ranged.placeCount(), "place counts must match");
+        for (int i = 0; i < full.placeCount(); i++) {
+            assertEquals(full.placeAt(i), ranged.placeAt(i), "place cell + order at " + i);
+        }
+        assertEquals(full.doorSetCount(), ranged.doorSetCount(), "door-set counts must match");
+    }
+
     // ---- PathEdits.addSnapshot (the per-pop seed) -----------------------------------------------------
 
     @Test

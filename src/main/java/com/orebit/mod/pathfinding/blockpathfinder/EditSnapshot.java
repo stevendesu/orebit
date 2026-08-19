@@ -17,7 +17,8 @@ import java.util.Arrays;
  * packed cells out into its own exact-size arrays — one small, cold allocation per splice (tens of
  * longs; splices happen at plan boundaries, never inside a search).
  *
- * <p><b>Latest-wins folding.</b> {@link #fromRemainingSteps} walks the plan's remaining steps
+ * <p><b>Latest-wins folding.</b> {@link #fromRemainingSteps} (and its sub-range form {@link #fromSteps},
+ * DESIGN-replan-handoff.md §4) walks the plan's folded steps
  * <i>last-to-first</i> with first-seen-wins per cell — the same reversed-iteration trick
  * {@link PathEdits} uses — so a cell edited twice resolves to the edit of the LATER step (the world
  * state after executing all remaining steps in order). Within one step, places are folded before
@@ -65,8 +66,23 @@ public final class EditSnapshot {
      */
     public static EditSnapshot fromRemainingSteps(BlockPathPlan plan, int fromStep) {
         if (plan == null) return EMPTY;
+        return fromSteps(plan, fromStep, plan.size() - 1);
+    }
+
+    /**
+     * Fold steps {@code fromStep..toStep} of {@code plan} — INCLUSIVE on both ends — into a baseline,
+     * latest-step-wins per cell. The sub-range form of {@link #fromRemainingSteps}, for a search seeded at
+     * an intermediate waypoint k of an executing plan (DESIGN-replan-handoff.md §4): such a search must see
+     * the world as it will be when the bot STANDS at k — the edits of the not-yet-executed steps up to and
+     * including k — while folding the whole suffix would inject phantom edits from steps {@code k+1..end}
+     * that will never execute under the new plan. Returns {@link #EMPTY} when the clamped range is empty
+     * (or {@code plan} is {@code null}). Cold: runs at splice/submit time, never inside a search.
+     */
+    public static EditSnapshot fromSteps(BlockPathPlan plan, int fromStep, int toStep) {
+        if (plan == null) return EMPTY;
         int first = Math.max(fromStep, 0);
-        if (first >= plan.size()) return EMPTY;
+        int last = Math.min(toStep, plan.size() - 1);
+        if (last < first) return EMPTY;
 
         // Tiny accumulators (a window plan is ≤ ~48 steps of a few cells each) — linear-scan dedup is
         // cheaper and simpler than any map at this size, and this is cold code.
@@ -79,7 +95,7 @@ public final class EditSnapshot {
         boolean[] drOpen = new boolean[4];
         int drN = 0;
 
-        for (int i = plan.size() - 1; i >= first; i--) {          // last-to-first = latest-wins
+        for (int i = last; i >= first; i--) {                     // last-to-first = latest-wins
             StepEdits se = plan.edits(i);
             if (se == null) continue;
             for (int j = 0, n = se.placeCount(); j < n; j++) {    // places before breaks, as PathEdits.add

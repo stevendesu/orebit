@@ -1253,6 +1253,17 @@ public final class RegionPathfinder {
                 probing = true;
             }
         }
+        if (TRACE && harvest) {
+            // Sealed-probe forensics (owner request 2026-08-18, the ReplanCourse reversal false seal): name the
+            // box, the goal root, and the resolved observer probe so the E/C dump below is auditable end-to-end.
+            trace("SEAL-PROBE L" + level + " box=[" + bound.minRx + ".." + bound.maxRx + ","
+                    + bound.minRy + ".." + bound.maxRy + "," + bound.minRz + ".." + bound.maxRz
+                    + "] goal=" + grx + "," + gry + "," + grz
+                    + " observer=" + (insideProbe == null ? "none"
+                            : insideProbe.getX() + "," + insideProbe.getY() + "," + insideProbe.getZ()
+                                    + " region=" + prx + "," + pry + "," + prz + " frag=" + probeFrag
+                                    + " probing=" + probing));
+        }
         final int dimX = bound.maxRx - bound.minRx + 1;
         final int dimY = bound.maxRy - bound.minRy + 1;
         final int dimZ = bound.maxRz - bound.minRz + 1;
@@ -1289,6 +1300,10 @@ public final class RegionPathfinder {
             // like from outside, THIS observer is not walled off. Stop — the verdict is already decided.
             if (probing && crx == prx && cry == pry && crz == prz && fragA == probeFrag) {
                 insideHit = true;
+                if (TRACE && harvest) {
+                    trace("SEAL-PROBE HIT: observer fragment settled at settle #" + settles
+                            + " g=" + nodes.g[current] + " — component contains the observer, NOT sealed");
+                }
                 break;
             }
             if (++expansions > MAX_REGION_EXPANSIONS) { backstopHit = true; break; }
@@ -1337,6 +1352,12 @@ public final class RegionPathfinder {
         // contract on the 13-arg overload.
         final boolean exhausted = !earlyExit && !backstopHit && !insideHit;
         final boolean closedFlood = exhausted && !nodes.outOfBoxRejected;
+        if (TRACE && harvest) {
+            trace("SEAL-VERDICT L" + level + " closed=" + closedFlood + " exhausted=" + exhausted
+                    + " earlyExit=" + earlyExit + " backstop=" + backstopHit + " insideHit=" + insideHit
+                    + " outOfBoxRejected=" + nodes.outOfBoxRejected
+                    + " settles=" + settles + " expansions=" + expansions);
+        }
         // Harvest the INFINITE (negative-reachability) set only under a closed flood; on any open flood
         // (early-exit / backstop / out-of-box reject) harvest NOTHING — every unreached region stays optimistic
         // (§6 optimism boundary). The normal per-search build (harvest == false) never closes (it early-exits)

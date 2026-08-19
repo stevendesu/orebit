@@ -28,4 +28,23 @@ public final class SpliceTestPlans {
                 Arrays.asList(new StepEdits[] { se }), 0f);
         return EditSnapshot.fromRemainingSteps(plan, 0);
     }
+
+    /** A bare no-op {@link StepEdits} — for tests that only need "this step CARRIES folded edits" as a
+     *  fact (the §10 U4 edit-carrying-step rule, {@code PrefixIntegrityTest}); reaches the
+     *  package-private ctor + {@code load} seam like the fixtures above. */
+    public static StepEdits emptyStepEdits() {
+        StepEdits se = new StepEdits();
+        se.load(new long[0], new byte[0], 0, new long[0], 0,
+                new long[0], new boolean[0], 0, ClutchModel.NONE, 0L);
+        return se;
+    }
+
+    /** A {@link StepEdits} carrying exactly one dry BREAK at {@code cell} (packed asLong) — the §10 U4
+     *  mine-cell rule's fixture ({@code PrefixIntegrityTest}). */
+    public static StepEdits breakStepEdits(long cell) {
+        StepEdits se = new StepEdits();
+        se.load(new long[] { cell }, new byte[] { (byte) PathEdits.BROKEN }, 1, new long[0], 0,
+                new long[0], new boolean[0], 0, ClutchModel.NONE, 0L);
+        return se;
+    }
 }

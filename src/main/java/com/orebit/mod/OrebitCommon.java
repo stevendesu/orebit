@@ -335,5 +335,14 @@ public final class OrebitCommon {
         // zero-input hold sank it out of the Traverse's admitted band in ~40. Plus a ladder-hang plug
         // control for the climbable branch. Same inert-unless-armed discipline (-Dorebit.swimmine).
         SwimMineCourse.register(events);
+
+        // Headless SEAM-ANCHORED-REPLAN diagnostic (the :fabric:<ver>:runReplan run config): boxed Traverse
+        // corridors the course seals mid-leg to force a seam-seeded mid-motion re-search — a no-edit zero-swap
+        // control, the pure-ADOPT detour (park across boundaries, install cursor-0 at the seam), and the
+        // U-turn reversal (the 2026-08-18 wedge's own shape, adopted via the seam/on-plan pump and walked
+        // back cleanly) — the live follower proof of DESIGN-replan-handoff.md §9.2 (a)-(c); §9.2(d) PANIC is
+        // deliberately absent (not deterministically forcible from a harness — see the class Javadoc). Same
+        // inert-unless-armed discipline (-Dorebit.replan); run once per pathing.async mode for full coverage.
+        ReplanCourse.register(events);
     }
 }
