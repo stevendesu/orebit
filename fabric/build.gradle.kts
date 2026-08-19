@@ -322,6 +322,26 @@ loom {
             project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
             isIdeConfigGenerated = false
         }
+        // Seam-anchored-REPLAN diagnostic: a superflat server that arms the common-src ReplanCourse hook
+        // (-Dorebit.replan) in its own run dir (run/replan). Builds boxed corridor tiles and forces a
+        // mid-motion re-search by sealing the committed route (DESIGN-replan-handoff.md §9.2). Launch:
+        // ./gradlew :fabric:1.21.11:runReplan (after scripts/run-replan.ps1 preps the run dir with a FLAT
+        // server.properties + a no-dig/no-place orebit.properties; run once async, once with -Sync).
+        // Mirrors the gate/shaft config exactly.
+        create("replan") {
+            server()
+            configName = "Orebit Replan ($minecraft)"
+            runDir = "../../../run/replan"
+            vmArg("-Dorebit.replan=true")
+            for (key in listOf("debug")) {
+                val v = project.findProperty("orebit.replan.$key")
+                if (v != null) vmArg("-Dorebit.replan.$key=$v")
+            }
+            // Ground drive-strategy selector rides through for the ground velocity-servo A/B (Stage 2):
+            //   ./gradlew :fabric:1.21.11:runReplan "-Porebit.ground.drive=servo"
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
+            isIdeConfigGenerated = false
+        }
     }
 }
 

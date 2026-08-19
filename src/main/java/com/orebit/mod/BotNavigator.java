@@ -27,6 +27,7 @@ import com.orebit.mod.platform.Worlds;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.worldmodel.hpa.RegionGrid;
 import com.orebit.mod.worldmodel.navblock.NavBlock;
+import com.orebit.mod.worldmodel.pathing.NavGridUpdater;
 import com.orebit.mod.worldmodel.pathing.NavGridView;
 import com.orebit.mod.worldmodel.pathing.NavStore;
 import net.minecraft.core.BlockPos;
@@ -184,6 +185,26 @@ final class BotNavigator {
     /** The plan's topY-aware FEET-block Y for the from/to stands (fed to plan() as fromFootY/toFootY) — the
      *  forensic's real expected takeoff/landing foot (== floorY for a partial standable floor, floorY+1 else). */
     private int planFromFootY, planToFootY;
+
+    // ---- edit-epoch move-compatibility + the rest-gated planless pickup (DESIGN-replan-handoff.md §10) --
+    /** Last-seen {@link NavGridUpdater#editEpoch} — the ONE cheap per-tick read the §10 U1 prompt trigger
+     *  rides. Unchanged epoch = no tracked grid mutation anywhere on this level, so the plan's cells
+     *  provably still read as searched and the (cold) move-compatibility scan is skipped entirely.
+     *  Deliberately NOT refreshed at plan install: the first steer tick of a new plan runs one scan, which
+     *  also covers an edit that landed while the search was in flight. */
+    private int editEpochSeen;
+    /** The first move-INCOMPATIBLE step (§10 U4) the last edit-epoch scan found on the CURRENT plan, or
+     *  -1 — identity-guarded by {@link #incompatiblePlan} so the fact is only ever read against the plan
+     *  it was found on. Two consumers: the U1 once-per-breakage gate (an epoch advance that re-detects the
+     *  SAME broken step must not re-fire the prompt replan — the seeded search / parked result for it is
+     *  already in motion), and the U2-extended seam CAUTION hold's next-step-invalidated arm. Cleared at
+     *  every plan install/clear/drop. */
+    private int incompatibleStep = -1;
+    private BlockPathPlan incompatiblePlan;
+    /** One "rest-gate deferring a launch" log per waiting episode (§10 — the planless pickup is the one
+     *  surviving rest-gated launch site, U6; U5 and PANIC are its only feeders) — set at the first
+     *  deferred launch, reset the tick the bot reaches rest. Never logs per tick. */
+    private boolean restGateLogged;
 
     // ---- region-tier online repair (the "recover when stuck" half of the stuck arc) ------------------
     /**
@@ -419,6 +440,8 @@ final class BotNavigator {
         this.lastBlockPlanRef = null;
         this.activePlanStep = -1;
         this.phaseRunner.clear();
+        this.incompatibleStep = -1;      // the broken-step fact is gone with the goal (§10 U4)
+        this.incompatiblePlan = null;
         this.exactGoalEscalated = false; // a cleared goal releases the exact-tolerance ratchet
         this.navReadyWaitTicks = 0;      // a fresh goal starts a fresh readiness episode
         this.navReadyWaitAnnounced = false;
@@ -475,13 +498,380 @@ final class BotNavigator {
      * built (DESIGN-async-step-safety.md §3).
      */
     private boolean stepCommitsRisk(int i) {
+        return stepCommitsRisk(path, i, bot.caps().safeFallDistance());
+    }
+
+    /** Static core of {@link #stepCommitsRisk} — pure plan + caps math, shared with the §3 horizon walk
+     *  ({@link #horizonSeamWalk}, and its headless test) so the seam-selection risk predicate can never
+     *  drift from the CAUTION hold's. */
+    static boolean stepCommitsRisk(BlockPathPlan path, int i, int safeFallDistance) {
         Movement m = path.movement(i);
         if (m.commitsAcrossArrival()) return true;
         if (m == MovementRegistry.FALL && i > 0) {
             int drop = path.waypoint(i - 1).getY() - path.waypoint(i).getY();
-            return drop > bot.caps().safeFallDistance();
+            return drop > safeFallDistance;
         }
         return false;
+    }
+
+    // ---- horizon-seam walk (DESIGN-replan-handoff.md §3, §10 U2) -------------------------------------
+    /** Memo of the last {@link #horizonSeamIndex} walk, keyed on (plan identity, cursor, edit epoch): the
+     *  boundary gate passes every tick the bot's floor is still the settled cell, but the walk's inputs
+     *  only change when the cursor, the plan, or the GRID does — the §10 U2 broken-step clamp reads the
+     *  live grid, so an edit-epoch advance must re-walk (a memo that survived the epoch could hand a
+     *  seam AT a freshly-invalidated step). Plain fields, no allocation; a swapped plan misses on
+     *  identity, a quiet world re-walks only per step. */
+    private BlockPathPlan seamWalkPlan;
+    private int seamWalkCursor = -1;
+    private int seamWalkEpoch;
+    private int seamWalkResult = -1;
+
+    /**
+     * The horizon-seam walk (DESIGN-replan-handoff.md §3, R1): the waypoint index {@code k} of the
+     * CURRENT window plan a mid-motion re-search is seeded FROM — the first waypoint of this plan the
+     * bot settles on AFTER a max-duration search completes. Candidate seams are {@code k >=
+     * waypointIndex} (the current move's destination is the floor — the bot is already committed to
+     * it). Per-step costs ({@link BlockPathPlan#stepCost}) are prefix-summed against the search budget
+     * in ticks — {@code budgetNanos / 50_000_000} (costs are already real ticks, the
+     * physically-derived-costs invariant; budget→physical precedent: the walk-outrun adoption
+     * tolerance) — picking the smallest k whose prefix reaches the budget, subject to:
+     * <ul>
+     *   <li><b>stop before commitment</b>: the walk never crosses a step where {@link #stepCommitsRisk}
+     *       holds (the parkour family / a deeper-than-safe Fall) — the seam is the waypoint BEFORE it,
+     *       its takeoff stand cell. This is what lets the CAUTION hold rescope to the seam rather than
+     *       grow (§7).</li>
+     *   <li><b>stop before breakage</b> (§10 U2): the walk never places the seam AT or PAST a step the
+     *       live grid has move-invalidated ({@link #incompatibleCell}) — clamped to the last safe
+     *       waypoint, exactly the commits-risk structure. Evaluated at walk time against the live grid
+     *       (the memo re-keys on the edit epoch), so no trigger-latency race can seed a re-search from a
+     *       broken cell, in either pathing mode.</li>
+     *   <li><b>terminus cap</b>: never past {@code size()-1} (degenerating toward P4's existing
+     *       {@code path.floor(last)} seed).</li>
+     *   <li><b>sync degenerate</b>: budget 0 → {@code k == waypointIndex}. One rule, both modes.</li>
+     * </ul>
+     * Returns -1 with no walkable incumbent (no plan, or consumed). Plain prefix-sum loop over the
+     * existing float array — no allocation beyond the U2 clamp's per-miss background view (hot-path
+     * rule; boundary/edit-epoch cadence, memoized per step).
+     */
+    private int horizonSeamIndex() {
+        if (path == null || waypointIndex >= path.size()) {
+            return -1;
+        }
+        final int epoch = NavGridUpdater.editEpoch((ServerLevel) Worlds.of(bot));
+        if (path == seamWalkPlan && waypointIndex == seamWalkCursor && epoch == seamWalkEpoch) {
+            return seamWalkResult;
+        }
+        PlanExecutor executor = ConfigLoader.config().asyncPathing() ? PlanExecutor.instance() : null;
+        final long budgetTicks = executor == null ? 0L : executor.budgetNanos() / 50_000_000L;
+        final NavGridView grid = NavGridView.background((ServerLevel) Worlds.of(bot));
+        final int k = horizonSeamWalk(path, waypointIndex, budgetTicks, bot.caps().safeFallDistance(), grid);
+        seamWalkPlan = path;
+        seamWalkCursor = waypointIndex;
+        seamWalkEpoch = epoch;
+        seamWalkResult = k;
+        if (Debug.VERBOSE) {
+            final int last = path.size() - 1;
+            float sum = 0f; // re-summed on the VERBOSE path only — same ascending add order as the walk
+            for (int i = waypointIndex; i <= k; i++) sum += path.stepCost(i);
+            // The walk only stops short of the terminus with the budget unmet on an early stop — a
+            // commits-risk step or a §10 U2 move-invalidated step at k+1.
+            boolean earlyStop = k < last && sum < budgetTicks;
+            BlockPos sf = path.floor(k);
+            bot.vlog("seam: k=" + k + "/" + last + " (" + sf.getX() + "," + sf.getY() + "," + sf.getZ()
+                    + ") budgetTicks=" + budgetTicks + " prefixCost=" + String.format("%.1f", sum)
+                    + (earlyStop ? " early-stop before step " + (k + 1) + " (commit/broken)" : ""));
+        }
+        return k;
+    }
+
+    /**
+     * The pure §3 selection rule (DESIGN-replan-handoff.md §3, §10 U2), extracted package-private static
+     * so it is testable headlessly ({@code HorizonSeamWalkTest}) with zero behavior change — the instance
+     * wrapper above owns the memo, the budget read, and the diagnostics. Smallest {@code k ≥ cursor}
+     * whose prefix cost reaches {@code budgetTicks}, never crossing a {@link #stepCommitsRisk
+     * commits-risk} step OR a move-invalidated step (§10 U2 — {@link #incompatibleCell} against
+     * {@code grid}; the seam is the waypoint BEFORE either), never past the terminus; budget 0
+     * degenerates to {@code cursor}. {@code grid} may be {@code null} (no clamp — the pure plan-shape
+     * tests). Returns -1 with no walkable incumbent ({@code null}/consumed).
+     */
+    static int horizonSeamWalk(BlockPathPlan path, int cursor, long budgetTicks, int safeFallDistance,
+                               NavGridView grid) {
+        if (path == null || cursor >= path.size()) {
+            return -1;
+        }
+        final int last = path.size() - 1;
+        int k = cursor;
+        float sum = path.stepCost(k);
+        while (sum < budgetTicks && k < last) {
+            if (stepCommitsRisk(path, k + 1, safeFallDistance)) {
+                break; // seam = the committing step's takeoff stand cell (§3)
+            }
+            if (grid != null && incompatibleCell(path, k + 1, true, grid) != null) {
+                break; // §10 U2: never AT or PAST a move-invalidated step — clamp to the last safe waypoint
+            }
+            k++;
+            sum += path.stepCost(k);
+        }
+        return k;
+    }
+
+    // ---- edit-epoch move-compatibility scan (DESIGN-replan-handoff.md §10, U1/U4/U5) -----------------
+    /**
+     * The §10 U1 prompt trigger's cold scan — runs ONLY when the level's edit epoch advanced (see the
+     * call site in {@link #steerAlongPath}): tests the WHOLE remaining plan ({@code cursor..end} — the
+     * plan is ≤~48 steps and epoch advances are rare) against the background nav descriptors via the
+     * pure {@link #firstIncompatibleStep} U4 rule. Three outcomes:
+     * <ul>
+     *   <li><b>Nothing invalidated / move-compatible</b> (solid→solid, décor, edits off the envelope):
+     *       do NOTHING — this deliberately reduces replan noise (vine growth outside the envelope stops
+     *       triggering anything here; the debounced chunk-granular recheck stays the backstop).</li>
+     *   <li><b>A LATER step invalidated</b> (U1): fire the S5 plan-impacted replan THE SAME TICK —
+     *       {@link PathPlan#promptImpactedReplan}, the same {@code refreshWindow(true)} path the
+     *       debounced recheck uses, seam-clamped below the broken step by the U2 walk — and re-baseline
+     *       the recheck's snapshot + debounce so it cannot double-fire on this same edit. Gated
+     *       once-per-breakage on {@link #incompatibleStep}: a later unrelated epoch advance that
+     *       re-detects the SAME broken step must not re-fire (the seeded search / parked result for it
+     *       is already in motion, and re-firing would churn it).</li>
+     *   <li><b>The CURRENT step invalidated</b> (U5, the one emergency — no safe waypoint exists): cut
+     *       inputs NOW and drop the plan ({@link #dropWalkedPlan} — pending seeded search + parked
+     *       result die with it); the planless WAIT coasts the bot to rest under vanilla physics and the
+     *       rest-gated planless pickup relaunches from wherever it stops (rest is a settle event).</li>
+     * </ul>
+     * Doors/trapdoors/gates are never breakage (the Need machinery owns them) and anything ambiguous is
+     * not flagged — see {@link #incompatibleCell}.
+     *
+     * @return {@code false} iff the CURRENT step broke and the plan was nulled this tick (U5).
+     */
+    private boolean scanPlanOnEditEpoch() {
+        if (path == null || waypointIndex >= path.size()) {
+            return true;
+        }
+        final NavGridView grid = NavGridView.background((ServerLevel) Worlds.of(bot));
+        final int broken = firstIncompatibleStep(path, waypointIndex, lastEditedIndex + 1, grid);
+        if (broken < 0) {
+            this.incompatibleStep = -1; // a prior breakage no longer reads broken (or was never there)
+            this.incompatiblePlan = null;
+            return true;
+        }
+        final BlockPos cell = // non-null by construction; for the log
+                incompatibleCell(path, broken, broken > lastEditedIndex, grid);
+        if (broken == waypointIndex) {
+            // §10 U5: the executing step's own cells broke — cut inputs and drop the plan NOW.
+            OrebitCommon.LOGGER.info(
+                    "[Orebit] prefix-break: CURRENT step {} {} cell={} — nulling the plan now;"
+                            + " coasting to rest, rest-gated replan follows",
+                    broken, path.movement(broken).getClass().getSimpleName(),
+                    cell == null ? "?" : AllyBotEntity.compact(cell));
+            dropWalkedPlan();
+            return false;
+        }
+        if (broken == incompatibleStep && path == incompatiblePlan) {
+            return true; // U1 once-per-breakage: this broken step already fired its prompt replan
+        }
+        this.incompatibleStep = broken;
+        this.incompatiblePlan = path;
+        OrebitCommon.LOGGER.info(
+                "[Orebit] prompt-replan: step {} {} cell={} (cursor {}) — move-invalidated; firing the"
+                        + " plan-impacted re-search this tick (debounce bypassed)",
+                broken, path.movement(broken).getClass().getSimpleName(),
+                cell == null ? "?" : AllyBotEntity.compact(cell), waypointIndex);
+        if (pathPlan != null) {
+            // The same S5 plan-impacted path the debounced recheck drives (refreshWindow(true)), with a
+            // FRESH seam handoff — the U2-clamped walk at the just-advanced epoch — so the seeded
+            // re-search can never launch from at-or-past the broken step. The anchor is the settled
+            // floor (the same live anchor every onBotMoved handoff carries).
+            pathPlan.promptImpactedReplan(
+                    settledFloor != null ? settledFloor : floorOf(bot.blockPosition()),
+                    bot.currentStartMode(), bot, path, horizonSeamIndex(),
+                    lastEditedIndex + 1, waypointIndex);
+            blockRefreshTicks = TERRAIN_RECHECK_TICKS; // re-arm the debounced backstop (no double-fire)
+        }
+        return true;
+    }
+
+    /**
+     * Drop the WALKED window plan while keeping the two-tier driver alive (§10 U5 — the follower-side
+     * twin of the PANIC drop): null the follower's plan state, tell {@link PathPlan#dropBlockPlan} to
+     * null its window plan AND kill any pending/parked seeded search (both were anchored on waypoints of
+     * the dying plan), zero the persistent forward input (§6 hygiene). The two-tier plan itself — the
+     * committed skeleton, the goal — survives; the rest-gated planless machinery owns the relaunch.
+     */
+    private void dropWalkedPlan() {
+        if (pathPlan != null) {
+            pathPlan.dropBlockPlan();
+        }
+        this.path = null;
+        this.lastBlockPlanRef = null;
+        this.waypointIndex = 0;
+        this.lastEditedIndex = -1;
+        this.activePlanStep = -1;
+        this.phaseRunner.clear();
+        this.incompatibleStep = -1; // the broken-step fact belonged to the dropped plan
+        this.incompatiblePlan = null;
+        this.stuckTicks = 0;
+        bot.setForward(0.0f); // §6 input hygiene: zza is the one input the tick-top reset spares
+    }
+
+    /**
+     * The pure §10 U4 move-compatibility rule, package-private static (the {@link #horizonSeamWalk}
+     * testability precedent — {@code PrefixIntegrityTest}): the smallest step index in
+     * {@code [cursor, size)} whose SELECTED movement the CURRENT grid definitely no longer supports
+     * ({@link #incompatibleCell}), or {@code -1}. {@code firstUnedited} is the follower's first
+     * not-yet-applied step ({@code lastEditedIndex + 1}) — steps before it have executed their folded
+     * edits, so their planned-mine cells are exempt from the U4 mine-cell rule (an own break that
+     * already ran legitimately reads air). Cold, on-edit-epoch cadence only.
+     */
+    static int firstIncompatibleStep(BlockPathPlan path, int cursor, int firstUnedited, NavGridView grid) {
+        for (int i = cursor; i < path.size(); i++) {
+            if (incompatibleCell(path, i, i >= firstUnedited, grid) != null) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * The one cell of step {@code i} whose new NavType no longer supports the step's SELECTED movement
+     * (§10 U4), or {@code null} while the step still reads walkable. <b>Move-compatibility, dispatched
+     * on the movement family — conservative in the DIRECTION of compatibility</b> (no invalidation is
+     * invented beyond these ratified arms):
+     * <ul>
+     *   <li><b>Steps carrying folded edits</b>: only the U4 mine-cell rule — an UNEXECUTED planned-mine
+     *       cell ({@code editsUnexecuted}) that no longer reads as a breakable solid (someone flooded it,
+     *       or swapped in an unbreakable/protected occupant) invalidates; every other cell of an
+     *       edit-carrying step is the step's own break/place/toggle machinery's property (the Need
+     *       pre-pass re-arms reactively), so no further live-grid verdict. A cell that became AIR stays
+     *       compatible — the planned break is already satisfied. Solid→different-breakable-solid is
+     *       undetectable without a plan-time baseline and stays compatible (the mine still executes,
+     *       at a different tick price).</li>
+     *   <li><b>Ground family</b> (Traverse/Diagonal/Ascend/Descend/Fall landings): body/head cells must
+     *       remain passable — a full-height collision blocker ({@code topY ≥ 16}, which also catches the
+     *       24-topped fence/wall family; NEVER an openable — doors/trapdoors/gates are the Need
+     *       machinery's, a closed door is a toggle not a wall) invalidates; the dest floor must remain
+     *       standable solid — floor→FLUID (water OR lava — you cannot walk on fluid) invalidates, a
+     *       floor offering nothing at all (no collision, no fluid, no climbable) invalidates,
+     *       solid→different-solid stays compatible. Two carve-outs: a {@link MovementRegistry#FALL Fall}
+     *       whose feet cell ALSO reads non-damaging fluid keeps a fluid floor — that is the water-cushion
+     *       landing arrangement the planner itself prices, indistinguishable from (and physically
+     *       equivalent to) the planned shape; and a feet cell that currently reads CLIMBABLE takes no
+     *       floor verdict at all — the bot hangs on it regardless of what sits below.</li>
+     *   <li><b>Fluid family</b> (Swim/SprintSwim/DiagonalSprintSwim/StartSprintSwim/RideBubbleColumn —
+     *       the moves whose destination is definitionally a fluid cell): the planned fluid feet cell
+     *       having become solid or air invalidates; everything else stays compatible (the transitional
+     *       bank moves — Surface/ExitWater/EndSprintSwim — take no verdict at all).</li>
+     *   <li><b>Climb</b>: the feet cell no longer climbable invalidates when the column is now walled
+     *       (a full solid filled the hang cell) or nothing below offers support (the mid-shaft rung
+     *       vanished); a dismount/exit-top stand over real ground, an open mouth (openable), or a
+     *       waterlogged column stays compatible.</li>
+     *   <li><b>Every other movement</b> (Pillar/MineDown/WalkOff/the parkour family/the bank moves): no
+     *       ratified invalidation arm — always compatible here.</li>
+     * </ul>
+     * Unbuilt cells read AIR and give no verdict anywhere; partial floors ({@code floorY == wp.y}) skip
+     * the feet-cell wall test (the feet legitimately share the floor's cell); partial-height intrusions
+     * (slabs/carpet/décor) are a judgement, not a definite wall, and stay compatible.
+     */
+    static BlockPos incompatibleCell(BlockPathPlan path, int i, boolean editsUnexecuted, NavGridView grid) {
+        final BlockPos wp = path.waypoint(i);
+        final int wx = wp.getX(), wy = wp.getY(), wz = wp.getZ();
+        final int fy = path.floorY(i);
+        final StepEdits edits = path.edits(i);
+        if (edits != null) {
+            if (editsUnexecuted) {
+                // U4 mine-cell rule: a planned-mine cell that changed out from under the fold. Executed
+                // steps are exempt (their own break already made the cell air).
+                for (int b = 0; b < edits.breakCount(); b++) {
+                    final BlockPos p = edits.breakPos(b);
+                    if (!grid.built(p.getX(), p.getY(), p.getZ())) {
+                        continue; // unbuilt: no verdict
+                    }
+                    final long d = grid.descriptorAt(p.getX(), p.getY(), p.getZ());
+                    if (NavBlock.isFluid(d) || (NavBlock.hasCollision(d) && !NavBlock.isBreakable(d))) {
+                        return p; // flooded, or unbreakable/protected swapped in — the mine cannot run
+                    }
+                }
+            }
+            return null; // the step's other cells are its own edit machinery's property — no verdict
+        }
+        final Movement m = path.movement(i);
+        if (m == MovementRegistry.SWIM || m == MovementRegistry.SPRINT_SWIM
+                || m == MovementRegistry.DIAGONAL_SPRINT_SWIM || m == MovementRegistry.START_SPRINT_SWIM
+                || m == MovementRegistry.RIDE_BUBBLE_COLUMN) {
+            // Fluid family: the destination feet cell must still BE fluid.
+            if (grid.built(wx, wy, wz) && !NavBlock.isFluid(grid.descriptorAt(wx, wy, wz))) {
+                return wp;
+            }
+            return null;
+        }
+        if (m == MovementRegistry.CLIMB) {
+            if (!grid.built(wx, wy, wz)) {
+                return null;
+            }
+            final long feet = grid.descriptorAt(wx, wy, wz);
+            if (NavBlock.isClimbable(feet) || NavBlock.openable(feet) != 0 || NavBlock.isFluid(feet)) {
+                return null; // rung/mouth intact (or a waterlogged column) — still supported
+            }
+            if (NavBlock.hasCollision(feet) && NavBlock.topY(feet) >= 16) {
+                return wp; // a full solid filled the column — the hang cell can no longer be occupied
+            }
+            // The rung is gone: broken only if nothing below offers support either (a dismount/exit-top
+            // stand over real ground, a lower rung, or fluid keeps the step compatible).
+            if (grid.built(wx, fy, wz)) {
+                final long below = grid.descriptorAt(wx, fy, wz);
+                if (!NavBlock.hasCollision(below) && !NavBlock.isFluid(below)
+                        && !NavBlock.isClimbable(below)) {
+                    return new BlockPos(wx, fy, wz);
+                }
+            }
+            return null;
+        }
+        if (m == MovementRegistry.TRAVERSE || m == MovementRegistry.DIAGONAL
+                || m == MovementRegistry.ASCEND || m == MovementRegistry.DESCEND
+                || m == MovementRegistry.FALL) {
+            // Ground family. Body: the feet cell (skipped when it IS the partial floor) and the head
+            // cell above it.
+            if (fy != wy && cellNowWalled(grid, wx, wy, wz)) {
+                return wp;
+            }
+            if (cellNowWalled(grid, wx, wy + 1, wz)) {
+                return new BlockPos(wx, wy + 1, wz);
+            }
+            // Dest floor, full-floor arrangement only: must remain standable solid. A feet cell that
+            // currently reads CLIMBABLE still supports the bot regardless of what sits below it (a
+            // vine grown into the stand — the bot hangs; the first shape's guard, kept for the same
+            // conservative-direction reason).
+            final boolean feetClimbable = grid.built(wx, wy, wz)
+                    && NavBlock.isClimbable(grid.descriptorAt(wx, wy, wz));
+            if (fy == wy - 1 && !feetClimbable && grid.built(wx, fy, wz)) {
+                final long floor = grid.descriptorAt(wx, fy, wz);
+                if (NavBlock.isFluid(floor)) {
+                    // floor→fluid invalidates — except the Fall water-cushion arrangement (feet also in
+                    // non-damaging fluid: the planner's own preferred deep-water landing shape).
+                    final boolean waterCushion = m == MovementRegistry.FALL && grid.built(wx, wy, wz)
+                            && NavBlock.isFluid(grid.descriptorAt(wx, wy, wz))
+                            && !NavBlock.isDamaging(grid.descriptorAt(wx, wy, wz));
+                    if (!waterCushion) {
+                        return new BlockPos(wx, fy, wz);
+                    }
+                } else if (!NavBlock.isStandable(floor) && !NavBlock.hasCollision(floor)
+                        && !NavBlock.isClimbable(floor)) {
+                    return new BlockPos(wx, fy, wz); // vanished outright — nothing to stand on
+                }
+            }
+            return null;
+        }
+        return null; // every other movement: no ratified invalidation arm — compatible (U4)
+    }
+
+    /** Whether the cell now classifies as a definite full-height wall: built, collision-solid, full-or-
+     *  taller top ({@code topY ≥ 16} — stone 16, fence/wall 24; slabs/carpet stay below and are not
+     *  "definite"), and not an openable (a door in any state is the Need machinery's, never breakage).
+     *  Unbuilt reads AIR → no verdict. */
+    private static boolean cellNowWalled(NavGridView grid, int x, int y, int z) {
+        if (!grid.built(x, y, z)) {
+            return false;
+        }
+        final long d = grid.descriptorAt(x, y, z);
+        return NavBlock.hasCollision(d) && NavBlock.topY(d) >= 16 && NavBlock.openable(d) == 0;
     }
 
     /**
@@ -574,6 +964,18 @@ final class BotNavigator {
         // this — Swim's continuous REACHED_Y window), so the adoption membership test downstream widens
         // its Y match by ±1 in fluid, mirroring that precedent. Ground anchors stay exact.
         final boolean fluidAnchor = bot.isInWater() || bot.inLava();
+        // §10 REST GATE (DESIGN-replan-handoff.md §10 U5/U6, owner 2026-08-18): the PLANLESS
+        // pickup+install (and the S3 blocked-null relaunch it feeds through onBotMoved's restForLaunch)
+        // additionally requires the bot AT REST — planAnchor answers "controlled medium", atRest answers
+        // "carry stopped" (a grounded bot sliding on ice passes the first while its anchor cell is still
+        // changing — the mid-slide install hazard, §1's quantization gap at a launch site). Medium-aware
+        // (BotSteering.atRest): fluid/climbable anchors are exempt — today's plan-anchor semantics, so
+        // flowing water can never deadlock the planner. U5 and PANIC are the ONLY feeders of this state
+        // (U6): the fresh-replan and repair sites are planAnchor-only (the owner rejected the FOLLOW
+        // stop-start cadence a blanket rest gate produced), and seam-seeded launches / P4 never take it —
+        // their anchor is a future waypoint, not the live floor.
+        final boolean atRest = bot.atRest();
+        if (atRest) restGateLogged = false; // rest reached → the next deferral episode logs once again
         if (withinRange && stableMedium && !onDamagingFloor() && !midCommittedMove()) {
             driveState = "COMPLETE";
             finalizeJourney("reached"); // NAVSTATS: the continuous arrival test is the definition of done
@@ -640,6 +1042,8 @@ final class BotNavigator {
             // moved goal) persists, so the replan fires on the first plan-anchor-stable tick; meanwhile any
             // current plan keeps executing (the known-good route from the previous plan) and a planless
             // airborne bot simply WAITs the few ticks to touchdown below.
+            // (planAnchor-ONLY, deliberately — §10 U6: the first-shape rest gate here produced a FOLLOW
+            // stop-start cadence the owner rejected; only the planless pickup and PANIC consume atRest.)
             if (planAnchor) {
                 // NAVGRID READINESS GATE (STEP 2): the block/region tiers read an UNBUILT nav cell as AIR (the
                 // background NavGridView has no live-getBlockState fallback), so planning before the bot's
@@ -685,6 +1089,14 @@ final class BotNavigator {
             BlockPos currentFloor = floorOf(bot.blockPosition()); // topY-aware, computed once per drain tick
             if (path != null && waypointIndex >= path.size() && stableMedium) {
                 this.settledFloor = currentFloor;
+            } else if (path == null && planAnchor && atRest) {
+                // REST IS A SETTLE EVENT for a PLANLESS bot (§10 U5): a plan nulled mid-move (PANIC, the U5
+                // current-step break) leaves the bot coasting under vanilla physics, and it may come to
+                // rest in a cell that was never a completed waypoint — a stale settledFloor would then gate
+                // the boundary machinery (and its blocked-null relaunch) off forever. Wherever an
+                // input-zeroed bot stops IS its settled stand; re-anchoring here is what lets the
+                // rest-gated relaunch fire from the live floor, in both sync and async modes.
+                this.settledFloor = currentFloor;
             }
             // Floor-cell EQUALITY alone is not "settled": an airborne bot whose feet have not yet left the
             // settled column passes it (the 2026-07-30 11:40:19 mid-air refreshWindow that adopted a plan
@@ -694,8 +1106,21 @@ final class BotNavigator {
             // suspension is a controlled anchor and keeps servicing window handoffs — deferring a mid-hang
             // handoff would WAIT the inputs away and slide the bot down the ladder). Deferral costs the few
             // ticks to touchdown; every commit/refresh/adopt below re-fires from persisting state.
+            // (A move-invalidated later step no longer stands this machinery down — §10 U1/U2: the
+            // prompt replan already fired the seam-seeded re-search, its walk clamped BELOW the broken
+            // step, and adoption at that clamped seam is exactly how the bot turns before the wall.)
             if (settledFloor != null && currentFloor.equals(settledFloor) && planAnchor) {
-                pathPlan.onBotMoved(settledFloor, bot.currentStartMode(), fluidAnchor);
+                // HORIZON-SEAM HANDOFF (DESIGN-replan-handoff.md §3/§4): hand the driver everything a
+                // seam-seeded mid-motion re-search needs — the walk's seam index on the CURRENT window
+                // plan, the first not-yet-applied step (the §4 sub-range fold's lower bound), and the
+                // live cursor (the §5 adoption pump's past-the-seam discriminator). -1 = no walkable
+                // incumbent (planless/consumed) → every launch site seeds from the settled floor as
+                // before. The gate itself is UNCHANGED (§7) — seam-anchoring is what makes it mean what
+                // it says for adoption.
+                // atRest rides along as the §10 rest-for-launch bit: inside onBotMoved it gates ONLY the
+                // blocked-null (S3) live-floor relaunch — the one launch in there anchored at botFloor.
+                pathPlan.onBotMoved(settledFloor, bot.currentStartMode(), fluidAnchor,
+                        bot, path, horizonSeamIndex(), lastEditedIndex + 1, waypointIndex, atRest);
                 boolean consumed = path != null && waypointIndex >= path.size() && !pathPlan.isComplete();
                 if (consumed || blockRefreshTicks <= 0) {
                     // Terrain-recheck debounce (s52): the periodic re-search fires ONLY when the level's
@@ -755,7 +1180,13 @@ final class BotNavigator {
                     this.lastEditedIndex = -1;
         this.lastFailLoggedStep = -1;
                     this.activePlanStep = -1; // rebuild the phase plan for the new window's first step
+                    this.incompatibleStep = -1; // §10 U4: the broken-step fact belonged to the replaced plan
+                    this.incompatiblePlan = null;
                     this.planStartFloor = settledFloor; // follower anchor == the search source (both settledFloor)
+                    // Input hygiene at the swap (DESIGN-replan-handoff.md §6): zza is the ONE input the
+                    // tick-top reset spares, so the superseded move's thrust would replay under the new
+                    // plan's step 0 in the stale yaw (the §1 wedge's third fact). Yaw is left alone.
+                    bot.setForward(0.0f);
                     if (Debug.ENABLED) logWindowSwap(goalFloor); // capture boundary-wiggle: alternating targets/hops
                 }
                 // Eager pre-plan (DESIGN-background-pathfinding.md §7, async only): once THIS window's plan
@@ -785,7 +1216,14 @@ final class BotNavigator {
         // drains through the boundary-gated onBotMoved the tick it settles. s52.)
         // Double adoption with the boundary block is impossible: both compare against lastBlockPlanRef,
         // so whichever runs first swaps and the other no-ops on the same reference.
-        if (pathPlan != null && path == null && planAnchor) {
+        // §10 REST GATE on the planless pickup+install (the mid-slide install hazard's front door): the
+        // adoption below anchors planStartFloor/settledFloor at the LIVE floor the same tick, so a bot
+        // still carrying speed defers the drain-and-install the few ticks to rest (fluid/climbable are
+        // exempt inside atRest — a treading-water bot still adopts at tick rate, unchanged).
+        if (pathPlan != null && path == null && planAnchor && !atRest) {
+            logRestGateDeferral("planless-pickup");
+        }
+        if (pathPlan != null && path == null && planAnchor && atRest) {
             BlockPos liveFloor = floorOf(bot.blockPosition());
             pathPlan.pollWhenPlanless(liveFloor, fluidAnchor);
             BlockPathPlan adopted = pathPlan.currentBlockPlan();
@@ -796,9 +1234,12 @@ final class BotNavigator {
                 this.lastEditedIndex = -1;
         this.lastFailLoggedStep = -1;
                 this.activePlanStep = -1;
+                this.incompatibleStep = -1; // §10 U4: fresh plan, fresh compatibility episode
+                this.incompatiblePlan = null;
                 this.planStartFloor = liveFloor;
                 this.settledFloor = liveFloor;
                 this.stuckTicks = 0; // fresh plan → fresh diagnostic window
+                bot.setForward(0.0f); // input hygiene at the install (DESIGN-replan-handoff.md §6)
             }
         }
 
@@ -808,6 +1249,8 @@ final class BotNavigator {
         // Plan-anchor gated (owner ruling 2026-07-30): the repair's replanBlock launches/installs a
         // search exactly like the boundary branch, so it defers mid-flight too; the BLOCKED generation
         // persists, so exactly-one-repair-per-result is preserved, just delayed to touchdown.
+        // (planAnchor-ONLY, deliberately — §10 U6: the first-shape rest gate here was reverted with the
+        // fresh-replan one; only the planless pickup and PANIC consume atRest.)
         if (planAnchor) {
             repairStep();
         }
@@ -982,8 +1425,12 @@ final class BotNavigator {
         this.lastEditedIndex = -1;
         this.lastFailLoggedStep = -1;
         this.activePlanStep = -1; // rebuild any phase plan for the new plan's first step
+        this.incompatibleStep = -1; // §10 U4: the broken-step fact belonged to the replaced plan
+        this.incompatiblePlan = null;
         this.planStartFloor = startFloor; // first segment begins at the bot's current floor cell
         this.settledFloor = startFloor;   // the commit/replan anchor starts at the fresh plan's start cell
+        bot.setForward(0.0f); // input hygiene at the install (DESIGN-replan-handoff.md §6); harmless on the
+                              // degraded (null-plan) branch too — a planless bot is about to WAIT anyway
         this.stuckTicks = 0; // fresh plan → fresh diagnostic window (the counter is observation-only)
         this.lastRepairedBlockedGen = 0; // fresh PathPlan → its BLOCKED-result generation restarts at 0
         this.startDeadReported = false; // fresh goal → fresh start-dead episode
@@ -1184,6 +1631,25 @@ final class BotNavigator {
         }
     }
 
+    /**
+     * §10 rest-gate deferral log (DESIGN-replan-handoff.md §10 U5): the planless pickup — the one
+     * surviving rest-gated install site (U6) — held its fire because the bot's carry hasn't stopped.
+     * ONE line per waiting episode — the flag resets the tick {@code atRest} reads true — never per
+     * tick; {@link Debug#ENABLED}-gated like the other launch-site diagnostics (block re-search /
+     * window-swap).
+     */
+    private void logRestGateDeferral(String site) {
+        if (restGateLogged) {
+            return;
+        }
+        restGateLogged = true;
+        if (Debug.ENABLED) {
+            OrebitCommon.LOGGER.info("[Orebit] rest-gate: deferring {} until at rest bot={} vel=({},{})",
+                    site, AllyBotEntity.compact(bot.blockPosition()),
+                    String.format("%.3f", bot.velX()), String.format("%.3f", bot.velZ()));
+        }
+    }
+
     /** One report per start-dead episode; reset on replan (a fresh goal is a fresh episode). */
     private boolean startDeadReported;
 
@@ -1278,6 +1744,21 @@ final class BotNavigator {
     }
 
     private void steerAlongPath() {
+        // §10 U1 PROMPT TRIGGER (DESIGN-replan-handoff.md §10): ONE monotone epoch read + compare per
+        // tick — the whole cost when nothing edited. Only on an epoch advance (some tracked grid
+        // mutation on this level) run the cold U4 move-compatibility scan over the WHOLE remaining plan
+        // — on-change only, allocation confined to that rare branch. A move-invalidated LATER step fires
+        // the S5 plan-impacted replan THE SAME TICK (debounce bypassed; the U2-clamped seam keeps the
+        // seeded search below the broken step); an invalidated CURRENT step is the U5 emergency — cut
+        // inputs, drop the plan NOW (the planless WAIT keeps the inputs zeroed and the bot coasts to
+        // rest under vanilla physics; a wall is its own brake, a committed arc finishes ballistically).
+        final int epoch = NavGridUpdater.editEpoch((ServerLevel) Worlds.of(bot));
+        if (epoch != editEpochSeen) {
+            editEpochSeen = epoch;
+            if (!scanPlanOnEditEpoch()) {
+                return; // §10 U5: the current step broke — plan nulled this tick, forward zeroed
+            }
+        }
         // Advance to the furthest waypoint the bot has reached. Waypoints ARE blocks and so are the bot's feet
         // ({@code blockPosition()}), so the default test is block-exact (Movement.reached); a swim move
         // loosens it vertically for a buoyancy-bobbing bot. Because the match includes Y, the feet block only
@@ -1337,24 +1818,36 @@ final class BotNavigator {
         // a window swap that reset the cursor) rebuilds it and resets the runner. The plan is written in the
         // search-native FLOOR cells, carried per-waypoint through reconstruct (BlockPathPlan.floorY).
         if (waypointIndex != activePlanStep) {
-            // PENDING-SEARCH CAUTION (owner 2026-07-31, DESIGN-async-step-safety.md §3): an async search
-            // is outstanding — suspect (terrain-impacted/repair: this plan may be INVALID) or routine (a
-            // window slide / P4 pre-plan whose result may change the route's direction). Entering a
-            // COMMITTED move or a deep Fall now would launch the bot into that unresolved future, so the
-            // transition defers: stand at the just-settled anchor. The wait is bounded by the search
-            // budget (the drain runs at this very anchor on the next boundary tick), and a standing bot
-            // always seam-accepts — which also breaks the walk-outruns-the-seam retry storm. Safe steps
-            // are NOT deferred (the async pipeline keeps walking through routine searches). Never holds
-            // on a damaging floor (the arrival gate's own keep-moving rule), and only from a stable
-            // medium (a ballistic bot cannot stand safe — it proceeds as before).
-            if (pathPlan != null && pathPlan.searchPending()
-                    && stepCommitsRisk(waypointIndex)
+            // SEAM CAUTION (owner 2026-07-31, DESIGN-async-step-safety.md §3; rescoped by
+            // DESIGN-replan-handoff.md §7, EXTENDED by §10 U2): a seam-SEEDED re-search is outstanding
+            // whose result adopts at the horizon seam — and because the §3 walk never places a seam
+            // beyond a committing step OR a move-invalidated step (the U2 clamp), the only step whose
+            // outcome that pending search can change is the step AT the seam. Entering it now would
+            // launch the bot into that unresolved future — a committed jump on a possibly-stale premise,
+            // or a walk INTO the very cell an edit just broke (the U2 arm: the async search still in
+            // flight when the bot arrives) — so exactly that one transition defers: stand at the seam
+            // until the search lands (the wait is bounded by the search budget, and a
+            // standing-at-the-seam bot IS the §5 ADOPT case). Every other transition proceeds —
+            // non-committing steps anywhere, committing steps away from the seam, anything under a
+            // routine P4 pre-plan — so step transitions no longer stutter under a pending search; R3/R4
+            // (fast-forward / panic-stop) own a bot that walks past the seam. Never holds on a damaging
+            // floor (the arrival gate's own keep-moving rule), and only from a stable medium (a
+            // ballistic bot cannot stand safe — it proceeds as before). The invalidated-step arm reads
+            // the stored U4 fact ({@code incompatibleStep}, identity-guarded, refreshed per edit epoch)
+            // — a state test, no per-tick grid scan.
+            final int pendingSeam = pathPlan == null ? -1 : pathPlan.seededSearchPendingSeam();
+            if (pendingSeam >= 0 && waypointIndex == pendingSeam + 1
+                    && (stepCommitsRisk(waypointIndex)
+                            || (waypointIndex == incompatibleStep && path == incompatiblePlan))
                     && (bot.grounded() || bot.isInWater())
                     && !onDamagingFloor()) {
                 if (Debug.VERBOSE && lastCautionLoggedStep != waypointIndex) {
                     lastCautionLoggedStep = waypointIndex;
                     bot.vlog("CAUTION hold before " + movement.getClass().getSimpleName() + " step "
-                            + waypointIndex + " — " + (pathPlan.suspectSearchPending() ? "SUSPECT" : "routine")
+                            + waypointIndex + " — "
+                            + (waypointIndex == incompatibleStep && path == incompatiblePlan
+                                    ? "move-invalidated (U2), " : "")
+                            + (pathPlan.suspectSearchPending() ? "SUSPECT" : "routine")
                             + " re-search in flight");
                 }
                 bot.setForward(0.0f);

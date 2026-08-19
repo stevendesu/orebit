@@ -99,6 +99,59 @@ public interface BotSteering {
     }
 
     /**
+     * Horizontal REST threshold (blocks/tick) for {@link #atRest} — the ground-medium half of the
+     * launch-anchor gate (DESIGN-replan-handoff.md §10).
+     *
+     * <p><b>Derived from the vanilla drag math, not tuned</b> (NOTES-movement-physics.md §1: ground drag
+     * per tick = {@code blockFriction × 0.91}). On default ground (friction 0.6 → decay ×0.546/t) a bot
+     * whose inputs just zeroed decays {@code 0.216 b/t} (walk terminal) under 0.02 in <b>4 ticks</b>
+     * ({@code 0.216·0.546⁴ = 0.019}) and sprint's {@code 0.281} in 5 — so an input-zeroed walking bot
+     * passes almost immediately. On blue ice (friction 0.989 → decay ×0.900/t) the same walk carry needs
+     * <b>~23 ticks</b> ({@code 0.216·0.9²³ = 0.019}) — a sliding bot keeps failing until it is genuinely
+     * slow, which is the whole point: "grounded" alone admits a bot skating across cell boundaries.
+     *
+     * <p>Why 0.02 and not looser/tighter: at 0.05 the residual coast on blue ice is still
+     * {@code 0.05·0.9/(1−0.9) = 0.45} blocks — the anchor cell can change AFTER the gate passes, the §1
+     * quantization gap this gate exists to close. At 0.02 the worst-case residual is {@code 0.18} blocks
+     * (default ground: {@code 0.024}) — sub-half-cell, within the drift every install site already
+     * absorbs. Tighter (0.005) buys ~6 more ice ticks of waiting for no anchor gain.
+     */
+    double REST_HSPEED = 0.02;
+
+    /**
+     * Whether the bot is <b>at rest</b> — a valid anchor for a search launch / plan install framed on its
+     * LIVE floor cell (DESIGN-replan-handoff.md §10, owner-ratified 2026-08-18). {@link #settled} and the
+     * follower's plan-anchor rule answer "is the bot in a controlled medium"; this answers the STRICTER
+     * question "has its carry stopped", because a grounded bot sliding at speed passes every medium test
+     * while its floor cell is about to change under the frame being anchored (the §1 quantization gap —
+     * the mid-slide install hazard). Callers AND this <i>beside</i> the plan-anchor test, never instead
+     * of it.
+     *
+     * <p><b>Medium-aware, exactly per §10:</b>
+     * <ul>
+     *   <li><b>Water / lava / climbable</b> — exempt (always at rest): these keep TODAY'S plan-anchor
+     *       semantics unchanged. Fluid drag arrests carry within a tick or two of input-zero; FLOWING
+     *       water pushes the bot continuously, so a speed test there would deadlock the planner; a
+     *       lava-borne bot must plan its escape immediately (existing owner ruling); a climbable hang
+     *       has always serviced handoffs (deferring one slides the bot down the ladder).</li>
+     *   <li><b>Ground (incl. ice)</b> — {@code grounded()} AND horizontal speed below
+     *       {@link #REST_HSPEED} (squared compare, no sqrt).</li>
+     *   <li><b>Ballistic</b> — never at rest (the plan-anchor gate already refuses it; kept consistent
+     *       here so this predicate is safe to read alone).</li>
+     * </ul>
+     */
+    default boolean atRest() {
+        if (inWater() || inLava() || onClimbable()) {
+            return true; // fluid / climbable media keep today's plan-anchor semantics (§10 U5)
+        }
+        if (!grounded()) {
+            return false;
+        }
+        final double vx = velX(), vz = velZ();
+        return vx * vx + vz * vz < REST_HSPEED * REST_HSPEED;
+    }
+
+    /**
      * Arrest threshold (blocks/tick) for {@link #hangingOnClimbable}, separating a HELD hang from a SLIDE.
      *
      * <p><b>Deliberately CONSERVATIVE, and the looser value is measured-and-refuted</b> (2026-08-02). Vanilla
