@@ -122,4 +122,17 @@ class SeamInstallSeedTest {
         assertTrue(BotNavigator.installSeed(null, S, S, -1, false).clearPhase(),
                 "even a BLOCKED (null-plan) install clears — no plan may own a dead step");
     }
+
+    @Test
+    void aPanicConsummationNullInstallAnchorsAtTheSettledFloor() {
+        // A8 (§11, owner ruling 2026-08-20): the PANIC consummation finishes the committed move
+        // centered, THEN drops — the null install that follows seeds cursor 0 anchored at the bot's
+        // settled floor (nothing to frame; the rest-gated planless machinery owns the relaunch). The
+        // botFloor argument here is the terminal move's LANDING — under §11 the install boundary is the
+        // execution edge, so the settled floor and the landing are the same cell by construction.
+        BotNavigator.InstallSeed seed = BotNavigator.installSeed(null, S, K1, -1, false);
+        assertEquals(0, seed.cursor(), "a null install has no plan to enter");
+        assertEquals(K1, seed.anchorFloor(), "anchored at the settled (landing) floor");
+        assertTrue(seed.clearPhase(), "the dropped plan's phase dies with it");
+    }
 }

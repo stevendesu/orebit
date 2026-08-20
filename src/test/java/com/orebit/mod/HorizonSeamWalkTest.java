@@ -286,4 +286,26 @@ class HorizonSeamWalkTest {
         assertEquals(-1, BotNavigator.horizonSeamWalk(p, 2, 100L, SAFE_FALL, null),
                 "a consumed plan (cursor past the last step) has no walkable incumbent");
     }
+
+    // ---- §11 terminal view (DESIGN-replan-handoff.md §11, owner ruling 2026-08-20) --------------------
+
+    @Test
+    void theWalkNeverPassesTheTruncatedTerminal() {
+        // A seam-truncated plan ends at planTerminalIndex for this follower — the walk caps there
+        // exactly as it caps at the real terminus (a seam past the truncation would seed a re-search
+        // from a cell the bot will never settle on).
+        BlockPathPlan p = plan(traverses(6), costs(6, 1f), line(6));
+        assertEquals(2, BotNavigator.horizonSeamWalk(p, 0, 1000L, SAFE_FALL, null, 2),
+                "terminal 2 caps the walk at step 2");
+        assertEquals(5, BotNavigator.horizonSeamWalk(p, 0, 1000L, SAFE_FALL, null, Integer.MAX_VALUE),
+                "MAX_VALUE = untruncated, byte-identical to the 5-arg overload");
+    }
+
+    @Test
+    void aCursorPastTheTruncatedTerminalHasNoWalkableIncumbent() {
+        // Holding at a truncated terminal (cursor advanced past it) is the consumed shape under the
+        // terminal view: no seam — every launch site seeds from the settled floor, as before.
+        BlockPathPlan p = plan(traverses(6), costs(6, 1f), line(6));
+        assertEquals(-1, BotNavigator.horizonSeamWalk(p, 3, 100L, SAFE_FALL, null, 2));
+    }
 }

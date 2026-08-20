@@ -129,6 +129,16 @@ boundary replan is submitted (already the rule — AsyncWindowSearch submit:99).
 
 ## §5 Adoption — the four cases (R2–R4)
 
+> **SUPERSEDED IN PART by §11 (owner ruling 2026-08-20).** The PARK/stay-parked and
+> park-on-completion machinery below stands, but every LOCATION test in cases 1–4 (settled-floor
+> `startMatches`, live-floor body membership, the cursor-only `pastSeam` bit) is replaced by §11's
+> execution-position trichotomy: verdicts key on WHERE THE BOT IS IN PLAN EXECUTION (cursor vs the
+> seam's waypoint index), rule on the in-flight move's LANDING cell, and consummate only at that
+> move's completion — no plan ever swaps mid-move. The pre-§11 geometric arms survive only in the
+> degenerate no-move-in-flight regime (planless / consumed / holding at a truncated terminal). Read
+> §11 first; the text below is kept for the mechanism it still owns (parking, staleness, tolerance
+> formulas, the hot-entry analysis).
+
 Adoption reuses the parked-P4 contract verbatim: results for seeded searches PARK on completion
 instead of installing at the next boundary. At each settled boundary (and via `pollWhenPlanless`
 when planless) run, in order:
@@ -179,7 +189,10 @@ gate defers adoption until the live floor equals the seam floor — and a fluid 
 Nonetheless case-2 adoption SHALL call `newPlan.movement(0).entryReady(bot, seam)` — one virtual
 call on a cold path, provably always-true for the current movement set — so a future movement with
 a real (directional/velocity) entry test is honored automatically; a refusal falls back to case 1
-(stay parked one more boundary).
+(stay parked one more boundary). **§11 re-sites this consultation from verdict time to CONSUMMATION
+time** (owner ruling 2026-08-20): the bot has just completed a move and holds centered at the seam,
+so the pose the gate examines is the settled one the plan's step 0 is actually framed from — a
+deferred verdict consults nothing, and the gate runs when the install actually happens.
 
 **Race: old plan consumed before the result lands** (seam near terminus). Consumption fires
 `refreshWindow` → `dropParked()` + `replanBlock`; the in-flight skip-guard keeps the seeded search
@@ -212,6 +225,11 @@ question with its own (reverted) history — re-read `bfca4a5`'s sibling audit b
   if the seeded search is still pending and the next step commits risk, hold until it lands*
   (Baritone's `shouldPause` analog, scoped to one cell). Same intent, strictly narrower trigger,
   and non-committing step transitions no longer stutter under a pending search.
+  **DELETED by §11 (owner ruling 2026-08-20)** — subsumed, not narrowed further: a pending seeded
+  search now TRUNCATES the walked plan at the seam (the §11 terminal view), so the cursor can never
+  enter seam+1 under one at all; the uniform SEAM-PAUSE hold at the truncated terminal replaces the
+  committing/invalidated-next-step special case for ANY pending seeded search, and the hold is a
+  centered `restHold` station-keep instead of a bare input drop.
 - **AMENDED: the 2026-07-30 owner ruling** ("never plan while the bot is in motion",
   DESIGN-background-pathfinding.md §5). Its ADOPT half is strengthened (seam-anchored). Its
   LAUNCH half is superseded for incumbent-plan re-searches: a seeded search's start is a future
@@ -233,6 +251,14 @@ question with its own (reverted) history — re-read `bfca4a5`'s sibling audit b
 | `BotNavigator` | horizon walk (uses `stepCosts` + `stepCommitsRisk`); pass seam to `PathPlan`; CAUTION hold rescoped to the seam; `setForward(0f)` at the three install sites |
 | `PathPlan` | `replanBlock` seeds `submit`/sync `findPath` from the seam when incumbent+mid-motion (per-site table §4); boundary results park (pending→parked path for seeded searches); PANIC = drop parked + null plan + resubmit |
 | `AsyncWindowSearch` | generalize `pollParked`'s accept/onStartOrPlan tests to boundary-seeded results; keep budget-scaled tolerance |
+
+**§11 delta (owner ruling 2026-08-20):** `BotNavigator` additionally owns the follower-side
+terminal view (`planTerminalIndex` + the `planLimit()` clamps + `refreshSeamTruncation` +
+`seamPauseHold`/`SEAM-PAUSE`); `AsyncWindowSearch.pollSeededParked` computes the §11 trichotomy
+(deferred verdicts + `consummateSeeded`), and `drainPending`'s post-plan-reconcile body arm probes
+the in-flight move's LANDING cell and carries its matched index; `PathPlan` owns the armed
+consummation (`consummationTick`) and threads the landing + execution position; `SteerControl`
+gains the `terminalArrive` centered-terminal drive flag.
 
 Perf note: nothing here touches a per-node hot path. `stepCosts` is one reconstruct-time array per
 found plan. Process still applies: paired interleaved A/B on the full JMH suite (SHORT/MULTI
@@ -346,3 +372,94 @@ end of it.
 **Proof tiles** (ReplanCourse): `prefixseal` (U1+U2 — same-tick prompt, clamped-seam ADOPT, NO drop,
 identical shape in both pathing modes), `currentseal` (U5), `currentseal-on-ice` (U5 + the kept rest
 gate — the install must wait out the slide).
+
+## §11 Seam as execution edge (owner-ratified 2026-08-20)
+
+**The ruling, verbatim intent:** "The seam shouldn't be about the bot's LOCATION, but about where it
+is in the plan execution. [...] The seam becomes the razor-thin edge between one movement completing
+and the next starting. [...] we probably never want to swap a plan mid-move. Plans should swap
+between moves. One move completes and instead of picking up with the OLD plan's next move we pick up
+with the NEW plan's next move. [...] Once a re-plan has completed [...] we should be able to
+truncate the old plan and say 'the plan will now END when the current movement ends' — which should
+drive the bot to the center of a cell before adopting the new plan."
+
+**What convicted the location seam** (the 2026-08-20 run-2 and run-6 convictions, on top of the
+run-5 stale-frame Pillar wedge §5/R3 had already patched): verdicts keyed on the bot's INSTANTANEOUS
+floor cell install plans under a move still in flight — the settled-floor equality gate approximates
+"between moves" only up to the tick quantization, and every arm of the §5 pump (startMatches on a
+mid-move floor, body membership of a cell the bot is passing THROUGH rather than landing ON,
+`pastSeam` as a bare cursor bit) inherited that approximation. §11 removes the approximation instead
+of patching its corners.
+
+### The model
+
+- **Truncation is a follower-side terminal VIEW, never a copied plan.** `BotNavigator.planTerminalIndex`
+  (default `MAX_VALUE`) caps every "how far does execution run" read via `planLimit()`;
+  `BlockPathPlan` stays immutable and the swap detector's identity test stays sound. Derived
+  state-based each tick (`refreshSeamTruncation`): an ARMED verdict imposes its terminal exactly; a
+  pending/parked seeded search truncates at its seam, latched at `max(seam, cursor)` once per
+  episode (never behind the in-flight move, never re-extended by the cursor's own advance); a dead
+  seam state restores `MAX_VALUE`. The §3 walk, the §10 U1 scan, the reached loop, the consumed
+  tests, the corner-blend look-ahead and the P4 preplan all read the terminal view.
+- **The verdict trichotomy** (`AsyncWindowSearch.pollSeededParked`, cursor vs the seam's waypoint
+  index, identity-guarded on the plan the walk chose the seam on):
+  - **before-seam** (`cursor < seamIndex`): park, keep executing the old plan — regardless of
+    geometry (subsumes the 2026-08-18 reversal ruling structurally: pre-seam NEVER installs).
+  - **at-seam** (`cursor == seamIndex` — the move ENDING at the seam is in flight): deferred ADOPT —
+    truncate at this move, consummate at its completion, settled at the seam.
+  - **beyond** (`cursor > seamIndex`): the in-flight move's LANDING floor (`seamPlan.floor(cursor)`)
+    is ruled against the new plan — the seam itself → deferred ADOPT; a body cell (fluid yTol ±1) →
+    deferred FAST-FORWARD carrying the matched index (the install seed starts past the executed
+    prefix); neither → deferred PANIC. The budget-scaled walk-outrun Chebyshev box survives as a
+    SANITY bound on the live floor (never a long-range PANIC).
+  - **degenerate** (no move in flight: planless via `pollWhenPlanless`, a consumed incumbent, or
+    holding at a truncated terminal): the verdict IS the consummation, immediately, on the settled
+    live floor — the pre-§11 geometric arms, in the one regime where they are exact.
+- **Consummation at completion** (`PathPlan.consummationTick`): a deferred verdict arms
+  (`armedVerdict`/`armedPlan`/`armedTerminal`/`armedMatched`) and owns every boundary until
+  `seamCursor > armedTerminal` — the reached-advance is the sole completion authority — then
+  installs (ADOPT/FAST-FORWARD through the existing install block + `installSeed`) or drops (PANIC:
+  null-only; the §10 rest-gated planless machinery owns the relaunch). State-based disarms on every
+  premise death (plan swapped/dropped, parked result gone, window target moved). The invariant is
+  absolute: NO plan swap while a move is in flight, and the new plan's step-0 frame equals the bot's
+  actual settled cell at install. The step-0 `entryReady` gate is consulted HERE (re-sited from
+  verdict time — the bot is settled and centered, the pose the plan actually starts from).
+- **Centered terminal.** While the terminal move executes, `SteerControl.terminalArrive` routes the
+  land drive onto the step-target ARRIVE (`arriveOnStep` — cruise-capped easing, hazard near-face
+  branch; the `stepGateArmed` plumbing discipline), and the terminal-view clamp kills the
+  corner-blend look-ahead, so the move ends squared-up at the cell centre. After completion, the
+  SEAM-PAUSE hold (`seamPauseHold`) station-keeps on the terminal waypoint centre via `restHold`
+  (§2.6 scope: grounded/!inWater/!onClimbable; `clingHold` keeps climbable/fluid) until
+  consummation — drift (ice) is actively re-centred, which is what re-establishes the settled-floor
+  equality the consummation boundary needs.
+- **PANIC = finish the committed move.** The parked slot drops at verdict time (the result answers a
+  dead premise); the PLAN drops only at consummation — the bot finishes its committed move, ends
+  centered at ITS landing, and the existing rest-gated planless pickup relaunches from there. The
+  old drop-immediately-mid-move shape is gone.
+- **The second mouth** (`drainPending`'s post-plan reconcile, the non-seeded boundary-result arm):
+  the body-membership probe is the in-flight move's LANDING cell (live floor only when planless),
+  and a body hit carries `resultMatchedIndex` so the install seed enters PAST the executed prefix —
+  the cursor-0 mid-plan install is gone from this arm too.
+- **The old CAUTION hold is deleted** (see §7): a pending seeded search truncates the plan at the
+  seam, so the cursor can never enter seam+1 under one; the uniform hold-at-seam covers ANY pending
+  seeded search, committing next step or not.
+
+### §11.1 The SEAM-PAUSE diagnostic (§8's successor)
+
+`driveState = "SEAM-PAUSE"` while holding at the truncated terminal; per-episode tick counter
+(`seamPauseTicks`, keyed on the terminal index); ONE INFO line at consummation —
+`[Orebit] seam-pause: held Nt at seam (x,y,z) waiting for the seeded search` — logged at the swap
+site, silent on zero-tick consummations and on episodes that die without an install. Frequent or
+long pauses are the SEAM-PADDING TUNING SIGNAL: the §3 walk's budget→distance conversion
+under-reached (the search outlives the bot's walk to the seam), so the padding — not the hold — is
+what wants tuning. Episode reads: seam-seed → seam-park → seam-verdict → [seam-pause Nt] →
+seam-adopt/seam-consummate.
+
+### §11.2 Test surface
+
+`SeamAdoptionTest` rewritten to the trichotomy (the pre-§11 location pins are deliberately
+superseded — each rewritten case cites this ruling); `HorizonSeamWalkTest` gains the terminal-view
+cases; `SeamInstallSeedTest` gains the PANIC null-install case; `ReplanCourse`'s reversal trial is
+retightened to the now-deterministic seam ADOPT; `prefixseal`'s park-at-seam pause is the SEAM-PAUSE
+hold. `planBodyIndex`/`startMatches`/stale-target-drop/`parkSeededResult` and the §5 install
+plumbing (`blockPlanStart`/`adoptedMatchedIndex`/`installSeed`) are unchanged.
