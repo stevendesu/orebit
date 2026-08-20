@@ -284,8 +284,16 @@ public final class PhaseRunner {
             return false;
         }
 
-        // Geometry holds — drive the phase, then advance or finish.
+        // Geometry holds — drive the phase, then advance or finish. While the step-off gate is ARMED but the
+        // carry is CONTAINED (the gate above declined to hold), the generic ground drive must not steer for
+        // the corner racing line the gate's lane law forbids — stepGateArmed routes SteerControl.drive's land
+        // branch onto the step-target ARRIVE for exactly these ticks (the (259,78,448) two-tick thrust/hold
+        // limit cycle; owner-ratified 2026-08-19, DESIGN-servo-normalization.md §2.5). Set and cleared AROUND
+        // the drive so no other SteerControl caller can ever read it stale; phases that write their own
+        // servos (Ascend's jump-climb, Fall/Descend's arriveOnTarget) never consult it and keep their inputs.
+        SteerControl.stepGateArmed = phase.carryGateArmed(bot);
         phase.drive(bot, view);
+        SteerControl.stepGateArmed = false;
         if (cursor == plan.size() - 1) {
             return phase.isDone(bot);
         }

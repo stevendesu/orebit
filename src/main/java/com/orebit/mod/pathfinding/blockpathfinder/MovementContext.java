@@ -211,6 +211,32 @@ public final class MovementContext {
     }
 
     /**
+     * Whether a jump IMPULSE exists at the node whose floor cell is {@code (x,y,z)} — the gate for
+     * jump-requiring moves that must stay legal from a FLUID floor (owner ruling 2026-08-19, the
+     * flagship vine-curtain conviction at (196,123,330)). {@link #solidFooting} is the launch gate for
+     * the GROUND jumps (Ascend/Parkour/DiagonalParkour/WalkOff): it demands a full-faced standable
+     * floor, which also refuses WATER — correct for a horizontal launch, wrong for {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Pillar}, whose flooded-shaft form (held jump
+     * = swim-up, place below) has always been admitted via {@code floorSurface}'s 16-sentinel. This
+     * predicate is the ruling's own two-part statement, no more:
+     * <ul>
+     *   <li><b>FEET in a climbable</b> — refused. The jump input climbs instead of launching (vanilla
+     *       truncates the 0.42 impulse to the 0.2 climb); vine, ladder and scaffolding feet alike.</li>
+     *   <li><b>A no-collision climbable FLOOR</b> (climbable and NOT standable: vine, ladder) —
+     *       refused. That is the crest-float stance ({@code Climb} §3.4 EXIT-TOP): held jump merely
+     *       holds altitude at the column top; there is no surface to push off.</li>
+     * </ul>
+     * A scaffolding DECK passes (standable floor — the climbable is below the feet, not in them), and a
+     * water floor passes (not climbable — held jump genuinely lifts). Two descriptor reads, same cost
+     * shape as {@link #solidFooting}.
+     */
+    public boolean canJumpFrom(int x, int y, int z) {
+        if (NavBlock.isClimbable(descriptorAt(x, y + 1, z))) return false;
+        long floor = descriptorAt(x, y, z);
+        return !(NavBlock.isClimbable(floor) && !NavBlock.isStandable(floor));
+    }
+
+    /**
      * Whether the TAKEOFF FLOOR cell {@code (x,y,z)} — the standable cell a jump move launches FROM, the
      * same cell {@link #floorSurface} reads — is a {@link NavBlock#reducesJump REDUCED-JUMP} floor (honey
      * block, jump factor 0.5): the jump apex there (~0.384 blocks) clears nothing, so every jump-takeoff
@@ -1353,8 +1379,10 @@ public final class MovementContext {
      * and grab loops both touch the same four cardinal columns). Note the
      * climbable shapes diverge (bytecode-adjudicated 2026-07-31, NOTES-movement-physics.md §3): ladder
      * classifies {@code SHAPE_OTHER} and scaffolding {@code SHAPE_FULL} (the empty-context query returns
-     * its stand-on-top stable shape) — both NOT {@link #passable} but genuinely {@link #standable}
-     * (full-height collision tops), and both read as <i>blocked</i> by the resident HEADROOM bit — while
+     * its stand-on-top stable shape) — both NOT {@link #passable}; scaffolding is genuinely
+     * {@link #standable} (full-height collision top) while the LADDER is NOT (NARROW_TOP strips
+     * STANDABLE in {@code withDerived} — this line claimed both standable before 2026-08-19; the code
+     * is stricter), and both read as <i>blocked</i> by the resident HEADROOM bit — while
      * vines are empty-shape and passable. Climb predicates must therefore never go through
      * {@link #requireBodyClear} (it would fold a break of the ladder itself); they read cells directly
      * against {@link #passableOrClimbable}.

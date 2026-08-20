@@ -15,10 +15,12 @@ import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.ClutchModel;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
 import com.orebit.mod.pathfinding.blockpathfinder.RegionBound;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Climb;
 import com.orebit.mod.config.Config;
 import com.orebit.mod.config.ConfigLoader;
 import com.orebit.mod.platform.BotInventory;
+import com.orebit.mod.platform.ChunkTracking;
 import com.orebit.mod.platform.ClientLoad;
 import com.orebit.mod.platform.CommandFeedback;
 import com.orebit.mod.platform.EntityState;
@@ -216,6 +218,15 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     private double comeArriveDist = BotNavigator.ARRIVE_DIST;
     private double comeArriveY = BotNavigator.ARRIVE_Y;
     private int comeGoalTol = BlockPathfinder.DEFAULT_GOAL_TOL_XZ;
+    /** Arrival-settle anchor (owner-ratified 2026-08-19, DESIGN-servo-normalization.md §2.6): the
+     *  completed plan's FINAL waypoint cell, armed at the COME→STAY arrival flip and driven by
+     *  {@link #holdPosition} so the bot rests on that cell's CENTRE ("stand EXACTLY there" — e.g. keeping
+     *  a mob spawner active from exact afk coordinates) instead of parking wherever it first clipped the
+     *  arrival radius. Deliberately NOT {@link #comeTarget}: under come-loose tolerance the plan ends
+     *  NEAR that cell and the bot must not stand ON it. {@code null} — a command-STAY or a planless
+     *  arrival — keeps the plain hold. Cleared on every mode change / new command (the same reset paths
+     *  as {@code comeTarget}). */
+    private BlockPos settleAnchor;
 
     // ---- swim-pose transition diagnostic (Debug.VERBOSE) — see logSwimTransition() -------------------
     // Vanilla drops the prone Pose.SWIMMING the instant a tick sees !(isSprinting() && isInWater()), and can
@@ -397,6 +408,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     public void setMode(Mode mode) {
         this.mode = mode;
         this.comeTarget = null;
+        this.settleAnchor = null;   // any mode change disarms the arrival settle (the arrival site re-arms)
         navigator.clearPlan();
         portalFollower.resetPortalSeek(); // a fresh command restarts (and re-announces) any cross-dimension seek
     }
@@ -405,6 +417,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     public void comeTo(BlockPos summonCell) {
         this.mode = Mode.COME;
         this.comeTarget = summonCell.immutable();
+        this.settleAnchor = null;   // a fresh summon disarms any previous arrival's settle
         this.comeArriveDist = BotNavigator.ARRIVE_DIST;
         this.comeArriveY = BotNavigator.ARRIVE_Y;
         this.comeGoalTol = BlockPathfinder.DEFAULT_GOAL_TOL_XZ;
@@ -438,6 +451,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     public void startGather(com.orebit.mod.worldmodel.resource.DropModel.Output output, int quota) {
         this.mode = Mode.GATHER;
         this.comeTarget = null;
+        this.settleAnchor = null;
         navigator.clearPlan();
         portalFollower.resetPortalSeek();
         gatherer.startGather(output, quota);
@@ -449,6 +463,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     public void startCraft(String item, int count) {
         this.mode = Mode.CRAFT;
         this.comeTarget = null;
+        this.settleAnchor = null;
         navigator.clearPlan();
         portalFollower.resetPortalSeek();
         crafter.startCraft(item, count);
@@ -459,6 +474,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     public void startFarm() {
         this.mode = Mode.FARM;
         this.comeTarget = null;
+        this.settleAnchor = null;
         navigator.clearPlan();
         portalFollower.resetPortalSeek();
         farmer.startFarm();
@@ -472,6 +488,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     public void startRoam(int radius) {
         this.mode = Mode.ROAM;
         this.comeTarget = null;
+        this.settleAnchor = null;
         navigator.clearPlan();
         portalFollower.resetPortalSeek();
         roamer.startRoam(radius);
@@ -482,6 +499,7 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
     public void startBuild(com.orebit.mod.building.Schematic schematic, BlockPos origin) {
         this.mode = Mode.BUILD;
         this.comeTarget = null;
+        this.settleAnchor = null;
         navigator.clearPlan();
         portalFollower.resetPortalSeek();
         builder.startBuild(schematic, origin);
@@ -609,7 +627,10 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                     if (portalFollower.followThroughPortal()) break;
                     double tx = comeTarget.getX() + 0.5, ty = comeTarget.getY(), tz = comeTarget.getZ() + 0.5;
                     if (navigator.driveToward(tx, ty, tz, comeTarget.below(),
-                            comeArriveDist, comeArriveY, comeGoalTol, comeGoalTol)) setMode(Mode.STAY); // arrived
+                            comeArriveDist, comeArriveY, comeGoalTol, comeGoalTol)) {
+                        setMode(Mode.STAY); // arrived — then arm the settle AFTER the mode flip clears it:
+                        settleAnchor = navigator.arrivedPlanEnd(); // rest on the plan's final cell (§2.6)
+                    }
                 }
                 default -> { // FOLLOW
                     if (!portalFollower.followThroughPortal()) {
@@ -654,6 +675,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             MoveReport.after(this, moved.x, moved.y, moved.z, EntityState.onGround(this));
         }
 
+        // Recentre the bot's player chunk tickets on this tick's FINAL position (platform/ChunkTracking):
+        // the ServerChunkCache.move a real client's move packets drive — a clientless bot never receives
+        // them, so its sim bubble stays at spawn and far chunks freeze (the 2026-08-19 floating-bamboo
+        // forensic). Self-guards on section change; a no-op tick is one section compare.
+        ChunkTracking.recenter(this);
+
         // Read the prone-pose state AFTER doTick (vanilla's updateSwimming ran inside it, from THIS tick's
         // inputs + resulting position), so a PRONE->STAND flip is dumped with the state that caused it.
         if (Debug.VERBOSE) logSwimTransition();
@@ -665,8 +692,21 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         if (!levelChanged) mining.tick(level);
     }
 
-    /** STAY: stop in place and face the owner. */
+
+    /** STAY: stop in place and face the owner — or, while an arrival armed {@link #settleAnchor}, drive
+     *  the settle instead: the unified core's HOLD at the final plan cell's centre
+     *  ({@link SteerControl#restHold}, DESIGN-servo-normalization.md §2.6), whose deadband quiescence is
+     *  the rest state and whose anchored pull actively re-centres an externally pushed bot. LAND-only
+     *  this round (grounded, not in water, not on a climbable — a bot arriving swimming keeps the plain
+     *  hold), and the guard re-asks per tick, so a settled bot pushed off its medium simply pauses the
+     *  settle for those ticks. A command-{@code /bot stay} never arms the anchor, so it keeps today's
+     *  behavior unchanged. */
     private void holdPosition() {
+        if (settleAnchor != null && grounded() && !isInWater() && !onClimbable()) {
+            navigator.clearPlan(); // STAY still holds no goal — the settle is a servo, not a plan
+            SteerControl.restHold(this, settleAnchor.getX() + 0.5, settleAnchor.getZ() + 0.5);
+            return;
+        }
         this.zza = 0.0f;
         navigator.clearPlan();
         lookAtPlayer(owner);

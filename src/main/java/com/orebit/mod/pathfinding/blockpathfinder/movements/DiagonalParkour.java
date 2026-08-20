@@ -510,7 +510,12 @@ public final class DiagonalParkour implements Movement {
                         sprintInject[1] = true;
                         sprintInject[0] = !sprint && SteerControl.parkourLaunchShort(b, uxn, uzn, tx, ty, tz);
                     }
-                    SteerControl.parkourRunupAlign(b, uxn, uzn);
+                    // The ballistic-runup composition (DESIGN-servo-normalization.md §2.4): along-axis
+                    // ARRIVE at the LANDING CENTRE + cross-axis HOLD on the jump-axis centreline through
+                    // it. The anchor is the landing, NEVER the gate: a gate-point ARRIVE put the anchor
+                    // underfoot on this very tick (desired ≈ 0, err = −vel) and yawed the bot into a
+                    // backwards phantom hop as setJumping fired — the 2026-08-19 ParkourCourse regression.
+                    SteerControl.parkourRunupAlign(b, uxn, uzn, landX, landZ);
                     b.setSprinting(sprint || sprintInject[0]);
                     b.setJumping(true);
                 })

@@ -102,6 +102,13 @@ public final class Pillar implements Movement {
         // Must be an open cell to place into; if it's already standable this isn't a pillar.
         if (!ctx.openForPlace(floorDesc)) return;
 
+        // R1 for Pillar (owner ruling 2026-08-19, the flagship vine-curtain conviction at (196,123,330)):
+        // no jump impulse from a climbable stance. Pillar was the ONLY jump-requiring move unenrolled —
+        // the floorSurface gate below is a HEIGHT test whose 16-sentinel makes a vine floor read as a full
+        // cube (Parkour.java names the same trap). NOT solidFooting: that would also refuse the water
+        // floor and delete the flooded-shaft swim-pillar the sentinel deliberately exempts.
+        if (!ctx.canJumpFrom(x, y, z)) return;
+
         // FULL-height start surface required (canon: heights in sixteenths, jump rise = JUMP_RISE = 20).
         // Pillaring places a full cube into the bot's own feet cell, whose top is 32 − startSurface above
         // the start surface. From a partial start (a slab, top 8) the jump apex reaches only

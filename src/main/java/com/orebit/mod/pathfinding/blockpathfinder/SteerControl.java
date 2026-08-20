@@ -810,6 +810,15 @@ public final class SteerControl {
     }
 
     public static boolean holdUntilOverTargetColumn(BotSteering b, SteerView p) {
+        // §4: unconditional stamp, before any early-out (DESIGN-servo-normalization.md — "a method that
+        // writes any steering input writes a tag in the same call"). This is the ONLY drive-path call on
+        // Descend's CLEAR hand-off tick, and untagged it left that tick reading the PREVIOUS servo's src
+        // in the exec log (the stale-tag trap — the (57,172,255) conviction's counter froze on exactly
+        // that tick). The dead variant is honest for every early-out (the drive ran and chose to write
+        // nothing); the sneak path re-stamps the active name. Callers that follow this with a real drive
+        // (Descend's STEP, Diagonal, Fall's walkoff) overwrite it — last stamp wins, the stationKeep
+        // after-recenterOn precedent.
+        tag("hold:overcol:dead");
         if (!b.onClimbable()) return false;
         // SUPPORT UNDERNEATH ⇒ no hold (the already-ratified lateral rule, re-derived here 2026-08-05).
         // This hold exists to stop the bot sliding down the WRONG column while it is still off-target. A bot
@@ -822,8 +831,164 @@ public final class SteerControl {
         if (b.grounded() || b.standableBelow()) return false;
         double ox = p.tx() - b.x(), oz = p.tz() - b.z();
         if (Math.sqrt(ox * ox + oz * oz) <= COLUMN_DEADBAND) return false; // over it — let go, gravity drops
+        tag("hold:overcol");
         b.setSneak(true);
         return true;
+    }
+
+    // ---- the unified servo core (DESIGN-servo-normalization.md §2, ratified 2026-08-19) --------------
+
+    /**
+     * Face-the-error escape-hatch threshold (b/t of velocity error) for the unified core's SEMANTIC yaw
+     * (DESIGN-servo-normalization.md §2.2): below it the head keeps facing the step's target and the hands
+     * (signed forward + strafe) express the correction; at/above it the servo yaws onto the error vector.
+     * DERIVED, not tuned (§7 Q1, owner 2026-08-19): {@code 1/}{@link #SERVO_GAIN} is the saturation point —
+     * the error at which the proportional key first maxes out — so the yaw escape engages exactly where a
+     * correction needs sprint-class thrust, which vanilla only grants FORWARD (sprint requires forward
+     * input); below it the strafe/backpedal channels can deliver the whole correction without spinning the
+     * head. No new literal by ruling; promote to a hysteresis pair only on observed chatter AT the threshold.
+     */
+    static final double FACE_ERR_THRESHOLD = 1.0 / SERVO_GAIN;
+
+    /**
+     * ARRIVE-mode GROUND position gain (b/t of desired closing speed per block of anchor distance) — a
+     * RE-EXPRESSION of {@link #GROUND_COAST}, not a new tuning constant (DESIGN-servo-normalization.md §2.3,
+     * ratified §7 Q3). The identity: with {@code gainP = 1/coast = (1−q)/q} for the medium's per-tick drag
+     * {@code q}, the cascade's error is exactly {@code gainP · (anchor − (pos + coast·vel))} — the unified
+     * law with this gain IS {@link #arriveOnTarget}'s projected-stop law. Physically, {@code desired_vel(d)}
+     * is precisely the speed from which a pure-drag coast stops ON the anchor. Ground {@code q = 0.546} →
+     * {@code ≈ 0.831}. Future media derive their gain the same way from NOTES-movement-physics §1, never
+     * from tuning sessions (the ratified derived-gainP rule).
+     */
+    static final double ARRIVE_GAIN_GROUND = 1.0 / GROUND_COAST;
+
+    /**
+     * The <b>unified servo core</b> — one position→velocity→thrust cascade, per tick, stateless,
+     * allocation-free (DESIGN-servo-normalization.md §2.1, owner-ratified 2026-08-19). The law:
+     *
+     * <pre>
+     *   desired_vel = unit(anchor − pos) · min(cap, gainP · |anchor − pos|)
+     *   err         = desired_vel − vel              (horizontal, blocks/tick)
+     *   thrust      = min(1, SERVO_GAIN · |err|)     (|err| &lt; SERVO_DEADBAND → coast)
+     * </pre>
+     *
+     * The modes differ ONLY by the anchor and the {@code cap}/{@code gainP} pair the caller passes —
+     * <b>HOLD</b> is a small ACHIEVABLE cap ({@link #SERVO_CROSS_CAP}/{@link #SERVO_CROSS_GAIN} on ground:
+     * {@link #stepOffGate}'s proven pull), <b>ARRIVE</b> an easing pull at the physics-derived
+     * {@link #ARRIVE_GAIN_GROUND}, <b>PASS-THROUGH</b> (no caller yet — Phase 2+) a moving pursuit anchor
+     * at the unreachable cruise ceiling, where the cap saturates and {@code gainP} never engages. The
+     * zero-velocity setpoint is DERIVED from the position error — {@link #uprightSwimServo}'s proven
+     * degenerate branch promoted to the norm — so at the anchor the servo actively brakes external push,
+     * and past it {@code unit(anchor − pos)} reverses and overshoot is answered with position-anchored
+     * reverse thrust. A position-anchored law cannot walk away from its anchor the way the retired
+     * velocity-only laws could (§1 class 1: a zero-velocity SETPOINT with no position term fights the
+     * velocity it sees this tick and is indifferent to where the bot has already been pushed — the
+     * (419,66,596) rear-lip walk-out).
+     *
+     * <h2>Actuation (§2.2 — {@link #arriveOnTarget}'s owner-ratified frame generalized to the norm)</h2>
+     * Yaw is SEMANTIC: face {@code (faceX,faceZ)} — the step's target / travel direction — never the error
+     * vector for a small correction (the 2026-08-06 no-pirouettes rulings: "heading is held, braking is
+     * REVERSE input"; "cross-axis error is corrected by STRAFE, not by yawing"). The error is expressed in
+     * the facing frame: {@code setForward = err·heading}, SIGNED — backpedal is legal, the moon-walk brake —
+     * and {@code setStrafe} the cross component, saturated as a VECTOR (the pair scaled so its magnitude is
+     * the thrust), never per-component. One escape hatch: at {@code |err| ≥ }{@link #FACE_ERR_THRESHOLD}
+     * the proportional key is saturated — the correction needs sprint-class thrust, which exists only
+     * forward — so the servo yaws onto the error, where the decomposition reduces exactly to the legacy
+     * face-the-error actuation ({@code along = |err|}, {@code cross = 0}, full key). The coexistence
+     * carve-outs that ride on specific FAMILIES (the climbable zero-horizontal-input ruling, the prone
+     * {@link #SERVO_FORWARD_MIN} floor, swim pitch ownership) attach at their families' migration phases —
+     * the two Phase-1 callers are grounded-on-land by their own gates.
+     *
+     * <h2>Tag (§4)</h2>
+     * Stamped on EVERY tick this core runs, before any input write or early-out — an untagged servo's ticks
+     * read the PREVIOUS servo's {@code src} in the exec log (the stale-tag trap, inventory bug-class 4), and
+     * the core kills that structurally rather than by auditing callers. {@code tagDead} is the caller's
+     * {@code :dead} quiescent variant; both are caller-supplied literals so the stamp allocates nothing
+     * beyond {@link #tag}'s own existing formatting.
+     */
+    static void anchoredServo(BotSteering b, String tagName, String tagDead,
+                              double ax, double az, double cap, double gainP,
+                              double faceX, double faceZ) {
+        // The cascade: anchor → desired velocity (capped proportional pull) → velocity error. Pure math up
+        // to the tag stamp — no input write and no return precedes it.
+        double dx = ax - b.x(), dz = az - b.z();
+        double dist = Math.sqrt(dx * dx + dz * dz);
+        double dvx = 0.0, dvz = 0.0;
+        if (dist >= EPS) {
+            double sp = Math.min(cap, gainP * dist);
+            dvx = (dx / dist) * sp;
+            dvz = (dz / dist) * sp;
+        }
+        actuate(b, tagName, tagDead, dvx - b.velX(), dvz - b.velZ(), faceX, faceZ);
+    }
+
+    /**
+     * The unified core's <b>err→thrust→actuation tail</b> (§2.2) — factored out of {@link #anchoredServo}
+     * so the {@link #parkourRunupAlign} composition (which forms its desired velocity PER AXIS rather than
+     * from a single anchor) can share it verbatim: one copy of the actuation math, ever. Takes the caller's
+     * already-formed velocity ERROR ({@code desired − actual}, horizontal, blocks/tick) and expresses it
+     * as inputs — the §4 tag stamp (unconditional, before any input write or early-out), SEMANTIC yaw at
+     * {@code (faceX,faceZ)} with the yaw-onto-the-error escape at {@link #FACE_ERR_THRESHOLD}, the signed
+     * forward + strafe decomposition in the facing frame, and vector saturation. See {@link #anchoredServo}
+     * for the rationale of each piece; behavior through the anchored path is byte-identical to the
+     * pre-factoring inline tail.
+     */
+    private static void actuate(BotSteering b, String tagName, String tagDead,
+                                double errx, double errz, double faceX, double faceZ) {
+        double emag = Math.sqrt(errx * errx + errz * errz);
+
+        boolean dead = emag < SERVO_DEADBAND;
+        tag(dead ? tagDead : tagName);                 // §4: unconditional, before any early-out
+
+        // §2.2 SEMANTIC yaw: face the step's target; yaw onto the error only for a saturated correction.
+        double hx, hz;
+        if (!dead && emag >= FACE_ERR_THRESHOLD) {
+            hx = errx / emag; hz = errz / emag;        // sprint-class: the hands alone can't deliver it
+        } else {
+            double fl = Math.sqrt(faceX * faceX + faceZ * faceZ);
+            if (fl >= EPS) {
+                hx = faceX / fl; hz = faceZ / fl;      // semantic: the head points where the bot is GOING
+            } else if (emag >= EPS) {
+                hx = errx / emag; hz = errz / emag;    // no semantic heading given — the error is all there is
+            } else {
+                b.setForward(0.0f);                    // nothing to face, nothing to correct — explicit
+                b.setStrafe(0.0f);                     // zeros, never a stale key (the zza invariant)
+                return;
+            }
+        }
+        b.faceHorizontally(hx, hz);
+        if (dead) {
+            b.setForward(0.0f);                        // quiescent: hold the heading, coast — explicit zeros
+            b.setStrafe(0.0f);
+            return;
+        }
+        // Decompose the error in the facing frame and drive BOTH channels (BotSteering's sign convention:
+        // positive strafe = the mover's LEFT, (hz,−hx) for unit heading), saturated as a VECTOR.
+        double along = errx * hx + errz * hz;          // signed: negative = backpedal (the moon-walk brake)
+        double cross = errx * hz - errz * hx;          // signed: positive = the error points LEFT of the facing
+        double scale = Math.min(1.0, SERVO_GAIN * emag) / emag;
+        b.setForward((float) (along * scale));
+        b.setStrafe((float) (cross * scale));
+    }
+
+    /**
+     * The ARRIVAL-SETTLE hold (owner-ratified 2026-08-19, DESIGN-servo-normalization.md §2.6): on plan
+     * completion the bot drives to rest on the CENTRE of its final plan cell — "if you tell the bot to
+     * stand in a specific location, you want it to stand EXACTLY there" (e.g. keeping a mob spawner
+     * active from exact afk coordinates). The {@link #anchoredServo unified core} in HOLD mode at the
+     * proven ground pull ({@link #SERVO_CROSS_CAP}/{@link #SERVO_CROSS_GAIN}), anchored at the completed
+     * plan's final waypoint centre {@code (ax,az)}. Facing is SEMANTIC per §2.2 — the anchor direction
+     * while off-centre; once the bot rests ON the anchor both the facing and the error vanish and the
+     * dead branch's final else writes explicit zero inputs without touching yaw, so the last approach
+     * heading is simply held. The deadband quiescence IS the rest state: an external push re-raises the
+     * error and the servo actively re-centres — an anchored station-keep, never a dead-band no-op.
+     * Callers gate on the GROUNDED land medium (water/climbable arrivals keep their pre-settle behavior
+     * — this round's ratified scope) and on holding a captured anchor at all: a planless arrival or a
+     * command-{@code /bot stay} hold never reaches this method.
+     */
+    public static void restHold(BotSteering b, double ax, double az) {
+        anchoredServo(b, "hold:rest", "hold:rest:dead", ax, az,
+                SERVO_CROSS_CAP, SERVO_CROSS_GAIN, ax - b.x(), az - b.z());
     }
 
     /**
@@ -841,15 +1006,23 @@ public final class SteerControl {
      * {@code v/(1−f)}: ×2.2 on stone at slip 0.6, ×9+ on ice). The step-off may drive only when
      * {@code |botCrossOffset + vCross/(1−f)| ≤ 0.5 − }{@link #PARKOUR_CELL_MARGIN} — the bot's centre,
      * after coasting out its carry, stays inside the one-wide landing lane with the player half-width to
-     * spare. While that fails, this method WRITES the arrest inputs for the tick — the pure cross servo
-     * ({@link #SERVO_CROSS_GAIN}/{@link #SERVO_CROSS_CAP} toward the lane centreline, desired along-speed
-     * ZERO, the {@link #parkourAirborne} actuation) — and returns {@code true}: bleed the carry and pull
-     * the centreline FIRST, commit after. On ice the horizon is honestly long, so the bot all but stops
-     * before stepping off — the physically right caution, at worst a visible pause on the lip (never a
-     * slide off it). Conservative by construction: the arrest beats pure friction, and post-commit the
-     * normal drive's cross-gain only shrinks the carry further, so the prediction is an upper bound.
-     * Callers gate on {@code b.grounded()} and on still standing on the FROM column — once the step-off
-     * is under way (foot moved / airborne) the gate must not re-engage.
+     * spare. While that fails, this method WRITES the hold inputs for the tick — {@link #anchoredServo
+     * the unified core} in HOLD mode, anchored at the TAKEOFF cell centre with the proven
+     * {@link #SERVO_CROSS_CAP}/{@link #SERVO_CROSS_GAIN} pull (DESIGN-servo-normalization.md §3) — and
+     * returns {@code true}: bleed the carry and re-centre on the takeoff stand FIRST, commit after. The
+     * RETIRED response (desired along-speed identically ZERO with no position term, crossErr measured to
+     * the TARGET centreline) was the audit's class-1/class-3 conviction: forward carry became along-error
+     * {@code −vAlong} → a full-key reverse (gain 18 saturates at 0.055 b/t against ~0.1 b/t imparted per
+     * ground tick), and standing near the rear lip of the from-cell ONE reverse tick walked the bot OUT of
+     * it — the gate self-disengaged (foot left carryFrom) and the validity envelope fired (the
+     * (419,66,596) rear-lip walk-out). Anchored at the takeoff centre that is geometrically impossible:
+     * the desired velocity always points back INTO the from-cell with magnitude ≤ 0.13. On ice the horizon
+     * is honestly long, so the bot all but stops before stepping off — the physically right caution, at
+     * worst a visible pause on the lip (never a slide off it). Conservative by construction: the hold
+     * beats pure friction, and post-commit the normal drive's cross-gain only shrinks the carry further,
+     * so the prediction is an upper bound. Callers gate on {@code b.grounded()} and on still standing on
+     * the FROM column — once the step-off is under way (foot moved / airborne) the gate must not
+     * re-engage; that same caller gate is what makes the bot's own foot cell the takeoff cell below.
      *
      * @return {@code true} = held at the gate (arrest inputs written for this tick);
      *         {@code false} = aligned/contained (nothing written — the caller drives the step).
@@ -869,21 +1042,85 @@ public final class SteerControl {
         final double f = b.slipperinessAt(b.footX(), b.footY() - 1, b.footZ()) * PARKOUR_H_DRAG;
         final double predictedOffset = -crossErr + vCross / (1.0 - f);
         if (Math.abs(predictedOffset) <= 0.5 - PARKOUR_CELL_MARGIN) return false; // contained — commit
-        // Arrest: the pure cross servo — desired along-speed 0, desired cross velocity toward the centreline.
-        final double desiredCross = Math.max(-SERVO_CROSS_CAP, Math.min(SERVO_CROSS_CAP, SERVO_CROSS_GAIN * crossErr));
-        final double errx = crossUx * desiredCross - b.velX();
-        final double errz = crossUz * desiredCross - b.velZ();
-        final double emag = Math.sqrt(errx * errx + errz * errz);
-        if (emag < EPS) {
-            tag("arrest:hold");
-            b.faceHorizontally(ux, uz);
-            b.setForward(0.0f);
-        } else {
-            tag("arrest");
-            b.faceHorizontally(errx, errz);
-            b.setForward((float) Math.min(1.0, SERVO_GAIN * emag));
-        }
+        // RESPONSE (re-anchored 2026-08-19, DESIGN-servo-normalization.md §3): HOLD at the TAKEOFF cell
+        // centre — the class-1 (no along position term) and class-3 (crossErr to the TARGET centreline
+        // while gating on the FROM cell) fixes in one anchor; see the class doc for the (419,66,596)
+        // conviction. The caller (MovePlan.Phase.carryUncontained) admits this tick only while
+        // foot == carryFrom, so the bot's own foot cell IS the takeoff cell by construction. Yaw is
+        // semantic — face the step's travel direction (§2.2) — and the desired velocity is a bounded pull
+        // (≤ SERVO_CROSS_CAP) that always points back INTO the from-cell.
+        anchoredServo(b, "hold:takeoff", "hold:takeoff:dead",
+                b.footX() + 0.5, b.footZ() + 0.5,
+                SERVO_CROSS_CAP, SERVO_CROSS_GAIN, ux, uz);
         return true;
+    }
+
+    /**
+     * Whether the CURRENT step's {@link #stepOffGate} is ARMED for the tick being driven — set by
+     * {@code PhaseRunner} around the phase drive ({@link MovePlan.Phase#carryGateArmed}), consumed by
+     * {@link #drive}'s land branch, and cleared by the runner the moment the drive returns, so no other
+     * caller of {@link #drive} can ever read it stale. Plain static per-tick scratch, the {@link #G}
+     * pattern: one bot per tick on the server thread, zero allocation, no cross-tick state.
+     *
+     * <p><b>Why the drive must know</b> (owner-ratified 2026-08-19, DESIGN-servo-normalization.md §2.5):
+     * the gate polices the CURRENT step's target centreline while the normal ground drive steers for
+     * {@link #groundServo}'s corner racing line — two controllers, two lane definitions. At (259,78,448)
+     * (a +z Traverse chaining into a −x turn) that dispute was a bit-identical TWO-TICK limit cycle for
+     * 46k ticks: the safe-corner blend pushed the bot to the ±0.2 lane boundary ({@code servo:thrust}),
+     * the gate's containment predicate read the resulting crossErr + carry as uncontained and its HOLD
+     * restored exactly the pre-drive state ({@code hold:takeoff}), forever — both saturated, no geometry
+     * involved. While the gate is armed the drive therefore anchors on the SAME lane the gate polices —
+     * {@link #arriveOnStep} — the one-gate principle (refusal, centring and drive share one lane
+     * definition) extended to the drive.
+     */
+    static boolean stepGateArmed;
+
+    /**
+     * Gate-armed CONTAINED-tick drive (owner-ratified 2026-08-19): the {@link #anchoredServo unified core}
+     * in <b>ARRIVE</b> at the CURRENT step's target centre — the {@link #SERVO_GROUND_CRUISE} cap over the
+     * physics-derived {@link #ARRIVE_GAIN_GROUND}, so the pull is full cruise beyond ~0.42 blocks with the
+     * easing emergent inside — and semantic yaw down the step's travel direction. Replaces the pursuit
+     * anchor ONLY while {@link #stepGateArmed} (see there for the conviction): the gate predicate is
+     * CROSS-axis only ({@code crossErr + vCross/(1−f)}), so with the drive pulling cross-ward toward the
+     * SAME centreline the gate's HOLD centres on, the cross error converges and stays converged, the
+     * predicate stays contained, and the along-axis ARRIVE advances the step until the foot leaves the
+     * from column and the gate disarms — where the normal drive (racing line and all) resumes. The
+     * look-ahead corner-cut this forgoes on gate-armed ticks is an accepted efficiency cost (owner,
+     * 2026-08-19); it survives everywhere else. The forward-pulled slice of Phase 2's hazard→ARRIVE mode
+     * switch (DESIGN-servo-normalization.md §2.5/§3).
+     *
+     * <p><b>Hazard → near-face anchor</b> (owner-ratified 2026-08-19, DESIGN-servo-normalization.md
+     * §2.5.1 — the (57,172,255) flagship conviction). The gate-armed drive consults the SAME hazard
+     * predicate call {@link #groundServo}'s hazard branch selects its cornering line on —
+     * {@code groundOvershootHazard || (groundFlankHazard && crossTrack > FLANK_DRIFT)}, verbatim — and
+     * while it fires the ARRIVE anchor moves from the step's target centre to the NEAR-FACE point,
+     * target centre − {@link #TURN_ARRIVE_OFFSET} along the step's travel direction (groundServo's own
+     * hazard aim point). Same law otherwise: cap, gain and semantic yaw unchanged, zero new constants.
+     * Why: the target-centre ARRIVE bypasses groundServo's hazard machinery for the whole gate-armed
+     * approach, so at wp9 Diagonal → (58,172,255) chaining into wp10 Descend → (59,171,255) nothing
+     * braked for the drop lip — speed built to ~0.115 b/t, the foot entered the last cell, the gate
+     * disarmed, and the legacy hazard branch received a fast bot one cell from the lip: its one-tick
+     * saturated reverse (the documented class-2 overshoot) handed the Descend backward momentum and the
+     * bot slid off the from-column to (57,172,255) → envelope fail→HOLD. Anchored at the near face, the
+     * easing spans the whole approach and the handoff speed at the lip is bounded by the cascade.
+     * Tagged {@code arrive:stephaz}({@code :dead}) so the exec log shows the mode switch (§4).
+     */
+    private static void arriveOnStep(BotSteering b, SteerView p) {
+        double dx = p.tx() - p.sx(), dz = p.tz() - p.sz();
+        if (groundOvershootHazard(b, p)
+                || (groundFlankHazard(b, p) && crossTrack(b, p) > FLANK_DRIFT)) {
+            // A firing predicate implies travelFrame(p) admitted the probe, so the segment's horizontal
+            // length is ≥ EPS and the travel unit for the near-face offset is well-defined.
+            double len = Math.sqrt(dx * dx + dz * dz);
+            anchoredServo(b, "arrive:stephaz", "arrive:stephaz:dead",
+                    p.tx() - (dx / len) * TURN_ARRIVE_OFFSET,
+                    p.tz() - (dz / len) * TURN_ARRIVE_OFFSET,
+                    SERVO_GROUND_CRUISE, ARRIVE_GAIN_GROUND, dx, dz);
+            return;
+        }
+        anchoredServo(b, "arrive:step", "arrive:step:dead",
+                p.tx(), p.tz(),
+                SERVO_GROUND_CRUISE, ARRIVE_GAIN_GROUND, dx, dz);
     }
 
     /**
@@ -1592,36 +1829,73 @@ public final class SteerControl {
     static final double PARKOUR_JUMP_VY = 0.42;
 
     /**
-     * The parkour RUNUP <b>velocity-alignment</b> drive — the launch-axis pre-jump servo that replaces the
-     * open-loop {@link #steerTowards} in a {@link
-     * com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour} runup. A diagonal jump launches a
-     * ballistic arc, and the arc is only a clean 45° (the geometry the envelope + airborne servo assume) if the
-     * bot's horizontal VELOCITY is on the jump axis at take-off. A cardinal (+X) run onto a diagonal (NE) takeoff
-     * cell arrives with velocity that is 45° OFF the jump line — a large component PERPENDICULAR to the axis — so
-     * an open-loop "face the pursuit point + full forward" launches a skewed arc that clips the near face of the
-     * landing and drops into the gap. This closes the loop on the bot's momentum exactly like {@link #groundServo}
-     * /{@link #swimServo}: the desired velocity is {@code (ux,uz)·}{@link #SERVO_GROUND_CRUISE} — pure along-axis,
-     * ZERO cross-axis — so the velocity error {@code desired − current} points to BOTH advance along the axis AND
-     * cancel (reverse-thrust) any perpendicular component. Facing that error and holding forward bleeds the
-     * cross-axis velocity to ~0 while the bot approaches the takeoff edge, so by the time the jump fires the launch
-     * is on-axis ({@code vx≈vz} for a 45° diagonal). No velocity is ever written — input only (look + forward),
-     * the Baritone model. The cruise ceiling is unreachable (an over-terminal target, the {@code groundServo}
-     * precedent), so on a safe straight the forward key saturates and this drives the runup exactly as hard as the
-     * open-loop walk — it only ever STEERS the momentum onto the axis, never slows a bot already on it.
+     * The parkour TAKEOFF <b>launch-alignment</b> drive — the <b>ballistic-runup composition</b>
+     * (DESIGN-servo-normalization.md §2.4, ratified 2026-08-19): two instances of the unified cascade in
+     * the jump-axis frame, one per axis, sharing {@link #actuate the core's actuation tail}. A diagonal
+     * jump launches a ballistic arc, and the arc is only a clean 45° (the geometry the envelope + airborne
+     * servo assume) if the bot's horizontal VELOCITY is on the jump axis at take-off — so the takeoff tick
+     * must hold full launch momentum ALONG the axis while converging position AND velocity onto it ACROSS.
+     *
+     * <ul>
+     *   <li><b>Along axis</b> ({@code (ux,uz)}): ARRIVE at the LANDING CENTRE's along-coordinate —
+     *       {@code desired_along = signum(dAlong) · min(SERVO_GROUND_CRUISE, ARRIVE_GAIN_GROUND·|dAlong|)}.
+     *       The landing centre sits a full jump ahead of any takeoff stand (≥ 1.4 blocks even on the
+     *       shortest offered jump), far outside the cap/gainP easing crossover ({@code 0.35/0.831 ≈ 0.42}
+     *       blocks), so on every live tick the cap saturates and the drive is a full-cruise advance toward
+     *       the landing.</li>
+     *   <li><b>Cross axis</b>: HOLD on the jump-axis centreline — the line through the landing centre
+     *       with direction {@code (ux,uz)} — with {@link #parkourAirborne}'s cross law verbatim:
+     *       {@code desired_cross = clamp(SERVO_CROSS_GAIN · crossErr, ±SERVO_CROSS_CAP)}, a bounded pull
+     *       back onto the axis. Why per-axis and not one isotropic ARRIVE at the landing: an isotropic
+     *       ARRIVE converges the cross error only LINEARLY over the remaining distance — the intercept
+     *       happens AT the anchor — so a long jump (gap-4) would launch while still displaced off-axis,
+     *       violating the planner's prism assumption (hitbox inside the 1-wide corridor). The per-axis
+     *       HOLD makes the cross convergence rate independent of jump length. The lane half-width the
+     *       prism assumes, ±0.2, is DERIVED, not new: {@code 0.5 − }{@link #PARKOUR_CELL_MARGIN}
+     *       (0.3 = the player half-width).</li>
+     * </ul>
+     *
+     * <p><b>Why the anchor is the LANDING centre and not the takeoff gate</b> (the backwards-phantom-hop
+     * conviction, ParkourCourse 2026-08-19). The first re-anchoring of this drive put an ARRIVE at the
+     * GATE point — the point whose along-line crossing TRIGGERS the takeoff — so on the jump tick the
+     * bot stood AT its own anchor moving 0.21–0.27 b/t: desired velocity ≈ 0, error = −vel (a full
+     * backward error, over {@link #FACE_ERR_THRESHOLD}), and the servo yawed the bot around and thrust
+     * BACKWARD on the very tick {@code setJumping(true)} fired — a backwards phantom hop that consumed
+     * the one-shot jump arm, after which the re-approach rolled off the lip with no jump (9–10
+     * ParkourCourse trials, the "fell" signature). The takeoff tick IS this drive's whole live exposure
+     * (the runup migrated to {@link #steerViaGate}), so an anchor that eases "only inside the final
+     * fraction of a block" was easing EXACTLY where it lived. With the landing centre as the along anchor
+     * that geometry cannot recur: the anchor is never underfoot, the error points down-axis, and the
+     * launch is at full cruise.
+     *
+     * <p>The RETIRED pre-normalization law was the audit's class-1 conviction on the CROSS axis: desired
+     * velocity {@code (ux,uz)·cruise} — a zero cross SETPOINT with no cross position term, structurally
+     * {@code stepOffGate}'s retired along-axis flaw rotated 90°: it bled cross-axis SPEED but was
+     * indifferent to where the bot had already been pushed. Yaw is semantic — face the jump axis (§2.2)
+     * — no velocity is ever written, input only (look + forward/strafe), the Baritone model.
+     *
+     * @param landingX the LANDING cell's centre (world x) — the along anchor + the centreline's point
+     * @param landingZ the LANDING cell's centre (world z)
      */
-    public static void parkourRunupAlign(BotSteering b, double ux, double uz) {
-        double dvx = ux * SERVO_GROUND_CRUISE;               // desired velocity: pure along-axis, zero cross-axis
-        double dvz = uz * SERVO_GROUND_CRUISE;
-        double errx = dvx - b.velX();                        // error → advance along-axis AND null the cross-axis
-        double errz = dvz - b.velZ();
-        double emag = Math.sqrt(errx * errx + errz * errz);
-        if (emag < SERVO_DEADBAND) {
-            b.faceHorizontally(ux, uz);                      // on-axis at speed: hold heading, coast
-            b.setForward(0.0f);
-        } else {
-            b.faceHorizontally(errx, errz);                  // face the error: forward thrust or cross-axis bleed
-            b.setForward((float) Math.min(1.0, SERVO_GAIN * emag));
-        }
+    public static void parkourRunupAlign(BotSteering b, double ux, double uz,
+                                         double landingX, double landingZ) {
+        // Jump-axis frame (parkourAirborne's, verbatim): along = ·(ux,uz); cross unit = (−uz, ux), 90°
+        // LEFT of the axis — so +crossErr below means the centreline lies to the bot's LEFT.
+        final double crossUx = -uz, crossUz = ux;
+        // ALONG — ARRIVE at the landing centre's along-coordinate: saturates to full cruise over the whole
+        // takeoff stand (the easing region can never contain it — see the class doc).
+        double dAlong = (landingX - b.x()) * ux + (landingZ - b.z()) * uz;
+        double desiredAlong = Math.signum(dAlong)
+                * Math.min(SERVO_GROUND_CRUISE, ARRIVE_GAIN_GROUND * Math.abs(dAlong));
+        // CROSS — HOLD on the jump-axis centreline through the landing centre (parkourAirborne's cross
+        // law): a bounded pull back onto the axis, convergence rate independent of jump length.
+        double crossErr = (landingX * crossUx + landingZ * crossUz) - (b.x() * crossUx + b.z() * crossUz);
+        double desiredCross = Math.max(-SERVO_CROSS_CAP, Math.min(SERVO_CROSS_CAP, SERVO_CROSS_GAIN * crossErr));
+        // Compose in the world frame, then the unified core's shared tail (err → deadband → semantic yaw
+        // at the jump axis → signed forward/strafe → vector saturation; tag stamped unconditionally first).
+        double dvx = ux * desiredAlong + crossUx * desiredCross;
+        double dvz = uz * desiredAlong + crossUz * desiredCross;
+        actuate(b, "arrive:runup", "arrive:runup:dead", dvx - b.velX(), dvz - b.velZ(), ux, uz);
     }
 
     /**
@@ -2261,6 +2535,15 @@ public final class SteerControl {
             // (§6). holdDepth still lifts/sinks it toward the planned cell.
             uprightSwimServo(b, p);
             holdDepth(b, p, 0.0);
+        } else if (stepGateArmed) {
+            // GATE-ARMED step — still grounded on the from column of a step whose step-off gate is armed
+            // (PhaseRunner plumbs the bit around the phase drive): anchor on the CURRENT step's target
+            // centre instead of the pursuit point, so the gate and the drive police ONE lane (the
+            // (259,78,448) two-tick thrust/hold limit cycle — see stepGateArmed). The climbable and water
+            // branches above keep precedence: the gate's lane law is a LAND rule, and the climbable/swim
+            // rulings override everything. Applies to BOTH ground-drive flavors — the lane dispute is not
+            // part of the servo/legacy A/B.
+            arriveOnStep(b, p);
         } else if ("servo".equals(GROUND_DRIVE)) {
             groundServo(b, p);            // input-only velocity servo (holds a 1-wide low-friction lane); A/B-gated
         } else {

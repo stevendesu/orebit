@@ -142,6 +142,15 @@ final class BotNavigator {
     /** COMPLETE-but-not-arrived ratchet (s52b): once the plan declared done short of the caller's
      *  arrival test, this goal is re-planned at EXACT (0/0) tolerance until arrival/clear/goal-move. */
     private boolean exactGoalEscalated;
+    /** The completed plan's FINAL waypoint (the feet cell the plan actually ended on), captured on the
+     *  arrival tick BEFORE {@link #clearPlan} drops the plan — the arrival-settle anchor the mode
+     *  dispatch reads at the COME→STAY flip (DESIGN-servo-normalization.md §2.6). {@code null} when the
+     *  arrival was planless (already in range — nothing was walked, so there is no plan cell to rest on). */
+    private BlockPos arrivedPlanEnd;
+
+    /** The anchor captured by the last arrival (see {@link #arrivedPlanEnd}); the caller reads it on the
+     *  tick {@link #driveToward} returns {@code true} — it is meaningless on any other tick. */
+    BlockPos arrivedPlanEnd() { return arrivedPlanEnd; }
 
     /** DIAGNOSTIC (swim harness): which driveToward outcome branch ran this tick — STEER (following the
      *  path), WAIT (no walkable plan), HOLD (gave up / window BLOCKED), COMPLETE (arrived). Label only,
@@ -979,6 +988,10 @@ final class BotNavigator {
         if (withinRange && stableMedium && !onDamagingFloor() && !midCommittedMove()) {
             driveState = "COMPLETE";
             finalizeJourney("reached"); // NAVSTATS: the continuous arrival test is the definition of done
+            // Arrival-settle anchor (DESIGN-servo-normalization.md §2.6): the plan's final waypoint,
+            // captured before clearPlan drops it. `path` is the block plan the follower actually walked —
+            // deliberately NOT the caller's target cell, which a loose-tolerance plan ends NEAR, not ON.
+            arrivedPlanEnd = (path != null && !path.isEmpty()) ? path.waypoint(path.size() - 1) : null;
             bot.setForward(0.0f);
             clearPlan(); // also resets the exact-goal escalation — this goal is DONE
             bot.lookAtPlayer(bot.owner());
