@@ -25,12 +25,18 @@ import net.minecraft.core.BlockPos;
  * scripted recording bot (the {@code ClimbPlanConversionTest} pattern):
  *
  * <ul>
- *   <li>C1 — framed from the WRONG floor (the bot's own column), the place lands in the bot's foot cell
- *       (the entombment mechanism, pinned so the install-seed fix has a named victim);</li>
+ *   <li>C1 — framed from the WRONG floor (the bot's own column), the {@link PhaseRunner} FOOTING arm's
+ *       self-entombment guard REFUSES the place into the bot's own foot cell and holds on the need
+ *       instead (the airborne half of the defense; the frame bugs themselves are fixed by the
+ *       install-seed commit — this is defense-in-depth);</li>
+ *   <li>C1b — the guard is EXACTLY the entombment geometry: a correctly-framed apex place (same column,
+ *       feet one cell ABOVE the footing — {@code footY == r.y+1}, the pose Pillar's jump gate
+ *       guarantees) is NOT refused;</li>
  *   <li>C2 — framed from the TRUE search start, the place lands in the plan's own column, never the
  *       bot's;</li>
  *   <li>C3 — the validity envelope: a bot GROUNDED at a foot-Y outside the step's own two feet levels
- *       (the entombed pose — grounded one above the landing foot) must FAIL the step, not latch.</li>
+ *       (the entombed pose — grounded one above the landing foot) must FAIL the step, not latch
+ *       (the grounded half of the same defense).</li>
  * </ul>
  */
 class PillarZeroDeltaFootingTest {
@@ -98,28 +104,50 @@ class PillarZeroDeltaFootingTest {
 
     /**
      * Drive a Pillar framed from floor {@code (fx, Y, fz)} through the runner over a scripted jump arc:
-     * airborne rise past the frame's {@code fy+2} advance gate (jump → place), then fall back into the
-     * feet cell — the pose the run-5 wedge placed from.
+     * airborne rise past the frame's {@code fy+2} advance gate (jump → place), then a final place-phase
+     * tick at {@code placeTickY} — {@code 65.4} (feet back in block 65) is the pose the run-5 wedge
+     * placed from; {@code 66.3} (feet in block 66, one above the footing) is the legitimate apex pose.
+     * Returns the runner so callers can assert its hold state.
      */
-    private static void driveJumpArc(FakeBot bot, int fx, int fz) {
+    private static PhaseRunner driveJumpArc(FakeBot bot, int fx, int fz, double placeTickY) {
         MovePlan plan = new Pillar().plan(fx, Y, fz, fx, Y + 1, fz, FROM_FOOT_Y, TO_FOOT_Y);
         PhaseRunner runner = new PhaseRunner();
         runner.begin(plan); // gate unarmed: the fixture injects mid-flight poses, the frame is under test
         runner.run(bot, new Up(fx, fz));     // jump phase: y=65.9 < fy+2 — drives, no advance
         bot.y = 66.3;                        // apex — feet cleared the footing cell
         runner.run(bot, new Up(fx, fz));     // advance gate fires: jump -> place
-        bot.y = 65.4;                        // falling back — feet block 65 again
+        bot.y = placeTickY;                  // the pose the place phase executes from
         runner.run(bot, new Up(fx, fz));     // place phase establishes Need.FOOTING at (fx, 65, fz)
+        return runner;
     }
 
     @Test
-    void aMisFramedPillarPlacesIntoTheBotsOwnFootCell() {
+    void aMisFramedPillarPlaceIntoTheBotsOwnFootCellIsRefused() {
         // C1: framed from the bot's own column B (the run-5 +shifted frame) the FOOTING need sits at
-        // (9,65,10) — the very cell the bot's feet occupy. The place fires there: the entombment.
+        // (9,65,10) — the very cell the bot's feet occupy (feet block 65 at y=65.4). Pre-guard, the
+        // place fired there and sealed the bot in; the runner's self-entombment guard must now REFUSE
+        // it — no place anywhere, and the runner holds on the FOOTING need (visible, self-healing as
+        // the bot moves) rather than filling the bot's own cell.
         FakeBot bot = new FakeBot();
-        driveJumpArc(bot, BX, Z);
-        assertTrue(bot.placed(BX, 65, Z),
-                "the mis-framed place phase fills the bot's own foot cell — the run-5 entombment");
+        PhaseRunner runner = driveJumpArc(bot, BX, Z, 65.4);
+        assertFalse(bot.placed(BX, 65, Z),
+                "the guard must refuse the place into the bot's own foot cell — the run-5 entombment");
+        assertTrue(bot.placeCalls.isEmpty(),
+                "a refused self-cell place must place NOTHING, not divert elsewhere");
+        assertTrue(runner.holdNeed() == MovePlan.Need.FOOTING,
+                "the refusal holds on the unmet FOOTING need (re-validated as the bot moves)");
+    }
+
+    @Test
+    void aCorrectlyFramedApexPlaceBeneathTheFeetIsNotRefused() {
+        // C1b: the guard is exactly the entombment geometry, nothing broader. Same column, but the
+        // place-phase tick runs at the APEX pose Pillar's jump gate guarantees (y=66.3 — feet block 66,
+        // one ABOVE the footing cell 65): footY == r.y+1, the cell is beneath the feet, the place fires.
+        FakeBot bot = new FakeBot();
+        bot.x = SX + 0.5; // on the frame's column — the real, correctly-framed pillar geometry
+        driveJumpArc(bot, SX, Z, 66.3);
+        assertTrue(bot.placed(SX, 65, Z),
+                "the legitimate apex place beneath the feet must NOT be refused by the guard");
     }
 
     @Test
@@ -127,7 +155,7 @@ class PillarZeroDeltaFootingTest {
         // C2: framed from the TRUE search start S, the footing goes to S's column — the bot's cell is
         // never touched. Same bot pose, same script; only the frame differs.
         FakeBot bot = new FakeBot();
-        driveJumpArc(bot, SX, Z);
+        driveJumpArc(bot, SX, Z, 65.4);
         assertTrue(bot.placed(SX, 65, Z), "the correctly-framed place fills the plan's own column");
         assertFalse(bot.placed(BX, 65, Z),
                 "a correct frame never places into the bot's occupied cell");
