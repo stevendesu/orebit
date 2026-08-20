@@ -150,15 +150,21 @@ class SeamAdoptionTest {
     }
 
     @Test
-    void theStepZeroEntryGateConsultsAtConsummationTime() {
+    void theStepZeroEntryGateAdmitsACentredDeliveredBotAtConsummation() {
         // §11 re-site (owner ruling 2026-08-20): entryReady moved from VERDICT time to CONSUMMATION
         // time. The immediate (degenerate) ADOPT is a consummation, so it consults the gate with the
-        // live bot — every current ground move's entryReady is the always-true default, so a real bot
-        // settled at the seam still ADOPTs (the gate exists for future directional/velocity entry
-        // tests). A DEFERRED verdict consults nothing — the driver re-asks at completion.
+        // live bot — and since the delivery invariant (owner-ratified 2026-08-20) the gate is NO
+        // LONGER vacuous for ground moves: the default entryReady is atWaypoint AND deliverable (the
+        // one-tick velocity projection stays in the cell — MarginalArrivalTest). This SeamBot is the
+        // pose consummation produces by construction (centred, zero velocity, grounded at the seam),
+        // so it passes both clauses and the ADOPT goes through; a bot one tick from leaving the cell
+        // would be ENTRY_REFUSED and re-consulted next boundary instead. A DEFERRED verdict consults
+        // nothing — the driver re-asks at completion.
         AsyncWindowSearch mailbox = parked();
         SeamVerdict v = pollSettled(mailbox, new SeamBot(), SEAM_FLOOR, SEAM_INDEX + 1, false);
-        assertEquals(SeamVerdict.ADOPT, v, "a Traverse step 0 never refuses entry");
+        assertEquals(SeamVerdict.ADOPT, v,
+                "a centred, zero-velocity bot at the seam is a delivered Traverse entry — the gate must"
+                        + " admit it");
     }
 
     // ---- before-seam: park, keep executing — regardless of geometry -----------------------------------

@@ -86,9 +86,11 @@ public interface Movement {
      * <p>Byte-identical wherever the current move's own test already implies {@link #atWaypoint} (the default,
      * {@code Ascend}, {@code Climb}, {@code Pillar}, and — since the {@code SWIM_RIDE} change — {@code Swim},
      * {@code SprintSwim} and {@code EndSprintSwim}): the clause simply re-asks a question already answered.
-     * It bites on exactly the two that still omit Y, {@code StartSprintSwim} and {@code RideBubbleColumn}, and
+     * It bites on the two that still omit Y, {@code StartSprintSwim} and {@code RideBubbleColumn}, and
      * only when a GROUND move follows — a fluid successor declares itself permissive because its own servo
-     * establishes its entry.
+     * establishes its entry. Since the delivery invariant (owner-ratified 2026-08-20) the default
+     * {@code entryReady} additionally asks {@link #deliverable}, so a ground successor also refuses a
+     * block-exact arrival whose one-tick velocity projection has already left the cell — see there.
      */
     default boolean reached(BotSteering b, int wx, int wy, int wz, Movement next) {
         return b.settled() && atWaypoint(b, wx, wy, wz) && teedUp(b, wx, wy, wz, next);
@@ -103,18 +105,57 @@ public interface Movement {
     }
 
     /**
+     * The <b>delivery invariant</b> (owner-ratified 2026-08-20): a grounded pose is a delivered entry for
+     * cell {@code (wx,·,wz)} only if a ONE-TICK velocity projection still lands in that cell. Owner
+     * philosophy — no envelope margins, invariants instead: "if the bot needs to be in a particular
+     * position, the prior move should have delivered the bot to that position." This is that precondition,
+     * asked once, at the handoff.
+     *
+     * <p><b>The conviction</b> (ReplanCourse run-2 forensic, 2026-08-20): a Traverse completed at
+     * {@code z=516.007} with {@code velZ=-0.015} — block-exact and grounded, so the cell-only
+     * {@code entryReady} accepted it and the cursor advanced — and vanilla drag carried the bot to
+     * {@code z=515.992} on the very next tick, the FIRST tick the successor's {@code failWhen} ever
+     * evaluated. The successor executed from outside the frame its whole plan was built on and the
+     * validity envelope fail→HELD it one tick after a "clean" arrival.
+     *
+     * <p><b>Why exactly one tick of projection, not a coast horizon.</b> {@code entryReady} answers "will
+     * the bot still be in this cell when the successor's {@code failWhen} is FIRST evaluated" — and that
+     * is exactly one tick away: the advance tick builds the successor's plan and begins it, the next
+     * steer tick runs it with {@code failWhen} first ({@code PhaseRunner}'s order), and physics moves the
+     * bot in between — the run-2 forensic to the tick. A full GROUND_COAST horizon would refuse ~any
+     * half-cell arrival (walk cruise 0.216 coasts ~0.26 blocks) — wrong: the full-coast question is
+     * answered downstream by {@code stepOffGate}/{@code arrestCarryFrom}, which this invariant buys its
+     * one tick ({@code carryUncontained} is checked AFTER {@code failWhen} in the runner). Same shape as
+     * {@code SteerControl.settleIntoBand}'s {@code y + velY}: the stored post-drag deltas, no drag
+     * constant, no margin constant.
+     *
+     * <p><b>The {@code grounded()} gate is load-bearing</b>: a floating bot ALWAYS carries velocity
+     * (buoyant bob), and {@code Surface}/{@code DiagonalSprintSwim} are fluid moves with NO permissive
+     * {@code entryReady} override — an ungated projection clause would newly bind them. Fluid/ballistic
+     * media own their own entry (each swim servo drives to its line from wherever it starts), mirroring
+     * {@link #atWaypoint}'s own medium exemption.
+     */
+    static boolean deliverable(BotSteering b, int wx, int wz) {
+        return !b.grounded()                                   // fluid/ballistic: the medium owns entry
+                || ((int) Math.floor(b.x() + b.velX()) == wx
+                 && (int) Math.floor(b.z() + b.velZ()) == wz);
+    }
+
+    /**
      * Would this movement accept the bot's CURRENT pose as its starting stance, standing at feet cell
      * {@code (wx,wy,wz)}? Asked of the SUCCESSOR by {@link #reached}, never of the move itself.
      *
-     * <p>The default is {@link #atWaypoint} — a ground move's whole plan is framed on that feet cell, so
-     * being anywhere else is not an entry. Moves whose servo establishes its own entry override this to be
-     * permissive: the swim family (which drives to depth regardless of where it starts, including from a dry
-     * lip) and {@code RideBubbleColumn} (a conveyor — requiring a particular cell to board it would wedge the
-     * very moves it exists for). Permissive is also exactly today's behaviour, since no entry test existed at
-     * all before this, so those moves cannot regress.
+     * <p>The default is {@link #atWaypoint} <b>and {@link #deliverable}</b> (the delivery invariant,
+     * owner-ratified 2026-08-20) — a ground move's whole plan is framed on that feet cell, so being
+     * anywhere else is not an entry, and a pose one tick from LEAVING the cell is not an entry either.
+     * Moves whose servo establishes its own entry override this to be permissive: the swim family (which
+     * drives to depth regardless of where it starts, including from a dry lip) and
+     * {@code RideBubbleColumn} (a conveyor — requiring a particular cell to board it would wedge the
+     * very moves it exists for). Permissive was also exactly the pre-gate behaviour, since no entry test
+     * existed at all before this, so those moves cannot regress.
      */
     default boolean entryReady(BotSteering b, int wx, int wy, int wz) {
-        return atWaypoint(b, wx, wy, wz);
+        return atWaypoint(b, wx, wy, wz) && deliverable(b, wx, wz);
     }
 
     /**
