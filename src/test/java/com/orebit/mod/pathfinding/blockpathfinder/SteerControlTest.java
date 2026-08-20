@@ -49,12 +49,22 @@ public class SteerControlTest {
         // faceDx/faceDz hold whether SteerControl aims via faceHorizontally or the 3-D faceTowards.
         @Override public void faceTowards(double dx, double dy, double dz) { faceDx = dx; faceDz = dz; }
         @Override public void setForward(float zza) { forward = zza; }
+        float strafe = Float.NaN;
+        @Override public void setStrafe(float xxa) { strafe = xxa; }
         @Override public void setSprinting(boolean s) { sprinting = s; }
         @Override public void setJumping(boolean j) { jumping = j; }
         @Override public void setSneak(boolean s) { sneaking = s; }
         @Override public void sinkInWater() { sank = true; }
-        // Reconcile seam — unused by the pure-geometry SteerControl tests, stubbed to satisfy the interface.
-        @Override public boolean solidAt(int x, int y, int z) { return false; }
+        // Terrain for the GROUND hazard probes (groundVoidColumn reads the lane floor via solidAt). Empty by
+        // default, so every pure-geometry test above is unaffected; the probe tests fill in the cells they mean.
+        final java.util.Set<Long> solid = new java.util.HashSet<>();
+        FakeBot withSolid(int x, int y, int z) {
+            solid.add((((long) x & 0x3FFFFFFL) << 38) | (((long) y & 0xFFFL) << 26) | ((long) z & 0x3FFFFFFL));
+            return this;
+        }
+        @Override public boolean solidAt(int x, int y, int z) {
+            return solid.contains((((long) x & 0x3FFFFFFL) << 38) | (((long) y & 0xFFFL) << 26) | ((long) z & 0x3FFFFFFL));
+        }
         @Override public boolean airAt(int x, int y, int z) { return true; }
         @Override public boolean movementBlockedAt(int x, int y, int z, int dx, int dz) { return false; }
         @Override public boolean swimHazardAt(int x, int y, int z) { return false; }
@@ -276,7 +286,7 @@ public class SteerControlTest {
         View seg = new View(0.5, 1, 0.5, 1.5, 1, 1.5);
         // Off the s→t line toward the OPEN side (+z), short of the gate (along ≈ 0.495 < 0.7071 − deadband).
         FakeBot b = new FakeBot(0.6, 1, 1.1); // vel 0 → the servo error IS the aim direction
-        SteerControl.steerViaGate(b, seg, 0.7, 1.3);
+        SteerControl.steerViaGate(b, seg.sx(), seg.sz(), seg.tx(), seg.tz(), 0.7, 1.3);
         // Aim = gate − bot = (0.1, 0.2): both positive, z-dominant — the drive keeps (deepens) the open-side
         // offset. Line-tracking (steerTowards/groundServo pursuit) would aim x-dominant here, pulling the bot
         // back toward the centerline and the blocked corner — exactly the recentering the hug refutation bans.
@@ -290,7 +300,7 @@ public class SteerControlTest {
         View seg = new View(0.5, 1, 0.5, 1.5, 1, 1.5);
         // Past the gate's projection (along ≈ 0.813 > 0.7071): the destination centre owns the aim.
         FakeBot b = new FakeBot(0.8, 1, 1.35);
-        SteerControl.steerViaGate(b, seg, 0.7, 1.3);
+        SteerControl.steerViaGate(b, seg.sx(), seg.sz(), seg.tx(), seg.tz(), 0.7, 1.3);
         // Aim = target − bot = (0.7, 0.15) — the heading has swung off the gate onto the destination.
         assertTrue(b.faceDx > 0 && b.faceDz > 0, "advances toward the target");
         assertEquals(0.0, b.faceDx * 0.15 - b.faceDz * 0.7, 1e-9, "aims the target POINT (collinear with target − bot)");
@@ -304,13 +314,13 @@ public class SteerControlTest {
         // ON the line just short of the handoff (along 0.60 < 0.7071 − GATE_PASS_DEADBAND ≈ 0.657): the gate
         // owns the aim, which points OFF the line toward the open side (−x, +z from here).
         FakeBot shortOf = new FakeBot(0.5 + 0.60 * ux, 1, 0.5 + 0.60 * uz);
-        SteerControl.steerViaGate(shortOf, seg, 0.7, 1.3);
+        SteerControl.steerViaGate(shortOf, seg.sx(), seg.sz(), seg.tx(), seg.tz(), 0.7, 1.3);
         assertTrue(shortOf.faceDx < 0 && shortOf.faceDz > 0,
                 "short of the gate the drive leaves the centerline for the gate (the hug's whole point)");
         // ON the line just past it (along 0.66 ≥ the deadbanded threshold): the target owns the aim — dead
         // ahead along the diagonal, equal components.
         FakeBot past = new FakeBot(0.5 + 0.66 * ux, 1, 0.5 + 0.66 * uz);
-        SteerControl.steerViaGate(past, seg, 0.7, 1.3);
+        SteerControl.steerViaGate(past, seg.sx(), seg.sz(), seg.tx(), seg.tz(), 0.7, 1.3);
         assertTrue(past.faceDx > 0 && past.faceDz > 0, "past the gate: forward along the diagonal");
         assertEquals(past.faceDx, past.faceDz, 1e-9, "…aimed at the target centre (on-line → equal components)");
         // The predicate itself, at the same two states.
@@ -326,7 +336,7 @@ public class SteerControlTest {
         // now anchored to the gate POINT so position converges too, not just velocity.
         FakeBot b = new FakeBot(0.5, 1, 0.5);
         b.velX = 0.2;
-        SteerControl.steerViaGate(b, seg, 0.7, 1.3);
+        SteerControl.steerViaGate(b, seg.sx(), seg.sz(), seg.tx(), seg.tz(), 0.7, 1.3);
         assertTrue(b.faceDx < 0, "faces against the lateral momentum (bleeds it)");
         assertTrue(b.faceDz > 0, "while still thrusting toward the gate");
         assertEquals(1.0f, b.forward, 1e-6f, "error well past the servo deadband → saturated forward");
@@ -352,6 +362,154 @@ public class SteerControlTest {
         FakeBot b = new FakeBot(67.5, 150, 246.5);
         assertFalse(SteerControl.stepOffGate(b, seg), "no carry, on the centreline → commit");
         assertTrue(Float.isNaN(b.forward), "a committing gate writes no inputs (the caller drives)");
+    }
+
+
+    // ---- GROUND hazard probes: the cell walk + the planned-descent exemption -------------------------
+    // Owner ruling 2026-08-20, the (340,69,481) creep-wedge conviction (flagship r8). Two independent
+    // defects were fixed in the probe machinery, and these pin both:
+    //   1a  pathDropsAhead's leg-alignment test (dot >= STRAIGHT_DOT) was the wrong QUESTION — it asked
+    //       "is the next leg straight ahead?" and, when it fired, suppressed EVERY void probe around the
+    //       waypoint. Replaced by an exact per-probe-cell test (plannedDescentCell): a cell is exempt iff
+    //       it IS the next waypoint's column and the next waypoint lies below the current one.
+    //   1b  the probe walk was DEGENERATE on diagonals — cells came from F.c* + round(u*k) with u
+    //       EUCLIDEAN-normalised, so on a 45 deg leg round(0.70711*1) == round(0.70711*2) == 1 and both k
+    //       named the same cell: HAZARD_LOOKAHEAD=2 inspected one cell twice and never read the cell
+    //       genuinely two ahead. Replaced by a CHEBYSHEV cell walk (u / max(|ux|,|uz|)), one cell per k.
+    // The frame under test: a waypoint FEET cell at y=69 (ty 69.0 -> F.cy 69), so the lane floor a probe
+    // reads is y=68 (groundVoidColumn = !solidAt(x, F.cy-1, z)).
+
+    /** 1a: a colinear planned descent exempts its OWN landing cell — and NOTHING else. The old whole-
+     *  predicate boolean suppressed both probes, so a genuine second void two cells on was invisible. */
+    @Test
+    void groundOvershoot_plannedDescentExemptsOnlyItsLandingCell() {
+        // +x leg to the waypoint at cell (11,10); the plan then steps DOWN into (12,10). Probes: (12,10), (13,10).
+        View descendAhead = new View(10.5, 69, 10.5, 11.5, 69, 10.5, true, 12.5, 68.0, 10.5);
+        // Only the planned landing cell lacks a floor -> the plan's own drop, not a hazard.
+        FakeBot planned = new FakeBot(11.0, 69, 10.5);
+        planned.withSolid(13, 68, 10);
+        assertFalse(SteerControl.groundOvershootHazard(planned, descendAhead),
+                "the cell the plan descends into is the plan's own trajectory, never a hazard");
+        // The cell BEYOND it is void too — an unplanned drop the bot would coast into. Pre-fix this was
+        // suppressed with the landing cell (one boolean for both probes) and the servo cruised into it.
+        FakeBot beyond = new FakeBot(11.0, 69, 10.5);
+        assertTrue(SteerControl.groundOvershootHazard(beyond, descendAhead),
+                "a genuine void two cells off the route is still caught (the exemption is PER CELL)");
+    }
+
+    /** 1a: the exemption is gated on the next waypoint actually being BELOW — a level next leg leaves the
+     *  same missing floor a hazard, which is what stops an ordinary walk-off being read as a descent. */
+    @Test
+    void groundOvershoot_levelNextLegLeavesTheDropAHazard() {
+        View levelAhead = new View(10.5, 69, 10.5, 11.5, 69, 10.5, true, 12.5, 69.0, 10.5);
+        FakeBot b = new FakeBot(11.0, 69, 10.5);
+        b.withSolid(13, 68, 10);                       // only the far probe has a floor
+        assertTrue(SteerControl.groundOvershootHazard(b, levelAhead),
+                "no planned descent -> the missing floor at (12,10) is an off-lane walk-off");
+    }
+
+    /** 1a, the FLANK half: a descent that turns ACROSS the lane. The old alignment test read dot = 0 and
+     *  declared no planned drop, so the plan's own landing column — sitting one step perpendicular to
+     *  travel — was braked for as a flank void. The per-cell test exempts exactly that column. */
+    @Test
+    void groundFlank_plannedDescentAcrossTheLaneIsExempt() {
+        // +x leg to waypoint cell (11,10); the plan then steps DOWN into (11,11) — the +z FLANK cell.
+        View turnDown = new View(10.5, 69, 10.5, 11.5, 69, 10.5, true, 11.5, 68.0, 11.5);
+        FakeBot b = new FakeBot(11.0, 69, 10.5);
+        b.withSolid(11, 68, 9);                        // the OTHER flank is solid ground
+        assertFalse(SteerControl.groundFlankHazard(b, turnDown),
+                "the flank the plan descends into is the plan's own step-down, not a lane hazard");
+        // The opposite flank is a real unplanned drop and must still fire.
+        FakeBot otherSide = new FakeBot(11.0, 69, 10.5);
+        otherSide.withSolid(11, 68, 11);
+        assertTrue(SteerControl.groundFlankHazard(otherSide, turnDown),
+                "an unplanned void on the OTHER flank is still a hazard");
+    }
+
+    /** 1b: on a 45 deg leg the two probes must name two DIFFERENT cells. Pre-fix both k rounded to the
+     *  same cell, so a void exactly two cells along the diagonal was never read at all. */
+    @Test
+    void groundOvershoot_diagonalWalksTwoDistinctCells() {
+        // Diagonal (+x,+z) leg to waypoint cell (11,11): Chebyshev walk visits (12,12) then (13,13).
+        View diagonal = new View(10.5, 69, 10.5, 11.5, 69, 11.5);
+        FakeBot b = new FakeBot(11.0, 69, 11.0);
+        b.withSolid(12, 68, 12);                       // the first cell along the diagonal HAS a floor
+        assertTrue(SteerControl.groundOvershootHazard(b, diagonal),
+                "the cell two along the diagonal (13,13) is void — pre-fix k=2 re-read (12,12) and missed it");
+        b.withSolid(13, 68, 13);                       // floor the second cell too
+        assertFalse(SteerControl.groundOvershootHazard(b, diagonal),
+                "both walked cells floored -> no overshoot hazard");
+    }
+
+    /** 1b: a CARDINAL leg is byte-identical under the Chebyshev step (max(|ux|,|uz|) == 1), in both
+     *  travel senses — the walk is exactly the waypoint cell +1 and +2 along the axis. */
+    @Test
+    void groundOvershoot_cardinalWalkIsUnchanged() {
+        View plusX = new View(10.5, 69, 10.5, 11.5, 69, 10.5);
+        FakeBot near = new FakeBot(11.0, 69, 10.5);
+        near.withSolid(13, 68, 10);
+        assertTrue(SteerControl.groundOvershootHazard(near, plusX), "k=1 cell is (12,10) — void");
+        FakeBot far = new FakeBot(11.0, 69, 10.5);
+        far.withSolid(12, 68, 10);
+        assertTrue(SteerControl.groundOvershootHazard(far, plusX), "k=2 cell is (13,10) — void");
+        FakeBot floored = new FakeBot(11.0, 69, 10.5);
+        floored.withSolid(12, 68, 10).withSolid(13, 68, 10);
+        assertFalse(SteerControl.groundOvershootHazard(floored, plusX), "both floored — nothing to brake for");
+
+        // −z sense: waypoint cell (10,9), walk (10,8) then (10,7).
+        View minusZ = new View(10.5, 69, 10.5, 10.5, 69, 9.5);
+        FakeBot back = new FakeBot(10.5, 69, 10.0);
+        back.withSolid(10, 68, 8);
+        assertTrue(SteerControl.groundOvershootHazard(back, minusZ), "k=2 cell is (10,7) — void");
+        back.withSolid(10, 68, 7);
+        assertFalse(SteerControl.groundOvershootHazard(back, minusZ), "both floored — nothing to brake for");
+    }
+
+
+    // ---- the LAND drive's hazard MODE SWITCH (owner ruling 2026-08-20, Phase 2) ----------------------
+    // groundServo's hazard branch is retired: drive() computes the hazard verdict once and routes the whole
+    // tick to arriveOnStep (position-anchored ARRIVE on the near-face point) instead of a speed schedule.
+
+    /** The flagship-r8 creep-wedge pose, verbatim: step 2 Diagonal floor (339,68,480)→(340,68,481), bot at
+     *  (339.926, 481.006) with vel (0.0963, 0.0651), grounded and ON its line (cte 0.0566), the plan turning
+     *  into a Descend at (341,67,481). The retired speed schedule produced a velocity error of magnitude
+     *  0.02817 — a hair over SERVO_DEADBAND — and faced THAT: yaw −178.9°, forward 0.51. A half-throttle
+     *  thrust due NORTH at a target east-north-east. The position-anchored ARRIVE wants −55.2° at full
+     *  forward, and that is what the drive must now command. */
+    @Test
+    void drive_hazardCorner_arrivesOnTheNearFace_insteadOfPirouetting() {
+        View diagonalIntoDescend = new View(339.5, 69.0, 480.5, 340.5, 69.0, 481.5,
+                true, 341.5, 68.0, 481.5);
+        FakeBot b = new FakeBot(339.926, 69.0, 481.006);
+        b.velX = 0.0963; b.velZ = 0.0651;
+        b.grounded = true;
+        // The real terrain (scripts/autotest-world-master/world): grass at y=68 on the x≤340 shelf, and the
+        // x=341 line stepped DOWN to y=67 — which is why every probe ahead reads "no floor at my level".
+        b.withSolid(339, 68, 480).withSolid(339, 68, 481).withSolid(339, 68, 482)
+         .withSolid(340, 68, 481).withSolid(340, 68, 482).withSolid(340, 68, 483)
+         .withSolid(341, 67, 480).withSolid(341, 67, 481).withSolid(341, 67, 482)
+         .withSolid(342, 67, 481).withSolid(342, 67, 482).withSolid(342, 67, 483);
+        SteerControl.drive(b, diagonalIntoDescend);
+        double yaw = Math.toDegrees(Math.atan2(-b.faceDx, b.faceDz));
+        assertTrue(yaw < -30.0 && yaw > -80.0,
+                "the drive must head toward the target (≈ −55°), not spin north; got " + yaw);
+        assertEquals(1.0f, b.forward, 1e-6f, "saturated ARRIVE pull, not the schedule's 0.51 half-throttle");
+        assertTrue(SteerControl.lastDrive.endsWith("arrive:stephaz"),
+                "hazard routes to the near-face ARRIVE, not servo:hazard; got " + SteerControl.lastDrive);
+    }
+
+    /** The A/B revert leg is untouched by the mode switch: a SAFE straight still runs the pursuit servo. */
+    @Test
+    void drive_safeStraight_stillRunsThePursuitServo() {
+        View straight = new View(10.5, 69.0, 10.5, 11.5, 69.0, 10.5);
+        FakeBot b = new FakeBot(11.0, 69.0, 10.5);
+        b.grounded = true;
+        b.withSolid(12, 68, 10).withSolid(13, 68, 10)     // floored ahead — nothing to brake for
+         .withSolid(11, 68, 11).withSolid(11, 68, 9);     // …and floored on both flanks
+        SteerControl.drive(b, straight);
+        assertTrue(SteerControl.lastDrive.endsWith("servo:thrust"),
+                "a safe corner keeps the pursuit servo; got " + SteerControl.lastDrive);
+        assertTrue(b.faceDx > 0, "heads down the leg");
     }
 
     /** The friction horizon is the SUPPORT block's, not a constant: a −0.05 carry coasts out to ~0.11 on

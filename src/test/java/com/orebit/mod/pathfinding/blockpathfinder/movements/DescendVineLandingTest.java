@@ -285,7 +285,7 @@ class DescendVineLandingTest {
         bot.climbable = true;
         run(bot, 4);
         assertFalse(bot.sneaking,
-                "settleOnOwnColumn is stationKeep MINUS the vertical hold; sneaking would hang the gate "
+                "the settle gate is stationKeep MINUS the vertical hold; sneaking would hang it "
                         + "forever at the height it exists to leave");
     }
 
