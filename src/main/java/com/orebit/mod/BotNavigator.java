@@ -128,6 +128,19 @@ final class BotNavigator {
 
     private BlockPathPlan path;
     private int waypointIndex;
+    /**
+     * The follower-side TERMINAL VIEW of {@link #path} (DESIGN-replan-handoff.md §11, owner ruling
+     * 2026-08-20 — "the seam is a position in PLAN EXECUTION, not space"): the waypoint index of the
+     * LAST step this follower will execute. {@code Integer.MAX_VALUE} = no truncation (every
+     * {@link #planLimit()} read then equals {@code path.size()}, byte-identically). A pending
+     * seam-seeded re-search (or an armed §11 consummation verdict) truncates the walked plan here —
+     * "the plan will now END when the current movement ends" — WITHOUT copying it: {@link BlockPathPlan}
+     * is immutable and the swap detector ({@code now != lastBlockPlanRef}) keys on identity, so a
+     * truncated copy would misfire it. Derived per tick by {@link #refreshSeamTruncation} (state-based,
+     * self-healing — a dead seam state restores {@code MAX_VALUE}); reset at every install/clear/drop
+     * site like {@link #activePlanStep}.
+     */
+    private int planTerminalIndex = Integer.MAX_VALUE;
     private int blockRefreshTicks; // terrain-recheck debounce countdown (see TERRAIN_RECHECK_TICKS)
     // The current drive's planner goal tolerance (set per driveToward call) and the tolerance the active
     // plan was BUILT with — a mismatch on the same goal region forces a fresh plan (s52, reached-vs-done).
@@ -138,7 +151,13 @@ final class BotNavigator {
     private int stuckTicks;         // consecutive ticks grinding in place; drives the stuck diagnostic
     private int lastEditedIndex = -1; // last step whose break/place edits were applied (apply once per step)
     private int lastFailLoggedStep = -1; // last step whose validity-envelope FAILURE was logged (log once per step)
-    private int lastCautionLoggedStep = -1; // last step whose suspect/pending-search CAUTION hold was logged
+    // ---- §11 seam-pause episode (owner ruling 2026-08-20; replaced the CAUTION-hold log key) ---------
+    /** Consecutive ticks of the current SEAM-PAUSE hold (the bot completed its truncated terminal and
+     *  is holding centered for the seeded search / consummation). Frequent or long pauses are the
+     *  seam-padding tuning signal (§11 — the walk's budget→distance conversion under-reached). */
+    private int seamPauseTicks;
+    /** The truncated terminal the current pause episode is holding at ({@code -1} = no episode). */
+    private int seamPauseSeam = -1;
     private boolean loggedHasPath;  // dedupe the path/no-path diagnostic so it logs only on change
     private boolean loggedPlanError; // log a two-tier replan exception only once (then degrade silently)
     /** COMPLETE-but-not-arrived ratchet (s52b): once the plan declared done short of the caller's
@@ -155,8 +174,9 @@ final class BotNavigator {
     BlockPos arrivedPlanEnd() { return arrivedPlanEnd; }
 
     /** DIAGNOSTIC (swim harness): which driveToward outcome branch ran this tick — STEER (following the
-     *  path), WAIT (no walkable plan), HOLD (gave up / window BLOCKED), COMPLETE (arrived). Label only,
-     *  no control-flow effect. */
+     *  path), SEAM-PAUSE (completed the §11 truncated terminal, holding centered for the seam
+     *  consummation), WAIT (no walkable plan), HOLD (gave up / window BLOCKED), COMPLETE (arrived).
+     *  Label only, no control-flow effect. */
     private String driveState = "INIT";
 
     /** The drive-state label set on the last {@link #driveToward} tick (see {@link #driveState}). */
@@ -208,8 +228,10 @@ final class BotNavigator {
      *  -1 — identity-guarded by {@link #incompatiblePlan} so the fact is only ever read against the plan
      *  it was found on. Two consumers: the U1 once-per-breakage gate (an epoch advance that re-detects the
      *  SAME broken step must not re-fire the prompt replan — the seeded search / parked result for it is
-     *  already in motion), and the U2-extended seam CAUTION hold's next-step-invalidated arm. Cleared at
-     *  every plan install/clear/drop. */
+     *  already in motion). (Its second consumer, the U2-extended seam CAUTION hold's
+     *  next-step-invalidated arm, was subsumed 2026-08-20 by the §11 uniform truncation: a pending
+     *  seeded search ends the plan at the U2-clamped seam, so the broken step is never entered.)
+     *  Cleared at every plan install/clear/drop. */
     private int incompatibleStep = -1;
     private BlockPathPlan incompatiblePlan;
     /** One "rest-gate deferring a launch" log per waiting episode (§10 — the planless pickup is the one
@@ -381,9 +403,105 @@ final class BotNavigator {
         return waypointIndex;
     }
 
-    /** Size of the current window's block plan, or -1 with no plan — for the same diagnostic line. */
+    /** Size of the current window's block plan AS THIS FOLLOWER WILL WALK IT — the §11 terminal view
+     *  ({@link #planLimit()}), so a seam-truncated plan reports its truncated length (the harnesses read
+     *  this against the cursor, e.g. ReplanCourse's per-tick trace) — or -1 with no plan. */
     int pathSize() {
-        return path != null ? path.size() : -1;
+        return path != null ? planLimit() : -1;
+    }
+
+    /**
+     * The EXCLUSIVE upper bound of the walkable steps of {@link #path} under the §11 terminal view
+     * (DESIGN-replan-handoff.md §11, owner ruling 2026-08-20): {@code planTerminalIndex + 1} when a seam
+     * truncation is in force, else {@code path.size()} — every follower read that used to say
+     * {@code path.size()} and means "how far does execution run" reads THIS instead, so truncating the
+     * plan is one field write, never a copy. Reads that mean "the plan's real shape" (the prefix-scan
+     * bound in {@link #planPlacedAt}, forensic dumps of the search result) deliberately keep
+     * {@code path.size()}. Callers guarantee {@code path != null}.
+     */
+    private int planLimit() {
+        final int n = path.size();
+        return planTerminalIndex < n ? planTerminalIndex + 1 : n;
+    }
+
+    /** The seam index the current truncation episode LATCHED on ({@code -1} = no episode) — the
+     *  episode key of {@link #refreshSeamTruncation}'s latch (a superseding seeded search with a new
+     *  seam re-latches; the same seam keeps the latched terminal even as the cursor moves). */
+    private int seamTruncSeam = -1;
+
+    /**
+     * Derive this tick's §11 terminal view (DESIGN-replan-handoff.md §11, owner ruling 2026-08-20) —
+     * state-based, self-healing, called at the top of every {@link #driveToward} tick:
+     * <ul>
+     *   <li>An ARMED consummation verdict ({@link PathPlan#armedSeamTerminal}) imposes its terminal
+     *       EXACTLY — the cursor legitimately passes it at completion (that is what consummation waits
+     *       for), so it is never cursor-clamped.</li>
+     *   <li>Otherwise a seeded handoff in play ({@link PathPlan#seededSeamFor} — a pending seeded
+     *       search or a parked, not-yet-ruled result) truncates at its seam, LATCHED at
+     *       {@code max(seam, waypointIndex)} once per episode: never behind the move already in flight
+     *       (a bot past the seam finishes its current move — the beyond verdict then rules from that
+     *       move's landing), and never re-extended by the cursor's own advance (re-deriving the max
+     *       each tick would walk the terminal ahead of the bot and dissolve the hold-at-seam).</li>
+     *   <li>No seam state → {@code MAX_VALUE} (untruncated), and the episode key clears.</li>
+     * </ul>
+     */
+    private void refreshSeamTruncation() {
+        if (pathPlan == null || path == null) {
+            planTerminalIndex = Integer.MAX_VALUE;
+            seamTruncSeam = -1;
+            seamPauseTicks = 0; // an episode that died without consummation resets silently
+            seamPauseSeam = -1;
+            return;
+        }
+        final int armed = pathPlan.armedSeamTerminal(path);
+        if (armed >= 0) {
+            planTerminalIndex = armed;
+            seamTruncSeam = armed;
+            return;
+        }
+        final int seam = pathPlan.seededSeamFor(path);
+        if (seam < 0) {
+            planTerminalIndex = Integer.MAX_VALUE;
+            seamTruncSeam = -1;
+            seamPauseTicks = 0; // an episode that died without consummation resets silently
+            seamPauseSeam = -1;
+            return;
+        }
+        if (seamTruncSeam != seam || planTerminalIndex == Integer.MAX_VALUE) {
+            seamTruncSeam = seam; // new episode (fresh seed or superseded seam) — latch once
+            planTerminalIndex = Math.max(seam, waypointIndex);
+        }
+    }
+
+    /**
+     * The §11 SEAM-PAUSE hold (DESIGN-replan-handoff.md §8/§11, owner ruling 2026-08-20): the bot has
+     * completed the truncated terminal move and waits for the seam machinery to consummate. Hold
+     * CENTERED on the terminal waypoint via {@link SteerControl#restHold} — the §2.6 arrival-settle
+     * servo, guarded to its ratified grounded/!inWater/!onClimbable scope ({@code clingHold} keeps
+     * owning climbable/fluid stands) — and count the episode's ticks: the count is the seam-padding
+     * TUNING SIGNAL (frequent/long pauses = the §3 walk's budget→distance conversion under-reached),
+     * logged once at consummation by the install site. State-based: the episode key is the terminal
+     * index; a dead seam state stops the branch firing and {@link #refreshSeamTruncation} clears the
+     * counters silently.
+     */
+    private void seamPauseHold() {
+        driveState = "SEAM-PAUSE";
+        final int t = Math.min(planTerminalIndex, path.size() - 1);
+        if (seamPauseSeam != t) {
+            seamPauseSeam = t;
+            seamPauseTicks = 0;
+        }
+        seamPauseTicks++;
+        final BlockPos wp = path.waypoint(t);
+        if (bot.grounded() && !bot.isInWater() && !bot.onClimbable()) {
+            SteerControl.restHold(bot, wp.getX() + 0.5, wp.getZ() + 0.5);
+        } else {
+            bot.setForward(0.0f); // climbable/fluid/ballistic: outside restHold's ratified scope
+            SteerControl.clingHold(bot);
+        }
+        if (Debug.VERBOSE) {
+            driveStateLog("SEAM-PAUSE (holding centered at terminal step " + t + ")");
+        }
     }
 
     /** The current window's block plan (or null with no plan) — for the swim harness's once-per-plan dump of
@@ -450,6 +568,8 @@ final class BotNavigator {
         this.path = null;
         this.lastBlockPlanRef = null;
         this.activePlanStep = -1;
+        this.planTerminalIndex = Integer.MAX_VALUE; // §11: the terminal view died with the plan
+        this.seamTruncSeam = -1;
         this.phaseRunner.clear();
         this.incompatibleStep = -1;      // the broken-step fact is gone with the goal (§10 U4)
         this.incompatiblePlan = null;
@@ -494,7 +614,7 @@ final class BotNavigator {
      * intentionally NOT done: that is the very mid-jump preemption this gate removes (the ice-STOP undershoot).
      */
     private boolean midCommittedMove() {
-        if (!phaseRunner.active() || path == null || waypointIndex >= path.size()) {
+        if (!phaseRunner.active() || path == null || waypointIndex >= planLimit()) {
             return false;
         }
         return path.movement(waypointIndex).commitsAcrossArrival();
@@ -513,8 +633,8 @@ final class BotNavigator {
     }
 
     /** Static core of {@link #stepCommitsRisk} — pure plan + caps math, shared with the §3 horizon walk
-     *  ({@link #horizonSeamWalk}, and its headless test) so the seam-selection risk predicate can never
-     *  drift from the CAUTION hold's. */
+     *  ({@link #horizonSeamWalk}, and its headless test) so the seam-selection risk predicate stays
+     *  single-sourced (it once also fed the pre-§11 CAUTION hold). */
     static boolean stepCommitsRisk(BlockPathPlan path, int i, int safeFallDistance) {
         Movement m = path.movement(i);
         if (m.commitsAcrossArrival()) return true;
@@ -535,6 +655,9 @@ final class BotNavigator {
     private BlockPathPlan seamWalkPlan;
     private int seamWalkCursor = -1;
     private int seamWalkEpoch;
+    /** The §11 terminal ({@link #planTerminalIndex}) the memoized walk ran under — a truncation change
+     *  re-keys the memo (a memo that survived it could hand a seam past the truncated terminal). */
+    private int seamWalkTerminal = Integer.MAX_VALUE;
     private int seamWalkResult = -1;
 
     /**
@@ -549,8 +672,9 @@ final class BotNavigator {
      * <ul>
      *   <li><b>stop before commitment</b>: the walk never crosses a step where {@link #stepCommitsRisk}
      *       holds (the parkour family / a deeper-than-safe Fall) — the seam is the waypoint BEFORE it,
-     *       its takeoff stand cell. This is what lets the CAUTION hold rescope to the seam rather than
-     *       grow (§7).</li>
+     *       its takeoff stand cell. This is what makes the §11 hold-at-seam (the pre-§11 CAUTION
+     *       hold's successor) safe: no committed move is ever the truncated terminal's successor
+     *       (§7/§11).</li>
      *   <li><b>stop before breakage</b> (§10 U2): the walk never places the seam AT or PAST a step the
      *       live grid has move-invalidated ({@link #incompatibleCell}) — clamped to the last safe
      *       waypoint, exactly the commits-risk structure. Evaluated at walk time against the live grid
@@ -565,23 +689,26 @@ final class BotNavigator {
      * rule; boundary/edit-epoch cadence, memoized per step).
      */
     private int horizonSeamIndex() {
-        if (path == null || waypointIndex >= path.size()) {
+        if (path == null || waypointIndex >= planLimit()) {
             return -1;
         }
         final int epoch = NavGridUpdater.editEpoch((ServerLevel) Worlds.of(bot));
-        if (path == seamWalkPlan && waypointIndex == seamWalkCursor && epoch == seamWalkEpoch) {
+        if (path == seamWalkPlan && waypointIndex == seamWalkCursor && epoch == seamWalkEpoch
+                && planTerminalIndex == seamWalkTerminal) {
             return seamWalkResult;
         }
         PlanExecutor executor = ConfigLoader.config().asyncPathing() ? PlanExecutor.instance() : null;
         final long budgetTicks = executor == null ? 0L : executor.budgetNanos() / 50_000_000L;
         final NavGridView grid = NavGridView.background((ServerLevel) Worlds.of(bot));
-        final int k = horizonSeamWalk(path, waypointIndex, budgetTicks, bot.caps().safeFallDistance(), grid);
+        final int k = horizonSeamWalk(path, waypointIndex, budgetTicks, bot.caps().safeFallDistance(), grid,
+                planTerminalIndex);
         seamWalkPlan = path;
         seamWalkCursor = waypointIndex;
         seamWalkEpoch = epoch;
+        seamWalkTerminal = planTerminalIndex;
         seamWalkResult = k;
         if (Debug.VERBOSE) {
-            final int last = path.size() - 1;
+            final int last = planLimit() - 1;
             float sum = 0f; // re-summed on the VERBOSE path only — same ascending add order as the walk
             for (int i = waypointIndex; i <= k; i++) sum += path.stepCost(i);
             // The walk only stops short of the terminus with the budget unmet on an early stop — a
@@ -607,10 +734,27 @@ final class BotNavigator {
      */
     static int horizonSeamWalk(BlockPathPlan path, int cursor, long budgetTicks, int safeFallDistance,
                                NavGridView grid) {
-        if (path == null || cursor >= path.size()) {
+        return horizonSeamWalk(path, cursor, budgetTicks, safeFallDistance, grid, Integer.MAX_VALUE);
+    }
+
+    /**
+     * As above under a §11 follower-side terminal view (DESIGN-replan-handoff.md §11, owner ruling
+     * 2026-08-20): {@code terminalIndex} is the last walkable step ({@link #planTerminalIndex};
+     * {@code Integer.MAX_VALUE} = untruncated, byte-identical to the overload above). The walk never
+     * crosses the truncated terminal — a seam past the point where this follower's execution ends would
+     * seed a re-search from a cell the bot will never settle on — and a cursor already past it has no
+     * walkable incumbent ({@code -1}, the consumed shape).
+     */
+    static int horizonSeamWalk(BlockPathPlan path, int cursor, long budgetTicks, int safeFallDistance,
+                               NavGridView grid, int terminalIndex) {
+        if (path == null) {
             return -1;
         }
-        final int last = path.size() - 1;
+        final int lim = terminalIndex < path.size() ? terminalIndex + 1 : path.size();
+        if (cursor >= lim) {
+            return -1;
+        }
+        final int last = lim - 1;
         int k = cursor;
         float sum = path.stepCost(k);
         while (sum < budgetTicks && k < last) {
@@ -728,11 +872,14 @@ final class BotNavigator {
      * @return {@code false} iff the CURRENT step broke and the plan was nulled this tick (U5).
      */
     private boolean scanPlanOnEditEpoch() {
-        if (path == null || waypointIndex >= path.size()) {
+        if (path == null || waypointIndex >= planLimit()) {
             return true;
         }
         final NavGridView grid = NavGridView.background((ServerLevel) Worlds.of(bot));
-        final int broken = firstIncompatibleStep(path, waypointIndex, lastEditedIndex + 1, grid);
+        // §11: the scan is bounded by the terminal view — breakage in a truncated plan's DEAD TAIL (steps
+        // this follower will never execute) must not fire the U1 prompt replan.
+        final int broken = firstIncompatibleStep(path, waypointIndex, lastEditedIndex + 1, grid,
+                planTerminalIndex);
         if (broken < 0) {
             this.incompatibleStep = -1; // a prior breakage no longer reads broken (or was never there)
             this.incompatiblePlan = null;
@@ -790,6 +937,8 @@ final class BotNavigator {
         this.waypointIndex = 0;
         this.lastEditedIndex = -1;
         this.activePlanStep = -1;
+        this.planTerminalIndex = Integer.MAX_VALUE; // §11: the terminal view died with the plan
+        this.seamTruncSeam = -1;
         this.phaseRunner.clear();
         this.incompatibleStep = -1; // the broken-step fact belonged to the dropped plan
         this.incompatiblePlan = null;
@@ -808,7 +957,16 @@ final class BotNavigator {
      * already ran legitimately reads air). Cold, on-edit-epoch cadence only.
      */
     static int firstIncompatibleStep(BlockPathPlan path, int cursor, int firstUnedited, NavGridView grid) {
-        for (int i = cursor; i < path.size(); i++) {
+        return firstIncompatibleStep(path, cursor, firstUnedited, grid, Integer.MAX_VALUE);
+    }
+
+    /** As above under a §11 terminal view (owner ruling 2026-08-20): the scan stops at the truncated
+     *  terminal — a broken step in the dead tail is not this follower's breakage ({@code MAX_VALUE} =
+     *  untruncated, byte-identical to the overload above). */
+    static int firstIncompatibleStep(BlockPathPlan path, int cursor, int firstUnedited, NavGridView grid,
+                                     int terminalIndex) {
+        final int lim = terminalIndex < path.size() ? terminalIndex + 1 : path.size();
+        for (int i = cursor; i < lim; i++) {
             if (incompatibleCell(path, i, i >= firstUnedited, grid) != null) {
                 return i;
             }
@@ -1007,6 +1165,7 @@ final class BotNavigator {
     boolean driveToward(double tx, double ty, double tz, BlockPos goalFloor,
                         double arriveDist, double arriveY, int goalTolXZ, int goalTolY) {
         navStatsTick(goalFloor); // NAVSTATS: journey bookkeeping (pure observation, no control-flow effect)
+        refreshSeamTruncation(); // §11: derive this tick's terminal view before anything reads planLimit()
 
         double dx = tx - bot.getX();
         double dy = ty - bot.getY();
@@ -1068,7 +1227,7 @@ final class BotNavigator {
             // Arrival-settle anchor (DESIGN-servo-normalization.md §2.6): the plan's final waypoint,
             // captured before clearPlan drops it. `path` is the block plan the follower actually walked —
             // deliberately NOT the caller's target cell, which a loose-tolerance plan ends NEAR, not ON.
-            arrivedPlanEnd = (path != null && !path.isEmpty()) ? path.waypoint(path.size() - 1) : null;
+            arrivedPlanEnd = (path != null && !path.isEmpty()) ? path.waypoint(planLimit() - 1) : null;
             bot.setForward(0.0f);
             clearPlan(); // also resets the exact-goal escalation — this goal is DONE
             bot.lookAtPlayer(bot.owner());
@@ -1177,7 +1336,7 @@ final class BotNavigator {
             // bot is still moving and lands (grounded) within ticks, and planning from an airborne floor
             // cell would anchor the next search in the air.
             BlockPos currentFloor = floorOf(bot.blockPosition()); // topY-aware, computed once per drain tick
-            if (path != null && waypointIndex >= path.size() && stableMedium) {
+            if (path != null && waypointIndex >= planLimit() && stableMedium) {
                 this.settledFloor = currentFloor;
             } else if (path == null && planAnchor && atRest) {
                 // REST IS A SETTLE EVENT for a PLANLESS bot (§10 U5): a plan nulled mid-move (PANIC, the U5
@@ -1210,8 +1369,14 @@ final class BotNavigator {
                 // atRest rides along as the §10 rest-for-launch bit: inside onBotMoved it gates ONLY the
                 // blocked-null (S3) live-floor relaunch — the one launch in there anchored at botFloor.
                 pathPlan.onBotMoved(settledFloor, bot.currentStartMode(), fluidAnchor,
-                        bot, path, horizonSeamIndex(), lastEditedIndex + 1, waypointIndex, atRest);
-                boolean consumed = path != null && waypointIndex >= path.size() && !pathPlan.isComplete();
+                        bot, path, horizonSeamIndex(), lastEditedIndex + 1, waypointIndex,
+                        path != null && waypointIndex < planLimit(), atRest);
+                // §11: a seam truncation in force means the consumed state at the truncated terminal is
+                // the SEAM-PAUSE hold, owned by the armed/parked machinery — not a consumed-plan
+                // refresh (which would submit a competing search and, in sync mode, clobber the parked
+                // adoption inline). A dead seam state restores MAX_VALUE and the refresh resumes.
+                boolean consumed = path != null && waypointIndex >= planLimit() && !pathPlan.isComplete()
+                        && planTerminalIndex == Integer.MAX_VALUE;
                 if (consumed || blockRefreshTicks <= 0) {
                     // Terrain-recheck debounce (s52): the periodic re-search fires ONLY when the level's
                     // nav grid actually changed since this plan's last search — an unchanged epoch means
@@ -1264,6 +1429,18 @@ final class BotNavigator {
                 }
                 BlockPathPlan now = pathPlan.currentBlockPlan();
                 if (now != lastBlockPlanRef) {
+                    // §11 SEAM-PAUSE episode close (DESIGN-replan-handoff.md §8): the swap IS the
+                    // consummation (new plan installed / PANIC's null). One INFO line with the held tick
+                    // count — the seam-padding tuning signal (frequent pauses = the §3 walk's
+                    // budget→distance conversion under-reached). Zero-tick consummations stay silent.
+                    if (seamPauseTicks > 0 && path != null && !path.isEmpty()) {
+                        final BlockPos held = path.waypoint(Math.min(planTerminalIndex, path.size() - 1));
+                        OrebitCommon.LOGGER.info(
+                                "[Orebit] seam-pause: held {}t at seam ({},{},{}) waiting for the seeded search",
+                                seamPauseTicks, held.getX(), held.getY(), held.getZ());
+                        seamPauseTicks = 0;
+                        seamPauseSeam = -1;
+                    }
                     // The install seed (see installSeed): cursor + step-0 frame anchor + outgoing-phase
                     // disposition, derived from the plan's TRUE search start and the adoption's matched
                     // body index rather than re-derived here inline.
@@ -1275,6 +1452,8 @@ final class BotNavigator {
                     this.lastEditedIndex = -1;
                     this.lastFailLoggedStep = -1;
                     this.activePlanStep = -1; // rebuild the phase plan for the new window's first step
+                    this.planTerminalIndex = Integer.MAX_VALUE; // §11: a fresh window starts untruncated
+                    this.seamTruncSeam = -1;
                     this.incompatibleStep = -1; // §10 U4: the broken-step fact belonged to the replaced plan
                     this.incompatiblePlan = null;
                     this.planStartFloor = seed.anchorFloor();
@@ -1291,9 +1470,9 @@ final class BotNavigator {
                 // at the window end adopts a ready plan with no pause. wantsPreplan() is tested FIRST so the
                 // argument construction (a BlockPos + the EditSnapshot fold) is never paid when it can't
                 // submit — in particular never in sync mode and never twice per window target.
-                if (path != null && !path.isEmpty() && waypointIndex > path.size() / 2
-                        && waypointIndex < path.size() && pathPlan.wantsPreplan()) {
-                    pathPlan.preplan(path.floor(path.size() - 1),
+                if (path != null && !path.isEmpty() && waypointIndex > planLimit() / 2
+                        && waypointIndex < planLimit() && pathPlan.wantsPreplan()) {
+                    pathPlan.preplan(path.floor(planLimit() - 1),
                             EditSnapshot.fromRemainingSteps(path, lastEditedIndex + 1),
                             bot.currentStartMode());
                 }
@@ -1337,6 +1516,8 @@ final class BotNavigator {
                 this.lastEditedIndex = -1;
                 this.lastFailLoggedStep = -1;
                 this.activePlanStep = -1;
+                this.planTerminalIndex = Integer.MAX_VALUE; // §11: a fresh window starts untruncated
+                this.seamTruncSeam = -1;
                 this.incompatibleStep = -1; // §10 U4: fresh plan, fresh compatibility episode
                 this.incompatiblePlan = null;
                 this.planStartFloor = seed.anchorFloor();
@@ -1359,10 +1540,18 @@ final class BotNavigator {
             repairStep();
         }
 
-        if (path != null && waypointIndex < path.size()) {
+        if (path != null && waypointIndex < planLimit()) {
             driveState = "STEER";
             lastDriveState = null; // following a path again → re-announce the next non-following state
             steerAlongPath();
+        } else if (path != null && !path.isEmpty() && planTerminalIndex != Integer.MAX_VALUE) {
+            // §11 SEAM-PAUSE (owner ruling 2026-08-20): the bot completed the truncated terminal move
+            // and is waiting for the seam machinery — the seeded search still in flight, or the armed
+            // verdict's consummation at the next settled boundary. Hold CENTERED on the terminal
+            // waypoint (restHold — an anchored station-keep, so ice-drift is actively re-centred and
+            // the consummation's settled-floor equality re-establishes itself), never WAIT's bare input
+            // drop. Uniform for ANY pending seeded search — the old CAUTION hold's successor (§7/§11).
+            seamPauseHold();
         } else if (navGaveUp || (pathPlan != null && pathPlan.status() == PathStatus.BLOCKED)) {
             driveState = "HOLD";
             // HOLD when we either gave up OR a committed-skeleton window is momentarily BLOCKED (the region
@@ -1892,10 +2081,12 @@ final class BotNavigator {
         // move" — a lateral vine cling is supported for its whole duration while its move is very much in
         // progress. Supported is not interruptible.
         final boolean phaseOwnsCompletion = phaseOwnsCompletion(phaseRunner, lastPhaseDone, bot);
-        for (int j = path.size() - 1; !phaseOwnsCompletion && j >= waypointIndex; j--) {
+        for (int j = planLimit() - 1; !phaseOwnsCompletion && j >= waypointIndex; j--) {
             BlockPos w = path.waypoint(j);
-            // The successor is what makes arrival mean "teed up" (Movement#reached); null past the end.
-            Movement nextMove = (j + 1 < path.size()) ? path.movement(j + 1) : null;
+            // The successor is what makes arrival mean "teed up" (Movement#reached); null past the end —
+            // §11: the terminal view's end, so a truncated plan's terminal step arrives successor-less
+            // ("squared up", never teed toward a dead-tail step this follower will not walk).
+            Movement nextMove = (j + 1 < planLimit()) ? path.movement(j + 1) : null;
             if (path.movement(j).reached(bot, w.getX(), w.getY(), w.getZ(), nextMove)) {
                 if (Debug.VERBOSE && j > waypointIndex) {
                     bot.vlog("advance SKIPPED " + (j - waypointIndex) + " step(s): " + waypointIndex + "→" + (j + 1)
@@ -1912,54 +2103,56 @@ final class BotNavigator {
                 break;
             }
         }
-        if (waypointIndex >= path.size()) {
-            bot.setForward(0.0f);
-            SteerControl.clingHold(bot);
+        if (waypointIndex >= planLimit()) {
+            // §11 (owner ruling 2026-08-20): the cursor just crossed the terminal view. A TRUNCATED
+            // terminal holds CENTERED until consummation (the seam-pause — restHold at the terminal
+            // waypoint centre, §2.6-scoped); a naturally consumed plan keeps the plain input drop.
+            if (planTerminalIndex != Integer.MAX_VALUE && !path.isEmpty()) {
+                seamPauseHold();
+            } else {
+                bot.setForward(0.0f);
+                SteerControl.clingHold(bot);
+            }
             return;
         }
 
         Movement movement = path.movement(waypointIndex);
         BlockPos wp = path.waypoint(waypointIndex);
 
+        // DELIVERY-TAIL CONVERGENCE (the delivery invariant's second half, owner-ratified 2026-08-20; a
+        // sibling arming of the §11 terminalArrive assignment below). With the default entryReady now
+        // asking Movement.deliverable, a step's TAIL can be positionally complete while `reached`
+        // withholds SOLELY on delivery — and the terminal phase's normal drive is groundServo PURSUIT,
+        // which never eases at its target: left alone it carries the bot THROUGH the centre, so the
+        // one-tick projection keeps failing on the far edge and delivery would only ever converge for
+        // rear/cross drift. Whenever (a) the current step's own completion is satisfied (its terminal
+        // phase's done, or it has no phase plan — the !phaseOwnsCompletion the advance loop already ran
+        // under), (b) the pose passes the move's own arrival test sans successor (reached with next=null
+        // — settled + atWaypoint + any override clause), and (c) only deliverable is refusing, route the
+        // land drive onto the step-target ARRIVE (SteerControl.terminalArrive → arriveOnStep) so the
+        // drive BRAKES onto the cell centre instead of pursuing through it: velocity decays toward zero,
+        // the projection re-enters the cell, and the handoff completes delivered. No timers, no new
+        // constants — the same mechanism, gain and precedence (stepGateArmed > terminalArrive) as the
+        // §11 centered terminal. Guarded on waypointIndex == activePlanStep so a step adopted THIS tick
+        // (whose runner still belongs to the outgoing step) can never arm off stale phase state; clause
+        // (b) failing on a fresh step's not-yet-entered waypoint makes that guard belt-and-braces.
+        // A successor exists whenever this arms: reached(next=null) true with no advance means teedUp
+        // was the withholding clause, which a null successor short-circuits.
+        final boolean deliveryArrive = !phaseOwnsCompletion
+                && waypointIndex == activePlanStep
+                && movement.reached(bot, wp.getX(), wp.getY(), wp.getZ(), null)
+                && !Movement.deliverable(bot, wp.getX(), wp.getZ());
+
         // Build (once per step) this move's phase-model plan, if it has one. A change of waypoint (a new step, or
         // a window swap that reset the cursor) rebuilds it and resets the runner. The plan is written in the
         // search-native FLOOR cells, carried per-waypoint through reconstruct (BlockPathPlan.floorY).
         if (waypointIndex != activePlanStep) {
-            // SEAM CAUTION (owner 2026-07-31, DESIGN-async-step-safety.md §3; rescoped by
-            // DESIGN-replan-handoff.md §7, EXTENDED by §10 U2): a seam-SEEDED re-search is outstanding
-            // whose result adopts at the horizon seam — and because the §3 walk never places a seam
-            // beyond a committing step OR a move-invalidated step (the U2 clamp), the only step whose
-            // outcome that pending search can change is the step AT the seam. Entering it now would
-            // launch the bot into that unresolved future — a committed jump on a possibly-stale premise,
-            // or a walk INTO the very cell an edit just broke (the U2 arm: the async search still in
-            // flight when the bot arrives) — so exactly that one transition defers: stand at the seam
-            // until the search lands (the wait is bounded by the search budget, and a
-            // standing-at-the-seam bot IS the §5 ADOPT case). Every other transition proceeds —
-            // non-committing steps anywhere, committing steps away from the seam, anything under a
-            // routine P4 pre-plan — so step transitions no longer stutter under a pending search; R3/R4
-            // (fast-forward / panic-stop) own a bot that walks past the seam. Never holds on a damaging
-            // floor (the arrival gate's own keep-moving rule), and only from a stable medium (a
-            // ballistic bot cannot stand safe — it proceeds as before). The invalidated-step arm reads
-            // the stored U4 fact ({@code incompatibleStep}, identity-guarded, refreshed per edit epoch)
-            // — a state test, no per-tick grid scan.
-            final int pendingSeam = pathPlan == null ? -1 : pathPlan.seededSearchPendingSeam();
-            if (pendingSeam >= 0 && waypointIndex == pendingSeam + 1
-                    && (stepCommitsRisk(waypointIndex)
-                            || (waypointIndex == incompatibleStep && path == incompatiblePlan))
-                    && (bot.grounded() || bot.isInWater())
-                    && !onDamagingFloor()) {
-                if (Debug.VERBOSE && lastCautionLoggedStep != waypointIndex) {
-                    lastCautionLoggedStep = waypointIndex;
-                    bot.vlog("CAUTION hold before " + movement.getClass().getSimpleName() + " step "
-                            + waypointIndex + " — "
-                            + (waypointIndex == incompatibleStep && path == incompatiblePlan
-                                    ? "move-invalidated (U2), " : "")
-                            + (pathPlan.suspectSearchPending() ? "SUSPECT" : "routine")
-                            + " re-search in flight");
-                }
-                bot.setForward(0.0f);
-                return;
-            }
+            // (§11, owner ruling 2026-08-20: the old SEAM-CAUTION hold that lived here — "at the seam,
+            // if the seeded search is still pending and the next step commits risk / is invalidated,
+            // hold" — is SUBSUMED. A pending seeded search now truncates the plan at the seam
+            // (refreshSeamTruncation), so the cursor can never enter seam+1 under one: the drive gate
+            // ends at the truncated terminal and the SEAM-PAUSE hold in driveToward owns the wait —
+            // uniform for ANY pending seeded search, not just committing/broken next steps.)
             if (Debug.VERBOSE && phaseRunner.active() && !lastPhaseDone && activePlanStep >= 0
                     && !phaseRunner.doneNow(bot)) {
                 // The reached-before-done seam: the cursor moved on while the old step's phase plan was still
@@ -2104,7 +2297,9 @@ final class BotNavigator {
         } else {
             segStart = path.waypoint(waypointIndex - 1);
         }
-        BlockPos next = (waypointIndex + 1 < path.size()) ? path.waypoint(waypointIndex + 1) : null;
+        // §11: hasNext is terminal-view-bounded — at a truncated terminal the corner-blend look-ahead dies
+        // and the last leg squares up onto the cell centre (the free win of the truncation clamp).
+        BlockPos next = (waypointIndex + 1 < planLimit()) ? path.waypoint(waypointIndex + 1) : null;
         cursor.set(segStart, wp, next);
         // Diagnostic snapshot of the executing step's segment cells (read by the parkour harness / Debug only).
         segFromX = segStart.getX(); segFromY = segStart.getY(); segFromZ = segStart.getZ();
@@ -2113,8 +2308,17 @@ final class BotNavigator {
         // Execute the step. A CONVERTED move (has a phase plan) reconciles its geometry against the LIVE world
         // each tick — breaking/placing reactively via the PhaseRunner, no one-shot applyEdits, so a missed edit
         // self-heals. An UNCONVERTED move keeps the original path: apply its folded edits once, then steer.
+        // §11 CENTERED TERMINAL (owner ruling 2026-08-20): while the TERMINAL move of a seam-truncated
+        // plan executes, route SteerControl.drive's land branch onto the step-target ARRIVE
+        // (SteerControl.terminalArrive — the stepGateArmed discipline: set and cleared tightly around
+        // the step execution so no other caller reads it stale), so the move ends settled AT the cell
+        // centre the new plan's step 0 is framed from. False on every untruncated plan (MAX_VALUE) —
+        // unless the DELIVERY-TAIL arming (computed above, same flag, same discipline) needs the same
+        // brake-onto-centre to complete a delivery-withheld handoff.
+        SteerControl.terminalArrive = waypointIndex == planTerminalIndex || deliveryArrive;
         if (phaseRunner.active()) {
             lastPhaseDone = phaseRunner.run(bot, cursor);
+            SteerControl.terminalArrive = false;
             if (phaseRunner.failed()) {
                 // VALIDITY-ENVELOPE FAILURE (the P1 off-plan wedge): the step's plan declared the live state
                 // outside its model (MovePlan.failWhen — e.g. a committed jump grounded on a cell that is
@@ -2161,6 +2365,7 @@ final class BotNavigator {
                 applyEdits(edits);
             }
             movement.steer(bot, cursor);
+            SteerControl.terminalArrive = false; // §11: cleared on both execution paths, every tick
         }
         bot.steeredThisTick = true;                            // a step ran → sprint re-asserted if a sprint move
         bot.lastSteerMove = movement.getClass().getSimpleName(); // (swim-pose diagnostic; Debug.VERBOSE)
@@ -2526,7 +2731,7 @@ final class BotNavigator {
                 bot.footX(), bot.footY(), bot.footZ(), String.format("%.3f", bot.getY()),
                 bot.grounded(), bot.onClimbable(),
                 movement.reached(bot, wp.getX(), wp.getY(), wp.getZ(),
-                        (waypointIndex + 1 < path.size()) ? path.movement(waypointIndex + 1) : null),
+                        (waypointIndex + 1 < planLimit()) ? path.movement(waypointIndex + 1) : null),
                 String.format("%.2f", wp.getY() + 1.0),
                 // THE STEERED SEGMENT (2026-08-12). Every servo derives its along/cross axes from
                 // (sx,sz)->(tx,tz), so without it a logged yaw/head/fwd triple cannot be checked against what

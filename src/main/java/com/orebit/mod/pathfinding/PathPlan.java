@@ -341,8 +341,31 @@ public final class PathPlan {
     /** The follower's first not-yet-applied step ({@code lastEditedIndex + 1}) — the lower bound of the
      *  §4 SUB-RANGE baseline fold {@code EditSnapshot.fromSteps(plan, first, seam)}. */
     private int seamFirstUnedited;
-    /** The follower's live waypoint cursor — the §5 case-4 past-the-seam discriminator. */
+    /** The follower's live waypoint cursor — with {@link #seamIndex}, the §11 trichotomy's execution
+     *  position (before / at / beyond the seam — owner ruling 2026-08-20). */
     private int seamCursor = -1;
+    /** Whether the follower has a move IN FLIGHT at {@link #seamCursor} (cursor inside its §11 terminal
+     *  view). {@code false} = the degenerate no-move-in-flight regime — planless, consumed, or holding
+     *  at a truncated terminal — where adoption consummates immediately on the settled floor. Set by
+     *  {@link #onBotMoved} / {@link #pollWhenPlanless}; only read inside {@link #pollPending}. */
+    private boolean seamMoveInFlight;
+
+    // ---- §11 armed consummation (DESIGN-replan-handoff.md §11, owner ruling 2026-08-20) --------------
+    /** The DEFERRED seam verdict awaiting its move-completion consummation ({@code null} = none): the
+     *  in-execution trichotomy ruled ADOPT / FAST_FORWARD / PANIC, the follower truncates the walked
+     *  plan at {@link #armedTerminal}, and the verdict consummates at the first settled boundary with
+     *  the terminal move COMPLETE ({@code seamCursor > armedTerminal}) — never mid-move. State-based:
+     *  disarmed whenever its premise dies (plan swapped/dropped, parked result gone, window target
+     *  moved). */
+    private AsyncWindowSearch.SeamVerdict armedVerdict;
+    /** The follower plan the armed verdict was ruled on (identity guard, the {@link #seamPlan} idiom). */
+    private BlockPathPlan armedPlan;
+    /** The §11 truncation terminal: the waypoint index of the LAST move the follower executes on
+     *  {@link #armedPlan} — the seam move (at-seam ADOPT) or the verdict-time in-flight move (beyond). */
+    private int armedTerminal = -1;
+    /** The FAST_FORWARD body match of the terminal move's landing on the parked plan ({@code -1} on
+     *  ADOPT/PANIC) — handed to {@link AsyncWindowSearch#consummateSeeded} at consummation. */
+    private int armedMatched = -1;
     /**
      * The current window's block target + corridor (set by {@link #replanBlock}), exposed via
      * {@link #currentWindowTarget()} / {@link #currentCorridor()} so {@code /bot trace} can re-run the SAME
@@ -693,7 +716,7 @@ public final class PathPlan {
      * region neither retreats {@code committedIndex} nor replans.
      */
     public void onBotMoved(BlockPos botFloor, int startMode, boolean fluidAnchor) {
-        onBotMoved(botFloor, startMode, fluidAnchor, null, null, -1, 0, -1, true);
+        onBotMoved(botFloor, startMode, fluidAnchor, null, null, -1, 0, -1, false, true);
     }
 
     /**
@@ -702,8 +725,10 @@ public final class PathPlan {
      * gate), {@code followerPlan}/{@code seamIndex} name the §3 walk's seam waypoint on the plan the
      * follower is walking ({@code -1} = no walkable incumbent — planless or consumed — so every launch
      * site seeds from {@code botFloor} exactly as before), {@code firstUneditedStep} is the follower's
-     * first not-yet-applied step (the §4 sub-range fold's lower bound), and {@code followerCursor} is
-     * the live waypoint cursor (the §5 case-4 past-the-seam discriminator). {@code restForLaunch} is the
+     * first not-yet-applied step (the §4 sub-range fold's lower bound), {@code followerCursor} is
+     * the live waypoint cursor, and {@code moveInFlight} says whether the move at that cursor is
+     * actually executing (cursor inside the follower's §11 terminal view) — together the §11
+     * trichotomy's execution position (owner ruling 2026-08-20). {@code restForLaunch} is the
      * §10 rest gate ({@code BotSteering.atRest}): it gates ONLY the blocked-null (S3) relaunch below —
      * the one launch in this method anchored at the live {@code botFloor} — deferring it until the bot's
      * carry has stopped (the trigger, a null plan, persists; the follower re-anchors its settled floor
@@ -712,12 +737,13 @@ public final class PathPlan {
      */
     public void onBotMoved(BlockPos botFloor, int startMode, boolean fluidAnchor, BotSteering bot,
                            BlockPathPlan followerPlan, int seamIndex, int firstUneditedStep,
-                           int followerCursor, boolean restForLaunch) {
+                           int followerCursor, boolean moveInFlight, boolean restForLaunch) {
         this.seamBot = bot;
         this.seamPlan = followerPlan;
         this.seamIndex = seamIndex;
         this.seamFirstUnedited = firstUneditedStep;
         this.seamCursor = followerCursor;
+        this.seamMoveInFlight = moveInFlight;
         this.botFloor = botFloor;
         this.startMode = startMode; // the bot's live pose, used by the next windowed search (keeps PRONE while swimming)
 
@@ -730,7 +756,10 @@ public final class PathPlan {
         // when sync or nothing is in flight (one null compare). A parked SEAM-SEEDED result also pumps in
         // SYNC mode (DESIGN-replan-handoff.md §5 — the sync park is what closes the §1 wedge), which the
         // seededParked() disjunct covers; a sync plan with nothing parked still never enters.
-        if (executor != null || async.seededParked()) {
+        // (+ §11: an ARMED consummation must keep pumping even with the parked slot EMPTY — a sync
+        // deferred PANIC drops the slot at verdict time, and without this disjunct its consummation
+        // would never run: the bot would hold at its truncated terminal forever.)
+        if (executor != null || async.seededParked() || armedVerdict != null) {
             pollPending(botFloor, fluidAnchor);
         }
 
@@ -1603,20 +1632,6 @@ public final class PathPlan {
     }
 
     /**
-     * Whether an async window search is outstanding (in flight or finished-but-undrained) that was
-     * launched from a site implying the CURRENT plan may be invalid — a terrain-impacted refresh, a
-     * repair, a blocked-null resubmit, or a retry inheriting one of those. The follower's caution gate
-     * (DESIGN-async-step-safety.md §3): while true, step transitions into committed moves and
-     * deeper-than-safe Falls defer (stand at the settled anchor) until the drain resolves the doubt.
-     * Routine searches (fresh plan, forward-slide, cascade re-derive, P4 pre-plan) never set it.
-     * Always false in sync mode — a synchronous search resolves within its own tick, so no doubt
-     * window exists.
-     */
-    public boolean suspectSearchPending() {
-        return executor != null && async.suspectPending();
-    }
-
-    /**
      * Whether ANY async search is outstanding (in flight or finished-but-undrained), routine or
      * suspect, window slide or P4 pre-plan — the follower's committed-move caution keys on this
      * (owner 2026-07-31): even a routine slide may change the route's direction, and a committed jump
@@ -1625,19 +1640,6 @@ public final class PathPlan {
      */
     public boolean searchPending() {
         return executor != null && async.searchPending();
-    }
-
-    /**
-     * The seam waypoint index of the outstanding seam-SEEDED window search (in flight or
-     * finished-but-undrained), or {@code -1} when none — identity-guarded against the CURRENT
-     * {@link #blockPlan}, so the index is only ever read against the plan the §3 walk chose it on.
-     * The follower's rescoped CAUTION hold keys on this (DESIGN-replan-handoff.md §7): the only step
-     * whose outcome a pending seeded search can change is the committing step AT the seam. Always
-     * {@code -1} in sync mode — a sync seeded search parks within its own tick, so no doubt window
-     * exists.
-     */
-    public int seededSearchPendingSeam() {
-        return executor != null ? async.pendingSeededSeamFor(blockPlan) : -1;
     }
 
     /** The failing search's start region as {@code (rx,ry,rz)} (minY-rebased level-0 region coords, the
@@ -1695,13 +1697,23 @@ public final class PathPlan {
      *   <li><b>Pre-plan</b> result (P4): PARK it — the bot hasn't reached the predicted start yet. Each
      *       boundary visit re-tests the parked seam; on accept it's adopted with no search pause at all,
      *       on target-change it's dropped (the window moved on).</li>
-     *   <li><b>Seam-seeded</b> result (DESIGN-replan-handoff.md §5, sync AND async): PARKS at drain, then
-     *       each boundary runs the four ordered adoption cases — PARK / ADOPT-at-seam (step-0
-     *       {@code entryReady}-gated) / FAST-FORWARD / PANIC (drop plan+result, resubmit from rest).</li>
+     *   <li><b>Seam-seeded</b> result (DESIGN-replan-handoff.md §5 as amended by §11, sync AND async):
+     *       PARKS at drain, then each boundary runs the §11 execution-edge pump — the index trichotomy
+     *       against the seam while a move is in flight (before-seam park / at-seam truncate+defer /
+     *       beyond: the in-flight move's LANDING cell decides FAST-FORWARD vs PANIC), with every
+     *       non-KEEP verdict CONSUMMATED only at the truncated terminal move's completion (the armed
+     *       consummation below — no plan ever swaps mid-move, owner ruling 2026-08-20); the degenerate
+     *       no-move-in-flight regimes (planless/consumed/holding) consummate immediately, step-0
+     *       {@code entryReady}-gated on ADOPT.</li>
      * </ul>
      */
     private void pollPending(BlockPos actualFloor, boolean fluidAnchor) {
-        switch (async.drainPending(actualFloor, windowTargetPos, startMode, fluidAnchor)) {
+        // §11 ARMED CONSUMMATION (owner ruling 2026-08-20): a deferred seam verdict owns this boundary
+        // until it consummates or its premise dies — nothing else may install while it holds.
+        if (consummationTick(actualFloor)) {
+            return;
+        }
+        switch (async.drainPending(actualFloor, inFlightLanding(), windowTargetPos, startMode, fluidAnchor)) {
             case RETRY:
                 // Executor hiccup / drifted past seam tolerance / window moved — plan from where we
                 // really are (the mailbox never decides; see AsyncWindowSearch.Drain).
@@ -1731,38 +1743,50 @@ public final class PathPlan {
                 break;
         }
         if (async.seededParked()) {
-            // The four ordered adoption cases for a parked SEAM-SEEDED result (DESIGN-replan-handoff.md
-            // §5, R2–R4) — the geometric tests live in the mailbox (pollSeededParked); the DECISIONS
-            // (install / drop-and-resubmit) live here, keeping the driver the sole writer of
-            // blockPlan/lastPlanPartial/status. pastSeam is cursor-derived: the follower's live waypoint
-            // cursor has advanced beyond the seam's index on the SAME plan object the walk chose it on.
-            final boolean pastSeam = seamPlan != null && async.parkedSeededFrom() == seamPlan
-                    && seamCursor > async.parkedSeamIndex();
+            // The §11 execution-edge pump for a parked SEAM-SEEDED result (DESIGN-replan-handoff.md §5
+            // as amended by §11, owner ruling 2026-08-20) — the verdict computation lives in the mailbox
+            // (pollSeededParked); the DECISIONS (install now / arm a deferred consummation / drop) live
+            // here, keeping the driver the sole writer of blockPlan/lastPlanPartial/status. The
+            // execution position (follower plan identity + cursor + move-in-flight) rides the seam
+            // handoff fields the follower refreshes every boundary.
             final AsyncWindowSearch.SeamVerdict verdict = async.pollSeededParked(seamBot, actualFloor,
-                    windowTargetPos, startMode, fluidAnchor, pastSeam);
+                    inFlightLanding(), windowTargetPos, startMode, fluidAnchor,
+                    seamPlan, seamCursor, seamMoveInFlight);
+            if (async.verdictDeferred()) {
+                // IN-EXECUTION: a move is in flight — no install now, full stop. Arm the consummation;
+                // the follower truncates its plan at verdictTerminal ("the plan will now END when the
+                // current movement ends") and the verdict consummates at that move's completion.
+                switch (verdict) {
+                    case ADOPT:
+                    case FAST_FORWARD:
+                    case PANIC:
+                        this.armedVerdict = verdict;
+                        this.armedPlan = seamPlan;
+                        this.armedTerminal = async.verdictTerminal();
+                        this.armedMatched = async.verdictMatched();
+                        if (Debug.ENABLED) {
+                            OrebitCommon.LOGGER.info(
+                                    "[Orebit] seam-verdict {} armed: terminal={} matched={} cursor={} seam={}"
+                                            + " — consummating at move completion (§11)",
+                                    verdict, armedTerminal, armedMatched, seamCursor,
+                                    async.parkedSeamIndex());
+                        }
+                        break;
+                    default: // KEEP never defers
+                        break;
+                }
+                return; // the seeded state owns this boundary — the P4 pump below must not run
+            }
             switch (verdict) {
-                case ADOPT:        // §5 case 2 — settled AT the seam: standard window-swap install
-                case FAST_FORWARD: // §5 case 3 — past the seam but ON the plan: reached-scan enters mid-plan
-                    this.blockPlan = async.resultPlan();
-                    this.blockPlanStart = async.resultStart(); // the seam — see blockPlanStart's javadoc
-                    this.adoptedMatchedIndex = async.resultMatchedIndex(); // FAST_FORWARD's body hit; -1 on ADOPT
-                    this.lastPlanPartial = async.resultPartial();
-                    this.status = resultStatus(blockPlan, async.resultExpansions(),
-                            async.resultPartial(), async.resultBudgetHit(), null, // parked plans are never null
-                            async.resultStart());
-                    if (Debug.ENABLED) {
-                        OrebitCommon.LOGGER.info("[Orebit] seam-adopt {}: bot=({},{},{}) seam=({},{},{})",
-                                verdict == AsyncWindowSearch.SeamVerdict.ADOPT ? "ADOPT" : "FAST-FORWARD",
-                                actualFloor.getX(), actualFloor.getY(), actualFloor.getZ(),
-                                async.resultStart().getX(), async.resultStart().getY(),
-                                async.resultStart().getZ());
-                        logBlockPlan();
-                    }
-                    snapshotPlanChunks(); // adopted a seeded result — re-baseline the plan-relevance snapshot
+                case ADOPT:        // degenerate (no move in flight) — immediate consummation at the seam
+                case FAST_FORWARD: // degenerate — settled on the new plan's body past the seam
+                    installSeededAdoption(
+                            verdict == AsyncWindowSearch.SeamVerdict.ADOPT ? "ADOPT" : "FAST-FORWARD",
+                            actualFloor);
                     break;
                 case ENTRY_REFUSED:
-                    // §5 case 2's step-0 entryReady gate refused the bot's pose — fall back to case 1:
-                    // stay parked one more boundary (provably unreachable for the current movement set).
+                    // The immediate ADOPT's step-0 entryReady gate refused the bot's pose — stay parked
+                    // one more boundary (provably unreachable for the current movement set).
                     if (Debug.ENABLED) {
                         OrebitCommon.LOGGER.info(
                                 "[Orebit] seam-adopt entryReady REFUSED at ({},{},{}) — staying parked",
@@ -1770,25 +1794,22 @@ public final class PathPlan {
                     }
                     break;
                 case PANIC:
-                    // §5 case 4 (R4), §10-amended: past the seam and NOT on the plan — the world told the
-                    // bot its heading is wrong AND it overshot the turn point. Drop the incumbent too and
-                    // stop THERE: null-only, NO immediate resubmit (the old same-tick replanBlock() here
-                    // installed/seeded from a floor the bot could still be sliding out of — the mid-slide
-                    // install hazard). The follower's existing planless WAIT zeroes forward, the bot
-                    // coasts to rest under vanilla physics, rest re-anchors its settled floor, and the
-                    // rest-gated blocked-null site relaunches from the true rest cell (§10 U5) — that IS
-                    // "resubmit from rest", now literally.
+                    // Degenerate PANIC — the bot is SETTLED past the seam and off the plan (no move in
+                    // flight to finish). Drop the incumbent and stop THERE: null-only, NO immediate
+                    // resubmit (the mid-slide install hazard). The follower's planless WAIT zeroes
+                    // forward, rest re-anchors the settled floor, and the rest-gated blocked-null site
+                    // relaunches from the true rest cell (§10 U5) — "resubmit from rest", literally.
                     this.blockPlan = null;
                     this.lastPlanPartial = false;
                     if (status != PathStatus.RUNNING) status = PathStatus.RUNNING;
                     if (Debug.ENABLED) {
                         OrebitCommon.LOGGER.info(
-                                "[Orebit] seam-adopt PANIC: bot=({},{},{}) past the seam and off the parked"
-                                        + " plan — dropped plan+result; rest-gated replan follows (§10)",
+                                "[Orebit] seam-adopt PANIC: bot=({},{},{}) settled past the seam and off the"
+                                        + " parked plan — dropped plan+result; rest-gated replan follows (§10)",
                                 actualFloor.getX(), actualFloor.getY(), actualFloor.getZ());
                     }
                     break;
-                default: // KEEP — §5 case 1: not at the seam yet (or beyond tolerance) — stay parked
+                default: // KEEP — before the seam / outside the sanity box / stale-dropped — stay parked
                     break;
             }
             return; // the parked slot was seeded — the P4 pump below must not run this tick
@@ -1806,6 +1827,149 @@ public final class PathPlan {
             if (Debug.ENABLED) logBlockPlan();
             snapshotPlanChunks(); // adopted a parked pre-plan — re-baseline the plan-relevance snapshot
         }
+    }
+
+    /**
+     * The in-flight move's LANDING floor — the §11 verdict probe ({@code seamPlan.floor(seamCursor)},
+     * the follower plan's search-native floor of the executing step; owner ruling 2026-08-20: verdicts
+     * key on where the bot is in PLAN EXECUTION, and the move in flight lands there next). {@code null}
+     * in the degenerate regimes (planless / consumed / holding at a truncated terminal), where the
+     * settled live floor is the truth instead. Cold: at most one {@link BlockPathPlan#floor} allocation
+     * per boundary drain.
+     */
+    private BlockPos inFlightLanding() {
+        return seamMoveInFlight && seamPlan != null && seamCursor >= 0 && seamCursor < seamPlan.size()
+                ? seamPlan.floor(seamCursor) : null;
+    }
+
+    /**
+     * The §11 armed-consummation tick (owner ruling 2026-08-20): while a deferred seam verdict is armed,
+     * it owns every boundary — HOLD until the truncated terminal move completes ({@code seamCursor >
+     * armedTerminal}, written by the follower's reached-advance, the sole completion authority), then
+     * consummate: ADOPT/FAST_FORWARD install the parked result exactly like a drained one (ADOPT gated
+     * on the new plan's step-0 {@link com.orebit.mod.pathfinding.blockpathfinder.Movement#entryReady}
+     * against the bot's settled, centered pose — the gate's §11 re-site from verdict time); PANIC drops
+     * the incumbent (null-only — the §10 rest-gated planless machinery owns the relaunch). State-based
+     * disarms whenever the premise dies: the follower plan changed (an install replaced the walked
+     * plan), the parked result vanished ({@code dropBlockPlan}/{@code cancel}), or the window target
+     * moved (the P4 rule, applied while holding).
+     *
+     * @return {@code true} when the armed state consumed this boundary (held, consummated, or a
+     *         premise-death drop) — {@code pollPending} must not run its other pumps this tick.
+     */
+    private boolean consummationTick(BlockPos actualFloor) {
+        if (armedVerdict == null) {
+            return false;
+        }
+        if (armedPlan != blockPlan || armedPlan != seamPlan) {
+            disarmConsummation("the walked plan changed"); // an install/drop replaced the premise
+            return false;
+        }
+        final boolean panic = armedVerdict == AsyncWindowSearch.SeamVerdict.PANIC;
+        if (!panic) {
+            if (!async.seededParked()) {
+                disarmConsummation("the parked result died");
+                return false;
+            }
+            if (!windowTargetPos.equals(async.parkedTargetCell())) {
+                async.dropParked();
+                disarmConsummation("the window target moved");
+                return false;
+            }
+        }
+        if (seamCursor <= armedTerminal) {
+            return true; // the terminal move is still in flight — hold (the follower ends it centered)
+        }
+        // The terminal move COMPLETED and this is a settled boundary — consummate.
+        if (panic) {
+            this.blockPlan = null;
+            this.lastPlanPartial = false;
+            if (status != PathStatus.RUNNING) status = PathStatus.RUNNING;
+            if (Debug.ENABLED) {
+                OrebitCommon.LOGGER.info(
+                        "[Orebit] seam-consummate PANIC: finished move {} centered at ({},{},{}) — dropping"
+                                + " the plan; rest-gated replan follows (§10 U5 / §11)",
+                        armedTerminal, actualFloor.getX(), actualFloor.getY(), actualFloor.getZ());
+            }
+            disarmConsummation(null);
+            return true;
+        }
+        if (armedVerdict == AsyncWindowSearch.SeamVerdict.ADOPT && seamBot != null) {
+            final BlockPathPlan parked = async.parkedSeededPlan();
+            if (parked != null && !parked.isEmpty() && !parked.movement(0)
+                    .entryReady(seamBot, seamBot.footX(), seamBot.footY(), seamBot.footZ())) {
+                if (Debug.ENABLED) {
+                    OrebitCommon.LOGGER.info(
+                            "[Orebit] seam-consummate entryReady REFUSED at ({},{},{}) — holding armed",
+                            actualFloor.getX(), actualFloor.getY(), actualFloor.getZ());
+                }
+                return true; // stay armed/held — re-consulted next boundary (delivery-gated since 2026-08-20, §5)
+            }
+        }
+        async.consummateSeeded(armedMatched);
+        installSeededAdoption(armedVerdict == AsyncWindowSearch.SeamVerdict.ADOPT
+                ? "ADOPT" : "FAST-FORWARD", actualFloor);
+        disarmConsummation(null);
+        return true;
+    }
+
+    /** Drop the §11 armed verdict ({@code reason} non-null = a premise death worth a Debug line). */
+    private void disarmConsummation(String reason) {
+        if (reason != null && Debug.ENABLED && armedVerdict != null) {
+            OrebitCommon.LOGGER.info("[Orebit] seam-verdict {} disarmed: {}", armedVerdict, reason);
+        }
+        this.armedVerdict = null;
+        this.armedPlan = null;
+        this.armedTerminal = -1;
+        this.armedMatched = -1;
+    }
+
+    /** The shared seeded-adoption install (§5/§11): the driver's sole-writer block for a consummated
+     *  (or degenerate-immediate) ADOPT / FAST-FORWARD — result fields were just filled by the mailbox. */
+    private void installSeededAdoption(String label, BlockPos actualFloor) {
+        this.blockPlan = async.resultPlan();
+        this.blockPlanStart = async.resultStart(); // the seam — see blockPlanStart's javadoc
+        this.adoptedMatchedIndex = async.resultMatchedIndex(); // FAST-FORWARD's body hit; -1 on ADOPT
+        this.lastPlanPartial = async.resultPartial();
+        this.status = resultStatus(blockPlan, async.resultExpansions(),
+                async.resultPartial(), async.resultBudgetHit(), null, // parked plans are never null
+                async.resultStart());
+        if (Debug.ENABLED) {
+            OrebitCommon.LOGGER.info("[Orebit] seam-adopt {}: bot=({},{},{}) seam=({},{},{})",
+                    label, actualFloor.getX(), actualFloor.getY(), actualFloor.getZ(),
+                    async.resultStart().getX(), async.resultStart().getY(),
+                    async.resultStart().getZ());
+            logBlockPlan();
+        }
+        snapshotPlanChunks(); // adopted a seeded result — re-baseline the plan-relevance snapshot
+    }
+
+    /**
+     * The §11 truncation terminal an ARMED consummation imposes on {@code followerPlan} (owner ruling
+     * 2026-08-20), or {@code -1}: the follower's terminal view reads this EXACTLY (never cursor-clamped
+     * — the cursor legitimately passes it at completion, which is what consummation waits for).
+     */
+    public int armedSeamTerminal(BlockPathPlan followerPlan) {
+        return armedVerdict != null && followerPlan != null && armedPlan == followerPlan
+                ? armedTerminal : -1;
+    }
+
+    /**
+     * The seam waypoint index of the seeded handoff currently in play for {@code followerPlan} — a
+     * PARKED seeded result's seam, or a PENDING seeded search's seam — identity-guarded, both pathing
+     * modes (sync parks inline, so its parked seam matters exactly like async's), or {@code -1}. The
+     * §11 uniform truncation source: the follower ends its plan at (no earlier than) this step and
+     * holds centered until the result lands and consummates — the rescoped CAUTION hold's successor
+     * (DESIGN-replan-handoff.md §7/§11).
+     */
+    public int seededSeamFor(BlockPathPlan followerPlan) {
+        if (followerPlan == null || followerPlan != blockPlan) {
+            return -1;
+        }
+        if (async.seededParked() && async.parkedSeededFrom() == followerPlan) {
+            return async.parkedSeamIndex();
+        }
+        return async.pendingSeededSeamFor(followerPlan);
     }
 
     /**
@@ -1860,6 +2024,7 @@ public final class PathPlan {
         this.botFloor = liveFloor;
         this.seamPlan = null; // planless: no incumbent to seed from (DESIGN-replan-handoff.md §4) — a
         this.seamIndex = -1;  // RETRY resubmit from here searches the bot's LIVE cell, as before
+        this.seamMoveInFlight = false; // §11: planless is the degenerate no-move-in-flight case
         pollPending(liveFloor, fluidAnchor);
     }
 
@@ -2198,6 +2363,7 @@ public final class PathPlan {
         this.seamIndex = seamIndex;
         this.seamFirstUnedited = firstUneditedStep;
         this.seamCursor = followerCursor;
+        this.seamMoveInFlight = true; // fired mid-steer, by construction (the U1 prompt path)
         this.botFloor = botFloor;
         this.startMode = startMode;
         refreshWindow(true);

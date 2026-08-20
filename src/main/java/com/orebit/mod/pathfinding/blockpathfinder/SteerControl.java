@@ -1100,6 +1100,27 @@ public final class SteerControl {
     static boolean stepGateArmed;
 
     /**
+     * §11 CENTERED-TERMINAL drive flag (DESIGN-replan-handoff.md §11, owner ruling 2026-08-20): the
+     * follower is executing the TERMINAL move of a seam-truncated plan — "the plan will now END when
+     * the current movement ends" — so the generic land drive must ARRIVE on the step's target centre
+     * ({@link #arriveOnStep}: the {@link #SERVO_GROUND_CRUISE}-capped easing, hazard near-face branch
+     * and all) instead of cruising the pursuit line, ending the move AT the cell centre at low speed —
+     * the settled, centered stand the seam consummation installs the new plan from. Set and cleared by
+     * the follower tightly AROUND the step execution (the {@link #stepGateArmed} discipline, one flag
+     * write each side — no other SteerControl caller can read it stale); {@link #stepGateArmed} keeps
+     * precedence (its lane law is phase-armed and stricter). Moves that write their own servos
+     * (steerTowards-direct committed arcs, the swim family's medium branches) never consult it.
+     *
+     * <p>Also armed by the follower's DELIVERY-TAIL convergence (the delivery invariant's second half,
+     * owner-ratified 2026-08-20): when a step's own completion is satisfied but {@code reached}
+     * withholds SOLELY on {@link com.orebit.mod.pathfinding.blockpathfinder.Movement#deliverable}, the
+     * same ARRIVE brakes the tail onto the cell centre so the one-tick projection re-enters the cell
+     * and the handoff completes — pursuit alone never eases at its target and would carry the bot
+     * through. Same flag, same set/clear discipline, same precedence.
+     */
+    public static boolean terminalArrive;
+
+    /**
      * Gate-armed CONTAINED-tick drive (owner-ratified 2026-08-19): the {@link #anchoredServo unified core}
      * in <b>ARRIVE</b> at the CURRENT step's target centre — the {@link #SERVO_GROUND_CRUISE} cap over the
      * physics-derived {@link #ARRIVE_GAIN_GROUND}, so the pull is full cruise beyond ~0.42 blocks with the
@@ -2567,6 +2588,12 @@ public final class SteerControl {
             // branches above keep precedence: the gate's lane law is a LAND rule, and the climbable/swim
             // rulings override everything. Applies to BOTH ground-drive flavors — the lane dispute is not
             // part of the servo/legacy A/B.
+            arriveOnStep(b, p);
+        } else if (terminalArrive) {
+            // §11 CENTERED TERMINAL (owner ruling 2026-08-20) — the terminal move of a seam-truncated
+            // plan: ARRIVE on the step's target centre so the move ends settled AT the cell the new
+            // plan's step 0 will be framed from (see terminalArrive). Same law as the gate-armed branch;
+            // climbable/water precedence identical.
             arriveOnStep(b, p);
         } else if ("servo".equals(GROUND_DRIVE)) {
             groundServo(b, p);            // input-only velocity servo (holds a 1-wide low-friction lane); A/B-gated

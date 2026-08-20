@@ -20,23 +20,32 @@ import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
 import net.minecraft.core.BlockPos;
 
 /**
- * The §5 four-case adoption state machine for a parked seam-SEEDED boundary result
- * ({@link AsyncWindowSearch#pollSeededParked}, DESIGN-replan-handoff.md §5, R2–R4) as a table over
- * (bot floor, seam floor, plan membership, past-the-seam) → {PARK, ADOPT, FAST_FORWARD, PANIC}.
- * The geometric verdicts all live in this one mailbox seam — the driver ({@code PathPlan.pollPending})
- * only switches on them — so the pump is testable headlessly over hand-built plans, a sync-mode
- * mailbox ({@code executor == null}, whose walk-outrun tolerance degenerates to the fixed
- * Chebyshev-3 splice box), and the driver-derived {@code pastSeam} flag passed explicitly.
+ * The §11 execution-edge adoption pump for a parked seam-SEEDED boundary result
+ * ({@link AsyncWindowSearch#pollSeededParked}, DESIGN-replan-handoff.md §5 as amended by §11 —
+ * <b>owner ruling 2026-08-20</b>: "the seam shouldn't be about the bot's LOCATION, but about where it
+ * is in the plan execution ... plans should swap between moves"). These cases deliberately SUPERSEDE
+ * the pre-§11 location-semantics pins (settled-floor startMatches / live-floor body membership): the
+ * verdict is now the index trichotomy (before / at / beyond the seam) while a move is in flight, ruled
+ * on the in-flight move's LANDING cell, DEFERRED to that move's completion — and the old geometric
+ * tests survive only in the degenerate no-move-in-flight regime, where the settled live floor is still
+ * the truth.
  *
- * <p>Geometry, all floor cells: seam at {@code (10,64,10)}; the parked plan runs on from it over
- * floors {@code (9,64,10) → (8,64,10) → (8,64,11)} (search-native floors, the frame
- * {@code onPlanBody} matches on).
+ * <p>The geometric verdicts all live in this one mailbox seam — the driver ({@code PathPlan.pollPending})
+ * only switches on them (arming a consummation for deferred verdicts) — so the pump is testable
+ * headlessly over hand-built plans, a sync-mode mailbox ({@code executor == null}, whose walk-outrun
+ * tolerance degenerates to the fixed Chebyshev-3 splice box), and an explicit execution position
+ * (follower plan identity + cursor + move-in-flight + landing floor).
+ *
+ * <p>Geometry, all floor cells: seam at {@code (10,64,10)} = the OLD plan's step-3 floor; the parked
+ * NEW plan runs on from it over floors {@code (9,64,10) → (8,64,10) → (8,64,11)} (search-native floors,
+ * the frame {@code planBodyIndex} matches on); the OLD plan continues past the seam over
+ * {@code (11,64,11) → (11,64,12)} (steps 4–5 — the route the seeded result supersedes).
  */
 class SeamAdoptionTest {
 
     private static final BlockPos SEAM_FLOOR = new BlockPos(10, 64, 10);
     private static final BlockPos TARGET = new BlockPos(0, 64, 0);
-    private static final int SEAM_INDEX = 3; // the seam's index on the OLD plan (identity-carried only)
+    private static final int SEAM_INDEX = 3; // the seam's waypoint index on the OLD plan
 
     /** A synthetic all-Traverse plan over stand (feet) cells; the convenience ctor derives each floor as
      *  {@code waypoint.below()} (the full-block case), matching {@code PathPlanOnRouteTest}'s fixture. */
@@ -50,9 +59,11 @@ class SeamAdoptionTest {
     /** The parked (new) plan: stands one above the floors (9,64,10) → (8,64,10) → (8,64,11). */
     private static final BlockPathPlan NEW_PLAN = planOf(new BlockPos(9, 65, 10),
             new BlockPos(8, 65, 10), new BlockPos(8, 65, 11));
-    /** The executing (old) plan the seam was walked on — identity-compared only, content irrelevant. */
-    private static final BlockPathPlan OLD_PLAN = planOf(new BlockPos(11, 65, 10),
-            new BlockPos(10, 65, 10));
+    /** The executing (old) plan the seam was walked on: floor(3) IS the seam (10,64,10); steps 4–5 walk
+     *  on past it — the in-flight-move landings the beyond-seam verdicts rule on. */
+    private static final BlockPathPlan OLD_PLAN = planOf(new BlockPos(13, 65, 10),
+            new BlockPos(12, 65, 10), new BlockPos(11, 65, 10), new BlockPos(10, 65, 10),
+            new BlockPos(11, 65, 11), new BlockPos(11, 65, 12));
 
     /** A sync-mode mailbox with the seeded result parked at the seam, ready for the pump. */
     private static AsyncWindowSearch parked() {
@@ -61,110 +72,187 @@ class SeamAdoptionTest {
         return mailbox;
     }
 
-    private static SeamVerdict poll(AsyncWindowSearch mailbox, BlockPos botFloor, boolean fluidAnchor,
-                                    boolean pastSeam) {
-        return mailbox.pollSeededParked(null, botFloor, TARGET, BlockPathfinder.MODE_AUTO, fluidAnchor,
-                pastSeam);
+    /** IN-EXECUTION poll: the OLD plan is walking with the move at {@code cursor} in flight, landing at
+     *  {@code landing}; {@code actual} is the live floor (the walk-outrun sanity box's only input). */
+    private static SeamVerdict poll(AsyncWindowSearch mailbox, BlockPos actual, BlockPos landing,
+                                    int cursor, boolean fluidAnchor) {
+        return mailbox.pollSeededParked(null, actual, landing, TARGET, BlockPathfinder.MODE_AUTO,
+                fluidAnchor, OLD_PLAN, cursor, true);
     }
 
-    // ---- case 2: ADOPT — settled AT the seam ----------------------------------------------------------
+    /** DEGENERATE poll: no move in flight (planless / consumed / holding at a truncated terminal) —
+     *  the verdict consummates immediately on the settled {@code actual} floor. */
+    private static SeamVerdict pollSettled(AsyncWindowSearch mailbox, BotSteering bot, BlockPos actual,
+                                           int cursor, boolean fluidAnchor) {
+        return mailbox.pollSeededParked(bot, actual, null, TARGET, BlockPathfinder.MODE_AUTO,
+                fluidAnchor, OLD_PLAN, cursor, false);
+    }
+
+    // ---- at-seam: the move ENDING at the seam is in flight — deferred ADOPT ---------------------------
 
     @Test
-    void settledAtTheSeamAdopts() {
+    void theSeamMoveInFlightDefersAdoptToItsCompletion() {
+        // §11 (supersedes the pre-§11 settledAtTheSeamAdopts location pin, owner ruling 2026-08-20):
+        // cursor == seamIndex means the move ENDING at the seam is in flight — the verdict is ADOPT, but
+        // nothing installs now: the driver truncates the old plan at this move (verdictTerminal) and
+        // consummates at its completion. The slot must stay parked until then.
         AsyncWindowSearch mailbox = parked();
-        assertEquals(SeamVerdict.ADOPT, poll(mailbox, SEAM_FLOOR, false, false));
+        SeamVerdict v = poll(mailbox, new BlockPos(11, 64, 10), OLD_PLAN.floor(SEAM_INDEX),
+                SEAM_INDEX, false);
+        assertEquals(SeamVerdict.ADOPT, v);
+        assertTrue(mailbox.verdictDeferred(), "an in-execution ADOPT defers to move completion");
+        assertEquals(SEAM_INDEX, mailbox.verdictTerminal(),
+                "the old plan truncates at the seam move — 'the plan ends when this movement ends'");
+        assertTrue(mailbox.seededParked(), "no install mid-move: the slot holds until consummation");
+    }
+
+    @Test
+    void consummationFillsTheResultFieldsAndClearsTheSlot() {
+        // The deferred verdict's second half: the driver calls consummateSeeded at the terminal move's
+        // completion — the result fields fill (with the seeded search's REAL telemetry) and the slot
+        // clears, exactly the pre-§11 adopt fill, just at the execution edge.
+        AsyncWindowSearch mailbox = parked();
+        poll(mailbox, new BlockPos(11, 64, 10), OLD_PLAN.floor(SEAM_INDEX), SEAM_INDEX, false);
+        mailbox.consummateSeeded(-1);
         assertSame(NEW_PLAN, mailbox.resultPlan(), "the adopted result installs through the result fields");
         assertEquals(SEAM_FLOOR, mailbox.resultStart(), "blockPlanStart becomes the seam");
         assertEquals(42, mailbox.resultExpansions(), "the seeded search's REAL telemetry is carried");
-        assertFalse(mailbox.seededParked(), "the slot clears on adoption");
+        assertEquals(-1, mailbox.resultMatchedIndex(), "an ADOPT consummation carries no body match");
+        assertFalse(mailbox.seededParked(), "the slot clears on consummation");
     }
 
-    @Test
-    void theFluidBobToleranceAdmitsOneCellOfYAtTheSeam() {
-        // fluidAnchor widens the start match to yTol +/-1 (the bob-quantized floor); a ground anchor
-        // stays exact — one cell of Y off the seam is an approach (KEEP), not an arrival.
-        AsyncWindowSearch dry = parked();
-        assertEquals(SeamVerdict.KEEP, poll(dry, SEAM_FLOOR.above(), false, false));
-        assertTrue(dry.seededParked(), "a ground anchor is exact — still parked");
-
-        AsyncWindowSearch wet = parked();
-        assertEquals(SeamVerdict.ADOPT, poll(wet, SEAM_FLOOR.above(), true, false));
-    }
+    // ---- degenerate: no move in flight — verdict IS consummation, on the settled floor ----------------
 
     @Test
-    void theStepZeroEntryGateIsVacuouslyTrueForGroundMovesToday() {
-        // §5: case-2 adoption consults movement(0).entryReady with the LIVE bot; every current ground
-        // move's entryReady is the always-true default, so a real bot at the seam still ADOPTs — the
-        // gate exists for future movements with a real (directional/velocity) entry test.
+    void holdingAtTheSeamConsummatesImmediately() {
+        // Scenario B of §11 (the seam-pause pickup): the bot completed the truncated terminal and HOLDS
+        // centered at the seam when the result lands — no move is in flight, so the verdict consummates
+        // immediately on the settled floor (the one regime where the live floor is still the truth).
         AsyncWindowSearch mailbox = parked();
-        SeamVerdict v = mailbox.pollSeededParked(new SeamBot(), SEAM_FLOOR, TARGET,
-                BlockPathfinder.MODE_AUTO, false, false);
-        assertEquals(SeamVerdict.ADOPT, v, "a Traverse step 0 never refuses entry");
-    }
-
-    // ---- case 1: PARK — not settled at the seam yet ---------------------------------------------------
-
-    @Test
-    void approachingInsideTheToleranceStaysParked() {
-        // Two cells short of the seam along the old route, off the new plan, cursor not past the seam:
-        // the result waits for a later boundary (R2 — park until the seam).
-        AsyncWindowSearch mailbox = parked();
-        assertEquals(SeamVerdict.KEEP, poll(mailbox, new BlockPos(12, 64, 10), false, false));
-        assertTrue(mailbox.seededParked(), "case 1 keeps the result parked");
-    }
-
-    @Test
-    void outsideTheToleranceStaysParkedEvenPastTheSeam() {
-        // The walk-outrun Chebyshev bound is checked FIRST: a bot wholly away from the seam (Cheb 5 > 3
-        // in the sync-degenerate box) parks regardless of the cursor — never a long-range PANIC.
-        AsyncWindowSearch mailbox = parked();
-        assertEquals(SeamVerdict.KEEP, poll(mailbox, new BlockPos(15, 64, 10), false, true));
-        assertTrue(mailbox.seededParked());
-    }
-
-    // ---- case 3: FAST_FORWARD — on the plan body ------------------------------------------------------
-
-    @Test
-    void pastTheSeamButOnThePlanFastForwards() {
-        // R3: the bot overshot the seam but its floor lies ON the new plan (step-1 floor (8,64,10)) —
-        // install; the follower's reached-scan enters mid-plan ("advance SKIPPED").
-        AsyncWindowSearch mailbox = parked();
-        assertEquals(SeamVerdict.FAST_FORWARD, poll(mailbox, new BlockPos(8, 64, 10), false, true));
+        SeamVerdict v = pollSettled(mailbox, null, SEAM_FLOOR, SEAM_INDEX + 1, false);
+        assertEquals(SeamVerdict.ADOPT, v);
+        assertFalse(mailbox.verdictDeferred(), "no move in flight — consummation is immediate");
         assertSame(NEW_PLAN, mailbox.resultPlan());
-        assertFalse(mailbox.seededParked(), "the slot clears on fast-forward too");
+        assertFalse(mailbox.seededParked(), "the slot clears on the immediate consummation");
     }
 
     @Test
-    void onThePlanBodyBeforeTheSeamStaysParked() {
-        // R3's precondition is load-bearing (owner ruling 2026-08-18, the ReplanCourse reversal stall): a
-        // seam-seeded plan legitimately DOUBLES BACK through the pre-seam cells the bot is still walking, so
-        // a pre-seam floor ON the plan body must NOT install — a cursor-0 body entry mid-cell pins the
-        // reached-scan (no waypoint's arrival plane is satisfied) and the follower stands in a yaw-flapping
-        // limit cycle. Pre-seam + on-plan = case 1: stay parked, walk the old plan to the seam, ADOPT there.
+    void settledOnTheBodyWithNoMoveInFlightFastForwardsImmediately() {
+        // Degenerate past-seam body membership (the consumed-incumbent / post-hold shape): settled on
+        // the new plan's step-1 floor — FAST_FORWARD immediately, matched index carried for the install
+        // seed (DESIGN-replan-handoff.md §5/R3).
         AsyncWindowSearch mailbox = parked();
-        assertEquals(SeamVerdict.KEEP, poll(mailbox, new BlockPos(9, 64, 10), false, false));
-        assertTrue(mailbox.seededParked(), "pre-seam on-plan keeps the result parked for the seam ADOPT");
+        SeamVerdict v = pollSettled(mailbox, null, new BlockPos(8, 64, 10), SEAM_INDEX + 1, false);
+        assertEquals(SeamVerdict.FAST_FORWARD, v);
+        assertFalse(mailbox.verdictDeferred());
+        assertEquals(1, mailbox.resultMatchedIndex(), "the body hit rides out to the install seed");
+        assertFalse(mailbox.seededParked());
     }
 
-    // ---- case 4: PANIC — past the seam, off the plan --------------------------------------------------
+    @Test
+    void theStepZeroEntryGateAdmitsACentredDeliveredBotAtConsummation() {
+        // §11 re-site (owner ruling 2026-08-20): entryReady moved from VERDICT time to CONSUMMATION
+        // time. The immediate (degenerate) ADOPT is a consummation, so it consults the gate with the
+        // live bot — and since the delivery invariant (owner-ratified 2026-08-20) the gate is NO
+        // LONGER vacuous for ground moves: the default entryReady is atWaypoint AND deliverable (the
+        // one-tick velocity projection stays in the cell — MarginalArrivalTest). This SeamBot is the
+        // pose consummation produces by construction (centred, zero velocity, grounded at the seam),
+        // so it passes both clauses and the ADOPT goes through; a bot one tick from leaving the cell
+        // would be ENTRY_REFUSED and re-consulted next boundary instead. A DEFERRED verdict consults
+        // nothing — the driver re-asks at completion.
+        AsyncWindowSearch mailbox = parked();
+        SeamVerdict v = pollSettled(mailbox, new SeamBot(), SEAM_FLOOR, SEAM_INDEX + 1, false);
+        assertEquals(SeamVerdict.ADOPT, v,
+                "a centred, zero-velocity bot at the seam is a delivered Traverse entry — the gate must"
+                        + " admit it");
+    }
+
+    // ---- before-seam: park, keep executing — regardless of geometry -----------------------------------
 
     @Test
-    void pastTheSeamAndOffThePlanPanics() {
-        // R4: near the seam (inside the tolerance box), NOT the seam, NOT on the plan, cursor past the
-        // seam — the result is dropped here; the driver drops the incumbent and resubmits from rest.
-        AsyncWindowSearch mailbox = parked();
-        assertEquals(SeamVerdict.PANIC, poll(mailbox, new BlockPos(10, 64, 12), false, true));
-        assertFalse(mailbox.seededParked(), "PANIC drops the parked result");
-        assertEquals(SeamVerdict.KEEP, poll(mailbox, new BlockPos(10, 64, 12), false, true),
-                "an empty slot is a no-op KEEP — PANIC fires once");
+    void beforeTheSeamParksRegardlessOfGeometry() {
+        // §11: cursor < seamIndex is a flat PARK — the pre-§11 approachingInside case, and it now
+        // structurally subsumes the 2026-08-18 reversal ruling (a seam-seeded plan legitimately DOUBLES
+        // BACK through pre-seam cells the bot is still walking): even a landing ON the new plan's body
+        // must not install before the seam. Walk the old plan to the seam; ADOPT consummates there.
+        AsyncWindowSearch onOld = parked();
+        assertEquals(SeamVerdict.KEEP, poll(onOld, new BlockPos(12, 64, 10),
+                OLD_PLAN.floor(1), 1, false));
+        assertTrue(onOld.seededParked(), "before-seam keeps the result parked");
+
+        AsyncWindowSearch onBody = parked();
+        assertEquals(SeamVerdict.KEEP, poll(onBody, new BlockPos(9, 64, 10),
+                new BlockPos(9, 64, 10), 2, false), "even landing ON the body: pre-seam never installs");
+        assertTrue(onBody.seededParked(), "pre-seam on-plan keeps the result parked for the seam ADOPT");
     }
 
     @Test
     void theSamePoseBeforeTheSeamKeepsApproaching() {
-        // The pastSeam flag is what separates R4 from R2: the identical off-plan pose with the cursor
-        // still at/before the seam is an ordinary approach — keep the result parked.
+        // The trichotomy is what separates PANIC from an ordinary approach: the identical off-plan
+        // landing with the cursor still before the seam is a plain park.
         AsyncWindowSearch mailbox = parked();
-        assertEquals(SeamVerdict.KEEP, poll(mailbox, new BlockPos(10, 64, 12), false, false));
+        assertEquals(SeamVerdict.KEEP, poll(mailbox, new BlockPos(10, 64, 12),
+                new BlockPos(10, 64, 12), 2, false));
+        assertTrue(mailbox.seededParked());
+    }
+
+    // ---- beyond: the in-flight move's LANDING cell decides --------------------------------------------
+
+    @Test
+    void beyondTheSeamWithTheLandingOnThePlanDefersFastForward() {
+        // §11 (supersedes the pre-§11 live-floor pastSeamOnPlanFastForwards pin): the move in flight at
+        // cursor 4 LANDS on the new plan's step-1 floor — FAST_FORWARD, deferred to that move's
+        // completion, truncated AT that move, matched index carried for the install seed.
+        AsyncWindowSearch mailbox = parked();
+        SeamVerdict v = poll(mailbox, new BlockPos(11, 64, 10), new BlockPos(8, 64, 10), 4, false);
+        assertEquals(SeamVerdict.FAST_FORWARD, v);
+        assertTrue(mailbox.verdictDeferred());
+        assertEquals(4, mailbox.verdictTerminal(), "truncate at the in-flight move — finish it first");
+        assertEquals(1, mailbox.verdictMatched(), "the LANDING's body hit, not the live floor's");
+        assertTrue(mailbox.seededParked(), "the slot holds until the consummation");
+        mailbox.consummateSeeded(mailbox.verdictMatched());
+        assertEquals(1, mailbox.resultMatchedIndex());
+        assertFalse(mailbox.seededParked());
+    }
+
+    @Test
+    void theFluidToleranceAdmitsOneCellOfYOnTheLandingMembership() {
+        // The fluid yTol survives §11 on the landing→body membership (the bob-quantized floor): a
+        // landing one Y above the body floor is off-plan dry (PANIC) but a body hit in fluid.
+        AsyncWindowSearch dry = parked();
+        assertEquals(SeamVerdict.PANIC, poll(dry, new BlockPos(11, 64, 10),
+                new BlockPos(8, 65, 10), 4, false), "dry: exact-Y — one cell off the body is off-plan");
+
+        AsyncWindowSearch wet = parked();
+        assertEquals(SeamVerdict.FAST_FORWARD, poll(wet, new BlockPos(11, 64, 10),
+                new BlockPos(8, 65, 10), 4, true), "fluid: yTol ±1 admits the bob-quantized landing");
+        assertEquals(1, wet.verdictMatched());
+    }
+
+    @Test
+    void beyondTheSeamWithTheLandingOffThePlanPanics() {
+        // §11 (supersedes the pre-§11 pastSeamOffPlanPanics location pin): the in-flight move's landing
+        // lies on NEITHER the seam nor the body — the result is useless (dropped NOW, the surviving
+        // assertion), but the PLAN drop defers: the verdict carries the truncation terminal so the
+        // driver finishes the committed move centered, THEN drops and relaunches rest-gated.
+        AsyncWindowSearch mailbox = parked();
+        SeamVerdict v = poll(mailbox, new BlockPos(11, 64, 11), new BlockPos(10, 64, 12), 4, false);
+        assertEquals(SeamVerdict.PANIC, v);
+        assertTrue(mailbox.verdictDeferred(), "the plan drop waits for the committed move to finish");
+        assertEquals(4, mailbox.verdictTerminal());
+        assertFalse(mailbox.seededParked(), "PANIC drops the parked result at verdict time");
+        assertEquals(SeamVerdict.KEEP, poll(mailbox, new BlockPos(11, 64, 11),
+                new BlockPos(10, 64, 12), 4, false), "an empty slot is a no-op KEEP — PANIC fires once");
+    }
+
+    @Test
+    void outsideTheToleranceStaysParkedEvenPastTheSeam() {
+        // The walk-outrun Chebyshev box survives §11 as a SANITY bound on the live floor: a bot wholly
+        // away from the seam (Cheb 5 > 3 in the sync-degenerate box) parks regardless of the cursor —
+        // never a long-range PANIC.
+        AsyncWindowSearch mailbox = parked();
+        assertEquals(SeamVerdict.KEEP, poll(mailbox, new BlockPos(15, 64, 10),
+                new BlockPos(10, 64, 12), 4, false));
         assertTrue(mailbox.seededParked());
     }
 
@@ -183,7 +271,7 @@ class SeamAdoptionTest {
     @Test
     void planBodyIndexRefusesTheSeamFloor() {
         // Reconstruct is START-EXCLUSIVE: the seam (the plan's search start) is NOT a waypoint of the
-        // body — standing there is startMatches' arm, and the install seed's cursor stays 0.
+        // body — a landing there is the ADOPT arm, and the install seed's cursor stays 0.
         assertEquals(-1, AsyncWindowSearch.planBodyIndex(NEW_PLAN, SEAM_FLOOR, 0),
                 "the seam floor is the plan's implicit step -1, never on its body");
     }
@@ -195,14 +283,25 @@ class SeamAdoptionTest {
         // The P4 rule carried over: the window moved on while the seeded search ran — the parked plan
         // answers a question nobody is asking anymore.
         AsyncWindowSearch mailbox = parked();
-        assertEquals(SeamVerdict.KEEP, mailbox.pollSeededParked(null, SEAM_FLOOR, new BlockPos(5, 64, 5),
-                BlockPathfinder.MODE_AUTO, false, false));
+        assertEquals(SeamVerdict.KEEP, mailbox.pollSeededParked(null, SEAM_FLOOR, null,
+                new BlockPos(5, 64, 5), BlockPathfinder.MODE_AUTO, false, OLD_PLAN, SEAM_INDEX, true));
         assertFalse(mailbox.seededParked(), "a stale-target result is dropped, not adopted");
     }
 
+    @Test
+    void aReplacedFollowerPlanDropsTheStaleResult() {
+        // §11: the seam index is meaningful only against the plan the walk chose it on. A follower
+        // walking a DIFFERENT plan (an install replaced the incumbent while the seeded search ran) makes
+        // the trichotomy — and the result's premise — meaningless: drop, never a location-lucky install.
+        AsyncWindowSearch mailbox = parked();
+        assertEquals(SeamVerdict.KEEP, mailbox.pollSeededParked(null, SEAM_FLOOR, null,
+                TARGET, BlockPathfinder.MODE_AUTO, false, NEW_PLAN /* not the walked plan */, 0, true));
+        assertFalse(mailbox.seededParked(), "a dead-premise result is dropped");
+    }
+
     /** A minimal live-pose {@link BotSteering} standing at the seam (feet cell {@code (10,65,10)}) — just
-     *  enough for the case-2 {@code entryReady} consultation ({@code CarryArrestGateTest}'s double,
-     *  trimmed to the constant pose this test needs). */
+     *  enough for the consummation-time {@code entryReady} consultation ({@code CarryArrestGateTest}'s
+     *  double, trimmed to the constant pose this test needs). */
     private static final class SeamBot implements BotSteering {
         @Override public double x() { return 10.5; }
         @Override public double y() { return 65.0; }
