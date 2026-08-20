@@ -64,14 +64,17 @@ import net.minecraft.world.phys.Vec3;
  *       goal reached with no wedge.</li>
  *   <li><b>reversal</b> — §9.2(b)+(c), the wedge's own shape (§9.4). A corridor whose only alternative is a
  *       U-turn: back west to a link BEHIND the bot's progress, along a parallel return row, rejoining east.
- *       Sealing mid-corridor makes the seeded result REVERSE travel. Because a reversing plan's body
- *       necessarily contains the pre-seam settled cells, the §5 on-plan arm may legitimately adopt one
- *       boundary early (FAST-FORWARD, the reached-scan entering mid-plan) or at the seam itself (ADOPT) —
- *       which of the two fires depends only on where within the executing move the recheck timer lands, so
- *       the trial asserts the INVARIANT rather than the class: every install is anchored on the walked or
- *       the new plan (never an unrelated cell), exactly one install is the reroute, the bot then actually
- *       reverses (reaches the west link), walks the return row, and arrives with no {@code step FAILED}
- *       wedge. The class that fired is recorded in the result line for the log reader.</li>
+ *       Sealing mid-corridor makes the seeded result REVERSE travel. Under the pre-§11 location pump the
+ *       reversing body (which necessarily contains the pre-seam settled cells) could adopt EITHER one
+ *       boundary early (FAST-FORWARD off the live floor) or at the seam (ADOPT), depending on where the
+ *       recheck timer landed within the executing move — so the trial once asserted only the invariant and
+ *       recorded the class. §11 (owner ruling 2026-08-20) makes the verdict DETERMINISTIC: before-seam is a
+ *       flat park regardless of geometry, the at-seam verdict defers to the seam move's completion, and the
+ *       landing of the seam move is the seam itself (start-exclusive, never a body cell) — so the reroute
+ *       install is ALWAYS the implicit-start ADOPT at the seam, and the trial asserts exactly that class,
+ *       plus: every install anchored on the walked or the new plan, exactly one reroute install, the bot
+ *       actually reverses (reaches the west link), walks the return row, and arrives with no
+ *       {@code step FAILED} wedge.</li>
  *   <li><b>prefixseal</b> — the unified ratified design's U1+U2 proof (owner 2026-08-18; supersedes the
  *       first §10 shape, which expected a drop here — the sync course failure that killed that shape was
  *       exactly the DEBOUNCED trigger letting the cursor advance onto the sealed step and the seam walk
@@ -90,10 +93,13 @@ import net.minecraft.world.phys.Vec3;
  *       install there: class ADOPT, cursor 0, zero installs between seal and reroute, zero drops,
  *       anchored on the bot's LIVE floor (the install-tick speed is recorded as an observable, NOT
  *       bounded: first-touch hot entry at the seam is the §5 contract, owned by §6's input zeroing +
- *       the lip-margin machinery). If the async search outlives the walk to the seam, the U2-extended
- *       CAUTION hold (next step move-invalidated + seeded search pending) parks the bot AT the seam —
- *       an intrinsic, ACCEPTED pause (U3), never failed as a wedge. Asserted: the bot NEVER enters the
- *       sealed cell, the reroute (U-link + return row) is walked, goal reached.</li>
+ *       the lip-margin machinery). If the async search outlives the walk to the seam, the §11
+ *       SEAM-PAUSE hold (the truncated plan ends at the clamped seam; the bot holds centered) parks
+ *       the bot AT the seam — an intrinsic, ACCEPTED pause (U3), never failed as a wedge. Asserted: the bot NEVER enters the
+ *       sealed cell, the reroute (U-link + return row) is walked, goal reached. (Since §11 the
+ *       park-at-seam is the uniform SEAM-PAUSE hold — the truncated plan ends at the clamped seam and
+ *       the bot holds centered there — rather than the retired U2-extended CAUTION hold; same
+ *       observable pause, one mechanism.)</li>
  *   <li><b>currentseal</b> — U5, the one emergency, mode-agnostic. Same corridor; the seal lands in the
  *       CURRENT step's destination (+12), armed in the last half-block before its boundary (x ≥ +11.5;
  *       the ≤0.28 b/t approach means the trigger tick still ends short of the boundary, so the wall can
@@ -122,7 +128,7 @@ import net.minecraft.world.phys.Vec3;
  *
  * <p><b>The near-seal tiles' observables</b> (prefixseal / currentseal / currentseal-on-ice; the
  * 2026-08-18 UNIFIED ratified design — U1 same-tick prompt trigger on the edit-epoch advance, U2
- * edit-aware seam clamp + the extended seam CAUTION hold, U3 adoption unchanged, U4 move-compatibility
+ * edit-aware seam clamp (+ since §11 the uniform SEAM-PAUSE hold at the seam), U3 adoption unchanged, U4 move-compatibility
  * as the breakage predicate, U5 the one emergency, U6 retirement of the first §10 shape's
  * side-mechanism — superseding the first-shape wording the mainline's earlier field docs may still
  * carry). These tiles mutate the NEAR route (the current step or cursor+1). On the EMERGENCY tiles
@@ -148,16 +154,16 @@ import net.minecraft.world.phys.Vec3;
  * <p><b>What "no step FAILED" means here.</b> The fail→hold policy freezes a failed step in place, so a
  * validity-envelope failure is observable as a wedge: the course fails any trial whose bot stops making
  * progress for {@link #NO_PROGRESS_LIMIT} consecutive ticks (generously past every legitimate hold — the
- * planless WAIT while a fresh async search runs is a few ticks; no trial contains a committing step for the
- * §7 seam CAUTION, and the U2-EXTENDED seam hold prefixseal can legally take — next step move-invalidated,
- * seeded search still pending — spans only the search's in-flight ticks). PASS therefore certifies the
+ * planless WAIT while a fresh async search runs is a few ticks; the §11 SEAM-PAUSE hold prefixseal can
+ * legally take — the truncated plan ended at the clamped seam with the seeded search still in flight —
+ * spans only the search's in-flight ticks). PASS therefore certifies the
  * reversing/diverting step 0 executed cleanly.
  *
  * <p><b>Sync AND async are both first-class.</b> The course adapts to the loaded {@code pathing.async}: in
  * sync mode the §3 walk degenerates to the current move's destination and the park spans the remainder of
  * that move; in async (default) the seam sits ~{@code budgetTicks} of step-cost ahead and the park spans
  * whole boundaries. The assertions are mode-agnostic (the detour tile pins ADOPT in both modes; the reversal
- * tile records ADOPT vs FAST-FORWARD; prefixseal pins the SAME clamped-seam ADOPT shape in both modes — the
+ * tile pins the deterministic seam ADOPT (§11); prefixseal pins the SAME clamped-seam ADOPT shape in both modes — the
  * sync blind spot U1+U2 close — and the emergency tiles' drop shape is mode-agnostic by U5). Full §9.2
  * coverage = one run with {@code pathing.async=false} and one with the default {@code true} in the run
  * dir's {@code orebit.properties}; the active mode is stamped into the result file.
@@ -914,6 +920,13 @@ public final class ReplanCourse {
                 case REVERSAL: {
                     String common = editTileFailure(tr);
                     if (common != null) return common;
+                    if (!"ADOPT".equals(rerouteClass)) {
+                        // §11 (owner ruling 2026-08-20): the old ADOPT-vs-ONPLAN disjunction is
+                        // deterministic now — before-seam parks flat, and the seam move's landing IS the
+                        // seam (start-exclusive), so the reroute must be the implicit-start ADOPT.
+                        return "reroute install was " + rerouteClass
+                                + ", expected the deterministic seam ADOPT (§11)";
+                    }
                     // The reversing plan must actually be WALKED back: the bot re-reaches the U-link column
                     // it had left ~15 cells behind — the clean-execution proof for the reversing step.
                     if (postRerouteMinX > tr.westLinkX + 1.5) {
@@ -1032,7 +1045,7 @@ public final class ReplanCourse {
          *  bounded, because hot first-touch entry at the seam is the §5 contract — the "never on a
          *  moving bot" invariant is asserted as ANCHOR integrity instead (settled anchor == the bot's
          *  live floor == the clamped seam). A parked pause AT the seam while the async search is still
-         *  in flight (the U2-extended CAUTION hold) is legal and asserted by nothing here. */
+         *  in flight (the §11 SEAM-PAUSE hold) is legal and asserted by nothing here. */
         String prefixSealFailure(Trial tr) {
             if (!sealPlaced) {
                 return "the seal never armed (the trigger segment was never observed)";
