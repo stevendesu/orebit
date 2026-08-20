@@ -237,9 +237,28 @@ public final class PhaseRunner {
                 }
             } else { // FOOTING
                 if (!bot.solidAt(r.x, r.y, r.z)) {
-                    bot.place(r.x, r.y, r.z);
+                    // SELF-ENTOMBMENT GUARD (the 2026-08-19 run-5 forensic; DESIGN-replan-handoff.md §5/R3 —
+                    // defense-in-depth beside Pillar's failWhen envelope): NEVER place into a cell the bot's
+                    // own body occupies — its feet cell (footY) or head cell (footY+1). A correctly-framed
+                    // FOOTING is never there: Pillar's place phase only runs past its jump gate
+                    // (advanceWhen b.y() >= fy+2), so at legitimate place time footY >= r.y+1 and the cell
+                    // is BENEATH the feet; Descend's step-down floor and Traverse's bridge planks sit in
+                    // another column or at footY-1 (audited: these three are the only FOOTING declarers;
+                    // clutches ride the separate placeClutch verb). Only a plan whose frame reality has left
+                    // can aim a place at the bot itself (run-5: a seam adoption re-ran an already-executed
+                    // Pillar with the frame shifted +1 onto the bot's column, and the executor's place()
+                    // clears soft occupants and writes server-side with no entity-collision check — it
+                    // sealed the bot in, silently and permanently). Refuse and HOLD, don't place: holdNeed
+                    // still reports FOOTING, so a persistent refusal is visible in the follower's hold log,
+                    // and the cell re-tests each tick as the bot moves. Grounded, the failWhen envelope
+                    // fails the mis-framed step; this guard is the AIRBORNE half of the same defense.
+                    boolean ownBodyCell = r.x == bot.footX() && r.z == bot.footZ()
+                            && (r.y == bot.footY() || r.y == bot.footY() + 1);
+                    if (!ownBodyCell) {
+                        bot.place(r.x, r.y, r.z);
+                    }
                     if (holdNeed == null) { holdNeed = r.kind; holdX = r.x; holdY = r.y; holdZ = r.z; }
-                    holding = true; // re-validate next tick (place is instant)
+                    holding = true; // re-validate next tick (place is instant; a refused self-cell clears as the bot moves)
                 }
             }
         }
