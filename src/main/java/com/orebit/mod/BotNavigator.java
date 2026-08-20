@@ -14,6 +14,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementRegistry;
 import com.orebit.mod.pathfinding.blockpathfinder.PhaseRunner;
 import com.orebit.mod.pathfinding.blockpathfinder.StepEdits;
+import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Parkour;
@@ -794,6 +795,7 @@ final class BotNavigator {
         this.incompatiblePlan = null;
         this.stuckTicks = 0;
         bot.setForward(0.0f); // §6 input hygiene: zza is the one input the tick-top reset spares
+        SteerControl.clingHold(bot);
     }
 
     /**
@@ -1369,6 +1371,7 @@ final class BotNavigator {
             // for the genuinely off-grid case below (no plan / no built ground under the owner).
             if (Debug.VERBOSE) driveStateLog(navGaveUp ? "HOLD (nav gave up)" : "HOLD (window BLOCKED)");
             bot.setForward(0.0f);
+            SteerControl.clingHold(bot);
         } else {
             driveState = "WAIT";
             // No walkable plan → WAIT. In async mode this branch is every tick a first/boundary search
@@ -1387,6 +1390,7 @@ final class BotNavigator {
                         + (exactGoalEscalated ? " [EXACT-ESCALATED]" : ""));
             }
             bot.setForward(0.0f);
+            SteerControl.clingHold(bot);
         }
 
         if (Debug.ENABLED && path != null) {
@@ -1789,6 +1793,7 @@ final class BotNavigator {
     private boolean holdForNavReady() {
         driveState = "WAIT";
         bot.setForward(0.0f);
+        SteerControl.clingHold(bot);
         bot.lookAtPlayer(bot.owner());
         navReadyWaitTicks++;
         if (!navReadyWaitAnnounced) {
@@ -1909,6 +1914,7 @@ final class BotNavigator {
         }
         if (waypointIndex >= path.size()) {
             bot.setForward(0.0f);
+            SteerControl.clingHold(bot);
             return;
         }
 
@@ -2144,6 +2150,7 @@ final class BotNavigator {
                             entryState());
                 }
                 bot.setForward(0.0f);
+                SteerControl.clingHold(bot);
                 return;
             }
             if (Debug.VERBOSE) logPhaseDiagnostics(movement);

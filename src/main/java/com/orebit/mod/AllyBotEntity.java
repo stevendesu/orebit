@@ -576,7 +576,11 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                                   // an idle/holding bot in water should hold, not auto-rise (was isInWater?1:0)
         this.setJumping(false);   // discrete land jumps use jumpFromGround(); swim following re-enables this
         this.setSprinting(false); // ditto — buoyancy + sprint-swim are refined per-step in steerAlongPath
-        this.setShiftKeyDown(false); // sneak is re-asserted per-step by a move that needs it (Climb lateral hold)
+        this.setSneak(false);     // sneak is re-asserted per-step by a move that needs it (Climb lateral hold).
+                                  // Through setSneak, NOT setShiftKeyDown directly: setSneak is the only
+                                  // writer of sneakInputHeld, so resetting the vanilla input alone left the
+                                  // field latched true after the first press of a bot's life — poisoning
+                                  // sneakHeld() -> hangingOnClimbable() -> settled() -> Fall.done/reached.
         this.steeredThisTick = false;       // reset the swim-pose diagnostic snapshot for this tick
 
         // Stage-1 mining test hook: while a /bot mine target is set, request it each tick until it's gone, then
