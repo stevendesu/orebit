@@ -243,7 +243,10 @@ decompilation and are indicative, not exact across versions.
   the passed default, `placement=false`, no NPE). NavBlock's null-context query gets SHAPE_STABLE →
   unit-cube bounds, so **scaffolding classifies SHAPE_FULL, topY 16, STANDABLE, COLLISION, BREAKABLE
   (hardness 0), CLIMB set, no NARROW_TOP** (2 navtypes, dry/waterlogged). Ladder → SHAPE_OTHER, topY 16,
-  STANDABLE, COLLISION, NARROW_TOP, CLIMB. Vines → SHAPE_EMPTY, passable, not standable, CLIMB.
+  COLLISION, NARROW_TOP, CLIMB — and NOT STANDABLE: `withDerived`'s `!isNarrowTop` conjunct strips
+  `STANDABLE_BIT` from every NARROW_TOP shape, ladders included (this line previously claimed STANDABLE
+  — stale, the code is stricter; corrected 2026-08-19 during the Pillar-R1 enrollment). Vines →
+  SHAPE_EMPTY, passable, not standable, CLIMB.
 
 ---
 
