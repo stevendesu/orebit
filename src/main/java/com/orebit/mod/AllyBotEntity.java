@@ -576,7 +576,13 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                                   // an idle/holding bot in water should hold, not auto-rise (was isInWater?1:0)
         this.setJumping(false);   // discrete land jumps use jumpFromGround(); swim following re-enables this
         this.setSprinting(false); // ditto — buoyancy + sprint-swim are refined per-step in steerAlongPath
-        this.setShiftKeyDown(false); // sneak is re-asserted per-step by a move that needs it (Climb lateral hold)
+        this.setSneak(false);     // sneak is re-asserted per-step by a move that needs it (Climb lateral hold).
+                                  // Through setSneak, NOT setShiftKeyDown directly: setSneak is the only
+                                  // writer of sneakInputHeld, so resetting the vanilla input alone left the
+                                  // field latched true after the first press of a bot's life — poisoning
+                                  // sneakHeld() -> hangingOnClimbable() -> settled() -> Fall.done/reached.
+                                  // sneakAppliedLastTick (snapshotted post-physics, end of this method) is
+                                  // what keeps PRE-drive readers honest across this reset — see sneakHeld().
         this.steeredThisTick = false;       // reset the swim-pose diagnostic snapshot for this tick
 
         // Stage-1 mining test hook: while a /bot mine target is set, request it each tick until it's gone, then
@@ -680,6 +686,12 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // them, so its sim bubble stays at spawn and far chunks freeze (the 2026-08-19 floating-bamboo
         // forensic). Self-guards on section change; a no-op tick is one section compare.
         ChunkTracking.recenter(this);
+
+        // Snapshot the sneak input that just DROVE this tick's physics (see sneakHeld()). Taken after
+        // doTick so it is exactly "the arrest input in force when the current pose was produced" — the
+        // value the NEXT tick's pre-drive evaluations (the follower's advance scan / doneNow, which run
+        // AFTER the tick-top input reset but BEFORE any drive re-asserts) must read to judge that pose.
+        this.sneakAppliedLastTick = this.sneakInputHeld;
 
         // Read the prone-pose state AFTER doTick (vanilla's updateSwimming ran inside it, from THIS tick's
         // inputs + resulting position), so a PRONE->STAND flip is dumped with the state that caused it.
@@ -1136,7 +1148,24 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      *  load-bearing input in the climbable lateral-cling and edge-guard mechanisms. */
     private boolean sneakInputHeld;
 
-    public boolean sneakHeld() { return sneakInputHeld; }
+    /** The sneak input that drove the LAST completed physics tick — snapshotted at the end of tick(),
+     *  after doTick. See {@link #sneakHeld}. */
+    private boolean sneakAppliedLastTick;
+
+    /**
+     * Whether the sneak (arrest) input is held — "held now, or in force when the current pose was
+     * produced". The OR is load-bearing (the 2026-08-20 flagship vine-hang freeze at (56,170,257)): the
+     * follower's advance scan and {@code doneNow} evaluate {@code hangingOnClimbable() -> settled() ->
+     * done/reached} BEFORE any drive has re-asserted this tick's inputs, and the tick-top reset has
+     * already cleared {@code sneakInputHeld} by then — so a genuinely sneak-arrested hang (pose frozen,
+     * stored velY pinned at the one-tick gravity −0.0784, below {@code CLIMBABLE_ARREST_VY}) read
+     * {@code settled()==false} every scan and the Fall's hang landing could never complete. The old
+     * pre-2026-08-20 LATCH (sneakInputHeld never reset) masked exactly this ordering dependency — and
+     * over-reported held-ness everywhere else. The one-tick-stale OR is the honest middle: a pre-drive
+     * reader judges the pose by the input that produced it; a drive that releases sneak reads held for
+     * at most the release tick itself (the pose it is judging was still a held pose), and the snapshot
+     * catches up at that tick's physics. State-based, no timers. */
+    public boolean sneakHeld() { return sneakInputHeld || sneakAppliedLastTick; }
 
     // onClimbable() on the BotSteering seam is satisfied by the inherited public vanilla
     // LivingEntity.onClimbable() (the feet block vs #climbable) — a class method wins over the interface

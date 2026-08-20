@@ -836,6 +836,30 @@ public final class SteerControl {
         return true;
     }
 
+    /**
+     * The PLANLESS/HELD CLING (owner-ratified 2026-08-19, the vine-hang wedge). A bot whose feet are inside
+     * a climbable slides out at the vanilla −0.15/t clamp on every tick nobody presses an input — and the
+     * follower's planless states (WAIT / HOLD / envelope fail→hold / U5 drop / nav-unready / plan-consumed)
+     * press only setForward(0), so a replan in flight walks the bot out the bottom of the very column its
+     * next plan will be framed from. Sneak IS the arrest: vanilla's isSuppressingSlidingDownLadder zeroes
+     * the slide precisely while it is held (BotSteering.sneakHeld). Purely VERTICAL: the climbable
+     * zero-horizontal-input ruling (2026-07-31 vine-bounce, DESIGN-servo-normalization.md §2.2) overrides
+     * everything on a climbable, so this writes no thrust — the caller's own setForward(0) is the whole
+     * horizontal story.
+     *
+     * @return true when the cling was engaged; false = nothing to hold.
+     */
+    public static boolean clingHold(BotSteering b) {
+        tag("hold:cling:dead");                       // §4: unconditional, before any early-out
+        if (!b.onClimbable()) return false;           // feet not IN a climbable — nothing arrests here
+        if (b.grounded() || b.standableBelow()) return false; // something already holds us; sneak would only
+                                                      // arm vanilla's maybeBackOffFromEdge
+        if (b.scaffoldingBelow()) return false;       // scaffolding is sneak-EXEMPT: sneak DESCENDS through it
+        tag("hold:cling");
+        b.setSneak(true);
+        return true;
+    }
+
     // ---- the unified servo core (DESIGN-servo-normalization.md §2, ratified 2026-08-19) --------------
 
     /**

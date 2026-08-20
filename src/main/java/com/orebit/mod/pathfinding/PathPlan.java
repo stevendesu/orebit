@@ -181,6 +181,13 @@ public final class PathPlan {
      *  freshly-installed plan as "bot is off-route" on the very next tick — a matcher artifact, exactly what
      *  {@code HierarchicalRegionPlan}'s exhausted/deviated invariant forbids. */
     private BlockPos blockPlanStart;
+    /** The waypoint index of {@link #blockPlan} the bot's floor matched when the plan installed via a
+     *  FAST_FORWARD seam adoption ({@link AsyncWindowSearch#pollSeededParked} case 3), {@code -1} on
+     *  every other install. Like {@link #blockPlanStart}, only meaningful while {@code blockPlan != null}
+     *  — every install site overwrites it. Read by the follower's install seed so an already-executed
+     *  prefix is never re-run from a mis-anchored frame (DESIGN-replan-handoff.md §5/R3; the 2026-08-19
+     *  run-5 stale-frame Pillar wedge). */
+    private int adoptedMatchedIndex = -1;
     /** #4 Increment 1 (DESIGN-boxed-in-reachability §4.2): whether the last region-tier give-up
      *  ({@link #repairBlocked}) harvested a CLOSED-flood proof that the bot's own region is provably
      *  goal-disconnected (boxed-in) under these caps — the honest discriminator between a STRUCTURAL BLOCKED
@@ -587,6 +594,23 @@ public final class PathPlan {
     /** The active windowed block path the follower walks; {@code null} when BLOCKED/FAILED. */
     public BlockPathPlan currentBlockPlan() {
         return blockPlan;
+    }
+
+    /** The floor cell {@link #currentBlockPlan()} was searched FROM — the plan's implicit step −1, its
+     *  TRUE frame origin (== the settled/live floor on an ordinary install, the horizon seam on a
+     *  seam-seeded one). Only meaningful while {@code currentBlockPlan() != null} — see
+     *  {@code blockPlanStart}'s field javadoc; the follower's install seed anchors on this rather than
+     *  the adoption-time bot floor (DESIGN-replan-handoff.md §5/R3). */
+    public BlockPos blockPlanStart() {
+        return blockPlanStart;
+    }
+
+    /** The waypoint index of {@link #currentBlockPlan()} the bot's floor matched when the plan installed
+     *  via a FAST_FORWARD seam adoption, {@code -1} on every other install — see
+     *  {@code adoptedMatchedIndex}'s field javadoc. The follower's install seed consumes it so an
+     *  already-executed prefix never re-runs. */
+    public int adoptedMatchedIndex() {
+        return adoptedMatchedIndex;
     }
 
     /** The driver's current lifecycle state. */
@@ -1467,6 +1491,7 @@ public final class PathPlan {
         }
         this.blockPlan = found;
         this.blockPlanStart = searchStart; // this plan's implicit step −1 (== botFloor unless seeded-null)
+        this.adoptedMatchedIndex = -1;     // an inline (sync) install always runs from its step 0
         this.lastPlanPartial = blockPlan != null && BlockPathfinder.lastWasPartial();
         this.status = resultStatus(blockPlan, BlockPathfinder.lastExpansions(),
                 BlockPathfinder.lastWasPartial(), BlockPathfinder.lastWasBudgetHit(),
@@ -1694,6 +1719,7 @@ public final class PathPlan {
             case RESULT:
                 this.blockPlan = async.resultPlan();
                 this.blockPlanStart = async.resultStart(); // see blockPlanStart's javadoc
+                this.adoptedMatchedIndex = async.resultMatchedIndex(); // -1 here — never a mid-body entry
                 this.lastPlanPartial = blockPlan != null && async.resultPartial();
                 this.status = resultStatus(blockPlan, async.resultExpansions(),
                         async.resultPartial(), async.resultBudgetHit(), async.resultRealized(),
@@ -1719,6 +1745,7 @@ public final class PathPlan {
                 case FAST_FORWARD: // §5 case 3 — past the seam but ON the plan: reached-scan enters mid-plan
                     this.blockPlan = async.resultPlan();
                     this.blockPlanStart = async.resultStart(); // the seam — see blockPlanStart's javadoc
+                    this.adoptedMatchedIndex = async.resultMatchedIndex(); // FAST_FORWARD's body hit; -1 on ADOPT
                     this.lastPlanPartial = async.resultPartial();
                     this.status = resultStatus(blockPlan, async.resultExpansions(),
                             async.resultPartial(), async.resultBudgetHit(), null, // parked plans are never null
@@ -1771,6 +1798,7 @@ public final class PathPlan {
         if (async.pollParked(actualFloor, windowTargetPos, startMode, fluidAnchor)) {
             this.blockPlan = async.resultPlan();
             this.blockPlanStart = async.resultStart(); // see blockPlanStart's javadoc
+            this.adoptedMatchedIndex = async.resultMatchedIndex(); // -1 — a P4 park adopts at its start
             this.lastPlanPartial = async.resultPartial();
             this.status = resultStatus(blockPlan, async.resultExpansions(),
                     async.resultPartial(), async.resultBudgetHit(), null, // parked plans are never null
