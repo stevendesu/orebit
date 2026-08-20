@@ -6,6 +6,7 @@ import com.orebit.mod.pathfinding.PathStatus;
 import com.orebit.mod.pathfinding.async.PlanExecutor;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathPlan;
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
+import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.ClutchModel;
 import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
@@ -624,6 +625,80 @@ final class BotNavigator {
         return k;
     }
 
+    // ---- window-swap install seed (DESIGN-replan-handoff.md §5, R2/R3) -------------------------------
+    /**
+     * The follower state a freshly-installed window plan starts from: the waypoint {@code cursor}, the
+     * floor cell step-0's frame anchors on ({@code anchorFloor} → {@code planStartFloor}), and whether
+     * the OUTGOING step's phase plan is dropped at the swap ({@code clearPhase} →
+     * {@code phaseRunner.clear()}). Produced by {@link #installSeed}; a plain value carrier so the
+     * seeding rule is headlessly testable ({@code SeamInstallSeedTest}).
+     */
+    record InstallSeed(int cursor, BlockPos anchorFloor, boolean clearPhase) { }
+
+    /**
+     * The install-seed rule for a swapped-in window plan, extracted package-private static (the
+     * {@link #horizonSeamWalk} pattern) so it is testable headlessly ({@code SeamInstallSeedTest}) —
+     * the install sites own the field writes, this owns the DERIVATION. The rule closes the 2026-08-19
+     * run-5 wedge (DESIGN-replan-handoff.md §5/R3): a FAST_FORWARD seam adoption installs a plan
+     * searched from a stale start one step behind the bot, and the old inline install (cursor 0, anchor
+     * at the adoption-time bot floor, outgoing phase left running) re-ran the already-executed Pillar
+     * step 0 from a +1-shifted frame whose place phase filled the bot's own foot cell — silently
+     * (Pillar had no failWhen) and permanently (the stale phase suppressed the reached-scan).
+     *
+     * <ul>
+     *   <li><b>cursor</b>: {@code matchedIndex + 1} when the adoption matched the bot's floor to a plan
+     *       body step (FAST_FORWARD — that step and everything before it is history; the bot STANDS on
+     *       its floor), else 0. No re-scan here: the index is the verdict site's own
+     *       {@code planBodyIndex} hit, carried through the mailbox.</li>
+     *   <li><b>anchor</b> ({@code planStartFloor}): the plan's TRUE search start, never the adoption-time
+     *       bot floor. For cursor {@code > 0} the anchor is inert anyway (the step frame's from-floor
+     *       comes from {@code path.waypoint(cursor - 1)}); for cursor 0 the R2/ADOPT geometry makes
+     *       {@code planStart} equal the settled floor on a ground anchor (and the bob-quantized fluid
+     *       ±1 resolves to the cell the search actually ran from — the frame the plan's step 0 was
+     *       priced against). {@code settledFloor} deliberately stays the LIVE floor at both install
+     *       sites: it is the bot's physical settle anchor (what the boundary gate compares against
+     *       {@code floorOf(blockPosition)}), not a plan frame — re-pointing it at a seam the bot has
+     *       walked past would deadlock the boundary.</li>
+     *   <li><b>clearPhase</b>: {@code true} on every arm — the outgoing step's phase plan belongs to the
+     *       REPLACED plan; left active it owns completion ({@link #phaseOwnsCompletion}) and suppresses
+     *       the new plan's reached-scan. A BLOCKED ({@code null}) install clears too, anchored at the
+     *       bot floor (nothing to frame).</li>
+     * </ul>
+     *
+     * @param plan         the just-installed plan ({@code null} on a BLOCKED install — nothing to frame)
+     * @param planStart    the plan's TRUE search start ({@link PathPlan#blockPlanStart()}; stale/unread
+     *                     when {@code plan} is null)
+     * @param botFloor     the adoption-time bot floor (the boundary site's {@code settledFloor}, the
+     *                     planless site's live floor)
+     * @param matchedIndex the FAST_FORWARD body-match index ({@link PathPlan#adoptedMatchedIndex()};
+     *                     {@code -1} on every other install)
+     * @param fluidAnchor  whether the bot is bodily in fluid (the adoption's ±1 bob tolerance context;
+     *                     carried for the seed's callers' symmetry — the rule itself is anchored on
+     *                     {@code planStart}, which already absorbs the bob offset)
+     */
+    static InstallSeed installSeed(BlockPathPlan plan, BlockPos planStart, BlockPos botFloor,
+                                   int matchedIndex, boolean fluidAnchor) {
+        if (plan == null) {
+            return new InstallSeed(0, botFloor, true);
+        }
+        if (matchedIndex >= 0) {
+            return new InstallSeed(matchedIndex + 1, planStart, true);
+        }
+        return new InstallSeed(0, planStart, true);
+    }
+
+    /**
+     * Whether a mid-flight phase plan owns its step's completion — while true the reached-scan may not
+     * advance the waypoint cursor (owner ruling 2026-08-03: a move that owns a phase plan is the sole
+     * authority on its own completion; the full rationale sits at the call site in
+     * {@link #steerAlongPath}). Extracted package-private static (the {@link #horizonSeamWalk} pattern)
+     * verbatim — {@code active && !lastPhaseDone && !doneNow} — so the suppression predicate is
+     * headlessly testable ({@code SeamInstallPhaseSuppressionTest}) against a real {@link PhaseRunner}.
+     */
+    static boolean phaseOwnsCompletion(PhaseRunner runner, boolean lastPhaseDone, BotSteering bot) {
+        return runner.active() && !lastPhaseDone && !runner.doneNow(bot);
+    }
+
     // ---- edit-epoch move-compatibility scan (DESIGN-replan-handoff.md §10, U1/U4/U5) -----------------
     /**
      * The §10 U1 prompt trigger's cold scan — runs ONLY when the level's edit epoch advanced (see the
@@ -1187,15 +1262,21 @@ final class BotNavigator {
                 }
                 BlockPathPlan now = pathPlan.currentBlockPlan();
                 if (now != lastBlockPlanRef) {
+                    // The install seed (see installSeed): cursor + step-0 frame anchor + outgoing-phase
+                    // disposition, derived from the plan's TRUE search start and the adoption's matched
+                    // body index rather than re-derived here inline.
+                    InstallSeed seed = installSeed(now, pathPlan.blockPlanStart(), settledFloor,
+                            pathPlan.adoptedMatchedIndex(), fluidAnchor);
                     this.path = now;
                     this.lastBlockPlanRef = now;
-                    this.waypointIndex = 0;
+                    this.waypointIndex = seed.cursor();
                     this.lastEditedIndex = -1;
-        this.lastFailLoggedStep = -1;
+                    this.lastFailLoggedStep = -1;
                     this.activePlanStep = -1; // rebuild the phase plan for the new window's first step
                     this.incompatibleStep = -1; // §10 U4: the broken-step fact belonged to the replaced plan
                     this.incompatiblePlan = null;
-                    this.planStartFloor = settledFloor; // follower anchor == the search source (both settledFloor)
+                    this.planStartFloor = seed.anchorFloor();
+                    if (seed.clearPhase()) phaseRunner.clear();
                     // Input hygiene at the swap (DESIGN-replan-handoff.md §6): zza is the ONE input the
                     // tick-top reset spares, so the superseded move's thrust would replay under the new
                     // plan's step 0 in the stale yaw (the §1 wedge's third fact). Yaw is left alone.
@@ -1241,16 +1322,24 @@ final class BotNavigator {
             pathPlan.pollWhenPlanless(liveFloor, fluidAnchor);
             BlockPathPlan adopted = pathPlan.currentBlockPlan();
             if (adopted != lastBlockPlanRef) {
+                // Same install seed as the boundary site: pollWhenPlanless drains the SAME mailbox
+                // (drainPending's on-plan-body arm, the seeded ADOPT pump), so a plan searched from an
+                // OLDER rest floor can install here with the bot mid-body or a bob-cell off the searched
+                // start — the anchor must be the plan's true start, not blindly the live floor (they
+                // coincide on the common searched-from-liveFloor-this-tick case).
+                InstallSeed seed = installSeed(adopted, pathPlan.blockPlanStart(), liveFloor,
+                        pathPlan.adoptedMatchedIndex(), fluidAnchor);
                 this.path = adopted;
                 this.lastBlockPlanRef = adopted;
-                this.waypointIndex = 0;
+                this.waypointIndex = seed.cursor();
                 this.lastEditedIndex = -1;
-        this.lastFailLoggedStep = -1;
+                this.lastFailLoggedStep = -1;
                 this.activePlanStep = -1;
                 this.incompatibleStep = -1; // §10 U4: fresh plan, fresh compatibility episode
                 this.incompatiblePlan = null;
-                this.planStartFloor = liveFloor;
+                this.planStartFloor = seed.anchorFloor();
                 this.settledFloor = liveFloor;
+                if (seed.clearPhase()) phaseRunner.clear();
                 this.stuckTicks = 0; // fresh plan → fresh diagnostic window
                 bot.setForward(0.0f); // input hygiene at the install (DESIGN-replan-handoff.md §6)
             }
@@ -1797,8 +1886,7 @@ final class BotNavigator {
         // now" (grounded / afloat / hanging), which is a different question from "is it safe to leave this
         // move" — a lateral vine cling is supported for its whole duration while its move is very much in
         // progress. Supported is not interruptible.
-        final boolean phaseOwnsCompletion =
-                phaseRunner.active() && !lastPhaseDone && !phaseRunner.doneNow(bot);
+        final boolean phaseOwnsCompletion = phaseOwnsCompletion(phaseRunner, lastPhaseDone, bot);
         for (int j = path.size() - 1; !phaseOwnsCompletion && j >= waypointIndex; j--) {
             BlockPos w = path.waypoint(j);
             // The successor is what makes arrival mean "teed up" (Movement#reached); null past the end.

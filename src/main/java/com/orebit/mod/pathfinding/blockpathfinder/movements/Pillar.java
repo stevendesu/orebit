@@ -250,6 +250,17 @@ public final class Pillar implements Movement {
         MovePlan plan = new MovePlan();
         // Fell back to (or below) the start with no height gained → the footing never took; re-attempt.
         plan.resetWhen(b -> b.grounded() && b.y() < startFeetY + 0.5);
+        // Validity envelope (PATHOLOGY P1 family — the Parkour/Ascend/Descend failWhen precedent; Pillar
+        // was a converted move WITHOUT one, which is what made the 2026-08-19 run-5 wedge SILENT —
+        // DESIGN-replan-handoff.md §5/R3). A pillar's whole life happens at exactly two feet levels: the
+        // takeoff foot (fromFootY) and the landing foot (toFootY) — GROUNDED at any other foot-Y the
+        // plan's frame is fiction (the run-5 entombed pose: standing ON a footing the mis-framed place
+        // phase filled into the bot's own feet cell, one above the landing foot — done/advance can never
+        // fire and holding jump there re-attempts in place forever). The takeoff foot stays resetWhen's
+        // re-attempt (excluded here); grounded BELOW it fails too — the frame's floor is no longer under
+        // the bot, and a jump from a lower floor can never clear the footing cell (the same latch).
+        // Airborne mid-jump ticks are exempt, exactly the family pattern.
+        plan.failWhen(b -> b.grounded() && b.footY() != fromFootY && b.footY() != toFootY);
         // JUMP: clear the takeoff head cell if it's solid, then recenter + hold jump until the feet have
         // CLEARED the footing cell (world Y >= fy+2, the cell's top) — so the footing is placed BENEATH the bot
         // at the apex, like a real player, not inside itself the instant it leaves the ground.

@@ -168,6 +168,26 @@ class SeamAdoptionTest {
         assertTrue(mailbox.seededParked());
     }
 
+    // ---- planBodyIndex — the R3 body-match INDEX the install seed consumes ----------------------------
+    // (DESIGN-replan-handoff.md §5/R3; the 2026-08-19 run-5 forensic: a FAST_FORWARD install must know
+    // WHICH step the bot already stands on, or the follower re-runs the executed prefix.)
+
+    @Test
+    void planBodyIndexReturnsTheMatchedStepForBodyFloors() {
+        assertEquals(0, AsyncWindowSearch.planBodyIndex(NEW_PLAN, new BlockPos(9, 64, 10), 0),
+                "step-0's search-native floor (9,64,10) matches at index 0");
+        assertEquals(1, AsyncWindowSearch.planBodyIndex(NEW_PLAN, new BlockPos(8, 64, 10), 0),
+                "step-1's search-native floor (8,64,10) matches at index 1");
+    }
+
+    @Test
+    void planBodyIndexRefusesTheSeamFloor() {
+        // Reconstruct is START-EXCLUSIVE: the seam (the plan's search start) is NOT a waypoint of the
+        // body — standing there is startMatches' arm, and the install seed's cursor stays 0.
+        assertEquals(-1, AsyncWindowSearch.planBodyIndex(NEW_PLAN, SEAM_FLOOR, 0),
+                "the seam floor is the plan's implicit step -1, never on its body");
+    }
+
     // ---- staleness ------------------------------------------------------------------------------------
 
     @Test
