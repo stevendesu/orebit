@@ -982,6 +982,17 @@ public final class Fall implements Movement {
                 .drive((b, v) -> {
                     SteerControl.arriveOnTarget(b, v);
                     SteerControl.holdClimbableStance(b, v, false);
+                    // HANG-LANDING CLING (owner-ratified 2026-08-19, the vine-hang wedge). The stance
+                    // servo above only sneaks INSIDE the settle band; on every tick the feet are above it
+                    // the descend branch returns having written nothing, so a 1-cell vine run — where the
+                    // arrest can land anywhere in [floorY, floorY+1) and atWaypoint's band clause
+                    // simultaneously withholds done/reached — slides out the bottom at the −0.15 clamp
+                    // before the next step (usually Climb) can take over. Once the arrest has happened
+                    // this holds it for the rest of the Fall's tenure. Gated on ARRESTED, never on
+                    // merely-in-a-vine: sneaking mid-fall-through would stop the drop at the wrong cell
+                    // (the onClimbable-is-true-for-every-tick-of-a-fall trap). clingHold's own gates make
+                    // it a no-op off a climbable and wherever something already holds the bot up.
+                    if (b.velY() > BotSteering.CLIMBABLE_ARREST_VY) SteerControl.clingHold(b);
                     // Wet endpoints (see {@link #waterStop}): a fall into deep water ends FLOATING at the
                     // cell the entry momentum carries the bot to, and nothing about being in water makes
                     // the bot grounded. holdDepth is the arrest — it presses the inputs that bring the feet
