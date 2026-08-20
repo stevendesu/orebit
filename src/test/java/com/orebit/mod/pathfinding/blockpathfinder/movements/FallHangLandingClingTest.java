@@ -21,13 +21,17 @@ import org.junit.jupiter.api.Test;
  * {@code done}/{@code reached} — so an arrested-but-high hang got NO input from anyone and slid back out
  * the bottom at the vanilla {@code -0.15}/t clamp before the next step (usually Climb) could take over.
  *
- * <p><b>The gate is ARRESTED ({@code velY > CLIMBABLE_ARREST_VY}), never merely-in-a-vine:</b>
- * {@code onClimbable()} is true for every tick of a fall THROUGH a vine column, and sneaking mid-transit
- * would stop the drop at the wrong cell. The velocity guard is also what keeps
- * {@code CarryArrestGateTest.aDeliberateDescentReleasesBothHolds} green — a deliberate release-drop rides
- * the clamp, below the arrest threshold, so the cling never sees it. {@code clingHold}'s own gates make
- * it a no-op off a climbable and wherever something already holds the bot up, so the ordinary dry fall is
- * byte-identical.
+ * <p><b>The gate is ARRESTED ({@code sneakHeld() || velY > CLIMBABLE_ARREST_VY}), never
+ * merely-in-a-vine:</b> {@code onClimbable()} is true for every tick of a fall THROUGH a vine column, and
+ * sneaking mid-transit would stop the drop at the wrong cell — a transiting fall has NO sneak writer, so
+ * both arms are false there. The {@code sneakHeld()} arm is load-bearing (2026-08-20 review conviction):
+ * a genuinely suppressed hang's stored velY reads the one-tick gravity {@code -0.0784}, BELOW the
+ * velocity gate, so a velocity-only guard was inert on exactly the pose it existed for — the arrest
+ * INPUT (honest across the tick-top reset since 6751c12's snapshot) is the signal that carries the hold.
+ * The gate is also what keeps {@code CarryArrestGateTest.aDeliberateDescentReleasesBothHolds} green — a
+ * deliberate release-drop rides the clamp un-sneaked, so neither arm sees it. {@code clingHold}'s own
+ * gates make it a no-op off a climbable and wherever something already holds the bot up, so the ordinary
+ * dry fall is byte-identical.
  *
  * <p>Harness cloned from {@link DescendVineLandingTest} (VineBot + Seg + run), retargeted at
  * {@code new Fall().plan(...)} framed for a hang landing: {@code toFootY} is the vine run's bottom cell.
@@ -41,10 +45,13 @@ class FallHangLandingClingTest {
     private static final int TX = 58, TY = 169, TZ = 254;
     private static final int FROM_FOOT_Y = 173, TO_FOOT_Y = 170; // toFootY = the vine run's bottom cell
 
-    /** A pose-settable bot that reports all plan geometry already established (the VineBot clone). */
+    /** A pose-settable bot that reports all plan geometry already established (the VineBot clone).
+     *  {@code sneakLastTick} mirrors AllyBotEntity's post-physics snapshot (6751c12): {@code sneakHeld()}
+     *  is "held now, or in force when this pose was produced" — the test's driver models the tick-top
+     *  reset + snapshot cycle so the across-reset hold is pinned against the REAL input lifecycle. */
     private static final class VineBot implements BotSteering {
         double x, y, z, vy;
-        boolean grounded, climbable, climbBelow, sneaking, hcol;
+        boolean grounded, climbable, climbBelow, sneaking, sneakLastTick, hcol;
         float forward;
 
         VineBot at(double x, double y, double z) { this.x = x; this.y = y; this.z = z; return this; }
@@ -65,7 +72,7 @@ class FallHangLandingClingTest {
         @Override public boolean onClimbable() { return climbable; }
         @Override public boolean climbableBelow() { return climbBelow; }
         @Override public boolean horizontalCollision() { return hcol; }
-        @Override public boolean sneakHeld() { return sneaking; }
+        @Override public boolean sneakHeld() { return sneaking || sneakLastTick; }
         @Override public void faceHorizontally(double dx, double dz) { }
         @Override public void faceTowards(double dx, double dy, double dz) { }
         @Override public void setForward(float zza) { forward = zza; }
@@ -123,18 +130,32 @@ class FallHangLandingClingTest {
     }
 
     /**
-     * THE REGRESSION. Arrested mid-cell — above the settle band, so the stance servo's descend branch
-     * writes nothing, and {@code atWaypoint}'s band clause withholds {@code done} — the hang must STILL
-     * be clung, or the {@code -0.15} clamp walks the feet out the bottom of the run before the next step
-     * can take over. (Fails without Fall's hang-landing cling — verified by disabling that one line.)
+     * THE REGRESSION (guard corrected 2026-08-20 review). Arrested mid-cell above the settle band by a
+     * PRIOR writer (the band catch, the anticipation tap, or the planless cling handing over at plan
+     * install) — the PHYSICAL held-hang pose: stored velY reads the one-tick gravity {@code -0.0784},
+     * BELOW the velocity gate, and the arrest input survives only as the 6751c12 snapshot across the
+     * tick-top reset. The Fall's cling must re-assert the hold from that input signal each tick — a
+     * velocity-only guard reads this exact pose as un-arrested and lets the {@code -0.15} clamp walk the
+     * feet out the bottom of the run (verified failing against the pre-correction guard). {@code done}
+     * stays withheld (above the band is not arrival).
      */
     @Test
-    void anArrestedHangAboveTheSettleBandIsStillClung() {
+    void anArrestedHangIsHeldAcrossTheTickTopInputReset() {
         VineBot bot = new VineBot().at(58.5, TO_FOOT_Y + 0.55, 254.5);
         bot.grounded = false;
-        bot.climbable = true;   // the vine run
-        bot.vy = 0.0;           // ARRESTED — the fall already stopped here
-        assertFalse(run(bot, 2), "0.55 above the band is not arrival — done must stay withheld");
+        bot.climbable = true;      // the vine run
+        bot.vy = -0.0784;          // the suppressed-hang stored velY — below CLIMBABLE_ARREST_VY
+        PhaseRunner runner = newRunner();
+        SteerView view = new Seg();
+        runner.run(bot, view);     // WALKOFF advances (airborne, over-column) — the fall phase is next
+        bot.sneakLastTick = true;  // a prior writer arrested this pose (its input produced it)
+        boolean done = false;
+        for (int i = 0; i < 2; i++) {
+            bot.sneaking = false;              // the tick-top input reset (AllyBotEntity.tick)
+            done = runner.run(bot, view);      // the fall drive must re-assert from sneakHeld()
+            bot.sneakLastTick = bot.sneaking;  // the post-physics snapshot (6751c12)
+        }
+        assertFalse(done, "0.55 above the band is not arrival — done must stay withheld");
         assertTrue(bot.sneaking,
                 "an arrested hang above the settle band must be HELD for the rest of the Fall's tenure; "
                         + "with no input the -0.15 clamp slides the feet out the bottom of the vine run");
@@ -146,7 +167,8 @@ class FallHangLandingClingTest {
         VineBot bot = new VineBot().at(58.5, TO_FOOT_Y + 0.1, 254.5);
         bot.grounded = false;
         bot.climbable = true;
-        bot.vy = 0.0;
+        bot.vy = -0.0784; // the physical suppressed-hang reading (2026-08-20 review: vy=0.0 is a state
+                          // real suppression never stores — gravity rebuilds one tick each tick)
         assertTrue(run(bot, 2), "an in-band hang is a resting pose — the Fall completes");
         assertTrue(bot.sneaking, "and it completes HELD, not mid-release");
     }
