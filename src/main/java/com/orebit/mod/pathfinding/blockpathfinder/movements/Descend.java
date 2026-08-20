@@ -135,6 +135,13 @@ public final class Descend implements Movement {
      * cell clears (before any drive), the floor is always down before the bot can step into the cleared column.
      * Keeping STEP need-free makes it pure locomotion.
      *
+     * <p><b>CLEAR's drive is a full drive tick</b> (owner ruling 2026-08-20 — see the phase body). It runs
+     * exactly once, on the tick the geometry finally holds, and it writes the same input set STEP writes:
+     * the column-gated climbable hold, the stance hold, and {@code arriveOnTarget}. It used to write only
+     * the column-gated hold, which for a grounded bot is no write at all — and an unwritten yaw is the
+     * PREVIOUS tick's yaw, which is how the flagship-r8 {@code (340,69,481)} wedge re-fired a stale
+     * north-facing thrust and walked the bot out of its own from-column.
+     *
      * <p><b>Coverage.</b> The three {@code Need.AIR} cells cover {@code candidates()}'s three {@code requireAir}
      * breaks (folded only in the {@code !headroomProves} case), and the {@code Need.FOOTING} covers its
      * {@code requireFloor} place (folded only when the dest isn't already standable). Both are declared
@@ -197,11 +204,10 @@ public final class Descend implements Movement {
                     // HOLD THE STANCE on the hand-off tick (owner ruling 2026-08-04, the (55,173,256) vine
                     // drop-off). While a need is unmet the RUNNER holds the bot (stationKeep -> sneak on a
                     // climbable). The tick the geometry finally holds, the runner stops holding and calls
-                    // THIS drive instead — and a drive that only clears a boolean presses nothing at all.
-                    // On solid ground that tick is invisible. On a hang it is fatal: one un-sneaked tick is
-                    // a 0.15 slide, enough to carry the feet out of the single vine cell supporting them,
-                    // and once off the climbable nothing can arrest the fall. Measured exactly — sneak held
-                    // at botY=173.043 while the cobble was placed, released on the hand-off tick, feet left
+                    // THIS drive instead. On a hang an un-held tick is fatal: one un-sneaked tick is a 0.15
+                    // slide, enough to carry the feet out of the single vine cell supporting them, and once
+                    // off the climbable nothing can arrest the fall. Measured exactly — sneak held at
+                    // botY=173.043 while the cobble was placed, released on the hand-off tick, feet left
                     // cell 173 at 172.965, and the bot free-fell 173 -> 171.4 into the two-tall gap it had
                     // just walled off with its own placed block.
                     //
@@ -210,6 +216,46 @@ public final class Descend implements Movement {
                     // is often one cell tall — it exits the climbable and free-falls. Once over the target
                     // this is a no-op and gravity does the one-block drop as always.
                     SteerControl.holdUntilOverTargetColumn(b, v);
+                    // AND THEN DRIVE — every path, every tick (owner ruling 2026-08-20, the (340,69,481)
+                    // creep-wedge conviction, flagship r8). This drive used to STOP at the line above, and
+                    // for a GROUNDED bot that call writes nothing at all: holdUntilOverTargetColumn returns
+                    // immediately off a climbable (tag hold:overcol:dead) and the whole tick's observable
+                    // effect was clearing a boolean. The old comment called that "invisible on solid
+                    // ground". It is not. zza is reset at the top of AllyBotEntity's tick, but YAW is a
+                    // persistent entity property, so a drive that writes no facing INHERITS the previous
+                    // tick's heading — and on the conviction the previous tick was the retired ground-servo
+                    // pirouette, a half-throttle thrust yawed −178.9° (due north) on a bot whose plan went
+                    // east. This CLEAR tick re-fired that stale north thrust, the bot crossed back out of
+                    // cell z=481, and the Descend validity envelope fail->HOLDed it permanently at
+                    // (340,69,480). The INVARIANT this restores: the CLEAR tick never leaves a stale
+                    // forward or a stale yaw standing.
+                    //
+                    // Driving toward the TARGET here is correct, not premature: PhaseRunner establishes a
+                    // phase's needs BEFORE its drive and holds (stationKeep on the bot's OWN column) while
+                    // any is unmet, so this drive only ever runs on the tick the step-off transit is
+                    // already broken and the step-down floor already placed. CLEAR then advances to STEP
+                    // the same tick (advanceWhen -> true), so this is a ONE-TICK handoff into the identical
+                    // chain STEP runs on every following tick — same holds, same servo, one tick earlier.
+                    // What is deliberately NOT mirrored is STEP's arrestCarryFrom gate: the carry arrest is
+                    // STEP's own declarative phase gate (the runner runs it before STEP's drive), and
+                    // arriveOnTarget is a projected-stop servo that brakes rather than a full-throttle push.
+                    //
+                    // No conviction in this class is resurrected. The (55,173,256) hang keeps its
+                    // column-gated sneak (above, unchanged and still first). The 2026-07-31 vine-bounce
+                    // ruling is untouched: arriveOnTarget short-circuits to recenterOn — deadband and all —
+                    // whenever the bot is on a climbable. The (58,133,189) "hold on your OWN column, never
+                    // the target" wedge is a HOLD-path ruling and cannot be re-entered from here, because
+                    // the runner's hold owns every tick where a need is unmet and this drive owns none of
+                    // them.
+                    if (b.inWater()) {
+                        // Fluid keeps the medium-aware drive, exactly as STEP does: the upright swim servo
+                        // + holdDepth own a wet descend, and arriveOnTarget's drag model is the AIR/GROUND
+                        // pair, not water's.
+                        SteerControl.drive(b, v);
+                        return;
+                    }
+                    SteerControl.holdClimbableStance(b, v, true);
+                    SteerControl.arriveOnTarget(b, v);
                 })
                 .advanceWhen(b -> true);                       // geometry held (runner drives only when met) → STEP
         // STEP: walk off the edge toward the dest column; gravity does the one-block drop. Complete once
