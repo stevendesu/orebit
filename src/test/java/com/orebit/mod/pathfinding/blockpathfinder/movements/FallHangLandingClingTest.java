@@ -21,17 +21,18 @@ import org.junit.jupiter.api.Test;
  * {@code done}/{@code reached} — so an arrested-but-high hang got NO input from anyone and slid back out
  * the bottom at the vanilla {@code -0.15}/t clamp before the next step (usually Climb) could take over.
  *
- * <p><b>The gate is ARRESTED ({@code sneakHeld() || velY > CLIMBABLE_ARREST_VY}), never
- * merely-in-a-vine:</b> {@code onClimbable()} is true for every tick of a fall THROUGH a vine column, and
- * sneaking mid-transit would stop the drop at the wrong cell — a transiting fall has NO sneak writer, so
- * both arms are false there. The {@code sneakHeld()} arm is load-bearing (2026-08-20 review conviction):
- * a genuinely suppressed hang's stored velY reads the one-tick gravity {@code -0.0784}, BELOW the
- * velocity gate, so a velocity-only guard was inert on exactly the pose it existed for — the arrest
- * INPUT (honest across the tick-top reset since 6751c12's snapshot) is the signal that carries the hold.
- * The gate is also what keeps {@code CarryArrestGateTest.aDeliberateDescentReleasesBothHolds} green — a
- * deliberate release-drop rides the clamp un-sneaked, so neither arm sees it. {@code clingHold}'s own
- * gates make it a no-op off a climbable and wherever something already holds the bot up, so the ordinary
- * dry fall is byte-identical.
+ * <p><b>The design is CONVERGENCE, not a sticky hold (settled by the 2026-08-20 run-4 conviction,
+ * flagship-r4-async-parked.log):</b> the vanilla climbable slide is {@code 0.15}/t, strictly less than
+ * the {@code 0.20} settle band, so a released above-band arrest cannot skip the band — it slides IN,
+ * where the stance servo's unconditional in-band hold arrests it and {@code done}/{@code reached}
+ * (atWaypoint's band clause) fire. A sneakHeld-gated sticky hold was tried and REVERTED the same night:
+ * one seeded sneak tick (fix A's planless cling during a window-swap gap) became self-sustaining ABOVE
+ * the band, where atWaypoint withholds done forever and Fall has no failWhen — the bot parked at +0.47
+ * for 59k ticks. The remaining velocity arm ({@code velY > CLIMBABLE_ARREST_VY}) is deliberately narrow:
+ * a suppressed hang's stored velY reads the one-tick gravity {@code -0.0784}, below the gate, so the
+ * line never sustains a hold on its own. A transiting fall has no sneak writer and rides the clamp below
+ * the gate, so nothing arrests mid-drop; the deliberate release-drop
+ * ({@code CarryArrestGateTest.aDeliberateDescentReleasesBothHolds}) likewise stays green.
  *
  * <p>Harness cloned from {@link DescendVineLandingTest} (VineBot + Seg + run), retargeted at
  * {@code new Fall().plan(...)} framed for a hang landing: {@code toFootY} is the vine run's bottom cell.
@@ -130,17 +131,17 @@ class FallHangLandingClingTest {
     }
 
     /**
-     * THE REGRESSION (guard corrected 2026-08-20 review). Arrested mid-cell above the settle band by a
-     * PRIOR writer (the band catch, the anticipation tap, or the planless cling handing over at plan
-     * install) — the PHYSICAL held-hang pose: stored velY reads the one-tick gravity {@code -0.0784},
-     * BELOW the velocity gate, and the arrest input survives only as the 6751c12 snapshot across the
-     * tick-top reset. The Fall's cling must re-assert the hold from that input signal each tick — a
-     * velocity-only guard reads this exact pose as un-arrested and lets the {@code -0.15} clamp walk the
-     * feet out the bottom of the run (verified failing against the pre-correction guard). {@code done}
-     * stays withheld (above the band is not arrival).
+     * THE CONVERGENCE PIN (the 2026-08-20 run-4 conviction, in two acts). Act 1: a pose arrested ABOVE
+     * the settle band by a prior writer (fix A's planless cling during a window-swap gap — the physical
+     * seeding: sneak survives only as the 6751c12 snapshot, stored velY reads the suppressed-hang
+     * {@code -0.0784}) must be RELEASED by the Fall's drive, not re-held — a sticky in-tenure hold parks
+     * the bot above the band forever (atWaypoint withholds done; Fall has no failWhen; 59k-tick park).
+     * Act 2: once the released slide brings the pose into the band, the stance servo's unconditional
+     * in-band hold arrests it and the step completes HELD — the convergence the design guarantees
+     * (a 0.15/t slide cannot skip the 0.20 band).
      */
     @Test
-    void anArrestedHangIsHeldAcrossTheTickTopInputReset() {
+    void anAboveBandArrestReleasesAndConvergesIntoTheHeldBand() {
         VineBot bot = new VineBot().at(58.5, TO_FOOT_Y + 0.55, 254.5);
         bot.grounded = false;
         bot.climbable = true;      // the vine run
@@ -152,13 +153,21 @@ class FallHangLandingClingTest {
         boolean done = false;
         for (int i = 0; i < 2; i++) {
             bot.sneaking = false;              // the tick-top input reset (AllyBotEntity.tick)
-            done = runner.run(bot, view);      // the fall drive must re-assert from sneakHeld()
+            done = runner.run(bot, view);      // the fall drive judges the pose
             bot.sneakLastTick = bot.sneaking;  // the post-physics snapshot (6751c12)
         }
         assertFalse(done, "0.55 above the band is not arrival — done must stay withheld");
-        assertTrue(bot.sneaking,
-                "an arrested hang above the settle band must be HELD for the rest of the Fall's tenure; "
-                        + "with no input the -0.15 clamp slides the feet out the bottom of the vine run");
+        assertFalse(bot.sneaking,
+                "an above-band arrest must RELEASE (no writer re-holds it) so the -0.15 slide can carry "
+                        + "the feet into the settle band — a sticky hold here parks the bot above the "
+                        + "band forever (the run-4 59k-tick park)");
+        // Act 2: the released slide has brought the pose into the band — the stance servo holds, done fires.
+        bot.at(58.5, TO_FOOT_Y + 0.10, 254.5);
+        bot.vy = -0.15;            // riding the clamp into the band
+        bot.sneaking = false;
+        done = runner.run(bot, view);
+        assertTrue(done, "in the band the hang is a resting pose — the Fall completes");
+        assertTrue(bot.sneaking, "and it completes HELD by the stance servo's in-band hold");
     }
 
     /** In the band the stance servo and the cling agree: held, positionally arrived, move complete. */

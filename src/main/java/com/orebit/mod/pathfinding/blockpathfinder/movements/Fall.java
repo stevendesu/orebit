@@ -982,24 +982,23 @@ public final class Fall implements Movement {
                 .drive((b, v) -> {
                     SteerControl.arriveOnTarget(b, v);
                     SteerControl.holdClimbableStance(b, v, false);
-                    // HANG-LANDING CLING (owner-ratified 2026-08-19, the vine-hang wedge; guard corrected
-                    // 2026-08-20 review). The stance servo above only sneaks INSIDE the settle band; above
-                    // it the descend branch's anticipation tap is the only writer, so a 1-cell vine run's
-                    // arrest relies on the band catch (a 0.15/t slide cannot skip the 0.20 band). Once ANY
-                    // writer has arrested the bot, this line is what makes the hold stick for the rest of
-                    // the Fall's tenure across the tick-top input reset: sneakHeld() is "held now or in
-                    // force when this pose was produced" (the 6751c12 snapshot), i.e. the arrest INPUT —
-                    // the signal CLIMBABLE_ARREST_VY's javadoc prescribes, because a suppressed hang's
-                    // stored velY reads the one-tick gravity −0.0784, BELOW the velocity gate (a
-                    // velocity-only guard is inert on a real held hang — 2026-08-20 review conviction).
-                    // The velY arm remains for the rising/zero-velocity transients. Gated on ARRESTED,
-                    // never on merely-in-a-vine: sneaking mid-fall-through would stop the drop at the
-                    // wrong cell (the onClimbable-is-true-for-every-tick-of-a-fall trap — a transiting
-                    // fall has no sneak writer, so sneakHeld is false there). clingHold's own gates make
-                    // it a no-op off a climbable and wherever something already holds the bot up.
-                    if (b.sneakHeld() || b.velY() > BotSteering.CLIMBABLE_ARREST_VY) {
-                        SteerControl.clingHold(b);
-                    }
+                    // HANG-LANDING CONVERGENCE (owner-ratified 2026-08-19; design settled by the
+                    // 2026-08-20 run-4 conviction, flagship-r4-async-parked.log). Within the Fall's OWN
+                    // tenure the hang landing is CONVERGENT by construction and must stay that way: the
+                    // vanilla climbable slide is 0.15/t, strictly less than the 0.20 settle band, so a
+                    // released above-band arrest cannot skip the band — it slides IN, where the stance
+                    // servo's unconditional in-band hold (translating=false) arrests it and done/reached
+                    // (atWaypoint's band clause) fire. A STICKY in-tenure hold is forbidden: gating this
+                    // cling on sneakHeld() (tried 2026-08-20) made one seeded sneak tick — e.g. fix A's
+                    // planless cling during a window-swap gap — self-sustaining ABOVE the band, where
+                    // atWaypoint withholds done forever and Fall has no failWhen: the bot parked at +0.47
+                    // for 59k ticks. The velocity arm below is deliberately NARROW (a suppressed hang's
+                    // stored velY reads the one-tick gravity -0.0784, below the gate, so this line never
+                    // sustains a hold on its own — it only catches rising/zero-velocity transients); the
+                    // RETAINED-hang guarantees live where they belong: fix A's clingHold on every
+                    // planless/held tick, and the band catch inside this drive. Never gate on
+                    // merely-in-a-vine: onClimbable is true for every tick of a fall THROUGH one.
+                    if (b.velY() > BotSteering.CLIMBABLE_ARREST_VY) SteerControl.clingHold(b);
                     // Wet endpoints (see {@link #waterStop}): a fall into deep water ends FLOATING at the
                     // cell the entry momentum carries the bot to, and nothing about being in water makes
                     // the bot grounded. holdDepth is the arrest — it presses the inputs that bring the feet
