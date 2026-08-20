@@ -111,6 +111,12 @@ final class AsyncWindowSearch {
     private boolean resultBudgetHit;
     private long[] resultRealized;
     private BlockPos resultStart;
+    /** The waypoint index of {@link #resultPlan} the bot's floor matched on a FAST_FORWARD adoption
+     *  ({@link #pollSeededParked} case 3 — the {@link #planBodyIndex} hit), {@code -1} on every other
+     *  fill (at-the-seam ADOPT, drained boundary/pre-plan results). Carried to the follower so its
+     *  install seed starts the cursor PAST the already-executed steps instead of re-running them
+     *  (DESIGN-replan-handoff.md §5/R3; the 2026-08-19 run-5 stale-frame Pillar wedge). */
+    private int resultMatchedIndex = -1;
 
     private final PlanExecutor executor;
 
@@ -235,6 +241,7 @@ final class AsyncWindowSearch {
                 resultBudgetHit = done.wasBudgetHit();
                 resultRealized = done.realizedCrossings();
                 resultStart = from;
+                resultMatchedIndex = -1;
                 return Drain.RESULT;
             }
             parkedPlan = done.plan();
@@ -278,6 +285,7 @@ final class AsyncWindowSearch {
         resultBudgetHit = done.wasBudgetHit();
         resultRealized = done.realizedCrossings();
         resultStart = from; // the floor the failed/successful search actually ran FROM (blame-walk input)
+        resultMatchedIndex = -1; // a drained boundary result never carries a body match — the seed re-anchors only
         return Drain.RESULT;
     }
 
@@ -313,6 +321,7 @@ final class AsyncWindowSearch {
         resultBudgetHit = false; // a parked (adopted precompute) plan is a real path, not a cap-bound result
         resultRealized = null;   // never null-plan ⇒ never BLOCKED ⇒ no blame input
         resultStart = parkedStart;
+        resultMatchedIndex = -1; // a P4 pre-plan adopts AT its predicted start — never a mid-body entry
         parkedPlan = null;
         return true;
     }
@@ -333,7 +342,7 @@ final class AsyncWindowSearch {
      * window rather than exact block-Y).
      */
     private static boolean onStartOrPlan(BlockPathPlan plan, BlockPos searchStart, BlockPos floor, int yTol) {
-        return startMatches(searchStart, floor, yTol) || onPlanBody(plan, floor, yTol);
+        return startMatches(searchStart, floor, yTol) || planBodyIndex(plan, floor, yTol) >= 0;
     }
 
     /** The "floor IS the searched start" arm — exact X/Z, Y within {@code yTol} (the §5 case-2 test:
@@ -343,18 +352,23 @@ final class AsyncWindowSearch {
                 && Math.abs(searchStart.getY() - floor.getY()) <= yTol;
     }
 
-    /** The "floor lies ON the plan" arm — some step's search-native floor matches (the §5 case-3 test:
-     *  the follower's reached-scan enters mid-plan there on its first steer tick). */
-    private static boolean onPlanBody(BlockPathPlan plan, BlockPos floor, int yTol) {
+    /** The "floor lies ON the plan" arm — the waypoint index whose search-native floor matches
+     *  {@code floor} (the §5 case-3 test: the follower's reached-scan enters mid-plan there on its first
+     *  steer tick), or {@code -1} when the floor is not on the body. The plan's SEARCH START is not a
+     *  waypoint (reconstruct is start-exclusive), so the seam floor itself never matches here — that is
+     *  {@link #startMatches}'s arm. Returns the INDEX (not a boolean) so a FAST_FORWARD adoption can
+     *  carry the matched step to the follower's install seed instead of forcing a re-scan
+     *  (DESIGN-replan-handoff.md §5/R3). */
+    static int planBodyIndex(BlockPathPlan plan, BlockPos floor, int yTol) {
         final int n = plan.size();
         for (int i = 0; i < n; i++) {
             final BlockPos wp = plan.waypoint(i);
             if (wp.getX() == floor.getX() && wp.getZ() == floor.getZ()
                     && Math.abs(plan.floorY(i) - floor.getY()) <= yTol) {
-                return true;
+                return i;
             }
         }
-        return false;
+        return -1;
     }
 
     /**
@@ -396,7 +410,7 @@ final class AsyncWindowSearch {
                     && !parkedPlan.movement(0).entryReady(bot, bot.footX(), bot.footY(), bot.footZ())) {
                 return SeamVerdict.ENTRY_REFUSED;
             }
-            adoptParkedSeeded();
+            adoptParkedSeeded(-1); // at the seam — the plan runs from its step 0, nothing matched mid-body
             return SeamVerdict.ADOPT;
         }
         final long budgetNanos = executor == null ? 0L : executor.budgetNanos();
@@ -413,8 +427,9 @@ final class AsyncWindowSearch {
         // yaw-flapping limit cycle (convicted by exec dump 2026-08-18: ±90° alternation at x≈73.87 for 858
         // ticks). Pre-seam + on-plan = case 1: stay parked, walk the old plan to the seam, ADOPT there with the
         // full-cell reversal runway of §2.
-        if (pastSeam && onPlanBody(parkedPlan, actualFloor, yTol)) {
-            adoptParkedSeeded();
+        final int matched = pastSeam ? planBodyIndex(parkedPlan, actualFloor, yTol) : -1;
+        if (matched >= 0) {
+            adoptParkedSeeded(matched);
             return SeamVerdict.FAST_FORWARD;
         }
         if (pastSeam) {
@@ -424,14 +439,17 @@ final class AsyncWindowSearch {
         return SeamVerdict.KEEP; // still BEFORE the seam (on the new plan's body or off it) — keep approaching
     }
 
-    /** Fill the result out-fields from the parked SEEDED slot (real telemetry) and clear it. */
-    private void adoptParkedSeeded() {
+    /** Fill the result out-fields from the parked SEEDED slot (real telemetry) and clear it.
+     *  {@code matchedIndex} is the FAST_FORWARD verdict's already-computed body match ({@code -1} on an
+     *  at-the-seam ADOPT) — carried out so the follower's install seed never re-scans the plan. */
+    private void adoptParkedSeeded(int matchedIndex) {
         resultPlan = parkedPlan;
         resultPartial = parkedPartial;
         resultExpansions = parkedExpansions;
         resultBudgetHit = parkedBudgetHit;
         resultRealized = null; // never null-plan ⇒ never BLOCKED ⇒ no blame input
         resultStart = parkedStart;
+        resultMatchedIndex = matchedIndex;
         parkedPlan = null;
     }
 
@@ -518,6 +536,12 @@ final class AsyncWindowSearch {
      *  {@link #resultPlan()}; the blame walk's start-region input on a {@code null} plan. */
     BlockPos resultStart() {
         return resultStart;
+    }
+
+    /** See {@link #resultMatchedIndex} — paired with {@link #resultPlan()}; {@code -1} unless the last
+     *  fill was a FAST_FORWARD adoption. */
+    int resultMatchedIndex() {
+        return resultMatchedIndex;
     }
 
     /** Whether an unfinished search toward {@code target} is already in flight (skip-resubmit guard). */

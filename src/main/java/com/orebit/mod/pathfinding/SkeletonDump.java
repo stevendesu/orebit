@@ -276,14 +276,25 @@ final class SkeletonDump {
      * legible at a glance: a plan that goes DOWN then back UP (a MineDown that undoes a Pillar) shows as
      * {@code d(0,-1,0)} followed by {@code d(0,+1,0)} — the signature we're hunting. Cold (one dump per replan,
      * under {@code Debug.ENABLED}); reads the plan in place, no allocation beyond the string.
+     *
+     * <p>The {@code from} header and step 0's delta baseline are the plan's TRUE search start
+     * ({@link PathPlan#blockPlanStart()}), NOT the adoption-time {@code botFloor}: on a seam-seeded
+     * install the two legitimately differ, and baselining on {@code botFloor} prints the step the bot
+     * already stands on as {@code d(0,0,0)} — which is exactly how the 2026-08-19 run-5 forensic's real
+     * +1Y Pillar step hid (DESIGN-replan-handoff.md §5/R3). When they differ, both are printed.
      */
     static void logBlockPlan(PathPlan plan) {
+        final BlockPos start = plan.blockPlanStart(); // the plan's implicit step −1 — its true frame origin
         final StringBuilder sb = new StringBuilder();
         sb.append("[Orebit] block plan ").append(plan.blockPlan.size()).append("wp cost=")
                 .append(String.format("%.1f", plan.blockPlan.cost()))
                 .append(plan.lastPlanPartial ? " PARTIAL" : " FULL")
-                .append(" from ").append(compactPos(plan.botFloor)).append(':');
-        BlockPos prev = plan.botFloor;
+                .append(" from ").append(compactPos(start));
+        if (!start.equals(plan.botFloor)) {
+            sb.append(" (bot at ").append(compactPos(plan.botFloor)).append(')');
+        }
+        sb.append(':');
+        BlockPos prev = start;
         final int lim = Math.min(plan.blockPlan.size(), 10);
         for (int i = 0; i < lim; i++) {
             final BlockPos floor = plan.blockPlan.floor(i); // the search-native floor cell (carried, exact on partials)
