@@ -315,14 +315,24 @@ public final class MovePlan {
         boolean shouldAdvance(BotSteering bot) { return advance.test(bot); }
         boolean isDone(BotSteering bot) { return done.test(bot); }
 
+        /** Whether this phase's step-off gate is ARMED for this tick — it declared {@link #arrestCarryFrom}
+         *  and the bot is still grounded on the from column. Read by the runner as the tick's lane owner:
+         *  while armed, the drive's anchor is routed onto the CURRENT step's target centre
+         *  ({@link SteerControl#stepGateArmed} — the one-gate principle, owner-ratified 2026-08-19), so the
+         *  gate's containment predicate and the drive police the SAME centreline instead of disputing the
+         *  lane (the (259,78,448) two-tick thrust/hold limit cycle). Never true once airborne or off the
+         *  from column — the same self-limits {@link #arrestCarryFrom} documents. */
+        boolean carryGateArmed(BotSteering bot) {
+            return arrestCarry
+                    && bot.grounded()
+                    && bot.footX() == carryFromX && bot.footZ() == carryFromZ;
+        }
+
         /** Whether the cross-axis carry is still uncontained for this phase — {@code true} means the arrest
          *  inputs have been WRITTEN for this tick and the caller must not drive. Inert unless the phase
          *  declared {@link #arrestCarryFrom}; never fires once airborne or off the from column. */
         boolean carryUncontained(BotSteering bot, SteerView view) {
-            return arrestCarry
-                    && bot.grounded()
-                    && bot.footX() == carryFromX && bot.footZ() == carryFromZ
-                    && SteerControl.stepOffGate(bot, view);
+            return carryGateArmed(bot) && SteerControl.stepOffGate(bot, view);
         }
     }
 
