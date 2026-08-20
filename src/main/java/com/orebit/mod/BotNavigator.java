@@ -2119,6 +2119,30 @@ final class BotNavigator {
         Movement movement = path.movement(waypointIndex);
         BlockPos wp = path.waypoint(waypointIndex);
 
+        // DELIVERY-TAIL CONVERGENCE (the delivery invariant's second half, owner-ratified 2026-08-20; a
+        // sibling arming of the §11 terminalArrive assignment below). With the default entryReady now
+        // asking Movement.deliverable, a step's TAIL can be positionally complete while `reached`
+        // withholds SOLELY on delivery — and the terminal phase's normal drive is groundServo PURSUIT,
+        // which never eases at its target: left alone it carries the bot THROUGH the centre, so the
+        // one-tick projection keeps failing on the far edge and delivery would only ever converge for
+        // rear/cross drift. Whenever (a) the current step's own completion is satisfied (its terminal
+        // phase's done, or it has no phase plan — the !phaseOwnsCompletion the advance loop already ran
+        // under), (b) the pose passes the move's own arrival test sans successor (reached with next=null
+        // — settled + atWaypoint + any override clause), and (c) only deliverable is refusing, route the
+        // land drive onto the step-target ARRIVE (SteerControl.terminalArrive → arriveOnStep) so the
+        // drive BRAKES onto the cell centre instead of pursuing through it: velocity decays toward zero,
+        // the projection re-enters the cell, and the handoff completes delivered. No timers, no new
+        // constants — the same mechanism, gain and precedence (stepGateArmed > terminalArrive) as the
+        // §11 centered terminal. Guarded on waypointIndex == activePlanStep so a step adopted THIS tick
+        // (whose runner still belongs to the outgoing step) can never arm off stale phase state; clause
+        // (b) failing on a fresh step's not-yet-entered waypoint makes that guard belt-and-braces.
+        // A successor exists whenever this arms: reached(next=null) true with no advance means teedUp
+        // was the withholding clause, which a null successor short-circuits.
+        final boolean deliveryArrive = !phaseOwnsCompletion
+                && waypointIndex == activePlanStep
+                && movement.reached(bot, wp.getX(), wp.getY(), wp.getZ(), null)
+                && !Movement.deliverable(bot, wp.getX(), wp.getZ());
+
         // Build (once per step) this move's phase-model plan, if it has one. A change of waypoint (a new step, or
         // a window swap that reset the cursor) rebuilds it and resets the runner. The plan is written in the
         // search-native FLOOR cells, carried per-waypoint through reconstruct (BlockPathPlan.floorY).
@@ -2288,8 +2312,10 @@ final class BotNavigator {
         // plan executes, route SteerControl.drive's land branch onto the step-target ARRIVE
         // (SteerControl.terminalArrive — the stepGateArmed discipline: set and cleared tightly around
         // the step execution so no other caller reads it stale), so the move ends settled AT the cell
-        // centre the new plan's step 0 is framed from. False on every untruncated plan (MAX_VALUE).
-        SteerControl.terminalArrive = waypointIndex == planTerminalIndex;
+        // centre the new plan's step 0 is framed from. False on every untruncated plan (MAX_VALUE) —
+        // unless the DELIVERY-TAIL arming (computed above, same flag, same discipline) needs the same
+        // brake-onto-centre to complete a delivery-withheld handoff.
+        SteerControl.terminalArrive = waypointIndex == planTerminalIndex || deliveryArrive;
         if (phaseRunner.active()) {
             lastPhaseDone = phaseRunner.run(bot, cursor);
             SteerControl.terminalArrive = false;

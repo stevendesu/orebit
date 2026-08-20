@@ -1903,7 +1903,7 @@ public final class PathPlan {
                             "[Orebit] seam-consummate entryReady REFUSED at ({},{},{}) — holding armed",
                             actualFloor.getX(), actualFloor.getY(), actualFloor.getZ());
                 }
-                return true; // stay armed/held — re-consulted next boundary (always-true today, §5)
+                return true; // stay armed/held — re-consulted next boundary (delivery-gated since 2026-08-20, §5)
             }
         }
         async.consummateSeeded(armedMatched);

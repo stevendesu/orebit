@@ -1110,6 +1110,13 @@ public final class SteerControl {
      * write each side — no other SteerControl caller can read it stale); {@link #stepGateArmed} keeps
      * precedence (its lane law is phase-armed and stricter). Moves that write their own servos
      * (steerTowards-direct committed arcs, the swim family's medium branches) never consult it.
+     *
+     * <p>Also armed by the follower's DELIVERY-TAIL convergence (the delivery invariant's second half,
+     * owner-ratified 2026-08-20): when a step's own completion is satisfied but {@code reached}
+     * withholds SOLELY on {@link com.orebit.mod.pathfinding.blockpathfinder.Movement#deliverable}, the
+     * same ARRIVE brakes the tail onto the cell centre so the one-tick projection re-enters the cell
+     * and the handoff completes — pursuit alone never eases at its target and would carry the bot
+     * through. Same flag, same set/clear discipline, same precedence.
      */
     public static boolean terminalArrive;
 

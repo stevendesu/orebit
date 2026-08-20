@@ -124,6 +124,25 @@ import net.minecraft.world.phys.Vec3;
  *       outwait. Asserted: the one prompt drop, post-null travel &gt; 1 block ending EAST of the sealed
  *       turn on row A, NO install while sliding (relaunch sampled speed &lt; eps, step 0 adjacent to
  *       the rest floor), the backtracking L-link route — the only route left — walked to the goal.</li>
+ *   <li><b>midstride</b> — the run-6 shape (2026-08-20). REVERSAL's exact corridor + U-link, but the
+ *       seal lands 2-3 cells AHEAD of the cursor (+14 — deliberately NOT cursor+1, PREFIXSEAL's shape)
+ *       and arms on a segment TRANSITION (the tick the cursor advances onto the approach step, bot at
+ *       the fresh cell's low edge with cruise carry), so the prompt re-search's seam-anchored result
+ *       provably DRAINS MID-STRIDE, between boundaries — the §11 park/defer machinery owns the whole
+ *       install. Asserts are INVARIANTS ONLY (the reversal tile's timer-dependence ruling — WHERE in
+ *       the stride the result drains is scheduling): no wedge, zero seam violations, zero drops, the
+ *       NEW step-0 frame-integrity count (a cursor-0 install whose step-0 floor is not adjacent to the
+ *       bot's live cell) zero, goal reached, the reroute walked back through the U-link; the reroute
+ *       class + install carry are recorded, never bounded.</li>
+ *   <li><b>marginal</b> — the run-2 shape (2026-08-20), the delivery invariant's live regression
+ *       guard. NOTHING is sealed ({@code sealKind} excludes it from every seal/reroute site): blue ice
+ *       (decay ×0.900/t — stone's ×0.546/t delivers deep in-cell and proves nothing) builds a straight
+ *       +X carry into a 90° turn and a one-block step-down, reproducing the marginal arrival —
+ *       block-exact, one-tick velocity projection already out of the cell — at the Descend's lip. The
+ *       goal sits two cells past the drop so the Descend is mid-plan (successor non-null). Asserted:
+ *       no wedge, ZERO swaps (CONTROL's assertion — any replan on the unsealed ice corner is a
+ *       regression by itself), the Descend physically completes (a per-tick lower-row sample), goal
+ *       reached; the handoff's entry speed is recorded, deliberately not bounded.</li>
  * </ol>
  *
  * <p><b>The near-seal tiles' observables</b> (prefixseal / currentseal / currentseal-on-ice; the
@@ -272,7 +291,9 @@ public final class ReplanCourse {
         REVERSAL,       // seal mid-corridor; only route is a U-turn -> reversing install (§5 case 2 or 3), the wedge shape
         PREFIXSEAL,     // U1+U2: seal cursor+1 mid-move -> same-tick prompt replan, seam CLAMPED to the current destination, ADOPT there — NO drop, both modes
         CURRENTSEAL,    // U5: seal the CURRENT destination mid-move -> inputs cut + plan dropped NOW, the wall brakes the coast, rest-gated relaunch
-        CURRENTSEAL_ICE // U5 under carry: same trigger at a blue-ice turn -> the null leaves a real slide the kept rest gate must outwait
+        CURRENTSEAL_ICE,// U5 under carry: same trigger at a blue-ice turn -> the null leaves a real slide the kept rest gate must outwait
+        MIDSTRIDE,      // run-6 shape: reversal corridor, seal 2-3 cells AHEAD armed on a segment transition -> the seeded result drains MID-STRIDE; invariants only, class recorded
+        MARGINAL        // run-2 shape: NO seal - blue ice into a 90-degree turn + a one-block step-down; the delivery invariant's live regression guard (zero swaps, the Descend must complete)
     }
 
     /** One replan challenge: a kind + its base grid cell, with corridor/seal/bypass geometry precomputed. */
@@ -351,6 +372,40 @@ public final class ReplanCourse {
                     this.bypassX1 = baseX + 22;
                     this.bypassProbe = new BlockPos(baseX + 1, Y0, zc + 2);
                     this.westLinkX = baseX + 1;
+                    break;
+                }
+                case MIDSTRIDE: {
+                    // The run-6 shape: REVERSAL's exact corridor + U-link (the buildTile default arm),
+                    // but the seal lands 2-3 cells AHEAD of the cursor (+14 — deliberately NOT
+                    // cursor+1, which is PREFIXSEAL's U2-clamp shape) and arms on a segment
+                    // TRANSITION (see sealTriggered): the tick the cursor advances onto the approach
+                    // step with the bot still at the low edge of its previous cell, so the seeded
+                    // seam-anchored result provably DRAINS MID-STRIDE — while the bot is between
+                    // boundaries — and the §11 park/defer machinery (never a boundary-settled pump
+                    // tick) owns the install. editX is unused — the trigger is the live segment.
+                    this.goal = new BlockPos(baseX + 24, Y0 + 1, zc);
+                    this.sealX = baseX + 14;
+                    this.editX = 0;
+                    this.bypassZ = zc + 2;
+                    this.bypassX0 = baseX + 1;
+                    this.bypassX1 = baseX + 22;
+                    this.bypassProbe = new BlockPos(baseX + 1, Y0, zc + 2);
+                    this.westLinkX = baseX + 1;
+                    break;
+                }
+                case MARGINAL: {
+                    // The run-2 shape — NOTHING is sealed (sealKind() excludes this tile from every
+                    // seal/reroute site, so sealX/editX/bypassProbe stay unused): a blue-ice straight
+                    // into a 90° turn and a one-block step-down (see buildTile). Ice (decay ×0.900/t)
+                    // carries residual momentum through the turns and delivers the run-2 marginal
+                    // arrival — block-exact, velocity projecting OUT of the cell — at the Descend's
+                    // lip; stone (×0.546/t) delivers deep in-cell and proves nothing. The goal sits
+                    // TWO cells past the drop so the Descend is mid-plan (successor non-null — teedUp
+                    // short-circuits on null and the tile would test nothing). bypassZ doubles as row
+                    // B's z for the per-tick descended sample; the goal row feet sit ONE BLOCK DOWN
+                    // (Y0, not Y0+1).
+                    this.goal = new BlockPos(baseX + 16, Y0, zc + 2);
+                    this.bypassZ = zc + 2;
                     break;
                 }
                 case CURRENTSEAL_ICE: {
@@ -439,6 +494,10 @@ public final class ReplanCourse {
         boolean pendOnNew, pendOnOld, pendReroute;
         double pendSpd;                 // the PREVIOUS tick's position delta at the install (the carry it rode in on)
         BlockPos pendLive;              // bot's LIVE floor cell at the install (vs pendFloor, the settled anchor)
+        BlockPos pendStep0;             // the installing plan's step-0 floor (the cursor-0 frame-integrity datum)
+        int step0FrameViolations;       // cursor-0 installs whose step-0 floor was NOT adjacent to the live cell (MIDSTRIDE's frame assert; a mid-stride install framed off the bot)
+        boolean descended;              // MARGINAL: the bot stood on row B's LOWER floor — the Descend physically completed
+        double dropEntrySpd;            // MARGINAL: entry carry the tick the segment first targets the step-down cell (recorded, deliberately NOT bounded — the segChanged idiom)
         double prevX, prevZ;
         String prevMove = "";
         int prevSegToX = Integer.MIN_VALUE, prevSegToY, prevSegToZ;
@@ -467,6 +526,16 @@ public final class ReplanCourse {
             add("prefixseal",         Kind.PREFIXSEAL);
             add("currentseal",        Kind.CURRENTSEAL);
             add("currentseal-on-ice", Kind.CURRENTSEAL_ICE);
+            add("midstride",          Kind.MIDSTRIDE);
+            add("marginal",           Kind.MARGINAL);
+        }
+
+        /** The tiles that seal ANYTHING — and therefore run the seal arm, the bypass sampling and the
+         *  reroute (bypassProbe) classification. CONTROL never sealed; MARGINAL (the run-2 delivery
+         *  tile) deliberately seals nothing either — its corridor must stay byte-stable so that ANY
+         *  replan on the ice corner is a regression by itself. */
+        static boolean sealKind(Kind k) {
+            return k != Kind.CONTROL && k != Kind.MARGINAL;
         }
 
         /** The tiles that seal the NEAR route (the current step or cursor+1) — the unified-design tiles;
@@ -601,6 +670,10 @@ public final class ReplanCourse {
             preSeamInstalls = 0;
             rerouteSpd = 0;
             rerouteLiveFloor = null;
+            pendStep0 = null;
+            step0FrameViolations = 0;
+            descended = false;
+            dropEntrySpd = -1;
             prevX = tr.startX;
             prevZ = tr.startZ;
             prevMove = "";
@@ -610,7 +683,7 @@ public final class ReplanCourse {
                         "== %s : kind=%s start=(%.1f,%.1f,%.1f) goal=(%d,%d,%d) seal=x%s\n",
                         tr.name, tr.kind, tr.startX, tr.startY, tr.startZ,
                         tr.goal.getX(), tr.goal.getY(), tr.goal.getZ(),
-                        tr.kind == Kind.CONTROL ? "-" : String.valueOf(tr.sealX)));
+                        sealKind(tr.kind) ? String.valueOf(tr.sealX) : "-"));
             } catch (IOException ignored) { }
         }
 
@@ -653,7 +726,8 @@ public final class ReplanCourse {
                     pendSpd = lastMoved; // the PREVIOUS tick's delta — the carry the install rode in on
                     pendOnNew = pendFloor != null && planContainsFloor(plan, pendFloor);
                     pendOnOld = pendFloor != null && planContainsFloor(prevPlanRef, pendFloor);
-                    pendReroute = tr.kind != Kind.CONTROL && planContainsFloor(plan, tr.bypassProbe);
+                    pendStep0 = plan.size() > 0 ? plan.floor(0) : null;
+                    pendReroute = sealKind(tr.kind) && planContainsFloor(plan, tr.bypassProbe);
                     if (tr.kind == Kind.PREFIXSEAL && sealPlaced && rerouteTick < 0 && !pendReroute) {
                         preSeamInstalls++; // an install between the seal and the clamped-seam reroute: U1 double-fired or something stale adopted
                     }
@@ -718,7 +792,7 @@ public final class ReplanCourse {
             // prefix stays walkable — §4's S5-impacted contract. The near-seal tiles instead seal the NEAR
             // route (cursor+1 for PREFIXSEAL — the U2 clamp's proof; the CURRENT destination for the U5
             // emergency tiles), armed off the live segment (see sealTriggered).
-            if (tr.kind != Kind.CONTROL && !sealPlaced && plan != null && sealTriggered(tr, nav)) {
+            if (sealKind(tr.kind) && !sealPlaced && plan != null && sealTriggered(tr, nav)) {
                 set(tr.sealX, Y0 + 1, tr.sealZ, STONE);
                 set(tr.sealX, Y0 + 2, tr.sealZ, STONE);
                 sealPlaced = true;
@@ -738,7 +812,7 @@ public final class ReplanCourse {
             } else {
                 if (bot.getX() < postRerouteMinX) postRerouteMinX = bot.getX();
             }
-            if (tr.kind != Kind.CONTROL
+            if (sealKind(tr.kind)
                     && (int) Math.floor(bot.getZ()) == tr.bypassZ
                     && bot.getX() >= tr.bypassX0 && bot.getX() <= tr.bypassX1 + 1) {
                 visitedBypass = true;
@@ -754,6 +828,11 @@ public final class ReplanCourse {
             // first shape's convicting failure was exactly the cursor advancing onto the sealed step).
             // The drop/reinstall detections above ran BEFORE this sample, so the drop tick itself never
             // counts as a pre-drop rest tick and the install tick's own delta never joins the slide.
+            if (tr.kind == Kind.MARGINAL && !descended
+                    && botFloorCell().getY() == Y0 - 1
+                    && (int) Math.floor(bot.getZ()) == tr.bypassZ) {
+                descended = true; // standing on row B's LOWER floor: the Descend physically completed
+            }
             if (nearSealKind(tr.kind)) {
                 if (emergencyKind(tr.kind)) {
                     if (sealPlaced && dropTick < 0 && moved < REST_EPS) {
@@ -836,6 +915,17 @@ public final class ReplanCourse {
                 seamViolations++;
                 cls = "UNANCHORED";
             }
+            // Step-0 frame integrity (the MIDSTRIDE tile's mid-stride assert, counted for every trial):
+            // an install that puts the follower at cursor 0 must frame its step 0 off the bot — its
+            // step-0 floor Chebyshev-adjacent (±1 xz, ±1 y — dropShapeFailure's predicate) to the LIVE
+            // floor the install rode in on. A violating install is the §1 shape draining mid-stride:
+            // the new plan's first move starts somewhere the bot is not.
+            if (nav.waypointIndex() == 0 && (pendStep0 == null || pendLive == null
+                    || Math.max(Math.abs(pendStep0.getX() - pendLive.getX()),
+                                Math.abs(pendStep0.getZ() - pendLive.getZ())) > 1
+                    || Math.abs(pendStep0.getY() - pendLive.getY()) > 1)) {
+                step0FrameViolations++;
+            }
             if (pendReroute && rerouteTick < 0) {
                 rerouteTick = pendTick;
                 rerouteClass = cls;
@@ -862,6 +952,15 @@ public final class ReplanCourse {
                     // Mid-move INTO sealX-1 (x in [sealX-1.3, sealX-1)): the seal lands on the NEXT step.
                     return nav.segToX() == tr.sealX - 1 && nav.segToZ() == tr.zc
                             && bot.getX() >= tr.editX;
+                case MIDSTRIDE:
+                    // Segment-transition arming (the CURRENTSEAL_ICE idiom, one step earlier): THE tick
+                    // the cursor advances onto the approach step (target sealX-2) with the bot still at
+                    // the low edge of its fresh cell (boundary + cruise carry). The seal then lands two
+                    // cells ahead of the segment target — mid-stride by construction, NOT cursor+1
+                    // (PREFIXSEAL's shape) — so the prompt re-search's seam sits ahead and its result
+                    // drains while the bot is between boundaries.
+                    return nav.segToX() == tr.sealX - 2 && nav.segToZ() == tr.zc
+                            && bot.getX() - Math.floor(bot.getX()) <= 0.30;
                 case CURRENTSEAL:
                     // Last half-block before the CURRENT destination's boundary (x in [sealX-0.5, sealX)).
                     return nav.segToX() == tr.sealX && nav.segToZ() == tr.zc
@@ -942,6 +1041,41 @@ public final class ReplanCourse {
                     // seam-anchored. (The superseded first shape's drop branch is gone; a drop here
                     // already failed the generic check above.)
                     return prefixSealFailure(tr);
+                }
+                case MIDSTRIDE: {
+                    // INVARIANTS ONLY (the reversal tile's timer-dependence ruling): WHERE within the
+                    // stride the seeded result drains is scheduling, so the reroute CLASS is recorded,
+                    // never asserted. The generic checks above already convicted drops + unanchored
+                    // installs; here: the shared edit-tile shape, step-0 frame integrity, and the
+                    // reroute physically walked back through the U-link.
+                    String common = editTileFailure(tr);
+                    if (common != null) return common;
+                    if (step0FrameViolations > 0) {
+                        return step0FrameViolations + " cursor-0 install(s) whose step-0 floor was not"
+                                + " adjacent to the bot's live cell (a mid-stride install framed off"
+                                + " the bot)";
+                    }
+                    if (postRerouteMinX > tr.westLinkX + 1.5) {
+                        return String.format(Locale.ROOT,
+                                "never returned to the U-link (min x %.2f, link %d) — the reversal was"
+                                        + " not walked", postRerouteMinX, tr.westLinkX);
+                    }
+                    return null;
+                }
+                case MARGINAL: {
+                    // Nothing is sealed, so CONTROL's zero-swap assertion applies verbatim: any replan
+                    // on the ice corner is a regression by itself. The tile's whole point is the
+                    // DELIVERED handoff into the step-down — the Descend must physically complete
+                    // (the per-tick descended sample), with the entry carry recorded, not bounded.
+                    if (swapCount != 0) {
+                        return "expected zero swaps on the unsealed ice corner, saw " + swapCount
+                                + " " + swapLog;
+                    }
+                    if (!descended) {
+                        return "the one-block step-down was never walked (the Descend did not"
+                                + " complete on row B's lower floor)";
+                    }
+                    return null;
                 }
                 default: { // CURRENTSEAL / CURRENTSEAL_ICE — the U5 emergency: the drop shape, both modes
                     return dropShapeFailure(tr);
@@ -1137,6 +1271,13 @@ public final class ReplanCourse {
             try {
                 boolean segChanged = nav.segToX() != prevSegToX || nav.segToY() != prevSegToY
                         || nav.segToZ() != prevSegToZ;
+                if (tr.kind == Kind.MARGINAL && dropEntrySpd < 0 && segChanged
+                        && nav.segToX() == tr.baseX + 14 && nav.segToZ() == tr.bypassZ) {
+                    // The tick the live segment first targets the step-down cell: the Descend's entry
+                    // carry — a recorded observable ONLY (hot delivered entry is legal; bounding it
+                    // would re-encode the envelope margins the delivery invariant replaced).
+                    dropEntrySpd = spd;
+                }
                 if (!move.equals(prevMove) || segChanged) {
                     trace.write(String.format(Locale.ROOT,
                             "  WP i=%d/%d %s seg=(%d,%d,%d)->(%d,%d,%d) bot=(%.2f,%.2f,%.2f)\n",
@@ -1163,6 +1304,18 @@ public final class ReplanCourse {
                         dropTick, dropFloor == null ? "?" : dropFloor.toShortString(),
                         restTicksBeforeDrop, reinstallTick, reinstallSpd,
                         reinstallFloor == null ? "?" : reinstallFloor.toShortString(), slideDistance);
+            } else if (tr.kind == Kind.MIDSTRIDE) {
+                // The mid-stride drain observables: install carry + live anchor (recorded — WHERE the
+                // result drained is scheduling) and the step-0 frame-violation count (asserted zero).
+                extra = String.format(Locale.ROOT,
+                        " adoptSpd=%.4f adoptLive=%s step0Viol=%d",
+                        rerouteSpd, rerouteLiveFloor == null ? "?" : rerouteLiveFloor.toShortString(),
+                        step0FrameViolations);
+            } else if (tr.kind == Kind.MARGINAL) {
+                // The delivery observables: the Descend handoff's entry carry (recorded, not bounded)
+                // and whether the step-down physically completed.
+                extra = String.format(Locale.ROOT,
+                        " dropEntrySpd=%.4f descended=%b", dropEntrySpd, descended);
             } else if (tr.kind == Kind.PREFIXSEAL) {
                 // The clamped-seam adopt shape: the install's carry (observable, not bounded — §5 hot
                 // entry), its live-floor anchor, and the between-seal-and-reroute install count.
@@ -1243,7 +1396,31 @@ public final class ReplanCourse {
                     }
                     break;
                 }
-                default: { // REVERSAL + PREFIXSEAL + CURRENTSEAL — the same corridor + U-link tile
+                case MARGINAL: {
+                    // The run-2 shape: a blue-ice straight into a 90° turn and a one-block step-down.
+                    // Row A (+X, ice from +3 so the mouth stays stone for launch acceleration) runs to
+                    // +11; the turn link (+11, zc+1) crosses to row B; row B's UPPER floor spans
+                    // +11..+13 (feet Y0+1); its LOWER floor (+14..+16, feet Y0 — the box is extended
+                    // one DOWN for the drop) sits past the one-block lip at +13/+14: the Descend's
+                    // destination floor is (+14, Y0-1, zc+2) and the goal two cells past it. The
+                    // corner (+11) is kept stone like the mouth — only STRAIGHT-line ice is asked to
+                    // build the carry; what the tile interrupts is the DELIVERY at the turn + lip.
+                    box(bx - 1, bx + 17, Y0 - 1, Y0 + 3, zc - 1, zc + 3);  // one deeper: the drop's floor
+                    carve(bx, bx + 11, Y0 + 1, Y0 + 2, zc);                // row A approach, +X
+                    carveCell(bx + 11, zc + 1);                            // the 90° turn link (cross-momentum)
+                    carve(bx + 11, bx + 13, Y0 + 1, Y0 + 2, zc + 2);       // row B upper: 2 cells after the turn
+                    // Row B LOWER is 3-tall (Y0..Y0+2): the Descend leaves the lip AT TAKEOFF HEIGHT
+                    // and falls in the destination column, so its transit head passes through
+                    // (+14, Y0+2) — a 2-tall lower row seals that cell and the planner (correctly)
+                    // refuses the step-down, dead-ending the whole tile (convicted on the first run:
+                    // "Descend -> (nothing)", search exhausted 4 blocks short of the goal).
+                    carve(bx + 14, bx + 16, Y0, Y0 + 2, zc + 2);           // row B LOWER: past the one-block lip
+                    for (int x = bx + 3; x <= bx + 10; x++) {
+                        set(x, Y0, zc, BLUE_ICE);                          // ice on the straight only
+                    }
+                    break;
+                }
+                default: { // REVERSAL + PREFIXSEAL + CURRENTSEAL + MIDSTRIDE — the same corridor + U-link tile
                     // Main row A + the U-return: a link BEHIND the leg at +1, the return row to +22, a south
                     // rejoin east of the seal (+16 for reversal; the near-seal tiles seal +12, see the Trial
                     // ctor). The only post-seal route reverses the bot's travel.
