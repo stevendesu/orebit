@@ -29,7 +29,13 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  *       into the body of a waterfall. That is why the planner placed cobble at {@code (153,-14,104)} — the one
  *       cell where the fall spread over a stone block and happened to have air above it. There was never a pool.
  *       The head test is now "<b>not solid</b>" (air <i>or</i> fluid), which is the real upright-fit
- *       requirement, and the two cases are priced apart ({@link #COST} vs {@link #SUBMERGED_COST}).</li>
+ *       requirement, and the two cases are priced apart ({@link #COST} vs {@link #SUBMERGED_COST}).
+ *       A <b>STEP-DOWN</b> entry (fluid below the bot's own feet level) from a NON-submerged start additionally
+ *       requires the <b>walk-out head cell</b> — {@code (nx, feetY+1, nz)}, the cell over the destination column
+ *       at the bot's own standing head height — to be non-solid (owner rule 2026-08-20; the walk-out clearance
+ *       gate in {@link #candidates}). The executor walks a step-down out ABOVE the water at standing height like
+ *       a {@link Descend} and then drops, so the destination column needs headroom "as tall as the starting
+ *       cell" — 3 open blocks over the destination feet, exactly Descend's transit shape.</li>
  *   <li><b>The verticals live here, not on the prone family</b> (§3.1/§4). {@link SprintSwim}'s pure-up and
  *       pure-down rungs were never real — a swimming look clamps near 80&deg;, so the last ~10&deg; is always
  *       lateral drift, and holding the prone pose requires holding forward every tick. In open water that is
@@ -102,7 +108,11 @@ public final class Swim implements Movement {
     /**
      * How far below the bot's current feet the lateral scan looks for the fluid surface — the maximum drop it
      * will take to enter fluid from a bank/ledge. Small and conservative (fluid cushions the landing, but a big
-     * committed plunge belongs to a future water-Fall variant); a deeper entry just isn't offered here.
+     * committed plunge belongs to a future water-Fall variant); a deeper entry just isn't offered here. Every
+     * step BELOW the feet level found by this scan is a step-down entry and, from a non-submerged start, must
+     * also pass the walk-out clearance gate in {@link #candidates} (owner rule 2026-08-20): the walk-out head
+     * cell {@code (nx, feetY+1, nz)} must be non-solid, because the executor walks out above the water at
+     * standing height before dropping.
      */
     private static final int MAX_SINK = 4;
 
@@ -158,6 +168,21 @@ public final class Swim implements Movement {
         // pose is water-only by vanilla, so lava never suppresses the upright paddle.
         if (wet && lateralSprintDominates(ctx, x, y, z)) return;
 
+        // Start-side term of the WALK-OUT CLEARANCE GATE below (owner rule 2026-08-20): is the bot's own head
+        // cell already fluid? Eyes underwater is one of the only two dive initiations (the other, a trapdoor
+        // crawl, is unmodeled), so a submerged start KEEPS its step-down entries — it swims down and out, it
+        // never walks out above the surface. Gated on `wet`: a dry bot's head cannot be fluid (fluid does not
+        // float on air in a column the bot stands dry in), so the overwhelmingly common dry expansion pays
+        // nothing here; a wet one pays one section-cached read, computed once for all four cardinals.
+        final boolean startSubmerged;
+        if (wet) {
+            int headPacked = ctx.packedAt(x, y + 2, z);
+            startSubmerged = headPacked != MovementContext.UNBUILT
+                    && fluid(ctx, ctx.descriptorOf(x, y + 2, z, headPacked));
+        } else {
+            startSubmerged = false;
+        }
+
         for (int[] d : CARDINALS) {
             int nx = x + d[0];
             int nz = z + d[1];
@@ -177,6 +202,27 @@ public final class Swim implements Movement {
                     long hd = ctx.descriptorAt(nx, wf + 1, nz);
                     boolean headFluid = fluid(ctx, hd);
                     if (!headFluid && !ctx.passable(hd)) break;
+                    // THE WALK-OUT CLEARANCE GATE (owner rule 2026-08-20): "we shouldn't emit a step-down
+                    // into water until the target has 3 blocks of headroom" — headroom "as tall as the
+                    // starting cell". A step-down entry (wf < feetY) does not dive off the lip: the executor
+                    // walks out ABOVE the destination column at STANDING height exactly like a Descend and
+                    // only then drops, so the walk-out head cell (nx, feetY+1, nz) must be non-solid
+                    // (passable or fluid) for the body to clear the lip. The cells between it and the
+                    // destination head are already proven passable by this scan on its way down. The old
+                    // code tested only the DESTINATION feet and head — never the transit — and Swim has no
+                    // failWhen: convicted on the 2026-08-20 run-5 wedge at (467,63,630)->(467,62,631), where
+                    // a dirt overhang at (467,64,631) blocked the walk-out and the bot pressed into it for
+                    // ~53k ticks (flagship-r5-async-838blocks.log). A SUBMERGED start is exempt: eyes
+                    // underwater is a dive initiation (owner rule) — it swims down, it never walks the lip.
+                    // Shape: the walk-out cell is SHARED by every deeper fluid cell in this column, so a
+                    // solid one `break`s the column scan (deeper fluid is unreachable through the same
+                    // blocked walk-out) rather than `continue`ing; an UNBUILT one is a conservative refusal
+                    // of the column, mirroring the `!ctx.built(...) break` idiom above.
+                    if (wf < feetY && !startSubmerged) {
+                        if (!ctx.built(nx, feetY + 1, nz)) break;
+                        long wd = ctx.descriptorAt(nx, feetY + 1, nz);
+                        if (!fluid(ctx, wd) && !ctx.passable(wd)) break;
+                    }
                     out.accept(nx, wf - 1, nz, cellCost(ctx, fd, headFluid ? SUBMERGED_COST : COST));
                     break;
                 }
