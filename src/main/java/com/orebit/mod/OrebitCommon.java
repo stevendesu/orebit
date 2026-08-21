@@ -344,5 +344,8 @@ public final class OrebitCommon {
         // deliberately absent (not deterministically forcible from a harness — see the class Javadoc). Same
         // inert-unless-armed discipline (-Dorebit.replan); run once per pathing.async mode for full coverage.
         ReplanCourse.register(events);
+        VineJumpProbe.register(events);
+        VineBridgeCourse.register(events);
+        LadderShaftCourse.register(events);
     }
 }

@@ -1355,6 +1355,24 @@ public final class MovementContext {
         return water(descriptorAt(x, y, z));
     }
 
+    /**
+     * Is the FLOOR cell {@code (x,y,z)} a climbable the bot can walk the TOP of — climbable, NOT standable,
+     * and with a non-climbable cell above it? (Owner-ratified 2026-08-21.)
+     *
+     * <p>The three clauses are each load-bearing. <b>Climbable</b> is what makes the cell hold the bot at
+     * all: it has no collision, so the only footing is vanilla's {@code onClimbable()} grab, which the
+     * follower sustains by holding jump through the dip. <b>Not standable</b> keeps this off ordinary
+     * floors (a waterlogged ladder-in-a-slab is standable and takes the normal flat walk). <b>Nothing
+     * climbable above</b> is the boundary with {@link com.orebit.mod.pathfinding.blockpathfinder.movements.Climb}:
+     * a climbable in the bot's FEET cell is a CURTAIN, which Climb owns as a sneak-speed lateral cling —
+     * two movements must never compete for one geometry.
+     */
+    public boolean climbableFloorAt(int x, int y, int z) {
+        final long floor = descriptorAt(x, y, z);
+        if (!NavBlock.isClimbable(floor) || NavBlock.isStandable(floor)) return false;
+        return !NavBlock.isClimbable(descriptorAt(x, y + 1, z));
+    }
+
     /** {@link #water(int, int, int)} on an already-read descriptor (read-once form). */
     public boolean water(long d) {
         // Swimmable = full water cell, no collision (not a waterlogged solid). Single source of truth in

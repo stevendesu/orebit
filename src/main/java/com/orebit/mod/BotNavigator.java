@@ -1358,7 +1358,31 @@ final class BotNavigator {
             // (A move-invalidated later step no longer stands this machinery down — §10 U1/U2: the
             // prompt replan already fired the seam-seeded re-search, its walk clamped BELOW the broken
             // step, and adoption at that clamped seam is exactly how the bot turns before the wall.)
-            if (settledFloor != null && currentFloor.equals(settledFloor) && planAnchor) {
+            // BOUNDARY-REFUSAL FORENSIC (2026-08-21). Every seam/adopt/drain log in this system sits
+            // DOWNSTREAM of the gate below, so a boundary that is never serviced is silent by construction
+            // — which is exactly the state that hid the mid-climb wedge for three sessions, while
+            // "seam-pause: held Nt ... waiting for the seeded search" asserted a cause nobody had checked.
+            // This line is the negative evidence: it names which half refused (the anchor medium, or the
+            // floor-equality test whose settledFloor re-anchor at the top of this block is gated on
+            // stableMedium and so never fires on a climbable), with the pose that decided it.
+            // Fires only while a seam episode is live, and thins out after the first few ticks.
+            if (Debug.ENABLED && planTerminalIndex != Integer.MAX_VALUE
+                    && !(settledFloor != null && planAnchor
+                            && (currentFloor.equals(settledFloor) || climbSagAtSettled()))
+                    && (seamPauseTicks <= 3 || seamPauseTicks % 20 == 0)) {
+                OrebitCommon.LOGGER.info(
+                        "[Orebit] boundary REFUSED t={} planAnchor={} (grounded={} inWater={} inLava={} "
+                                + "onClimbable={} climbBelow={}) stableMedium={} atRest={} settled={} "
+                                + "floorEq={} sag={} cur={} settledFloor={} y={} wp={}/{} term={} polls={} lastSearchMs={}",
+                        seamPauseTicks, planAnchor, bot.grounded(), bot.isInWater(), bot.inLava(),
+                        bot.onClimbable(), bot.climbableBelow(), stableMedium, atRest, bot.settled(),
+                        currentFloor.equals(settledFloor), climbSagAtSettled(), currentFloor, settledFloor,
+                        String.format("%.3f", bot.y()), waypointIndex, planLimit(), planTerminalIndex,
+                        pathPlan.pendingPollTicks(),
+                        pathPlan.lastSearchNanos() < 0 ? "-" : String.format("%.1f", pathPlan.lastSearchNanos() / 1e6));
+            }
+            if (settledFloor != null && planAnchor
+                    && (currentFloor.equals(settledFloor) || climbSagAtSettled())) {
                 // HORIZON-SEAM HANDOFF (DESIGN-replan-handoff.md §3/§4): hand the driver everything a
                 // seam-seeded mid-motion re-search needs — the walk's seam index on the CURRENT window
                 // plan, the first not-yet-applied step (the §4 sub-range fold's lower bound), and the
@@ -1436,8 +1460,21 @@ final class BotNavigator {
                     if (seamPauseTicks > 0 && path != null && !path.isEmpty()) {
                         final BlockPos held = path.waypoint(Math.min(planTerminalIndex, path.size() - 1));
                         OrebitCommon.LOGGER.info(
-                                "[Orebit] seam-pause: held {}t at seam ({},{},{}) waiting for the seeded search",
-                                seamPauseTicks, held.getX(), held.getY(), held.getZ());
+                                // NO LONGER ASSERTS A CAUSE (2026-08-21). The old text read "waiting for
+                                // the seeded search" — never checked, and usually false: the search is
+                                // submitted while the bot is still WALKING to the seam, and this counter
+                                // only starts once the terminal move completed, so it measures
+                                // wait-for-ADOPTION, not compute. It also fires on ANY block-plan
+                                // reference change, including a PANIC that discarded the result.
+                                // `polls` is the discriminator: SERVICED boundary ticks that found the
+                                // search still running. polls ~= held => the search really is slow;
+                                // polls == 0 => the boundary was never serviced at all (pair it with the
+                                // "boundary REFUSED" line, which names the half that refused).
+                                "[Orebit] seam-pause: held {}t at seam ({},{},{}) polls={} lastSearch={}ms",
+                                seamPauseTicks, held.getX(), held.getY(), held.getZ(),
+                                pathPlan.pendingPollTicks(),
+                                pathPlan.lastSearchNanos() < 0 ? "-"
+                                        : String.format("%.1f", pathPlan.lastSearchNanos() / 1e6));
                         seamPauseTicks = 0;
                         seamPauseSeam = -1;
                     }
@@ -1779,6 +1816,67 @@ final class BotNavigator {
      * or the bot is in the goal region but can't reach the goal cell) the bot has exhausted its options: it
      * sets {@link #navGaveUp} (→ HOLD, no blind straight-line) and tells the owner once. A new goal clears it.
      */
+    /**
+     * One tick of vanilla climb travel (owner ruling 2026-08-21) — the sag window {@link #climbSagAtSettled}
+     * allows around the settled stand height. Vanilla moves a bot on a climbable by at most {@code 0.15}/tick
+     * (the slide clamp; the jump-driven climb is {@code +0.2} before drag), so a pose inside this window is
+     * one tick away from the anchor cell in the only medium that can hold the bot without a floor.
+     */
+    private static final double CLIMB_SAG = 0.15;
+
+    /**
+     * THE CLIMBABLE SAG CLAUSE (owner ruling 2026-08-21) — the boundary gate's second, deliberately
+     * unreachable-on-land disjunct.
+     *
+     * <p><b>The defect it closes.</b> A bot topped out on a climbable is held by an OSCILLATION, not by
+     * contact: it sinks a hair, its feet enter the climbable, vanilla lifts it, repeat. Measured on the
+     * mid-climb tile: {@code planAnchor=true atRest=true settled=true}, everything healthy — and
+     * {@code floorEq=false} forever, because {@code y=151.988} is 12mm under the cell boundary, so
+     * {@code floorOf} reports floor 150 while {@code settledFloor} says 151. The boundary is refused every
+     * tick, {@code onBotMoved} never runs, and with it neither the drain, the seam pump, nor FAST_FORWARD —
+     * the very machinery built to absorb "the bot is somewhere else on the plan".
+     *
+     * <p><b>Why not widen the cell comparison.</b> {@code settledFloor} is not merely compared, it is PASSED
+     * as the planning anchor ({@code onBotMoved}, {@code installSeed}, {@code promptImpactedReplan}), and the
+     * equality test is the guarantee that the anchor cell is the cell the bot is IN (see the §boundary
+     * comment above: "NEVER mid-move"). A blanket ±1 would admit a bot mid-Descend or mid-run and frame step
+     * 0 one cell off — reintroducing the very wedge this exists to fix, in a shape that only reproduces on a
+     * mid-move replan and so would never be caught by a test.
+     *
+     * <p><b>So this clause cannot fire on land, by construction.</b> It demands a climbable medium, the
+     * settled column, a sub-tick height error, and a non-falling pose:
+     * <ul>
+     *   <li>{@code onClimbable() || climbableBelow()} — no ground move can reach this branch at all, so
+     *       Descend/Traverse/Ascend/parkour-off-a-slab keep today's behaviour bit-for-bit.</li>
+     *   <li>the bot's foot COLUMN equals the settled floor's column — no lateral admission.</li>
+     *   <li>{@code |y - standHeight| <= CLIMB_SAG} — a sub-cell sag, not a cell of drift.</li>
+     * </ul>
+     *
+     * <p><b>Deliberately NO settled/velocity guard</b> (owner ruling 2026-08-21, after two failed attempts to
+     * add one). A top-out is held by an OSCILLATION, so it is sampled at two phases: at {@code y>=152} the
+     * floor cell is right but the bot is in no medium ({@code planAnchor=false}); at {@code y<152} it is on
+     * the climbable but the floor cell has flipped AND {@code settled()} reads false — that dip IS a brief
+     * unsupported sink, by construction. Any instantaneous held-test therefore rejects precisely the phase
+     * this clause exists for; a raw {@code velY} compare was tried first and fails for the separate reason
+     * {@code CLIMBABLE_ARREST_VY}'s javadoc records (a HELD hang reads {@code -0.0784}, indistinguishable
+     * from the first tick of a fall). The WINDOW is the guard instead: a bot 0.012 of a block from the
+     * settled stand height, in the settled column, IS at the anchor cell in every sense the anchor is used
+     * for — the wedge this prevents was a bot a FULL CELL off, not a hundredth of one.
+     *
+     * <p>Consequence: on a top-out the boundary is serviced on the DIP ticks of the oscillation rather than
+     * every tick — a few ticks of latency, not a hold.
+     */
+    private boolean climbSagAtSettled() {
+        final BlockPos settled = settledFloor;
+        if (settled == null || !(bot.onClimbable() || bot.climbableBelow())) {
+            return false; // land can never reach this clause
+        }
+        if (bot.footX() != settled.getX() || bot.footZ() != settled.getZ()) {
+            return false; // same column only
+        }
+        return Math.abs(bot.y() - (settled.getY() + 1.0)) <= CLIMB_SAG;
+    }
+
     private void repairStep() {
         if (pathPlan == null || navGaveUp) return;
         final PathStatus status = pathPlan.status();
@@ -1789,9 +1887,30 @@ final class BotNavigator {
             giveUp();
             return;
         }
-        if (status != PathStatus.BLOCKED) {
-            return; // route is fine
-        }
+        // KEY ON THE GENERATION COUNTER, NOT THE TRANSIENT STATUS (owner ruling 2026-08-21).
+        //
+        // `status` is clobbered by the very next search SUBMIT (PathPlan:1496 — `if (status !=
+        // PathStatus.RUNNING) status = PathStatus.RUNNING`), which in async mode happens on the SAME tick
+        // the BLOCKED result drained. Measured on the ladder-shaft course: 3962 consecutive searches
+        // returned null after real exploration, every one correctly classified
+        // (`resultStatus: plan=NULL expansions=210 budgetHit=false -> BLOCKED (startDead=false)`), and
+        // `blockedGeneration` incremented every time — yet this guard read RUNNING on every tick, so ZERO
+        // crossings were ever invalidated, no hop was ever blacklisted, and giveUp() below was unreachable.
+        // The bot sat for its whole 4000-tick budget re-running an identical doomed search once per tick.
+        //
+        // `blockedGeneration` is the durable form of the same fact: monotone, incremented once per BLOCKED
+        // result inside resultStatus, and NOT reset by a submit. It already governed one-repair-per-result
+        // below; it simply has to be what OPENS the door too.
+        //
+        // BOTH invalidation cases ride it, and neither is loosened (owner, 2026-08-21):
+        //   * exhausted search — the open set emptied: proof no connection exists between the regions.
+        //   * a partial whose FIRST move is irreversible — `lastReversibleRow` returns startRow, the
+        //     partial is SUPPRESSED, and the search returns null ("unsafe to cross this edge"). Both
+        //     therefore arrive here as a null-with-exploration; BlockPathfinder's own comment at that site
+        //     says the suppression exists so this invalidation fires.
+        // A transient blocker (a newly-grown vine, a placed cobble) that merely breaks the CURRENT block
+        // plan never produces a null-with-exploration, so it still cannot invalidate an edge — and
+        // START-DEAD (<=1 expansion) keeps its own carve-out immediately below.
         // START-DEAD (s52b): the search died AT the start cell (≤1 expansion — the bot's own feet/head
         // cells emit no candidates). That proves nothing about any skeleton hop, so hop repair must NOT
         // run (blacklisting on it was an unbounded repair→resubmit→fail churn at planner speed — the
@@ -2091,6 +2210,24 @@ final class BotNavigator {
                 if (Debug.VERBOSE && j > waypointIndex) {
                     bot.vlog("advance SKIPPED " + (j - waypointIndex) + " step(s): " + waypointIndex + "→" + (j + 1)
                             + " — skipped steps' edits/phases never ran");
+                }
+                // CURSOR-ADVANCE TRACE (2026-08-20). This is the ONLY site that advances the cursor
+                // forward; every other write is a reset or an install seed. It is therefore the sole
+                // producer of the value PathPlan reads as `seamCursor`, and `consummationTick` treats
+                // `seamCursor > armedTerminal` as "the terminal move COMPLETED" — so a cursor advance
+                // here IS a completion claim, and the mid-climb adoption wedge is a false one. Note the
+                // scan runs BACKWARDS from the plan end, so a LATER waypoint the bot happens to occupy
+                // can carry the cursor past a move still in flight. Log the pose that justified it.
+                if (Debug.ENABLED) {
+                    OrebitCommon.LOGGER.info(
+                            "[Orebit] cursor-advance {}→{} via {} @wp({},{},{}) skipped={} | bot y={} foot=({},{},{})"
+                                    + " grounded={} climbable={} climbBelow={} settled={} phaseOwns={}",
+                            waypointIndex, j + 1, path.movement(j).getClass().getSimpleName(),
+                            w.getX(), w.getY(), w.getZ(), j - waypointIndex,
+                            String.format(java.util.Locale.ROOT, "%.3f", bot.y()),
+                            bot.footX(), bot.footY(), bot.footZ(),
+                            bot.grounded(), bot.onClimbable(), bot.climbableBelow(), bot.settled(),
+                            phaseOwnsCompletion);
                 }
                 waypointIndex = j + 1;
                 // A move just COMPLETED — this is the settled stand cell the driver commits/replans off (its

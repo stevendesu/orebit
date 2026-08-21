@@ -9,6 +9,7 @@ import com.orebit.mod.pathfinding.async.PlanExecutor;
 import com.orebit.mod.pathfinding.async.SearchRequest;
 import com.orebit.mod.pathfinding.blockpathfinder.BotCaps;
 import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
+import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.blockpathfinder.ClutchModel;
 import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
@@ -742,6 +743,13 @@ public final class PathPlan {
         this.seamPlan = followerPlan;
         this.seamIndex = seamIndex;
         this.seamFirstUnedited = firstUneditedStep;
+        if (Debug.ENABLED && armedVerdict != null && followerCursor != this.seamCursor) {
+            OrebitCommon.LOGGER.info(
+                    "[Orebit] seamCursor {}→{} (onBotMoved) armedTerminal={} inFlight={} — {}",
+                    this.seamCursor, followerCursor, armedTerminal, moveInFlight,
+                    followerCursor > armedTerminal ? "PAST the armed terminal: consummation will fire"
+                                                   : "still at/behind the terminal: hold");
+        }
         this.seamCursor = followerCursor;
         this.seamMoveInFlight = moveInFlight;
         this.botFloor = botFloor;
@@ -1556,6 +1564,16 @@ public final class PathPlan {
             return PathStatus.RUNNING;
         }
         startDead = expansions <= 1;
+        // CLASSIFICATION FORENSIC (2026-08-21): the one choke every installed result passes through. If a
+        // run shows exhausted searches but no "region-crossing BLOCKED", the question is whether this line
+        // ever ran — a result discarded upstream (see AsyncWindowSearch.drainLog) never reaches it, so the
+        // status stays RUNNING and repairStep's `status != BLOCKED` guard silently disables invalidation.
+        if (Debug.ENABLED) {
+            OrebitCommon.LOGGER.info(
+                    "[Orebit] resultStatus: plan={} expansions={} partial={} budgetHit={} -> {} (startDead={})",
+                    plan == null ? "NULL" : (plan.size() + "wp"), expansions, partial, budgetHit,
+                    plan != null ? "RUNNING" : "BLOCKED", startDead);
+        }
         if (!startDead) {
             blockedGeneration++;
             // Snapshot the failed search's realized crossings WITH the window geometry it ran under, so
@@ -1644,6 +1662,26 @@ public final class PathPlan {
 
     /** The failing search's start region as {@code (rx,ry,rz)} (minY-rebased level-0 region coords, the
      *  skeleton convention), or {@code "?"} when unknown — diagnostic read for the repair log line. */
+    /**
+     * DIAGNOSTIC (2026-08-21 seam-pause forensic) — serviced boundary ticks spent waiting on the current
+     * search, and the last drained search's submit-to-drain wall clock in ns ({@code -1} before the first
+     * drain).
+     *
+     * <p>Read together with {@code BotNavigator.seamPauseTicks} these separate the three ways a seam-pause
+     * burns ticks, which no previous log could tell apart: {@code polls ~= pauseTicks} = the search really
+     * is slow; {@code polls == 0} while the pause climbs = the boundary is never serviced at all, so the
+     * drain is unreachable (the {@code planAnchor} gate refused); {@code polls} small but the pause long =
+     * the result is in hand and something downstream (an entry refusal) is holding it.
+     */
+    public int pendingPollTicks() {
+        return async.pendingPollTicks();
+    }
+
+    /** See {@link #pendingPollTicks}. */
+    public long lastSearchNanos() {
+        return async.lastSearchNanos();
+    }
+
     public String blockedStartRegionDesc() {
         if (blockedStartFloor == null) return "?";
         return "(" + RegionAddress.regionX(blockedStartFloor.getX(), 0) + ","
@@ -1880,6 +1918,17 @@ public final class PathPlan {
         if (seamCursor <= armedTerminal) {
             return true; // the terminal move is still in flight — hold (the follower ends it centered)
         }
+        // THE COMPLETION CLAIM. Note this is a CURSOR test, not a physical one: "the terminal move
+        // completed" means only "the follower's reached-scan advanced past it". BotNavigator's
+        // cursor-advance trace prints the pose that justified the advance — pair the two lines when
+        // diagnosing a mid-move consummation (the r10/r12 wedge, ReplanCourse midclimb-t6..t10).
+        if (Debug.ENABLED) {
+            OrebitCommon.LOGGER.info(
+                    "[Orebit] seam-consummate GATE OPEN: seamCursor={} > armedTerminal={} verdict={}"
+                            + " inFlight={} actualFloor=({},{},{})",
+                    seamCursor, armedTerminal, armedVerdict, seamMoveInFlight,
+                    actualFloor.getX(), actualFloor.getY(), actualFloor.getZ());
+        }
         // The terminal move COMPLETED and this is a settled boundary — consummate.
         if (panic) {
             this.blockPlan = null;
@@ -1896,8 +1945,10 @@ public final class PathPlan {
         }
         if (armedVerdict == AsyncWindowSearch.SeamVerdict.ADOPT && seamBot != null) {
             final BlockPathPlan parked = async.parkedSeededPlan();
-            if (parked != null && !parked.isEmpty() && !parked.movement(0)
-                    .entryReady(seamBot, seamBot.footX(), seamBot.footY(), seamBot.footZ())) {
+            if (parked != null && !parked.isEmpty()
+                    && !parked.movement(0)
+                            .entryReady(seamBot, seamBot.footX(), seamBot.footY(), seamBot.footZ())
+                    && !climbStanceEntry(seamBot)) {
                 if (Debug.ENABLED) {
                     OrebitCommon.LOGGER.info(
                             "[Orebit] seam-consummate entryReady REFUSED at ({},{},{}) — holding armed",
@@ -1911,6 +1962,39 @@ public final class PathPlan {
                 ? "ADOPT" : "FAST-FORWARD", actualFloor);
         disarmConsummation(null);
         return true;
+    }
+
+    /**
+     * ADOPTION ENTRY FROM A CLIMBABLE STANCE (owner-ratified 2026-08-21) — the one pose the armed
+     * consummation's {@code entryReady} gate refuses for a reason that does not apply to it.
+     *
+     * <p><b>What that gate actually tests here.</b> It is called with the bot's OWN foot cell
+     * ({@code entryReady(seamBot, footX(), footY(), footZ())}), so {@link Movement#atWaypoint}'s cell
+     * identity is tautological and {@link Movement#deliverable} short-circuits {@code true} while airborne.
+     * All that survives is {@code atWaypoint}'s SETTLE BAND, {@code [footY.00, footY.20]} — i.e. "is your y
+     * cleanly seated at the bottom of your own foot cell". That band is an ARRIVAL concept (added
+     * 2026-08-05: "a move's arrival pose is the PRECONDITION of the next move"), asked at the END of a move
+     * where the bot has come to rest on something.
+     *
+     * <p><b>Why it is wrong at an adoption on a climbable.</b> A bot topped out on a vine is held by an
+     * oscillation and legitimately sits near the TOP of its foot cell, not the bottom: measured
+     * {@code y=151.988} with {@code footY=151}, which the band rejects by 0.788. Yet the successor itself
+     * would run happily from that pose — {@code Traverse}'s own {@code failWhen} admits anything above
+     * {@code runLo - STEP_ASSIST_MAX_RISE} ({@code 151.4375} here). The gate was refusing a pose the
+     * MOVEMENT considers valid, so the ADOPT held armed forever while the bot alternated between the phase
+     * that satisfies the boundary and the phase that satisfies this gate — never both at once.
+     *
+     * <p><b>Scoped so nothing else can reach it.</b> Not grounded, and on or atop a climbable — no ground
+     * adoption can satisfy either clause, and the fluid movements keep their own {@code entryReady}
+     * overrides untouched ({@code Swim}, {@code SprintSwim}, {@code StartSprintSwim}, {@code EndSprintSwim},
+     * {@code ExitWater}, {@code RideBubbleColumn}), because this is only ever consulted AFTER theirs has
+     * already declined. {@link Movement#deliverable} is still required: the run-2 drag invariant is
+     * independent of the band and stays in force.
+     */
+    private static boolean climbStanceEntry(BotSteering b) {
+        return !b.grounded()
+                && (b.onClimbable() || b.climbableBelow())
+                && Movement.deliverable(b, b.footX(), b.footZ());
     }
 
     /** Drop the §11 armed verdict ({@code reason} non-null = a premise death worth a Debug line). */
@@ -2362,6 +2446,11 @@ public final class PathPlan {
         this.seamPlan = followerPlan;
         this.seamIndex = seamIndex;
         this.seamFirstUnedited = firstUneditedStep;
+        if (Debug.ENABLED && armedVerdict != null && followerCursor != this.seamCursor) {
+            OrebitCommon.LOGGER.info(
+                    "[Orebit] seamCursor {}→{} (promptImpactedReplan) armedTerminal={}",
+                    this.seamCursor, followerCursor, armedTerminal);
+        }
         this.seamCursor = followerCursor;
         this.seamMoveInFlight = true; // fired mid-steer, by construction (the U1 prompt path)
         this.botFloor = botFloor;

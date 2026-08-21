@@ -333,6 +333,16 @@ loom {
             configName = "Orebit Replan ($minecraft)"
             runDir = "../../../run/replan"
             vmArg("-Dorebit.replan=true")
+            // Physics probe piggy-backs on this superflat server (-Porebit.vinejump=true). It arms
+            // VineJumpProbe, which suppresses ReplanCourse — they would otherwise fight over one bot.
+            project.findProperty("orebit.vinejump")?.let { vmArg("-Dorebit.vinejump=true") }
+            project.findProperty("orebit.vinebridge")?.let { vmArg("-Dorebit.vinebridge=$it") }
+            // Same piggy-back for the 200-rung shaft harness (LadderShaftCourse). The sub-keys are
+            // pass-through, not fixed: -Porebit.ladder.height / .kind / .bore / .trace all reach the JVM.
+            project.findProperty("orebit.ladder")?.let { vmArg("-Dorebit.ladder=$it") }
+            for (key in listOf("height", "kind", "bore", "trace")) {
+                project.findProperty("orebit.ladder.$key")?.let { vmArg("-Dorebit.ladder.$key=$it") }
+            }
             for (key in listOf("debug")) {
                 val v = project.findProperty("orebit.replan.$key")
                 if (v != null) vmArg("-Dorebit.replan.$key=$v")

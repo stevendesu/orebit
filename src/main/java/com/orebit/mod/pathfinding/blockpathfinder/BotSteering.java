@@ -232,6 +232,22 @@ public interface BotSteering {
     default boolean climbableBelow() { return false; }
 
     /**
+     * Is the FLOOR cell {@code (x,y,z)} a climbable whose TOP the bot can walk — the <b>executor mirror</b> of
+     * {@link MovementContext#climbableFloorAt}, read off the LIVE level instead of the search's grid snapshot
+     * (the {@link #solidAt} pattern), and classified through the SAME {@link com.orebit.mod.worldmodel.navblock.NavBlock} bits the planner used
+     * so the two can never disagree about what "climbable top" means.
+     *
+     * <p><b>Why the executor needs it.</b> A {@link MovePlan.Need#FOOTING} is satisfied by {@link #solidAt},
+     * and a vine has no collision — so a {@code Traverse} the planner emitted ACROSS vine tops
+     * ({@code Traverse.CLIMBABLE_TOP_COST}) would hold forever trying to place a plank the search never
+     * priced. This is the predicate that lets the runner recognise the footing it was actually given; see
+     * {@link MovePlan.Phase#needFootingOrClimbable}.
+     *
+     * <p>Default {@code false} for the headless test doubles, which have no level to read.
+     */
+    default boolean climbableFloorAt(int x, int y, int z) { return false; }
+
+    /**
      * Whether a <b>standable surface</b> sits close enough BELOW the bot's feet to arrest a step-off — the
      * discriminator between "hanging on a curtain over nothing" and "clinging to a curtain that merely grows
      * over a floor". Owner ruling 2026-08-02: while moving laterally on a climbable, the sneak stance-hold is

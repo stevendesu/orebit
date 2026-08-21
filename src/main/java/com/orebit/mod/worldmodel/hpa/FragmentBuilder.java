@@ -103,6 +103,36 @@ public final class FragmentBuilder {
                              int passCount, int standCount, int waterCount,
                              long hardnessSumSolid, int solidCount,
                              RegionFragments out) {
+        build(passable, standable, water, null, G, passCount, standCount, waterCount,
+                hardnessSumSolid, solidCount, out);
+    }
+
+    /**
+     * As above, additionally carrying the <b>climbable</b> mask — the third kind of FOOTING (owner ruling
+     * 2026-08-21), beside water-at-the-cell and a standable floor below.
+     *
+     * <p><b>Why a climbable is footing.</b> {@code typeS} asks "is there a cell in this component where the
+     * bot can BE, with air above" — the region tier's claim that the fragment is somewhere you can arrive
+     * and stand, not merely fall through. Water already makes that claim by treading; a ladder, vine or
+     * scaffold makes it by gripping, and vanilla holds the bot there indefinitely. Without the term a
+     * floorless climbable column is {@code ¬S} everywhere, which types it as the pure-air
+     * {@link RegionFragments#KIND_AIR} class — <b>a one-way DOWN chute</b> — so the region tier will not
+     * route UP it and heads for whatever real surface it can see instead.
+     *
+     * <p><b>Measured</b> (LadderShaftCourse, a 200-rung vine shaft in the void, 2026-08-21): the goal was
+     * correct and built ({@code goal=(1399,260,1400)(built=true)}), yet the skeleton reported
+     * {@code goalRegion=(87,20,87) reachedGoal=false} and aimed its window at {@code (1399,-61,1399)} — the
+     * superflat ground ~320 blocks BELOW — because every fragment in the shaft was {@code ¬S}. The block
+     * tier then exhausted trying to path down through void.
+     *
+     * <p>The HEADROOM half needs no change: the flood mask is {@link NavBlock#floodPassable}, which already
+     * counts climbables (and openables) as air, so a rung above a rung clears it — for ladders as well as
+     * vines. {@code null} = no climbable mask (the legacy overload above, and every existing test).
+     */
+    public static void build(boolean[] passable, boolean[] standable, boolean[] water, boolean[] climbable,
+                             int G, int passCount, int standCount, int waterCount,
+                             long hardnessSumSolid, int solidCount,
+                             RegionFragments out) {
         out.reset(G);
         final int cells = G * G * G;
 
@@ -127,6 +157,7 @@ public final class FragmentBuilder {
         // 2) Flood the passable cells (keep-all), computing per-component types, cap, extract footprints.
         out.setKind(RegionFragments.KIND_MIXED);
         final boolean[] wat = water != null ? water : DRY;
+        final boolean[] clb = climbable != null ? climbable : DRY;
 
         // Leaf-scale label emission (label-slab membership): the flood below visits every
         // passable cell anyway and the queue holds exactly one component's cells at a time, so stamping each
@@ -185,7 +216,10 @@ public final class FragmentBuilder {
                 boolean cellWater = wat[c];
                 if (cellWater) typeW = true;
                 if (!typeS) {
-                    boolean footing = cellWater || ((y > 0) && standable[c - G2]);
+                    // THREE kinds of footing (owner ruling 2026-08-21): tread water, grip a climbable, or
+                    // stand on a floor below. See the build overload's javadoc for why the climbable term
+                    // is not optional — without it a floorless vine/ladder column is a one-way down chute.
+                    boolean footing = cellWater || clb[c] || ((y > 0) && standable[c - G2]);
                     if (footing) {
                         boolean headAir = (y == G - 1) || (passable[c + G2] && !wat[c + G2]);
                         if (headAir) typeS = true;
