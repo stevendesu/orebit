@@ -175,11 +175,21 @@ public final class CostPyramidCodec {
     // (ladder-blind) connectivity until its leaves are rebuilt from live or <world>/orebit/ is deleted.
     // 2026-08-17 (fluid-flow arc classification split, DESIGN-fluid-flow-prediction.md §3): the
     // FLUID_SOURCE / FLUID_MIN_LEVEL descriptor bits fan water and lava states into source / flowing /
-    // min-level navtypes (waterlogged states all read source, so they do not fan further). Flood output
+    // min-level navtypes (waterlogged states all read source, so they do not fan further). [FLUID_MIN_LEVEL
+    // was superseded by the FLUID_LEVEL field on 2026-08-20 — see the entry below; this text stands as what
+    // was true when the arc landed.] Flood output
     // and standable verdicts are unchanged at every fluid cell (neither the region flood mask nor any
     // standable predicate consults the new bits) — new navtypes appearing is normal per-boot churn, not
     // a semantic change to persisted leaf data: the fence-gate precedent. No bump; the arc's
     // planner-strength change lives in the INVAL_SIG_SCHEMA_VERSION history below (its v6 entry).
+    // 2026-08-20 (eye-submersion fix): FLUID_MIN_LEVEL (bit 53) was WIDENED into the 3-bit FLUID_LEVEL
+    // field (53-55) carrying the fluid's exact amount; FLUID_SOURCE (52) is untouched. Water and lava
+    // states now fan per amount rather than per source/flowing/min, so the navtype table grows again.
+    // Same verdict as the 2026-08-17 entry above and for the same reason: neither the region flood mask
+    // nor any standable predicate consults the level, so flood output and standable verdicts are
+    // unchanged at every fluid cell — normal per-boot navtype churn, not a semantic change to persisted
+    // leaf data. No bump. The arc's planner-strength change is in the INVAL_SIG_SCHEMA_VERSION history
+    // below (its v7 entry), and note that it points the OTHER WAY from v3-v6.
     // (The "v2" above is HISTORY, not the live value — see the pre-release pin note at the top.)
     static final short VERSION = 1;
 
@@ -233,7 +243,20 @@ public final class CostPyramidCodec {
      *  recorded under the lava-refusing planner can be plainly FALSE for the very caps sig it names, so
      *  old negatives are over-pessimistic and the section is dropped (re-learn). The cost body's {@code
      *  VERSION} is untouched — the arc's classification split is normal navtype churn (see the 2026-08-17
-     *  entry in the {@code VERSION} history above), not a semantic change to persisted leaf data. */
+     *  entry in the {@code VERSION} history above), not a semantic change to persisted leaf data.
+     *  <p>v7 (2026-08-20, the eye-submersion fix): no bit moved and no sig dimension changed, and unlike
+     *  v3&ndash;v6 the planner got strictly <b>WEAKER</b> under unchanged caps — {@code StartSprintSwim}'s
+     *  in-place branch now demands that the head cell's fluid actually cover the EYES
+     *  ({@code MovementContext.eyesSubmergedWithHeadIn}) instead of merely holding water, so a set of
+     *  prone-entry candidates every earlier search emitted is no longer offered. <b>This direction does not
+     *  drop sections, and that asymmetry is the point of this entry.</b> Invalidation rows record
+     *  "unreachable" NEGATIVES; a planner that offers strictly fewer moves can only make more things
+     *  unreachable, so a v6 negative stays true under v7 — the over-pessimism argument that retired v2..v6
+     *  simply does not apply. Dropping here would discard sound evidence for nothing. A future reader
+     *  pattern-matching on the entries above should stop and check the DIRECTION of the planner change
+     *  before reaching for a bump. The cost body's {@code VERSION} is likewise untouched (see its
+     *  2026-08-20 entry): {@code LeafCostComputer}'s only swim term prices crossing a FULLY-FLOODED leaf,
+     *  whose cells are sources at amount 8 and therefore sit far above the new threshold. */
     static final int INVAL_SIG_SCHEMA_VERSION = 1;
     /** Invalidation-section region-graph class — 0 = "optimistic-v1", today's single symmetric/optimistic
      *  connectivity graph. A future capability-aware graph persists its own sections under a new id; rows never

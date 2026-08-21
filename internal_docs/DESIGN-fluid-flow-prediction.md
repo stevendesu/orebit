@@ -230,8 +230,23 @@ for breaks actually folded next to fluid. See §5.
 
 ## §3 Descriptor bits (2 new)
 
+> **SUPERSEDED IN PART, 2026-08-20 (owner-ratified).** `FLUID_MIN_LEVEL` was widened from one bit into the
+> 3-bit **`FLUID_LEVEL`** field (descriptor bits 53–55) holding the fluid's exact `amount` (1–8, stored as
+> `amount - 1`); `NavBlock.isFluidMinLevel` survives unchanged as the derived predicate `fluidLevel(d) == 1`,
+> so every consumer in this document still reads correctly and the funnel below needed no edit. `FLUID_SOURCE`
+> at bit 52 is untouched. The driver was the eye-submersion gate on `StartSprintSwim`: vanilla grants the
+> prone swim pose only when the fluid SURFACE clears `getEyeY()`, and a flowing block's surface is `amount/9`
+> of its cell, so the *exact* amount — not merely "is it minimal" — is what the swim moves need. Keeping the
+> whole amount rather than adding a second threshold bit means the next movement that needs a level costs no
+> further descriptor bits. Cost: water and lava each fan from 3 navtype groups to 9. Measured **+12 navtypes
+> on both a live 26.2 server (519 → 531) and headless 1.21.11 (483 → 495)** — the delta is version-independent
+> because every version has the same eight fluid amounts. See `NavBlock`'s bit-layout table for the encoding
+> and `MovementContext.eyesSubmergedWithHeadIn` for the physics derivation.
+
 - **`FLUID_SOURCE`** — the fluid state is a source (`amount == 8`).
-- **`FLUID_MIN_LEVEL`** — `amount == 1`, i.e. one more lateral step yields amount 0.
+- **`FLUID_MIN_LEVEL`** — `amount == 1`, i.e. one more lateral step yields amount 0. *(Now derived from
+  `FLUID_LEVEL`; see the note above. Note that `amount == 8` alone does NOT mean source — falling water is
+  amount 8 and not a source, which is why sourcehood keeps its own bit.)*
 
 **Deliberate choice: `FLUID_MIN_LEVEL` is `amount == 1`, fluid-agnostic.** Overworld lava (`dropOff=2`)
 also cannot spread at amount 2, but `getDropOff` is **dimension-dependent** (`isFastLava` → nether lava is
@@ -554,7 +569,10 @@ HOLDS — the correct behaviour here, because the precondition becomes true on i
 ## §9 Tests
 
 - **Descriptor:** `FLUID_SOURCE` / `FLUID_MIN_LEVEL` set on the right states across the version range;
-  navtype split does not exceed the cap; **no test asserts a navtype COUNT**.
+  navtype split does not exceed the cap; **no test asserts a navtype COUNT**. (2026-08-20: the same
+  assertions now cover the derived `FLUID_LEVEL` field, plus exact per-amount round-trips — the fact that
+  the pre-existing min-level pins pass unchanged against the derived accessor is itself the regression
+  evidence for the widening.)
 - **Flag:** `HAS_FLUID_NEIGHBOR` scatter matches the lava term's seam behaviour in both vertical
   directions; patch-path re-derivation agrees with a full rebuild (the `PatchStorm` identity property).
 - **Funnel, tier 1:** the steady-state table (§1.1) — source spreads; mid-column flowing does not;

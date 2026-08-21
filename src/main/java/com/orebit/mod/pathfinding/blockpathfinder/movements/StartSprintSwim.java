@@ -11,7 +11,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
 /**
  * Initiate a sprint-swim — the STANDING→PRONE mode transition (the stateful water rule). It does NOT move
  * the bot: it flips the search node's mode in place at the same {@code (x,y,z)}, and is valid only where
- * vanilla lets you <i>start</i> sprint-swimming — in <b>2-deep</b> water (feet AND head submerged), the only
+ * vanilla lets you <i>start</i> sprint-swimming — with the feet in water and the EYES under its surface, the only
  * place the prone {@code Pose.SWIMMING} can be entered. Once {@link MovementContext#MODE_PRONE PRONE},
  * {@link SprintSwim} carries the bot on through 1-deep water and 1-tall gaps (the pose is retained) — exactly
  * the move-state continuation a position-only search could never express.
@@ -31,11 +31,27 @@ public final class StartSprintSwim implements Movement {
         if (ctx.mode() != MovementContext.MODE_STANDING) return; // already prone (or other) — nothing to start
         if (!ctx.built(x, y + 1, z) || !ctx.water(x, y + 1, z)) return; // must be in water (feet wet) to swim
 
-        // (1) Already fully submerged here (feet AND head water = 2-deep) → go prone IN PLACE. (Mostly the
-        //     start cell when a replan fires mid-dive; an ordinary STANDING node can't be fully submerged,
-        //     since walking/swimming only ever lands it on dry ground or a water surface.)
+        // (1) Already fully submerged here → go prone IN PLACE. (Mostly the start cell when a replan fires
+        //     mid-dive; an ordinary STANDING node can't be fully submerged, since walking/swimming only ever
+        //     lands it on dry ground or a water surface.)
+        //
+        //     "Submerged" is an EYE test, not a two-cells-of-water test. Vanilla only starts a swim while
+        //     isUnderWater(), i.e. with the fluid surface above getEyeY() — and a flowing block's surface is
+        //     amount/9 of its cell, which can sit BELOW eye height even though the cell is unambiguously
+        //     "water". This is precisely the 2026-08-20 noodle-cave wedge: a 1-wide stream ran four blocks
+        //     horizontally before dropping, leaving a shallow flow in the head cell; the planner emitted this
+        //     move, the physics declined the pose, and the bot stalled in the transition forever.
+        //     See MovementContext#eyesSubmergedWithHeadIn for the derivation and the version sweep.
         if (ctx.built(x, y + 2, z) && ctx.water(x, y + 2, z)) {
-            out.accept(x, y, z, COST, MovementContext.MODE_PRONE);
+            if (ctx.eyesSubmergedWithHeadIn(x, y + 2, z)) {
+                out.accept(x, y, z, COST, MovementContext.MODE_PRONE);
+            }
+            // Deliberately RETURN either way. A head cell that holds water but not enough of it is not a
+            // surface-tread pose, so branch (2)'s dive does not describe it; falling through would emit a
+            // dive on geometry we have not reasoned about. Emitting NOTHING is the correct answer — the bot
+            // must break through or route around, exactly as the owner ruled for the analogous Swim
+            // step-down-into-water case (2026-08-20). The only vanilla ways to initiate from a sub-eye cell
+            // are an already-underwater pose or a trapdoor crawl, and we model neither.
             return;
         }
         // (2) Treading at the SURFACE of deep water (head is open air, but the floor cell below the feet is
