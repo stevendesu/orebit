@@ -611,9 +611,9 @@ public final class NavGridUpdater {
         // authoritatively (both sides) AFTER — resolving the lateral neighbour from the same live store. This
         // sits OUTSIDE drain() deliberately: BatchDrainIdentityTest drives drain() directly against a
         // lateral-free sequential reference, and flush() is not exercised under the Knot test classloader.
-        EdgeFluidScatter.collect(queue, minY);
+        EdgeScatter.collect(queue, minY);
         drain(queue, minY, chunks);
-        EdgeFluidScatter.reconcile(chunks, minY, k -> bumpChunk(level, NavStore.keyX(k), NavStore.keyZ(k)));
+        EdgeScatter.reconcile(chunks, minY, k -> bumpChunk(level, NavStore.keyX(k), NavStore.keyZ(k)));
     }
 
     // Drain sort-key layout (one long per pending cell, grouped by section when sorted):

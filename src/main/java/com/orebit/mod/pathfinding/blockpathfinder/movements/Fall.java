@@ -106,8 +106,10 @@ import com.orebit.mod.worldmodel.pathing.TraversalGrid;
  * exact for a vertical drop whose crossed faces are never a panel's cardinal blocked face; closed trapdoors
  * stay standable landings), the step-off body the stricter {@link MovementContext#passable} (a lateral
  * crossing, kept conservative in v1). The highest reachable landing wins (shortest, safest drop). Fall folds no edits
- * on any landing the TERRAIN alone makes survivable (you can't usefully break/place mid-drop), so it never
- * consults {@code RISKY_EDIT}; the single clutch place above is the one exception. Every cell the
+ * on any landing the TERRAIN alone makes survivable (you can't usefully break/place mid-drop), so no edit
+ * gate ever applies to it; the single LANDS-ON-TOP clutch place is the one exception, and it is gated like
+ * any other place — at the cell it fills — by the fold-sited {@code RISKS_GRAVITY} test inside
+ * {@code EditScratch} (placing a clutch beside an unsupported gravity column IS a cave-in poke). Every cell the
  * drop transits (the step-off body and the whole column down to the landing feet/head) is additionally
  * priced per cell via {@link MovementContext#cellTransitCost}/{@link MovementContext#bodyTransitCost} —
  * dropping through fire / a berry bush costs a mortal bot the damage surcharge, and a cobweb / powder-snow

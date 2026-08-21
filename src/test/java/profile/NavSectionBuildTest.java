@@ -72,7 +72,7 @@ public class NavSectionBuildTest {
         // DESIGN-fluid-flow-prediction.md §4), and this single-section entry point runs only
         // classify + computeFlags, never the depth pass — so headless single-section grids keep the bit
         // clear by design (the funnel's tier-0 reads "clear ⇒ cannot flood": correctness-by-fallback,
-        // erring dry). The scatter itself is proven by FluidScatterIdentityTest.
+        // erring dry). The scatter itself is proven by ScatterIdentityTest.
         assertFalse(NavFlags.hasFluidNeighbor(g.flags(1, 5, 2)), "classifyInto never scatters the fluid bit (lateral)");
         assertFalse(NavFlags.hasFluidNeighbor(g.flags(2, 6, 2)), "classifyInto never scatters the fluid bit (above)");
         assertFalse(NavFlags.hasFluidNeighbor(g.flags(8, 10, 8)), "open air far from fluid carries no fluid bit");

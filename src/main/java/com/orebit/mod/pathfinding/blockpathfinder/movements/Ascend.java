@@ -25,7 +25,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  * resident HEADROOM bit: the source's own feet/head are already clear (the bot stands there), so its
  * HEADROOM is {@code JUMP} exactly when {@code y+3} is clear; the landing needs {@code WALK}. Cells the
  * bit can't prove (near a section face, or genuinely blocked) are read and — when the bot may break and
- * the edit isn't {@code RISKY_EDIT} — folded into a break-set.
+ * breaking THAT cell would not drop a gravity block ({@code NavFlags.RISKS_GRAVITY}, enforced at the fold
+ * inside {@code EditScratch}) — folded into a break-set.
  *
  * <p><b>The same-level jump arm (owner-ratified, DESIGN-trapdoors.md §6).</b> A {@code dy = 0} neighbour
  * whose surface-to-surface rise sits in {@code (STEP_ASSIST_MAX_RISE, JUMP_RISE]} — a 13/16 plate→full
@@ -114,7 +115,6 @@ public final class Ascend implements Movement {
         // feet/head are clear; HEADROOM == JUMP iff the takeoff head-clearance (y+3) is also clear.
         int srcFlags = ctx.flagsAt(x, y, z);
         boolean srcClear = ctx.headroomProves(srcFlags, x, y, z, MovementContext.HEADROOM_JUMP);
-        boolean srcRisky = MovementContext.risksEdit(srcFlags);
         // The START surface height (sixteenths) — a partial start (slab, top 8) eats into the jump
         // budget: every rise below is measured from THIS surface (MovementContext.rise). Read the start
         // descriptor ONCE and derive both the scalar surface (== floorSurface: a non-standable float node's
@@ -152,7 +152,7 @@ public final class Ascend implements Movement {
             // (directional 8/16) starts can never fire the arm. One in-register compare per direction
             // skips the dest-column reads on essentially every pop.
             if (sTop <= SAME_LEVEL_MAX_START_TOP) {
-                sameLevelJump(ctx, out, x, y, z, d, sTop, srcClear, srcRisky, exitDoorToggle);
+                sameLevelJump(ctx, out, x, y, z, d, sTop, srcClear, exitDoorToggle);
             }
 
             // The destination floor (nx,uy,nz) is read three ways below (standable, topY, flags) — resolve
@@ -184,7 +184,7 @@ public final class Ascend implements Movement {
             }
 
             int dstFlags = MovementContext.flagsOf(dstPacked);
-            EditScratch e = ctx.edits().reset(!(srcRisky || MovementContext.risksEdit(dstFlags)));
+            EditScratch e = ctx.edits().reset();
             // §2b: fold the exit-door toggle onto this arm when leaving through a blocked (toggleable) feet door.
             if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
             // The landing's EFFECTIVE floor: the standing block, the toggled-closed hatch, or (build arm)
@@ -207,7 +207,9 @@ public final class Ascend implements Movement {
                 // Footing: BUILD A STEP UP. If the footing one-up-and-over has no face of its own (open
                 // air / a ledge), a support block is placed beneath it against the floor the bot stands
                 // on, then the footing on top — the two-block staircase step. requireFootingOn folds 0, 1
-                // or 2 places; invalid if the bot can't place or the spot is RISKY_EDIT.
+                // or 2 places; invalid if the bot can't place, or if placing at the footing or the support
+                // would drop a gravity block (the fold-sited RISKS_GRAVITY gate — now covering the SUPPORT
+                // cell too, which no frame ever read before).
                 e.requireFootingOn(nx, uy, nz, nx, y, nz);
             }
             // The takeoff head-clearance (source y+3) and the landing body (feet+head) must be clear; cells
@@ -245,8 +247,7 @@ public final class Ascend implements Movement {
      * the direction and must not silence this arm.
      */
     private static void sameLevelJump(MovementContext ctx, CandidateSink out, int x, int y, int z,
-                                      int[] d, int sTop, boolean srcClear, boolean srcRisky,
-                                      boolean exitDoorToggle) {
+                                      int[] d, int sTop, boolean srcClear, boolean exitDoorToggle) {
         int nx = x + d[0];
         int nz = z + d[1];
         int lvlPacked = ctx.packedAt(nx, y, nz);
@@ -261,7 +262,7 @@ public final class Ascend implements Movement {
             if (rise > MovementContext.JUMP_RISE) return;            // taller than one jump gains
         }
         int lvlFlags = MovementContext.flagsOf(lvlPacked);
-        EditScratch e = ctx.edits().reset(!(srcRisky || MovementContext.risksEdit(lvlFlags)));
+        EditScratch e = ctx.edits().reset();
         if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
         long lvlFloor = lvlDesc;
         int lvlTop;

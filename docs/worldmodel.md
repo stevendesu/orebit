@@ -47,9 +47,10 @@ Key decisions:
   reads: the low **10 bits** are the navtype index (1024 possible — ~1.7× headroom
   over the measured count), and the high **6 bits** are precomputed
   *neighbour-property flags* — walkable headroom above the floor (that one takes two
-  bits), "editing here could drop gravel on you or disturb lava", "there's a
+  bits), "breaking or placing **here** will drop a gravity block", "there's fluid
+  touching this cell, so opening it up may flood it", "there's a
   walk-through hazard in the body space", "there's something in the body space that
-  slows you as you pass through it", "there's a solid face to place a block against".
+  slows you as you pass through it".
   Most of these are multi-cell facts the movement code would otherwise re-derive on
   every search expansion; computing them once at build time turns them into a single
   masked array access. That accounts for all sixteen bits exactly — **the cell is

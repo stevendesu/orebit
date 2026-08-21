@@ -75,6 +75,11 @@ class BatchDrainIdentityTest {
                 NavBlock.navtypeFor(Blocks.GLASS.defaultBlockState()),
                 NavBlock.navtypeFor(Blocks.WATER.defaultBlockState()),
                 NavBlock.navtypeFor(Blocks.LADDER.defaultBlockState()),
+                // SAND (a gravity block) is the randomized proof that RISKS_GRAVITY's scatter-owned half B
+                // survives arbitrary edit sequences including the seam rows — the class's "every flag is a
+                // pure function of the final navtype field on the union of recompute windows" claim was
+                // otherwise untested for that term (owner ruling 2026-08-21).
+                NavBlock.navtypeFor(Blocks.SAND.defaultBlockState()),
         };
     }
 

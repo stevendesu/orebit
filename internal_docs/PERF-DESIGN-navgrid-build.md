@@ -26,7 +26,7 @@ committed → the JFR (§3) establishes it.
 | Pass | What | Class | Reads/output cell |
 |---|---|---|---|
 | 1 classify | navtype interning (palette decode + `navtypeFor` map) | LOCAL + fixed palette cost | own cell; palette-sized decode/section |
-| 2 flags | `NavFlags.compute` — headroom/hazard/slow/**RISKY_EDIT**/placeable | **NEIGHBOR-AWARE (heavy)** | **~27 worst** |
+| 2 flags | `NavFlags.compute` — headroom/hazard/slow/**RISKS_GRAVITY half A** | **NEIGHBOR-AWARE (heavy)** | **~27 worst** |
 | 3 depth | `floorGap` (↓ sweep) + `runUp` (↑ sweep) nibbles | NEIGHBOR-AWARE (cheap) | 1 each |
 
 **CONFIRMED (JFR on-CPU, `ChunkBuildBenchmark.navgrid`, 2026-07-25):** the cost is **Pass 2 flag
@@ -60,6 +60,31 @@ same output, not an approximation.
 
 ### C1 — Fluid SCATTER, folded into the depth sweep (FLAGSHIP; owner 2026-07-25; bit-identical)
 
+> **SEMANTIC SUPERSESSION — owner ruling 2026-08-21: bit 0 became CELL-CENTRED and SPLIT-OWNERSHIP, and
+> this scatter now carries TWO terms behind ONE union mask test.** `RISKY_EDIT` was renamed
+> **`RISKS_GRAVITY`** and reframed to *"breaking or placing at THIS CELL drops a gravity block"*
+> (DESIGN-fluid-flow-prediction.md §4.3 has the two ratified rules). The consequences for the machinery
+> described below:
+> - **Ownership is split.** `NavFlags.compute` writes **half A** — `hasGravity(a1)`, a pure upward column
+>   read that the existing overscan already serves. `computeDepth`'s ascending sweep scatters **half B**
+>   (`scatterGravityNeighbor`, from every UNSUPPORTED gravity cell) on exactly the fluid term's geometry:
+>   the shared `NavFlags.SIX` table, the vertical section seam crossed in BOTH directions through the real
+>   below/above grids, the lateral chunk face dropped for `EdgeScatter`.
+> - **One dispatch, not two.** The sweep tests `d & NavBlock.SCATTER_MASK` (low FLUID bit ∪ GRAVITY bit)
+>   once per cell; the ordinary cell pays exactly the one predictable not-taken branch the fluid term alone
+>   used to cost, and the two predicates discriminate on the cold side.
+> - **The patch window widened `ly+1 → ly+2`.** The gravity gather reads one row DEEPER than the fluid one
+>   (its `-y` neighbour's own support), so inverting, an edit can flip half B two rows ABOVE itself — the
+>   supported→unsupported transition. `recomputeWindow`'s box is now `(lx±1, ly-3..ly+2, lz±1)`, and the
+>   above-seam pass arms at `ly >= 14` (not `ly == 15`), reaching the above section's rows 0–1.
+> - **`EdgeFluidScatter` is now `EdgeScatter`** — one class, one face walk, both bits (`crossBitsAt`
+>   returns the OR). Its patch-side `neighbourRederive` re-derives **two** cells (`colY` and `colY+1`), the
+>   one structural addition the gravity term forces: the `+1` cell reads the edited cell as its own lateral
+>   neighbour's SUPPORT.
+> - **Perf:** re-measure with `PatchStormBenchmark` (SCATTER/DIG/TOGGLE/**SEAM**) — the widened window and
+>   the second gather are squarely in SEAM's blast radius, the same place the fluid above-seam pass cost
+>   +3.5%.
+
 > **SEMANTIC SUPERSESSION — owner ruling 2026-08-10: the term is now LAVA-ONLY, UNCONDITIONAL, and
 > 6-DIRECTIONAL.** Everything below about *which cells* RISKY_EDIT's fluid term covers is HISTORY. The
 > mechanism (a scatter folded into `computeDepth`'s ascending sweep, a patch-path gather, a cross-chunk
@@ -78,22 +103,27 @@ same output, not an approximation.
 >   the above grid as well as the below one, and the patch path grew (a) an explicit below-grid read for its
 >   row-0 cells and (b) an **above-seam window** for `ly == 15` edits — the lava term is the first flag fact
 >   that reads DOWNWARD across a section face, which the upward-only descriptor overscan cannot serve; the
->   cross-chunk lateral fold (`EdgeFluidScatter`) loses its row offset and its flowing carry (same `colY`).
+>   cross-chunk lateral fold (`EdgeScatter`, then named `EdgeFluidScatter`) loses its row offset and its
+>   flowing carry (same `colY`).
 > - **Perf note:** the non-lava common case is now ONE mask test per cell with no scratch read at all, so
 >   the build sweep is cheaper than the flowing variant measured below. The patch path is slightly more
 >   expensive: `ly == 15` edits now pay one extra `fillScratch` + a one-row window (`PatchStormBenchmark`
 >   re-measure pending).
 >
-> The authoritative prose lives in `NavFlags`'s class Javadoc ("RISKY_EDIT's fluid term: LAVA-ONLY,
-> unconditional, 6-directional"). The rest of this section is retained as the record of how the scatter
-> mechanism was derived and why the seam carry was continuous.
+> The authoritative prose lives in `NavFlags`'s class Javadoc — the fluid term under
+> **"HAS_FLUID_NEIGHBOR: ANY fluid, unconditional, 6-directional"**, and, since the 2026-08-21
+> reframe, bit 0's own term under **"RISKS_GRAVITY: two halves, two owners"** (half A is
+> `NavFlags.compute`'s upward read, half B is this same scatter apparatus with a second term).
+> The rest of this section is retained as the record of how the scatter mechanism was derived and
+> why the seam carry was continuous.
 
 The owner's reformulation, superseding the earlier per-section palette-guard (which had only
 section-level fidelity, still paid the 3-row overscan, and would have to persist `hasFluid`/`hasGravity`
 never used at search). Replace the per-cell **gather** (each cell scans neighbours for fluid) with a
 **scatter** (each fluid source marks the cells it endangers), folded into a sweep we already run.
 
-**Bit-exact derivation from `NavFlags.java:150-208`.** RISKY_EDIT's fluid term is
+**Bit-exact derivation from the then-current `NavFlags.compute` (line numbers long since stale — the
+method has been rewritten twice since; read it, do not trust a citation).** RISKY_EDIT's fluid term was
 `risksFluidFlow(y+1) || risksFluidFlow(y+2)`, and `risksFluidFlow(row)` = "a horizontal neighbour at
 `row` is **flowing**", where **flowing(F) ≡ `fluid(F)≠0 && fluid(F_below)==0`** (`:202-203`). So:
 - **Detect flowing** in the bottom-up sweep carrying a per-column `fluidBelow` bit (`DEPTH_COL` pattern):

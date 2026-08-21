@@ -152,13 +152,14 @@ public final class ChunkNavLoader {
         // SLOWTICK navBuild phase: the NavGrid section build + its portal/epoch riders (diagnosis only).
         final long navStart = System.nanoTime();
         NavStore.put(level, k, ChunkNavBuilder.buildAllSections(level, chunk, portals));
-        // DURABLE cross-chunk fluid edge fold (#7 step 3, PERF-DESIGN-navgrid-build §C1): the intra-chunk
-        // SCATTER is lateral-air-optimistic, so lava straddling a chunk boundary leaves the
-        // boundary cells' RISKY_EDIT wrong. Now that this chunk is built + stored, reconcile its 4 lateral
-        // faces against whichever neighbours are already built (both directions, monotone OR into the live
+        // DURABLE cross-chunk edge fold for BOTH scatter-owned flag terms (#7 step 3,
+        // PERF-DESIGN-navgrid-build §C1): the intra-chunk SCATTERs are lateral-air-optimistic, so fluid —
+        // or an unsupported gravity column — straddling a chunk boundary leaves the boundary cells'
+        // HAS_FLUID_NEIGHBOR / RISKS_GRAVITY wrong. Now that this chunk is built + stored, reconcile its
+        // 4 lateral faces against whichever neighbours are already built (both directions, monotone OR into the live
         // neighbour grid — tick-thread single-writer, planners only read). Each MODIFIED neighbour is bumped;
         // this chunk's own bump follows unconditionally below.
-        EdgeFluidScatter.reconcileBuild(NavStore.chunksOf(level), NavStore.keyX(k), NavStore.keyZ(k),
+        EdgeScatter.reconcileBuild(NavStore.chunksOf(level), NavStore.keyX(k), NavStore.keyZ(k),
                 nk -> NavGridUpdater.bumpChunk(level, NavStore.keyX(nk), NavStore.keyZ(nk)));
         // Newly BUILT nav data is as plan-relevant as an edit: advance THIS chunk's version so the
         // follower's terrain-recheck re-searches only a plan that traverses this chunk (without this a

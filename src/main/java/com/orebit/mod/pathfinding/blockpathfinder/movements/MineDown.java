@@ -32,9 +32,11 @@ import com.orebit.mod.pathfinding.blockpathfinder.cuboid.NavGridCuboidsView;
  * following move.
  *
  * <p><b>Caps.</b> Requires {@link BotCaps#canBreak}; a non-breaking bot emits nothing. The floor must be
- * actually breakable (not bedrock/fluid) and not {@code RISKY_EDIT} (don't undermine a gravity stack —
- * strictly gravity since DESIGN-fluid-flow-prediction.md §4.1; a dig that would flood is PRICED through
- * the {@link EditScratch} fold funnel's verdict, never refused).
+ * actually breakable (not bedrock/fluid) and must not carry {@code NavFlags.RISKS_GRAVITY} — don't
+ * undermine a gravity stack. That gate is fold-sited inside {@link EditScratch}, read at each level's own
+ * broken cell, so a macro shaft clamps at the first level whose break would drop gravel. (A dig that would
+ * FLOOD is a different matter: PRICED through the {@link EditScratch} fold funnel's verdict, never
+ * refused.)
  *
  * <h2>Lava exposure (DESIGN-fluid-flow-prediction.md §6, the 2026-08-17 adversarial-review correction)</h2>
  * MineDown is the one move whose own dig CREATES the lava it then stands in: a {@code BROKEN_LAVA} fold
@@ -105,18 +107,17 @@ public final class MineDown implements Movement {
         if (packed == MovementContext.UNBUILT) return;
         if (!ctx.standable(ctx.descriptorOf(x, dy, z, packed))) return; // must land on solid ground
 
-        // Break the block the bot currently stands on so it can drop into it. RISKY_EDIT on that cell
-        // forbids the break (don't undermine a gravity stack — strictly gravity, DESIGN-fluid-flow-
-        // prediction.md §4.1); unbreakable floor → invalid.
-        int flags = ctx.flagsAt(x, y, z);
-
+        // Break the block the bot currently stands on so it can drop into it. RISKS_GRAVITY at that cell
+        // forbids the break (don't undermine a gravity stack) — enforced inside EditScratch at the cell the
+        // break actually touches, so every level of the macro shaft is gated by construction and nothing is
+        // read here. Unbreakable floor → invalid.
         // ---- Micro fallback: macros off, no cuboid seam (legacy unbounded search), OR (Option B) this
         //      movement's travel axis (Y) is not the search's primary axis P — an off-P movement skips
         //      cuboidAt + MacroJump so a uniform region is extracted on ONE axis only. Byte-for-byte the
         //      original single-step behaviour — emit exactly one mine-down candidate. ----
         NavGridCuboidsView cuboids = ctx.cuboids();
         if (!BlockPathfinder.MACRO_MOVES || cuboids == null || ctx.macroAxis() != Axes.AXIS_Y) {
-            EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+            EditScratch e = ctx.edits().reset();
             // The floor stood on: break it — or, when it is a toggleable CLOSED trapdoor, fold the §5
             // SET_OPEN instead (the hatch-drop; class doc) and drop through the opened wall panel.
             e.requireAirVertical(x, y, z);
@@ -140,7 +141,7 @@ public final class MineDown implements Movement {
         // be dry); each level k ≥ 2 digs grounded (standing on the level it breaks) and submerged exactly
         // when ITS head cell — level k−2's already-folded break, or the original mouth for k == 2 — reads
         // water scratch-first (EditScratch.readsWater; lava does not submerge the eye).
-        EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+        EditScratch e = ctx.edits().reset();
 
         // Per-step move cost = base move + the break folded onto each level. Use the REAL break cost of the
         // column substrate (the floor cell the bot is currently standing on), not a literal — cheap moves
@@ -173,10 +174,6 @@ public final class MineDown implements Movement {
         float exposure = 0f; // Σ per-level lava-exposure (class doc "Lava exposure"); 0 on dry/water shafts
         for (int k = 1; k <= J; k++) {
             int by = y - (k - 1); // the floor cell broken on step k
-            // Re-evaluate RISKY_EDIT per level (the micro move does, since each shaft cell is its own node):
-            // don't undermine a gravity stack mid-shaft just because the START cell was safe. The start
-            // level (k==1) was already gated by the reset() above. Clamp the jump above a risky cell.
-            if (k > 1 && MovementContext.risksEdit(ctx.flagsAt(x, by, z))) { J = k - 1; break; }
             // Break — or §5-toggle a closed hatch — the step-k floor. Level 1 digs at the node's own stance;
             // each deeper level at ITS OWN flood-latched stance (the explicit-stance overload): grounded,
             // submerged exactly when the level's head cell (by+2) reads water through the scratch chain.

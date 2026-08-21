@@ -19,21 +19,34 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * the floor; {@code (x,y+1,z)}…{@code (x,y+3,z)} are the body/clearance space above. (Same convention the
  * movement layer uses — an A* node IS a floor cell. A cell's <i>own</i> geometry — standable, slow,
  * damaging floor, fluid — stays in the navtype descriptor, read via {@code descriptorAt}; only the
- * neighbour-derived facts live here.) The one exception is {@code HAS_FLUID_NEIGHBOR}, which is
- * deliberately CELL-CENTRED, not floor-framed — see its entry.
+ * neighbour-derived facts live here.) TWO bits are exceptions — {@code HAS_FLUID_NEIGHBOR} and
+ * {@code RISKS_GRAVITY} — and both are deliberately CELL-CENTRED, not floor-framed: they answer "what
+ * happens if I EDIT this cell", a question about the cell itself, and the frame of the mover is
+ * irrelevant to it. {@code RISKS_GRAVITY} is additionally SPLIT between two owners — {@link #compute}
+ * writes the half that is a pure upward column read, the build/patch scatter owns the half that reads
+ * laterally and two rows downward — see the section below.
  *
  * <h2>The bitmask (all 6 bits used)</h2>
  * <pre>
- *   bit 0     RISKY_EDIT         breaking/placing at/next to this cell could drop a GRAVITY block onto
- *                                the bot — a BREAK/PLACE gate, NOT a walk gate (walking through is
- *                                fine). STRICTLY the gravity term: gravity above the body space, or an
- *                                unsupported gravity block at/above the feet the edit would undercut,
- *                                computed here per cell ({@link #compute}). The LAVA term that used to
- *                                ride this bit under OR migrated to HAS_FLUID_NEIGHBOR
- *                                (DESIGN-fluid-flow-prediction.md §4.1, owner-ratified 2026-08-17); the
- *                                gain is that each fact now has ONE coherent frame — gravity is
- *                                body-space-framed, the fluid fact cell-centred — where the shared bit
- *                                made the frame mismatch unfixable.
+ *   bit 0     RISKS_GRAVITY      breaking or placing at THIS CELL will drop a GRAVITY block — a
+ *                                BREAK/PLACE gate, NOT a walk gate (walking through is fine).
+ *                                Owner-ratified 2026-08-21, two rules:
+ *                                  (a) this cell is DIRECTLY BELOW a gravity block that is currently
+ *                                      SUPPORTED — this cell IS that block's support, so breaking it
+ *                                      drops the block (the UNDERMINING hazard: the shape that killed
+ *                                      the 2026-08-21 flagship at (968,56,905));
+ *                                  (b) this cell is ORTHOGONALLY ADJACENT to a gravity block that is
+ *                                      currently UNSUPPORTED — a suspended column vanilla only drops
+ *                                      when a neighbouring block update pokes it, and editing this cell
+ *                                      IS that update (the classic CAVE-IN; worldgen makes suspended
+ *                                      gravel ceilings constantly).
+ *                                READ IT AT THE CELL BEING EDITED, never at a floor/body frame; the ONE
+ *                                gate site is {@code EditScratch}'s break/place fold. SPLIT OWNERSHIP:
+ *                                {@link #compute} writes HALF A ({@code hasGravity(above)}), the
+ *                                {@code NavSectionBuilder} scatter/gather pair writes HALF B — see the
+ *                                section below. Formerly RISKY_EDIT (floor-framed); the LAVA term that
+ *                                once rode this bit under OR migrated to HAS_FLUID_NEIGHBOR
+ *                                (DESIGN-fluid-flow-prediction.md §4.1, owner-ratified 2026-08-17).
  *   bit 1     CLEARABLE_HAZARD   a walk-through damaging block in the body space (fire, berry bush,
  *                                powder snow) — adds cost, not blocked. (A damaging FLOOR — lava/magma/
  *                                cactus — is intrinsic to the navtype via NavBlock.isDamaging, so it needs
@@ -64,6 +77,35 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *                                body descriptors for the exact per-cell magnitude only when it's set.
  * </pre>
  *
+ * <h2>RISKS_GRAVITY: two halves, two owners (owner ruling 2026-08-21)</h2>
+ * The predicate, written out over the six orthogonal offsets {@link #SIX}:
+ * <pre>
+ *   P(C) = hasGravity(above(C))                                  … HALF A
+ *       OR ∃N ∈ SIX(C): hasGravity(N) &amp;&amp; isPassable(below(N))    … HALF B
+ * </pre>
+ * <ul>
+ *   <li><b>Half A is the whole of rule (a) AND the below-neighbour case of rule (b).</b> For any gravity
+ *       block {@code G}, the cell directly under it takes the bit under (a) when {@code G} is supported and
+ *       under (b) when it is not — and those two cases are exact COMPLEMENTS, because
+ *       {@code unsupported(G) ≡ isPassable(below(G)) ≡ isPassable(C)}. So their union collapses to the bare
+ *       unconditional test {@code hasGravity(above(C))}: a single upward column read, exactly the {@code a1}
+ *       slot {@link #compute} already has and the vertical overscan already serves. Half A therefore needs
+ *       NO scatter, no seam work and no chunk-face work.</li>
+ *   <li><b>Half B — the remaining five offsets — is genuinely lateral and downward-reading</b>
+ *       ({@code N} at {@code y±1}/{@code x±1}/{@code z±1}, and {@code N}'s own support one row below that),
+ *       so it cannot be expressed as a read of the upward-only scratch. It is SCATTER-OWNED, mirroring
+ *       {@code HAS_FLUID_NEIGHBOR} exactly: {@code NavSectionBuilder.scatterGravityNeighbor} scatters it out
+ *       of every UNSUPPORTED gravity cell during the build's depth sweep (crossing the vertical section seam
+ *       in both directions through the real neighbour grids), {@link #risksGravityNeighborGather} gathers it
+ *       on the patch path, and {@link EdgeScatter} closes the lateral chunk faces. Build-scatter ≡
+ *       patch-gather is a hard requirement, pinned by the scatter/patch identity tests.</li>
+ *   <li><b>The centre is deliberately excluded from half B</b> — breaking a floating gravel block drops
+ *       nothing onto anyone; and if a stack rests on it, half A marks the cell under it. The {@code -y}
+ *       offset IS kept in the scatter's table even though half A already marks that cell: scatter and gather
+ *       must express the IDENTICAL set, the bit is OR-composed, so the redundancy is free while an
+ *       asymmetric table is a drift hazard.</li>
+ * </ul>
+ *
  * <h2>HAS_FLUID_NEIGHBOR: ANY fluid, unconditional, 6-directional (DESIGN-fluid-flow-prediction.md §4)</h2>
  * The fact is a pure adjacency DILATION of the fluid set — no flowing test, no cell-below read, no
  * impoundment logic; {@link NavBlock#isFluid}, a single mask test on the already-decoded descriptor:
@@ -89,7 +131,7 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * The build SCATTER ({@link NavSectionBuilder#computeDepth}) and the patch GATHER
  * ({@code NavSectionBuilder.recomputeWindow} via {@link #hasFluidNeighborGather}) express exactly this
  * dilation, so a patched grid stays byte-identical to a rebuild — pinned by
- * {@code FluidScatterIdentityTest} / {@code FluidPatchIdentityTest}.
+ * {@code ScatterIdentityTest} / {@code ScatterPatchIdentityTest}.
  *
  * <p><b>Why the bit is scatter-owned and {@link #compute} never writes it:</b> the descriptor scratch
  * handed to {@code compute} overscans UPWARD only, so an in-{@code compute} gather would be blind to
@@ -115,10 +157,11 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  * <p><b>Lateral faces — the fluid term is CLOSED.</b> The scatter's {@code x±1}/{@code z±1} reads cross
  * CHUNKS at a section's side faces, and the neighbour may not be built when the scatter runs, so the
  * intra-chunk build scatter and patch re-dilation are each lateral-air-optimistic on their own.
- * {@link EdgeFluidScatter} (PERF-DESIGN-navgrid-build §C1 step 3) closes that in BOTH directions at BOTH
+ * {@link EdgeScatter} (PERF-DESIGN-navgrid-build §C1 step 3) closes that in BOTH directions at BOTH
  * sites on the tick thread — wired from {@code ChunkNavLoader} (build) and {@code NavGridUpdater} (patch
- * drain) — so a fluid cell just across a chunk face IS folded into the edge cell's bit. Proven by
- * {@code CrossChunkFluidScatterTest}.
+ * drain) — so a fluid cell just across a chunk face IS folded into the edge cell's bit. The SAME face walk
+ * carries {@code RISKS_GRAVITY}'s half B (one class, one walk, two bits — so the two dilations cannot drift
+ * apart). Proven by {@code CrossChunkScatterTest}.
  *
  * <p><b>The vertical SECTION seam — also closed, in BOTH directions.</b> The 6-neighbour dilation crosses a
  * section face both ways (fluid in row 0 marks row 15 of the section below; fluid in row 15 marks row 0 of
@@ -131,24 +174,37 @@ import com.orebit.mod.worldmodel.navblock.NavBlock;
  *
  * <p><b>Still air-optimistic / stale (recorded, deferred):</b>
  * <ul>
- *   <li><b>The downward face</b> — the {@code y-1} read at a section's bottom row ({@code unsupported})
- *       resolves to air, so RISKY_EDIT over-sets there (a gravity block is assumed unsupported) — errs
- *       safe. The FLUID term is the one downward read that is NOT left optimistic — see the vertical-seam
- *       note above; it is supplied out-of-band from the real below grid, because an optimistic read would
- *       make patch and rebuild disagree at every 16th row and blind the funnel's tier-0 early-out to
- *       fluid directly below the break.</li>
+ *   <li><b>The downward face is now CLOSED for both scatter-owned terms.</b> The old floor-framed
+ *       {@code unsupported()} helper read {@code y-1} through the upward-only scratch, so it resolved to air
+ *       at a section's bottom row and over-set the bit there; that helper is DELETED. Half B's support read
+ *       is served by the real below grid on both sides — the build scatter reads the below section's row 15
+ *       directly ({@code NavSectionBuilder.unsupportedInColumn}) and the patch gather takes an explicit
+ *       {@code belowGrid} for its two-deep reads ({@link #risksGravityNeighborGather}) — exactly as the
+ *       FLUID term's downward read already was. The remaining optimism for both terms is the LATERAL chunk
+ *       face, and only until {@link EdgeScatter} runs (build hook + patch drain hook, same tick).</li>
  *   <li><b>Path edits are NOT layered onto these bits</b> (recorded 2026-08-11; reaffirmed for the fluid
  *       bit by DESIGN-fluid-flow-prediction.md §8's table).
  *       {@code MovementContext.flagsAt} is a raw grid read. Unlike {@code descriptorAt}/{@code descriptorOf}
  *       (which layer the {@code PathEdits} diff) and {@code floorGapAt} (gated by
  *       {@code editsDisjointFromColumn}), this bitmask reflects COMMITTED world state for the whole search.
- *       Two recorded consequences: a break the plan ITSELF folded does not clear the RISKY_EDIT it
- *       invalidates (breaking a gravity block leaves the cell below "risky" for every later node —
- *       over-conservative only, but it costs real routes: observed as a 3-break {@code Descend} detour
- *       chosen over continued {@code MineDown} through a gravel column); and a folded
+ *       Two recorded consequences. (1) A break the plan ITSELF folded does not clear the
+ *       {@code RISKS_GRAVITY} it invalidates, so <b>a shaft cannot be planned more than ONE level into a
+ *       gravity column</b>: at level 2 of a {@code MineDown} the cell being broken still reads "gravity
+ *       directly above" even though the plan broke that gravity at level 1, and the fold-sited gate refuses.
+ *       Over-conservative only, and ACCEPTED as ratified (2026-08-21) — it supersedes the older recorded
+ *       shape ("a 3-break {@code Descend} detour chosen over continued {@code MineDown}"). There is a clean
+ *       fix that needs an owner ruling rather than an ad-hoc patch: half A is exactly
+ *       {@code hasGravity(descriptorAt(x, y+1, z))} and {@code descriptorAt} DOES layer the diff, so half A
+ *       could be evaluated live in the gate and the stored bit reduced to half B alone — a pure mirror of
+ *       {@code HAS_FLUID_NEIGHBOR}. That changes the bit's ratified meaning and what {@code /bot probe}
+ *       reports, so it is deliberately NOT done here. (2) A folded
  *       {@code BROKEN_WATER}/{@code BROKEN_LAVA} neighbour never SETS {@code HAS_FLUID_NEIGHBOR}, so the
  *       funnel's tier-0 early-out is blind to plan-created fluid — errs dry, recoverable, KNOWN AND
  *       DEFERRED to the PathEdits-scatter workflow (§8 table row; do not fix ad-hoc here).</li>
+ *   <li><b>{@code classifyInto}-built grids carry half A but never half B</b> — a single-section producer
+ *       (the headless test/bench path) skips {@code computeDepth}, hence the scatter. The same
+ *       "correctness by fallback" posture {@code HAS_FLUID_NEIGHBOR} already has; live
+ *       {@code ChunkNavBuilder} columns always run pass 3, so it never affects the game.</li>
  * </ul>
  * The movement layer still treats {@code HEADROOM} as a prefilter (re-verifying via {@code descriptorAt}
  * near faces), so any residual optimism is caught in the fine layer, not trusted blindly.
@@ -158,7 +214,7 @@ public final class NavFlags {
     private NavFlags() {}
 
     // ---- Bit layout within the 6-bit field ---------------------------------------------------
-    public static final int RISKY_EDIT         = 1 << 0;
+    public static final int RISKS_GRAVITY      = 1 << 0;
     public static final int CLEARABLE_HAZARD   = 1 << 1;
     private static final int HEADROOM_SHIFT    = 2;
     public static final int HEADROOM_MASK      = 0x3 << HEADROOM_SHIFT; // bits 2-3
@@ -184,11 +240,12 @@ public final class NavFlags {
     private static final long AIR_DESC = NavBlock.descriptor(NavBlock.AIR);
 
     /**
-     * The six orthogonal neighbour offsets {@code (dx,dy,dz)} — the structuring element of the
-     * HAS_FLUID_NEIGHBOR dilation ({@link #hasFluidNeighborGather} gathers it;
-     * {@code NavSectionBuilder.scatterFluidNeighbor} scatters it, reusing this same table so the two can
-     * never drift). Package-visible and READ-ONLY — it is iterated on the build hot path, so it must never
-     * be copied or allocated per cell.
+     * The six orthogonal neighbour offsets {@code (dx,dy,dz)} — the shared structuring element of BOTH
+     * scatter-owned dilations: HAS_FLUID_NEIGHBOR ({@link #hasFluidNeighborGather} gathers it,
+     * {@code NavSectionBuilder.scatterFluidNeighbor} scatters it) and RISKS_GRAVITY's half B
+     * ({@link #risksGravityNeighborGather} / {@code NavSectionBuilder.scatterGravityNeighbor}). All four
+     * reuse this one table so no pair can drift. Package-visible and READ-ONLY — it is iterated on the
+     * build hot path, so it must never be copied or allocated per cell.
      */
     static final int[][] SIX = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
 
@@ -199,13 +256,13 @@ public final class NavFlags {
      * section above's descriptors (vertical overscan; the index formula extends naturally). Reads outside
      * the scratch — lateral, below, or above the overscan — resolve to air (see boundary handling above).
      *
-     * <p>Writes every bit EXCEPT {@link #HAS_FLUID_NEIGHBOR}, which is scatter-owned (see the class doc) —
-     * the caller that stores this result beside live data is responsible for OR-ing the fluid term back in
-     * ({@code NavSectionBuilder.recomputeWindow}, {@code EdgeFluidScatter.rederiveCell}) or scattering it
-     * afterwards ({@code NavSectionBuilder.computeDepth}).
+     * <p>Writes every bit EXCEPT {@link #HAS_FLUID_NEIGHBOR} (wholly scatter-owned) and
+     * {@link #RISKS_GRAVITY}'s HALF B (the lateral/two-deep half; half A IS written here) — see the class
+     * doc. The caller that stores this result beside live data is responsible for OR-ing both scattered
+     * terms back in ({@code NavSectionBuilder.recomputeWindow}, {@code EdgeScatter.rederiveCell}) or
+     * scattering them afterwards ({@code NavSectionBuilder.computeDepth}).
      */
     public static int compute(long[] desc, int x, int y, int z) {
-        long ground = at(desc, x, y, z);
         long a1 = at(desc, x, y + 1, z);
         long a2 = at(desc, x, y + 2, z);
         long a3 = at(desc, x, y + 3, z);
@@ -215,7 +272,8 @@ public final class NavFlags {
         // HEADROOM: how many body cells above the floor are clear for a WALKER (passable AND fluid-free AND
         // not a teleport portal, so the value lines up with MovementContext.passable — water is not
         // walk-clearance, and a portal cell is a no-go the walker routes around). Breaking a block in the way
-        // is the break modifier's job (it consults RISKY_EDIT); headroom is the raw clearance prefilter.
+        // is the break modifier's job (whose gate is RISKS_GRAVITY, read at the cell it actually breaks);
+        // headroom is the raw clearance prefilter.
         int headroom;
         if (!walkClear(a1)) headroom = HEADROOM_NONE;
         else if (!walkClear(a2)) headroom = HEADROOM_CRAWL;
@@ -232,19 +290,21 @@ public final class NavFlags {
             flags |= SLOW_TRANSIT;
         }
 
-        // RISKY_EDIT (strictly gravity — DESIGN-fluid-flow-prediction.md §4.1): an edit in the body space
-        // could drop a gravity block.
-        //   - gravity above (would fall when disturbed), or a gravity block here/in-the-feet we'd undercut.
-        // HAS_FLUID_NEIGHBOR (bit 4) is deliberately NOT written here: it is SCATTERED from each fluid cell
-        // in NavSectionBuilder.computeDepth (PERF-DESIGN-navgrid-build §C1), which crosses the vertical
-        // section seam in both directions and so cannot be expressed as a read of this (upward-only)
-        // scratch. The patch path re-derives it via hasFluidNeighborGather (+ an explicit below-grid read)
-        // beside this call.
-        if (NavBlock.hasGravity(a2)
-                || (NavBlock.hasGravity(ground) && unsupported(desc, x, y, z))
-                || (NavBlock.hasGravity(a1) && unsupported(desc, x, y + 1, z))) {
-            flags |= RISKY_EDIT;
-        }
+        // RISKS_GRAVITY (bit 0) — HALF A of the cell-centred predicate: "a gravity block rests DIRECTLY ON
+        // me, so an edit here drops it." Frame-agnostic: a1 is the cell above THIS cell under any
+        // convention. It subsumes both ratified rules for the below-neighbour: a SUPPORTED gravity block's
+        // support is this cell (rule a); an UNSUPPORTED one has this cell among its six orthogonal
+        // neighbours (rule b). The two cases are exact complements (unsupported(G) == isPassable(ground)),
+        // so the union is the bare test.
+        // HALF B — "this cell is orthogonally adjacent to an UNSUPPORTED gravity block", the classic
+        // cave-in — is SCATTER-OWNED (NavSectionBuilder.computeDepth / scatterGravityNeighbor, gathered
+        // here by risksGravityNeighborGather), for the same reason HAS_FLUID_NEIGHBOR (bit 4) is: it reads
+        // laterally and TWO rows downward, and this scratch overscans UPWARD only. The patch path
+        // re-derives both scattered terms beside this call.
+        // The DELETED terms and why: hasGravity(a2) was pure floor-framing (the cell BETWEEN now carries the
+        // bit itself), and the ground-unsupported term said "I am a floating gravity block" — breaking that
+        // drops nothing onto anyone, and if a stack sits on it, half A marks it.
+        if (NavBlock.hasGravity(a1)) flags |= RISKS_GRAVITY;
 
         return flags;
     }
@@ -252,7 +312,9 @@ public final class NavFlags {
     // ---- Field extraction (for consumers reading a stored flag value) ------------------------
     /** The 2-bit headroom level (one of {@link #HEADROOM_NONE}..{@link #HEADROOM_JUMP}). */
     public static int headroom(int flags)            { return (flags & HEADROOM_MASK) >>> HEADROOM_SHIFT; }
-    public static boolean risksEdit(int flags)       { return (flags & RISKY_EDIT) != 0; }
+    /** Whether EDITING this cell — breaking OR placing — drops a gravity block (the two ratified rules; see
+     *  the class doc). Cell-centred: read it AT the cell being edited, never at a floor/body frame. */
+    public static boolean risksGravity(int flags)    { return (flags & RISKS_GRAVITY) != 0; }
     public static boolean clearableHazard(int flags) { return (flags & CLEARABLE_HAZARD) != 0; }
     public static boolean slowTransit(int flags)     { return (flags & SLOW_TRANSIT) != 0; }
     /** Any fluid among the six orthogonal neighbours of this cell — the funnel's tier-0 prefilter
@@ -277,9 +339,45 @@ public final class NavFlags {
         return NavBlock.isPassable(d) && NavBlock.fluid(d) == 0 && !NavBlock.isPortal(d);
     }
 
-    /** Nothing solid directly below — a gravity block here/above would fall. */
-    private static boolean unsupported(long[] desc, int x, int y, int z) {
-        return NavBlock.isPassable(at(desc, x, y - 1, z));
+    /**
+     * The GATHER form of {@link #RISKS_GRAVITY}'s HALF B: one of the six orthogonal neighbours of
+     * {@code (x,y,z)} is a gravity block that is currently UNSUPPORTED (nothing solid under it), so any
+     * block update at this cell — a break OR a place — is what vanilla needs to drop it. The exact
+     * counterpart of {@code NavSectionBuilder.scatterGravityNeighbor} (same {@link #SIX} table, same
+     * {@code hasGravity && isPassable(below)} predicate) so the two can never drift. Half A
+     * ({@code hasGravity(above)}) is NOT gathered here — {@link #compute} writes it authoritatively.
+     *
+     * <p><b>It reads TWO rows below its cell</b> ({@code N = below(C)} at {@code y-1}, and {@code N}'s own
+     * support at {@code y-2}), one deeper than {@link #hasFluidNeighborGather}. The upward-only scratch
+     * cannot serve either row at a section's bottom face, so {@code belowGrid} is threaded in explicitly and
+     * consulted for every {@code ny < 0} read (rows {@code -1}/{@code -2} → the below section's rows
+     * 15/14). A null {@code belowGrid} ⇒ AIR, which matches the build scatter's own air-optimism at the
+     * world floor / a column hole, so build and patch agree. The four LATERAL reads at a section side face
+     * still resolve to AIR here and are closed out of band by {@link EdgeScatter}, exactly as the fluid
+     * gather's are.
+     *
+     * <p>Allocation-free (iterating the shared {@code int[][]} table allocates nothing). NOT on the build
+     * hot path: the build scatters instead, so a gravity-free cell costs nothing there.
+     */
+    static boolean risksGravityNeighborGather(long[] desc, TraversalGrid belowGrid, int x, int y, int z) {
+        for (int[] o : SIX) {
+            int nx = x + o[0], ny = y + o[1], nz = z + o[2];
+            long n = descOrBelow(desc, belowGrid, nx, ny, nz);
+            if (NavBlock.hasGravity(n)
+                    && NavBlock.isPassable(descOrBelow(desc, belowGrid, nx, ny - 1, nz))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** {@link #at} with an explicit fall-through to the section BELOW for {@code y < 0} (rows -1/-2 →
+     *  15/14) — the two reads the upward-only scratch cannot serve. Air when {@code belowGrid} is null or
+     *  the read leaves the 16×16 lateral footprint (the chunk-face blindness {@link EdgeScatter} closes). */
+    private static long descOrBelow(long[] desc, TraversalGrid belowGrid, int x, int y, int z) {
+        if (y >= 0) return at(desc, x, y, z);
+        if (belowGrid == null || y < -NavSection.SIZE || x < 0 || x > 15 || z < 0 || z > 15) return AIR_DESC;
+        return NavBlock.descriptor((short) belowGrid.navtype(x, NavSection.SIZE + y, z));
     }
 
     /**
@@ -289,14 +387,14 @@ public final class NavFlags {
      *
      * <p>The exact counterpart of {@code NavSectionBuilder.scatterFluidNeighbor} (same {@link #SIX} table,
      * same unconditional {@link NavBlock#isFluid} predicate), used by the patch path
-     * ({@code NavSectionBuilder.recomputeWindow}, {@code EdgeFluidScatter.rederiveCell}) and as the oracle
+     * ({@code NavSectionBuilder.recomputeWindow}, {@code EdgeScatter.rederiveCell}) and as the oracle
      * the identity tests build their reference grids from. NOT on the build hot path: the build scatters
      * instead, so a fluid-free cell costs nothing there.
      *
      * <p><b>Reads that leave the scratch resolve to AIR</b> ({@link #at}) — which for this predicate means
      * the {@code y-1} read at row 0 and all four lateral reads at a section's side faces are blind. Both
      * gaps are closed OUT OF BAND by the caller, not here: the below-section row by an explicit grid read in
-     * {@code recomputeWindow}, the chunk faces by {@link EdgeFluidScatter}. The {@code y+1} read at row 15
+     * {@code recomputeWindow}, the chunk faces by {@link EdgeScatter}. The {@code y+1} read at row 15
      * needs no help — it lands in the vertical overscan rows.
      */
     static boolean hasFluidNeighborGather(long[] desc, int x, int y, int z) {

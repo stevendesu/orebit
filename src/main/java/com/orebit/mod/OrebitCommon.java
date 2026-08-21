@@ -347,5 +347,6 @@ public final class OrebitCommon {
         VineJumpProbe.register(events);
         VineBridgeCourse.register(events);
         LadderShaftCourse.register(events);
+        CaveInCourse.register(events);
     }
 }
