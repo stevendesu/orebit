@@ -9,6 +9,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.EditSnapshot;
 import com.orebit.mod.pathfinding.blockpathfinder.Movement;
 import com.orebit.mod.pathfinding.splice.SpliceSeam;
 
+import com.orebit.mod.Debug;
+import com.orebit.mod.OrebitCommon;
 import net.minecraft.core.BlockPos;
 
 /**
@@ -62,6 +64,14 @@ final class AsyncWindowSearch {
     // ---- async in-flight state (all tick-thread-confined; meaningful only when executor != null) ----
     /** The outstanding search, or {@code null}. At most one per plan (latest-wins: superseders cancel). */
     private PlanHandle pending;
+    /** DIAGNOSTIC (2026-08-21 seam-pause forensic): wall clock at submit, and the count of SERVICED
+     *  boundary ticks that found the search still running. The pair separates the three ways a seam-pause
+     *  burns ticks — a slow search shows a large {@link #pendingPollTicks}, while a pause whose boundary is
+     *  never serviced at all shows ZERO polls against a climbing seamPauseTicks (the drain is only reached
+     *  from inside the planAnchor gate, so no poll means the gate refused). Reset on every submit. */
+    private long pendingSubmitNanos;
+    private int pendingPollTicks;
+    private long lastSearchNanos = -1;
     /** The floor cell {@link #pending} was searched FROM — the seam's predicted start. */
     private BlockPos pendingStart;
     /** The window target {@link #pending} was searched TOWARD (adoption re-checks it's still current). */
@@ -165,6 +175,8 @@ final class AsyncWindowSearch {
         if (pending != null) pending.cancel();
         if (!preplan) parkedPlan = null;
         pending = executor.submit(request);
+        pendingSubmitNanos = System.nanoTime();
+        pendingPollTicks = 0;
         pendingStart = fromFloor;
         pendingTarget = target;
         pendingPreplan = preplan;
@@ -181,6 +193,36 @@ final class AsyncWindowSearch {
      *  A PARKED pre-plan result does not count: its plan is finished and waiting at a known seam. */
     boolean searchPending() {
         return pending != null;
+    }
+
+    /** Serviced boundary ticks spent waiting on the CURRENT search (see {@link #pendingPollTicks}). */
+    int pendingPollTicks() {
+        return pendingPollTicks;
+    }
+
+    /** Submit-to-drain wall clock of the last drained search in ns, or -1 before the first drain. This is
+     *  end-to-end latency (compute PLUS pickup delay), which is the number the seam-pause cares about. */
+    long lastSearchNanos() {
+        return lastSearchNanos;
+    }
+
+    /**
+     * DIAGNOSTIC (2026-08-21): name the drain verdict and the values that chose it. Every existing log in
+     * this system sits downstream of an INSTALLED result, so a search that is finished, correct, and then
+     * silently discarded leaves no trace at all — which is how 3964 consecutive exhausted searches produced
+     * zero region-crossing invalidations without a single line saying why.
+     */
+    private static void drainLog(String verdict, PlanHandle done, BlockPos from, BlockPos toward,
+                                 BlockPos currentTarget, BlockPos actualFloor, boolean seeded) {
+        if (!Debug.ENABLED) {
+            return;
+        }
+        OrebitCommon.LOGGER.info(
+                "[Orebit] drain {} | plan={} expansions={} partial={} budgetHit={} rejected={} "
+                        + "from={} actualFloor={} toward={} currentTarget={} seeded={}",
+                verdict, done.plan() == null ? "NULL" : (done.plan().size() + "wp"), done.expansions(),
+                done.wasPartial(), done.wasBudgetHit(), done.wasRejected(),
+                from, actualFloor, toward, currentTarget, seeded);
     }
 
     /** See {@link #lastDrainSuspect}. */
@@ -214,9 +256,13 @@ final class AsyncWindowSearch {
     Drain drainPending(BlockPos actualFloor, BlockPos landingFloor, BlockPos currentTarget,
                        int startMode, boolean fluidAnchor) {
         if (pending == null || !pending.isDone()) {
+            if (pending != null) {
+                pendingPollTicks++; // a SERVICED boundary that found the search still running
+            }
             return Drain.NONE;
         }
         final PlanHandle done = pending;
+        lastSearchNanos = System.nanoTime() - pendingSubmitNanos;
         pending = null;
         final boolean preplan = pendingPreplan;
         final BlockPos from = pendingStart;
@@ -251,9 +297,13 @@ final class AsyncWindowSearch {
             // null plan carries no frame to park and passes through as a normal BLOCKED result — the
             // repair owns it, exactly the sync path's semantics.
             if (!toward.equals(currentTarget)) {
+                drainLog("RETRY seeded: window target MOVED under the search", done, from, toward,
+                        currentTarget, actualFloor, true);
                 return Drain.RETRY;
             }
             if (done.plan() == null) {
+                drainLog("RESULT seeded: null plan -> BLOCKED (the repair owns it)", done, from, toward,
+                        currentTarget, actualFloor, true);
                 resultPlan = null;
                 resultPartial = done.wasPartial();
                 resultExpansions = done.expansions();
@@ -285,6 +335,15 @@ final class AsyncWindowSearch {
                 (int) Math.ceil(budgetNanos * 1e-9 * 6.0)); // ~6 b/s: sprint 5.6 + margin
         final SpliceSeam seam = new SpliceSeam(from, startMode, EditSnapshot.EMPTY, adoptTol);
         if (!seam.accepts(actualFloor) || !toward.equals(currentTarget)) {
+            // THE DISCRIMINATOR (2026-08-21). These two causes are very different and the verdict hides
+            // both: a bot that walked out of seam tolerance is a real recovery, while a window target that
+            // MOVED under the search discards a finished result — and if the target moves every tick (a
+            // planless bot re-deriving its skeleton), every search is discarded, resultStatus is never
+            // reached, status never leaves RUNNING, and the repair's `status != BLOCKED` guard means edge
+            // invalidation can never fire no matter how many searches exhaust.
+            drainLog(!seam.accepts(actualFloor) ? "RETRY: bot drifted past seam tolerance"
+                            : "RETRY: window target MOVED under the search",
+                    done, from, toward, currentTarget, actualFloor, false);
             return Drain.RETRY; // drifted past tolerance / window moved — plan from where we really are
         }
         // POST-PLAN RECONCILE (owner ruling 2026-07-30, §11-amended 2026-08-20): being within seam
@@ -310,6 +369,8 @@ final class AsyncWindowSearch {
                 }
             }
         }
+        drainLog(done.plan() == null ? "RESULT: null plan -> BLOCKED (the repair owns it)"
+                        : "RESULT: adopted", done, from, toward, currentTarget, actualFloor, false);
         resultPlan = done.plan();
         resultPartial = done.wasPartial();
         resultExpansions = done.expansions();

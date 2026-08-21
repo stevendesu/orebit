@@ -1,6 +1,7 @@
 package com.orebit.mod.pathfinding.blockpathfinder.movements;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BlockPathfinder;
+import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
 import com.orebit.mod.pathfinding.blockpathfinder.CandidateSink;
 import com.orebit.mod.pathfinding.blockpathfinder.EditScratch;
 import com.orebit.mod.pathfinding.blockpathfinder.MovePlan;
@@ -105,6 +106,26 @@ public final class Traverse implements Movement {
      * {@code WALK_ONE_OVER_SOUL_SAND_COST}).
      */
     public static final float SLOW_COST_FACTOR = 1f / 0.4f;
+
+    /**
+     * How far BELOW a run's height band the bot may sit without the step being off-plan — vanilla's step
+     * assist, in blocks ({@link MovementContext#STEP_ASSIST_MAX_RISE} sixteenths). DERIVED, not tuned: it is
+     * exactly the lip the auto-step clears without a jump, so a dip within it is a transient the physics
+     * undoes by itself on the next tick. Anything deeper is a real fall and fails immediately.
+     */
+    /**
+     * Ticks per block walking along the TOP of a climbable — {@link #FLAT_COST} × 1.3. The crossing is not
+     * a flat walk: the bot sinks into the climbable, re-grabs, and is lifted back on every cell, and the
+     * grab arrests horizontal momentum each time. OWNER-MEASURED in-game 2026-08-21: about 30% slower than
+     * ordinary walking. A rough number by construction, and deliberately so — it only has to rank this
+     * crossing correctly against a detour, and 1.3 is the measurement rather than a guess.
+     * <p>Distinct from {@code Climb.GRAB_LATERAL_COST} (~3.3× flat), which prices the CURTAIN case: hanging
+     * inside a climbable and easing sideways at sneak speed. Walking its top is much cheaper than hanging
+     * in it.
+     */
+    public static final float CLIMBABLE_TOP_COST = FLAT_COST * 1.3f;
+
+    private static final double STEP_ASSIST_RECOVERY = MovementContext.STEP_ASSIST_MAX_RISE / 16.0;
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
@@ -283,6 +304,30 @@ public final class Traverse implements Movement {
             // walking onto it from a partial start is a rising lip of 16 − startTopY sixteenths — gated
             // by the same auto-step budget (a slab start's 8/16 lip walks; a 2/16 plate start's 14/16
             // lip doesn't).
+            // WALK THE TOP OF A CLIMBABLE (owner-ratified 2026-08-21). A vine/ladder cell is not
+            // STANDABLE — it has no collision — so the flat-walk branch above never targets one, and a
+            // vine "bridge" read as an impassable gap (measured: the floor-variant VineBridgeCourse found
+            // NO route at all and the bot never left its start cell). A human crosses it by holding jump:
+            // the body dips into the climbable, vanilla's onClimbable() (a FEET-block test) grants the
+            // grab, jump lifts it back, repeat. So the node is real and we were simply not emitting it.
+            //
+            // Scope: the DESTINATION FLOOR is climbable-and-not-standable while its FEET cell is NOT
+            // climbable. That second clause is what keeps this out of Climb's territory — a climbable in
+            // the feet cell is a CURTAIN, owned by Climb's sneak-speed lateral cling (GRAB_LATERAL_COST),
+            // and emitting a Traverse there would race two movements for one geometry. No floor is
+            // required or placed: the climbable IS the footing, for as long as the follower holds jump
+            // (see the steer's dip-recovery rule).
+            if (built && !standable && ctx.climbableFloorAt(nx, y, nz)) {
+                int flags = MovementContext.flagsOf(p);
+                EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+                if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
+                ctx.requireBodyClearToward(e, nx, y, nz, flags, d[0], d[1]);
+                if (e.valid()) {
+                    out.accept(nx, y, nz,
+                            CLIMBABLE_TOP_COST + ctx.bodyTransitCost(e, flags, nx, y, nz) + e.extraCost(), e);
+                }
+            }
+
             if (built && !standable
                     && MovementContext.rise(0, 16, sTop) <= MovementContext.STEP_ASSIST_MAX_RISE) {
                 int flags = MovementContext.flagsOf(p);
@@ -446,6 +491,43 @@ public final class Traverse implements Movement {
      * cell the bot stands ON (never inside), and each run cell's FOOTING is declared while the bot is still on
      * the previous cell, so it is never placed into an occupied cell.
      */
+    /**
+     * Is the bot supported at waypoint cell {@code (wx,wy,wz)} by a <b>CLIMBABLE TOP</b> — the stance this
+     * movement's {@link #CLIMBABLE_TOP_COST} node buys, and the one {@link BotSteering#grounded} can never
+     * report, because a climbable has no collision to stand on?
+     *
+     * <p>Vanilla holds the bot there by oscillation, not contact: it sinks into the cell, {@code onClimbable}
+     * re-lifts it, and it sinks again (measured across the vine bridge: {@code y} cycling 150.95&ndash;151.12
+     * with {@code grounded=false} on EVERY tick). {@link SteerControl#climbableDipRecover} sustains that cycle
+     * by holding jump through the dip. So every gate this movement phrases as "settled at the cell" —
+     * {@link #reached}, and the phase {@code advanceWhen}/{@code done} guards — must accept the top-out pose
+     * or the cursor can never advance off a vine, which is exactly how the floor vine-bridge harness wedged
+     * one cell in with zero {@code step FAILED}.
+     *
+     * <p><b>Scoped, deliberately.</b> {@link BotSteering#settled} excludes {@link BotSteering#climbableBelow}
+     * on ratified grounds — it is true for a bot in BALLISTIC FLIGHT over a vine, which fired {@code reached}
+     * mid-arc and advanced the cursor in flight (the {@code (57,113,160)} Parkour incident) — and the top-out
+     * is instead accepted by the movements that EMIT such nodes ({@code Climb.reached} is the precedent this
+     * mirrors). The extra clause here is what keeps that scoping honest: the waypoint's OWN floor must be the
+     * climbable top the search priced ({@link MovementContext#climbableFloorAt}, mirrored live), so an
+     * ordinary stone-floored Traverse — every other Traverse in the world — cannot reach this at all.
+     *
+     * <p>The height half is left to {@link Movement#atWaypoint}'s settle band at the call sites that have it;
+     * the dip half of the cycle (feet momentarily IN the climbable, one cell low) simply does not count as
+     * arrived, which costs nothing — the pose recurs every few ticks and refusing it is the safe direction.
+     */
+    static boolean atopClimbable(BotSteering b, int wx, int wy, int wz) {
+        return b.footX() == wx && b.footZ() == wz
+                && b.climbableBelow() && b.climbableFloorAt(wx, wy - 1, wz);
+    }
+
+    /** Arrival accepts the {@link #atopClimbable} stance beside the ordinary settled one — see there. */
+    @Override
+    public boolean reached(BotSteering b, int wx, int wy, int wz, Movement next) {
+        return (b.settled() || atopClimbable(b, wx, wy, wz)) && atWaypoint(b, wx, wy, wz)
+                && Movement.teedUp(b, wx, wy, wz, next);
+    }
+
     @Override
     public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
         int ddx = tx - fx;
@@ -491,7 +573,8 @@ public final class Traverse implements Movement {
                     // folded requireBodyClearToward(e, nx, uy, nz, …) with uy = y+1, i.e. (ty+1, ty+2).
                     .need(MovePlan.Need.AIR, tx, ty + 1, tz)                // landing feet (above the raised floor)
                     .need(MovePlan.Need.AIR, tx, ty + 2, tz)                // landing head
-                    .drive(SteerControl::drive)                             // hold forward + face; vanilla auto-steps the lip
+                    // drive THEN dip-recover: drive owns forward/yaw, the recovery owns jump (§ climbableDipRecover)
+                    .drive((b, v) -> { SteerControl.drive(b, v); SteerControl.climbableDipRecover(b, v); })
                     .done(b -> b.grounded()
                             && atWaypoint(b, tx, toFootY, tz));
             return plan;
@@ -518,7 +601,18 @@ public final class Traverse implements Movement {
             if (!(b.grounded() || b.inWater() || b.inLava())) {
                 return false;
             }
-            if (b.footY() < runLo || b.footY() > runHi) {
+            // LOWER BOUND IS CONTINUOUS, NOT CELL-QUANTISED (owner-measured 2026-08-21). A Traverse entered
+            // off a climbable TOP-OUT spends a tick or two below its foot cell before vanilla's step assist
+            // lifts it back — the transient is SUB-CELL (~0.1 of a block), but footY() is a cell index, so a
+            // 0.1 dip reads as a whole cell of error against a band that for a flat step
+            // (fromFootY == toFootY) has ZERO room below. Allow exactly what the physics recovers on its own
+            // — {@link MovementContext#STEP_ASSIST_MAX_RISE} — and not a block more: the case this guard
+            // exists for (the longrun-6 (120,64,18) latch, a bot 3 cells below its Traverse, ground-looping
+            // forever) is an order of magnitude deeper and still trips on the very first tick.
+            //
+            // The UPPER bound stays a cell test: being LIFTED off the line is a different failure with no
+            // self-recovering transient behind it.
+            if (b.y() < runLo - STEP_ASSIST_RECOVERY || b.footY() > runHi) {
                 return true; // off the run's height — fell off (or was lifted off) the line
             }
             final int along = (b.footX() - fx) * sx + (b.footZ() - fz) * sz;
@@ -530,7 +624,10 @@ public final class Traverse implements Movement {
             final int cx = fx + sx * k;
             final int cz = fz + sz * k;
             MovePlan.Phase ph = plan.phase("walk" + k)
-                    .need(MovePlan.Need.FOOTING, cx, fy, cz)               // plank under the cell (bridge places; flat/macro noop) — FLOOR-relative
+                    // Footing that a CLIMBABLE TOP also satisfies — this movement PRICES walking the top of a
+                    // climbable (CLIMBABLE_TOP_COST), so its executor must recognise that footing rather than
+                    // try to plank it. Ordinary floors and genuine bridge places are unaffected.
+                    .needFootingOrClimbable(cx, fy, cz)                    // plank under the cell (bridge places; flat/macro/climbable-top noop) — FLOOR-relative
                     // BODY CLEARANCE IS FLOOR-FRAME (corrected 2026-08-01), mirroring exactly what the
                     // search folded — MovementContext.requireBodyClearToward(e, nx, y, nz, …) over (y+1,
                     // y+2). Asking in the FEET frame collided with the FOOTING cell above whenever the
@@ -546,7 +643,8 @@ public final class Traverse implements Movement {
                     // under movementBlockedAt's 9/16 corridor floor.
                     .need(MovePlan.Need.AIR, cx, fy + 1, cz)               // feet-body cell clear (FLOOR-frame)
                     .need(MovePlan.Need.AIR, cx, fy + 2, cz)               // head-body cell clear (FLOOR-frame)
-                    .drive(SteerControl::drive);                           // medium-aware line-track walk (Traverse's default)
+                    // drive THEN dip-recover: drive owns forward/yaw, the recovery owns jump (§ climbableDipRecover)
+                    .drive((b, v) -> { SteerControl.drive(b, v); SteerControl.climbableDipRecover(b, v); }); // line-track walk)
             if (k == 1) {
                 // Only the FIRST run cell commits out of the start column, so only it can be entered with a
                 // cross-axis carry from the previous step (the chained 90° turn). Cells k>=2 are already
@@ -558,11 +656,11 @@ public final class Traverse implements Movement {
                 // Non-terminal: advance once grounded AT OR PAST cell k. Progress is monotone along the cardinal
                 // line (one of sx/sz is 0), so >= is skip-proof against a lag tick — at walk speed a cell is
                 // never skipped anyway, but >= cascades cleanly if it ever were.
-                ph.advanceWhen(b -> b.grounded()
+                ph.advanceWhen(b -> (b.grounded() || atopClimbable(b, cx, toFootY, cz))
                         && (b.footX() - fx) * sx + (b.footZ() - fz) * sz >= kk);
             } else {
                 // Terminal: the whole move is done standing on the to-cell.
-                ph.done(b -> b.grounded()
+                ph.done(b -> (b.grounded() || atopClimbable(b, tx, toFootY, tz))
                         && atWaypoint(b, tx, toFootY, tz));
             }
         }

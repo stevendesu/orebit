@@ -1255,6 +1255,25 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     // ---- Live-world geometry + block actions (the reconcile seam a MovePlan drives through) -----------
 
+    /**
+     * The walk-the-top-of-a-climbable footing test ({@link BotSteering#climbableFloorAt}) — the executor mirror
+     * of {@code MovementContext.climbableFloorAt}, cell-for-cell and bit-for-bit: climbable, NOT standable, and
+     * nothing climbable above (which is the boundary with {@code Climb}'s lateral cling on a curtain).
+     *
+     * <p>Classified through {@link NavBlock#descriptorFor} rather than raw block tests, so the runner and the
+     * search read the SAME three bits off the same interning table — the two cannot drift apart. Live level
+     * read (the {@link #solidAt} pattern), so it reflects the bot's own just-made edits.
+     */
+    @Override
+    public boolean climbableFloorAt(int x, int y, int z) {
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        long floor = NavBlock.descriptorFor(level.getBlockState(scratchPos.set(x, y, z)));
+        if (!NavBlock.isClimbable(floor) || NavBlock.isStandable(floor)) {
+            return false;
+        }
+        return !NavBlock.isClimbable(NavBlock.descriptorFor(level.getBlockState(scratchPos.set(x, y + 1, z))));
+    }
+
     /** Live movement-blocking test: the cell has a non-empty collision shape (air/water/plants read clear).
      *  Reads the live level so it reflects the bot's own just-made breaks/places (unlike the cached nav grid). */
     @Override

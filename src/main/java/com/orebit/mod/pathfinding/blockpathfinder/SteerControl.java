@@ -767,8 +767,26 @@ public final class SteerControl {
      */
     public static void settleIntoBand(BotSteering b, SteerView p, int footY) {
         recenterOn(b, Math.floor(b.x()) + 0.5, Math.floor(b.z()) + 0.5); // hold the column, never press on
-        if (!b.onClimbable() || b.y() < footY) {
-            return;                                    // nothing to hold with, or already below — let it be
+        if (!b.onClimbable()) {
+            return;                                    // nothing to hold with — the envelope's verdict, not ours
+        }
+        if (b.y() < footY) {
+            // BELOW THE BAND ON A CLIMBABLE ⇒ CLIMB BACK INTO IT (owner ruling 2026-08-21: "hold jump if the
+            // feet cell is climbable and you're below your expected Y"). This used to fall under the same
+            // early-out as "no climbable" — "already below, let it be" — which DEADLOCKED against
+            // PhaseRunner's implicit-settle gate: that gate refuses to run the phase drive until
+            // inRestingPose(fromFootY) holds, and settleIntoBand is the only thing that can establish it.
+            // Releasing here left the bot with NO input at all, so vanilla's -0.15/t climbable slide carried
+            // it FURTHER from the band every tick and the pose could never be reached.
+            //
+            // Measured on the mid-climb tile: a freshly adopted Traverse framed at fromFootY=152 met the bot
+            // at y=151.988 — short by 0.012 — and the exec log shows exactly this: `src=recenter:dead
+            // jump=false sneak=false fwd=0.00`, then botY 151.988 -> 151.838 -> ... -> 151.088 in exact
+            // -0.150 steps (the unsuppressed clamp) until the validity envelope fired. Jump is the correct
+            // input and the only one that closes the gap: on a climbable vanilla drives vy = +0.2 while it
+            // is held, so the bot re-enters the band within a tick or two and the gate opens.
+            b.setJumping(true);
+            return;
         }
         if (b.y() <= footY + SETTLE_BAND || b.y() + b.velY() < footY) {
             b.setSneak(true);                          // in the band, or one tick from falling out of it
@@ -815,11 +833,55 @@ public final class SteerControl {
      *
      * @return true when the cling was engaged; false = nothing to hold.
      */
+    /**
+     * The CLIMBABLE-TOP DIP RECOVERY (owner-ratified 2026-08-21) — the follower half of Traverse's
+     * walk-the-top-of-a-climbable node ({@code MovementContext#climbableFloorAt}).
+     *
+     * <p>A climbable has no collision, so a bot walking its top is not standing on anything: it sinks,
+     * and only once its FEET enter the climbable does vanilla grant the grab that jump can act on
+     * ({@code onClimbable()} is a feet-block test — {@code climbableBelow()} does NOT enable climbing, which
+     * is exactly why "hold jump whenever a climbable is below" would be inert). So the rule is stated on
+     * the dip itself: feet in the climbable AND below the step's target height -> hold jump, which lifts at
+     * {@code +0.2/t} until the bot clears the cell again. That is the same dip-and-recover a human does by
+     * holding space, and it is what the {@code CLIMBABLE_TOP_COST} 1.3× surcharge prices.
+     *
+     * <p><b>No curtain guard is needed here</b>, and deliberately so rather than by omission: a Traverse is
+     * only ever emitted onto a climbable floor whose FEET cell is non-climbable, so by construction this
+     * cannot fire inside a curtain (Climb's sneak-speed lateral cling owns those). Scaffolding likewise
+     * cannot reach this path — it is STANDABLE, so {@code climbableFloorAt} rejects it and the ordinary
+     * flat walk applies.
+     *
+     * <p>Call it AFTER the phase drive: {@link #drive} writes forward/yaw and must not clobber the jump.
+     *
+     * @return true when the recovery jump was engaged.
+     */
+    public static boolean climbableDipRecover(BotSteering b, SteerView p) {
+        tag("hold:dip:dead");                  // §4: unconditional, before any early-out
+        if (!b.onClimbable()) return false;    // no grab yet — jump is inert until the feet are IN it
+        if (b.y() >= p.ty()) return false;     // at or above the step's height — never ratchet upward
+        tag("hold:dip");
+        b.setJumping(true);
+        return true;
+    }
+
     public static boolean clingHold(BotSteering b) {
         tag("hold:cling:dead");                       // §4: unconditional, before any early-out
         if (!b.onClimbable()) return false;           // feet not IN a climbable — nothing arrests here
-        if (b.grounded() || b.standableBelow()) return false; // something already holds us; sneak would only
-                                                      // arm vanilla's maybeBackOffFromEdge
+        // GROUNDED ONLY — a floor SOMEWHERE BELOW is not a hold (owner ruling 2026-08-21). This guard used
+        // to bail on standableBelow() as well, reading "something already holds us"; over a vine that merely
+        // GROWS above a floor that is false — the bot is a block up, resting on nothing, and refusing the
+        // cling let it ride all the way down. Convicted on the flagship at (56,170,257): a SEAM-PAUSE held
+        // 10 ticks at the top-out (vine 170, floor 169, feet 171); clingHold refused on the airborne half
+        // (feet not yet IN the vine) and then refused AGAIN on the dip half because the stone at 169 read
+        // standable — so nothing arrested across the whole pause, the bot sank the full 1.114 blocks to
+        // botY=170.000, and the adopted plan's step 0 (framed at feet 171) failed its envelope on tick one.
+        //
+        // Clinging 0.1 of a block above a floor costs nothing: the bot simply holds the vine until it has a
+        // plan, then moves under that plan. The 2026-08-02 standableBelow ruling this drops is untouched
+        // where it belongs — it governs MOVING LATERALLY on a climbable (walk off, don't cling), and the
+        // stance servo still reads it. This is a station-keeping HOLD, which is the opposite case.
+        if (b.grounded()) return false;               // a real floor holds us; sneak would only arm
+                                                      // vanilla's maybeBackOffFromEdge
         if (b.scaffoldingBelow()) return false;       // scaffolding is sneak-EXEMPT: sneak DESCENDS through it
         tag("hold:cling");
         b.setSneak(true);
