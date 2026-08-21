@@ -228,19 +228,31 @@ class TrapdoorLadderClimbTest {
     }
 
     /**
-     * PRE-EXISTING GAP, pinned AS a gap (DESIGN-trapdoor-ladder-climb.md §3 descent finding): no
-     * plain-ladder top-entry exists at all — a ladder plate is NARROW_TOP, so Traverse/Descend/Fall/
-     * WalkOff refuse it as a destination floor and MineDown as a landing, and no vanilla rule holds a
-     * body in a bare mouth-less air cell (the §3.8 arm deliberately requires the trapdoor mouth). This
-     * test documents that refusal; it is NOT a behavior this arc introduced, and closing it is out of
-     * scope (§8). If it starts passing a route, a top-entry for bare ladders was built — retire this pin
-     * in favor of positive assertions.
+     * BARE-LADDER TOP-ENTRY — the gap this test used to pin AS a gap, now closed and pinned as a
+     * behavior (owner ruling 2026-08-21; the pin's own retirement instruction, followed).
+     *
+     * <p><b>What closed it.</b> Nothing in this arc: the walk-the-top-of-a-climbable node
+     * ({@code MovementContext.climbableFloorAt} / {@code Traverse.CLIMBABLE_TOP_COST}), built for the
+     * mid-climb wedge, admits exactly the geometry the old refusal turned on. The rim floor plane and the
+     * shaft's top rung share y = {@link #MOUTH_Y}, so the rim bot's flat neighbour IS a ladder cell:
+     * climbable, NOT standable (the NARROW_TOP plate the old note blamed), nothing climbable above. That
+     * is the predicate, so {@code Traverse} now steps onto the rung top and {@code Climb} owns the
+     * descent — the §3.8 trapdoor-mouth arm is no longer the only way in.
+     *
+     * <p>Asserts the ROUTE, not merely non-refusal: it enters the bore, it reaches the bottom stance, and
+     * it costs nothing — a bare ladder is climbed, never mined or bridged.
      */
     @Test
-    void topToBottomPlainShaftIsThePreExistingGap() {
+    void topToBottomPlainShaftEntersOnTheRungTop() {
         BlockPathPlan plan = BlockPathfinder.findPath(plainShaft(), RIM, BOTTOM, WALK_TOGGLE);
-        assertNeverEntersShaft(plan,
-                "GAP (pre-existing): no move enters a bare ladder shaft from its rim");
+
+        assertNotNull(plan, "the climbable-top node threads the rim bot onto the shaft's top rung");
+        assertTrue(contains(plan, SX, MOUTH_Y, SZ),
+                "the entry waypoint's feet cell is the mouth cell, standing on the rung below it");
+        BlockPos last = plan.waypoint(plan.size() - 1);
+        assertTrue(last.getX() == SX && last.getZ() == SZ && last.getY() <= 5,
+                "descends the bore to within goal tolerance of the bottom stance; ended " + last);
+        assertNoEditsAtAll(plan);
     }
 
     // ---- scene builders (the GateToggleTest / TrapdoorToggleTest single-section idiom) --------------

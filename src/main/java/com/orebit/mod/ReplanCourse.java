@@ -291,6 +291,10 @@ public final class ReplanCourse {
         if (System.getProperty("orebit.replan") == null) {
             return;
         }
+        if (System.getProperty("orebit.vinejump") != null || System.getProperty("orebit.vinebridge") != null
+                || System.getProperty("orebit.ladder") != null) {
+            return; // a physics harness owns the bot on this server (VineJumpProbe / VineBridgeCourse)
+        }
         Course course = new Course();
         events.onServerStarted(course::start);
         events.onWorldTickEnd(course::tick);
@@ -1047,7 +1051,7 @@ public final class ReplanCourse {
                     // to; the tick the invalidation lands relative to the climb's own progress can, and a
                     // one-block climb is only ~9 ticks long, so the whole window is a small integer sweep.
                     if (climbStartTick < 0
-                            && !bot.onGround() && bot.onClimbable()
+                            && !bot.grounded() && bot.onClimbable()
                             && (int) Math.floor(bot.getX()) == tr.climbX) {
                         climbStartTick = attemptTicks;
                     }

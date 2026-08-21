@@ -59,6 +59,12 @@ public final class FragmentLeafComputer {
     /** Water mask (descriptor fluid == WATER on a passable cell) — the typed-fragments type source
      *  (DESIGN-typed-fragments.md §5.1), same pattern as the passable/standable masks. */
     private static final ThreadLocal<boolean[]> WATER = ThreadLocal.withInitial(() -> new boolean[CELLS]);
+    /** Climbable mask (ladder / scaffolding / the vine family) — the THIRD footing kind beside water and a
+     *  standable floor below (owner ruling 2026-08-21; see {@code FragmentBuilder.build}'s climbable
+     *  overload). Without it a floorless climbable column types as pure air, i.e. a one-way DOWN chute, and
+     *  the region tier will not route UP it. Consumed only by {@link #computeLeaf} (the typeS source);
+     *  {@link #fragmentContaining} needs no climbable mask — it labels components, not types. */
+    private static final ThreadLocal<boolean[]> CLIMBABLE = ThreadLocal.withInitial(() -> new boolean[CELLS]);
 
     /** Flat cell index for local coords (0..15 each) — the {@code G == 16} form of {@link FragmentBuilder}'s. */
     private static int idx(int lx, int ly, int lz) {
@@ -75,6 +81,7 @@ public final class FragmentLeafComputer {
         final boolean[] standable = STANDABLE.get();
         final boolean[] passable = PASSABLE.get();
         final boolean[] water = WATER.get();
+        final boolean[] climbable = CLIMBABLE.get();
 
         int standCount = 0;
         int passCount = 0;
@@ -95,6 +102,9 @@ public final class FragmentLeafComputer {
                     int i = idx(lx, ly, lz);
                     standable[i] = st;
                     passable[i] = pa;
+                    // Footing source #3 (owner 2026-08-21): a climbable is a place the bot can BE — vanilla
+                    // holds it on a rung indefinitely — exactly the claim water makes by treading.
+                    climbable[i] = NavBlock.isClimbable(desc);
                     boolean wa = false;
                     if (st) standCount++;
                     if (pa) {
@@ -118,7 +128,7 @@ public final class FragmentLeafComputer {
             }
         }
 
-        FragmentBuilder.build(passable, standable, water, LEAF,
+        FragmentBuilder.build(passable, standable, water, climbable, LEAF,
                 passCount, standCount, waterCount,
                 hardnessSumSolid, solidCount,
                 out);

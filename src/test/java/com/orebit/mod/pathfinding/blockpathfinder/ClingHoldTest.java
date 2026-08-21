@@ -90,15 +90,30 @@ class ClingHoldTest {
                 "the drive ran and chose to write nothing — it still names itself (§4, before any early-out)");
     }
 
-    /** Support underneath means the bot is not sliding anywhere; sneak would only arm the edge-guard. */
+    /**
+     * A FLOOR BELOW IS NOT A HOLD — the cling engages anyway (owner ruling 2026-08-21, superseding this
+     * test's former assertion that {@code standableBelow} suppresses it).
+     *
+     * <p>The pose is the one that convicted the old rule: feet INSIDE a vine that merely grows above a
+     * floor, airborne, a fraction of a block up. {@code standableBelow()} is true, but nothing is holding
+     * the bot — it is falling toward that floor, not resting on it. Refusing the cling there let a bot
+     * ride a full block down during a 10-tick SEAM-PAUSE (flagship (56,170,257): vine 170, floor 169,
+     * feet 171), landing a cell below the frame its freshly adopted plan was built on and failing that
+     * plan's step 0 on tick one.
+     *
+     * <p>Clinging 0.1 of a block above a floor costs nothing: the bot holds the vine until it has a plan,
+     * then moves under that plan. Only {@code grounded()} still suppresses — see
+     * {@link #groundedInAVineNeverSneaks}, which pins the surviving half of the old guard.
+     */
     @Test
-    void aStandableBelowSuppressesTheCling() {
+    void aStandableBelowNoLongerSuppressesTheCling() {
         SettleBot bot = new SettleBot().at(58.5, 170.5, 254.5);
         bot.climbable = true;
-        bot.standable = true;   // something already holds us
-        assertFalse(SteerControl.clingHold(bot), "a supported bot has nothing to cling against");
-        assertFalse(bot.sneaking,
-                "sneak here buys nothing and arms vanilla's maybeBackOffFromEdge against the next step-off");
+        bot.standable = true;   // a floor exists one cell down — but the bot is NOT resting on it
+        assertTrue(SteerControl.clingHold(bot), "airborne in a climbable: the floor below is not a hold");
+        assertTrue(bot.sneaking, "sneak IS the arrest — without it the bot rides down to that floor");
+        assertTrue(SteerControl.lastDrive.endsWith("hold:cling"),
+                "the engaged cling tags its own tick (§4)");
     }
 
     /** A grounded bot in a vine cell (trunk vine over solid footing) is held by the floor, not the vine. */

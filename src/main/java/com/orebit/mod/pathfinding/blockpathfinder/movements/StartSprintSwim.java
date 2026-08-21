@@ -58,7 +58,22 @@ public final class StartSprintSwim implements Movement {
         //     also water) → DIVE in and go prone one cell down, where feet + head are now both water (2-deep).
         //     This is how a swimming bot actually initiates: sprint forward, submerge, prone. Without it a
         //     surface-bound STANDING bot could never reach a fully-submerged cell to start from.
-        if (ctx.built(x, y, z) && ctx.water(x, y, z)) {
+        //     THE DIVE NEEDS THE SAME EYE TEST AS (1) (owner ruling 2026-08-21). Both tests above ask only
+        //     whether water is PRESENT — the feet cell at the top of this method, the floor cell here — and
+        //     presence is not depth. After the dive the bot's feet are (x,y,z) and its EYES sit at
+        //     feet+1.62, i.e. in the cell that is the FEET cell right now: (x, y+1, z). If that cell holds a
+        //     shallow flow, vanilla declines the prone pose and the bot stalls in the transition — the same
+        //     wedge (1)'s gate exists to prevent, reached by the branch that actually fires.
+        //
+        //     Convicted on the flagship at (1837,-10,1854), twice, the SECOND time after (1) was gated: the
+        //     bot trod at feet -9 (head -8 AIR, so (1) was skipped entirely), dived to feet -10, and its eyes
+        //     landed in (1837,-9,1854) — raw state {@code water level=4}, i.e. amount 4 of the 6 an upright
+        //     eye needs. The foot cell was {@code level=8} (FALLING water, amount 8), which is why the
+        //     executor's fluid readout looked full and the geometry looked fine: the foot cell was never the
+        //     question. Refusing here makes the planner break through or route around, exactly as ruled for
+        //     the analogous Swim step-down-into-water case.
+        if (ctx.built(x, y, z) && ctx.water(x, y, z)
+                && ctx.eyesSubmergedWithHeadIn(x, y + 1, z)) {
             out.accept(x, y - 1, z, COST, MovementContext.MODE_PRONE);
         }
     }

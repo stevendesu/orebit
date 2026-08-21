@@ -236,6 +236,13 @@ public final class PhaseRunner {
                     break; // one timed break per tick
                 }
             } else { // FOOTING
+                // A CLIMBABLE TOP is footing the search may have priced deliberately (Traverse's
+                // CLIMBABLE_TOP_COST node, declared via Phase.needFootingOrClimbable). It has no collision, so
+                // solidAt reads false and the strict branch below would place a plank the plan never budgeted
+                // — or, barehanded, hold on this cell forever. Same predicate the planner used, read live.
+                if (r.climbableOk && bot.climbableFloorAt(r.x, r.y, r.z)) {
+                    continue; // geometry already established: nothing to place, nothing to hold
+                }
                 if (!bot.solidAt(r.x, r.y, r.z)) {
                     // SELF-ENTOMBMENT GUARD (the 2026-08-19 run-5 forensic; DESIGN-replan-handoff.md §5/R3 —
                     // defense-in-depth beside Pillar's failWhen envelope): NEVER place into a cell the bot's

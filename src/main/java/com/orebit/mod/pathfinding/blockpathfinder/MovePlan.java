@@ -291,6 +291,30 @@ public final class MovePlan {
             return this;
         }
 
+        /**
+         * Require footing at {@code (x,y,z)} that a <b>climbable top</b> also satisfies — the executor half of
+         * the walk-the-top-of-a-climbable node ({@link MovementContext#climbableFloorAt},
+         * {@code Traverse.CLIMBABLE_TOP_COST}).
+         *
+         * <p>A plain {@link Need#FOOTING} is satisfied by {@link BotSteering#solidAt}, and a climbable has no
+         * collision — so on a vine floor the runner would place a plank the search never priced, or (with
+         * nothing to place) hold forever. This variant tests {@link BotSteering#climbableFloorAt} first and
+         * treats a match as ALREADY-established geometry: nothing to place, nothing to hold.
+         *
+         * <p><b>Deliberately opt-in, not a change to {@link Need#FOOTING} itself.</b> The other two footing
+         * declarers must stay strict: {@code Pillar} places the block it is about to stand on (a climbable
+         * there would leave it standing on nothing), and {@code Descend}'s step-down floor is a real surface
+         * by construction. Only a movement that PRICED the climbable top may accept one.
+         *
+         * <p>The predicate is the planner's own, mirrored — so a 2-tall curtain (which {@code Climb} owns as
+         * a lateral cling) fails it executor-side exactly as it fails it search-side, and a genuine bridge
+         * place into a vine cell still happens.
+         */
+        public Phase needFootingOrClimbable(int x, int y, int z) {
+            needs.add(new Req(Need.FOOTING, x, y, z, true, Req.OPENABLE_DOOR, true));
+            return this;
+        }
+
         /** How to drive the bot's inputs once this phase's needs are met (default: medium-aware locomotion). */
         public Phase drive(BiConsumer<BotSteering, SteerView> d) {
             this.drive = d;
@@ -373,9 +397,16 @@ public final class MovePlan {
         final int x, y, z;
         final boolean open;
         final int openableKind;
-        Req(Need kind, int x, int y, int z) { this(kind, x, y, z, true, OPENABLE_DOOR); }
+        /** {@link Need#FOOTING} only: a CLIMBABLE TOP also satisfies this footing, so the runner must not
+         *  try to place a plank into it ({@link Phase#needFootingOrClimbable}). Inert for other kinds. */
+        final boolean climbableOk;
+        Req(Need kind, int x, int y, int z) { this(kind, x, y, z, true, OPENABLE_DOOR, false); }
         Req(Need kind, int x, int y, int z, boolean open, int openableKind) {
+            this(kind, x, y, z, open, openableKind, false);
+        }
+        Req(Need kind, int x, int y, int z, boolean open, int openableKind, boolean climbableOk) {
             this.kind = kind; this.x = x; this.y = y; this.z = z; this.open = open; this.openableKind = openableKind;
+            this.climbableOk = climbableOk;
         }
     }
 }
