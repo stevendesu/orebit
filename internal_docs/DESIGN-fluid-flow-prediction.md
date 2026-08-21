@@ -274,8 +274,9 @@ gathered. Same shape, same seam handling, same patch-path re-derivation.
 
 **Frame: cell-centred** — "breaking THIS cell may admit fluid." Every consumer must read it **at the cell
 it actually breaks**: `MineDown`/`Pillar` at their own target, `Traverse`'s `breakThrough` at `F+1`/`F+2`,
-**not** at `F`. This is the explicit lesson of the `RISKY_EDIT` frame mismatch (underwater-mining backlog
-OPEN 2) — do not create a fourth frame.
+**not** at `F`. This was the explicit lesson of the `RISKY_EDIT` frame mismatch (underwater-mining backlog
+OPEN 2) — do not create a fourth frame. **Since 2026-08-21 the gravity bit obeys the same rule** (see §4.3):
+there is one frame for every edit-hazard bit, and the gate that reads them sits at the fold.
 
 ### §4.1 The lava term migrates — RATIFIED (owner, 2026-08-17)
 
@@ -284,6 +285,39 @@ OPEN 2) — do not create a fourth frame.
 mismatch** (underwater-mining backlog OPEN 2) — the gravity term is body-space-framed and the lava term
 cell-centred, and sharing one bit is what made the three-frame problem unfixable. Each now has one
 coherent frame.
+
+### §4.3 The gravity term became cell-centred too — RATIFIED (owner, 2026-08-21). OPEN 2 is now CLOSED.
+
+§4.1 above says the migration "resolves **half** the frame mismatch … the gravity term is
+body-space-framed and the lava term cell-centred … Each now has one coherent frame." **That sentence is
+superseded.** Each fact had one coherent frame, but they were still two DIFFERENT frames, and the
+body-space one was wrong on its own terms: it could not see a gravity block resting on the cell a bot was
+about to break (out of frame at `F+3`), and consumers read it at a FLOOR cell and then folded breaks
+several cells away. That is what killed the 2026-08-21 flagship at `(968,56,905)` — see `CaveInCourse`.
+
+Bit 0 was therefore **reframed and renamed**: `RISKY_EDIT` → **`RISKS_GRAVITY`**, meaning
+*"breaking or placing at **THIS CELL** will cause a gravity block to fall."* Cell `C` carries it iff
+
+- **(a)** `C` is DIRECTLY BELOW a gravity block that is currently **supported** (`C` IS that block's
+  support, so breaking `C` drops it — the UNDERMINING hazard), **or**
+- **(b)** `C` is ORTHOGONALLY ADJACENT to a gravity block that is currently **unsupported** (vanilla only
+  drops a suspended column when a neighbouring block update pokes it, and editing `C` is that update — the
+  classic CAVE-IN).
+
+Both halves are **scattered, not gathered**, on exactly this section's machinery — with one collapse worth
+recording: the union of (a) and the *below-neighbour* case of (b) is the bare unconditional
+`hasGravity(above(C))`, because `unsupported(G) ≡ isPassable(below(G)) ≡ isPassable(C)` makes the two cases
+exact complements. That half ("half A") is a pure upward column read, so `NavFlags.compute` keeps it. Only
+the remaining five offsets ("half B") need the scatter/gather/`EdgeScatter` apparatus.
+
+**The gate moved with the frame.** It used to be replicated across `Pillar`/`MineDown`/`Traverse`/
+`Ascend`/`Descend`/`Fall` and seeded into `EditScratch.reset(allowEdits)` from one floor cell; it now lives
+inside `EditScratch`'s break/place fold, testing the flags of the cell **actually being edited**. The
+documented openable SET bypasses survive unchanged (toggling a door/trapdoor/gate changes no cell's
+occupancy for support purposes, so it cannot drop a gravity block).
+
+**Consequence for §4's "do not create a fourth frame" rule:** there is now exactly ONE frame for every
+edit-hazard bit, and **backlog OPEN 2 (the frame mismatch) is CLOSED, not half-closed.**
 
 ### §4.2 Lava is PRICED, not forbidden — RATIFIED (owner, 2026-08-17), reversing §6's earlier DISALLOW
 

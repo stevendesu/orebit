@@ -339,6 +339,7 @@ loom {
             project.findProperty("orebit.vinebridge")?.let { vmArg("-Dorebit.vinebridge=$it") }
             // Same piggy-back for the 200-rung shaft harness (LadderShaftCourse). The sub-keys are
             // pass-through, not fixed: -Porebit.ladder.height / .kind / .bore / .trace all reach the JVM.
+            project.findProperty("orebit.cavein")?.let { vmArg("-Dorebit.cavein=$it") }
             project.findProperty("orebit.ladder")?.let { vmArg("-Dorebit.ladder=$it") }
             for (key in listOf("height", "kind", "bore", "trace")) {
                 project.findProperty("orebit.ladder.$key")?.let { vmArg("-Dorebit.ladder.$key=$it") }

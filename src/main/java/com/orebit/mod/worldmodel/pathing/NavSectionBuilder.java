@@ -425,11 +425,15 @@ public final class NavSectionBuilder {
      *       {@code run(y) = nav(y+1)==nav(y) ? min(run(y+1)+1, 14) : 0}, seeded 0 at the top of the built
      *       column (unbuilt above = "differs", the same hard wall the extractor's legacy scan reports).</li>
      * </ul>
-     * The ascending sweep also carries the <b>HAS_FLUID_NEIGHBOR SCATTER</b> (PERF-DESIGN-navgrid-build
-     * §C1; DESIGN-fluid-flow-prediction.md §4): it already decodes every cell's descriptor, so a single
-     * {@link NavBlock#isFluid} mask test per cell drives {@link #scatterFluidNeighbor}'s 6-neighbour
-     * dilation for free on fluid-free terrain. That is a FLAGS write riding a depth pass — deliberate, and
-     * the reason the term is not gathered in {@link NavFlags#compute}.
+     * The ascending sweep also carries <b>TWO SCATTERS behind ONE union mask test</b>
+     * ({@link NavBlock#SCATTER_MASK}; PERF-DESIGN-navgrid-build §C1): it already decodes every cell's
+     * descriptor, so a single mask test per cell drives both 6-neighbour dilations for free on ordinary
+     * terrain — {@link #scatterFluidNeighbor} for HAS_FLUID_NEIGHBOR
+     * (DESIGN-fluid-flow-prediction.md §4) and {@link #scatterGravityNeighbor} for
+     * {@link NavFlags#RISKS_GRAVITY}'s half B (the cave-in dilation off an UNSUPPORTED gravity block —
+     * NavFlags, "RISKS_GRAVITY: two halves, two owners"). Those are FLAGS writes riding a depth pass —
+     * deliberate, and the reason neither term is gathered in {@link NavFlags#compute}: both read laterally
+     * and downward, and that scratch overscans UPWARD only.
      *
      * <p>A {@code null} section slot (a chunk shorter than the level column) ends the ascending sweep — every
      * cell above it keeps {@link TraversalGrid#DEPTH_UNKNOWN} (conservative: readers legacy-scan) — and
@@ -485,12 +489,26 @@ public final class NavSectionBuilder {
                         colA[c] = gap;
                         colB[c] = NavBlock.isStandable(d) ? 1 : 0;
 
-                        // Fluid scatter: a fluid cell (water OR lava) UNCONDITIONALLY marks its 6 orthogonal
-                        // neighbours HAS_FLUID_NEIGHBOR (DESIGN-fluid-flow-prediction.md §4). Detection
-                        // reuses the already-decoded descriptor d — exactly ONE mask test per cell when the
-                        // cell is not fluid, which is the overwhelming common case.
-                        if (NavBlock.isFluid(d)) {
-                            scatterFluidNeighbor(grid, below, above, c & 15, y, (c >> 4) & 15);
+                        // SCATTER dispatch — ONE union mask test per swept cell (NavBlock.SCATTER_MASK =
+                        // the low FLUID bit OR the GRAVITY bit), on the descriptor d this sweep has already
+                        // decoded for the standability carry. The overwhelmingly common cell is neither
+                        // fluid nor gravity and pays exactly this one predictable not-taken branch — the
+                        // same budget the fluid term alone used to cost. Inside, the two predicates
+                        // discriminate on the cold side:
+                        //   * FLUID  -> HAS_FLUID_NEIGHBOR, unconditional 6-neighbour dilation
+                        //               (DESIGN-fluid-flow-prediction.md §4).
+                        //   * GRAVITY & UNSUPPORTED -> RISKS_GRAVITY half B, the cave-in dilation (NavFlags,
+                        //               "RISKS_GRAVITY: two halves, two owners"). Half A (the cell directly
+                        //               below ANY gravity block) is NavFlags.compute's, already written in
+                        //               pass 2 — nothing to scatter for it.
+                        if ((d & NavBlock.SCATTER_MASK) != 0) {
+                            int lx = c & 15, lz = (c >> 4) & 15;
+                            if (NavBlock.isFluid(d)) {
+                                scatterFluidNeighbor(grid, below, above, lx, y, lz);
+                            }
+                            if (NavBlock.hasGravity(d) && unsupportedInColumn(raw, below, idx, y, lx, lz)) {
+                                scatterGravityNeighbor(grid, below, above, lx, y, lz);
+                            }
                         }
                     }
                     if (seedRow) seeded = true;
@@ -543,7 +561,7 @@ public final class NavSectionBuilder {
      *       precedes pass 3 for the whole column). A null neighbour = the built column ends there; the
      *       scatter drops, as it must.</li>
      *   <li><b>Lateral chunk face</b> — {@code x±1}/{@code z±1} off the 0..15 section: dropped here (the
-     *       neighbour chunk may not even be built yet) and folded separately by {@link EdgeFluidScatter}.</li>
+     *       neighbour chunk may not even be built yet) and folded separately by {@link EdgeScatter}.</li>
      * </ul>
      * Allocation-free: no per-cell object, no per-cell array; OR-ing HAS_FLUID_NEIGHBOR preserves navtype +
      * the other flag bits.
@@ -552,13 +570,64 @@ public final class NavSectionBuilder {
                                              int x, int y, int z) {
         for (int[] o : NavFlags.SIX) {
             int nx = x + o[0], ny = y + o[1], nz = z + o[2];
-            if (nx < 0 || nx > 15 || nz < 0 || nz > 15) continue; // chunk face: EdgeFluidScatter's job
+            if (nx < 0 || nx > 15 || nz < 0 || nz > 15) continue; // chunk face: EdgeScatter's job
             if (ny < 0) {
                 if (below != null) below.orFlags(nx, NavSection.SIZE - 1, nz, NavFlags.HAS_FLUID_NEIGHBOR);
             } else if (ny >= NavSection.SIZE) {
                 if (above != null) above.orFlags(nx, 0, nz, NavFlags.HAS_FLUID_NEIGHBOR);
             } else {
                 grid.orFlags(nx, ny, nz, NavFlags.HAS_FLUID_NEIGHBOR);
+            }
+        }
+    }
+
+    /**
+     * Is the gravity cell at row {@code y} of this section UNSUPPORTED — nothing solid directly beneath it?
+     * The gate on {@link #scatterGravityNeighbor}: only a SUSPENDED gravity block can be poked loose by an
+     * edit at one of its neighbours (RISKS_GRAVITY rule (b)); a supported one is handled entirely by half A
+     * on the single cell that IS its support.
+     *
+     * <p>Reads this section's own row {@code y-1}, or the section BELOW's row 15 at {@code y == 0} (that
+     * grid's navtypes are final: pass 1 ran for the whole column before pass 3). A null {@code below} means
+     * the built column ends there ⇒ AIR ⇒ unsupported — the same air-optimism the patch gather's null
+     * {@code belowGrid} produces, so build and patch agree. Reached only on gravity cells.
+     */
+    private static boolean unsupportedInColumn(short[] raw, TraversalGrid below, int idx, int y,
+                                               int lx, int lz) {
+        long d = y > 0
+                ? NavBlock.descriptor((short) (raw[idx - 256] & TraversalGrid.NAVTYPE_MASK))
+                : (below == null ? AIR_DESC
+                                 : NavBlock.descriptor((short) below.navtype(lx, NavSection.SIZE - 1, lz)));
+        return NavBlock.isPassable(d);
+    }
+
+    /**
+     * Scatter {@link NavFlags#RISKS_GRAVITY}'s HALF B from an UNSUPPORTED gravity cell at section-local
+     * {@code (x,y,z)} onto its 6 orthogonal neighbours — byte-for-byte the destination logic of
+     * {@link #scatterFluidNeighbor} (same {@link NavFlags#SIX} table, same three destinations: in-section /
+     * vertical seam through the REAL below+above grids / lateral chunk face dropped for
+     * {@link EdgeScatter}). The exact SCATTER counterpart of
+     * {@link NavFlags#risksGravityNeighborGather}'s gather.
+     *
+     * <p>The {@code -y} offset is deliberately kept even though {@link NavFlags#compute}'s half A already
+     * marks that cell: scatter and gather must express the IDENTICAL set, the bit is OR-composed, so the
+     * redundancy is free while an asymmetric table would be a standing drift hazard.
+     *
+     * <p>Allocation-free; OR-ing preserves navtype + the other flag bits. The write-into-{@code above}
+     * safety argument is {@link #scatterFluidNeighbor}'s verbatim (pass 2 completed for the ENTIRE column
+     * before this sweep, so no later {@code computeFlags} clobbers a scattered bit).
+     */
+    private static void scatterGravityNeighbor(TraversalGrid grid, TraversalGrid below, TraversalGrid above,
+                                               int x, int y, int z) {
+        for (int[] o : NavFlags.SIX) {
+            int nx = x + o[0], ny = y + o[1], nz = z + o[2];
+            if (nx < 0 || nx > 15 || nz < 0 || nz > 15) continue; // chunk face: EdgeScatter's job
+            if (ny < 0) {
+                if (below != null) below.orFlags(nx, NavSection.SIZE - 1, nz, NavFlags.RISKS_GRAVITY);
+            } else if (ny >= NavSection.SIZE) {
+                if (above != null) above.orFlags(nx, 0, nz, NavFlags.RISKS_GRAVITY);
+            } else {
+                grid.orFlags(nx, ny, nz, NavFlags.RISKS_GRAVITY);
             }
         }
     }
@@ -605,7 +674,7 @@ public final class NavSectionBuilder {
      *       gain.</li>
      * </ul>
      * Lateral neighbours keep the air default within this method (a change never touches another CHUNK's
-     * data here); the cross-chunk fluid fold is {@link EdgeFluidScatter}, driven from the drain. The
+     * data here); the cross-chunk fluid fold is {@link EdgeScatter}, driven from the drain. The
      * vertical neighbours are same-chunk by construction ({@link NavStore}'s per-chunk column).
      *
      * <p>The descriptor scratch is reconstructed from resident navtypes (≈4.8k cheap array reads — well
@@ -639,10 +708,12 @@ public final class NavSectionBuilder {
         fillScratch(desc, grid, aboveGrid);
 
         // Recompute the changed cell's flags + the cells whose flags depend on it. NavFlags.compute()
-        // reads the headroom column up to y+3 and the x±1 / z±1 gravity neighbourhood, and the
-        // fluid term reads the 6 orthogonal neighbours, so the inverse affected set is
-        // x±1 / y-3..y+1 / z±1 (clamped to this section; the parts across the two section faces are the
-        // seam passes below). belowGrid feeds the one fluid read the upward-only scratch cannot serve.
+        // reads the headroom column up to y+3 (it has NO lateral reads at all), the fluid gather reads the
+        // 6 orthogonal neighbours, and the GRAVITY gather reads the 6 neighbours PLUS each one's own
+        // support a further row down — so the inverse affected set is x±1 / y-3..y+2 / z±1 (clamped to this
+        // section; the parts across the two section faces are the seam passes below). See
+        // recomputeWindow's doc for the union arithmetic. belowGrid feeds the downward reads the
+        // upward-only scratch cannot serve, for BOTH scattered terms.
         recomputeWindow(grid, belowGrid, desc, lx, ly, lz);
 
         // Below-seam propagation: rebuild the scratch AS THE BELOW SECTION SEES IT (its navtypes + this
@@ -653,13 +724,16 @@ public final class NavSectionBuilder {
             recomputeWindow(belowGrid, null, desc, lx, ly + NavSection.SIZE, lz);
         }
 
-        // Above-seam propagation (the mirror, required only by the fluid term's DOWNWARD read): a change in
-        // this section's TOP row is the y-1 neighbour of the above section's row 0, and no scratch reaches
-        // downward across a face. Rebuild the scratch AS THE ABOVE SECTION SEES IT and run the window on a
-        // virtual change at y = ly-16 = -1, which clamps to row 0 alone. A null overscan is EXACT there —
-        // a row-0 cell reads at most y+3 = row 3, inside the above section's own 4096 cells — and THIS grid
-        // is handed in as its below, supplying the cross-face fluid descriptors.
-        if (ly == NavSection.SIZE - 1 && aboveGrid != null) {
+        // Above-seam propagation (the mirror, required by the two SCATTERED terms' DOWNWARD reads): a
+        // change in this section's TOP rows is read by the above section's bottom rows, and no scratch
+        // reaches downward across a face. Rebuild the scratch AS THE ABOVE SECTION SEES IT and run the
+        // window on a virtual change at y = ly-16. The trigger is ly >= 14, not ly == 15, because the
+        // GRAVITY gather reads TWO rows down: an ly==15 change is the above row 0's y-1 neighbour (virtual
+        // centre -1 -> rows 0..1), and an ly==14 change is that row-0 cell's y-2 support (virtual centre
+        // -2 -> row 0). A null overscan stays EXACT — the deepest cell reached is the above section's
+        // row 1, which reads at most y+3 = row 4, inside its own 4096 cells — and THIS grid is handed in as
+        // its below, supplying the cross-face descriptors.
+        if (ly >= NavSection.SIZE - 2 && aboveGrid != null) {
             fillScratch(desc, aboveGrid, null);
             recomputeWindow(aboveGrid, grid, desc, lx, ly - NavSection.SIZE, lz);
         }
@@ -711,10 +785,12 @@ public final class NavSectionBuilder {
      *   <li><b>P2</b>: ONE {@code fillScratch} over the final field + one {@link #recomputeWindow} per
      *       changed cell, then — when any {@code ly <} {@link NavFlags#OVERSCAN_ROWS} cell changed —
      *       ONE below-seam scratch fill (the below grid with this just-patched grid as its overscan) +
-     *       the inverse window per low cell, and — when any {@code ly == 15} cell changed — ONE above-seam
-     *       fill + a one-row window per top-row cell (the HAS_FLUID_NEIGHBOR term's downward read; see
+     *       the inverse window per low cell, and — when any {@code ly >= 14} cell changed — ONE above-seam
+     *       fill + a short window per top-rows cell (the two scattered terms' downward reads; see
      *       {@link #patchCell}). Exactly the single-cell seam contract amortized per section-pair, in both
-     *       directions.</li>
+     *       directions. <b>The above-seam trigger is {@code ly >= 14}, not {@code ly == 15}</b>: the
+     *       gravity gather reads two rows down, so an {@code ly == 14} edit is the {@code y-2} support read
+     *       of the above section's row 0.</li>
      * </ul>
      * Final grid state is byte-identical to the sequential loop (depth: P1 IS the sequential regime,
      * one cell at a time from a consistent grid; flags = f(final navtypes) on the union of windows
@@ -767,7 +843,7 @@ public final class NavSectionBuilder {
                 patchRunUp(grid, aboveGrid, belowGrid, lx, ly, lz);
                 changed++;
                 anyLow |= ly < NavFlags.OVERSCAN_ROWS;
-                anyHigh |= ly == NavSection.SIZE - 1;
+                anyHigh |= ly >= NavSection.SIZE - 2;
             }
         }
         if (changed == 0) return;
@@ -800,13 +876,14 @@ public final class NavSectionBuilder {
                 }
             }
         }
-        // The above-seam mirror (the fluid term's downward read — see patchCell): a top-row change is the
-        // y-1 neighbour of the above section's row 0. One scratch fill AS THE ABOVE SECTION SEES IT (null
-        // overscan is exact for row 0, which reads at most y+3 = row 3) + a one-row window per top-row cell,
-        // with THIS grid as the above section's below.
+        // The above-seam mirror (the scattered terms' downward reads — see patchCell): a row-15 change is
+        // the y-1 neighbour of the above section's row 0, and a row-14 change is that row-0 cell's y-2
+        // SUPPORT read (the gravity gather). One scratch fill AS THE ABOVE SECTION SEES IT (null overscan
+        // stays exact: the deepest cell this reaches is the above section's row 1, which reads at most
+        // y+3 = row 4) + the clamped window per top-rows cell, with THIS grid as the above section's below.
         if (anyHigh && aboveGrid != null) {
             fillScratch(desc, aboveGrid, null);
-            for (int w = ((NavSection.SIZE - 1) * 256) >> 6; w < 64; w++) { // words 60..63 = ly 15
+            for (int w = ((NavSection.SIZE - 2) * 256) >> 6; w < 64; w++) { // words 56..63 = ly 14-15
                 long b = bits[w];
                 while (b != 0) {
                     final int p = (w << 6) | Long.numberOfTrailingZeros(b);
@@ -901,14 +978,20 @@ public final class NavSectionBuilder {
      * neighbour that scratch cannot reach — see the seam bullet.
      * <ul>
      *   <li><b>Authoritative, not additive</b> — {@code compute} writes every other bit from scratch
-     *       (including the now strictly-gravity RISKY_EDIT), then the gather OR-s the fluid term in. A cell
-     *       that LOSES its only fluid neighbour has HAS_FLUID_NEIGHBOR correctly CLEARED — the
-     *       {@code grid.set} below stores the whole recomputed flags, never an accumulate.</li>
-     *   <li><b>The window is a superset of the affected set</b> — an edit at {@code (lx,ly,lz)} can change
-     *       the fluid term of exactly its 6 orthogonal neighbours, all inside
-     *       {@code (lx±1, ly-1..ly+1, lz±1)} ⊂ the box {@code (lx±1, ly-3..ly+1, lz±1)} this method walks
-     *       (that box is sized by {@code compute}'s own inverse footprint, which is deeper). Cells outside
-     *       the window keep their already-correct stored term.</li>
+     *       (including {@link NavFlags#RISKS_GRAVITY}'s half A), then the two gathers OR their scattered
+     *       terms in. A cell that LOSES its only fluid neighbour, or whose adjacent suspended gravel gains a
+     *       support, has the corresponding bit correctly CLEARED — the {@code grid.set} below stores the
+     *       whole recomputed flags, never an accumulate.</li>
+     *   <li><b>The window is a superset of the affected set</b>, and its extent is the UNION of three
+     *       inverse footprints. (1) {@code compute}'s own is {@code ly-3..ly+1} (it reads the headroom column
+     *       to {@code y+3}). (2) The fluid gather changes exactly the 6 orthogonal neighbours,
+     *       {@code ly-1..ly+1}. (3) <b>The gravity gather is what forces the {@code +2} row</b>: it reads
+     *       {@code C±1} on every axis PLUS {@code C-2y} (its {@code -y} neighbour's own support), so
+     *       inverting, an edit at {@code E} can change the half-B term of every {@code C} in
+     *       {@code (lx±1, ly-1..ly+2, lz±1)}. Concretely: an edit can flip a gravity block's SUPPOSEDNESS,
+     *       and that moves half B on the block's UPPER neighbour — two rows above the edit. Union:
+     *       {@code (lx±1, ly-3..ly+2, lz±1)}, the box this method walks. Cells outside keep their
+     *       already-correct stored term.</li>
      *   <li><b>The vertical seam, both ways.</b> The dilation crosses a section face; the scratch only
      *       overscans UPWARD. So {@code y+1} at row 15 is fine (it lands in the overscan), but {@code y-1}
      *       at row 0 would read air — hence {@code belowGrid}: when non-null its row 15 supplies that one
@@ -918,9 +1001,9 @@ public final class NavSectionBuilder {
      *       (rows {@code 13+ly..15} of the section below, THIS grid as its overscan) never reaches row 0, so
      *       it correctly passes {@code belowGrid == null}.</li>
      *   <li><b>Bit-identical to a rebuild</b> — over the final navtypes the per-cell 6-neighbour gather is
-     *       the same dilation as the whole-column scatter (the {@code FluidScatterIdentityTest} oracle), and
+     *       the same dilation as the whole-column scatter (the {@code ScatterIdentityTest} oracle), and
      *       it reads only cells present in {@code desc} + the supplied below row, exactly what a full build
-     *       sees for that cell. Cross-chunk lateral faces are folded by {@link EdgeFluidScatter} in both
+     *       sees for that cell. Cross-chunk lateral faces are folded by {@link EdgeScatter} in both
      *       forms.</li>
      * </ul>
      * O(window) gathers per patch (a patch touches O(1) cells), so the gather is cheap here even though it
@@ -928,13 +1011,19 @@ public final class NavSectionBuilder {
      */
     private static void recomputeWindow(TraversalGrid grid, TraversalGrid belowGrid, long[] desc,
                                         int lx, int ly, int lz) {
-        for (int y = clampCell(ly - 3); y <= clampCell(ly + 1); y++) {
+        for (int y = clampCell(ly - 3); y <= clampCell(ly + 2); y++) {
             for (int z = clampCell(lz - 1); z <= clampCell(lz + 1); z++) {
                 for (int x = clampCell(lx - 1); x <= clampCell(lx + 1); x++) {
                     int flags = NavFlags.compute(desc, x, y, z);
                     if (NavFlags.hasFluidNeighborGather(desc, x, y, z)
                             || (y == 0 && belowGrid != null && isFluidAt(belowGrid, x, NavSection.SIZE - 1, z))) {
                         flags |= NavFlags.HAS_FLUID_NEIGHBOR;
+                    }
+                    // RISKS_GRAVITY half B (compute wrote half A). The gather takes belowGrid for BOTH
+                    // y == 0 and y == 1 — it reads two rows down — which is why the grid is threaded into
+                    // it rather than special-cased at this call site like the fluid one.
+                    if (NavFlags.risksGravityNeighborGather(desc, belowGrid, x, y, z)) {
+                        flags |= NavFlags.RISKS_GRAVITY;
                     }
                     grid.set(x, y, z, grid.navtype(x, y, z), flags);
                 }

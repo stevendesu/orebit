@@ -52,27 +52,24 @@ public final class EditScratch {
     private long clutchCell;
     private float extraCost;
     private boolean valid;
-    private boolean allowEdits;
 
     EditScratch(MovementContext ctx) {
         this.ctx = ctx;
     }
 
-    /** Clear the accumulator for a fresh candidate, edits permitted; returns {@code this} for fluent use. */
-    public EditScratch reset() {
-        return reset(true);
-    }
-
     /**
-     * Clear the accumulator for a fresh candidate. When {@code allowEdits} is false, no break or place is
-     * folded — a blocked/empty required cell makes the move <i>invalid</i> instead of editing through it.
-     * Movements pass {@code false} to honour the {@code RISKY_EDIT} flag: editing at/next to this cell
-     * could drop a GRAVITY block onto the bot — strictly gravity since the lava term migrated off bit 0
-     * (DESIGN-fluid-flow-prediction.md §4.1; a fluid-adjacent dig is now PRICED by the {@link #fluidVerdict
-     * fold funnel}, never refused here) — so the bot must reach it without editing or not at all. Returns
-     * {@code this} for fluent use.
+     * Clear the accumulator for a fresh candidate; returns {@code this} for fluent use.
+     *
+     * <p><b>There is no longer an {@code allowEdits} parameter</b> (owner ruling 2026-08-21). The old
+     * {@code reset(boolean)} carried a gate the CALLER had read from ONE cell — under the floor-framed
+     * {@code RISKY_EDIT}, typically the movement's start or destination FLOOR — and then applied to every
+     * edit the candidate folded, some of them one to three cells away. That is exactly the defect that
+     * killed the 2026-08-21 flagship: {@code Pillar} seeded the gate from its start floor and folded
+     * landing-body breaks at {@code y+J+1}/{@code y+J+2} that NOTHING gated. The bit is now cell-centred
+     * ({@code NavFlags.RISKS_GRAVITY}) and the gate is <b>fold-sited</b> — see {@link #mayEdit} — so no
+     * movement can forget it and none can apply it to the wrong cell.
      */
-    public EditScratch reset(boolean allowEdits) {
+    public EditScratch reset() {
         breakCount = 0;
         placeCount = 0;
         doorCount = 0;
@@ -80,8 +77,23 @@ public final class EditScratch {
         clutchCell = 0L;
         extraCost = 0f;
         valid = true;
-        this.allowEdits = allowEdits;
         return this;
+    }
+
+    /**
+     * <b>THE EDIT GATE</b> (owner ruling 2026-08-21). {@code NavFlags.RISKS_GRAVITY} is CELL-CENTRED —
+     * "editing THIS cell drops a gravity block" (a supported gravity block resting directly on it, or an
+     * unsupported one orthogonally adjacent) — so it is tested at the cell actually being edited, at the
+     * single point each edit kind is folded: {@link #addBreak} and {@link #addPlace}. No movement can
+     * forget it, which is exactly the defect it replaces: {@code Pillar}'s landing-body breaks,
+     * {@code Descend}'s {@code y+2} break, {@code Ascend}'s {@code y+3} break and staircase support place,
+     * and every ground move's head-cell break were all folded under a gate read at a DIFFERENT cell.
+     *
+     * <p>Costs one grid read, and only on the fold path: every caller tests the cheap descriptor predicate
+     * ({@code breakable} / {@code placeable}) first, so an unedited required cell reads nothing.
+     */
+    private boolean mayEdit(int x, int y, int z) {
+        return !ctx.risksGravityAt(x, y, z);
     }
 
     /**
@@ -257,9 +269,9 @@ public final class EditScratch {
      * </ul>
      * Deliberately does NOT free-pass intact doors (unlike the vertical faces of {@link #requireAirToward}):
      * the historical vertical-family behaviour broke/refused a door cell and no ruling widened it. Like the
-     * other SET folds — and unlike the break tail — the toggle bypasses the {@code RISKY_EDIT}
-     * ({@code allowEdits}) gate (the door-symmetric precedent, see {@link #requireFloorOrToggle}). Returns
-     * the cell's EFFECTIVE descriptor, as {@link #requireAirToward}.
+     * other SET folds — and unlike the break tail — the toggle bypasses the {@code RISKS_GRAVITY} edit gate
+     * (the door-symmetric precedent, see {@link #requireFloorOrToggle}). Returns the cell's EFFECTIVE
+     * descriptor, as {@link #requireAirToward}.
      */
     public long requireAirVertical(int x, int y, int z) {
         return requireAirVertical(x, y, z, 0f);
@@ -327,11 +339,10 @@ public final class EditScratch {
      *  ({@code stanceMult ≤ 0} = the node's per-pop stance) — the macro-shaft seam, see
      *  {@link #requireAirVertical(int, int, int, float)}. */
     private void foldBreakOrFail(int x, int y, int z, long d, float stanceMult) {
-        if (allowEdits && ctx.breakable(d)) {
-            addBreak(x, y, z);
+        if (ctx.breakable(d) && addBreak(x, y, z)) {
             extraCost += stanceMult > 0f ? ctx.breakCost(d, stanceMult) : ctx.breakCost(d);
         } else {
-            valid = false; // blocked, and either the bot can't break it or an edit here is forbidden (risky)
+            valid = false; // blocked, and either the bot can't break it or breaking it drops gravity on us
         }
     }
 
@@ -342,8 +353,16 @@ public final class EditScratch {
      * later read of the cell — this candidate's own tiers ({@link #scratchDescriptorAt}), later pops on
      * this path ({@code descriptorAt}), spliced searches ({@link EditSnapshot}) and the invalidation
      * seam's expectation arm — sees the same air / water / lava answer the fold's price was computed from.
+     *
+     * <p><b>This is the single break-fold funnel, and {@link #mayEdit} lives here so it cannot be
+     * bypassed</b> — a refused cell returns {@code false} and folds nothing (the caller decides whether that
+     * invalidates the move or merely declines an optional break). The openable SET folds are deliberately
+     * NOT breaks and do not pass through here — see {@link #setOpenable}.
+     *
+     * @return whether the break was folded ({@code false} = refused by the gravity gate)
      */
-    private void addBreak(int x, int y, int z) {
+    private boolean addBreak(int x, int y, int z) {
+        if (!mayEdit(x, y, z)) return false;
         byte kind = fluidVerdict(x, y, z);
         if (breakCount == breaks.length) {
             breaks = Arrays.copyOf(breaks, breaks.length * 2);
@@ -352,6 +371,7 @@ public final class EditScratch {
         breaks[breakCount] = BlockPos.asLong(x, y, z);
         breakKind[breakCount] = kind;
         breakCount++;
+        return true;
     }
 
     // ---- The fluid-flow evaluation funnel (DESIGN-fluid-flow-prediction.md §5) ----------------------
@@ -629,11 +649,8 @@ public final class EditScratch {
         if (!valid) return;
         long d = ctx.descriptorAt(x, y, z); // one read; reused by standable/placeable below
         if (ctx.standable(d)) return;
-        if (allowEdits && ctx.placeable(x, y, z, d)) {
-            addPlace(x, y, z);
-        } else {
-            valid = false; // no footing, and either the bot can't place or an edit here is forbidden (risky)
-        }
+        if (ctx.placeable(x, y, z, d) && addPlace(x, y, z)) return;
+        valid = false; // no footing, and either the bot can't place or placing here drops gravity on us
     }
 
     /**
@@ -644,8 +661,9 @@ public final class EditScratch {
      * MovementContext#DOOR_TOGGLE_COST}. Ordered standable → toggle → place, so every non-open-trapdoor
      * cell behaves bit-identically to {@code requireFloor} (Stage 3 movements switch their dest-floor call
      * sites over without behavior change on trapdoor-free worlds). Like the crossing SET folds — and unlike
-     * the break/place folds — the toggle deliberately bypasses the {@code RISKY_EDIT} ({@code allowEdits})
-     * gate, the door-symmetric precedent ({@link #requireAirToward} folds door SETs unconditionally too).
+     * the break/place folds — the toggle deliberately bypasses the {@code RISKS_GRAVITY} edit gate. The
+     * sharper reason (not merely the door-symmetric precedent): toggling a door / trapdoor / fence gate
+     * changes no cell's occupancy for SUPPORT purposes, so it cannot drop a gravity block.
      *
      * <p>Returns the EFFECTIVE floor descriptor — the read one when already standable, the TOGGLED one after
      * the SET fold (so the movement's rise/topY math uses the real closed topY, 3 or 16 per half — the §5
@@ -662,8 +680,7 @@ public final class EditScratch {
             setTrapdoor(x, y, z, false); // SET_CLOSED — close the hatch into a floor
             return NavBlock.withOpenableOpen(d, false);
         }
-        if (allowEdits && ctx.placeable(x, y, z, d)) {
-            addPlace(x, y, z);
+        if (ctx.placeable(x, y, z, d) && addPlace(x, y, z)) {
             return MovementContext.PLACED_DESC;
         }
         valid = false;
@@ -691,7 +708,9 @@ public final class EditScratch {
         if (!valid) return;
         long fd = ctx.descriptorAt(fx, fy, fz);
         if (ctx.standable(fd)) return;
-        if (!allowEdits) { valid = false; return; }
+        // The FOOTING cell is pre-checked (rather than left to addPlace's own gate) so that a refused
+        // footing can never leave a stray SUPPORT folded on the two-placement arm below.
+        if (!mayEdit(fx, fy, fz)) { valid = false; return; }
         if (ctx.placeable(fx, fy, fz, fd)) { // footing already has a face — one placement
             addPlace(fx, fy, fz);
             return;
@@ -700,18 +719,28 @@ public final class EditScratch {
         // support's face is the floor the bot stands on, which reads solid via the PathEdits diff (real
         // terrain or a preceding step's block), so a plain placeable() check finds it — staircase chains.
         long sd = ctx.descriptorAt(sx, sy, sz);
-        if (ctx.openForPlace(fd) && ctx.placeable(sx, sy, sz, sd)) {
-            addPlace(sx, sy, sz);
+        // The SUPPORT cell carries its own gate through addPlace — closing the last ungated place in the
+        // codebase (its flags were never read by any frame under the old floor-framed bit).
+        if (ctx.openForPlace(fd) && ctx.placeable(sx, sy, sz, sd) && addPlace(sx, sy, sz)) {
             addPlace(fx, fy, fz);
         } else {
             valid = false;
         }
     }
 
-    private void addPlace(int x, int y, int z) {
+    /**
+     * Record a place of cell {@code (x,y,z)} and charge its cost. The second half of the fold-sited edit
+     * gate ({@link #mayEdit}): a PLACE is a block update at the cell too, so RISKS_GRAVITY rule (b) — an
+     * adjacent UNSUPPORTED gravity block that any neighbouring update pokes loose — applies identically.
+     * Rule (a) can never refuse a legal place: a cell that supports a gravity block is solid, hence not
+     * {@code placeable}. Returns whether the place was folded ({@code false} = refused by the gate).
+     */
+    private boolean addPlace(int x, int y, int z) {
+        if (!mayEdit(x, y, z)) return false;
         places = push(places, placeCount, x, y, z);
         placeCount++;
         extraCost += ctx.placeCost(x, y, z); // real ticks-to-place (+ inventory premium when consuming) — 1d
+        return true;
     }
 
     /**
@@ -757,8 +786,9 @@ public final class EditScratch {
      * reads its cells through {@code packedAt}/{@code descriptorOf} (its UNBUILT discipline) and so cannot
      * ride a self-verdicting {@code require*} that re-reads via {@code descriptorAt}. Rides the
      * kind-agnostic doors[] channel and charges one {@link MovementContext#DOOR_TOGGLE_COST}, exactly like
-     * every other single-cell trapdoor SET; like all SET folds it bypasses the {@code RISKY_EDIT}
-     * ({@code allowEdits}) gate (the door-symmetric precedent).
+     * every other single-cell trapdoor SET; like all SET folds it bypasses the {@code RISKS_GRAVITY} edit
+     * gate (a toggle changes no cell's occupancy for support purposes — see
+     * {@link #requireFloorOrToggle}).
      */
     public void openClimbMouth(int x, int y, int z) {
         setTrapdoor(x, y, z, true);
@@ -814,10 +844,14 @@ public final class EditScratch {
      * break cheaper than transiting the cell intact; {@code cost} is the real mining ticks plus the
      * {@code mining.breakBaseCost} surcharge, charged here in place of the transit surcharge the cell
      * would otherwise add. Package-private: only the context's transit vocabulary emits these.
+     *
+     * @return whether the break was folded; {@code false} = the fold-sited gravity gate refused it, and the
+     *         caller must charge the intact-transit price instead (never invalidate — transiting is legal)
      */
-    void breakThrough(int x, int y, int z, float cost) {
-        addBreak(x, y, z);
+    boolean breakThrough(int x, int y, int z, float cost) {
+        if (!addBreak(x, y, z)) return false;
         extraCost += cost;
+        return true;
     }
 
     /**
@@ -840,20 +874,11 @@ public final class EditScratch {
      * to know which geometry applies.
      *
      * <p>Last call wins (a plain overwrite): a movement evaluates one landing per candidate, and
-     * {@link #reset(boolean)} clears the slot between candidates, so there is no accumulation to reconcile.
+     * {@link #reset()} clears the slot between candidates, so there is no accumulation to reconcile.
      */
     public void setClutch(int kind, int x, int y, int z) {
         clutchKind = kind;
         clutchCell = BlockPos.asLong(x, y, z);
-    }
-
-    /**
-     * Whether this candidate may fold edits at all — {@code reset(false)} (a {@code RISKY_EDIT} floor)
-     * forbids them, and an already-invalid scratch has nothing to gain. The gate the context's
-     * break-through fold checks before recording a break (mirrors {@link #requireAir}'s own gate).
-     */
-    boolean editsAllowed() {
-        return allowEdits && valid;
     }
 
     /** Whether every required cell was satisfiable (directly or via an allowed break/place). */

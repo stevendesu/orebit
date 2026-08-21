@@ -76,6 +76,15 @@ verdicts (§3–§6) that the shipped climb arc left behind.
 - §8 nav-grid cell encoding (RATIFIED s17): packed `short` = [6 NavFlags neighbour-property bits |
   10 navtype bits]; fluid+gravity merged into one RISKY_EDIT bit; work items built per consumer, not
   speculatively; the block-change hook wired via the mixin/overlay pattern.
+  - **Amended 2026-08-21 — the bit is `RISKS_GRAVITY`, cell-centred, and its gate is fold-sited.**
+    Bit 0 no longer means "editing in MY body space could drop gravel"; it means *"breaking or placing at
+    THIS CELL drops a gravity block"* — (a) the cell directly under a SUPPORTED gravity block, or (b) a
+    cell orthogonally adjacent to an UNSUPPORTED one (DESIGN-fluid-flow-prediction.md §4.3). Ownership is
+    split: `NavFlags.compute` writes half A (`hasGravity(above)`), the `computeDepth` scatter / patch
+    gather / `EdgeScatter` own half B. **The per-movement `reset(!risksEdit(flags))` gate is DELETED** —
+    every movement now calls the bare `reset()` and the single gate lives inside `EditScratch`'s
+    break/place fold, reading the cell actually edited. That is what closed the class of bug where
+    `Pillar` tested its start floor and then folded ungated landing-body breaks three cells away.
   - **Amended 2026-08-10/11 — "fluid" over-states what RISKY_EDIT carries.** The fluid half is
     **LAVA-only and unconditional**: water never sets the bit, and lava sets it via a 1-cell dilation over
     the 6 orthogonal neighbours with no flowing/impoundment test. Modelling vanilla's slope-distance

@@ -1137,14 +1137,19 @@ public final class MovementContext {
         return NavFlags.headroom(flags);
     }
 
-    /** Whether editing at/next to this floor risks dropping a GRAVITY block onto the bot (from
-     *  {@code flags}) — STRICTLY the gravity term since the 2026-08-17 migration
-     *  (DESIGN-fluid-flow-prediction.md §4.1): the lava keep-away that used to ride this bit under OR
-     *  moved to {@code NavFlags.HAS_FLUID_NEIGHBOR}, where the {@link EditScratch} funnel PRICES the
-     *  predicted flood instead of forbidding the edit (§4.2). Existing {@code reset(!risksEdit(...))}
-     *  call sites are unchanged in text; their semantics narrowed to gravity-only. */
-    public static boolean risksEdit(int flags) {
-        return NavFlags.risksEdit(flags);
+    /**
+     * Whether EDITING cell {@code (x,y,z)} — breaking OR placing — would drop a gravity block onto the bot
+     * ({@link NavFlags#RISKS_GRAVITY} at that cell: a gravity block resting directly on it, or an
+     * unsupported one orthogonally adjacent). ONE grid read, and the entire implementation of
+     * {@link EditScratch}'s fold-sited edit gate.
+     *
+     * <p><b>Read AT THE CELL BEING EDITED — never at a floor frame.</b> This replaces the static
+     * {@code risksEdit(int flags)} predicate the movements used to call on a floor cell's stored bitmask
+     * and then hand to {@code reset(boolean)}; that shape is what let {@code Pillar} fold ungated
+     * landing-body breaks three cells from the cell it had tested (owner ruling 2026-08-21).
+     */
+    public boolean risksGravityAt(int x, int y, int z) {
+        return NavFlags.risksGravity(flagsAt(x, y, z));
     }
 
     /**
@@ -1664,7 +1669,7 @@ public final class MovementContext {
      * EXACT for this method: a hazard just across a section's top face IS flagged and charged. (The old
      * within-section computation left the top ~3 floor rows of every section stale-CLEAR — this zero-read
      * fast path then transited a seam-row berry-bush maze for free, lethally. The one LATERALLY-read bit,
-     * {@code HAS_FLUID_NEIGHBOR}, is folded across chunk faces by {@code EdgeFluidScatter} and is not
+     * {@code HAS_FLUID_NEIGHBOR}, is folded across chunk faces by {@code EdgeScatter} and is not
      * read here.) Solid damaging blocks (cactus / magma / campfire) in the body space also set the
      * hazard bit, but {@link #cellTransitCost} charges only passable cells, so a folded BREAK of such a
      * block is priced by its mining ticks alone.
@@ -1776,8 +1781,10 @@ public final class MovementContext {
      *
      * <p>Same zero-read fast path as the non-folding form: no prefilter bit (or the hazard bit on an
      * invulnerable bot with no slow bit) → {@code 0f}, no grid reads, no fold — ordinary cells pay the
-     * one predictable branch and nothing else. The fold honours the scratch's {@code RISKY_EDIT} gate
-     * ({@link EditScratch#editsAllowed}): a risky floor transits intact at full price, exactly as before.
+     * one predictable branch and nothing else. The fold honours the fold-sited {@code RISKS_GRAVITY} gate
+     * inside {@link EditScratch}: a cell whose break would drop gravity transits INTACT at full price
+     * (never invalidates — walking through is always legal). Note the gate's flags read now happens only
+     * when a fold is actually about to occur, off the arbitration path.
      * Movements that fold no edits by design (Diagonal's corners, Fall's drop column, the airborne
      * Parkour family — nothing can usefully break mid-flight, and their executors have no break slot)
      * keep the non-folding form.
@@ -1800,12 +1807,11 @@ public final class MovementContext {
         long d = descriptorAt(x, y, z);
         float transit = cellTransitCost(d);
         if (transit <= 0f) return 0f;
-        if (e.editsAllowed() && breakableThrough(d)) {
-            float breakThrough = breakCost(d);
-            if (breakThrough < transit) {
-                e.breakThrough(x, y, z, breakThrough);
-                return 0f;
-            }
+        if (breakableThrough(d)) {
+            float bt = breakCost(d);
+            // A refused fold (the fold-sited gravity gate) falls THROUGH to the intact transit charge —
+            // punching the bush was only ever the cheaper of two legal options.
+            if (bt < transit && e.breakThrough(x, y, z, bt)) return 0f;
         }
         return transit;
     }

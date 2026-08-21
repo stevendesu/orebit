@@ -236,7 +236,8 @@ public final class CostPyramidCodec {
      *  the {@code VERSION} history above. It stands here as what was true when v5 was recorded.)
      *  <p>v6 (2026-08-17, DESIGN-fluid-flow-prediction.md §4.1–§4.2): no bit moved and no sig dimension
      *  changed, but the planner got strictly STRONGER under unchanged caps — the RISKY_EDIT lava term
-     *  migrated from categorical refusal to pricing (grid flag bit 0 narrowed to strictly gravity; the
+     *  (bit 0, renamed RISKS_GRAVITY by v8 below) migrated from categorical refusal to pricing (grid flag
+     *  bit 0 narrowed to strictly gravity; the
      *  lava-adjacency fact moved to {@code HAS_FLUID_NEIGHBOR} and the flood funnel's {@code BROKEN_LAVA}
      *  verdict, priced through the existing {@code costPerHitpoint} currency), so digs beside lava that
      *  every earlier search categorically refused are now offered and priced. A v5 "unreachable" row
@@ -256,7 +257,32 @@ public final class CostPyramidCodec {
      *  pattern-matching on the entries above should stop and check the DIRECTION of the planner change
      *  before reaching for a bump. The cost body's {@code VERSION} is likewise untouched (see its
      *  2026-08-20 entry): {@code LeafCostComputer}'s only swim term prices crossing a FULLY-FLOODED leaf,
-     *  whose cells are sources at amount 8 and therefore sit far above the new threshold. */
+     *  whose cells are sources at amount 8 and therefore sit far above the new threshold.
+     *  <p>v8 (2026-08-21, the {@code RISKY_EDIT -> RISKS_GRAVITY} reframe): no bit moved and no sig
+     *  dimension changed — and, unlike every entry above, <b>the direction is MIXED</b>. Grid flag bit 0
+     *  stopped being floor-framed ("editing in MY body space could drop gravel") and became cell-centred
+     *  ("breaking or placing at THIS cell drops a gravity block"), and its gate moved out of the movements'
+     *  {@code EditScratch.reset(boolean)} into the break/place FOLD, where it reads the cell actually being
+     *  edited. Consequences, in both directions:
+     *  <ul>
+     *    <li><b>Weaker refusal (planner STRONGER):</b> the old gate refused <i>every</i> edit of a candidate
+     *        whose FLOOR cell was flagged, including edits several cells from the gravity. Only the
+     *        genuinely hazardous cell is refused now, so routes earlier searches categorically refused are
+     *        offered — the v3..v6 "old negatives can be plainly FALSE" argument applies to that half.</li>
+     *    <li><b>Stronger refusal (planner WEAKER):</b> rule (b) — adjacency to an UNSUPPORTED gravity block
+     *        — is new refusal surface, and a large set of previously UNGATED folds is now gated
+     *        ({@code Pillar}'s landing body, {@code Descend}'s {@code y+2}, {@code Ascend}'s {@code y+3}
+     *        plus its staircase SUPPORT place, every ground move's head-cell break,
+     *        {@code MovementContext.breakThrough}, {@code Fall}'s lands-on-top clutch place). That half is
+     *        v7's shape, where a stored negative stays sound.</li>
+     *  </ul>
+     *  Because it is MIXED, neither clean argument holds: old negatives can be false AND the planner offers
+     *  fewer moves in places. Recorded honestly and <b>NOT bumped</b> — the pre-release pin governs, and
+     *  v7's closing instruction ("check the DIRECTION before reaching for a bump") is being obeyed rather
+     *  than pattern-matched. Nothing on disk encodes this bit in any case: no {@code NavFlags} reference
+     *  exists anywhere under {@code hpa/} or {@code persistence/}, and the realizability sig is
+     *  {@code BotCaps}-derived only. The cost body's {@code VERSION} is untouched (bit 0 is not a
+     *  classification input; no navtype and no flood verdict changes). */
     static final int INVAL_SIG_SCHEMA_VERSION = 1;
     /** Invalidation-section region-graph class — 0 = "optimistic-v1", today's single symmetric/optimistic
      *  connectivity graph. A future capability-aware graph persists its own sections under a new id; rows never

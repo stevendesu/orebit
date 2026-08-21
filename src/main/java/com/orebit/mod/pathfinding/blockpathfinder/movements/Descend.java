@@ -20,7 +20,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerView;
  * 2026-08-11 — "in a single read" over-stated it: the flags ride the one {@code packedAt} slot already
  * resolved for the dest-floor standability test); where it can't (near a
  * section face, or a block in the way), the cells are read and folded into a break-set under the
- * {@code RISKY_EDIT} gate.
+ * fold-sited {@code RISKS_GRAVITY} gate — read at each cell actually broken, so the {@code y+2} head
+ * break is gated now too (it never was under the old floor-framed bit).
  *
  * <p><b>Place modifier (MOVEMENT-DESIGN §1, decision 1).</b> When there's no footing one block down, a
  * throwaway floor is <i>placed</i> against the wall to descend onto (the counterpart to {@link Ascend}'s
@@ -69,7 +70,7 @@ public final class Descend implements Movement {
             long dstDesc = ctx.descriptorOf(nx, dy, nz, packed);
             boolean dstStandable = ctx.standable(dstDesc);
             int flags = MovementContext.flagsOf(packed);
-            EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+            EditScratch e = ctx.edits().reset();
             // §2b: fold the exit-door toggle onto this arm when leaving through a blocked (toggleable) feet door.
             if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
             // Footing: step onto the block below, CLOSE an open hatch into one (§5 requireFloorOrToggle —
@@ -87,7 +88,8 @@ public final class Descend implements Movement {
                 }
             }
             // The step-off transit (nx, y..y+2, nz) is the dest floor's body column; clear it through the
-            // dest's JUMP-level HEADROOM, else read/break the three cells under the RISKY_EDIT gate. A door in
+            // dest's JUMP-level HEADROOM, else read/break the three cells (each under its own fold-sited
+            // RISKS_GRAVITY gate). A door in
             // the dest column is a LOWERED doorway (a door standing on the step the bot drops onto): it occupies
             // the two body cells directly above the dest floor — (nx,y,nz) lower + (nx,y+1,nz) upper — which are
             // cleared DOOR-AWARE (walked past free / opened rather than mined, as Traverse handles a flat one).
