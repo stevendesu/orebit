@@ -321,10 +321,34 @@ public final class MovePlan {
          *  ({@link SteerControl#stepGateArmed} — the one-gate principle, owner-ratified 2026-08-19), so the
          *  gate's containment predicate and the drive police the SAME centreline instead of disputing the
          *  lane (the (259,78,448) two-tick thrust/hold limit cycle). Never true once airborne or off the
-         *  from column — the same self-limits {@link #arrestCarryFrom} documents. */
+         *  from column — the same self-limits {@link #arrestCarryFrom} documents.
+         *
+         *  <p><b>NOT IN FLUID</b> (2026-08-20, flagship r11 {@code (365,17,449)}). The one-gate principle
+         *  above is the gate's own precondition: it may only arm where the drive is routed onto its lane.
+         *  {@link SteerControl#drive}'s water branch takes precedence over {@code stepGateArmed} by design
+         *  ("the gate's lane law is a LAND rule, and the climbable/swim rulings override everything"), so in
+         *  fluid the drive steers {@link SteerControl#uprightSwimServo}'s lane while this gate polices the
+         *  takeoff centre — the two-tick limit cycle above, restored verbatim. Measured: {@code fwd} pinned
+         *  at 1.00 for 1,630 ticks while yaw alternated {@code -29} (drive, toward the step target) and
+         *  {@code +71} (hold, back to the from-cell centre), the bot pinned at {@code z=449.41} and never
+         *  advancing. Neither controller could end it — {@code uprightSwimServo} carries no cross-track term,
+         *  so the cross error keeping the gate armed was never reduced.
+         *
+         *  <p>Arming is ALSO unsound in fluid on its own terms: {@link SteerControl#stepOffGate}'s
+         *  containment prediction is a GROUND-friction coast ({@code slipperinessAt(foot below) *
+         *  PARKOUR_H_DRAG}), and "with zero further input the bot coasts to a stop" is false in a current —
+         *  zero input means the current carries you. On the conviction tick the predicate was tripping on
+         *  POSITION alone: velocity ~0.01 contributes ~0.02 to the horizon, against a cross offset of ~0.21
+         *  and a {@code 0.5 - PARKOUR_CELL_MARGIN} threshold of 0.20. There was no carry to arrest.
+         *
+         *  <p>Scope, deliberately: this withdraws the arrest from fluid, where its prediction was never
+         *  valid — it does not weaken any dry step-off. A wet ledge loses the arrest, which is a real
+         *  (accepted) trade: the alternative is an arrest whose physics model does not describe the medium
+         *  it is arresting in. */
         boolean carryGateArmed(BotSteering bot) {
             return arrestCarry
                     && bot.grounded()
+                    && !bot.inWater()
                     && bot.footX() == carryFromX && bot.footZ() == carryFromZ;
         }
 

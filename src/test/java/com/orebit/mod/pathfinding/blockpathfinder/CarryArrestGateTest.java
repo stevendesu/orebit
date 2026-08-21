@@ -32,6 +32,7 @@ class CarryArrestGateTest {
     private static final class CarryBot implements BotSteering {
         double x, y, z, vx, vz;
         boolean grounded = true;
+        boolean inWater;
         boolean climbable, climbBelow;
         boolean jumping, sprinting, sneaking;
         float forward;
@@ -58,7 +59,7 @@ class CarryArrestGateTest {
         @Override public int footY() { return (int) Math.floor(y); }
         @Override public int footZ() { return (int) Math.floor(z); }
         @Override public boolean grounded() { return grounded; }
-        @Override public boolean inWater() { return false; }
+        @Override public boolean inWater() { return inWater; }
         @Override public boolean inLava() { return false; }
         @Override public boolean prone() { return false; }
         @Override public boolean onClimbable() { return climbable; }
@@ -118,6 +119,44 @@ class CarryArrestGateTest {
         assertFalse(runner.run(bot, new Seg()), "an arrested step is not done");
         assertFalse(runner.failed(), "arresting is not an envelope failure — the move is still viable");
         assertFalse(bot.jumping, "the jump must NOT be pressed while the cross carry would coast it off-lane");
+    }
+
+    @Test
+    void theArrestIsWithdrawnInFluid_theR11StandoffAtASubmergedStep() {
+        // The SAME pose as the canonical arrest above — a pure cross carry that would be held on land —
+        // but with the body in fluid. The gate must not arm at all.
+        //
+        // Flagship r11 (365,17,449), 1,630 ticks: SteerControl.drive's water branch takes precedence over
+        // stepGateArmed by design ("the gate's lane law is a LAND rule"), so in fluid the drive steers
+        // uprightSwimServo's lane while this gate polices the takeoff centre. That is exactly the
+        // (259,78,448) two-tick thrust/hold limit cycle the one-gate principle exists to prevent, and
+        // neither controller can end it: uprightSwimServo has no cross-track term, so the cross error
+        // keeping the gate armed is never reduced. Measured: fwd pinned at 1.00 throughout while yaw
+        // alternated -29 (drive) / +71 (hold), the bot pinned at z=449.41.
+        //
+        // The gate's own prediction is also unsound here: it coasts on GROUND friction
+        // (slipperinessAt(foot below) * PARKOUR_H_DRAG) and assumes zero input means coasting to rest,
+        // which is false in a current. On the conviction tick it tripped on POSITION alone.
+        CarryBot bot = new CarryBot().at(FX + 0.5, FROM_FOOT_Y, FZ + 0.15).vel(0, -0.2);
+        bot.inWater = true;
+        PhaseRunner runner = ascendAtClimb(bot);
+
+        runner.run(bot, new Seg());
+        assertTrue(bot.jumping,
+                "in fluid the carry arrest must not arm — the drive owns the tick, or the gate and the "
+                        + "swim servo deadlock at full throttle (flagship r11, (365,17,449))");
+    }
+
+    @Test
+    void theArrestStillHoldsOnTheIdenticalDryPose() {
+        // The control for the case above: identical pose and carry, dry. Withdrawing the arrest in fluid
+        // must not weaken any dry step-off — this is the guard on that scope claim.
+        CarryBot bot = new CarryBot().at(FX + 0.5, FROM_FOOT_Y, FZ + 0.15).vel(0, -0.2);
+        bot.inWater = false;
+        PhaseRunner runner = ascendAtClimb(bot);
+
+        runner.run(bot, new Seg());
+        assertFalse(bot.jumping, "a dry cross carry is still arrested — the fluid withdrawal is scoped");
     }
 
     @Test
