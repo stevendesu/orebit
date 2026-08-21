@@ -274,6 +274,18 @@ public final class ReplanCourse {
     private static final BlockState AIR = Blocks.AIR.defaultBlockState();
     /** The ice tile's approach/runway floor (version-stable constant, 1.17→26.x — see class Javadoc). */
     private static final BlockState BLUE_ICE = Blocks.BLUE_ICE.defaultBlockState();
+    /** Ladder on the EAST wall of the shaft, so its face (and the bot) is on the WEST side. A ladder, not a
+     *  vine: vines SPREAD on random ticks, which is precisely the nondeterminism this tile exists to replace. */
+    /** A VINE on the east face — climbable with NO hitbox, so a Fall MAY land in it, and deterministic
+     *  here because vines only ever spread DOWNWARD and this one rests on a solid floor. A LADDER may NOT
+     *  be used: its 3-pixel slab is a real collision surface a falling body can come down on and take the
+     *  damage from, so the planner refuses a ladder cell as a fall landing (measured: empty cell ->
+     *  "Fall ->(18,150,215)" emitted; ladder in it -> "Fall -> (nothing)", zero successors). */
+    private static final BlockState VINE = Blocks.VINE.defaultBlockState()
+            .setValue(net.minecraft.world.level.block.VineBlock.EAST, Boolean.TRUE);
+
+    private static final BlockState LADDER = Blocks.LADDER.defaultBlockState()
+            .setValue(net.minecraft.world.level.block.LadderBlock.FACING, net.minecraft.core.Direction.WEST);
 
     public static void register(PlatformEvents events) {
         if (System.getProperty("orebit.replan") == null) {
@@ -293,7 +305,8 @@ public final class ReplanCourse {
         CURRENTSEAL,    // U5: seal the CURRENT destination mid-move -> inputs cut + plan dropped NOW, the wall brakes the coast, rest-gated relaunch
         CURRENTSEAL_ICE,// U5 under carry: same trigger at a blue-ice turn -> the null leaves a real slide the kept rest gate must outwait
         MIDSTRIDE,      // run-6 shape: reversal corridor, seal 2-3 cells AHEAD armed on a segment transition -> the seeded result drains MID-STRIDE; invariants only, class recorded
-        MARGINAL        // run-2 shape: NO seal - blue ice into a 90-degree turn + a one-block step-down; the delivery invariant's live regression guard (zero swaps, the Descend must complete)
+        MARGINAL,       // run-2 shape: NO seal - blue ice into a 90-degree turn + a one-block step-down; the delivery invariant's live regr
+        MIDCLIMB        // r10/r12 shape: seal the upper route while the bot is AIRBORNE on a ladder -> adoption must not frame step 0 on the climb's destinationession guard (zero swaps, the Descend must complete)
     }
 
     /** One replan challenge: a kind + its base grid cell, with corridor/seal/bypass geometry precomputed. */
@@ -316,6 +329,9 @@ public final class ReplanCourse {
         int bypassX0, bypassX1;     // inclusive x-span of the bypass row
         BlockPos bypassProbe;       // a FLOOR cell only a rerouted plan can contain (reroute-swap detector)
         int westLinkX;              // REVERSAL: the U-turn link column the bot must reach back to
+        int climbX;                 // MIDCLIMB: the ladder shaft's column (the seal is armed off the bot being IN it, airborne)
+        int sealFeetY = Y0 + 1;     // feet level of the sealed cell (tiles that seal an UPPER row override)
+        int climbDelay = -1;        // MIDCLIMB: ticks AFTER the bot first goes airborne on the ladder to seal
 
         Trial(String name, Kind kind, int baseX, int baseZ) {
             this.name = name;
@@ -325,7 +341,7 @@ public final class ReplanCourse {
             this.zc = baseZ + 6;
             this.minFloorY = Y0 - 6;
             this.startX = baseX + 0.5; // start INSIDE the corridor mouth (same level-0 region as the leg)
-            this.startY = Y0 + 1;
+            this.startY = kind == Kind.MIDCLIMB ? Y0 + 9 : Y0 + 1; // MIDCLIMB launches from a high stand
             this.startZ = zc + 0.5;
             this.startYaw = yaw(1, 0); // face +X down the corridor
             this.sealZ = zc;           // corridor-row seal by default (the ICE tile overrides: its LINK cell)
@@ -391,6 +407,38 @@ public final class ReplanCourse {
                     this.bypassX1 = baseX + 22;
                     this.bypassProbe = new BlockPos(baseX + 1, Y0, zc + 2);
                     this.westLinkX = baseX + 1;
+                    break;
+                }
+                case MIDCLIMB: {
+                    // The r10/r12 shape, deterministic. A 1-wide lower corridor runs +X into a LADDER shaft
+                    // at +6; the bot climbs ~8 blocks and tops out onto an upper corridor that runs +X to the
+                    // goal, with a bypass row at zc+2 rejoining it. Mid-CLIMB — airborne, on the ladder, with
+                    // the whole shaft still to go — the course seals the upper direct row at +11, so the
+                    // re-search's answer diverges from the incumbent while the terminal move (the Climb) is
+                    // still in flight. That is the exact window both flagship wedges landed in:
+                    // r10 (890,68,969) at botY 68.890 and r12 (56,170,257) at botY 170.996 — the latter four
+                    // thousandths of a block from topping out when the plan swapped.
+                    //
+                    // The bypass exists so the tile has a real answer: the assertion is that the bot ARRIVES,
+                    // which is precisely what a step-0 frame built on the climb's DESTINATION prevents (its
+                    // envelope fails on the first tick and fail->hold makes it permanent).
+                    this.climbX = baseX + 1;
+                    this.sealFeetY = Y0 + 2;   // the ledge the top-out steps onto, one above the landing
+                    this.goal = new BlockPos(baseX + 16, Y0 + 2, zc);
+                    // THE SEAL IS THE FIRST CELL OFF THE LADDER TOP. That is what makes the seam the climb's
+                    // own landing cell rather than something further along: the ladder top has two exits
+                    // (east along row A, north into row B), the shorter east one is what the incumbent plan
+                    // commits to, and sealing it mid-climb forces the re-search to diverge AT the top of the
+                    // ladder. The Climb therefore becomes the TERMINAL move of the truncated plan — exactly
+                    // r12's `seam-adopt bot=(56,169,257) seam=(56,170,257)`. Sealing further east instead
+                    // produces a legitimate ONPLAN install and proves nothing (measured: the tile passed).
+                    this.sealX = baseX + 2;   // the east ledge cell, i.e. the Traverse right after the top-out
+                    this.sealZ = zc;
+                    this.editX = 0;            // unused — the trigger is the airborne-in-shaft state
+                    this.bypassZ = zc + 2;
+                    this.bypassX0 = baseX + 1;
+                    this.bypassX1 = baseX + 16;
+                    this.bypassProbe = new BlockPos(baseX + 11, Y0 + 1, zc + 2);
                     break;
                 }
                 case MARGINAL: {
@@ -528,6 +576,10 @@ public final class ReplanCourse {
             add("currentseal-on-ice", Kind.CURRENTSEAL_ICE);
             add("midstride",          Kind.MIDSTRIDE);
             add("marginal",           Kind.MARGINAL);
+            // Sweep the whole in-flight window of the one-block climb, one trial per tick offset.
+            for (int d = 0; d <= 10; d++) {
+                add("midclimb-t" + d, Kind.MIDCLIMB, d);
+            }
         }
 
         /** The tiles that seal ANYTHING — and therefore run the seal arm, the bypass sampling and the
@@ -551,13 +603,23 @@ public final class ReplanCourse {
         }
 
         void add(String name, Kind kind) {
+            add(name, kind, -1);
+        }
+
+        /** {@link #add} with a MIDCLIMB tick offset: seal exactly {@code climbDelay} ticks after the bot
+         *  first leaves the ground on the ladder. Registering the same tile at several offsets sweeps the
+         *  whole in-flight window in ONE run, which is the only way to hit a handoff that geometry alone
+         *  cannot steer (three geometry variants all landed on the healthy FAST_FORWARD path). */
+        void add(String name, Kind kind, int climbDelay) {
             int i = trials.size();
             int row = i / COLS;
             int col = i % COLS;
             if ((row & 1) == 1) col = COLS - 1 - col; // snake: keep consecutive trials adjacent
             int bx = BASE_X + col * STRIDE;
             int bz = BASE_Z + row * STRIDE;
-            trials.add(new Trial(name, kind, bx, bz));
+            Trial t = new Trial(name, kind, bx, bz);
+            t.climbDelay = climbDelay;
+            trials.add(t);
         }
 
         void start(MinecraftServer server) {
@@ -643,6 +705,7 @@ public final class ReplanCourse {
             justRetried = false;
             sealPlaced = false;
             sealTick = -1;
+            climbStartTick = -1;
             editFloor = null;
             swapCount = 0;
             seamViolations = 0;
@@ -793,8 +856,8 @@ public final class ReplanCourse {
             // route (cursor+1 for PREFIXSEAL — the U2 clamp's proof; the CURRENT destination for the U5
             // emergency tiles), armed off the live segment (see sealTriggered).
             if (sealKind(tr.kind) && !sealPlaced && plan != null && sealTriggered(tr, nav)) {
-                set(tr.sealX, Y0 + 1, tr.sealZ, STONE);
-                set(tr.sealX, Y0 + 2, tr.sealZ, STONE);
+                set(tr.sealX, tr.sealFeetY, tr.sealZ, STONE);
+                set(tr.sealX, tr.sealFeetY + 1, tr.sealZ, STONE);
                 sealPlaced = true;
                 sealTick = attemptTicks;
                 editFloor = nav.settledFloor();
@@ -946,6 +1009,9 @@ public final class ReplanCourse {
          *  plain x-threshold (the seal is far ahead; only "a few moves in" matters). The near-seal tiles
          *  arm off the LIVE segment so the seal provably lands relative to the CURRENT move, mid-move by
          *  construction — see each tile's geometry comment for the derivation of the thresholds. */
+        /** Tick the bot first went airborne on the ladder this attempt ({@code -1} until then). */
+        int climbStartTick = -1;
+
         boolean sealTriggered(Trial tr, BotNavigator nav) {
             switch (tr.kind) {
                 case PREFIXSEAL:
@@ -965,6 +1031,28 @@ public final class ReplanCourse {
                     // Last half-block before the CURRENT destination's boundary (x in [sealX-0.5, sealX)).
                     return nav.segToX() == tr.sealX && nav.segToZ() == tr.zc
                             && bot.getX() >= tr.editX;
+                case MIDCLIMB:
+                    // AIRBORNE on the ladder, inside the shaft column, with most of the climb still ahead.
+                    // State-based and exact — no timer, no x threshold: onClimbable() plus "not grounded"
+                    // IS the mid-move window, and the height band keeps the seal off both endpoints (at the
+                    // very bottom it would land before the Climb starts; at the very top the move would
+                    // complete first and the handoff would be an ordinary settled one).
+                    // Fire while the bot is still GROUNDED at the foot of the ladder, so the re-search is
+                    // already in flight when the first one-block Climb starts. Measured: arming mid-shaft
+                    // instead resolves the seam to a cell the bot has ALREADY climbed past, which matches
+                    // the new plan body (matched=0) and takes the healthy FAST_FORWARD path — the tile
+                    // passed and proved nothing. r12's seam sat one cell ABOVE the bot with matched=-1.
+                    // TICK-EXACT. Latch the tick the bot leaves the ground on the ladder, then seal
+                    // exactly climbDelay ticks later. Geometry cannot steer which cell the seam resolves
+                    // to; the tick the invalidation lands relative to the climb's own progress can, and a
+                    // one-block climb is only ~9 ticks long, so the whole window is a small integer sweep.
+                    if (climbStartTick < 0
+                            && !bot.onGround() && bot.onClimbable()
+                            && (int) Math.floor(bot.getX()) == tr.climbX) {
+                        climbStartTick = attemptTicks;
+                    }
+                    return climbStartTick >= 0 && tr.climbDelay >= 0
+                            && attemptTicks == climbStartTick + tr.climbDelay;
                 case CURRENTSEAL_ICE:
                     // The tick the cursor turns north: the destination IS the T-link cell, and the bot
                     // still carries its +X ice cruise (mid-move by construction — reached just fired).
@@ -1059,6 +1147,22 @@ public final class ReplanCourse {
                         return String.format(Locale.ROOT,
                                 "never returned to the U-link (min x %.2f, link %d) — the reversal was"
                                         + " not walked", postRerouteMinX, tr.westLinkX);
+                    }
+                    return null;
+                }
+                case MIDCLIMB: {
+                    // The whole assertion is ARRIVAL, and that is not a weak test here: the r10/r12 failure
+                    // is a permanent fail->hold one tick after the swap, so a bot that reaches this goal
+                    // provably did not take a step-0 frame built on the climb's destination. Arrival is
+                    // checked by the caller (this method only runs on a reached trial); what is asserted
+                    // here is that the tile actually exercised the window it exists for.
+                    if (!sealPlaced) {
+                        return "the mid-climb seal never armed — the bot never went airborne in the shaft"
+                                + " column, so this trial proved nothing";
+                    }
+                    if (swapCount == 0) {
+                        return "the seal placed but no plan swap followed — the re-search did not reroute,"
+                                + " so the mid-move handoff was never exercised";
                     }
                     return null;
                 }
@@ -1396,6 +1500,35 @@ public final class ReplanCourse {
                     }
                     break;
                 }
+                case MIDCLIMB: {
+                    // Lower corridor (feet Y0+1) -> ladder shaft at +6 -> upper corridor (feet Y0+9) -> goal,
+                    // plus a bypass row at zc+2 that rejoins east of the seal. Boxed tall enough for the shaft.
+// A ladder at +1, four tall, so the Climb is an EARLY plan step (r12 wedged at cursor=1).
+                    // NOTE: an earlier attempt rebuilt this as r12's true shape — a Fall into a ONE-block
+                    // climbable, then a top-out — and the planner emitted ZERO successors from the launch
+                    // stand ("nowhere left to go after 1 expansions") even with the drop shortened to a
+                    // damage-free 3 blocks. Fall appears not to offer a landing whose FEET cell holds a
+                    // climbable; that is unexplained and worth its own look, and it is why this tile still
+                    // enters the climb on foot rather than by falling into it.
+                    // r12's shape exactly. An EIGHT-block lateral fall into a ONE-block vine, then a
+                    // top-out onto a ledge one block above the landing FLOOR, then a Traverse east.
+                    // r12: Fall d(-1,-8,0) from feet 178 to feet 170 (vine) on leaves at 169, Climb to
+                    // feet 171, Traverse onto the ledge at floor 170. The height is load-bearing, not
+                    // decorative: a vine clamps descent to -0.15 on contact so the drop costs no damage,
+                    // but the fall distance sets how much downward momentum is reversed at the landing —
+                    // which is what the climb then has to overcome. A 3-block drop was the most this tile
+                    // ever ran and it never reproduced; r12's was 8.
+                    box(bx - 1, bx + 18, Y0 - 1, Y0 + 12, zc - 1, zc + 4);
+                    carve(bx, bx, Y0 + 9, Y0 + 10, zc);                    // launch stand (feet Y0+9)
+                    carve(bx + 1, bx + 1, Y0 + 1, Y0 + 10, zc);            // fall column (lateral step-off)
+                    set(bx + 1, Y0 + 1, zc, VINE);                         // the ONE-block landing climbable
+                    // TWO exits from the TOP-OUT (feet Y0+2), so the re-search diverges right there:
+                    carve(bx + 2, bx + 16, Y0 + 2, Y0 + 3, zc);            // row A ledge, east (planned)
+                    carveCell2(bx + 1, zc + 1, Y0 + 2);                    // north link, off the top-out
+                    carve(bx + 1, bx + 16, Y0 + 2, Y0 + 3, zc + 2);        // row B, the bypass
+                    carveCell2(bx + 16, zc + 1, Y0 + 2);                   // east rejoin B -> A at the goal
+                    break;
+                }
                 case MARGINAL: {
                     // The run-2 shape: a blue-ice straight into a 90° turn and a one-block step-down.
                     // Row A (+X, ice from +3 so the mouth stays stone for launch acceleration) runs to
@@ -1453,8 +1586,13 @@ public final class ReplanCourse {
 
         /** Carve one 2-tall corridor cell (a link column between the two rows). */
         void carveCell(int x, int z) {
-            set(x, Y0 + 1, z, AIR);
-            set(x, Y0 + 2, z, AIR);
+            carveCell2(x, z, Y0 + 1);
+        }
+
+        /** {@link #carveCell} at an arbitrary feet level — the MIDCLIMB tile's links sit above the shaft. */
+        void carveCell2(int x, int z, int feetY) {
+            set(x, feetY, z, AIR);
+            set(x, feetY + 1, z, AIR);
         }
 
         void set(int x, int y, int z, BlockState state) {
