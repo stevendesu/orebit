@@ -128,7 +128,7 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           0.989) — a servo gain, not a class, so it can never consume a grid bit. The field
  *                           stays 2 BITS ON PURPOSE: narrowing it would either leave a hole at bit 19 or
  *                           renumber every field above it, and freeing descriptor bits is not scarce here
- *                           (54–63 are free). Keeping the width makes this an assignment-only change with a
+ *                           (56–63 are free). Keeping the width makes this an assignment-only change with a
  *                           byte-identical layout.
  *   20      1   climbable
  *   21      1   gravity     falling block (sand/gravel/concrete-powder)
@@ -211,14 +211,26 @@ import net.minecraft.world.phys.shapes.VoxelShape;
  *                           states too (their fluid state IS a water source — see {@link #isFluidSource}), so
  *                           the bit does NOT imply an open water cell. A base identity field: splits water and
  *                           lava navtypes into source vs flowing variants.
- *   53      1   fluidMinLevel the fluid is at MINIMUM level ({@code getAmount() == 1}) — one more lateral
- *                           step yields amount 0, so the cell can never spread (the funnel's cheapest tier-1
- *                           continue). Deliberately fluid-agnostic: exact for water and nether lava (dropOff
- *                           1), merely conservative for overworld lava at amount 2 (assumed able to spread
- *                           when it cannot — errs wet, the safe direction for lava). Do NOT make it
- *                           dimension-aware; the descriptor is interned globally, not per-dimension
- *                           (DESIGN-fluid-flow-prediction.md §3). A base identity field. Bits 54–63 remain
- *                           wholly unused.
+ *  53-55    3   fluidLevel  the fluid's AMOUNT, stored as {@code amount - 1} so the eight legal amounts
+ *                           (1–8) fit exactly in three bits; {@link #fluidLevel} decodes it back to 1–8 and
+ *                           answers 0 for a non-fluid cell. Superseded the single fluidMinLevel bit on
+ *                           2026-08-20 (owner-ratified): the minimum-level fact is now the derived predicate
+ *                           {@code fluidLevel(d) == 1}, and the exact amount is what the eye-submersion test
+ *                           needs — vanilla starts a sprint-swim only when the EYES are in fluid, and a
+ *                           partial flow block in the head cell can sit below eye height (the noodle-cave
+ *                           wedge, 2026-08-20). Keeping the full amount rather than one more threshold bit
+ *                           means the next movement to need a level does not cost another descriptor bit.
+ *                           <p>Amount is a per-blockstate fact; the SURFACE height vanilla actually tests is
+ *                           neighbour-dependent ({@code FlowingFluid.getHeight} returns 1.0 when the same
+ *                           fluid sits directly above, else {@code amount / 9F}), so a consumer that needs
+ *                           the true height must ALSO look at the cell above — the descriptor cannot carry
+ *                           that. It is flat across the cell: the sloped surface is client-side rendering
+ *                           ({@code LiquidBlockRenderer}) and never reaches server physics.
+ *                           <p>Deliberately fluid-agnostic, as fluidMinLevel was: exact for water and nether
+ *                           lava (dropOff 1), merely conservative for overworld lava (errs wet, the safe
+ *                           direction). Do NOT make it dimension-aware; the descriptor is interned globally,
+ *                           not per-dimension (DESIGN-fluid-flow-prediction.md §3). A base identity field:
+ *                           it splits water/lava navtypes per amount. Bits 56–63 remain wholly unused.
  * </pre>
  */
 public final class NavBlock {
@@ -304,8 +316,10 @@ public final class NavBlock {
     // the 2-bit portal field (any-portal / is-nether, see below); bits 13 and 43 were freed when the portal
     // marker moved down into 11–12, and were then CLAIMED by the door encoding below (13 = hinge, 43 = open)
     // — this comment claimed both were still free long after they were not, so do not read it as a free list.
-    // THE FREE BITS ARE 54–63; the highest bit in use is FLUID_MIN_LEVEL (53) — the fluid-flow arc claimed
-    // 52–53 (FLUID_SOURCE / FLUID_MIN_LEVEL, DESIGN-fluid-flow-prediction.md §3, owner-ratified 2026-08-17).
+    // THE FREE BITS ARE 56–63; the highest bit in use is the top of FLUID_LEVEL (53–55). The fluid-flow arc
+    // claimed 52–53 (FLUID_SOURCE / FLUID_MIN_LEVEL, DESIGN-fluid-flow-prediction.md §3, owner-ratified
+    // 2026-08-17); the eye-submersion fix then WIDENED 53 into the 3-bit FLUID_LEVEL field (owner-ratified
+    // 2026-08-20), leaving FLUID_SOURCE at 52 untouched so every existing sourcehood reader is unaffected.
     // The trapdoor arc added ZERO bits:
     // facing/half/open/hand-toggleable are all SHARED fields discriminated by the openable kind (14–15) —
     // DESIGN-trapdoors.md §2, owner-ratified 2026-08-08. Adding a descriptor bit needs explicit owner
@@ -363,12 +377,16 @@ public final class NavBlock {
     private static final int FALLSOFT_SHIFT = 48, FALLSOFT_MASK = 0x03; // landing fall-damage class (base field)
     private static final long HAND_TOGGLEABLE_BIT = 1L << 50;          // hand-openable door/trapdoor, not iron
     private static final long NARROW_TOP_BIT = 1L << 51;                // narrow-post collision top (base field)
-    // Fluid spread facts (DESIGN-fluid-flow-prediction.md §3, owner-ratified 2026-08-17): the two
-    // per-blockstate facts vanilla's spread logic needs that the 2-bit fluid field cannot express —
-    // sourcehood and minimum level. Base identity fields (they SPLIT water/lava navtypes into
-    // source/flowing/min variants), read by the flood funnel's tier 1 at candidate-emission time.
+    // Fluid facts (DESIGN-fluid-flow-prediction.md §3, owner-ratified 2026-08-17; widened 2026-08-20): the
+    // per-blockstate facts the 2-bit fluid field cannot express — sourcehood and the exact amount. Base
+    // identity fields (they SPLIT water/lava navtypes per source/amount), read by the flood funnel's tier 1
+    // at candidate-emission time and by the swim moves' eye-submersion test.
+    //
+    // Sourcehood is kept as its OWN bit rather than folded into the level field because it is not derivable
+    // from the amount: a source and a FALLING flow block are both amount 8. `!isFluidSource(d) &&
+    // fluidLevel(d) == 8` is exactly "full-height flow" — the middle of a waterfall.
     private static final long FLUID_SOURCE_BIT    = 1L << 52;           // FluidState is a source (amount 8)
-    private static final long FLUID_MIN_LEVEL_BIT = 1L << 53;           // fluid at minimum level (amount 1)
+    private static final int FLUID_LEVEL_SHIFT = 53, FLUID_LEVEL_MASK = 0x07; // amount-1 (0..7 <-> 1..8)
 
     // ---- Precomputed predicate bits (37+) ----------------------------------------------------
     // Each is a PURE function of the fields above, so it adds ZERO navtypes (a function of existing bits
@@ -509,14 +527,18 @@ public final class NavBlock {
         d |= (long) (shapeClass & SHAPE_MASK) << SHAPE_SHIFT;
         d |= (long) (openable & OPEN_MASK) << OPEN_SHIFT;
         d |= (long) (fluid & FLUID_MASK) << FLUID_SHIFT;
-        // Fluid spread facts (DESIGN-fluid-flow-prediction.md §3), read off the same FluidState as the
-        // fluid field: sourcehood (amount 8 — waterlogged states qualify, their fluid state IS a water
-        // source) and minimum level (amount 1, fluid-agnostic — see the bit-layout notes on bit 53).
-        // Guarded like the fluid ternary above: an EmptyFluid answers false/0 anyway, but the guard keeps
-        // the reads mirror-symmetric with the field derivation.
+        // Fluid facts (DESIGN-fluid-flow-prediction.md §3), read off the same FluidState as the fluid
+        // field: sourcehood (amount 8 — waterlogged states qualify, their fluid state IS a water source)
+        // and the exact amount, stored as amount-1 so 1..8 fits in three bits. Guarded like the fluid
+        // ternary above: an EmptyFluid answers false/0 anyway, but the guard keeps the reads
+        // mirror-symmetric with the field derivation AND keeps a non-fluid cell's level field at zero, which
+        // is what lets fluidLevel() answer 0 for "no fluid" without a second stored bit.
         if (!fs.isEmpty()) {
-            if (fs.isSource())       d |= FLUID_SOURCE_BIT;
-            if (fs.getAmount() == 1) d |= FLUID_MIN_LEVEL_BIT;
+            if (fs.isSource()) d |= FLUID_SOURCE_BIT;
+            int amount = fs.getAmount();
+            if (amount > 0) {
+                d |= (long) ((amount - 1) & FLUID_LEVEL_MASK) << FLUID_LEVEL_SHIFT;
+            }
         }
         d |= (long) (surface & SURF_MASK) << SURF_SHIFT;
         if (isClimbable(block))               d |= CLIMB_BIT;
@@ -1187,14 +1209,31 @@ public final class NavBlock {
      */
     public static boolean isFluidSource(long d)   { return (d & FLUID_SOURCE_BIT) != 0; }
     /**
-     * The cell's fluid is at MINIMUM level ({@code FluidState.getAmount() == 1}) — one more lateral step
+     * The cell's fluid is at MINIMUM level ({@code fluidLevel(d) == 1}) — one more lateral step
      * yields amount 0, so the cell can never spread (the flood funnel's cheapest tier-1 continue,
      * DESIGN-fluid-flow-prediction.md §3/§5). Deliberately fluid-agnostic: exact for water and nether lava
      * (dropOff 1), merely conservative for overworld lava at amount 2 (assumed able to spread when it
      * cannot — errs wet, the safe direction for lava). Do not make it dimension-aware; the descriptor is
      * interned globally, not per-dimension.
      */
-    public static boolean isFluidMinLevel(long d) { return (d & FLUID_MIN_LEVEL_BIT) != 0; }
+    public static boolean isFluidMinLevel(long d) { return fluidLevel(d) == 1; }
+    /**
+     * The cell's fluid AMOUNT, 1–8, or 0 when the cell holds no fluid — {@code FluidState.getAmount()} as
+     * classified. A source is 8; so is FALLING flow, which is why sourcehood keeps its own bit
+     * ({@link #isFluidSource}) instead of being folded in here.
+     * <p><b>This is the fluid's OWN amount, not the surface height vanilla tests.</b> {@code
+     * FlowingFluid.getHeight} returns {@code 1.0} whenever the SAME fluid occupies the cell directly above,
+     * and only otherwise falls back to {@code amount / 9F}. A consumer reasoning about where the fluid's
+     * surface actually sits — the eye-submersion test that gates starting a sprint-swim, above all — must
+     * therefore consult the cell above as well; this field alone under-reports a stacked column. The height
+     * is flat across the whole cell: the sloped surface is client-side rendering only
+     * ({@code LiquidBlockRenderer}), so there is no sub-cell variation in server physics.
+     * <p>Fluid-agnostic, like the sourcehood bit: exact for water and nether lava, conservative for
+     * overworld lava (dropOff 2), and never dimension-aware — the descriptor is interned globally.
+     */
+    public static int fluidLevel(long d) {
+        return isFluid(d) ? (int) ((d >>> FLUID_LEVEL_SHIFT) & FLUID_LEVEL_MASK) + 1 : 0;
+    }
     /** Surface: 0 none, 1 slow (2–3 unused; the SLIPPERY class was removed 2026-08-10 — see the bit layout). */
     public static int surface(long d)      { return (int) (d >>> SURF_SHIFT) & SURF_MASK; }
     public static boolean isClimbable(long d)   { return (d & CLIMB_BIT) != 0; }

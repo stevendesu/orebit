@@ -75,29 +75,39 @@ public class NavBlockTableTest {
         assertFalse(NavBlock.isLava(water), "water is not lava");
         assertTrue(NavBlock.isLava(lava), "lava is lava");
 
-        // FLUID_SOURCE / FLUID_MIN_LEVEL (DESIGN-fluid-flow-prediction.md §3) — the two base-field bits
-        // the flood funnel's tier 1 reads. A default fluid state IS the source; blockstate LEVEL 1..7 is
-        // flowing at amount 8-level (so LEVEL 7 = amount 1 = the minimum); LEVEL >= 8 is the FALLING
-        // (mid-fall column) state — amount 8 but NOT a source, so both bits stay clear.
+        // FLUID_SOURCE / FLUID_LEVEL (DESIGN-fluid-flow-prediction.md §3; the level field superseded the
+        // single FLUID_MIN_LEVEL bit on 2026-08-20) — the base fields the flood funnel's tier 1 and the
+        // swim moves' eye test read. A default fluid state IS the source; blockstate LEVEL 1..7 is flowing
+        // at amount 8-level (so LEVEL 7 = amount 1 = the minimum); LEVEL >= 8 is the FALLING (mid-fall
+        // column) state — amount 8 but NOT a source, so the source bit stays clear at a full level.
+        // isFluidMinLevel is now DERIVED (fluidLevel == 1); the assertions below are unchanged from when it
+        // was a stored bit, which is exactly what makes them a regression pin on the widening.
         assertTrue(NavBlock.isFluidSource(water), "default water state is the source (amount 8)");
         assertFalse(NavBlock.isFluidMinLevel(water), "a source is not min-level");
+        assertEquals(8, NavBlock.fluidLevel(water), "a water source is amount 8");
         long waterFlow = NavBlock.descriptorFor(
                 Blocks.WATER.defaultBlockState().setValue(BlockStateProperties.LEVEL, 1));
         assertFalse(NavBlock.isFluidSource(waterFlow), "flowing water (amount 7) is not a source");
         assertFalse(NavBlock.isFluidMinLevel(waterFlow), "…and not yet minimum");
+        assertEquals(7, NavBlock.fluidLevel(waterFlow), "blockstate LEVEL 1 = amount 7");
         long waterMin = NavBlock.descriptorFor(
                 Blocks.WATER.defaultBlockState().setValue(BlockStateProperties.LEVEL, 7));
         assertFalse(NavBlock.isFluidSource(waterMin), "min-level water is not a source");
-        assertTrue(NavBlock.isFluidMinLevel(waterMin), "LEVEL 7 = amount 1 = FLUID_MIN_LEVEL set");
+        assertTrue(NavBlock.isFluidMinLevel(waterMin), "LEVEL 7 = amount 1 = min level");
+        assertEquals(1, NavBlock.fluidLevel(waterMin), "blockstate LEVEL 7 = amount 1");
         long waterFalling = NavBlock.descriptorFor(
                 Blocks.WATER.defaultBlockState().setValue(BlockStateProperties.LEVEL, 8));
         assertFalse(NavBlock.isFluidSource(waterFalling), "falling water is amount 8 but NOT a source");
         assertFalse(NavBlock.isFluidMinLevel(waterFalling), "…and not min-level");
+        assertEquals(8, NavBlock.fluidLevel(waterFalling),
+                "falling water is amount 8 — full height but not a source; !isFluidSource && level==8 is"
+                        + " the waterfall-middle fact the old two-bit encoding could not express");
         // Lava variants: same encoding, and the deliberately fluid-agnostic minimum — amount==1 exactly,
         // so overworld lava at amount 2 (dropOff 2, cannot actually spread) reads as spread-capable:
         // conservative, errs wet, the safe direction for lava (§3 — do not make it dimension-aware).
         assertTrue(NavBlock.isFluidSource(lava), "default lava state is the source");
         assertFalse(NavBlock.isFluidMinLevel(lava), "a lava source is not min-level");
+        assertEquals(8, NavBlock.fluidLevel(lava), "a lava source is amount 8");
         long lavaAmount2 = NavBlock.descriptorFor(
                 Blocks.LAVA.defaultBlockState().setValue(BlockStateProperties.LEVEL, 6));
         assertFalse(NavBlock.isFluidSource(lavaAmount2), "flowing lava (amount 2) is not a source");
@@ -106,9 +116,20 @@ public class NavBlockTableTest {
         long lavaMin = NavBlock.descriptorFor(
                 Blocks.LAVA.defaultBlockState().setValue(BlockStateProperties.LEVEL, 7));
         assertTrue(NavBlock.isFluidMinLevel(lavaMin), "lava at amount 1 is min-level");
+        assertEquals(1, NavBlock.fluidLevel(lavaMin), "lava blockstate LEVEL 7 = amount 1");
+        assertEquals(2, NavBlock.fluidLevel(lavaAmount2), "lava blockstate LEVEL 6 = amount 2");
         // Non-fluids carry neither bit.
         assertFalse(NavBlock.isFluidSource(stone) || NavBlock.isFluidMinLevel(stone), "stone: no fluid bits");
         assertFalse(NavBlock.isFluidSource(air) || NavBlock.isFluidMinLevel(air), "air: no fluid bits");
+        assertEquals(0, NavBlock.fluidLevel(stone), "a non-fluid cell has NO level, not level 1");
+        assertEquals(0, NavBlock.fluidLevel(air), "a non-fluid cell has NO level, not level 1");
+
+        // The eye-submersion threshold this field exists to serve (MovementContext.EYE_SUBMERGE_MIN_AMOUNT
+        // = 6): a standing bot's eyes sit at feetY+1.62, so the head cell's fluid must clear 0.62 of the
+        // cell, and getOwnHeight is amount/9F. Pin both sides of the boundary against the raw arithmetic
+        // so a future change to either the constant or the encoding has to face the physics.
+        assertTrue(6 / 9.0f > 0.62f, "amount 6 clears the standing eye");
+        assertFalse(5 / 9.0f > 0.62f, "amount 5 does not");
 
         // Bottom slab: solid lower half, top at 0.5; top slab: solid upper half.
         BlockState slabBottom = Blocks.OAK_SLAB.defaultBlockState(); // default type = BOTTOM
@@ -140,11 +161,14 @@ public class NavBlockTableTest {
         assertTrue(NavBlock.isWaterloggedNow(wf), "waterlogged fence reports water");
         assertTrue(NavBlock.isFluidSource(wf), "a waterlogged state's fluid IS a water source");
         assertFalse(NavBlock.isFluidMinLevel(wf), "…at amount 8, so never min-level");
+        assertEquals(8, NavBlock.fluidLevel(wf), "…and carries the source's amount");
 
-        // Cap headroom: the FLUID_SOURCE/FLUID_MIN_LEVEL split fans water and lava into source/flowing/
-        // min variants (base fields — they split navtypes). The table must stay inside TraversalGrid's
-        // 10-bit navtype capacity — asserted as a BOUND, never an exact count (the count moves with MC
-        // version, loaded tags, and mining.protectedBlocks at runtime: no-hardcoded-navtype-counts).
+        // Cap headroom: the FLUID_SOURCE/FLUID_LEVEL split fans water and lava per source and per AMOUNT
+        // (base fields — they split navtypes), so the 2026-08-20 widening from one min-level bit to a
+        // 3-bit level field fans each fluid further than the fluid-flow arc did. The table must stay
+        // inside TraversalGrid's 10-bit navtype capacity — asserted as a BOUND, never an exact count (the
+        // count moves with MC version, loaded tags, and mining.protectedBlocks at runtime:
+        // no-hardcoded-navtype-counts).
         assertTrue(NavBlock.navtypeCount() <= TraversalGrid.NAVTYPE_CAPACITY,
                 "navtype count " + NavBlock.navtypeCount() + " must fit the "
                         + TraversalGrid.NAVTYPE_CAPACITY + "-entry grid capacity");

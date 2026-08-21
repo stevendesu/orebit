@@ -51,6 +51,18 @@ public final class MovementContext {
     public static final int STEP_ASSIST_MAX_RISE = 9;
 
     /**
+     * Smallest fluid {@code amount} (1&ndash;8, {@link NavBlock#fluidLevel}) whose surface rises above a
+     * STANDING bot's eyes, so that vanilla will let it ENTER the prone sprint-swim pose. Derived, not tuned:
+     * the eye sits at {@code feetY + 1.62} inside the head cell, so the fluid's surface must clear
+     * {@code 1.62 - 1 = 0.62} of that cell, and {@code FlowingFluid.getOwnHeight} is {@code amount / 9F} —
+     * {@code 6/9 = 0.667 > 0.62}, while {@code 5/9 = 0.556} falls short.
+     * <p>Six also holds on 1.17&ndash;1.20.4, where vanilla probes {@code getEyeY() - 1/9} and the true bar
+     * is 5: a stricter threshold can only ever decline a move, never invent one. See
+     * {@link #eyesSubmergedWithHeadIn} for the full derivation and the version sweep behind it.
+     */
+    public static final int EYE_SUBMERGE_MIN_AMOUNT = 6;
+
+    /**
      * The rise (sixteenths, negative = a drop) from standing on a floor with collision top
      * {@code startTopY} to standing on a floor {@code dyBlocks} block-levels away with collision top
      * {@code destTopY}: {@code dyBlocks·16 + destTopY − startTopY}. The single derivation point every
@@ -1348,6 +1360,43 @@ public final class MovementContext {
         // Swimmable = full water cell, no collision (not a waterlogged solid). Single source of truth in
         // NavBlock so the swim movements and the region-tier window-target agree on what "water" means.
         return NavBlock.isSwimmableWater(d);
+    }
+
+    /**
+     * <b>Would a STANDING bot whose head occupies {@code (hx,hy,hz)} have its EYES in water?</b> — the exact
+     * vanilla precondition for <i>entering</i> the prone sprint-swim pose, and a strictly stronger test than
+     * "the head cell holds water".
+     * <p>Vanilla, {@code Entity.updateFluidOnEyes} → {@code Entity.isUnderWater} → {@code
+     * Entity.updateSwimming}: swimming STARTS only while {@code isUnderWater()}, which requires the fluid
+     * SURFACE in the cell containing {@code getEyeY()} to sit strictly above the eyes. Continuing to swim
+     * needs merely {@code isInWater()} — which is why a bot can hold a swim through shallows it could never
+     * have started in, and why this gate belongs on the START move alone.
+     * <p>The arithmetic, all constants javap/source-verified against the shipped range:
+     * <pre>
+     *   standing eye  = feetY + 1.62          (Avatar.STANDING_DIMENSIONS, stable 1.17.1 -> 26.x)
+     *   probe cell    = the HEAD cell         (floor(feetY + 1.62) == feetY + 1)
+     *   submerged iff cellY + height &gt; eyeY  =&gt;  height &gt; 0.62  =&gt;  amount &gt;= 6   (6/9 = 0.667)
+     *   height        = hasSameAbove ? 1.0 : amount / 9F      (FlowingFluid.getHeight)
+     * </pre>
+     * Hence the two-term test below: the amount threshold, OR water directly above (which forces the
+     * surface to a full 1.0 no matter how little water is in this cell — a stacked column or the middle of
+     * a waterfall).
+     * <p><b>Why 6 across every version.</b> Versions 1.17&ndash;1.20.4 probe at {@code getEyeY() - 1/9}
+     * instead of {@code getEyeY()}, which lowers the bar to {@code amount >= 5}; the offset was dropped at
+     * 1.20.5 (verified by a constant-pool sweep of every cached jar in the range: the literal appears in
+     * exactly one class up to 1.20.4 and nowhere at all from 1.20.5). Six is therefore a strict SUBSET of
+     * what every supported version permits — it can never emit a move the physics will refuse, at the price
+     * of declining amount-5 entry on the older half. That is a deliberate conservative choice (owner-ratified
+     * 2026-08-20) and the reason this needs no {@code platform/} seam.
+     * <p>An UNBUILT cell above reads as not-water, so the fallback is the amount threshold — refusing rather
+     * than assuming, the safe direction for a move whose failure mode is a wedge.
+     */
+    public boolean eyesSubmergedWithHeadIn(int hx, int hy, int hz) {
+        long head = descriptorAt(hx, hy, hz);
+        if (!water(head)) return false;
+        if (NavBlock.fluidLevel(head) >= EYE_SUBMERGE_MIN_AMOUNT) return true;
+        // hasSameAbove: same fluid directly above forces this cell's surface height to a full 1.0.
+        return built(hx, hy + 1, hz) && NavBlock.fluid(descriptorAt(hx, hy + 1, hz)) == NavBlock.fluid(head);
     }
 
     /**
