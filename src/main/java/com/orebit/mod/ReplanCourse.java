@@ -292,7 +292,8 @@ public final class ReplanCourse {
             return;
         }
         if (System.getProperty("orebit.vinejump") != null || System.getProperty("orebit.vinebridge") != null
-                || System.getProperty("orebit.ladder") != null) {
+                || System.getProperty("orebit.ladder") != null
+                || System.getProperty("orebit.cavein") != null) {
             return; // a physics harness owns the bot on this server (VineJumpProbe / VineBridgeCourse)
         }
         Course course = new Course();

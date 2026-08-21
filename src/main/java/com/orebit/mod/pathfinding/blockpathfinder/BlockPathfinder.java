@@ -1273,9 +1273,10 @@ public final class BlockPathfinder {
      * for place, {@code p}=passable, {@code .}=blocked. A breakable solid is suffixed {@code k}; a solid the
      * search WON'T dig is suffixed with {@link MovementContext#breakBlockedReason the reason} in parens
      * (e.g. {@code s(unbreakable)}) — the diagnostic for a "mine-up walled by a ceiling the search thinks it
-     * can't break". A cell whose edit is hazardous ({@code RISKY_EDIT} — a gravity cascade; strictly
-     * gravity since the lava term migrated to pricing, DESIGN-fluid-flow-prediction.md §4.1 — which
-     * disables Pillar/place edits there) is suffixed {@code r}.
+     * can't break". A cell whose OWN edit would drop a gravity block ({@code NavFlags.RISKS_GRAVITY} —
+     * cell-centred since 2026-08-21: "breaking or placing HERE drops gravel", not "editing near here is
+     * disabled") is suffixed {@code r}. That is exactly the cell {@code EditScratch}'s fold-sited gate
+     * refuses, so an {@code r} on a cell a movement needed to break IS the refusal.
      */
     private static void dumpColumn(MovementContext ctx, RegionBound bound, String label, int x, int z,
                                    int y0, int y1) {
@@ -1295,7 +1296,7 @@ public final class BlockPathfinder {
                 String why = ctx.breakBlockedReason(d); // null unless a solid the search refuses to dig
                 if (why != null) sb.append('(').append(why).append(')');
             }
-            if (MovementContext.risksEdit(ctx.flagsAt(x, y, z))) sb.append('r');
+            if (ctx.risksGravityAt(x, y, z)) sb.append('r');
         }
         OrebitCommon.LOGGER.info("[Orebit]   {} ({},{}):{}", label, x, z, sb);
     }

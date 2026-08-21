@@ -121,14 +121,12 @@ public final class Pillar implements Movement {
         // expansion.
         if (ctx.floorSurface(x, y, z) < 16) return;
 
-        int flags = MovementContext.flagsOf(packed);
-
         // --- Micro path: emit the original single step, byte-for-byte. Taken when macros are off, there is no
         // cuboid view, OR (Option B) this movement's travel axis (Y) is not the search's primary axis P — an
         // off-P movement skips cuboidAt + MacroJump entirely so a uniform region is extracted on ONE axis only.
         NavGridCuboidsView cuboids = ctx.cuboids();
         if (!BlockPathfinder.MACRO_MOVES || cuboids == null || ctx.macroAxis() != Axes.AXIS_Y) {
-            EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+            EditScratch e = ctx.edits().reset();
             // Place the footing, supported by the floor below (the bot's current floor — solid by invariant).
             e.requireFloor(x, ny, z);
             // Takeoff head-clearance: the new head cell must be clear — air, an OPEN hatch's wall panel, or
@@ -157,18 +155,17 @@ public final class Pillar implements Movement {
         int j = MacroJump.steps(box, x, y, z, Axes.AXIS_Y, +1, moveCost,
                 ctx.goalX(), ctx.goalY(), ctx.goalZ());
 
-        EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+        EditScratch e = ctx.edits().reset();
         // Fold the same per-step edit the micro move makes, level by level: a support placed under each
         // rise, at floor cell (x, y+k, z) for k = 1..J. If a placement fails partway up, clamp J to the
         // last valid step (conservative — a shorter jump is always safe; plain A* fills the remainder).
         // EditScratch short-circuits once invalid (the failing requireFloor folds nothing), so at the
         // break the scratch holds exactly the places for steps 1..k-1 — the emitted prefix's edit-set.
+        // No per-level pre-check: RISKS_GRAVITY is cell-centred and enforced inside requireFloor at the
+        // cell each footing is actually placed into, so a level whose place would drop gravel simply fails
+        // and the clamp below shortens the jump. The LANDING-body breaks after the loop are gated the same
+        // way — under the old floor-framed bit they were gated by NOTHING, which is what buried the bot.
         for (int k = 1; k <= j; k++) {
-            // Re-evaluate RISKY_EDIT per level (the start footing k==1 was gated by reset above): don't place
-            // into a cell whose body space risks a GRAVITY cascade just because the start was safe — the
-            // micro move re-checks per node, so the macro must too. Clamp the jump below a risky cell.
-            // (Strictly gravity since the lava term migrated to pricing — DESIGN-fluid-flow-prediction.md §4.1.)
-            if (k > 1 && MovementContext.risksEdit(ctx.flagsAt(x, y + k, z))) { j = k - 1; break; }
             e.requireFloor(x, y + k, z);
             if (!e.valid()) { j = k - 1; break; }
         }
@@ -188,7 +185,7 @@ public final class Pillar implements Movement {
             // even a 1-step pillar and break vertical reachability) — fall back to the micro single step,
             // which is always-correct and complete (it fails to emit only when a true 1-block pillar is
             // itself blocked, exactly as the micro move would).
-            e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+            e = ctx.edits().reset();
             e.requireFloor(x, ny, z);
             e.requireAirVertical(x, y + 3, z);
             if (e.valid()) out.accept(x, ny, z, COST + e.extraCost(), e);

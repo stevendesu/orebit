@@ -212,7 +212,7 @@ public final class Traverse implements Movement {
                     // Legacy micro emit — the pre-macro flat-walk single step, plus the pass-through
                     // hazard/slow surcharge for the destination body (zero-read when the flag bits are
                     // clear; the edit-folding form breaks through a bush/web where that's cheaper).
-                    EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+                    EditScratch e = ctx.edits().reset();
                     if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
                     // Dest floor top threaded for the §4 exact-fit body rules (a ≤3/16 plate floor skips the
                     // head cell; a slab floor admits a flush top-band ceiling). Plain topY — a stair's 16 is
@@ -235,7 +235,7 @@ public final class Traverse implements Movement {
             // so trapdoor-free worlds pay nothing new.
             if (built && !standable && ctx.trapdoorSetFloors(pd)) {
                 int flags = MovementContext.flagsOf(p);
-                EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+                EditScratch e = ctx.edits().reset();
                 if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
                 long fd = e.requireFloorOrToggle(nx, y, nz); // folds the SET_CLOSED; returns the toggled floor
                 int fTop = ctx.topYOf(fd);
@@ -263,7 +263,7 @@ public final class Traverse implements Movement {
                         && MovementContext.rise(1, ctx.directionalTopY(pud, -d[0], -d[1]), sTop)
                                 <= MovementContext.STEP_ASSIST_MAX_RISE) {
                     int flags = MovementContext.flagsOf(pu);
-                    EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+                    EditScratch e = ctx.edits().reset();
                     if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
                     // Dest floor top threaded (§4 exact-fit) — the step-assist ONTO a 3/16 plate one up is
                     // exactly the case whose head cell must not be consulted (2-tall hallway hatch pocket).
@@ -280,7 +280,7 @@ public final class Traverse implements Movement {
                     // the self-refusing flat arm hands over to); a closed TOP half (rise 16+16−sTop > 9)
                     // refuses here and is Ascend's jump-onto-hatch arm.
                     int flags = MovementContext.flagsOf(pu);
-                    EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+                    EditScratch e = ctx.edits().reset();
                     if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
                     long fd = e.requireFloorOrToggle(nx, uy, nz);
                     int fTop = ctx.topYOf(fd);
@@ -319,7 +319,7 @@ public final class Traverse implements Movement {
             // (see the steer's dip-recovery rule).
             if (built && !standable && ctx.climbableFloorAt(nx, y, nz)) {
                 int flags = MovementContext.flagsOf(p);
-                EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+                EditScratch e = ctx.edits().reset();
                 if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
                 ctx.requireBodyClearToward(e, nx, y, nz, flags, d[0], d[1]);
                 if (e.valid()) {
@@ -331,7 +331,7 @@ public final class Traverse implements Movement {
             if (built && !standable
                     && MovementContext.rise(0, 16, sTop) <= MovementContext.STEP_ASSIST_MAX_RISE) {
                 int flags = MovementContext.flagsOf(p);
-                EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(flags));
+                EditScratch e = ctx.edits().reset();
                 if (exitDoorToggle) ctx.foldExitDoorToggle(e, x, y, z, d[0], d[1]);
                 e.requireFloor(nx, y, nz);
                 ctx.requireBodyClearToward(e, nx, y, nz, flags, d[0], d[1]);
@@ -392,23 +392,19 @@ public final class Traverse implements Movement {
                 ctx.goalX(), ctx.goalY(), ctx.goalZ());
 
         // Fold the J per-step requirements into one edit-set, re-running the SAME micro checks the flat walk
-        // uses at each step. risksEdit gate is taken from the FIRST destination cell's flags (its body space
-        // is the run's leading edge); a uniform run shares its hazard classification by construction. The
-        // pass-through surcharge is accumulated PER CELL (body cells may differ along the run even when the
-        // floor is uniform — fire sits on some of it), reusing the flags read the risky-edit check already
-        // makes, so the collapsed run charges exactly what J micro steps would.
-        EditScratch e = ctx.edits().reset(!MovementContext.risksEdit(startFlags));
+        // uses at each step. There is NO run-level edit gate: RISKS_GRAVITY is cell-centred and enforced
+        // inside EditScratch at the cell each break/place actually touches, so a step whose edit would drop
+        // gravel simply fails its require* and the clamp below shortens the run — no start-cell proxy, no
+        // per-cell pre-check. The pass-through surcharge is accumulated PER CELL (body cells may differ
+        // along the run even when the floor is uniform — fire sits on some of it), so the collapsed run
+        // charges exactly what J micro steps would.
+        EditScratch e = ctx.edits().reset();
         int valid = 0;
         float transit = 0f;
         for (int k = 1; k <= j; k++) {
             int cx = x + Axes.stepX(axis, sign) * k;
             int cz = z + Axes.stepZ(axis, sign) * k;
-            // Re-evaluate RISKY_EDIT per cell (the start cell k==1 was gated by reset above): don't fold a
-            // body break/footing place at a cell whose edit risks a GRAVITY cascade just because the
-            // run's leading edge was safe — the micro move re-checks per node. Clamp the run before it.
-            // (Strictly gravity since the lava term migrated to pricing — DESIGN-fluid-flow-prediction.md §4.1.)
             int cellFlags = k == 1 ? startFlags : ctx.flagsAt(cx, y, cz);
-            if (k > 1 && MovementContext.risksEdit(cellFlags)) { valid = k - 1; break; }
             // Footing under the k-th cell (already standable for a flat run; placeable fallback for a bridge
             // cell that crept into the run), then the two body cells above it. Same vocabulary as the micro
             // move's requireBodyClear, but read per cell so each step's headroom is verified.
@@ -440,7 +436,7 @@ public final class Traverse implements Movement {
             // too — the folding bodyTransitCost records break-throughs on the scratch just reset, and each
             // re-run cell repeats the identical fold-vs-transit decision it made above (steps 1..valid all
             // stayed valid, and nothing they read has changed).
-            e = ctx.edits().reset(!MovementContext.risksEdit(startFlags));
+            e = ctx.edits().reset();
             transit = 0f;
             for (int k = 1; k <= valid; k++) {
                 int cx = x + Axes.stepX(axis, sign) * k;

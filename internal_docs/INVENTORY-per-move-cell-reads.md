@@ -79,7 +79,7 @@ Plane: **G** = descriptor/navtype/packed · **F** = flags · **N** = depth nibbl
 | (d,+2,d),(d,+3,d) | G | `requireBodyClearToward` :243 / `bodyTransitCost` :246 | raised body clear + priced |
 | (d,+1,d) | G | `requireFloorOrToggle` :258 | close-and-stand +1 (2nd resolve of :232's cell) |
 | (d,0,d) | G | `requireFloor` :285 | bridge: place a plank (+ ≤6 `supportsPlacement` probes) |
-| macro: (k·d,0,k·d) k=1..J | F+G | `flagsAt` :358, `requireFloor` :363, `requireAirToward` :364/:365 | per-run-cell RISKY_EDIT + footing + body |
+| macro: (k·d,0,k·d) k=1..J | F+G | `flagsAt` (transit), `requireFloor`, `requireAirToward` ×2 | per-run-cell transit prefilter + footing + body. **The per-run-cell RISKY_EDIT read is GONE** (2026-08-21): the edit gate is fold-sited, so the surviving `flagsAt` is the `bodyTransitCost` prefilter only |
 
 **Totals** — best (4 dirs flag-proven, no doors/hazards): **5 reads / 5 cells**. Worst micro: **≈75–80
 calls / 19 cells**. Macro adds 4 calls per run cell, doubled when the run clamps (see §7).
@@ -151,13 +151,15 @@ cells**.
 | Cell | Plane | API | Why |
 |---|---|---|---|
 | (0,−1,0) | G | `packedAt` :81 | destination floor exists + standable |
-| (0,0,0) | F | `flagsAt` :87 | RISKY_EDIT on the floor being undermined |
 | (0,0,0) | G | `requireAirVertical` :98 (micro) / `descriptorAt` :108 (macro) | break the floor (2nd/3rd resolve) |
-| (0,−(k−1),0) k=2..J | F | `flagsAt` :124 | per-level RISKY_EDIT; clamps J |
 | (0,−(k−1),0) k=1..J | G | `requireAirVertical` :126 | break the step-k floor |
 
-**Totals** — micro **3 calls / 2 cells**; macro **2J+3 calls / J+1 cells**. Per extra level = 2 reads
-(one F, one G) that a single `packedAt` would serve.
+**Totals** (2026-08-21, after the edit gate moved into the fold) — micro **2 calls / 2 cells**; macro
+**J+2 calls / J+1 cells**. The whole F-plane column here — one `flagsAt` at the start cell plus one per
+deep level — was the RISKY_EDIT pre-check and is **deleted**: the gate now costs one `flagsAt` inside
+`EditScratch.addBreak`, i.e. exactly one per cell actually broken, on the fold path. Net for MineDown that
+is a wash per level and one read saved at the start cell — and it is now *correct*, since the read is at
+the broken cell rather than at the node's floor.
 *Correctness note:* for J>1 only `(0,−1,0)` is verified standable; the true landing `(0,−J,0)` is never
 read — soundness rests entirely on the cuboid uniformity certificate.
 
@@ -171,12 +173,13 @@ read — soundness rests entirely on the cuboid uniformity certificate.
 | (0,0,0) | G | `floorSurface` :115 | start surface must be full-height (3rd resolve) |
 | (0,+1,0) | G | `requireFloor` :126 | place the footing (2nd resolve, + ≤6 `placeable` probes) |
 | (0,+3,0) | G | `requireAirVertical` :132 | takeoff head clearance |
-| (0,+k,0) k=2..J | F | `flagsAt` :163 | per-level RISKY_EDIT |
 | (0,+k,0) k=1..J | G | `requireFloor` :164 | place the per-level support |
 | (0,J+1,0),(0,J+2,0) | G | `requireAirVertical` :176/:177 | landing body |
 
-**Totals** — best **3 calls / 2 cells**; micro full **6–8 calls / 3–4 cells**; macro **2J+6 calls /
-J+3 cells**.
+**Totals** (2026-08-21) — best **3 calls / 2 cells**; micro full **6–8 calls / 3–4 cells**; macro
+**J+6 calls / J+3 cells**. The per-level `flagsAt` RISKY_EDIT pre-check is **deleted** (fold-sited gate);
+`requireFloor` pays one `flagsAt` per level it actually places into, and — the point of the change — the
+two LANDING-body `requireAirVertical` cells are gated for the first time.
 
 ### 3.8 Parkour — 4 cardinals × gap columns × 3 tiers. The most expensive move.
 
@@ -365,7 +368,7 @@ Two independent causes:
 | **HEADROOM (2-bit)** | The only bit that removes reads on the mainline walking path. `requireBodyClear*` returns with **0 reads** when it proves ≥WALK; Traverse/Ascend/Descend/Diagonal/WalkOff/Parkour all exploit it. | Earning its keep |
 | **CLEARABLE_HAZARD** | Zero-read fast path for `bodyTransitCost` on ordinary cells — which is most cells. | Earning its keep |
 | **SLOW_TRANSIT** | Same, plus it prefilters `noJumpFromBody`/`bodyTransitLight` down to one flag read. | Earning its keep |
-| **RISKY_EDIT** | **Zero.** It is a policy gate ("may I edit here"), not a read-avoidance bit. | Does not pay rent in reads |
+| **RISKS_GRAVITY** | **Net NEGATIVE cost since 2026-08-21.** It is a policy gate ("does editing THIS cell drop gravel"), so it avoids no reads of its own — it costs exactly one `flagsAt` per folded break/place, on the fold path only. But moving it there DELETED the per-cell / per-level macro `flagsAt` pre-checks in `Traverse` (per run cell), `Pillar` and `MineDown` (per level), which ran on every macro pop whether or not anything was edited. | Cheaper than it was, and now read at the right cell |
 | **PLACEABLE_NEIGHBOR** | **Zero — nothing reads it.** Only consumer in `src/main` is `/bot probe`. | Inert |
 
 ### 6.1 The `PLACEABLE_NEIGHBOR` mismatch
@@ -414,7 +417,7 @@ Pricing does not block it: `cellTransitCost` is nonzero only for hazard/slow cel
 1. **The section-seam refusal must be FIXED, not worked around** (owner ruling — read headroom across
    the seam so the bit is accurate everywhere, the same move the lava `RISKY_EDIT` term made when
    `scatterLavaRisky` started writing through the real below/above grids instead of the upward-only
-   scratch).
+   scratch — and the same move `RISKS_GRAVITY`'s half B made in turn, 2026-08-21).
 
    **The producer side is already done for LIVE grids** — this is the key finding, and it makes the fix
    much smaller than it looks. `NavFlags.compute` accepts `OVERSCAN_ROWS = 3` rows above the section, and

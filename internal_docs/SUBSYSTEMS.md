@@ -56,14 +56,17 @@ planner-thread view, no live fallback). `NavGridUpdater` records block changes i
 §4.2) and drains them through `patchCells` at flush barriers, bumping the per-level `editEpoch`.
 `NavReclaim` = epoch-deferred section reclamation for async readers (DESIGN-background-pathfinding.md
 §4.1). `NavWarmup` = boot JIT warm-up (first search 21.8→0.67 ms). `NetherPortalIndex` = per-dimension
-portal-column index (fed by pass 1 + `ChunkNavLoader.record`). `EdgeFluidScatter` = step 3 of the
-lava RISKY_EDIT arc (PERF-DESIGN-navgrid-build §C1; LAVA-ONLY/6-directional since the 2026-08-10 owner
-ruling): the durable cross-CHUNK lateral fold that
-closes the lateral-air-optimistic gap left by the intra-chunk build scatter (in `computeDepth`) and the
-patch re-dilation, OR-ing flags into a live neighbour grid on the tick thread.
+portal-column index (fed by pass 1 + `ChunkNavLoader.record`). `EdgeScatter` = step 3 of the
+scatter arc (PERF-DESIGN-navgrid-build §C1): the durable cross-CHUNK lateral fold that closes the
+lateral-air-optimistic gap left by the intra-chunk build scatter (in `computeDepth`) and the patch
+re-dilation, OR-ing flags into a live neighbour grid on the tick thread. It carries **both**
+scatter-owned terms on one face walk — `HAS_FLUID_NEIGHBOR` (any fluid, 6-directional) and
+`RISKS_GRAVITY`'s half B (adjacency to an UNSUPPORTED gravity block, owner ruling 2026-08-21) — and its
+patch-side neighbour re-derive touches two rows (`colY`, `colY+1`) because the gravity predicate reads a
+row deeper than the fluid one.
 - Files: `worldmodel/pathing/TraversalGrid.java`, `NavSectionBuilder.java`, `ChunkNavBuilder.java`,
   `NavStore.java`, `NavGridView.java`, `ChunkNavLoader.java`, `NavGridUpdater.java`,
-  `PendingPatches.java` (+ `NavReclaim`, `NavWarmup`, `NetherPortalIndex`, `EdgeFluidScatter`)
+  `PendingPatches.java` (+ `NavReclaim`, `NavWarmup`, `NetherPortalIndex`, `EdgeScatter`)
 - Entry: `ChunkNavLoader.register` / `NavGridUpdater.register` from `OrebitCommon.init`.
 
 ## pathfinding/blockpathfinder — block-tier A\* + movements + cuboids + phases + steering

@@ -91,7 +91,7 @@ public final class ProbeCommand implements BotCommand {
                     + " headroom=" + headroomName(NavFlags.headroom(flags))
                     + " CLEARABLE_HAZARD=" + NavFlags.clearableHazard(flags)
                     + " SLOW_TRANSIT=" + NavFlags.slowTransit(flags)
-                    + " RISKY_EDIT=" + NavFlags.risksEdit(flags)
+                    + " RISKS_GRAVITY=" + NavFlags.risksGravity(flags)
                     + " HAS_FLUID_NEIGHBOR=" + NavFlags.hasFluidNeighbor(flags));
             // The two body cells a walker transits standing on this floor, each priced individually, then
             // the flags-gated aggregate a Traverse/Diagonal into this column actually charges. If a body

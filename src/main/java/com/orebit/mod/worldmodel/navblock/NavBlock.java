@@ -358,6 +358,16 @@ public final class NavBlock {
     private static final int SURF_SHIFT  = 18, SURF_MASK  = 0x03;
     private static final int CLIMB_BIT   = 1 << 20;
     private static final int GRAVITY_BIT = 1 << 21;
+
+    /**
+     * The union prefilter for {@code NavSectionBuilder.computeDepth}'s SCATTER dispatch: the low FLUID bit
+     * (any fluid — {@link #isFluid}) OR {@link #hasGravity}'s bit. One mask test per swept cell replaces two
+     * independent branches on the build's hottest loop; the individual predicates then discriminate inside,
+     * on the cold side of a branch that is almost always not-taken. Public because the sweep lives in
+     * {@code worldmodel.pathing} while both bit positions are private here.
+     */
+    public static final long SCATTER_MASK = ((long) 1 << FLUID_SHIFT) | GRAVITY_BIT;
+
     private static final int DAMAGE_BIT  = 1 << 22;
     private static final int REPLACE_BIT = 1 << 23;
     private static final int HARD_SHIFT  = 24, HARD_MASK  = 0xFF;
@@ -689,8 +699,8 @@ public final class NavBlock {
         // FLUIDS ARE OPEN (owner ruling, s52b): water and lava are vanilla-replaceable — placing into
         // them is completely valid (sealing a lava source with cobble is a standard technique). The old
         // noFluid conjunct wrongly barred every fluid cell. (Since 2026-08-17 no flag gate refuses
-        // fluid-adjacent edits at all: RISKY_EDIT is strictly gravity and a fluid-admitting break is
-        // PRICED by the fold funnel — DESIGN-fluid-flow-prediction.md §4.1/§4.2.)
+        // fluid-adjacent edits at all: bit 0 is strictly gravity (RISKS_GRAVITY) and a fluid-admitting
+        // break is PRICED by the fold funnel — DESIGN-fluid-flow-prediction.md §4.1/§4.2.)
         if ((isReplaceable(d) || shape == SHAPE_EMPTY) && !isProtected(d))           d |= OPEN_PLACE_BIT;
         if (solid && noFluid)                                                d |= COLLISION_BIT;
         return d;

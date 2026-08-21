@@ -42,7 +42,7 @@ import net.minecraft.world.level.chunk.Strategy;
  * overscan → {@code computeDepth}), NOT the {@code classifyInto} one-liner: the funnel's tier-0b early-out
  * reads {@code HAS_FLUID_NEIGHBOR}, which is <i>scatter-owned</i> and written only by {@code computeDepth}
  * — a {@code classifyInto} grid leaves the bit permanently clear and every lateral verdict would collapse
- * to dry, passing these tests vacuously (the {@code FluidScatterIdentityTest} pipeline is the template).
+ * to dry, passing these tests vacuously (the {@code ScatterIdentityTest} pipeline is the template).
  *
  * <p>Coverage, in the design doc's §9 order:
  * <ul>

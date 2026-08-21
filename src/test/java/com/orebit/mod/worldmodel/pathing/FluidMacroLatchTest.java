@@ -62,7 +62,7 @@ import net.minecraft.world.level.chunk.Strategy;
  * {@code SliceStepKindChannelTest}, whose class Javadoc derives why it needs a wide insta-mine cuboid.
  *
  * <p>Substrate is built through the FULL column pipeline ({@code classifyNavtypes} → {@code computeFlags}
- * with overscan → {@code computeDepth}, the {@code FluidScatterIdentityTest} pattern) — the lateral
+ * with overscan → {@code computeDepth}, the {@code ScatterIdentityTest} pattern) — the lateral
  * funnel's tier 0b reads the scatter-owned {@code HAS_FLUID_NEIGHBOR} flag that only {@code computeDepth}
  * writes; on a {@code classifyInto} grid every lateral verdict collapses to dry and the wet pin would
  * fail while the dry pin passed vacuously (the {@code FluidFlowVerdictTest} class-Javadoc trap).
@@ -249,7 +249,7 @@ class FluidMacroLatchTest {
     /**
      * Assemble a single-chunk world through the FULL column pipeline — {@code classifyNavtypes} per
      * section, {@code computeFlags} with the above-grid overscan, then {@code computeDepth} over the whole
-     * column, exactly as {@code ChunkNavBuilder} drives it live (the {@code FluidScatterIdentityTest}
+     * column, exactly as {@code ChunkNavBuilder} drives it live (the {@code ScatterIdentityTest}
      * pattern). The only build path that populates the scatter-owned {@code HAS_FLUID_NEIGHBOR} flag the
      * funnel's tier 0b reads; {@code classifyInto} never runs {@code computeDepth} and leaves the bit
      * permanently clear (the synthetic-grid trap).
