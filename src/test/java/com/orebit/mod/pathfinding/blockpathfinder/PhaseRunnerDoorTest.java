@@ -147,6 +147,11 @@ class PhaseRunnerDoorTest {
 
         MovePlan mp = new MovePlan();
         mp.requireDoor(DX, DY, DZ, true);
+        // Plan-carried break (owner ruling 2026-08-25): the runner mines a Need.AIR cell iff the SEARCH
+        // folded a break for it, so this hand-built plan declares the break the way BotNavigator injects it
+        // off StepEdits in production. Note the door cell deliberately gets NO break — a door is opened, and
+        // its exemption is now expressed by simply never folding one, not by a runner-side type check.
+        mp.requireBreak(DX + 1, DY, DZ);
         mp.phase("walk")
                 .need(MovePlan.Need.AIR, DX, DY, DZ)        // door cell — skipped
                 .need(MovePlan.Need.AIR, DX + 1, DY, DZ)    // non-door wall — mined

@@ -428,10 +428,28 @@ public final class SteerControl {
      *         end a re-centre and start accelerating. Callers that only want the input may ignore it.
      */
     public static boolean recenterOn(BotSteering b, double cx0, double cz0) {
+        return recenterOn(b, cx0, cz0, COLUMN_DEADBAND);
+    }
+
+    /**
+     * {@link #recenterOn} with an EXPLICIT tolerance, for callers whose requirement is tighter than
+     * {@link #COLUMN_DEADBAND}.
+     *
+     * <p>{@code COLUMN_DEADBAND} is a general "close enough to the column" figure, and inside it this servo
+     * writes {@code setForward(0.0)} — it stops driving and reports success. That makes the deadband a hard
+     * FLOOR on how precisely any caller can be positioned: a caller needing better cannot get it by testing
+     * more strictly, because no input is being written any more, so a tighter test just spins forever.
+     *
+     * <p>Parkour's run-up is such a caller. Its requirement is {@code ParkourEnvelope.maxLaunchOffset}
+     * (~0.026 on stone), about a sixth of the deadband, because the run-up is quantised in ticks and losing
+     * the last one costs 5% of launch speed. Passing the requirement in as the tolerance is what lets the
+     * servo keep driving until it is actually met — see the (456,0,512) flagship wedge.
+     */
+    public static boolean recenterOn(BotSteering b, double cx0, double cz0, double deadband) {
         double cx = cx0 - b.x();
         double cz = cz0 - b.z();
         double d = Math.sqrt(cx * cx + cz * cz);
-        if (d > COLUMN_DEADBAND) {
+        if (d > deadband) {
             tag("recenter");
             b.faceHorizontally(cx, cz);
             b.setForward((float) Math.min(1.0, d));

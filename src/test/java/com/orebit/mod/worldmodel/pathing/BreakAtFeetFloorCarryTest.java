@@ -158,6 +158,17 @@ class BreakAtFeetFloorCarryTest {
                 wp.getX(), plan.floorY(i), wp.getZ(),
                 from.getY() + 1, wp.getY()); // full-block from-foot; wp.getY() is the topY-aware to-foot
         assertNotNull(mp, "Ascend is a converted move — it must produce a phase plan for its contract frame");
+        // INJECT THE FOLDED BREAKS, exactly as BotNavigator does off the step's StepEdits (owner ruling
+        // 2026-08-25: the search decides what to break and the executor obeys). Without this the runner has
+        // no break set and mines nothing — which is what this test is FOR: it asserts the plan's own folded
+        // breaks are the ones executed, so the injection is part of the contract under test, not setup noise.
+        StepEdits se = plan.edits(i);
+        if (se != null) {
+            for (int k = 0; k < se.breakCount(); k++) {
+                BlockPos bp = se.breakPos(k);
+                mp.requireBreak(bp.getX(), bp.getY(), bp.getZ());
+            }
+        }
 
         // Drive the runner against a bot double seeded with the fixture's live riser cells.
         FakeBot bot = new FakeBot();

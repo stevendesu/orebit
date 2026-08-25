@@ -176,6 +176,98 @@ public final class ParkourEnvelope {
         return v;
     }
 
+    /**
+     * PREDICT the jump-tick speed a launch from {@code (projFromCentre, velDelta)} will ACTUALLY reach, by
+     * running this class's own {@link #vGroundStep} recurrence forward to the takeoff trigger.
+     *
+     * <p>This is the question {@code Parkour}'s run-up gate has to answer -- <em>will I have enough speed
+     * when the trigger fires?</em> -- computed instead of approximated. It exists to replace three proxies
+     * that each stood in for it and each got it wrong: an {@code atRest()} test (being stationary is only
+     * HALF the precondition -- {@link #vRunup} integrates from rest ACROSS {@link #RUNUP_BLOCKS}, so the
+     * DISTANCE left to the trigger matters just as much, and at rest 0.30 past centre there is 0.05 of it),
+     * a sign test on carried velocity, and a hardcoded launch floor.
+     *
+     * <p><b>Frames -- the trap that makes this easy to get wrong.</b> The recurrence's state variable is the
+     * tick's TRAVEL speed (pre-friction): {@link #vGroundStep} maps travel speed to travel speed and
+     * {@link #vRunup} accumulates it as distance. A live bot's {@code velX()/velZ()} is
+     * {@code deltaMovement}, which vanilla has ALREADY multiplied by friction at the end of the tick, so it
+     * equals {@code travel * QG * gsf} -- a different quantity, smaller by ~45% on stone. {@code velDelta}
+     * is therefore converted on the way in. Reading one as the other is precisely the error that produced a
+     * wrong first diagnosis of the 2026-08-24 flagship death.
+     *
+     * <p>Validated against three live course cards launching from 0.00 / 0.208 / 0.30 past centre, which
+     * MEASURED 0.4557 / 0.4349 / 0.3970 by position delta; this predicts 0.4557 / 0.4350 / 0.3970.
+     *
+     * <p><b>Domain.</b> {@code gsf} is the SLOW-FLOOR factor (soul sand 0.4), so normal and slow floors are
+     * exact. ICE IS NOT MODELLED: vanilla friction scales the input accel by {@code 0.216 / friction^3} as
+     * well as the drag, while {@link #A_G} pins the stone value. On a slippery floor this prediction is
+     * OPTIMISTIC, so a caller must gate on friction separately -- that is a statement of this integrator's
+     * domain, not a tuning constant.
+     *
+     * @param projFromCentre along-axis distance past the takeoff cell's centre, in blocks
+     * @param velDelta       live horizontal {@code deltaMovement} along that axis (post-friction, may be <0)
+     * @param edge           the takeoff trigger for this launch ({@link #TAKEOFF_EDGE} or the stair variant)
+     */
+    /**
+     * The DEEPEST along-axis offset past the takeoff centre from which a from-rest run-up still reaches
+     * {@link #modelJumpTickSpeed} — i.e. still gets the same number of run-up ticks the model does.
+     *
+     * <p>This is the run-up re-centre's tolerance, derived rather than chosen. The run-up is quantised in
+     * TICKS, so launch speed does not degrade smoothly with the offset: it is a step function. From the
+     * centre on stone the bot gets three ticks ({@code 0.1274 → 0.3244 → 0.5593} cumulative) and launches at
+     * {@code 0.4557}; start anywhere past {@code edge − 0.3244 = 0.0256} and the second tick already carries
+     * it over the trigger, the third never happens, and the launch drops to {@code 0.4349} — a 5% cliff for
+     * a 3 cm difference in where the bot stopped.
+     *
+     * <p><b>Why this had to exist.</b> {@code SteerControl.COLUMN_DEADBAND} is {@code 0.15} — roughly SIX
+     * TIMES this tolerance — and inside it {@code recenterOn} writes {@code setForward(0.0)} and reports
+     * success, so the bot simply stops wherever it happens to be. On the 2026-08-24 long flagship it stopped
+     * {@code 0.039} past centre, lost the third tick, launched at 95%, and fell short of a gap-4 fall-2 at
+     * (456,0,512) — 13 THOUSANDTHS of a block outside the requirement, on a servo that had reported itself
+     * done. Tightening the acceptance test alone would have deadlocked instead: with no input written inside
+     * the deadband, the bot can never close the remaining distance. The tolerance has to come from the
+     * physics, and this is where it comes from.
+     */
+    public static double maxLaunchOffset(double edge, double gsf) {
+        double v = 0.0, d = 0.0, prev = 0.0;
+        for (int t = 0; t < 32 && d < edge; t++) {
+            prev = d;                       // cumulative distance BEFORE the tick that crosses the trigger
+            v = vGroundStep(v, gsf);
+            d += v;
+        }
+        return edge - prev;                 // any deeper start loses that final run-up tick
+    }
+
+    public static double predictLaunchSpeed(double projFromCentre, double velDelta, double edge, double gsf) {
+        double v = velDelta / (QG * gsf);      // deltaMovement -> the recurrence's travel-speed frame
+        double p = projFromCentre;
+        for (int t = 0; t < 32 && p < edge; t++) {
+            v = vGroundStep(v, gsf);
+            p += v;
+        }
+        return vJumpFrom(v, gsf);
+    }
+
+    /**
+     * The jump-tick horizontal speed the whole reach table is DERIVED from — {@code vJumpFrom(vRunup(gsf))},
+     * i.e. what the bot launches at after accelerating from REST across {@link #RUNUP_BLOCKS}.
+     *
+     * <p>Exposed 2026-08-24 so a HARNESS can assert the follower's promise DIRECTLY instead of inferring it
+     * from whether the bot happened to land. On flat ground ({@code gsf == 1}) this is {@code 0.4557}, and a
+     * dead stop at the takeoff cell's CENTRE reproduces it to four decimals — three run-up ticks, launching
+     * on the {@code TAKEOFF_EDGE} trigger. That equality is the contract: every emitted Parkour is realisable
+     * from a standstill at centre, and carried momentum is a bonus, never a requirement.
+     *
+     * <p>What made this worth exposing: the 2026-08-24 flagship death launched at {@code 0.4069} (89%)
+     * because the bot began the move 0.208 PAST centre and so got ONE run-up tick instead of three. Every
+     * other signal looked perfect — sprint held, full {@code A_G}, correct yaw — and the only symptom was
+     * that a max-reach gap-4 came up 0.07 blocks short at the far lip. A pass/fail-on-landing course cannot
+     * see an 11% shortfall until it crosses the cliff into a miss; this number can.
+     */
+    public static double modelJumpTickSpeed(double gsf) {
+        return vJumpFrom(vRunup(gsf), gsf);
+    }
+
     private static double vJump(double gsf) {
         return vJumpFrom(vRunup(gsf), gsf);          // a run-up the follower can actually deliver
     }

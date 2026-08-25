@@ -288,6 +288,7 @@ class StationKeepMediumTest {
         // must issue the break AND settle onto that very block on the same tick. (It breaks a moment later
         // and the bot drops — that IS the movement.)
         MovePlan plan = new MovePlan();
+        plan.requireBreak(X, FOOT_Y - 1, Z);   // plan-carried break (owner ruling 2026-08-25)
         plan.phase("descend").need(MovePlan.Need.AIR, X, FOOT_Y - 1, Z);
         PhaseRunner runner = new PhaseRunner();
         runner.begin(plan);
@@ -346,6 +347,8 @@ class StationKeepMediumTest {
     @Test
     void theSubmergedRunnerHoldMinesAndStationKeepsOnTheSameTick() {
         MovePlan plan = new MovePlan().moveDir(1, 0);
+        plan.requireBreak(X + 1, FOOT_Y, Z);       // plan-carried breaks (owner ruling 2026-08-25)
+        plan.requireBreak(X + 1, FOOT_Y + 1, Z);
         plan.phase("walk")
                 .need(MovePlan.Need.AIR, X + 1, FOOT_Y, Z)
                 .need(MovePlan.Need.AIR, X + 1, FOOT_Y + 1, Z);

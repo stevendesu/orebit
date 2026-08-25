@@ -250,16 +250,41 @@ public final class PhaseRunner {
                     // NEVER mine it, even a CLOSED toggleable one (which DOES obstruct the corridor): the crossing
                     // operates it by hand, not by force.
                     if (plan.isOpenableCell(r.x, r.y, r.z)) continue;
-                    // Mine only a GENUINE obstruction — the block's live collision actually intrudes into the bot's
-                    // body corridor (movementBlockedAt), NOT merely "has some collision" (solidAt). This is the
-                    // general fix for the whole passable-collision class: a movement's plan() declares Need.AIR on its
-                    // body column blind to what occupies it (Traverse.plan), and many blocks the bot moves THROUGH or
-                    // stands ON still read solidAt (thin panel / low floor) — an already-open door or open trapdoor
-                    // (edge panel outside the corridor), and a carpet / pressure plate / bottom slab / snow layer in
-                    // the feet cell (collision below the auto-step). solidAt made the runner swing at all of them
-                    // (arm-swing + crack overlay on blocks that need nothing); the geometry test lets the bot pass/
-                    // stand while still clearing a real full-block wall. No per-block-type ("is it a door") gate.
-                    if (bot.movementBlockedAt(r.x, r.y, r.z, plan.moveDx(), plan.moveDz())) {
+                    // OBEY THE PLAN (owner ruling 2026-08-25). Mine a Need.AIR cell iff the SEARCH folded
+                    // a break for it. The planner already decided which cells must be cleared and PAID for
+                    // them in g; the executor's job is to carry that out, not to hold a second opinion.
+                    //
+                    // This replaces a live-geometry re-derivation (movementBlockedAt: does the block's
+                    // collision intrude into a travel corridor?) that was introduced to stop the runner
+                    // swinging at carpets, pressure plates, bottom slabs and open door panels — cells whose
+                    // Need.AIR is declared blind by plan() and which need nothing done. The break set solves
+                    // that case too, and more directly: the planner never folds a break for a carpet, so
+                    // none is executed.
+                    //
+                    // It was ALSO unsound, and not merely mistuned. Bamboo is registered
+                    // .offsetType(OffsetType.XZ): its collision post is displaced up to 0.25 blocks by a
+                    // hash of the block coordinate. NavBlock classifies from getCollisionShape(null, null)
+                    // — no position, so no offset — while movementBlockedAt read
+                    // getCollisionShape(level, pos), offset applied. The planner is RIGHT to ignore the
+                    // offset (a per-position variant would need its own navtype for every bamboo placement),
+                    // so the two sides cannot be reconciled and any executor-side geometry test is guessing.
+                    // On 2026-08-25 that guess said "not blocked" for a stalk whose post the offset had
+                    // pushed past the corridor's half-cell bound; nothing was mined, the phase advanced
+                    // after 4 ticks, and the bot walked into the stalk and wedged for ~47k ticks -- with no
+                    // step FAILED, because a hold is not a failure.
+                    //
+                    // Doors keep their exemption ABOVE this, and are not a counter-example: an openable cell
+                    // carries a Need.OPEN rather than a break, so "enter the cell, then operate it" is
+                    // likewise something the plan states and the executor obeys.
+                    // TWO QUESTIONS, TWO OWNERS. isPlannedBreak asks WHETHER this cell should be cleared —
+                    // the search's call, never re-litigated here. solidAt asks whether it is cleared YET —
+                    // progress, not a second opinion, and the reason it must still be asked: a planned break
+                    // stays planned forever, so gating on the plan alone re-mines cell #1 every tick and
+                    // never reaches cell #2 (caught by BreakAtFeetFloorCarryTest, which mines a folded PAIR).
+                    // Deliberately the COARSE solidAt ("is anything still here") and not the old
+                    // movementBlockedAt ("does its collision intrude into my corridor") — the latter is the
+                    // judgement call that belongs to the planner and that offset blocks make unanswerable.
+                    if (plan.isPlannedBreak(r.x, r.y, r.z) && bot.solidAt(r.x, r.y, r.z)) {
                         bot.mine(r.x, r.y, r.z);
                         if (holdNeed == null) { holdNeed = r.kind; holdX = r.x; holdY = r.y; holdZ = r.z; }
                         holding = true;

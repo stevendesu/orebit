@@ -125,7 +125,10 @@ public final class Traverse implements Movement {
      */
     public static final float CLIMBABLE_TOP_COST = FLAT_COST * 1.3f;
 
-    private static final double STEP_ASSIST_RECOVERY = MovementContext.STEP_ASSIST_MAX_RISE / 16.0;
+    /** Package-private since 2026-08-25: {@link Diagonal} needs the IDENTICAL tolerance for the identical
+     *  reason (a step entered off a climbable top-out dips sub-cell before step assist recovers it), and one
+     *  definition means the two cannot drift apart if {@code STEP_ASSIST_MAX_RISE} ever moves. */
+    static final double STEP_ASSIST_RECOVERY = MovementContext.STEP_ASSIST_MAX_RISE / 16.0;
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
