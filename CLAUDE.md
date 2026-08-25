@@ -214,3 +214,11 @@ routinely regress.** Understand why before touching anything hot:
 ## Portability (Fabric vs Forge, multi-version)
 
 Both are **shared-core + thin-adapter** problems, NOT separate codebases. The entire loader/version-volatile surface is ~2,300 lines in <10 files (root fake-player stack + worldmodel data layer + `platform/` adapters). The fragile spots are the fake-player network internals (`ConnectedClientData`, `SyncedClientOptions`, protocol version, `ADD_PLAYER`/spawn packet — handled per-version in `overlays/`) and `NavSectionBuilder`'s reflection into `PalettedContainer`. Tooling: **Architectury Loom + Stonecutter** for the ≤1.21 era; **pure Fabric Loom + Stonecutter** for the 26 era; the **Architectury *API* is deliberately unused** (native per-loader glue → zero runtime deps). See the `portability-findings`, `multiversion-build-strategy`, `mc-26-fabric-era`, and `loader-matrix` memories.
+
+## Sub-agent / workflow hygiene
+
+There is a history in this repository of spinning up 16, 24, or even 32 sub-agents to perform "adversarial review" of
+large changes. This process burns through API quota at an alarming rate and leads to pauses in development for several
+days while waiting for the API quota to reset.
+
+Adversarial reviews are fine. More than 4 or 5 agents is not.

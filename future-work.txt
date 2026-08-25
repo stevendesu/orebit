@@ -2,6 +2,8 @@ Known Bugs:
 ===========
 Regions marked dirty DURING persist flush are queued for NEXT TICK instead of next persist - leading slow persists to last forever
 Claude reported "bare-ladder top-entry" and "bug #9's remaining half". Worth getting more details on this
+Mining blocks underwater or while climbing currently doesn't include the 5x "underwater" penalty or 5x "ungrounded" penalty
+We need to invalidate current plans if they routed through unbuilt regions once those regions become built"
 
 
 Known Gaps:
@@ -77,6 +79,57 @@ We could pull these once outside of ANY specific movement's logic and pass them 
 So movements get a pointer to the NavGrid plus a handful of pre-pulled cells that we know they're likely to need.
 
 IN GENERAL: I'd love to do another JFR run and understand where we're spending our time. We've accepted multiple "+3%" costs to add new features, and those compound.
+
+**Idea 5: Grow our NavGrid values from 16-bit to 32-bit**
+
+The goal of things like our headrooms bits and risky_edits bits was, allegedly, to pre-compute anything that depends on neighbor cells.
+This way when doing our hottest path reads we can look at a single cell and know everything we need to know in order to compute valid movements.
+
+The issue is that 6 bits of flags wasn't nearly enough to store EVERYTHING we needed. Headroom is nice and all, but we still end up reading MULITPLE
+neighbor cells to answer questions like "is the neighbor in the +x direction climbable" or "is the landing cell for the parkour slippery"
+
+Increasing the size of our values means doubling our RAM usage, which also means slower reads since our NavGrid will spread over more cache lines.
+However it also means we can store more pre-computed values, which may mean fewer nodes being read **at all**
+
+TWO major concerns:
+
+ 1. We need an inventory of every single time we read a neighbor cell and what we're reading from it
+ 2. We need to consider how world edits impact that. When a cell is edited, that edit could scatter to neighbors now
+
+**IDEA 6 -- NEWEST AND BIGGERIST IDEA**
+
+Okay, so in the past we tried using flood fill as a cheap "test of futility" when we started to flood. Instead of running A* in an ocean, we
+said "quickly scan the ocean to see if it's even possible to reach a better position from here"
+
+The problem was that it added MASSIVE complexity and the flood fill was only about 3x faster than A*
+
+So for 99% of searches we don't flood (never triggered) and for the 1% that flood we still had a millisecond budget (either explicitly for async
+or implicitly to stay within a 50ms tick for sync) so it's not like we could suddenly flood MASSIVE plains... We went from a 10k node budget to
+a 30k node budget AT BEST (but only the futility check was faster, not the A*, so it was more realistically like 20-25k)
+
+But we just recently fixed flooding at the REGION tier with a clever trick. I realized that there was no reason to scan unbuilt regions AWAY from
+the goal into an endless void - because provably any path through that unbuilt sea could be trimmed due to the guaranteed six-connectivity of our
+optimistic unbuilt regions. It trims to exactly the shell wrapping our built regions. A path through unbuilt space never needs to do more than:
+ * Dip out of the unbuilt regions
+ * Surf around the shell
+ * Dip back in at a built location where we could cheaply reach the goal
+
+So we built this. There were some caveats like "we can extend more than 1 region into unbuilt space if doing so reduced h" - this allows us to
+bridge across an unbuilt void. Or we allow a single expansion into the unbuilt void in order to route around corners.
+
+After building this we had an issue: one of our test fixtures was intended to cause region flooded at the L0 level by forcing a path around a
+huge unbreakable wall when there was a huge region of unbuilt space behind us. The search would flood that unbuilt space looking for a way around
+the wall that didn't exist. The test then checked that when this flooding occurred, we escalated to the L1 region tier.
+
+The issue was that the new, smarter rules for unbuilt regions meant we never flooded anymore. We knew to never scan the regions behind us (they
+provably CAN'T contain a faster route to the goal) and we cheaply hugged the wall at the L0 tier as we scanned around it and found the path.
+
+I realized that this same clever "scan the shell" technique could work at the block tier! If we're starting to flood, then instead of running
+flood fill we could limit A* to only checking nodes along the "shell". So if a move increases h (we're moving away from the goal), only pop it
+if the block is adjacent to a non-passable cell. Or something like that. This way we can cheaply flood the PERIMETER and find another way in
+without wandering into the ocean.
+
+I don't have it 100% fleshed out in my head, but I'm like 95% sure this will work!
 
 
 New features:
