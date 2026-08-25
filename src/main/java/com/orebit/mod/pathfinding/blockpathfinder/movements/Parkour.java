@@ -511,7 +511,25 @@ public final class Parkour implements Movement {
      * Compared against the follower's live {@link BotSteering#slipperinessAt} read, not a grid bit: the
      * planner's SLIPPERY surface class was deleted 2026-08-10 as dead, and slipperiness is a servo gain.
      */
-    public static final double NORMAL_FRICTION = 0.6;
+    /**
+     * Vanilla's DEFAULT block friction, as a {@code double} that is bit-equal to what
+     * {@code Block.getFriction()} actually returns.
+     *
+     * <p><b>The {@code f} is load-bearing and must not be dropped.</b> {@code getFriction()} returns a
+     * {@code float}; stone's {@code 0.6f} widens to {@code 0.6000000238418579}, which is strictly GREATER
+     * than the {@code double} literal {@code 0.6}. Written as {@code 0.6} this constant therefore matched
+     * NOTHING -- {@code slipperinessAt(...) <= NORMAL_FRICTION} was false on every ordinary block in the
+     * game, so the run-up re-centre it guards had never once armed on normal ground since the guard was
+     * added. That is the missing half of the 2026-08-24 flagship death at (432,-7,506): the arm block WAS
+     * entered (carry 0.0209 against REST_HSPEED 0.02) and this comparison silently rejected it, which is
+     * why the drive tag read {@code steer} and never {@code recenter}.
+     *
+     * <p>Widening the float instead of writing a tolerance keeps the constant EXACT and keeps its meaning
+     * honest -- it is not "about 0.6", it is "whatever vanilla calls default friction". The separation it
+     * has to make is wide anyway: slime is {@code 0.8f}, ice and packed ice {@code 0.98f}, blue ice
+     * {@code 0.989f}, so every slippery surface still sorts above it by a comfortable margin.
+     */
+    public static final double NORMAL_FRICTION = 0.6f;
 
     /** Fix 3 predictive lookahead multiplier on the along-axis velocity (see {@link #HAZARD_TAKEOFF_LOOKAHEAD}
      *  — the measured trigger→last-grounded latency is ~3 ticks). */
@@ -1301,13 +1319,61 @@ public final class Parkour implements Movement {
             // steering (steerTowards / steerViaGate's gate-point pursuit) already corrects while it
             // accelerates. Every convicted failure had real carry -- entry speeds 0.130, 0.116, 0.117 --
             // against REST_HSPEED 0.02.
-            if (!recentreDone[0] && !recentring[0] && !hadNormalRunupTick[0] && !b.atRest()) {
+            // NO atRest() GATE (2026-08-24). This used to open with `&& !b.atRest()`, justified as "at rest
+            // IS the state vRunup integrates from, so a re-centre buys nothing but lost ticks". That reads
+            // half the precondition: vRunup integrates from rest ACROSS RUNUP_BLOCKS = 0.5, so the DISTANCE
+            // left to the trigger is the other half. At rest 0.30 past centre there is 0.05 of it, one
+            // run-up tick fits instead of three, and the launch comes out at 0.3970 against a 0.4557 model
+            // -- 87%. The offcentre.* course cards pin exactly that, and the 2026-08-24 flagship death at
+            // (432,-7,506) was the same shortfall at 89%: a max-reach gap-4 clipped the near face of its
+            // landing block 0.07 blocks low and fell into a dripstone cave.
+            //
+            // Worth knowing WHY that shortfall hid for so long: whether an under-launch actually MISSES is
+            // decided per-tick, by whether the 0.6-wide box overlaps the landing column on a tick when the
+            // feet are still above its top. offcentre.g4f2.p30 and .p34 launched at the SAME 0.3970 and
+            // disagreed -- p34 started 0.04 further along, overlapped by 0.024, and landed; p30 was 0.016
+            // short, clipped the side face and died. Under-launching walks toward a cliff; going over it is
+            // luck. So the gate must ask about SPEED, and the courses must assert on speed, because a
+            // land/fall verdict scores two of those three green.
+            if (!recentreDone[0] && !recentring[0] && !hadNormalRunupTick[0]) {
                 boolean arm;
                 if (rawTakeoffTrigger.test(b)) {
                     // COMMITTED entry -- already past the trigger. The 2026-07-31 rule, unchanged.
                     arm = lowHalfStair.test(b) || ux * b.velX() + uz * b.velZ() <= 0.0;
+                } else if (lowHalfStair.test(b) || b.slipperinessAt(fx, fy, fz) > NORMAL_FRICTION) {
+                    // OUTSIDE the prediction's domain. Both exclusions are statements of fact, not tuning:
+                    //
+                    //   ICE -- ParkourEnvelope's recurrence pins A_G at the stone value and lets gsf scale
+                    //   only the DRAG term, but vanilla friction scales the input accel by 0.216/friction^3
+                    //   as well. On ice the prediction is therefore OPTIMISTIC and cannot be trusted to
+                    //   decide anything. It also happens to be where re-centring is worst: high friction
+                    //   retains momentum and correspondingly refuses to rebuild it, so blue.chain.g3 went
+                    //   PASS -> FAIL with takeoff speed collapsing 0.3958 -> 0.0103 when an earlier arm
+                    //   re-centred there. On ice the carry IS the run-up: keep it.
+                    //
+                    //   PARTIAL-HEIGHT takeoff -- a bottom slab reads topY 8 < 16 so lowHalfStair is TRUE,
+                    //   and the re-centre then aims at STAIR_BACK_PROJ, 0.20 BEHIND centre. That rear aim is
+                    //   calibrated for the COMMITTED hot entry above; applying it to a runway entry walked
+                    //   the bot off the back of its own takeoff (slabflat2.walkin, maxProj -2.42, timeout).
+                    //   Fixing the rear aim is a separate change; until then this branch declines.
+                    arm = false;
                 } else {
-                    // HAS RUNWAY -- trade the carry for alignment, but ONLY where the carry can be REBUILT.
+                    // HAS RUNWAY, normal floor -- ASK THE INTEGRATOR. Run ParkourEnvelope's own ground
+                    // recurrence forward from where the bot actually is, at the speed it actually has, to
+                    // the trigger that will actually fire, and compare the launch speed that yields against
+                    // the one the reach table was derived from. Re-centre exactly when the answer is short.
+                    //
+                    // This replaces two proxies that were standing in for that question. The sign test
+                    // (`ux*velX + uz*velZ <= 0`) asked "is the bot moving backwards?" -- in the flagship the
+                    // carry was +0.018, noise, and it read as real momentum worth preserving. The atRest()
+                    // gate above asked "is it stationary?" -- which is the wrong half. Neither is needed
+                    // once the launch speed itself is computable.
+                    //
+                    // gsf is 1.0 on both sides deliberately: plan() has no MovementContext, so there is no
+                    // live slow-floor read here, and a normal-floor prediction compared against a
+                    // normal-floor model is self-consistent. On soul sand both sides shift the same way and
+                    // the prediction is optimistic, so this arms LESS often -- i.e. it degrades to today's
+                    // behaviour rather than to a new risk.
                     // The re-centre spends momentum to buy a clean on-axis start; that is a good trade only
                     // if the run-up can then earn the momentum back inside 0.35 blocks. Two surfaces where
                     // it cannot, both caught by the 2026-08-24 course baseline as regressions this arm
@@ -1326,7 +1392,10 @@ public final class Parkour implements Movement {
                     //
                     // Both keep their pre-existing behaviour: a committed entry still re-centres per the
                     // branch above, and everything else runs up on its carry exactly as before.
-                    arm = !lowHalfStair.test(b) && b.slipperinessAt(fx, fy, fz) <= NORMAL_FRICTION;
+                    double proj = ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5));
+                    double vAlong = ux * b.velX() + uz * b.velZ();
+                    arm = ParkourEnvelope.predictLaunchSpeed(proj, vAlong, TAKEOFF_EDGE, 1.0)
+                            < ParkourEnvelope.modelJumpTickSpeed(1.0);
                 }
                 if (arm) {
                     recentring[0] = true;
@@ -1363,8 +1432,24 @@ public final class Parkour implements Movement {
                         // SETTLE uses (grounded AND horizontal speed < REST_HSPEED, derived from vanilla
                         // ground drag) -- so the run-up begins from the from-rest, on-axis state that
                         // ParkourEnvelope.vRunup actually models.
+                        // TOLERANCE = THE REQUIREMENT (2026-08-24). This used to accept SteerControl's
+                        // general COLUMN_DEADBAND of 0.15, which is ~6x looser than what the run-up actually
+                        // needs: ParkourEnvelope.maxLaunchOffset is ~0.026 on stone, because the run-up is
+                        // quantised in TICKS and starting deeper than that loses the last one -- a 5% launch
+                        // cliff for 3 cm of position. On the 2026-08-24 long flagship the servo reported
+                        // itself done at 0.039 past centre, lost the third tick, launched at 95% and fell
+                        // short of a gap-4 fall-2 at (456,0,512).
+                        //
+                        // Note the deadband could NOT simply be tested more strictly here: inside it
+                        // recenterOn writes setForward(0.0), so no input is being applied and a tighter
+                        // acceptance test would spin forever rather than converge. The tolerance has to be
+                        // passed IN so the servo keeps driving until the requirement is met. The aim is
+                        // still the CELL CENTRE (owner ruling 2026-08-14) -- only the tolerance moved, and
+                        // at 0.026 the 0.6-wide body stays entirely inside the takeoff cell.
+                        double edge = lowHalfStair.test(b) ? STAIR_TAKEOFF_EDGE : TAKEOFF_EDGE;
                         boolean centred = SteerControl.recenterOn(b,
-                                fx + 0.5 + ux * back, fz + 0.5 + uz * back);
+                                fx + 0.5 + ux * back, fz + 0.5 + uz * back,
+                                ParkourEnvelope.maxLaunchOffset(edge, 1.0));
                         if (centred && b.atRest()) {
                             recentring[0] = false;
                             recentreDone[0] = true;
