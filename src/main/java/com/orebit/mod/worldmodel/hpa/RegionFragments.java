@@ -97,10 +97,23 @@ public final class RegionFragments {
 
     /**
      * Hard cap on fragments per region (HPA-FRAGMENTS.md §3, §5). Over-cap ⇒ collapse. Real fragment ids are
-     * {@code 0..MAX_FRAGMENTS-1} = 0..61 in the 6-bit id space; id 62 is unused/reserved and id 63 is the
-     * search-only virtual-goal id ({@code RegionPathfinder.VIRTUAL_GOAL_FRAG}) — so any id
-     * {@code >= MAX_FRAGMENTS} is never a real fragment. The cap is 62 (not 63) so the persisted 6-bit
-     * fragment-count field can spend 63 on the {@link #FRAGMENT_COUNT_COLLAPSED} sentinel.
+     * {@code 0..MAX_FRAGMENTS-1} = 0..61 in the 6-bit id space, and the top of that space is reserved for
+     * SEARCH SENTINELS — so any id {@code >= MAX_FRAGMENTS} is never a real fragment:
+     * <ul>
+     *   <li><b>62 = {@code RegionPathfinder.VIRTUAL_START_FRAG}</b> — the search ROOT's from-fragment (the
+     *       bot's own fragment has no predecessor), and every reverse/virtual node whose from-fragment is
+     *       not load-bearing.</li>
+     *   <li><b>63 = {@code RegionPathfinder.VIRTUAL_GOAL_FRAG}</b> — the search-only virtual goal node.</li>
+     * </ul>
+     * <b>A sentinel means the SAME thing in both 6-bit fields of the node key</b> (fragment id, bits 49-54;
+     * from-fragment, bits 58-63), and that is deliberate: a fragment id becomes a from-fragment one hop
+     * later, so a value that meant different things per field would be read wrong the moment the search
+     * walked through it. ({@code isVirtualStart}/{@code isVirtualGoal} both take a bare {@code int} with
+     * nothing to say which field it came from — the shared meaning is what makes that safe.) An earlier
+     * revision of this javadoc called 62 "unused/reserved", which predates VIRTUAL_START_FRAG claiming it.
+     *
+     * <p>The cap is 62 (not 63) so the persisted 6-bit fragment-count field can spend 63 on the
+     * {@link #FRAGMENT_COUNT_COLLAPSED} sentinel — a COUNT-field value, a different space again.
      */
     public static final int MAX_FRAGMENTS = 62;
 
