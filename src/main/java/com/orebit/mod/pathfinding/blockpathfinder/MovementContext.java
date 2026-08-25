@@ -1944,9 +1944,11 @@ public final class MovementContext {
     /**
      * Can the bot create footing at an empty floor cell by placing a throwaway block? True only when the
      * bot {@link BotCaps#canPlace may place}, the cell is open ({@link NavBlock#isReplaceable} or genuinely
-     * empty — so we don't try to place into a solid) and at least one of the SIX adjacent cells holds a
-     * non-replaceable occupant to place against (the owner-verified vanilla rule, s52b). The exact
-     * against-face is chosen by the follower at execution time from whatever neighbour is still solid then.
+     * empty — so we don't try to place into a solid) and at least one of the FIVE candidate neighbours —
+     * below and the four lateral, the cell ABOVE deliberately excluded (owner ruling 2026-08-23; see the
+     * note on the return below) — holds a non-replaceable occupant to place against (the owner-verified
+     * vanilla rule, s52b). The exact against-face is chosen by the follower at execution time from
+     * whatever neighbour is still solid then.
      */
     public boolean placeable(int x, int y, int z) {
         return placeable(x, y, z, descriptorAt(x, y, z));
@@ -1968,8 +1970,8 @@ public final class MovementContext {
         if (inv != null && inv.consumesBlocks() && inv.placeableBlocks() <= 0) return false;
         if (!openForPlace(d)) return false;        // need an open cell to fill (replaceable/empty — fluids count)
         // Placement support (owner-verified vanilla semantics, s52b): a solid full cube — the only thing
-        // the bot ever places — can be placed against ANY ADJACENT block (all SIX faces, including the
-        // ceiling above) that is not vanilla-REPLACEABLE. Not "standable" (that's a walkability question —
+        // the bot ever places — can be placed against an adjacent block that is not vanilla-REPLACEABLE.
+        // Not "standable" (that's a walkability question —
         // it wrongly excluded damaging floors like magma and made bridging out of a magma field
         // impossible), and not "has a solid collision shape" either (torches/grass/dripstone are all
         // legal support in vanilla despite empty collision). A replaceable neighbour (air, water, lava,
@@ -1978,7 +1980,14 @@ public final class MovementContext {
         // support-requiring blocks (torches). REPLACE_BIT is true per-state vanilla replaceability,
         // interned at classification via the Replaceable seam — pure descriptor bit math, no
         // block-identity checks.
-        return supportsPlacement(x, y - 1, z) || supportsPlacement(x, y + 1, z)
+        // FIVE faces, not six: the cell ABOVE is deliberately EXCLUDED (owner ruling 2026-08-23).
+        // Supporting against it means clicking that block's UNDERSIDE — placing on the ceiling. Vanilla
+        // permits it, but no movement benefits: every place the planner folds is a floor, a footing, a
+        // bridge plank or a clutch, and each of those rests on the cell BELOW it or chains laterally off
+        // the previous one. Admitting the ceiling only ever bought placements that look impossible in
+        // play (standing on a block while placing another under it) and that the follower would have to
+        // aim at an awkward, moving face. Restoring it is one disjunct if a movement ever needs it.
+        return supportsPlacement(x, y - 1, z)
                 || supportsPlacement(x + 1, y, z) || supportsPlacement(x - 1, y, z)
                 || supportsPlacement(x, y, z + 1) || supportsPlacement(x, y, z - 1);
     }
