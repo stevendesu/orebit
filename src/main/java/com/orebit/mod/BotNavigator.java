@@ -2408,6 +2408,17 @@ final class BotNavigator {
                             mp.requireDoor(ox, oy, oz, se.doorSetOpenAt(i));
                         }
                     }
+                    // BREAKS: same injection, same reason (owner ruling 2026-08-25 — "the planner
+                    // schedules breaks; if the planner says to break, we should break"). The runner used to
+                    // re-derive this from live collision geometry, which is unsound for any block whose
+                    // shape depends on its POSITION: bamboo is .offsetType(XZ), so NavBlock's
+                    // getCollisionShape(null,null) and the executor's getCollisionShape(level,pos) disagree
+                    // about where the post is, by design and irreconcilably. Carrying the decision on the
+                    // step removes the second opinion entirely.
+                    for (int i = 0; i < se.breakCount(); i++) {
+                        BlockPos bp = se.breakPos(i);
+                        mp.requireBreak(bp.getX(), bp.getY(), bp.getZ());
+                    }
                     // CLUTCHES: same injection, same reason. The search decided not just THAT this drop is
                     // survivable but WHICH carried block makes it so — ClutchModel.best walks a preference
                     // order gated on the bot's clutchMask and the depth, and its residual damage is already
@@ -2848,6 +2859,14 @@ final class BotNavigator {
         // of decay off a +0.2 impulse ((0.2 - 0.08) x 0.98), against +0.0368 on the ticks out of the vine
         // (pure gravity). The climb was provably firing; the input that caused it was invisible.
         final boolean jump = bot.jumpHeld();
+        // SPRINT (2026-08-24). The sixth and last movement input, and the only one that was NOT logged --
+        // which is exactly how long it stayed invisible. It matters more than any other flag on this line:
+        // sprinting swaps the ground input accel from 0.0980 to 0.1274 b/t^2 AND adds the 0.2 jump-tick
+        // BOOST, so ParkourEnvelope's whole reach table is derived on the assumption it is held. A run-up
+        // that silently walked instead of sprinting looks IDENTICAL on every other field (fwd=1.00,
+        // str=0.00, correct yaw) and simply comes up short. Read off the entity, not off an intent flag, so
+        // the line reports what vanilla physics will actually integrate this tick.
+        final boolean sprint = bot.isSprinting();
         // The FORWARD INPUT (owner, 2026-08-03). `vel`/`dm` are the POST-collision deltaMovement, so a bot
         // holding forward into a wall reads (0,0) and looks idle — which is exactly how this wedge hid. The
         // input is the load-bearing value: vanilla sets horizontalCollision from the ATTEMPTED movement, so a
@@ -2882,7 +2901,7 @@ final class BotNavigator {
         OrebitCommon.LOGGER.info(
                 "[Orebit] exec {} wp{} -> {} ({}) phase={}/{} botFoot=({},{},{}) botY={} grounded={}"
                         + " climbable={} reached={} targetY={} seg=({},{})->({},{}) x={} z={} vel=({},{})"
-                        + " sneak={} jump={} fwd={} str={} src={} yaw={} head=({},{}) hcol={} dm=({},{},{})"
+                        + " sneak={} jump={} spr={} fwd={} str={} src={} yaw={} head=({},{}) hcol={} dm=({},{},{})"
                         + " stance[{}]",
                 move, waypointIndex, AllyBotEntity.compact(wp), medium,
                 phaseRunner.phase(), phaseRunner.phases(),
@@ -2902,7 +2921,7 @@ final class BotNavigator {
                 String.format("%.3f", cursor.tx()), String.format("%.3f", cursor.tz()),
                 String.format("%.3f", bot.getX()), String.format("%.3f", bot.getZ()),
                 String.format("%.4f", bot.velX()), String.format("%.4f", bot.velZ()),
-                sneak, jump, String.format("%.2f", fwd),
+                sneak, jump, sprint, String.format("%.2f", fwd),
                 // STRAFE + the authoring BRANCH (2026-08-06). str: the lateral input added with the strafe
                 // seam was invisible, so a cross-axis correction could not be told from no correction at all.
                 // src: which servo wrote these inputs — the branches mean different things by the same yaw

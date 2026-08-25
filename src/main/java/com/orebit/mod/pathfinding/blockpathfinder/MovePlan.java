@@ -61,6 +61,8 @@ public final class MovePlan {
     /** Plan-level openable {@link Need#OPEN} reqs — doors AND trapdoors (DOORS P3; DESIGN-trapdoors.md §7);
      *  almost always empty (an openable crossing is rare). */
     private final List<Req> doorReqs = new ArrayList<>(0);
+    /** Cells the SEARCH folded a break for on this step — see {@link #requireBreak}. */
+    private final List<Long> breakCells = new ArrayList<>();
     /**
      * The plan-level CLUTCH: the {@link ClutchModel} kind to place into the landing cell mid-drop, and the
      * cell it goes in. {@link ClutchModel#NONE} on every plan but a clutched deep {@link
@@ -225,6 +227,55 @@ public final class MovePlan {
     int moveDx() { return moveDx; }
     int moveDz() { return moveDz; }
     List<Req> doorReqs() { return doorReqs; }
+
+    /**
+     * Declare that the SEARCH folded a break for cell {@code (x,y,z)} on this step. Injected by
+     * {@link com.orebit.mod.BotNavigator} off the step's {@link StepEdits}, exactly like
+     * {@link #requireDoor} and the clutch — plan-carried knowledge the movement's own {@code plan()} cannot
+     * re-derive from floor coordinates.
+     *
+     * <p><b>Why the executor must be TOLD rather than work it out (owner ruling 2026-08-25).</b> A
+     * movement's {@code plan()} declares {@link Need#AIR} on its body column BLIND to what occupies it, so
+     * the runner used to decide for itself whether a cell needed clearing, by testing the block's live
+     * collision against a travel corridor ({@code AllyBotEntity.movementBlockedAt}). That put the break
+     * decision in the servo, and the servo got it wrong: on 2026-08-25 the planner folded
+     * {@code BREAK(358,65,499) BREAK(358,66,499)} through a bamboo stalk, the corridor test said "not
+     * blocked", nothing was ever mined, and the bot walked into the stalk and wedged for ~47k ticks with no
+     * {@code step FAILED} ever emitted — a hold is not a failure.
+     *
+     * <p>Two things made the servo's answer unreliable, and only one of them was a tuning error. Bamboo is
+     * registered {@code .offsetType(OffsetType.XZ)}, so its collision post is displaced up to 0.25 by a hash
+     * of the block coordinate; {@code NavBlock} reads {@code getCollisionShape(null, null)} (no position,
+     * hence no offset) while the corridor test read {@code getCollisionShape(level, pos)} (offset applied).
+     * The planner is RIGHT to ignore the offset — a per-position variant would need a navtype per bamboo
+     * placement — so the two sides can never be made to agree on WHERE the block is, and any executor-side
+     * geometry re-derivation is unsound by construction.
+     *
+     * <p>So the plan decides and the executor obeys. Doors are not an exception to that rule but an
+     * instance of it: a door cell carries a {@link Need#OPEN} instead of a break, and the plan says to enter
+     * the cell and operate it by hand — the executor never had to infer that either.
+     */
+    public MovePlan requireBreak(int x, int y, int z) {
+        breakCells.add(cellKey(x, y, z));
+        return this;
+    }
+
+    /** Pack a cell into a comparison key. Deliberately NOT {@code BlockPos.asLong}: this class carries no
+     *  Minecraft imports (only {@code java.util}), and nothing here needs to round-trip the key back to
+     *  coordinates — it is only ever compared against another key from this same function, so the masking
+     *  behaviour on negative coordinates is irrelevant as long as it is consistent. */
+    private static long cellKey(int x, int y, int z) {
+        return ((long) x & 0x3FFFFFFL) << 38 | ((long) z & 0x3FFFFFFL) << 12 | ((long) y & 0xFFFL);
+    }
+
+    /** Whether the search folded a break for cell {@code (x,y,z)} on this step — see {@link #requireBreak}. */
+    boolean isPlannedBreak(int x, int y, int z) {
+        long key = cellKey(x, y, z);
+        for (int i = 0; i < breakCells.size(); i++) {
+            if (breakCells.get(i) == key) return true;
+        }
+        return false;
+    }
 
     /** Whether cell {@code (x,y,z)} is governed by an openable {@link Need#OPEN} — door, trapdoor or fence
      *  gate — (so a {@code Need.AIR} must NOT mine it: a SET-governed cell is opened/closed by hand, never

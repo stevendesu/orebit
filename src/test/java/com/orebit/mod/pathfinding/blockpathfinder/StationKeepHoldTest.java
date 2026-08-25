@@ -124,6 +124,9 @@ class StationKeepHoldTest {
     /** The Traverse's shape: one phase needing the destination's two body cells clear. */
     private static MovePlan lateralPlan() {
         MovePlan plan = new MovePlan().moveDir(1, 0);
+        // Plan-carried breaks (owner ruling 2026-08-25) — see PhaseRunnerDoorTest for the contract.
+        plan.requireBreak(TO_X, FLOOR_Y + 1, Z);
+        plan.requireBreak(TO_X, FLOOR_Y + 2, Z);
         plan.phase("walk")
                 .need(MovePlan.Need.AIR, TO_X, FLOOR_Y + 1, Z)
                 .need(MovePlan.Need.AIR, TO_X, FLOOR_Y + 2, Z);
