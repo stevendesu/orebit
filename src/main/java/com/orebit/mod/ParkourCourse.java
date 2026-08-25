@@ -205,6 +205,9 @@ public final class ParkourCourse {
         boolean padTakeoff;             // the takeoff cell ALONE is raised one block, so the route must
                                         // ASCEND onto a 1-wide pad and launch from ON TOP of it -- the
                                         // no-lateral-runway shape. See padParkourTrial.
+        double launchFloor = 0.97;      // fraction of ParkourEnvelope.modelJumpTickSpeed the launch must
+                                        // reach. 0 = MEASURE AND REPORT ONLY, for cards where the stone
+                                        // sprint model is not a legitimate target (see iceRestTrial).
         boolean jumpSpeedGate;          // STRICT verdict -- PASS requires the measured launch speed to reach
                                         // ParkourEnvelope.modelJumpTickSpeed. See offCentreTrial.
         double offCentre;               // REST spawn offset ALONG the jump axis, in blocks past the takeoff
@@ -684,6 +687,21 @@ public final class ParkourCourse {
             Trial t = new Trial(name, Approach.REST, 1, 0, jdx, jdy, jdz, Template.REACH, false, b[0], b[1]);
             t.iceRunway = ice;
             t.jumpSpeedGate = true;
+            // MEASURE, DO NOT ASSERT (2026-08-25). These cards are NOT broken and neither is the bot: all
+            // five LAND, and the trace has g3f0 touching down at x=70.582 against a landing centre of
+            // 70.5 -- 0.08 blocks past, dead on the intended cell. What they were red against was a floor
+            // of 0.97 x the STONE SPRINT model, which ice cannot reach by construction: vanilla scales
+            // input accel by 0.216/friction^3, so ice accelerates 4.36x slower than stone (0.02924 vs
+            // 0.12740 per tick) and a from-rest launch tops out at 0.3343 = 73% of the stone figure. Even
+            // granting the physical ceiling inside one cell -- back edge to lip, ~0.99 blocks of run-up --
+            // it is 84%. A 97% floor is unreachable arithmetic, not a bug report.
+            //
+            // ParkourEnvelope's gsf is the SLOW-FLOOR factor (soul sand) and does not model friction at
+            // all, so there is no ice-appropriate model to assert against either; any number here would be
+            // invented rather than derived. So these cards guard on LANDING -- a real regression tripwire,
+            // since a follower or planner change that makes them fall shows up immediately -- and record
+            // the launch speed so a drift in it is visible without being a verdict.
+            t.launchFloor = 0;
             trials.add(t);
         }
 
@@ -1134,7 +1152,13 @@ public final class ParkourCourse {
                     return;
                 }
                 settling = false;
-                bot.comeTo(tr.goal);
+                // ARRIVAL TOLERANCE (2026-08-25): EXACT -- the same (0.75, 0.75, 0) `/bot goto` passes,
+                // and what gate/shaft/staircase/swim/swimmine/trapdoor/replan/ladder/vinebridge already
+                // used. This course (and IceCourse/IceParkourCourse) had the bare comeTo(goal), which keeps
+                // the LOOSE come/follow default and lets a trial score "arrived" while still a block or two
+                // out -- so a card could pass on geometry it never actually finished. A deterministic
+                // fixture should be judged on reaching the precise cell.
+                bot.comeTo(tr.goal, 0.75, 0.75, 0);
                 return;
             }
 
@@ -1206,7 +1230,7 @@ public final class ParkourCourse {
                 if (bot.navigator().navGaveUp()) {
                     if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
                         navRetries++;
-                        bot.comeTo(tr.goal);
+                        bot.comeTo(tr.goal, 0.75, 0.75, 0);
                         return;
                     }
                     record(tr, "PASS", "correctly refused (no route offered)"
@@ -1238,6 +1262,13 @@ public final class ParkourCourse {
             // tighter than 3%.
             if (tr.jumpSpeedGate) {
                 double model = ParkourEnvelope.modelJumpTickSpeed(1.0);
+                // SPRINT-AWARE (2026-08-25). modelJumpTickSpeed includes the 0.2 sprint-jump BOOST and the
+                // sprint A_G, but Parkour only sprints when dx^2+dz^2 >= 9 (Parkour.plan tests that exact
+                // integer). Comparing a WALK-jump against a sprint model is meaningless -- icerest.g1f0
+                // (jdx=2, so 4 < 9) measured 25% and was never doing anything wrong. Checked here rather
+                // than left to each card so a future short-gap card cannot fall into the same trap.
+                boolean sprints = tr.jdx * tr.jdx + tr.jdz * tr.jdz >= 9;
+                boolean floorApplies = tr.launchFloor > 0 && sprints;
                 if (!bot.isAlive() || fell) {
                     record(tr, "FAIL", String.format(Locale.ROOT,
                             "fell — launched %.4f from proj %.3f (model %.4f, %.0f%%)",
@@ -1247,7 +1278,7 @@ public final class ParkourCourse {
                 if (bot.navigator().navGaveUp()) {
                     if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
                         navRetries++;
-                        bot.comeTo(tr.goal);
+                        bot.comeTo(tr.goal, 0.75, 0.75, 0);
                         return;
                     }
                     record(tr, "FAIL", "nav gave up (no route offered)");
@@ -1256,14 +1287,15 @@ public final class ParkourCourse {
                 if (atGoal) {
                     if (launchSpeed < 0) {
                         record(tr, "FAIL", "reached the goal without ever leaving the takeoff cell airborne");
-                    } else if (launchSpeed < 0.97 * model) {
+                    } else if (floorApplies && launchSpeed < tr.launchFloor * model) {
                         record(tr, "FAIL", String.format(Locale.ROOT,
                                 "landed, but UNDER-LAUNCHED: %.4f from proj %.3f (model %.4f, %.0f%%)",
                                 launchSpeed, launchProj, model, 100.0 * launchSpeed / model));
                     } else {
                         record(tr, "PASS", String.format(Locale.ROOT,
-                                "launched %.4f from proj %.3f (model %.4f, %.0f%%)",
-                                launchSpeed, launchProj, model, 100.0 * launchSpeed / model));
+                                "launched %.4f from proj %.3f (%.0f%% of stone-sprint model%s)",
+                                launchSpeed, launchProj, 100.0 * launchSpeed / model,
+                                floorApplies ? "" : ", MEASURED not asserted"));
                     }
                     return;
                 }
@@ -1294,7 +1326,7 @@ public final class ParkourCourse {
                 if (bot.navigator().navGaveUp()) {
                     if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
                         navRetries++;
-                        bot.comeTo(tr.goal);
+                        bot.comeTo(tr.goal, 0.75, 0.75, 0);
                         return;
                     }
                     record(tr, "FAIL", "nav gave up (no step-on offered)");
@@ -1324,7 +1356,7 @@ public final class ParkourCourse {
                 if (bot.navigator().navGaveUp()) {
                     if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
                         navRetries++;
-                        bot.comeTo(tr.goal);
+                        bot.comeTo(tr.goal, 0.75, 0.75, 0);
                         return;
                     }
                     record(tr, "FAIL", "nav gave up (no crossing offered)");
@@ -1366,7 +1398,7 @@ public final class ParkourCourse {
                 // calling it a real failure (the identical jump can pass once its grid finishes building).
                 if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
                     navRetries++;
-                    bot.comeTo(tr.goal);
+                    bot.comeTo(tr.goal, 0.75, 0.75, 0);
                     return;
                 }
                 record(tr, "FAIL", "nav gave up (no route offered)");
@@ -1407,7 +1439,7 @@ public final class ParkourCourse {
             if (bot.navigator().navGaveUp()) {
                 if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
                     navRetries++;
-                    bot.comeTo(tr.goal);
+                    bot.comeTo(tr.goal, 0.75, 0.75, 0);
                     return;
                 }
                 record(tr, "FAIL", "nav gave up (no route offered)");
@@ -1466,13 +1498,21 @@ public final class ParkourCourse {
             // maxProj / shortfall / minHP are the Phase-2 diagnostics (honey-gap reach shortfall + magma HP
             // loss); harmless-but-uninformative for the stair/refusal trials.
             String proj = maxProj <= -1e8 ? "n/a" : String.format(Locale.ROOT, "%.2f", maxProj);
-            String shortfall = maxProj <= -1e8 ? "n/a"
-                    : String.format(Locale.ROOT, "%.2f", tr.landCenterProj() - maxProj);
+            // RENAMED from "shortfall" (2026-08-25). It was NEVER a landing-precision metric and read
+            // exactly like one: maxProj is the furthest projection reached across the WHOLE trial, which
+            // includes walking the GOAL_REACH cells from the landing to the goal, so on any completed trial
+            // it necessarily exceeds landCenterProj and the old "shortfall" came out around -1.7 -- on
+            // healthy PASSing controls just as much as on failures. It caused a live misdiagnosis: five ice
+            // cards were reported as "overshooting the landing by 1.6-1.8 blocks" when the trace shows they
+            // touch down 0.08 blocks past the landing CENTRE. Sign-corrected and renamed so the number says
+            // what it measures: how far PAST the landing the bot got, positive when it went past.
+            String pastLanding = maxProj <= -1e8 ? "n/a"
+                    : String.format(Locale.ROOT, "%.2f", maxProj - tr.landCenterProj());
             results.add(String.format(Locale.ROOT,
-                    "%s = %s (%s) takeoffSpd=%s finalY=%.2f maxProj=%s shortfall=%s minHP=%.1f",
+                    "%s = %s (%s) takeoffSpd=%s finalY=%.2f maxProj=%s pastLanding=%s minHP=%.1f",
                     tr.name, result, reason,
                     takeoffSpeed < 0 ? "n/a" : String.format(Locale.ROOT, "%.4f", takeoffSpeed),
-                    bot.getY(), proj, shortfall, minHealth));
+                    bot.getY(), proj, pastLanding, minHealth));
             if (result.equals("PASS")) passed++; else if (gapFail) plannerGap++; else failed++;
             OrebitCommon.LOGGER.info("[Orebit/parkour] {} -> {} ({}) takeoffSpd={} finalY={}",
                     tr.name, result, reason,
