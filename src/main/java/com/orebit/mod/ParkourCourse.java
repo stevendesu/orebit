@@ -12,6 +12,7 @@ import java.util.UUID;
 
 import com.mojang.authlib.GameProfile;
 import com.orebit.mod.config.ConfigLoader;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.ParkourEnvelope;
 import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.platform.ConfigDir;
 import com.orebit.mod.platform.EntityState;
@@ -118,6 +119,9 @@ public final class ParkourCourse {
     /** Soul sand: a full-block SLOW floor (speedFactor 0.4, jumpFactor 1.0 — NOT reduced-jump like honey),
      *  so it reaches the envelope's soul-sand row and tightens the offered gaps. */
     private static final BlockState SOUL = Blocks.SOUL_SAND.defaultBlockState();
+    private static final BlockState BAMBOO = Blocks.BAMBOO.defaultBlockState();
+    private static final BlockState ICE_BLK = Blocks.ICE.defaultBlockState();          // friction 0.98
+    private static final BlockState BLUE_ICE_BLK = Blocks.BLUE_ICE.defaultBlockState();// friction 0.989
     /** A BOTTOM straight stair FACING EAST (+X): its HIGH 16/16 half is on +X, LOW 8/16 front on -X (verified
      *  empirically, StairVoxelProbe). Climbing +X (or descending -X) walks its low front → high back. */
     private static final BlockState STAIR_EAST = Blocks.STONE_STAIRS.defaultBlockState()
@@ -157,7 +161,7 @@ public final class ParkourCourse {
      *  run-autotest-climb scenario miniaturized — a feet-level vine row on a wall face across a
      *  floorless gap, the ONLY crossing a no-capability bot has (grab + sideways ease + step-off);
      *  repro for the 2026-07-31 lateral-cling latch found when that autotest was finally re-run. */
-    private enum ClimbKind { ASC_PIN, ASC_FACE, CLIFF, LATERAL }
+    private enum ClimbKind { ASC_PIN, ASC_FACE, CLIFF, LATERAL, DIAG_TOP }
 
     /** One jump challenge: an approach direction + a jump vector + a landing template + a precursor condition,
      *  with all world geometry precomputed from its base X band. */
@@ -193,6 +197,18 @@ public final class ParkourCourse {
         final boolean wideRunway;       // 3-wide straight runway (only when approach == continuation, cardinal)
         final boolean diagRunway;       // 1-wide diagonal runway strip
         boolean ownerRepro;             // owner-gate: lay the owner's honey-flyover course (buildOwnerTile)
+        BlockState centrePost;          // != null: a 2-high stalk planted at the TAKEOFF CELL'S CENTRE —
+                                        // passable to the planner, but its collision post occupies exactly
+                                        // the cell centre a carry gate would hold at. See centrePostTrial.
+        BlockState iceRunway;           // != null: runway AND takeoff cell are this slippery block, so the
+                                        // bot must launch from ICE. See iceRestTrial.
+        boolean padTakeoff;             // the takeoff cell ALONE is raised one block, so the route must
+                                        // ASCEND onto a 1-wide pad and launch from ON TOP of it -- the
+                                        // no-lateral-runway shape. See padParkourTrial.
+        boolean jumpSpeedGate;          // STRICT verdict -- PASS requires the measured launch speed to reach
+                                        // ParkourEnvelope.modelJumpTickSpeed. See offCentreTrial.
+        double offCentre;               // REST spawn offset ALONG the jump axis, in blocks past the takeoff
+                                        // cell's centre (0 = centre, which every other card uses).
         boolean slowStep;               // STRICT verdict — PASS requires the bot to actually STAND ON the
                                         // partial-height slow block (honey / soul sand), never merely teeter
                                         // on the full block beside it. See slowStepTrial.
@@ -203,7 +219,7 @@ public final class ParkourCourse {
                                         //   run-up twin — does the walk-off cross CLEANLY when it reaches the lip
                                         //   at/near sprint, vs the standstill spawn that arrives at walk speed?).
         BlockPos goal;                  // (non-final: ownerRepro overrides it to the owner's goto target cell)
-        final double startX, startZ;
+        double startX, startZ;   // non-final: offCentreTrial shifts them along the jump axis
         final float startYaw;
         final double ujx, ujz;          // normalized horizontal jump direction (for along-line projection)
 
@@ -295,6 +311,12 @@ public final class ParkourCourse {
         int passed, failed, plannerGap;   // plannerGap = intended RED reminders, counted apart from real fails
         double minHealth;           // lowest HP seen this trial (magma-overhang damage detection)
         double maxProj = -1e9;      // furthest along-jump-axis projection reached (honey-gap shortfall)
+        // THE LAUNCH MEASUREMENT (2026-08-24). takeoffSpeed above captures EVERY grounded->airborne
+        // transition, so it is overwritten by landing bounces and, on a padTakeoff card, by the route's own
+        // Ascend hop onto the pad. These two capture the PARKOUR launch specifically -- the first departure
+        // from inside the takeoff cell -- and are never overwritten afterwards.
+        double launchSpeed = -1;         // position-delta horizontal speed on the tick it left the takeoff cell
+        double launchProj = Double.NaN;  // along-axis projection it launched FROM (0.00 = the cell centre)
 
         Course() {
             buildTrialList();
@@ -441,6 +463,37 @@ public final class ParkourCourse {
                     "slabrise1.walkin", "slabrise1.rest",
                     "soulflat2.walkin", "soulflat2.rest");
 
+            // ==== ICE-FROM-REST PINS (2026-08-24) ============================================================
+            // Motionless on ice, jumps the planner admits. Expected RED at the top of each row -- see
+            // iceRestTrial() for why the follower provably cannot close the gap and why this is a planner pin.
+            iceRestTrial("icerest.g1f0", ICE_BLK, 2, 0, 0);        // well inside the envelope: should PASS
+            iceRestTrial("icerest.g2f0", ICE_BLK, 3, 0, 0);
+            iceRestTrial("icerest.g3f0", ICE_BLK, 4, 0, 0);        // max FLAT reach: expected RED
+            iceRestTrial("icerest.g4f2", ICE_BLK, 5, -2, 0);       // the flagship row on ice: expected RED
+            iceRestTrial("icerest.blue.g3f0", BLUE_ICE_BLK, 4, 0, 0);
+
+            // ==== LAUNCH-SPEED PINS (2026-08-24, the flagship death at (432,-7,506)) =========================
+            // The whole Parkour family was GREEN while the bot was dying in-game on a jump the envelope
+            // admits, because every card approaches its takeoff over flat ground with a clean lateral
+            // run-up and scores pass/fail on whether the bot LANDED. These cards attack both halves of that
+            // blind spot: they start the bot where the run-up is short, and they gate on the LAUNCH SPEED
+            // rather than the landing.
+            //
+            // offcentre.g4f2.* is the flagship jump (gap 4, fall 2) from progressively further past centre.
+            // 0.208 is the exact flagship pose; the rest bracket it. EXPECT RED until the run-up re-centre
+            // is fixed -- these are pins, not regressions.
+            offCentreTrial("offcentre.g4f2.centre", 0.00, 5, -2, 0);   // control: must hit the model exactly
+            offCentreTrial("offcentre.g4f2.p21",    0.208, 5, -2, 0);  // the literal flagship pose
+            offCentreTrial("offcentre.g4f2.p30",    0.30, 5, -2, 0);
+            offCentreTrial("offcentre.g4f2.p34",    0.34, 5, -2, 0);   // a hair inside TAKEOFF_EDGE (0.35)
+            // A SHORT jump from the same bad pose: the launch is equally slow, but the gap is well inside
+            // the envelope, so it should still land. Separates "the servo under-launches" (fails here too)
+            // from "the servo under-launches only at max reach" (passes here, fails on g4f2).
+            offCentreTrial("offcentre.g2f0.p30",    0.30, 3, 0, 0);
+            // The in-game shape: ascend onto a 1-wide pad, launch from on top of it, no lateral runway.
+            padParkourTrial("padparkour.g4f2", 5, -1, 0);
+            padParkourTrial("padparkour.g2f0", 3, 1, 0);
+
             // ==== OWNER'S EXACT IN-GAME REPRODUCTION (NeoForge 1.21.11, 100% consistent void-fall) ============
             // The permanent gate for the honey-flyover-without-runup void-fall. See ownerRepro() for the geometry.
             ownerRepro();
@@ -497,6 +550,12 @@ public final class ParkourCourse {
             // jdx=5 puts the REACH landing platform (and goal) PAST a 4-cell floorless gap; buildClimb
             // hangs the feet-level vine row across it. The no-capability config makes the lateral cling
             // the only realizable crossing — the run-autotest-climb scenario, miniaturized + per-tick.
+            // Diagonal off a vine TOP-OUT — the (662,70,616) long-flagship wedge, miniaturised. The
+            // approach runs along +z (rdx=0, rdz=1) so the -x support column is lateral to the runway.
+            climbDiagCard("diagvine.top", Approach.WALKIN, ClimbKind.DIAG_TOP, 1, 3, 1,
+                    Template.OFFSET, BASE_X - STRIDE, BASE_Z + 7 * STRIDE);
+            climbDiagCard("diagvine.top.rest", Approach.REST, ClimbKind.DIAG_TOP, 1, 3, 1,
+                    Template.OFFSET, BASE_X - STRIDE, BASE_Z + 8 * STRIDE);
             climbCard("latvine", Approach.WALKIN, ClimbKind.LATERAL, 5, 0,
                     BASE_X - STRIDE, BASE_Z + 6 * STRIDE);
         }
@@ -534,6 +593,140 @@ public final class ParkourCourse {
         void ownerRepro() {
             slowStepTrial("slowstep.honey", HONEY);
             slowStepTrial("slowstep.soul", SOUL);
+        }
+
+        /**
+         * ONE OFF-CENTRE LAUNCH TRIAL — the 2026-08-24 flagship-death pin.
+         *
+         * <p>Spawns AT REST inside the takeoff cell but {@code offset} blocks PAST its centre along the jump
+         * axis, then asks for a jump the envelope admits. Everything else is a plain REACH card.
+         *
+         * <p><b>Why the offset alone decides it.</b> {@code ParkourEnvelope}'s reach table is derived from
+         * {@code vRunup} — the ground speed after accelerating from REST across {@code RUNUP_BLOCKS = 0.5}
+         * — and the takeoff trigger is POSITIONAL at {@code TAKEOFF_EDGE = 0.35} past centre. From the
+         * centre that budget buys THREE run-up ticks and the launch speed comes out at {@code 0.4557},
+         * exactly {@link ParkourEnvelope#modelJumpTickSpeed}. Start 0.208 past centre and only ONE tick fits
+         * before the trigger fires, so the launch is {@code 0.4069} — 89%. On a max-reach gap the missing
+         * 11% is the difference between clearing the far lip and clipping its near face 0.07 blocks low,
+         * which is precisely how the bot died at (432,-7,506) on the 2026-08-24 long flagship.
+         *
+         * <p>{@code Parkour}'s run-up phase already owns a re-centre for exactly this case — it should walk
+         * the bot back to centre and only then launch — so a PASS here means that re-centre armed and a
+         * FAIL means it did not. The verdict deliberately does NOT accept a lucky landing: it gates on the
+         * measured launch speed (see the {@code jumpSpeedGate} branch), because an 11% shortfall is
+         * invisible to a pass/fail-on-landing test until the geometry happens to cross the cliff into a
+         * miss. That is why the whole green ParkourCourse family missed this.
+         */
+        void offCentreTrial(String name, double offset, int jdx, int jdy, int jdz) {
+            int[] b = nextBase();
+            Trial t = new Trial(name, Approach.REST, 1, 0, jdx, jdy, jdz, Template.REACH, false, b[0], b[1]);
+            t.offCentre = offset;
+            t.jumpSpeedGate = true;
+            t.startX += offset * t.ujx;
+            t.startZ += offset * t.ujz;
+            trials.add(t);
+        }
+
+        /**
+         * ONE PAD-TAKEOFF TRIAL — the in-game shape the flagship actually died on.
+         *
+         * <p>Flat approach, then the takeoff cell alone raised one block ({@link #buildTile}'s
+         * {@code padTakeoff} branch), so the route must ASCEND onto a 1-wide pad and the bot arrives
+         * standing ON TOP of it with no lateral runway at all. In the flagship the pad was cobblestone the
+         * bot PLACED on a ledge lip; a pre-built pad reproduces the same arrival without depending on the
+         * planner choosing to place, which keeps the fixture deterministic.
+         *
+         * <p>NOTE the frame: {@code jdy} is measured from {@code Y0}, but the pad sits at {@code Y0 + 1}, so
+         * the drop RELATIVE TO THE TAKEOFF is {@code jdy - 1}. The flagship jump was gap-4 fall-2, which is
+         * {@code jdx = 5, jdy = -1} here.
+         */
+        void padParkourTrial(String name, int jdx, int jdy, int jdz) {
+            int[] b = nextBase();
+            Trial t = new Trial(name, Approach.WALKIN, 1, 0, jdx, jdy, jdz, Template.REACH, false, b[0], b[1]);
+            t.padTakeoff = true;
+            t.jumpSpeedGate = true;
+            trials.add(t);
+        }
+
+        /**
+         * ONE ICE-FROM-REST TRIAL — can the follower launch a planner-emitted jump off ice at all?
+         *
+         * <p>Spawns MOTIONLESS at the centre of an ICE takeoff cell, on an ice runway, and asks for a jump
+         * the planner admits. This is the one shape nothing else covers: the existing IceParkourCourse cards
+         * either LAND on ice (their takeoff speed is 0.4775, bit-identical to the stone control, which is how
+         * we know their takeoff is stone) or take off from ice CARRYING momentum from a previous hop
+         * (ice.chain.g3 launches at 0.3934). Taking off from ice at REST is untested, and it is reachable in
+         * play: {@code Fall} re-centres on its target and zeroes horizontal momentum, so any Fall-then-Parkour
+         * on ice lands here, as does a seam pause, an Ascend onto ice, or a plan that simply starts there.
+         *
+         * <p><b>These are expected RED at the top of each row, and the planner is the reason.</b>
+         * {@code ParkourEnvelope.MAX_GAP} is indexed {@code [startTopY][gsfBucket][occBucket]} with NO
+         * friction dimension, {@code A_G} is baked at stone friction 0.6, and {@code SURFACE_SLIPPERY} was
+         * deleted from NavBlock on 2026-08-10 as dead. So the planner offers stone-length jumps on ice.
+         *
+         * <p>The follower CANNOT make up the difference, and that is arithmetic rather than a servo bug.
+         * Vanilla scales input accel by {@code 0.216/f^3} and drag by {@code f*0.91}, so ice accelerates
+         * 4.36x slower than stone (0.02924 vs 0.12740 per tick) while topping out at almost the same speed
+         * (0.2702 vs 0.2806). From rest, the run-up available inside ONE cell is at most ~0.99 blocks --
+         * back edge at local 0.3 (body-limited, half-width 0.3) to the last supported tick near local 1.29 --
+         * which reaches 84% of the stone launch speed. Even granting the best case BOTH levers (start at the
+         * back edge AND delay takeoff to the lip, worth +0.231 blocks of launch position), total reach lands
+         * 0.19-0.44 blocks SHORT of the stone model across every flight time, and the deficit grows with
+         * time aloft. Matching stone needs 4.66 blocks / 25 ticks of run-up -- several cells, not one.
+         *
+         * <p>So a red card here is a PLANNER pin, not a follower one: the fix is a friction dimension on the
+         * envelope (surface values 2-3 are still free, so restoring SURFACE_SLIPPERY costs no bits), not a
+         * cleverer servo. Sub-maximal rows have margin and should pass; the split between them is the actual
+         * measurement this card exists to take.
+         */
+        void iceRestTrial(String name, BlockState ice, int jdx, int jdy, int jdz) {
+            int[] b = nextBase();
+            Trial t = new Trial(name, Approach.REST, 1, 0, jdx, jdy, jdz, Template.REACH, false, b[0], b[1]);
+            t.iceRunway = ice;
+            t.jumpSpeedGate = true;
+            trials.add(t);
+        }
+
+        /**
+         * ONE CENTRE-POST TURN TRIAL — does a movement ENTER a cell whose blocking occupant it planned to
+         * break but never broke?
+         *
+         * <p>An L-shaped route: the runway approaches along +Z, then the plan turns 90 degrees and Traverses
+         * +X out of the corner cell, which holds a 2-high BAMBOO stalk. Bamboo classifies as a FULL blocking
+         * cube ({@code SHAPE_OTHER}, solid, {@code COLLISION_BIT}, and {@code topY = 16} because its
+         * collision {@code box(6.5,0,6.5,9.5,16,9.5)} reaches the top of the cell), so the planner correctly
+         * prices breaking it: on the 2026-08-25 long flagship the emitted step was
+         * {@code Traverse d(0,0,1) ->(358,64,499) [brk=2 plc=0]} with
+         * {@code planned edits: BREAK(358,65,499) BREAK(358,66,499)} — both body cells.
+         *
+         * <p><b>The bug is that the breaks never executed and the Traverse advanced anyway.</b> Zero
+         * {@code break executed} lines at either coordinate, the stalk still standing in the saved world,
+         * and 16 successful breaks elsewhere in the same run — so breaking works, these two just did not
+         * happen. The phase declares {@code need(AIR)} on exactly those two cells (floor-frame
+         * {@code fy+1}/{@code fy+2} over floor {@code (358,64,499)}), which should have held it.
+         *
+         * <p>What the flagship then SHOWED is only the downstream symptom: standing inside the stalk, the
+         * bot's carry gate armed and {@code SteerControl.stepOffGate} held at {@code footX()+0.5,
+         * footZ()+0.5} — the cell centre, which is precisely where bamboo's collision post sits
+         * ({@code 0.406..0.594} in X and Z). It drove {@code fwd=1.00} into the stalk with
+         * {@code hcol=true} for the remaining ~47k ticks and never emitted a {@code step FAILED}, because a
+         * hold is not a failure. Do NOT read that as a {@code stepOffGate} defect — the gate was handed a
+         * bot standing somewhere no plan ever said it should be.
+         *
+         * <p>The turn is load-bearing: {@code stepOffGate} only runs behind {@code carryGateArmed}, which
+         * needs CROSS-AXIS carry, and a 90-degree entry is the only way a Traverse gets it (hence
+         * {@code arrestCarryFrom} on {@code k == 1}). A bot merely spawned on the corner cell starts at rest
+         * and reproduces nothing — which is why a {@code -Start} coordinate could not stand in for this tile.
+         *
+         * <p>Deterministic on purpose: bamboo GROWS on random ticks, so the flagship reaches this geometry
+         * by luck and with a different stalk height every run.
+         */
+        void centrePostTrial(String name, BlockState post) {
+            int[] b = nextBase();
+            // rdx=0, rdz=1: approach along +Z. jdx=1: leave along +X. The 90-degree turn is the point.
+            Trial t = new Trial(name, Approach.WALKIN, 0, 1, 1, 0, 0, Template.REACH, false, b[0], b[1]);
+            t.centrePost = post;
+            trials.add(t);
         }
 
         /** One SLOW-STEP trial: walk from a full stone takeoff onto the adjacent PARTIAL-HEIGHT slow block
@@ -829,6 +1022,16 @@ public final class ParkourCourse {
             trials.add(tr);
         }
 
+        /** A {@link ClimbKind} card with a DIAGONAL jump vector and an explicit template — {@link
+         *  #climbCard} hardcodes {@code jdz = 0} and {@code Template.REACH}, neither of which works for
+         *  {@link ClimbKind#DIAG_TOP} (see the case in {@code buildClimb} for why REACH voids the test). */
+        void climbDiagCard(String name, Approach a, ClimbKind kind, int jdx, int jdy, int jdz,
+                Template template, int baseX, int baseZ) {
+            Trial tr = new Trial(name, a, 0, 1, jdx, jdy, jdz, template, false, baseX, baseZ);
+            tr.climb = kind;
+            trials.add(tr);
+        }
+
         void start(MinecraftServer server) {
             this.server = server;
             if (Boolean.getBoolean("orebit.parkour.debug")) {
@@ -890,6 +1093,8 @@ public final class ParkourCourse {
             stoodOnSlow = false;
             stairAirborne = false;
             takeoffSpeed = -1;
+            launchSpeed = -1;
+            launchProj = Double.NaN;
             wasGrounded = true;
             minHealth = bot.getMaxHealth();
             maxProj = -1e9;
@@ -1020,6 +1225,58 @@ public final class ParkourCourse {
             // onto the far landing platform AND reaches the far goal — a honey-edge teeter inside the 2.5-block
             // arrival radius (the old false PASS) no longer counts, because the goal is HONEY_GOAL_PAST cells
             // beyond the landing and reachedLanding requires the Y-drop + past-the-gap proj.
+            // LAUNCH-SPEED GATE (2026-08-24). PASS requires BOTH that the bot reached the landing AND that
+            // it launched at the speed ParkourEnvelope's reach table is derived from. The second half is the
+            // point: an 11% launch shortfall clears every gap except the max-reach ones, so a landing-only
+            // verdict reports GREEN right up until the geometry crosses into a miss -- which is exactly how
+            // the whole Parkour family stayed green while the bot died in-game at (432,-7,506).
+            //
+            // The floor is 97% of the model rather than 100% because the launch is measured by POSITION
+            // DELTA over one tick (the only frame-safe way to read it -- the exec log's vel field is
+            // post-friction deltaMovement, which is what produced a wrong diagnosis the first time round),
+            // and a dead stop at centre reproduces the model to four decimals, so the true margin is far
+            // tighter than 3%.
+            if (tr.jumpSpeedGate) {
+                double model = ParkourEnvelope.modelJumpTickSpeed(1.0);
+                if (!bot.isAlive() || fell) {
+                    record(tr, "FAIL", String.format(Locale.ROOT,
+                            "fell — launched %.4f from proj %.3f (model %.4f, %.0f%%)",
+                            launchSpeed, launchProj, model, 100.0 * launchSpeed / model));
+                    return;
+                }
+                if (bot.navigator().navGaveUp()) {
+                    if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
+                        navRetries++;
+                        bot.comeTo(tr.goal);
+                        return;
+                    }
+                    record(tr, "FAIL", "nav gave up (no route offered)");
+                    return;
+                }
+                if (atGoal) {
+                    if (launchSpeed < 0) {
+                        record(tr, "FAIL", "reached the goal without ever leaving the takeoff cell airborne");
+                    } else if (launchSpeed < 0.97 * model) {
+                        record(tr, "FAIL", String.format(Locale.ROOT,
+                                "landed, but UNDER-LAUNCHED: %.4f from proj %.3f (model %.4f, %.0f%%)",
+                                launchSpeed, launchProj, model, 100.0 * launchSpeed / model));
+                    } else {
+                        record(tr, "PASS", String.format(Locale.ROOT,
+                                "launched %.4f from proj %.3f (model %.4f, %.0f%%)",
+                                launchSpeed, launchProj, model, 100.0 * launchSpeed / model));
+                    }
+                    return;
+                }
+                if (attemptTicks >= ATTEMPT_BUDGET) {
+                    record(tr, "FAIL", String.format(Locale.ROOT,
+                            "timeout — launched %s from proj %s (model %.4f), maxProj %.2f of %.2f",
+                            launchSpeed < 0 ? "never" : String.format(Locale.ROOT, "%.4f", launchSpeed),
+                            Double.isNaN(launchProj) ? "n/a" : String.format(Locale.ROOT, "%.3f", launchProj),
+                            model, maxProj, tr.landCenterProj()));
+                }
+                return;
+            }
+
             // SLOW-STEP (2026-08-24): PASS demands the bot actually stand ON the partial-height slow block.
             // Deliberately a RED pin at introduction — the follower cannot do this yet (it teeters on the
             // takeoff stone's edge in a 2-tick limit cycle and never descends the 1/16), and the planner's
@@ -1177,6 +1434,11 @@ public final class ParkourCourse {
                             nav.segToX(), nav.segToY(), nav.segToZ()));
                     prevMove = move;
                 }
+                if (wasGrounded && !onGround && launchSpeed < 0
+                        && Math.abs(tr.proj(prevX, prevZ)) <= 0.6) {
+                    launchSpeed = spd;                       // left the ground from INSIDE the takeoff cell
+                    launchProj = tr.proj(prevX, prevZ);      // => this departure IS the parkour launch
+                }
                 if (wasGrounded && !onGround) {
                     takeoffSpeed = spd;
                     trace.write(String.format(Locale.ROOT,
@@ -1256,7 +1518,8 @@ public final class ParkourCourse {
             for (int k = 0; k < RUN; k++) {
                 int cx = tr.baseX + k * tr.rdx;
                 int cz = tr.baseZ + k * tr.rdz;
-                if (tr.slabRunway) placeState(cx, Y0, cz, SLAB);
+                if (tr.iceRunway != null) placeState(cx, Y0, cz, tr.iceRunway);
+                else if (tr.slabRunway) placeState(cx, Y0, cz, SLAB);
                 else if (tr.soulRunway) placeState(cx, Y0, cz, SOUL);
                 // soulTakeoff: 1-wide STONE runway with soul sand ONLY on the last (takeoff) cell. Placed BEFORE
                 // the wideRunway branch so no stone side-cell exists to corner-cut the diagonal from.
@@ -1265,12 +1528,24 @@ public final class ParkourCourse {
                 // cell right before the jump — the planner must chain Descend into the Parkour, grounding
                 // the bot on the takeoff with carried momentum (the hot-entry condition).
                 else if (tr.descendRunway) place(cx, k == RUN - 1 ? Y0 : Y0 + 1, cz);
+                // padTakeoff: the MIRROR of descendRunway -- flat approach, then the takeoff cell ALONE
+                // raised one block, so the route must ASCEND onto it and the bot arrives standing ON TOP of
+                // a 1-wide pad rather than running across it. Deliberately in this 1-wide branch chain
+                // (ahead of wideRunway) so the pad stays 1x1: a 3-wide takeoff would hand the bot lateral
+                // room the in-game shape never has.
+                else if (tr.padTakeoff) place(cx, k == RUN - 1 ? Y0 + 1 : Y0, cz);
                 else if (tr.wideRunway) placeWide(cx, Y0, cz, tr.rdx, tr.rdz);
                 else place(cx, Y0, cz);
             }
             // PHASE 2: a hazard block in the FIRST gap cell (magma/honey overhang, honey-in-gap diagnostic).
             // At node level Y0 (the arc passes over it); the planner overflies it, Fix 3 keeps the bot's center
             // off it during the grounded runup.
+            // A CENTRE POST in the takeoff cell (2026-08-25). Planted AFTER the runway so it sits on
+            // top of the takeoff floor rather than replacing it. Two high = the bot's full body.
+            if (tr.centrePost != null) {
+                placeState(tr.takeoffX, Y0 + 1, tr.takeoffZ, tr.centrePost);
+                placeState(tr.takeoffX, Y0 + 2, tr.takeoffZ, tr.centrePost);
+            }
             if (tr.gapFloor != null) {
                 placeState(tr.gapFloorX, Y0, tr.gapFloorZ, tr.gapFloor);
             }
@@ -1347,6 +1622,36 @@ public final class ParkourCourse {
                     for (int y = Y0 - 4; y <= Y0 - 1; y++) place(tr.takeoffX, y, z);        // the cliff face
                     for (int y = Y0 - 3; y <= Y0; y++) placeState(tr.landX, y, z, VINE_WEST); // the curtain
                     break;
+                case DIAG_TOP: {
+                    // WALK OFF THE TOP OF A VINE **DIAGONALLY** (2026-08-25). Pins the long-flagship wedge
+                    // at (662,70,616): a Climb tops out HANGING on the vine (the "floor" is the climbable,
+                    // toFloorTopY=0), the next step is a lateral Diagonal, and before this arc the bot
+                    // simply let go and fell.
+                    //
+                    // THE FIXTURE'S WHOLE DIFFICULTY is that a vine needs a solid block to attach to, and
+                    // that block is itself a standable orthogonal option — so the naive layout hands the
+                    // planner a two-step L route and the Diagonal is never emitted. The way out is that a
+                    // vine has FOUR possible support faces: pick the one that is neither of the diagonal's
+                    // two corner cells nor the approach lane. With the diagonal running (+x,+z):
+                    //
+                    //   corner A (tx+1, tz)   must stay AIR        \ either one being solid gives an
+                    //   corner B (tx, tz+1)   must stay AIR        / orthogonal step and voids the test
+                    //   support  (tx-1, tz)   VINE_WEST attaches here — opposite the diagonal
+                    //   approach  along +z    so the support column never blocks the walk-in
+                    //
+                    // The support runs to Y0+6, well over the topped-out bot's head, so its own top is not
+                    // a reachable floor either. Both corners are air over VOID, so they are not standable
+                    // and no orthogonal step exists at all — the Diagonal is FORCED, not merely preferred
+                    // by the greedy heuristic. The course's canPlace=false / canMine=false closes the last
+                    // escape (no pillaring up, no digging through the support).
+                    //
+                    // NOTE the card MUST be Template.OFFSET. Template.REACH lays a 3-WIDE landing platform
+                    // perpendicular to the continuation axis, which places a block at corner A and quietly
+                    // hands back the orthogonal route — the fixture would pass while testing nothing.
+                    for (int y = Y0 + 1; y <= Y0 + 6; y++) place(tr.takeoffX - 1, y, tr.takeoffZ);
+                    for (int y = Y0 + 1; y <= Y0 + 3; y++) placeState(tr.takeoffX, y, tr.takeoffZ, VINE_WEST);
+                    break;
+                }
                 case LATERAL:
                     // A feet-level vine row across the floorless gap (takeoffX+1 .. landX-1), backed by
                     // a TWO-high wall face at z+1 (supports placed first). Two-high is load-bearing: a
