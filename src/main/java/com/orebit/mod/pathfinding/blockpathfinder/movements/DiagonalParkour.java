@@ -141,9 +141,6 @@ public final class DiagonalParkour implements Movement {
     /** Ticks for the approach step onto the takeoff corner — one diagonal walk step. */
     public static final float RUNUP_COST = Diagonal.COST;
 
-    /** The player hitbox half-width (blocks) — the overhang the takeoff gate must keep inside the cell
-     *  while the bot is grounded (the point-mass insight: overhang only matters ON the ground). */
-    public static final double BODY_RADIUS = 0.3;
 
     /** Small support margin (blocks) past the body radius folded into {@link #GATE_SETBACK} — slack for the
      *  one grounded tick between the trigger crossing and liftoff. */
@@ -151,11 +148,11 @@ public final class DiagonalParkour implements Movement {
 
     /**
      * How far back INTO the takeoff cell, in blocks ALONG the diagonal line, the takeoff GATE sits from the
-     * cell's exit corner ({@code = BODY_RADIUS + GATE_MARGIN}). The gate is therefore
+     * cell's exit corner ({@code = BotSteering.BODY_RADIUS + GATE_MARGIN}). The gate is therefore
      * {@code 0.5·√2 − GATE_SETBACK ≈ 0.357} along-line past the cell centre — the runup's aim point and the
      * takeoff trigger's crossing (class Javadoc, execution section).
      */
-    public static final double GATE_SETBACK = BODY_RADIUS + GATE_MARGIN;
+    public static final double GATE_SETBACK = BotSteering.BODY_RADIUS + GATE_MARGIN;
 
     private static final int[][] DIAGONALS = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
 
@@ -457,11 +454,12 @@ public final class DiagonalParkour implements Movement {
                 && !(b.footX() == tx && b.footY() == toFootY && b.footZ() == tz));
         // Fix 3: hazardous diagonal gap-floor → predictive early takeoff (raw √2 units), else the
         // corner-gate trigger: jump EARLY, on the along-line crossing of the gate — the centre is
-        // still ≥ BODY_RADIUS inside the takeoff cell, so support is guaranteed and the foot cell
+        // still ≥ BotSteering.BODY_RADIUS inside the takeoff cell, so support is guaranteed and the foot cell
         // cannot have spilled. ONE predicate shared by the runup's advance AND its hot-entry press,
         // so the two can never disagree (Parkour's shared-trigger shape).
-        final Predicate<BotSteering> takeoffTrigger = b -> {
-            if (!b.grounded()) return false;
+        // RAW takeoff geometry, positional only: it deliberately knows nothing about grounding or the
+        // re-centre, so the gate and the drive can both consult it without re-arming anything.
+        final Predicate<BotSteering> rawTakeoffTrigger = b -> {
             if (b.gapFloorHazardAt(gapX, fy, gapZ)) {
                 double projRaw = ux * (b.x() - startX) + uz * (b.z() - startZ);
                 double vRaw = ux * b.velX() + uz * b.velZ();
@@ -469,13 +467,54 @@ public final class DiagonalParkour implements Movement {
             }
             return SteerControl.pastGate(b, startX, startZ, landX, landZ, gateX, gateZ);
         };
+        // PRE-RUN-UP RE-CENTRE (owner ruling 2026-08-24), mirroring Parkour. This class had NO re-centre at
+        // all, and it is hurt WORSE than Parkour by a rotating entry, because its gate deliberately fires
+        // EARLY (pastGate, the corner gate) and so leaves even less runway to build along-axis speed.
+        //
+        // Convicted on the 2026-08-24 flagship at (1584,64,1711): a Diagonal handed the bot off travelling
+        // -X+Z into a jump whose axis is +X+Z -- a ~90 degree turn. The along-axis speed at takeoff was
+        // 0.092 against the ~0.24 ParkourEnvelope.vRunup assumes, and the launch still carried a NEGATIVE
+        // x component, i.e. the bot left the lip moving almost square across its own jump heading. Its
+        // steerViaGate does bleed off-line momentum, but three ticks of early gate cannot spend a turn.
+        //
+        // So a run-up that HAS runway now starts from rest on the cell centre -- the state vRunup
+        // integrates from. Armed on ENTRY POSITION, not entry speed: a bot that enters already past the
+        // gate is committed (dragging it backwards off a corner gate is worse than a weak launch), which
+        // also leaves the hazardous-gap-floor predictive takeoff untouched.
+        // No stair arm here: a low-half-stair takeoff is a cardinal-Parkour case, and this class's gate
+        // geometry (GATE_SETBACK on the diagonal) has no stair flavour to mirror.
+        final boolean[] recentring = new boolean[1];
+        final boolean[] recentreDone = new boolean[1];
+        // Declared HERE (not beside the runup phase) because the GATE below reads it: the arm is an
+        // ENTRY test, and hadNormalRunupTick is what makes "entry" meaningful.
+        boolean[] hadNormalRunupTick = {false};
+        final Predicate<BotSteering> takeoffTrigger = b -> {
+            if (!b.grounded()) return false;
+            // ...and only when there is CARRY to spend. atRest() at entry means the bot is already in the
+            // exact state vRunup integrates from (zero velocity), so a re-centre would buy nothing but lost
+            // ticks and lost along-line progress; a purely POSITIONAL offset is what the run-up's own
+            // steering (steerTowards / steerViaGate's gate-point pursuit) already corrects while it
+            // accelerates. Every convicted failure had real carry -- entry speeds 0.130, 0.116, 0.117 --
+            // against REST_HSPEED 0.02.
+            // ...and only on a surface that can REBUILD the carry this spends. Above vanilla's default
+            // friction (Parkour.NORMAL_FRICTION) a floor retains momentum rather than building it, so
+            // re-centring there destroys a run-up it cannot earn back -- measured on the cardinal twin as
+            // a 0.3958 -> 0.0103 takeoff-speed collapse on blue ice. No partial-surface arm is needed here:
+            // this class has no low-half-stair flavour to mis-aim.
+            if (!recentreDone[0] && !recentring[0] && !hadNormalRunupTick[0] && !b.atRest()
+                    && !rawTakeoffTrigger.test(b)
+                    && b.slipperinessAt(fx, fy, fz) <= Parkour.NORMAL_FRICTION) {
+                recentring[0] = true;          // entered with runway to spare - use it properly
+            }
+            if (recentring[0]) return false;   // re-centring - no takeoff until the run-up has room
+            return rawTakeoffTrigger.test(b);
+        };
         // HOT-ENTRY latch (owner ruling 2026-07-31, mirrors Parkour): a chained hand-off can ground the
         // bot already past the gate on its FIRST grounded runup tick; the drive-then-advance ordering
         // then presses jump only next tick and the coast exits the envelope. On exactly that hot entry
         // the runup presses jump SAME-TICK — including the takeoff drive's first-grounded-tick work
         // (the sprint-injection predict, specified to run on the grounded jump tick so the arc
         // predictor sees the real accel). Entries with a normal runup tick stay byte-identical.
-        boolean[] hadNormalRunupTick = {false};
         plan.phase("runup")
                 .drive((b, v) -> {
                     airborneOnce[0] = false; // re-attempt begins → disarm until the next arc is live
@@ -486,19 +525,32 @@ public final class DiagonalParkour implements Movement {
                     // never corrected cross-axis POSITION), and the same servo actuation still bleeds
                     // off-line momentum toward a clean 45° launch. On-axis it is identical to the old
                     // parkourRunupAlign (desired velocity = the diagonal at cruise).
+                    // The gate armed a re-centre: spend the approach carry and settle on the cell centre,
+                    // then run up cleanly along the diagonal. Ends CENTRED **and** AT REST -- centred alone
+                    // is a position test, so a bot sweeping through COLUMN_DEADBAND with its turn momentum
+                    // still on would satisfy it and start the run-up carrying the very cross-axis carry
+                    // this exists to spend. atRest() is the same predicate Pillar's SETTLE and Parkour's
+                    // re-centre use (grounded AND horizontal speed < REST_HSPEED, from vanilla ground drag).
+                    if (recentring[0]) {
+                        b.setSprinting(false);   // you cannot sprint backwards; the run-up re-sprints below
+                        if (SteerControl.recenterOn(b, startX, startZ) && b.atRest()) {
+                            recentring[0] = false;
+                            recentreDone[0] = true;
+                        }
+                        return;
+                    }
                     SteerControl.steerViaGate(b, startX, startZ, landX, landZ, gateX, gateZ);
                     b.setSprinting(sprint);
-                    if (takeoffTrigger.test(b)) {
-                        if (!hadNormalRunupTick[0]) {
-                            // Hot entry — launch this tick, with the takeoff drive's grounded-tick work.
-                            sprintInject[1] = true;
-                            sprintInject[0] = !sprint
-                                    && SteerControl.parkourLaunchShort(b, uxn, uzn, tx, ty, tz);
-                            b.setSprinting(sprint || sprintInject[0]);
-                            b.setJumping(true);
-                        }
-                    } else if (b.grounded()) {
-                        hadNormalRunupTick[0] = true; // a normal runup tick — legacy timing from here on
+                    // A NORMAL runup tick: grounded and still short of the gate. Reads the RAW geometry so
+                    // consulting it here cannot re-arm the re-centre.
+                    //
+                    // NO hot-entry jump press any more (it mirrored Parkour's, removed 2026-08-23): with
+                    // the phase runner advancing before it drives, a legal trigger hands off to the takeoff
+                    // phase on this SAME tick, and that phase already performs the grounded-tick sprint
+                    // injection predict when sprintInject[1] is still false -- which this drive clears
+                    // every tick. One owner instead of two.
+                    if (b.grounded() && !rawTakeoffTrigger.test(b)) {
+                        hadNormalRunupTick[0] = true; // a normal runup tick - legacy timing from here on
                     }
                 })
                 .advanceWhen(takeoffTrigger);

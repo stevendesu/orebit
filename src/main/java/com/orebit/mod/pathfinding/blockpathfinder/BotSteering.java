@@ -119,6 +119,24 @@ public interface BotSteering {
     double REST_HSPEED = 0.02;
 
     /**
+     * The player hitbox HALF-WIDTH in blocks (vanilla 0.6 wide). Hoisted here 2026-08-24 from
+     * {@code DiagonalParkour}, where it was declared but only that one movement consulted it: it is a
+     * property of the BOT, not of diagonal parkour, and any controller reasoning about whether the bot is
+     * "in" a cell needs it.
+     *
+     * <p><b>Why it matters to a controller, not just to geometry.</b> A cell is 1.0 wide and the body is
+     * 0.6, so a position within 0.3 of a cell boundary leaves part of the body in the NEIGHBOURING cell.
+     * An aim point chosen in cell-centre units alone can therefore name a pose the bot cannot actually
+     * occupy as an arrival — which is precisely the 2026-08-24 slowstep conviction: the corner brake
+     * anchored 0.45 back from the target centre, i.e. 0.05 inside the near face, leaving a quarter of the
+     * body still in the SOURCE cell. On a same-height step that is invisible (the foot cell flips on the
+     * centre crossing, so the step completes anyway); onto a partial-height block, where arrival demands
+     * the body physically clear the source block, it is fatal. Bound aim points by
+     * {@code 0.5 - BODY_RADIUS}, never by 0.5.
+     */
+    double BODY_RADIUS = 0.3;
+
+    /**
      * Whether the bot is <b>at rest</b> — a valid anchor for a search launch / plan install framed on its
      * LIVE floor cell (DESIGN-replan-handoff.md §10, owner-ratified 2026-08-18). {@link #settled} and the
      * follower's plan-anchor rule answer "is the bot in a controlled medium"; this answers the STRICTER

@@ -497,6 +497,27 @@ final class BotNavigator {
             SteerControl.restHold(bot, wp.getX() + 0.5, wp.getZ() + 0.5);
         } else {
             bot.setForward(0.0f); // climbable/fluid/ballistic: outside restHold's ratified scope
+            // PRONE MUST SURVIVE THE PAUSE (owner ruling 2026-08-24; the flagship swim livelock at
+            // (1766,18,1950)). vanilla's Entity.updateSwimming is ASYMMETRIC: ENTERING the swimming pose
+            // needs isSprinting() && isUnderWater() (eyes submerged) && the feet blockstate is water, but
+            // STAYING needs only isSprinting() && isInWater() -- merely touching water, stationary, with
+            // no jump or sneak. AllyBotEntity zeroes sprint at tick-top and each move re-asserts it, so a
+            // pause that presses nothing RELEASES the one input holding the pose.
+            //
+            // That is self-defeating here: the parked plan this pause exists to adopt was seeded at
+            // mode=PRONE (its search ROOT logs mode=1), so the pause invalidates the very assumption it
+            // is waiting on. Usually harmless -- the next move's first steered tick re-enters prone --
+            // but an un-proned bot in water has no sprint-swim propulsion and SINKS, and if it settles
+            // where its eyes break the surface (fl0.667 at the convicted site) the ENTER condition can
+            // never be met again. SprintSwim.reached() requires prone(), so the step can never complete
+            // and, correctly under the no-timers rule, nothing breaks the hold.
+            //
+            // Re-asserting sprint costs nothing when the bot is not prone (the flag alone moves nothing;
+            // forward is zeroed above and clingHold owns the vertical) and is exactly the STAY condition
+            // when it is. Gated on prone() so this can never CREATE a pose the plan did not have.
+            if (bot.prone() && bot.isInWater()) {
+                bot.setSprinting(true);
+            }
             SteerControl.clingHold(bot);
         }
         if (Debug.VERBOSE) {
