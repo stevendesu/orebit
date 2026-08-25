@@ -361,7 +361,7 @@ public final class IceParkourCourse {
                 int target = index == 0 ? WARMUP_TICKS : SETTLE_TICKS;
                 if (++settleTicks < target) return;
                 settling = false;
-                bot.comeTo(tr.goal);
+                bot.comeTo(tr.goal, 0.75, 0.75, 0); // EXACT arrival — see ARRIVAL TOLERANCE note
                 return;
             }
 
@@ -412,7 +412,7 @@ public final class IceParkourCourse {
             if (bot.navigator().navGaveUp()) {
                 if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
                     navRetries++;
-                    bot.comeTo(tr.goal);
+                    bot.comeTo(tr.goal, 0.75, 0.75, 0); // EXACT arrival — see ARRIVAL TOLERANCE note
                     return;
                 }
                 record(tr, "FAIL", "nav gave up (no route offered)");
