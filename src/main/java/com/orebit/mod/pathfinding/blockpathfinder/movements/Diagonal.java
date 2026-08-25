@@ -141,7 +141,17 @@ public final class Diagonal implements Movement {
             if (!(b.grounded() || b.inWater() || b.inLava())) {
                 return false;                                       // mid-step airborne is not a verdict
             }
-            if (b.footY() < bandLo || b.footY() > bandHi) {
+            // LOWER BOUND IS CONTINUOUS, NOT CELL-QUANTISED (2026-08-25) — the same correction Traverse
+            // took on 2026-08-21, for the same stance and the same reason. A Diagonal entered off a
+            // CLIMBABLE TOP-OUT hovers on the vine's top rather than standing on it, and dips sub-cell
+            // between jump presses; footY() is a cell index, so a ~0.1 dip reads as a whole cell of error
+            // against a band that for a flat diagonal (fromFootY == toFootY) has ZERO room below. Allow
+            // exactly what the physics recovers on its own and not a block more.
+            //
+            // The upper bound stays a CELL test: being lifted off the line is a different failure with no
+            // self-recovering transient behind it (and off a climbable it is the involuntary-climb ratchet,
+            // which holdUntilOverTargetColumn already owns).
+            if (b.y() < bandLo - Traverse.STEP_ASSIST_RECOVERY || b.footY() > bandHi) {
                 return true;                                        // fell off / was lifted off the step
             }
             final int bx = b.footX();
@@ -163,6 +173,22 @@ public final class Diagonal implements Movement {
                 .drive((b, v) -> {
                     SteerControl.holdUntilOverTargetColumn(b, v);
                     SteerControl.drive(b, v);
+                    // WALK OFF THE TOP OF A CLIMBABLE (2026-08-25). Traverse has priced and executed this
+                    // stance since 2026-08-21 (CLIMBABLE_TOP_COST + atopClimbable + needFootingOrClimbable
+                    // + this same dip recovery); Diagonal had the pricing available to the planner but none
+                    // of the execution, so a route that climbed a vine and then stepped off it DIAGONALLY
+                    // simply let go. Convicted on the 2026-08-25 long flagship at (662,70,616): a Climb
+                    // arrived hanging (grounded=false climbable=true, toFloorTopY=0 — the "floor" IS the
+                    // vine), the next step planned Diagonal from-floor=(663,70,616) with
+                    // fromFootStandable=false takeoffTopY=0, and the bot dropped 71.001 -> 70.011 until its
+                    // validity envelope fired and held for the remaining 42k ticks.
+                    //
+                    // Ordering matches Traverse exactly: drive owns forward/yaw, this owns JUMP. It is
+                    // inert off a climbable (onClimbable() is a FEET-block test, false while hovering ON
+                    // TOP) and self-arms only once the body has dipped INTO the vine, then presses jump to
+                    // bob back up — and its own b.y() >= ty() guard stops it ratcheting above the step, so
+                    // it cannot re-create the involuntary-climb bug holdUntilOverTargetColumn exists for.
+                    SteerControl.climbableDipRecover(b, v);
                 })
                 // SETTLED, not grounded — the same widening Descend needed (2026-08-03). A diagonal whose
                 // destination cell holds a vine is never grounded there, so a grounded-only guard is
