@@ -565,6 +565,32 @@ public final class PathPlan {
             // stay visible, HPA-IMPLEMENTATION.md §10).
             this.blockPlan = null;
             this.status = PathStatus.FAILED;
+            // A NO-ROUTE SKELETON *IS* THE DEGENERATE BOXED-IN CASE (owner ruling 2026-08-25), so prove it
+            // rather than discard it. Region adjacency is fragment-to-fragment: a sealed pocket is a fragment
+            // with NO EDGES, so the region A* legitimately returns nothing, and the goal-rooted flood over
+            // that same fragment closes after ZERO hops. This is not a case the prover struggles with -- it
+            // is the one it is most certain about, reached by the cheapest possible path.
+            //
+            // It used to be reached the long way round. Before ce31f5a (2026-08-14) the region search could
+            // detour through UNBUILT space, which is optimistically connected to everything including a
+            // sealed fragment in a built neighbour, so a sealed goal still produced a bogus non-empty
+            // skeleton -- and that false skeleton was the only thing keeping control flowing past this
+            // `return` and into the honest prover below. ce31f5a correctly stopped the speculation and, in
+            // doing so, removed the prover's accidental precondition: from 2026-08-14 to 2026-08-25 every
+            // sealed goal gave up REACTIVELY (boxedInProven=false), which is exactly what BoxedInCourse's
+            // `tomb` scenario had been reporting, unread, for eleven days. Both commits are individually
+            // right; the interaction was the defect. Bisected d78f1fd(PASS) -> 5421cdb(FAIL), one commit.
+            //
+            // Ignoring the return value is deliberate: this plan has already FAILED either way. What the
+            // call adds is the REASON -- boxedInProven turns an unexplained give-up into "walled off", and
+            // separates it from this branch's other meaning, "no built ground at the start region".
+            maybeProactiveBoxedIn();
+            if (Debug.VERBOSE) {
+                OrebitCommon.LOGGER.info("[Orebit] plan: NO SKELETON (skeleton={}) start={} goal={}"
+                        + " goalRegionBuilt={} boxedInProven={}",
+                        skeleton == null ? "null" : "empty", startFloor, goalFloor,
+                        regionGrid.fragmentRecord(0, goalRX, goalRY, goalRZ) != null, this.boxedInProven);
+            }
             return;
         }
         // #4 PROACTIVE boxed-in check (DESIGN-boxed-in-reachability §4 — the proactive rework of Increment 1's
@@ -2616,14 +2642,34 @@ public final class PathPlan {
      * leaves every subsequent block search byte-identical (INV BR-3).
      */
     private boolean maybeProactiveBoxedIn() {
-        if (goalFloor == null) return false;
+        // WHY THE DECLINE PATHS LOG (2026-08-25). Until now ONLY the proof branch was audible, and the
+        // comment on it says exactly why that was wrong -- "the drifted-world vine-jungle false positive was
+        // invisible precisely because this branch FAILed silently". The same reasoning applies to the other
+        // side, and it bit: BoxedInCourse's `tomb` scenario reports
+        // "gave up but boxedInProven=false (not a proactive seal proof)" with NOTHING in the run log, so
+        // there is no way to tell whether the scan bailed at a gate, ran all seven levels and declined, or
+        // threw seven times into the swallowing catch below. Three very different bugs, one silence.
+        // Verbose-gated because a decline is the overwhelmingly common outcome on every ordinary journey;
+        // the swallowed Throwable is NOT gated, because a hidden exception is never routine.
+        if (goalFloor == null) {
+            if (Debug.VERBOSE) OrebitCommon.LOGGER.info("[Orebit] boxed-in scan: skipped (no goal floor)");
+            return false;
+        }
         regionGrid.ensureLeaf(goalRX, goalRY, goalRZ);
         if (regionGrid.fragmentRecord(0, goalRX, goalRY, goalRZ) == null) {
+            if (Debug.VERBOSE) {
+                OrebitCommon.LOGGER.info("[Orebit] boxed-in scan: skipped (goal region {},{},{} UNBUILT at L0"
+                        + " -- optimistic; a later build re-forces the check)", goalRX, goalRY, goalRZ);
+            }
             proactiveSignalValid = false; // goal unbuilt ⇒ optimistic; a later build re-forces the first check
             return false;
         }
         final long sig = goalNeighbourhoodBuildSignal();
         if (proactiveSignalValid && sig == lastProactiveSignal) {
+            if (Debug.VERBOSE) {
+                OrebitCommon.LOGGER.info("[Orebit] boxed-in scan: skipped (goal neighbourhood signal {}"
+                        + " unchanged -- no seal could have completed)", sig);
+            }
             return false; // nothing in the goal's sealing neighbourhood changed since the last check
         }
         lastProactiveSignal = sig;
@@ -2651,6 +2697,10 @@ public final class PathPlan {
                         caps.boxedInScanRadius(),
                         caps.canBreak(), caps.canPlace(), caps.safeFallDistance(), regionMine, regionPlace);
             } catch (Throwable t) {
+                // NEVER silent: the probe backing out is fine, but doing so because it EXCEEDED is a defect
+                // hiding behind a give-up that looks deliberate.
+                OrebitCommon.LOGGER.warn("[Orebit] boxed-in scan: level {} THREW ({}) -- treating as"
+                        + " inconclusive and descending", lvl, t.toString());
                 sealed = false; // a sealed-probe backs a give-up, never gates it: inconclusive ⇒ descend/proceed
             }
             if (sealed) {
@@ -2667,6 +2717,12 @@ public final class PathPlan {
                 this.status = PathStatus.FAILED;
                 return true;
             }
+        }
+        if (Debug.VERBOSE) {
+            OrebitCommon.LOGGER.info("[Orebit] boxed-in scan: goal={} NOT sealed at any level {}..0"
+                    + " (radius {}, bot={}, canBreak={} canPlace={}) — no proof, give-up (if any) will be"
+                    + " reactive", goalFloor, RegionAddress.MAX_COARSE_LEVEL, caps.boxedInScanRadius(),
+                    botFloor, caps.canBreak(), caps.canPlace());
         }
         return false;
     }
