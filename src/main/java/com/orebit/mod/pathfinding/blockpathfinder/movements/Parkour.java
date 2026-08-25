@@ -504,6 +504,15 @@ public final class Parkour implements Movement {
      */
     public static final double STAIR_BACK_PROJ = -0.20;
 
+    /**
+     * Vanilla's DEFAULT block friction. A takeoff floor at or below this rebuilds a spent run-up; anything
+     * above it (slime 0.8, ice / packed ice 0.98, blue ice 0.989) RETAINS momentum instead of rebuilding
+     * it, which inverts the pre-run-up re-centre's whole trade -- see the note on the arm in {@code plan}.
+     * Compared against the follower's live {@link BotSteering#slipperinessAt} read, not a grid bit: the
+     * planner's SLIPPERY surface class was deleted 2026-08-10 as dead, and slipperiness is a servo gain.
+     */
+    public static final double NORMAL_FRICTION = 0.6;
+
     /** Fix 3 predictive lookahead multiplier on the along-axis velocity (see {@link #HAZARD_TAKEOFF_LOOKAHEAD}
      *  — the measured trigger→last-grounded latency is ~3 ticks). */
     public static final double HAZARD_TAKEOFF_TICKS = 3.0;
@@ -1193,14 +1202,23 @@ public final class Parkour implements Movement {
             if (takeoffSurface[0] < 0) takeoffSurface[0] = b.surfaceTopYToward(fx, fy, fz, lipSx, lipSz);
             return takeoffSurface[0] < 16;
         };
-        // Takeoff trigger: grounded AND the bot's along-axis progress past the start-cell centre
-        // reaches TAKEOFF_EDGE — jump as late as possible without stepping off the lip. Fix 3: when
-        // the first gap-floor cell is a takeoff hazard (magma/lava/honey), switch to the PREDICTIVE
-        // early trigger so the center never crosses the lip onto it on a grounded tick. ONE predicate
-        // shared by the runup's advance AND its hot-entry press below, so the two can never disagree.
-        final Predicate<BotSteering> takeoffTrigger = b -> {
-            if (!b.grounded()) return false;
-            if (recentring[0]) return false;   // re-centring — no takeoff until the run-up has room
+        // The HOT-ENTRY latch (owner ruling 2026-07-31): true once the runup has had a normal grounded
+        // tick (trigger not yet met). A chained hand-off (a Descend's inbound sprint momentum) can ground
+        // the bot ALREADY past the trigger on its very first grounded runup tick, with no run-up at all.
+        // Declared BEFORE the trigger because the GATE now reads it - see takeoffTrigger.
+        boolean[] hadNormalRunupTick = {false};
+        // One-way latch: the pre-run-up re-centre has been performed for this step. Without it the
+        // unconditional arm below would re-fire the instant the re-centre cleared (the bot is then at the
+        // centre, so the raw trigger is false and hadNormalRunupTick has not been set yet) and the run-up
+        // could never start.
+        boolean[] recentreDone = {false};
+
+        // RAW takeoff geometry: along-axis progress past the start-cell centre reaches TAKEOFF_EDGE - jump
+        // as late as possible without stepping off the lip. Fix 3: when the first gap-floor cell is a
+        // takeoff hazard (magma/lava/honey), switch to the PREDICTIVE early trigger so the centre never
+        // crosses the lip onto it on a grounded tick. Positional ONLY: it deliberately knows nothing about
+        // grounding or the re-centre, so the gate and the drive can both consult it without re-arming.
+        final Predicate<BotSteering> rawTakeoffTrigger = b -> {
             double proj = ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5));
             if (b.gapFloorHazardAt(gapX, fy, gapZ)) {
                 double vAlong = ux * b.velX() + uz * b.velZ();
@@ -1208,73 +1226,162 @@ public final class Parkour implements Movement {
             }
             return proj >= (lowHalfStair.test(b) ? STAIR_TAKEOFF_EDGE : TAKEOFF_EDGE);
         };
-        // HOT-ENTRY latch (owner ruling 2026-07-31): true once the runup has had a normal grounded tick
-        // (trigger not yet met). A chained hand-off (a Descend's inbound sprint momentum) can ground the
-        // bot ALREADY past the trigger on its very first grounded runup tick; the runner's drive-then-
-        // advance ordering then presses jump only on the NEXT tick, and the coasting bot exits the
-        // envelope's admitted cells in that one-tick gap — the 2026-07-30 23:48:47 "walked straight off
-        // the platform" wedge (step FAILED phase 1/4, no jump ever pressed). On exactly that hot entry
-        // the runup drive presses jump SAME-TICK (inputs precede this tick's physics, so the launch
-        // beats the next failWhen); every entry that got a normal runup tick keeps the late takeoff
-        // byte-identical — the Phase-4 sweep ruled a UNIFORM earlier takeoff out (see TAKEOFF_EDGE).
-        boolean[] hadNormalRunupTick = {false};
+
+        // THE FULL "may the runup be LEFT" predicate (owner ruling 2026-08-23). Every condition that makes
+        // a launch legal lives HERE, in the gate - because the phase runner now advances BEFORE it drives,
+        // so whatever the gate does not test is not tested at all.
+        //
+        // It used to be split: the gate tested only position while the DRIVE silently owned the other half
+        // - it armed the recentring latch on a hot entry and returned early, and the gate saw that latch
+        // set only because drive ran FIRST. Predicate correctness rested on phase-runner ordering, which is
+        // exactly the fragility the 2026-08-23 reorder exposed: with advance-before-drive the latch was
+        // still false when the gate ran, the runup was left un-driven, and the takeoff phase launched a
+        // backwards hot entry the envelope cannot support
+        // (LipMarginTest.backwardsHotEntryRecentresInsteadOfJumping).
+        //
+        // Arming in the gate is also where the decision belonged: "this entry has not earned its run-up, so
+        // refuse the launch and re-centre first" is a statement about whether the phase may be LEFT, not
+        // about how to steer inside it. ParkourEnvelope.MAX_GAP is derived from closed-form physics at a
+        // SPRINT takeoff; nothing may leave this phase without having made that true.
+        //
+        // THE RE-CENTRE IS NOW UNCONDITIONAL (owner ruling 2026-08-24). It used to arm only on a BACKWARDS
+        // hot entry (along-axis velocity <= 0), which is a SIGN test -- and the 2026-08-24 flagship proved
+        // the sign is the wrong question. Four envelope failures, every one from a legitimate delivery that
+        // simply had not built along-axis speed yet, because the bot was still ROTATING from its approach
+        // heading onto the jump heading when the position trigger fired:
+        //
+        //   (936,50,875)    Pillar mis-delivery, stationary   vAlong 0.006   2% of the assumed 0.24
+        //   (1030,76,1226)  Ascend, 90 degrees (+X -> +Z)     vAlong 0.109  45%
+        //   (655,84,790)    Diagonal, 45 degrees              vAlong 0.142  59%
+        //   (1584,64,1711)  Diagonal, ~90 degrees             vAlong 0.092  38%  (DiagonalParkour)
+        //
+        // In each the along-axis velocity was POSITIVE, so the sign test never armed -- while cross-axis
+        // momentum ate the entire 0.35-block runway. You cannot rotate momentum: the old component must
+        // decay before the new one builds, and the runway cannot pay for both. Measured at (1030,76,1226)
+        // the TOTAL speed actually FELL 0.130 -> 0.102 before recovering to 0.114 as the bot turned.
+        //
+        // So a run-up that HAS runway now begins from rest at the centre, which is precisely the state
+        // ParkourEnvelope.vRunup integrates from -- reality is made to match the model rather than the
+        // model widened to excuse reality.
+        //
+        // "Has runway" is the discriminator, and it is the ENTRY POSITION, not the entry speed. All three
+        // cross-axis failures entered the run-up BEFORE the trigger and had room to spend the turn
+        // (proj -0.346 / +0.023 / -0.018 against TAKEOFF_EDGE 0.35); a bot that enters ALREADY PAST the
+        // trigger is committed and must not be dragged backwards. That case keeps its 2026-07-31
+        // behaviour exactly: backwards or low-half-stair re-centres, forward launches THIS TICK. The
+        // measured forward hot entry sits at proj 0.471 with the lip at 0.5 -- 0.029 away, closing at
+        // 0.12/tick -- so it crosses the lip on the very next tick and ground friction cannot reverse
+        // 0.12 in under one. Re-centring there is the 2026-07-30 "walked straight off the platform"
+        // wedge. The hazardous-gap-floor predictive takeoff is committed for the same reason: delaying it
+        // one tick spends a third of the HAZARD_TAKEOFF_TICKS margin that keeps the centre off the lava.
+        // Residual: COLUMN_DEADBAND is 0.15, so the run-up can start up
+        // to 0.15 past the centre, leaving a 0.20 runway that reaches ~0.201 (84% of vRunup) instead of
+        // the full 0.2397. Accepted by the owner until it is shown to matter -- it cannot be closed by
+        // aiming further back, since STAIR_BACK_PROJ's -0.20 is already the rear limit at which a 0.6-wide
+        // box stops overhanging the neighbouring column.
+        //
+        // A LOW-HALF STAIR re-centres to STAIR_BACK_PROJ (0.20 BEHIND the centre, away from the takeoff
+        // lip) rather than the centre, so that after its run-up the body box is still clipping the top
+        // step: its launch window is only 0.25..0.30 past centre.
+        // Measured on the flagship at (158,112,114)->(158,111,109): a Diagonal handed off across the
+        // takeoff cell's -z corner at z=114.029, so proj = 0.471 >= TAKEOFF_EDGE on the very first grounded
+        // tick while velocity was (+0.053,+0.052) - vAlong = -0.052, moving INTO the cell. Both phases
+        // fired in two ticks with no run-up, the sprint boost launched at vz = -0.142 instead of ~-0.28,
+        // and the bot covered 2.68 of the 4.53 blocks it needed.
+        //
+        // A LOW-HALF STAIR takeoff arms UNCONDITIONALLY on a hot entry, whatever the sign of the velocity:
+        // its launch window is only 0.25..0.30 past centre, so a hot entry has very likely already
+        // overshot the last supported tick, and pressing jump there is the swallowed press this branch
+        // exists to prevent.
+        final Predicate<BotSteering> takeoffTrigger = b -> {
+            if (!b.grounded()) return false;
+            // ...and only when there is CARRY to spend. atRest() at entry means the bot is already in the
+            // exact state vRunup integrates from (zero velocity), so a re-centre would buy nothing but lost
+            // ticks and lost along-line progress; a purely POSITIONAL offset is what the run-up's own
+            // steering (steerTowards / steerViaGate's gate-point pursuit) already corrects while it
+            // accelerates. Every convicted failure had real carry -- entry speeds 0.130, 0.116, 0.117 --
+            // against REST_HSPEED 0.02.
+            if (!recentreDone[0] && !recentring[0] && !hadNormalRunupTick[0] && !b.atRest()) {
+                boolean arm;
+                if (rawTakeoffTrigger.test(b)) {
+                    // COMMITTED entry -- already past the trigger. The 2026-07-31 rule, unchanged.
+                    arm = lowHalfStair.test(b) || ux * b.velX() + uz * b.velZ() <= 0.0;
+                } else {
+                    // HAS RUNWAY -- trade the carry for alignment, but ONLY where the carry can be REBUILT.
+                    // The re-centre spends momentum to buy a clean on-axis start; that is a good trade only
+                    // if the run-up can then earn the momentum back inside 0.35 blocks. Two surfaces where
+                    // it cannot, both caught by the 2026-08-24 course baseline as regressions this arm
+                    // introduced:
+                    //
+                    //   BLUE ICE (blue.chain.g3, PASS -> FAIL "slid off landing"): high friction RETAINS
+                    //   momentum and correspondingly refuses to build it. Re-centring bled the carry to a
+                    //   stop and the run-up could not rebuild it -- takeoff speed collapsed 0.3958 -> 0.0103,
+                    //   a fortieth of baseline, and the bot fell. On ice the carry IS the run-up: keep it.
+                    //
+                    //   PARTIAL-HEIGHT takeoff surfaces (slabflat2.walkin, PASS -> FAIL timeout): a bottom
+                    //   slab reads topY 8 < 16, so lowHalfStair is TRUE for it and the re-centre aims at
+                    //   STAIR_BACK_PROJ, 0.20 BEHIND centre. That rear aim is calibrated for the COMMITTED
+                    //   hot entry it was written for -- applying it to every carry entry walked the bot off
+                    //   the back of its own takeoff (maxProj -2.42) until the card timed out.
+                    //
+                    // Both keep their pre-existing behaviour: a committed entry still re-centres per the
+                    // branch above, and everything else runs up on its carry exactly as before.
+                    arm = !lowHalfStair.test(b) && b.slipperinessAt(fx, fy, fz) <= NORMAL_FRICTION;
+                }
+                if (arm) {
+                    recentring[0] = true;
+                }
+            }
+            if (recentring[0]) return false;   // re-centring - no takeoff until the run-up has room
+            return rawTakeoffTrigger.test(b);
+        };
         plan.phase("runup")
                 .drive((b, v) -> {
-                    airborneOnce[0] = false; // re-attempt begins → disarm until the next arc is live
-                    // A hot entry says the bot is already past the takeoff point. The latch above splits it by
-                    // the sign of the ALONG-LINE velocity, which is what the 2026-07-31 ruling actually assumed
-                    // and never tested. Moving FORWARD (vAlong > 0) the bot really is about to coast off the
-                    // lip, so waiting a tick loses the jump — press now, unchanged. Moving BACKWARD or standing
-                    // (vAlong ≤ 0) nothing is carrying it off, and jumping now is the worst option available:
-                    // ParkourEnvelope.MAX_GAP is derived from closed-form physics at a SPRINT takeoff, and the
-                    // follower had no gate making that assumption true.
+                    airborneOnce[0] = false; // re-attempt begins -> disarm until the next arc is live
+                    // The hot-entry REFUSAL now lives in takeoffTrigger (the gate); this drive only
+                    // EXECUTES the re-centre the gate armed. Give the run-up its run-up: re-centre in the
+                    // takeoff cell, then take off on the normal trigger. That is ~0.5 blocks of runway -
+                    // HALF a cell, and the CENTRE is the only safe place to stand (owner ruling
+                    // 2026-08-14, rejecting a full-cell run-up to the far edge): the bot is 0.6 wide, so
+                    // parking it at the far edge puts 0.3 of the hitbox in the NEIGHBOURING column, which
+                    // we cannot prove is either safe (it may be fire or lava) or free (it may be solid).
+                    // Neither a death nor a wedge is an acceptable price for a parkour PRECONDITION.
+                    // Centre-to-centre is also the assumption the whole planner is written on. A low-half
+                    // stair re-centre aims further back - the rear lip, not the cell centre - to open the
+                    // 0.30 -> 0.75 run-up.
                     //
-                    // Measured on the flagship at (158,112,114)→(158,111,109): a Diagonal handed off across the
-                    // takeoff cell's −z corner at z=114.029, so proj = 0.471 ≥ TAKEOFF_EDGE on the very first
-                    // grounded tick while the velocity was (+0.053,+0.052) — i.e. vAlong = −0.052, moving INTO
-                    // the cell. Both phases fired in two ticks with no run-up at all, the sprint boost launched
-                    // from the wrong sign at vz = −0.142 instead of ~−0.28, and the bot covered 2.68 of the 4.53
-                    // blocks it needed. It grounded two cells short and the envelope fail→HELD it.
-                    //
-                    // The fix is to give the run-up its run-up: re-centre in the takeoff cell, then take off on
-                    // the normal trigger. That is ~0.5 blocks of runway — HALF a cell, and the CENTRE is the
-                    // only safe place to stand (owner ruling 2026-08-14, rejecting a full-cell run-up to the
-                    // far edge): the bot is 0.6 wide, so parking it at the far edge puts 0.3 of the hitbox in
-                    // the NEIGHBOURING column, which we cannot prove is either safe (it may be fire or lava)
-                    // or free (it may be solid). Neither a death nor a wedge is an acceptable price for a
-                    // parkour PRECONDITION. Centre-to-centre is also the assumption the whole planner is
-                    // written on; every deviation from it in the follower is either incidental (holding a
-                    // perfect centre is impossible) or a deliberate speed/realism trade (stuttering onto every
-                    // cell centre across an open plain looks absurd), never a place to park on purpose.
-                    //
-                    // Bounded to the takeoff cell (which failWhen already admits), purely positional, one-way
-                    // (the latch never re-arms), and no timers. If something blocks the re-centre the move
-                    // simply stalls in place, which is the sanctioned outcome under the no-recovery rule.
-                    //
-                    // A LOW-HALF STAIR takeoff arms this unconditionally on a hot entry, whatever the sign of
-                    // the velocity: its launch window is only 0.25..0.30 past centre, so a hot entry has very
-                    // likely already overshot the last supported tick, and pressing jump there is the
-                    // swallowed press this whole branch exists to prevent. Its re-centre also aims further
-                    // back — the rear lip, not the cell centre — to open the 0.30 → 0.75 run-up.
-                    if (!recentring[0] && !hadNormalRunupTick[0] && takeoffTrigger.test(b)
-                            && (lowHalfStair.test(b) || ux * b.velX() + uz * b.velZ() <= 0.0)) {
-                        recentring[0] = true;
-                    }
+                    // Bounded to the takeoff cell (which failWhen already admits), purely positional,
+                    // one-way (the latch never re-arms), and no timers. If something blocks the re-centre
+                    // the move simply stalls in place, the sanctioned outcome under the no-recovery rule.
                     if (recentring[0]) {
                         b.setSprinting(false);   // you cannot sprint backwards; the run-up re-sprints below
                         double back = lowHalfStair.test(b) ? STAIR_BACK_PROJ : 0.0;
-                        if (SteerControl.recenterOn(b, fx + 0.5 + ux * back, fz + 0.5 + uz * back)) {
+                        // Ends CENTRED **and** AT REST. Centred alone is not enough: COLUMN_DEADBAND is a
+                        // position test, so a bot sweeping through the deadband with its approach momentum
+                        // still on would satisfy it and start the run-up carrying the very cross-axis carry
+                        // this re-centre exists to spend. atRest() is the same carry predicate Pillar's
+                        // SETTLE uses (grounded AND horizontal speed < REST_HSPEED, derived from vanilla
+                        // ground drag) -- so the run-up begins from the from-rest, on-axis state that
+                        // ParkourEnvelope.vRunup actually models.
+                        boolean centred = SteerControl.recenterOn(b,
+                                fx + 0.5 + ux * back, fz + 0.5 + uz * back);
+                        if (centred && b.atRest()) {
                             recentring[0] = false;
+                            recentreDone[0] = true;
                         }
                         return;
                     }
                     SteerControl.steerTowards(b, v);
                     b.setSprinting(sprint);
-                    if (takeoffTrigger.test(b)) {
-                        if (!hadNormalRunupTick[0]) b.setJumping(true); // hot entry — launch this tick
-                    } else if (b.grounded()) {
-                        hadNormalRunupTick[0] = true; // a normal runup tick — legacy timing from here on
+                    // A NORMAL runup tick: grounded and still short of the trigger. From here the legacy
+                    // late takeoff applies and the gate's hot-entry arm can never fire again. Reads the RAW
+                    // geometry, so consulting it here cannot re-arm the re-centre.
+                    if (b.grounded() && !rawTakeoffTrigger.test(b)) {
+                        hadNormalRunupTick[0] = true;
                     }
+                    // NO hot-entry jump press here any more. On a LEGAL hot entry (forward-moving, not a
+                    // low-half stair) the gate fires on this same tick, the runner advances, and the
+                    // takeoff phase presses jump - same tick, same launch, one owner instead of two.
                 })
                 .advanceWhen(takeoffTrigger);
         plan.phase("takeoff")

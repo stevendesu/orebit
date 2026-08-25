@@ -245,8 +245,15 @@ public final class Pillar implements Movement {
         final double startFeetY = fromFootY;       // feet world Y standing on the (full) from-floor
         final int landedFeetBlockY = toFootY;      // feet BLOCK Y once standing on the placed footing
         MovePlan plan = new MovePlan();
-        // Fell back to (or below) the start with no height gained → the footing never took; re-attempt.
-        plan.resetWhen(b -> b.grounded() && b.y() < startFeetY + 0.5);
+        // Reset-guard arm (Ascend's {@code launched} / Parkour's {@code airborneOnce} precedent). Required
+        // once SETTLE precedes JUMP: through SETTLE and the first JUMP ticks the bot is still GROUNDED at
+        // the start feet, which is exactly resetWhen's condition -- unguarded it would fire every tick and
+        // churn the cursor back to SETTLE forever, inflating the regression counter that exists to detect
+        // real attempt/fall-back livelocks.
+        final boolean[] launched = new boolean[1];
+        // Fell back to (or below) the start with no height gained -> the footing never took; re-attempt.
+        // Armed only once the bot has actually left the ground (see the JUMP drive).
+        plan.resetWhen(b -> launched[0] && b.grounded() && b.y() < startFeetY + 0.5);
         // Validity envelope (PATHOLOGY P1 family — the Parkour/Ascend/Descend failWhen precedent; Pillar
         // was a converted move WITHOUT one, which is what made the 2026-08-19 run-5 wedge SILENT —
         // DESIGN-replan-handoff.md §5/R3). A pillar's whole life happens at exactly two feet levels: the
@@ -261,9 +268,58 @@ public final class Pillar implements Movement {
         // JUMP: clear the takeoff head cell if it's solid, then recenter + hold jump until the feet have
         // CLEARED the footing cell (world Y >= fy+2, the cell's top) — so the footing is placed BENEATH the bot
         // at the apex, like a real player, not inside itself the instant it leaves the ground.
+        // SETTLE: stop, and be ON the column, BEFORE rising (owner ruling 2026-08-23). A pillar is a
+        // straight-up movement: it has no downrange component to spend momentum on, and the block it is
+        // building is one cell wide. Taking off with carry does not merely land the bot off-centre -- it
+        // risks stepping off the very pillar being built.
+        //
+        // Convicted on the 2026-08-24 flagship at (936,51,871). An Ascend delivered CORRECTLY, landing
+        // grounded at z=871.445 against a cell centre of 871.5 -- but with its landing velocity still on
+        // (vz=0.1301, the honest product of a jump made with fwd=1.00). Pillar then pressed jump on its
+        // very FIRST tick and carried that 0.13 into the air: z drifted 871.445 -> 871.884 over the arc,
+        // and it came down 0.39 past centre, on the far lip. recenterOnTarget fought it the whole way
+        // (fwd climbing 0.21 -> 0.38) and could not win -- air control is ~0.02/t, so ~9 airborne ticks
+        // bled 0.13 down to only 0.0057. The next move, a Parkour whose takeoff trigger reads
+        // proj >= 0.35, then saw proj = 0.390 with a nominally-forward vAlong of +0.0057, took it for a
+        // hot entry about to coast off the lip, and launched from a standstill: 3.16 blocks covered of
+        // the ~4.6 needed, and the validity envelope failed the step. The pillar mis-delivery is the
+        // cause; every move that follows a pillar inherits whatever pose it leaves.
+        //
+        // The gate is two existing predicates, no new constants. atRest() is the carry test
+        // (grounded AND horizontal speed < REST_HSPEED = 0.02, itself derived from vanilla ground drag,
+        // not tuned); COLUMN_DEADBAND is the same centred verdict recenterOn returns and Parkour's run-up
+        // already consumes. The drive is plain recenterOnTarget, which is what actually does the braking:
+        // grounded, with forward input zeroed inside the deadband, ground drag arrests the carry in a few
+        // ticks (measured on the same flagship Ascend: 0.0586 -> 0.0000 in nine).
+        //
+        // FLUID AND CLIMBABLE ARE EXEMPT, deliberately: atRest() is already medium-aware and returns true
+        // there (fluid drag arrests carry within a tick or two, and flowing water pushes continuously, so
+        // a speed test would deadlock), and the centring half is skipped for the same reason -- a flowing
+        // column could never satisfy it. So the flooded-shaft swim-pillar keeps its exact behaviour and
+        // only the GROUNDED takeoff, the case actually convicted, changes.
+        plan.phase("settle")
+                .drive(SteerControl::recenterOnTarget)
+                .advanceWhen(b -> {
+                    if (!b.atRest()) return false;   // carry must be SPENT, not merely grounded
+                    if (!b.grounded()) return true;  // fluid / climbable: medium-exempt, as atRest is
+                    double dx = (fx + 0.5) - b.x();
+                    double dz = (fz + 0.5) - b.z();
+                    return dx * dx + dz * dz
+                            <= SteerControl.COLUMN_DEADBAND * SteerControl.COLUMN_DEADBAND;
+                });
         plan.phase("jump")
                 .need(MovePlan.Need.AIR, fx, fy + 3, fz)
-                .drive((b, v) -> { SteerControl.recenterOnTarget(b, v); b.setJumping(true); })
+                .drive((b, v) -> {
+                    SteerControl.recenterOnTarget(b, v);
+                    b.setJumping(true);
+                    // Armed once off the ground, DISARMED while still on it. A plain one-way arm is not
+                    // enough here: after a fall-back, resetWhen sends the cursor to SETTLE, and if the bot
+                    // is already at rest SETTLE advances without its drive ever running -- so a disarm
+                    // sited there could be skipped and resetWhen would re-fire every tick. The JUMP drive
+                    // runs on every tick until its gate gives, so it is the one place the flag is certain
+                    // to be maintained.
+                    launched[0] = !b.grounded();
+                })
                 .advanceWhen(b -> b.y() >= fy + 2.0);
         // PLACE: airborne over the vacated cell — place the footing there; advance once it's solid.
         plan.phase("place")

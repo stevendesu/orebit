@@ -240,23 +240,29 @@ public final class IceParkourCourse {
             // The STONE control is the geometry discriminator: if it settles but blue ice slips, it's a
             // surface/servo problem, not the jump geometry. gap=4 descending-1 is the exact reported case; gap=3
             // is the cheaper shorter variant; ICE (0.98) alongside BLUE_ICE (0.989) brackets the friction.
-            add("ctl.fall.g4",  4, -1, Surface.STONE,    0, Template.STOP);   // geometry control (stone)
-            add("blue.fall.g4", 4, -1, Surface.BLUE_ICE, 0, Template.STOP);   // THE reported pathology (runout 0)
+            add("ctl.fall.g4",  4, -2, Surface.STONE,    0, Template.STOP);   // geometry control (stone)
+            add("blue.fall.g4", 4, -2, Surface.BLUE_ICE, 0, Template.STOP);   // THE reported pathology (runout 0)
             add("blue.fall.g3", 3, -1, Surface.BLUE_ICE, 0, Template.STOP);   // shorter descending variant
-            add("ice.fall.g4",  4, -1, Surface.ICE,      0, Template.STOP);   // plain-ice bracket
+            add("ice.fall.g4",  4, -2, Surface.ICE,      0, Template.STOP);   // plain-ice bracket
             // Runout sweep on the g4/blue-ice case: the 1-wide runout=0 landing is the EXTREME (a 4-gap's reach
             // momentum can't be fully bled on frictionless ice inside one cell — a reach-vs-brake conflict). Any
             // runout gives the servo/friction room to arrest, so these settle — showing the fix works whenever
             // the landing isn't the pathological 1-cell extreme (and quantifying how much runout g4 needs).
-            add("blue.fall.g4.r1", 4, -1, Surface.BLUE_ICE, 1, Template.STOP);
-            add("blue.fall.g4.r2", 4, -1, Surface.BLUE_ICE, 2, Template.STOP);
+            add("blue.fall.g4.r1", 4, -2, Surface.BLUE_ICE, 1, Template.STOP);
+            add("blue.fall.g4.r2", 4, -2, Surface.BLUE_ICE, 2, Template.STOP);
             // The runout-0 g4-onto-ice cases are the MEASURED physical extreme: the servo brakes a 4-gap fall to
             // its floor (~0.16 b/t) but a 4-gap's reach momentum can't be fully bled on frictionless ice inside a
             // single 1-wide cell (it falls ~0.09 b short). Any runout ≥ 1 settles (the .r1/.r2 trials above). So
             // these are KNOWN PLANNER GAPS (score FAIL with a PLANNER-GAP: reason, counted apart from real
             // pass/fail) — RED reminders that the planner should not offer a falling-4 onto a 1-wide zero-runout
             // ice landing; they become expected-refusal PASSes once the planner arc stops offering them.
-            markPlannerGap("PLANNER-GAP: falling-4 onto 1-wide zero-runout ice", "blue.fall.g4", "ice.fall.g4");
+            // The PLANNER-GAP marking is GONE (2026-08-24). Its label blamed ice and runout, but the STONE
+            // control failed identically -- and by this block's own discriminator that means geometry, not
+            // surface. The real cause was that every g4 card was a FALL-1, and 7e588f5 cut base fall-1 from
+            // gap 4 to gap 3 when it re-baked the envelope at the run-up the follower can guarantee. No route
+            // was ever offered on ANY surface, so the momentum pathology was never actually exercised. The
+            // whole g4 family is now dy -2, where FALL2 admits gap 4 -- keeping the 4-gap reach momentum the
+            // trials are about while getting a route. A failure here is now a REAL slip, not a refusal.
         }
 
         /** Mark the named trials (already added) as KNOWN PLANNER GAPS: a slide-off scores FAIL with {@code

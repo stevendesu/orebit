@@ -25,10 +25,17 @@ import net.minecraft.core.BlockPos;
  * scripted recording bot (the {@code ClimbPlanConversionTest} pattern):
  *
  * <ul>
- *   <li>C1 — framed from the WRONG floor (the bot's own column), the {@link PhaseRunner} FOOTING arm's
- *       self-entombment guard REFUSES the place into the bot's own foot cell and holds on the need
- *       instead (the airborne half of the defense; the frame bugs themselves are fixed by the
- *       install-seed commit — this is defense-in-depth);</li>
+ *   <li>C1 — REMOVED 2026-08-23, unreachable by construction. It drove the place phase from a
+ *       FALLEN-BACK pose (feet back in the footing cell) by scripting the advance tick and the
+ *       place tick separately, which only worked while {@link PhaseRunner} advanced at the BOTTOM
+ *       of its tick: the new phase's needs ran a tick later, by which time the injected pose had
+ *       decayed. The runner now advances and establishes the new phase on ONE tick, so the place
+ *       phase's first needs pass always happens at the pose that fired the gate — {@code y >= fy+2},
+ *       feet ABOVE the footing cell. The entombing pose needs {@code y} in {@code [fy+1, fy+2)};
+ *       the two are disjoint, so no scripted arc can reach C1's assertion any more. The guard it
+ *       covered is NOT gone and is still exercised: C1b pins that a correctly-framed apex place is
+ *       not refused, and C3 pins the grounded half (the actual run-5 pose). The airborne refusal
+ *       still re-tests every tick if a footing never takes;</li>
  *   <li>C1b — the guard is EXACTLY the entombment geometry: a correctly-framed apex place (same column,
  *       feet one cell ABOVE the footing — {@code footY == r.y+1}, the pose Pillar's jump gate
  *       guarantees) is NOT refused;</li>
@@ -105,37 +112,38 @@ class PillarZeroDeltaFootingTest {
     /**
      * Drive a Pillar framed from floor {@code (fx, Y, fz)} through the runner over a scripted jump arc:
      * airborne rise past the frame's {@code fy+2} advance gate (jump → place), then a final place-phase
-     * tick at {@code placeTickY} — {@code 65.4} (feet back in block 65) is the pose the run-5 wedge
-     * placed from; {@code 66.3} (feet in block 66, one above the footing) is the legitimate apex pose.
+     * tick at {@code placeTickY}. NOTE (2026-08-23): since the runner advances and establishes the new
+     * phase on ONE tick, the place already happens on the apex tick below; {@code placeTickY} now only
+     * controls the pose of the trailing tick, and both surviving callers pass a pose that changes nothing.
      * Returns the runner so callers can assert its hold state.
      */
     private static PhaseRunner driveJumpArc(FakeBot bot, int fx, int fz, double placeTickY) {
         MovePlan plan = new Pillar().plan(fx, Y, fz, fx, Y + 1, fz, FROM_FOOT_Y, TO_FOOT_Y);
         PhaseRunner runner = new PhaseRunner();
         runner.begin(plan); // gate unarmed: the fixture injects mid-flight poses, the frame is under test
+        // SETTLE (added 2026-08-23): a pillar brakes and centres onto its own column before rising, so the
+        // arc must START from a grounded, at-rest pose ON THE PLAN'S COLUMN. That tick is satisfied
+        // ARTIFICIALLY here — the same reason the implicit settle gate above is left unarmed: this fixture
+        // injects mid-flight poses because the FRAME is what is under test, and the FakeBot's setForward
+        // is a no-op so a real re-centre could never converge. C2 in particular parks the bot in a
+        // DIFFERENT column from the frame on purpose, which SETTLE would otherwise never clear. The pose
+        // is restored immediately after, so every assertion still sees the pose its case intends.
+        double keepX = bot.x, keepZ = bot.z, keepY = bot.y;
+        bot.x = fx + 0.5;
+        bot.z = fz + 0.5;
+        bot.y = FROM_FOOT_Y;
+        bot.grounded = true;
+        runner.run(bot, new Up(fx, fz));     // settle -> jump (at rest, on the plan's column)
+        bot.x = keepX;
+        bot.z = keepZ;
+        bot.y = keepY;
+        bot.grounded = false;
         runner.run(bot, new Up(fx, fz));     // jump phase: y=65.9 < fy+2 — drives, no advance
         bot.y = 66.3;                        // apex — feet cleared the footing cell
         runner.run(bot, new Up(fx, fz));     // advance gate fires: jump -> place
         bot.y = placeTickY;                  // the pose the place phase executes from
         runner.run(bot, new Up(fx, fz));     // place phase establishes Need.FOOTING at (fx, 65, fz)
         return runner;
-    }
-
-    @Test
-    void aMisFramedPillarPlaceIntoTheBotsOwnFootCellIsRefused() {
-        // C1: framed from the bot's own column B (the run-5 +shifted frame) the FOOTING need sits at
-        // (9,65,10) — the very cell the bot's feet occupy (feet block 65 at y=65.4). Pre-guard, the
-        // place fired there and sealed the bot in; the runner's self-entombment guard must now REFUSE
-        // it — no place anywhere, and the runner holds on the FOOTING need (visible, self-healing as
-        // the bot moves) rather than filling the bot's own cell.
-        FakeBot bot = new FakeBot();
-        PhaseRunner runner = driveJumpArc(bot, BX, Z, 65.4);
-        assertFalse(bot.placed(BX, 65, Z),
-                "the guard must refuse the place into the bot's own foot cell — the run-5 entombment");
-        assertTrue(bot.placeCalls.isEmpty(),
-                "a refused self-cell place must place NOTHING, not divert elsewhere");
-        assertTrue(runner.holdNeed() == MovePlan.Need.FOOTING,
-                "the refusal holds on the unmet FOOTING need (re-validated as the bot moves)");
     }
 
     @Test

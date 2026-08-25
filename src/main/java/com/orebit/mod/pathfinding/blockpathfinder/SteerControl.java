@@ -117,9 +117,56 @@ public final class SteerControl {
      * ~0.5 block short of the centre — so a brake that decelerates toward the far centre still hands off (cursor
      * advances) with the bot half a cell short and a full head of momentum, which then coasts THROUGH the lane
      * into the far wall. Braking toward the near face instead zeroes the momentum right where the cursor
-     * releases, so the bot arrives centred on the lane. Kept under 0.5 so the aim still lies inside the turn cell
-     * (the bot must cross the near face to advance the cursor — a full 0.5 offset would stall it at the face). */
+     * releases, so the bot arrives centred on the lane.
+     *
+     * <p><b>BOUNDED BY THE BODY, NOT THE CELL</b> (owner ruling 2026-08-24). This was a hand-set {@code 0.45},
+     * justified as "kept under 0.5 so the aim still lies inside the turn cell". 0.5 is the CELL half-width;
+     * the bot is 0.6 wide, so an aim {@code 0.45} back from the centre sits 0.05 inside the near face and
+     * leaves {@code 0.25} of the body in the SOURCE cell. That is not a pose the bot has arrived in — on any
+     * surface, in any medium.
+     *
+     * <p>It went unnoticed because a same-height destination hides it: the foot cell flips the moment the
+     * CENTRE crosses the boundary, so the step completes wherever the body happens to be. The 2026-08-24
+     * slowstep cards removed that cover — walking onto a partial-height block (honey 15/16, soul sand 14/16)
+     * the foot cell is the block's OWN cell, so arrival demands the body physically clear the source block,
+     * which needs the centre at {@code 0.5 - BODY_RADIUS} or deeper. The bot held this anchor exactly, at
+     * {@code x≈1.95} against a 1.70 requirement, and hunted there forever: a correct servo, obediently
+     * holding an anchor that no completion test could ever accept.
+     *
+     * <p>So the offset is DERIVED: the deepest aim that still leaves the whole body inside the destination
+     * cell, less a small margin so support genuinely transfers rather than resting flush on the boundary.
+     * No per-surface arm and no "unless descending" special case — the same law for swim lanes, corners,
+     * slabs, honey and plain stone, which is the whole point of a servo. */
     static final double TURN_ARRIVE_OFFSET = 0.45;
+
+    /** Small support margin (blocks) past the body radius in {@link #STEP_ARRIVE_OFFSET} — slack so the
+     *  destination floor genuinely carries the bot rather than the box resting flush on the boundary
+     *  between the two cells. Mirrors {@code DiagonalParkour.GATE_MARGIN}, which folds the same slack into
+     *  its takeoff gate for the same reason. */
+    static final double STEP_ARRIVE_MARGIN = 0.01;
+
+    /**
+     * How far (blocks) a GROUNDED hazard-corner arrive pulls its anchor back from the step's target centre.
+     * Split out from {@link #TURN_ARRIVE_OFFSET} on 2026-08-24: the hazard arrive had borrowed the SWIM
+     * constant, and the two are different physical quantities that merely sat at similar numbers.
+     *
+     * <p><b>Swim</b> arrival is the foot BLOCK entering the cell — at the near face — and a buoyant bot is
+     * not supported by anything, so braking to that face is exactly right there. <b>Ground</b> arrival is
+     * standing ON the destination floor, which cannot happen until the 0.6-wide body clears the SOURCE
+     * block. Borrowing the swim number put the ground anchor 0.05 inside the near face, leaving 0.25 of the
+     * body still in the source cell — a pose the bot can hold forever without ever arriving.
+     *
+     * <p>A same-height destination hides it (the foot cell flips on the centre crossing, so the step
+     * completes wherever the body is). The 2026-08-24 slowstep cards removed that cover: onto a partial-
+     * height block (honey 15/16, soul sand 14/16) the destination foot cell is the block's OWN cell, so
+     * arrival demands the descent, the descent demands the body clear the source block, and the bot instead
+     * held the borrowed anchor at {@code x≈1.95} against a 1.70 requirement — a correct servo obediently
+     * holding an anchor no completion test could accept.
+     *
+     * <p>DERIVED, not tuned: the deepest anchor that still leaves the whole body inside the destination
+     * cell, less {@link #STEP_ARRIVE_MARGIN}. One law for every surface and medium — no per-block arm and
+     * no "unless descending" case, which is the entire point of a servo. */
+    static final double STEP_ARRIVE_OFFSET = 0.5 - BotSteering.BODY_RADIUS - STEP_ARRIVE_MARGIN; // 0.19
     /** Crawl throttle cap at a HAZARD corner: the forward key is capped this low so a fast bot DECELERATES into
      *  the corner (drag beats the reduced thrust) yet a slow bot keeps CREEPING across the cell face — a steady
      *  near-crawl (owner: "velocity ≈ 0") that neither overshoots the lane into the flank hazard nor stalls the
@@ -129,7 +176,7 @@ public final class SteerControl {
 
     /**
      * A/B + revert switch for {@link #drive}'s LAND branch (the chokepoint the ground moves Traverse/Descend/
-     * Diagonal steer through): {@code "servo"} (default) = the input-only velocity {@link #groundServo} (hazard-
+     * Diagonal steer through): {@code "servo"} (default) = the input-only velocity {@code groundServo} (deleted 2026-08-24) (hazard-
      * aware target-velocity with reverse-thrust braking — holds a 1-wide blue-ice lane); {@code "legacy"} = the
      * old open-loop {@link #steerTowards} (full-forward look-ahead, overshoots on ice). Mirrors SprintSwim's
      * {@code orebit.swim.bleed} servo A/B switch. Set {@code -Dorebit.ground.drive=legacy} to revert. Momentum-
@@ -856,10 +903,11 @@ public final class SteerControl {
      * @return true when the recovery jump was engaged.
      */
     public static boolean climbableDipRecover(BotSteering b, SteerView p) {
-        tag("hold:dip:dead");                  // §4: unconditional, before any early-out
+        tagAlso(":dip:dead");                  // §4: unconditional, before any early-out — but APPENDED, not
+                                               // clobbering: this runs after drive and writes only jump
         if (!b.onClimbable()) return false;    // no grab yet — jump is inert until the feet are IN it
         if (b.y() >= p.ty()) return false;     // at or above the step's height — never ratchet upward
-        tag("hold:dip");
+        tagAlso(":dip");
         b.setJumping(true);
         return true;
     }
@@ -1116,7 +1164,7 @@ public final class SteerControl {
      *
      * <p><b>Why the drive must know</b> (owner-ratified 2026-08-19, DESIGN-servo-normalization.md §2.5):
      * the gate polices the CURRENT step's target centreline while the normal ground drive steers for
-     * {@link #groundServo}'s corner racing line — two controllers, two lane definitions. At (259,78,448)
+     * {@code groundServo} (deleted 2026-08-24)'s corner racing line — two controllers, two lane definitions. At (259,78,448)
      * (a +z Traverse chaining into a −x turn) that dispute was a bit-identical TWO-TICK limit cycle for
      * 46k ticks: the safe-corner blend pushed the bot to the ±0.2 lane boundary ({@code servo:thrust}),
      * the gate's containment predicate read the resulting crossErr + carry as uncontained and its HOLD
@@ -1151,14 +1199,14 @@ public final class SteerControl {
     /**
      * The GROUND <b>hazard-corner verdict</b> — the single mode-selection predicate the land drive branches on
      * (owner-ratified 2026-08-20, Phase 2 of the servo normalization). Verbatim the expression
-     * {@link #groundServo}'s retired hazard branch and {@link #arriveOnStep}'s near-face branch each used to
+     * {@code groundServo} (deleted 2026-08-24)'s retired hazard branch and {@link #arriveOnStep}'s near-face branch each used to
      * spell out for themselves: an overshoot hazard straight ahead, or a hazardous lane FLANK that the bot has
      * already drifted toward ({@link #crossTrack} beyond {@link #FLANK_DRIFT} — a centred bot on a flanked
      * straight is not in danger and must not be slowed).
      *
      * <p>Factored out because it is now a MODE SWITCH rather than a branch inside one controller: {@link #drive}
      * asks it once and routes the whole tick — hazard &rarr; {@link #arriveOnStep} (the position-anchored ARRIVE
-     * on the near-face point), safe &rarr; {@link #groundServo} (pure pursuit). Asking it once also keeps the
+     * on the near-face point), safe &rarr; {@code groundServo} (deleted 2026-08-24) (pure pursuit). Asking it once also keeps the
      * two consumers from ever disagreeing about the same tick, which is the failure the mode switch exists to
      * end.
      */
@@ -1182,10 +1230,10 @@ public final class SteerControl {
      *
      * <p><b>Hazard → near-face anchor</b> (owner-ratified 2026-08-19, DESIGN-servo-normalization.md
      * §2.5.1 — the (57,172,255) flagship conviction). The gate-armed drive consults the SAME hazard
-     * predicate call {@link #groundServo}'s hazard branch selects its cornering line on —
+     * predicate call {@code groundServo} (deleted 2026-08-24)'s hazard branch selects its cornering line on —
      * {@code groundOvershootHazard || (groundFlankHazard && crossTrack > FLANK_DRIFT)}, verbatim — and
      * while it fires the ARRIVE anchor moves from the step's target centre to the NEAR-FACE point,
-     * target centre − {@link #TURN_ARRIVE_OFFSET} along the step's travel direction (groundServo's own
+     * target centre − {@link #STEP_ARRIVE_OFFSET} along the step's travel direction (groundServo's own
      * hazard aim point). Same law otherwise: cap, gain and semantic yaw unchanged, zero new constants.
      * Why: the target-centre ARRIVE bypasses groundServo's hazard machinery for the whole gate-armed
      * approach, so at wp9 Diagonal → (58,172,255) chaining into wp10 Descend → (59,171,255) nothing
@@ -1197,7 +1245,7 @@ public final class SteerControl {
      * Tagged {@code arrive:stephaz}({@code :dead}) so the exec log shows the mode switch (§4).
      *
      * <p><b>Now also the HAZARD mode of the ordinary land drive</b> (owner-ratified 2026-08-20, Phase 2 — the
-     * {@code (340,69,481)} creep-wedge conviction). {@link #groundServo}'s hazard branch is retired and
+     * {@code (340,69,481)} creep-wedge conviction). {@code groundServo} (deleted 2026-08-24)'s hazard branch is retired and
      * {@link #drive} routes every hazard-corner tick here instead, gate-armed or not; see {@link #drive} for
      * why a speed schedule could not steer and this can. The {@code hazard} verdict is passed IN rather than
      * recomputed so the routing decision and the anchor choice are provably the same verdict.
@@ -1214,8 +1262,8 @@ public final class SteerControl {
             // length is ≥ EPS and the travel unit for the near-face offset is well-defined.
             double len = Math.sqrt(dx * dx + dz * dz);
             anchoredServo(b, "arrive:stephaz", "arrive:stephaz:dead",
-                    p.tx() - (dx / len) * TURN_ARRIVE_OFFSET,
-                    p.tz() - (dz / len) * TURN_ARRIVE_OFFSET,
+                    p.tx() - (dx / len) * STEP_ARRIVE_OFFSET,
+                    p.tz() - (dz / len) * STEP_ARRIVE_OFFSET,
                     SERVO_GROUND_CRUISE, ARRIVE_GAIN_GROUND, dx, dz);
             return;
         }
@@ -1513,109 +1561,17 @@ public final class SteerControl {
         b.setForward((float) fwd);
     }
 
-    /**
-     * GROUND <b>velocity SERVO</b> horizontal drive (YAW-ONLY) — the land counterpart of {@link #swimServo}, the
-     * input-only velocity-feedback alternative to the open-loop {@link #steerTowards} the ground moves
-     * (Traverse/Descend/Diagonal) drive through {@link #drive}. Where {@code steerTowards} just faces the
-     * look-ahead pursuit point and holds full forward — which on low-friction blue ice lets the carried momentum
-     * coast the bot off a 1-wide path at a corner into the flanking lava/void — this closes the loop on the bot's
-     * ACTUAL momentum: it computes a horizontal velocity ERROR {@code desired - current}, FACES along that error,
-     * and presses forward in proportion to its magnitude, so ice friction is fought with forward thrust to HOLD a
-     * capped speed and an overshoot is killed with REVERSE thrust (the error points up-track → the yaw flips 180°
-     * → the W key becomes a brake — essential on ice, where merely releasing forward coasts forever). No velocity
-     * is ever written; only look + forward, exactly as a player steers. NO depth pitch (land is 2-D).
-     *
-     * <ul>
-     *   <li><b>Desired direction</b> = the pursuit vector {@code (G.q - bot)} from {@link #computeGeom} (along-track
-     *       advance + cross-track return toward the centerline), blended near a turn toward the NEXT leg with an
-     *       OUTSIDE racing-line bias ({@link #CORNER_BLEND_MAX}/{@link #CORNER_RACING_BIAS}) so the bot rounds the
-     *       corner wide and keeps its hitbox off the inside flank — identical geometry to {@link #swimServo}.</li>
-     *   <li><b>Desired speed</b> = {@link #SERVO_GROUND_CRUISE}, flat. An unreachable ceiling on normal ground,
-     *       so the servo is a no-op there; on ice it caps the runaway coast, which is the whole reason it
-     *       exists.</li>
-     * </ul>
-     * A degenerate (vertical/in-place) segment collapses to {@link #recenterOnTarget}, exactly like
-     * {@link #steerTowards}.
-     *
-     * <h2>SAFE ONLY — the hazard branch was retired 2026-08-20</h2>
-     * This method used to carry a second, entirely different controller for a hazard corner: a SPEED SCHEDULE
-     * ({@code min(cruise, max(SERVO_TURN_FLOOR, SERVO_HAZARD_RAMP·dist))} decomposed into along/cross terms and
-     * scaled by {@code SERVO_CTE_HALT}). Its desired velocity had <b>no position term</b> — inventory class 1 —
-     * so the error it faced was a velocity difference that bore no relation to where the bot actually was. On
-     * the flagship r8 creep-wedge the two facts met: at {@code (339.926, 481.006)} on a {@code (1,1)} Diagonal
-     * the schedule produced {@code dv = (0.09684, 0.03684)} against {@code vel = (0.096, 0.065)}, an error of
-     * {@code (+0.00084, −0.02816)} — magnitude {@code 0.02817}, a hair over {@link #SERVO_DEADBAND} — and
-     * {@code faceHorizontally} on THAT vector yawed the bot to −178.3°, a half-throttle thrust due NORTH at a
-     * target lying east-north-east. The bot was ON its line ({@code cte = 0.0566}); nothing about its position
-     * asked for that input. The normalized {@link #arriveOnStep} on the identical pose wants −55.2° at full
-     * forward: the two layers disagreed by 123°.
-     *
-     * <p>{@link #drive} now switches MODE on {@link #groundHazardCorner} instead — hazard goes to
-     * {@link #arriveOnStep}, which anchors on the near-face point, eases at the drag-derived
-     * {@link #ARRIVE_GAIN_GROUND}, and holds semantic yaw. A speed schedule cannot be repaired into a
-     * position-anchored law; it is replaced by one. What survives here is the pursuit the safe straight always
-     * wanted.
-     */
-    public static void groundServo(BotSteering b, SteerView p) {
-        computeGeom(b, p);                                 // ground: fixed look-ahead (gain 0), like steerTowards
-        if (G.segLen < EPS) {
-            recenterOnTarget(b, p);                        // no line to track → re-centre on the column
-            return;
-        }
-        double dirx = G.qx - b.x(), dirz = G.qz - b.z();   // pursuit direction (along-track + cross-track return)
-        double dl = Math.sqrt(dirx * dirx + dirz * dirz);
-        if (dl < EPS) { recenterOnTarget(b, p); return; }
-        dirx /= dl; dirz /= dl;
-
-        if (p.hasNext()) {
-            // Safe corner: rotate the desired direction toward the next leg near the turn, with an OUTSIDE
-            // racing-line bias so the bot rounds WIDE for efficiency. Only ever reached on a SAFE corner now —
-            // drive() sends a hazard corner to arriveOnStep before this method is called — which is what makes
-            // the wide line unconditionally harmless here: the inside-flank clip it used to risk on ice was
-            // exactly the hazard case, and that case no longer arrives.
-            double ndx = p.nx() - p.tx(), ndz = p.nz() - p.tz();
-            double nl = Math.sqrt(ndx * ndx + ndz * ndz);
-            if (nl > EPS) {
-                ndx /= nl; ndz /= nl;
-                double ccx = p.tx() - b.x(), ccz = p.tz() - b.z();
-                double dCorner = Math.sqrt(ccx * ccx + ccz * ccz);
-                double w = (CORNER_BLEND_DIST - dCorner) / CORNER_BLEND_DIST;
-                if (w > CORNER_BLEND_MAX) w = CORNER_BLEND_MAX;
-                if (w > 0.0) {
-                    double cross = dirx * ndz - dirz * ndx;
-                    double sgn = cross > 0 ? 1.0 : (cross < 0 ? -1.0 : 0.0);
-                    double outx = sgn * dirz, outz = -sgn * dirx;   // unit outward normal
-                    double bx = (1.0 - w) * dirx + w * ndx + CORNER_RACING_BIAS * w * outx;
-                    double bz = (1.0 - w) * dirz + w * ndz + CORNER_RACING_BIAS * w * outz;
-                    double bl = Math.sqrt(bx * bx + bz * bz);
-                    if (bl > EPS && !blendLeavesLane(b, p, bx / bl, bz / bl)) {
-                        dirx = bx / bl; dirz = bz / bl;
-                    }
-                }
-            }
-        }
-        double dvx = dirx * SERVO_GROUND_CRUISE;            // flat cruise on the pursuit heading
-        double dvz = dirz * SERVO_GROUND_CRUISE;
-
-        // Velocity error = desired - current (horizontal). Face ALONG the error, thrust proportional to |error|:
-        // under-speed → forward thrust; overshoot → error points up-track → yaw flips → reverse-thrust brake.
-        double errx = dvx - b.velX();
-        double errz = dvz - b.velZ();
-        double emag = Math.sqrt(errx * errx + errz * errz);
-        if (emag < SERVO_DEADBAND) {
-            tag("servo:coast");
-            b.faceHorizontally(dirx, dirz);                // at speed: hold heading, coast
-            b.setForward(0.0f);
-        } else {
-            tag("servo:thrust");
-            b.faceHorizontally(errx, errz);                // face the velocity error (forward thrust or reverse brake)
-            b.setForward((float) Math.min(1.0, SERVO_GAIN * emag));
-        }
-    }
+    // groundServo was DELETED here on 2026-08-24 (owner ruling). It was the last non-normalized ground
+    // servo: an input-only velocity controller that faced the raw velocity error with no position term,
+    // so near a segment end -- where the scheduled speed drops under the residual velocity -- its facing
+    // flipped 180 degrees per tick at saturated throttle and it parked the bot short of the target in a
+    // stable limit cycle. Phase 2 (2026-08-20) retired its hazard branch onto arriveOnStep; Phase 3 does
+    // the same for the pursuit branch, so ONE position-anchored law now owns every grounded drive tick.
+    // The behaviour it was kept for -- holding a 1-wide low-friction lane -- is guarded by IceParkourCourse.
 
     /**
      * UPRIGHT-SWIM <b>velocity SERVO</b> horizontal drive (YAW-ONLY) — the fluid counterpart of
-     * {@link #groundServo}, and the control half of the "fluid is a medium" design
+     * {@code groundServo} (deleted 2026-08-24), and the control half of the "fluid is a medium" design
      * . Drives the tall {@link
      * com.orebit.mod.pathfinding.blockpathfinder.movements.Swim Swim} / {@link
      * com.orebit.mod.pathfinding.blockpathfinder.movements.Surface Surface} pose and {@link #drive}'s in-water
@@ -1814,7 +1770,23 @@ public final class SteerControl {
     public static void parkourAirborne(BotSteering b, SteerView p, double ux, double uz,
                                        int tx, int ty, int tz, boolean sprint, boolean iceFallAggressive) {
         final double accel = sprint ? PARKOUR_A_SPRINT : PARKOUR_A_WALK;
-        final double landY = ty + 1.0;                       // feet rest on the landing floor's top face
+        // Feet rest on the landing floor's REAL top face, read live in sixteenths — NOT a blanket +1.0
+        // (owner ruling 2026-08-24; the slabflat2.walkin conviction). A full block is 16/16 so this is
+        // byte-identical there, and surfaceTopYToward defaults to 16, so every test double is unchanged.
+        //
+        // The blanket +1.0 ended the predicted arc HALF A BLOCK EARLY on a slab (top 8/16), and the servo
+        // then did exactly the wrong thing for exactly the right reason. Measured on slabflat2.walkin: aim
+        // d = 11.7, predicted touchdown ~11.6 (the arc cut at y=151.0, where the bot was still at x=11.605),
+        // so the servo read "predicted SHORT" and accelerated for eight ticks. Reality ended the arc at
+        // y=150.5, carrying it to x=11.996 -- 0.296 past its own aim, with only three ticks left to brake --
+        // and the 0.17 it still carried coasted it across the cell boundary, where the validity envelope
+        // correctly failed a jump that had physically succeeded.
+        //
+        // Direction is the travel axis, mirroring Parkour's lowHalfStair call: only a BOTTOM stair reads
+        // direction-dependently, and the landing is approached along (ux,uz).
+        final double landTop = b.surfaceTopYToward(tx, ty, tz,
+                (int) Math.signum(ux), (int) Math.signum(uz)) / 16.0;
+        final double landY = ty + landTop;
         // Along-axis frame: s = along position, v = along velocity; cross-axis = 90 deg left of the jump axis.
         final double s = b.x() * ux + b.z() * uz;
         final double v = b.velX() * ux + b.velZ() * uz;
@@ -2037,7 +2009,7 @@ public final class SteerControl {
      * is the target POINT (not the line either — a line-return would pull the bot back toward the corner it
      * just cleared).
      *
-     * <p><b>Actuation</b> is the standard velocity-servo idiom ({@link #groundServo}/{@link
+     * <p><b>Actuation</b> is the standard velocity-servo idiom ({@code groundServo} (deleted 2026-08-24)/{@link
      * #parkourRunupAlign}): desired velocity = unit(aim − bot) × {@link #SERVO_GROUND_CRUISE} (an unreachable
      * ceiling on normal friction, so forward saturates like the open-loop walk), face the velocity ERROR and
      * thrust proportional — so momentum off the gate line is BLED (reverse-thrust component), which is what
@@ -2427,7 +2399,7 @@ public final class SteerControl {
      * entry point, read by the follower's {@code exec} log. Never read by logic.
      *
      * <p><b>Why it exists</b> (2026-08-06). {@code fwd} and {@code yaw} alone cannot identify the author of an
-     * input, and the branches mean completely different things by the same numbers: {@link #groundServo} faces
+     * input, and the branches mean completely different things by the same numbers: {@code groundServo} (deleted 2026-08-24) faces
      * the VELOCITY ERROR (so its yaw is a thrust direction, not a heading), {@link #arriveOnTarget} faces the
      * SEGMENT, {@link #stepOffGate}'s arrest faces the cross-axis correction, and a movement's own deadband
      * writes {@code 0} while facing nothing at all. Two mechanism claims were derived from that ambiguity and
@@ -2439,6 +2411,15 @@ public final class SteerControl {
     /** Record the drive branch for {@link #lastDrive}; diagnostic-only, so it can be called freely. Public so a
      *  movement that writes inputs directly (e.g. {@code Descend}'s column deadband) can name itself too. */
     public static void tag(String branch) { lastDrive = "#" + (++driveCalls) + " " + branch; }
+
+    /** Append a SECONDARY branch to {@link #lastDrive} instead of replacing it — for helpers that run AFTER
+     *  the phase drive and write only ONE input, so the log names the servo that actually steered PLUS the
+     *  arm that ran beside it. {@link #climbableDipRecover} writes only jump ({@link #drive} owns
+     *  forward/yaw), and its §4 unconditional entry tag was overwriting the drive branch every tick: the
+     *  2026-08-24 slowstep investigation read {@code src=hold:dip:dead} on every line and could not tell
+     *  which ground servo had steered, which had to be inferred from the yaw instead. Deliberately does NOT
+     *  bump {@code driveCalls} — the primary tag's counter stays the staleness oracle. */
+    public static void tagAlso(String branch) { lastDrive = lastDrive + "+" + branch; }
 
     /** Diagnostic ONLY: call counter for {@link #lastDrive}, mirroring {@link #stanceCalls}. A drive tag is a
      *  STATIC last-writer-wins slot, so a tick on which NO servo ran reprints the previous tick's branch
@@ -2645,12 +2626,25 @@ public final class SteerControl {
             // routing to arriveOnStep — the same ARRIVE the gate-armed and terminal branches above use, near-face
             // anchor and all — makes ONE law responsible for every hazard-corner tick regardless of which branch
             // brought the bot here.
-            boolean hazard = groundHazardCorner(b, p);
-            if (hazard) {
-                arriveOnStep(b, p, true);
-            } else {
-                groundServo(b, p);        // input-only velocity servo (holds a 1-wide low-friction lane)
-            }
+            // PHASE 3 (owner ruling 2026-08-24): the SAFE branch joins the hazard branch on arriveOnStep,
+            // and groundServo is GONE. Phase 2 retired only its hazard mode; the pursuit mode it kept was
+            // the same defect wearing different clothes -- it faced the RAW VELOCITY ERROR,
+            // faceHorizontally(dv - vel), with a saturated throttle and no position term at all.
+            //
+            // Convicted on the slowstep cards: walking onto a partial-height slow block the scheduled speed
+            // near the segment end falls BELOW the residual velocity, so (dv - vel) flips sign every tick;
+            // the bot spun 180 degrees per tick at fwd=1.00 and sat in a +-0.0346 limit cycle at x~1.95,
+            // 0.45 short of a target it was driving at full throttle. It never descended the 1/16 onto the
+            // block, so the step could never complete.
+            //
+            // That shortfall is NOT specific to slow blocks -- it is how this servo always arrived. A
+            // full-height destination hides it, because there toFootY == ty+1 is already satisfied the
+            // instant the bot crosses the cell boundary, so the step completes while the servo is still
+            // parked short. The partial top merely made the standing error observable by demanding a real
+            // descent. arriveOnStep anchors on the step's target CENTRE (p.tx(), p.tz()) via anchoredServo,
+            // whose error is unit(anchor - pos): a facing that cannot flip on residual velocity, and an
+            // anchor far enough into the cell that the 0.6-wide box clears the previous block.
+            arriveOnStep(b, p, groundHazardCorner(b, p));
         } else {
             steerTowards(b, p);           // legacy open-loop walk — the -Dorebit.ground.drive=legacy A/B leg,
                                           // deliberately untouched by the mode switch (it never had a hazard mode)

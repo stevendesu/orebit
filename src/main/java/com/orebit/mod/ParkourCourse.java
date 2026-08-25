@@ -12,6 +12,7 @@ import java.util.UUID;
 
 import com.mojang.authlib.GameProfile;
 import com.orebit.mod.config.ConfigLoader;
+import com.orebit.mod.worldmodel.hpa.RegionAddress;
 import com.orebit.mod.platform.ConfigDir;
 import com.orebit.mod.platform.EntityState;
 import com.orebit.mod.platform.PlatformEvents;
@@ -192,6 +193,9 @@ public final class ParkourCourse {
         final boolean wideRunway;       // 3-wide straight runway (only when approach == continuation, cardinal)
         final boolean diagRunway;       // 1-wide diagonal runway strip
         boolean ownerRepro;             // owner-gate: lay the owner's honey-flyover course (buildOwnerTile)
+        boolean slowStep;               // STRICT verdict — PASS requires the bot to actually STAND ON the
+                                        // partial-height slow block (honey / soul sand), never merely teeter
+                                        // on the full block beside it. See slowStepTrial.
         boolean honestCross;            // owner-gate: STRICT verdict — PASS requires a REAL airborne crossing that
                                         //   lands on the far platform; goal pushed well past the landing so the
                                         //   2.5-block arrival radius can't score a honey-edge teeter as "arrived".
@@ -282,6 +286,7 @@ public final class ParkourCourse {
         boolean leftTakeoff;
         boolean wentAirborne;       // (honestCross) the bot was airborne past the takeoff lip — a real walk-off
         boolean reachedLanding;     // (honestCross) the bot stood on the far landing platform (dropped 1, past gap)
+        boolean stoodOnSlow;        // (slowStep) the bot got its feet ONTO the partial-height slow block
         boolean stairAirborne;      // (stair trials) the bot left the ground during the run — i.e. it JUMPED
         double takeoffSpeed = -1;   // position-delta horizontal speed the tick the bot left the ground
         boolean wasGrounded = true;
@@ -327,7 +332,6 @@ public final class ParkourCourse {
             card("fall1", 2, -1, 0, Template.PRECISION); // overshoot (shallow ledge)
             card("fall2", 3, -1, 0, Template.PRECISION); // overshoot (shallow ledge)
             card("fall3", 4, -1, 0, Template.REACH);
-            card("fall4", 5, -1, 0, Template.REACH);
             card("falld2g4", 5, -2, 0, Template.REACH);
             card("falld3g4", 5, -3, 0, Template.REACH);
             // Small-gap DEEP-drop family — the coverage hole the flagship-GOTO cliff exposed: a (gap 1, −3)
@@ -345,6 +349,9 @@ public final class ParkourCourse {
             diag("diag1", 2, 0, 2);
             diag("diag2", 3, 0, 3);
             diag("diag3", 4, 0, 4);
+            // The region-corner pin lives beside the diag cards because it shares their shape — but it is
+            // a REGION-tier fixture, not a parkour one. See regionCornerPin().
+            regionCornerPin();
             // OFFSET (c,±1): approach +X, jump lands 1 cell OFF the cardinal line — the gated tier. The cardinal
             // line is kept pure gap (1-wide runway + 1-wide off-axis landing) so the aligned scan finds no
             // landing and ARMS the offset probe; nothing else can reach the landing. Both lateral signs.
@@ -508,38 +515,44 @@ public final class ParkourCourse {
          *  and launches with very little speed. Owner: "jumping over the honey without sufficient speed and
          *  falling into the void." A miss falls to its death = an unambiguous FAIL.
          *
-         *  <p><b>HONEST GATE (2026-07-15).</b> These trials are now {@code honestCross}: PASS requires a REAL
-         *  airborne walk-off that DROPS onto the far landing platform and then reaches a goal pushed
-         *  {@link #HONEY_GOAL_PAST} cells PAST the landing edge — so a bot that merely teeters onto the honey
-         *  edge and lands inside the 2.5-block arrival radius no longer scores a (false) PASS. The landing
-         *  platform is extended ({@link #HONEY_LAND_LEN}) so an overshoot has runout and the far goal is real.
-         *  The bot crosses via WalkOff FROM the honey (Traverse onto the honey, then advance-2/descend-1) —
-         *  honey {@code reducesJump}-gates a jump, so WalkOff is the sole crosser; soul sand is NOT jump-gated,
-         *  so the plan Traverses onto it and JUMPS FROM it (Parkour), the decisive honey/soul control.
+         *  <p><b>THE FLYOVER TRIALS ARE GONE (2026-08-24).</b> They asserted a jump OVER the honey, and
+         *  {@code Parkour.candidates} now refuses that by ratified owner decision: a SLOW floor is deliberately
+         *  not overflown (the {@code HoneyBlock.doSlideMovement} wall-slide steals ~88% of horizontal momentum
+         *  on a fast descent beside honey and drops the bot into the void, and special-casing it is the bandaid
+         *  class the model avoids). The overfly trigger is {@code (damaging && takesDamage) || topY < 12};
+         *  honey's top is 15/16 and soul sand's 14/16, so neither qualifies and the scan dead-ends on them —
+         *  magma, being damaging, still overflies, which is why {@code magmaov} behaves differently. The
+         *  model's route for a slow obstacle is instead "Traverse ONTO it, then a reduced-envelope Parkour
+         *  off it".
          *
-         *  <p>Three trials: the owner's STANDSTILL spawn ({@code REST}, ~1-block run-up, arrives at walk speed),
-         *  a RUN-UP twin ({@code honeyRunup}: WALKIN + full stone runway + {@code fastEntry} sprint-arrival — does
-         *  a walk-off cross CLEANLY when it reaches the lip at sprint?), and the soul-sand jump-from-sand
-         *  positive control. */
+         *  <p>So this tile now hosts the SLOW-STEP pair, which isolates step one of that route: walk from the
+         *  stone takeoff onto the partial-height slow block and stand on it. They are a deliberate RED pin —
+         *  the 2026-08-24 course run showed the follower cannot do it, teetering on the takeoff stone's edge
+         *  at y == Y0+1.0 in a 2-tick +-0.0346 limit cycle with its centre already over the slow cell, never
+         *  descending the 1/16 onto it. Until that is fixed, every slow-obstacle crossing is unreachable at
+         *  its first move. See {@link #slowStepTrial}. */
         void ownerRepro() {
-            ownerReproTrial("owner.honeyflyover", HONEY, false);       // standstill (owner's spawn) — the hard case
-            ownerReproTrial("owner.honeyflyover.runup", HONEY, true);  // run-up (sprint arrival) — is honey solved?
-            ownerReproTrial("owner.soulflyover", SOUL, false);         // control: jump-from-soul really crosses
+            slowStepTrial("slowstep.honey", HONEY);
+            slowStepTrial("slowstep.soul", SOUL);
         }
 
-        /** One owner honey/soul crossing trial. {@code runup} = WALKIN + full stone runway + {@code fastEntry}
-         *  (arrive at the lip at sprint terminal); else {@code REST} at the takeoff (the owner's standstill). */
-        void ownerReproTrial(String name, BlockState gapBlock, boolean runup) {
+        /** One SLOW-STEP trial: walk from a full stone takeoff onto the adjacent PARTIAL-HEIGHT slow block
+         *  (honey 15/16, soul sand 14/16) and stand on it. Reuses {@code buildOwnerTile}'s geometry — runway,
+         *  takeoff stone, the slow block in the next cell, a void, then a landing strip — but the goal is the
+         *  SLOW BLOCK ITSELF, so the trial isolates the single Traverse the planner's slow-obstacle route
+         *  depends on. Partial top ⇒ standing on it puts the feet cell at Y0, the block's own cell. */
+        void slowStepTrial(String name, BlockState slowBlock) {
             int[] b = nextBase();
-            Trial t = new Trial(name, runup ? Approach.WALKIN : Approach.REST, -1, 0, -3, -1, 0,
-                    Template.REACH, false, b[0], b[1]);
-            t.ownerRepro = true;
-            t.honestCross = true;                                // strict: must really cross onto the far platform
-            t.honeyRunup = runup;
-            t.fastEntry = runup;                                 // pin sprint terminal on the approach to the lip
-            t.gapFloor = gapBlock;                               // honey/soul at the walk-off takeoff cell (owner's 80)
-            // Goal pushed HONEY_GOAL_PAST cells past the landing edge (owner's 78) — beyond the 2.5-block arrival
-            // radius from the honey, so ONLY a real crossing that stands on the landing platform can "arrive".
+            Trial t = new Trial(name, Approach.REST, -1, 0, -3, -1, 0, Template.REACH, false, b[0], b[1]);
+            t.ownerRepro = true;   // lay buildOwnerTile's terrain
+            t.slowStep = true;     // strict: feet actually ON the slow block, not a teeter beside it
+            t.gapFloor = slowBlock;
+            // Goal is the FAR LANDING, not the slow block itself. Aiming at the slow cell directly makes the
+            // planner refuse outright ("nav gave up", maxProj 0.00) -- a partial block's own cell is not a
+            // goal it will path into -- which would test nothing. Aimed past the gap, the planner produces
+            // exactly the route its slow-obstacle decision documents: Traverse ONTO the slow block, then a
+            // reduced-envelope Parkour off it. stoodOnSlow then pins STEP ONE of that route independently of
+            // whether the crossing ever completes.
             t.goal = new BlockPos(t.landX + HONEY_GOAL_PAST * t.cdx, t.landY + 1,
                     t.landZ + HONEY_GOAL_PAST * t.cdz);
             trials.add(t);
@@ -724,8 +737,57 @@ public final class ParkourCourse {
         }
 
         void diag(String name, int jdx, int jdy, int jdz) {
-            addTrial(name + ".walkin", Approach.WALKIN, 1, 1, jdx, jdy, jdz, Template.REACH, false);
-            addTrial(name + ".rest", Approach.REST, 1, 1, jdx, jdy, jdz, Template.REACH, false);
+            addDiagTrial(name + ".walkin", Approach.WALKIN, jdx, jdy, jdz);
+            addDiagTrial(name + ".rest", Approach.REST, jdx, jdy, jdz);
+        }
+
+        /**
+         * A DIAGONAL-approach trial, with its tile nudged OFF the region-corner degeneracy.
+         *
+         * <p>A (+1,+1) diagonal run-in from {@code (bx,bz)} steps through blocks {@code (bx+k, bz+k)}, so it
+         * crosses its x REGION boundary at {@code k = (16 - bx%16) % 16} and its z boundary at
+         * {@code k = (16 - bz%16) % 16} ({@code RegionAddress.LEAF_SIZE == 16}). Those coincide exactly when
+         * {@code bx % 16 == bz % 16} — and on that one step the chain moves CORNER-TO-CORNER between two
+         * diagonally-adjacent regions, entering neither orthogonal neighbour.
+         *
+         * <p>The region tier's adjacency is strictly 6-FACE ({@code for (int f = 0; f < 6; f++)} in
+         * RegionPathfinder, FragmentBuilder, InvalidationRollup and PyramidMerger), so no edge exists for
+         * that hop. When both corner-adjacent regions are also untraversable under the bot's caps — pure-air
+         * neighbours with no place capability, the case here — region A* returns FAIL, the skeleton is NONE,
+         * and the bot refuses to move AT ALL even though block-tier A* paths the chain happily.
+         *
+         * <p>That is a REAL bot bug, and it is pinned on purpose by {@code regioncorner.walkin} below. It is
+         * emphatically NOT what the diag cards test — they test diagonal PARKOUR — and it reached them only
+         * because a 2026-08-24 trial-list edit shifted diag1's tile from x=60 (60%16=12 vs 138%16=10, two
+         * separate face crossings) onto x=138 (10 vs 10, one corner crossing). One block of z decouples the
+         * two crossings again; applied only when they would collide, so every other tile is untouched.
+         */
+        void addDiagTrial(String name, Approach a, int jdx, int jdy, int jdz) {
+            int[] b = nextBase();
+            if (Math.floorMod(b[0] - b[1], RegionAddress.LEAF_SIZE) == 0) {
+                b[1] += 1;
+            }
+            trials.add(new Trial(name, a, 1, 1, jdx, jdy, jdz, Template.REACH, false, b[0], b[1]));
+        }
+
+        /**
+         * REGION-CORNER PIN (2026-08-24) — deliberately placed ON the degeneracy {@link #addDiagTrial}
+         * avoids, so the diagonal run-in must cross a region CORNER.
+         *
+         * <p>Geometrically trivial: a 1-wide diagonal stone chain with open air above, which block-tier A*
+         * paths as six plain {@code Diagonal} steps. It fails at the REGION tier, which has no 6-face edge
+         * for the corner hop and no traversable intermediate (both corner-adjacent regions are pure air and
+         * the trial's bot cannot place). Expected verdict today: {@code nav gave up (no route offered)},
+         * with the bot never leaving its spawn block — a RED pin, not a marked refusal, because the bot
+         * genuinely should be able to walk this.
+         *
+         * <p>Base is pinned OUTSIDE the snake grid (negative, like {@code hotdiag1}'s explicit base) so the
+         * degeneracy is a property of the fixture rather than of wherever the trial list happens to put it:
+         * {@code -18 % 16 == -18 % 16}, and the chain's x and z crossings coincide at {@code k = 2}.
+         */
+        void regionCornerPin() {
+            trials.add(new Trial("regioncorner.walkin", Approach.WALKIN, 1, 1, 2, 0, 2,
+                    Template.REACH, false, BASE_X - STRIDE, BASE_Z - STRIDE));
         }
 
         /** OFFSET (c,±lat) knight's-move jump, both precursor conditions. */
@@ -825,6 +887,7 @@ public final class ParkourCourse {
             leftTakeoff = false;
             wentAirborne = false;
             reachedLanding = false;
+            stoodOnSlow = false;
             stairAirborne = false;
             takeoffSpeed = -1;
             wasGrounded = true;
@@ -905,6 +968,19 @@ public final class ParkourCourse {
             if (EntityState.onGround(bot) && bot.getY() < tr.landedFeetY + 0.5
                     && proj >= tr.landCenterProj() - 0.6) reachedLanding = true;
 
+            // slowStep tracking: the bot has genuinely STEPPED DOWN onto the partial-height slow block only
+            // when it is grounded IN that cell BELOW the neighbouring full block's top. This is exactly the
+            // discriminator the 2026-08-24 course run needed: a bot whose CENTRE is over the slow cell while
+            // its 0.6-wide box still overlaps the takeoff stone stays supported at y == Y0 + 1.0, so a
+            // cell-only test would score that teeter as success. Honey's top is 15/16 and soul sand's 14/16,
+            // so a real step-down always reads strictly below Y0 + 0.99.
+            if (EntityState.onGround(bot)
+                    && (int) Math.floor(bot.getX()) == tr.gapFloorX
+                    && (int) Math.floor(bot.getZ()) == tr.gapFloorZ
+                    && bot.getY() < Y0 + 0.99) {
+                stoodOnSlow = true;
+            }
+
             // A KNOWN-PLANNER-GAP trial (honey-in-first-gap max-reach tier, or the no-runway magma-overhang) is
             // scored by the normal fell/atGoal logic below — but record() rewrites any FAIL to its PLANNER-GAP
             // reason and counts it apart from real pass/fail (so it reads as an intended RED reminder, never a
@@ -944,6 +1020,37 @@ public final class ParkourCourse {
             // onto the far landing platform AND reaches the far goal — a honey-edge teeter inside the 2.5-block
             // arrival radius (the old false PASS) no longer counts, because the goal is HONEY_GOAL_PAST cells
             // beyond the landing and reachedLanding requires the Y-drop + past-the-gap proj.
+            // SLOW-STEP (2026-08-24): PASS demands the bot actually stand ON the partial-height slow block.
+            // Deliberately a RED pin at introduction — the follower cannot do this yet (it teeters on the
+            // takeoff stone's edge in a 2-tick limit cycle and never descends the 1/16), and the planner's
+            // own documented route for a slow obstacle is "Traverse onto it, then a reduced-envelope Parkour
+            // off it", so step one failing blocks the whole intent.
+            if (tr.slowStep) {
+                if (!bot.isAlive() || fell) {
+                    record(tr, "FAIL", "fell off the slow block");
+                    return;
+                }
+                if (stoodOnSlow) {
+                    record(tr, "PASS", "stepped down onto the slow block");
+                    return;
+                }
+                if (bot.navigator().navGaveUp()) {
+                    if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
+                        navRetries++;
+                        bot.comeTo(tr.goal);
+                        return;
+                    }
+                    record(tr, "FAIL", "nav gave up (no step-on offered)");
+                    return;
+                }
+                if (attemptTicks >= ATTEMPT_BUDGET) {
+                    record(tr, "FAIL", String.format(Locale.ROOT,
+                            "never stepped onto the slow block — teetered at y=%.3f (needs < %.2f)",
+                            bot.getY(), Y0 + 0.99));
+                }
+                return;
+            }
+
             if (tr.honestCross) {
                 if (!bot.isAlive() || fell) {
                     record(tr, "FAIL", String.format(Locale.ROOT,

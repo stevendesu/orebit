@@ -500,15 +500,22 @@ public class SteerControlTest {
 
     /** The A/B revert leg is untouched by the mode switch: a SAFE straight still runs the pursuit servo. */
     @Test
-    void drive_safeStraight_stillRunsThePursuitServo() {
+    void drive_safeStraight_alsoArrivesOnTheStep() {
+        // PHASE 3 (2026-08-24): this used to assert the SAFE corner kept groundServo's pursuit branch
+        // ("servo:thrust"). That servo is deleted — it faced the raw velocity error with no position term,
+        // so near a segment end, where the scheduled speed drops under the residual velocity, its facing
+        // flipped 180 degrees per tick at full throttle and parked the bot short of the target. Both the
+        // safe and the hazard corner now route to arriveOnStep, so ONE position-anchored law owns every
+        // grounded drive tick; the assertion follows the law rather than the retired branch.
         View straight = new View(10.5, 69.0, 10.5, 11.5, 69.0, 10.5);
         FakeBot b = new FakeBot(11.0, 69.0, 10.5);
         b.grounded = true;
         b.withSolid(12, 68, 10).withSolid(13, 68, 10)     // floored ahead — nothing to brake for
          .withSolid(11, 68, 11).withSolid(11, 68, 9);     // …and floored on both flanks
         SteerControl.drive(b, straight);
-        assertTrue(SteerControl.lastDrive.endsWith("servo:thrust"),
-                "a safe corner keeps the pursuit servo; got " + SteerControl.lastDrive);
+        assertTrue(SteerControl.lastDrive.contains("arrive:step")
+                        && !SteerControl.lastDrive.contains("arrive:stephaz"),
+                "a safe corner arrives on the step's target centre; got " + SteerControl.lastDrive);
         assertTrue(b.faceDx > 0, "heads down the leg");
     }
 
