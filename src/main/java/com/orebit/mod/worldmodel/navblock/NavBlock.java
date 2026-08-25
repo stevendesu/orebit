@@ -404,7 +404,7 @@ public final class NavBlock {
     // once per navtype by {@link #deriveBits} at table build, asserted consistent at init.
     private static final long STANDABLE_BIT  = 1L << 37; // stand on top: solid-topped, no fluid, not damaging
     private static final long BREAKABLE_BIT  = 1L << 38; // mineable geometry: solid, no fluid, not unbreakable/protected
-    private static final long OPEN_PLACE_BIT = 1L << 39; // a placed block could fill it: replaceable/empty, no fluid
+    private static final long OPEN_PLACE_BIT = 1L << 39; // a placed block could fill it: replaceable/empty, not protected (FLUIDS INCLUDED)
     private static final long COLLISION_BIT  = 1L << 40; // has a face to build against: solid, no fluid
 
     /** All derived predicate bits — stripped before a re-derivation ({@link #applyProtected}). */
@@ -1399,8 +1399,12 @@ public final class NavBlock {
     /** Is this cell's geometry mineable? Solid, no fluid, not unbreakable, not owner-{@link #isProtected
      *  protected} (still gate on the bot's caps). */
     public static boolean isBreakable(long d)    { return (d & BREAKABLE_BIT) != 0; }
-    /** Could a placed block fill this cell? Replaceable/empty, no fluid, and not owner-{@link #isProtected
-     *  protected} — filling replaces (destroys) the occupant (still gate on the bot's caps). */
+    /** Could a placed block fill this cell? Replaceable/empty and not owner-{@link #isProtected protected}
+     *  — filling replaces (destroys) the occupant (still gate on the bot's caps).
+     *
+     *  <p><b>FLUIDS ARE OPEN</b> (owner ruling, s52b): water and lava are vanilla-replaceable, so a fluid
+     *  cell IS fillable — sealing a lava source with cobble is a standard technique. There is deliberately
+     *  NO {@code noFluid} conjunct in {@link #withDerived}; an earlier one wrongly barred every fluid cell. */
     public static boolean isOpenForPlace(long d) { return (d & OPEN_PLACE_BIT) != 0; }
     /** Does this cell have a solid face to build against? Solid, no fluid. */
     public static boolean hasCollision(long d)   { return (d & COLLISION_BIT) != 0; }

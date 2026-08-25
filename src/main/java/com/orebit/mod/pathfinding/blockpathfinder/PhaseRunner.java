@@ -214,61 +214,110 @@ public final class PhaseRunner {
         // Establish this phase's geometry. Mining is timed and one-cell-at-a-time, so the first unmet AIR
         // need claims the tick and we hold; placements are instant, so all missing footings resolve now. While
         // anything is unmet, hold on the target column instead of driving the phase (stop and fix the geometry).
-        for (MovePlan.Req r : phase.needs()) {
-            if (r.kind == MovePlan.Need.AIR) {
-                // An openable cell (door OR trapdoor) is governed by a Need.OPEN (toggled by hand above) —
-                // NEVER mine it, even a CLOSED toggleable one (which DOES obstruct the corridor): the crossing
-                // operates it by hand, not by force.
-                if (plan.isOpenableCell(r.x, r.y, r.z)) continue;
-                // Mine only a GENUINE obstruction — the block's live collision actually intrudes into the bot's
-                // body corridor (movementBlockedAt), NOT merely "has some collision" (solidAt). This is the
-                // general fix for the whole passable-collision class: a movement's plan() declares Need.AIR on its
-                // body column blind to what occupies it (Traverse.plan), and many blocks the bot moves THROUGH or
-                // stands ON still read solidAt (thin panel / low floor) — an already-open door or open trapdoor
-                // (edge panel outside the corridor), and a carpet / pressure plate / bottom slab / snow layer in
-                // the feet cell (collision below the auto-step). solidAt made the runner swing at all of them
-                // (arm-swing + crack overlay on blocks that need nothing); the geometry test lets the bot pass/
-                // stand while still clearing a real full-block wall. No per-block-type ("is it a door") gate.
-                if (bot.movementBlockedAt(r.x, r.y, r.z, plan.moveDx(), plan.moveDz())) {
-                    bot.mine(r.x, r.y, r.z);
-                    if (holdNeed == null) { holdNeed = r.kind; holdX = r.x; holdY = r.y; holdZ = r.z; }
-                    holding = true;
-                    break; // one timed break per tick
-                }
-            } else { // FOOTING
-                // A CLIMBABLE TOP is footing the search may have priced deliberately (Traverse's
-                // CLIMBABLE_TOP_COST node, declared via Phase.needFootingOrClimbable). It has no collision, so
-                // solidAt reads false and the strict branch below would place a plank the plan never budgeted
-                // — or, barehanded, hold on this cell forever. Same predicate the planner used, read live.
-                if (r.climbableOk && bot.climbableFloorAt(r.x, r.y, r.z)) {
-                    continue; // geometry already established: nothing to place, nothing to hold
-                }
-                if (!bot.solidAt(r.x, r.y, r.z)) {
-                    // SELF-ENTOMBMENT GUARD (the 2026-08-19 run-5 forensic; DESIGN-replan-handoff.md §5/R3 —
-                    // defense-in-depth beside Pillar's failWhen envelope): NEVER place into a cell the bot's
-                    // own body occupies — its feet cell (footY) or head cell (footY+1). A correctly-framed
-                    // FOOTING is never there: Pillar's place phase only runs past its jump gate
-                    // (advanceWhen b.y() >= fy+2), so at legitimate place time footY >= r.y+1 and the cell
-                    // is BENEATH the feet; Descend's step-down floor and Traverse's bridge planks sit in
-                    // another column or at footY-1 (audited: these three are the only FOOTING declarers;
-                    // clutches ride the separate placeClutch verb). Only a plan whose frame reality has left
-                    // can aim a place at the bot itself (run-5: a seam adoption re-ran an already-executed
-                    // Pillar with the frame shifted +1 onto the bot's column, and the executor's place()
-                    // clears soft occupants and writes server-side with no entity-collision check — it
-                    // sealed the bot in, silently and permanently). Refuse and HOLD, don't place: holdNeed
-                    // still reports FOOTING, so a persistent refusal is visible in the follower's hold log,
-                    // and the cell re-tests each tick as the bot moves. Grounded, the failWhen envelope
-                    // fails the mis-framed step; this guard is the AIRBORNE half of the same defense.
-                    boolean ownBodyCell = r.x == bot.footX() && r.z == bot.footZ()
-                            && (r.y == bot.footY() || r.y == bot.footY() + 1);
-                    if (!ownBodyCell) {
-                        bot.place(r.x, r.y, r.z);
+        boolean doorsHolding = holding;
+
+        // ESTABLISH, THEN ADVANCE — both on THIS tick (owner ruling 2026-08-23; the flagship surface-Pillar
+        // wedge at (1113,15,1060)). The advance check used to sit at the BOTTOM of this method, after drive,
+        // so a phase whose gate fired on THIS tick had its needs and its drive deferred to the NEXT one.
+        // Wherever a floor arrests gravity that lag is free — the bot is still in the same pose next tick.
+        // In water, on a climbable, or mid-air the pose DECAYS every tick and the lag is unrecoverable
+        // altitude: it cost exactly the one-tick placement window a surface pillar gets. Pillar's jump gate
+        // (y >= fy+2) fired at botY=17.002 — the bob apex, feet clear of the footing cell for ONE tick — and
+        // the place phase's FOOTING need did not run until the following tick, by which point the bot had
+        // fallen back INTO the cell it had to fill and the self-entombment guard (correctly) refused it,
+        // permanently.
+        //
+        // The loop is what makes this safe, and the unit suite is what proved a bare reorder is not. Needs
+        // run at the TOP of every iteration, so a phase is ALWAYS established before its own gate is read:
+        //   - a bare advance-before-needs skipped phase 0 entirely whenever its gate was already true on the
+        //     first tick (phase 0 is entered by begin(), not by an advance) — the 2026-08-03 Descend CLEAR
+        //     wedge exactly, and BreakAtFeetFloorCarryTest mined nothing;
+        //   - gating that on a "was established" latch then forbade a legitimate first-tick advance —
+        //     DescendVineLandingTest.groundedBotPassesTheGateOnTheFirstTick.
+        // Establish -> test -> advance -> establish the NEW phase -> drive it satisfies all three.
+        //
+        // HOLDING NEVER ADVANCES: unmet geometry (timed mining, a refused footing) breaks out before the
+        // gate is read, so a gate coming true mid-hold can never abandon unfinished edits — Pillar's refused
+        // self-cell place (PillarZeroDeltaFootingTest) depends on it. Bounded by plan.size(): every
+        // iteration either advances the cursor or breaks.
+        while (true) {
+            phase = plan.phaseAt(cursor);
+            holding = doorsHolding;
+
+            for (MovePlan.Req r : phase.needs()) {
+                if (r.kind == MovePlan.Need.AIR) {
+                    // An openable cell (door OR trapdoor) is governed by a Need.OPEN (toggled by hand above) —
+                    // NEVER mine it, even a CLOSED toggleable one (which DOES obstruct the corridor): the crossing
+                    // operates it by hand, not by force.
+                    if (plan.isOpenableCell(r.x, r.y, r.z)) continue;
+                    // Mine only a GENUINE obstruction — the block's live collision actually intrudes into the bot's
+                    // body corridor (movementBlockedAt), NOT merely "has some collision" (solidAt). This is the
+                    // general fix for the whole passable-collision class: a movement's plan() declares Need.AIR on its
+                    // body column blind to what occupies it (Traverse.plan), and many blocks the bot moves THROUGH or
+                    // stands ON still read solidAt (thin panel / low floor) — an already-open door or open trapdoor
+                    // (edge panel outside the corridor), and a carpet / pressure plate / bottom slab / snow layer in
+                    // the feet cell (collision below the auto-step). solidAt made the runner swing at all of them
+                    // (arm-swing + crack overlay on blocks that need nothing); the geometry test lets the bot pass/
+                    // stand while still clearing a real full-block wall. No per-block-type ("is it a door") gate.
+                    if (bot.movementBlockedAt(r.x, r.y, r.z, plan.moveDx(), plan.moveDz())) {
+                        bot.mine(r.x, r.y, r.z);
+                        if (holdNeed == null) { holdNeed = r.kind; holdX = r.x; holdY = r.y; holdZ = r.z; }
+                        holding = true;
+                        break; // one timed break per tick
                     }
-                    if (holdNeed == null) { holdNeed = r.kind; holdX = r.x; holdY = r.y; holdZ = r.z; }
-                    holding = true; // re-validate next tick (place is instant; a refused self-cell clears as the bot moves)
+                } else { // FOOTING
+                    // A CLIMBABLE TOP is footing the search may have priced deliberately (Traverse's
+                    // CLIMBABLE_TOP_COST node, declared via Phase.needFootingOrClimbable). It has no collision, so
+                    // solidAt reads false and the strict branch below would place a plank the plan never budgeted
+                    // — or, barehanded, hold on this cell forever. Same predicate the planner used, read live.
+                    if (r.climbableOk && bot.climbableFloorAt(r.x, r.y, r.z)) {
+                        continue; // geometry already established: nothing to place, nothing to hold
+                    }
+                    if (!bot.solidAt(r.x, r.y, r.z)) {
+                        // SELF-ENTOMBMENT GUARD (the 2026-08-19 run-5 forensic; DESIGN-replan-handoff.md §5/R3 —
+                        // defense-in-depth beside Pillar's failWhen envelope): NEVER place into a cell the bot's
+                        // own body occupies — its feet cell (footY) or head cell (footY+1). A correctly-framed
+                        // FOOTING is never there: Pillar's place phase only runs past its jump gate
+                        // (advanceWhen b.y() >= fy+2), so at legitimate place time footY >= r.y+1 and the cell
+                        // is BENEATH the feet; Descend's step-down floor and Traverse's bridge planks sit in
+                        // another column or at footY-1 (audited: these three are the only FOOTING declarers;
+                        // clutches ride the separate placeClutch verb). Only a plan whose frame reality has left
+                        // can aim a place at the bot itself (run-5: a seam adoption re-ran an already-executed
+                        // Pillar with the frame shifted +1 onto the bot's column, and the executor's place()
+                        // clears soft occupants and writes server-side with no entity-collision check — it
+                        // sealed the bot in, silently and permanently). Refuse and HOLD, don't place: holdNeed
+                        // still reports FOOTING, so a persistent refusal is visible in the follower's hold log,
+                        // and the cell re-tests each tick as the bot moves. Grounded, the failWhen envelope
+                        // fails the mis-framed step; this guard is the AIRBORNE half of the same defense.
+                        boolean ownBodyCell = r.x == bot.footX() && r.z == bot.footZ()
+                                && (r.y == bot.footY() || r.y == bot.footY() + 1);
+                        if (!ownBodyCell) {
+                            bot.place(r.x, r.y, r.z);
+                        }
+                        if (holdNeed == null) { holdNeed = r.kind; holdX = r.x; holdY = r.y; holdZ = r.z; }
+                        holding = true; // re-validate next tick (place is instant; a refused self-cell clears as the bot moves)
+                    }
                 }
             }
+
+            if (holding) break;                      // geometry unmet — hold this phase, do not advance
+            if (cursor < plan.size() - 1 && phase.shouldAdvance(bot)) {
+                // PHASE ADVANCE is otherwise INVISIBLE (owner request, 2026-08-03). The follower's exec log
+                // prints once per state change AFTER run() has driven, so a phase that satisfies its own
+                // shouldAdvance immediately never appears in the log at all — it is only detectable as a gap
+                // in the phase histogram. That is how the 2026-08-03 wedge hid: every Descend showed
+                // phase=1/2 and never 0/2, so its CLEAR phase was advancing past without performing its
+                // edits, and the bot then tried to descend through a 1-tall gap it had never opened.
+                if (com.orebit.mod.Debug.VERBOSE) {
+                    com.orebit.mod.OrebitCommon.LOGGER.info("[Orebit]   phase advance {}/{} -> {}/{} (left '{}')",
+                            cursor, plan.size(), cursor + 1, plan.size(), phase.name);
+                }
+                cursor++;
+                continue;                            // establish the NEW phase's geometry on this same tick
+            }
+            break;
         }
+
         if (holding) {
             // "Stop and fix, like a player" — and STOP means stop. A SETTLED bot station-keeps on its OWN
             // column (SteerControl.stationKeep): re-centring on the step TARGET instead drove it at full
@@ -322,21 +371,6 @@ public final class PhaseRunner {
         SteerControl.stepGateArmed = false;
         if (cursor == plan.size() - 1) {
             return phase.isDone(bot);
-        }
-        if (phase.shouldAdvance(bot)) {
-            // PHASE ADVANCE is otherwise INVISIBLE (owner request, 2026-08-03). The follower's exec log prints
-            // once per state change AFTER run() has already driven and advanced, so a phase that satisfies its
-            // own shouldAdvance on its first drive tick never appears in the log at all — it is only detectable
-            // as a gap in the phase histogram. That is exactly how the 2026-08-03 wedge hid: every Descend in
-            // the run showed phase=1/2 and never 0/2, so its CLEAR phase (the one that mines the step-off
-            // column and places the footing) was advancing past without performing its edits, and the bot then
-            // tried to descend through a 1-tall gap it had never opened. Logging the transition names the
-            // phase that yielded and the tick it happened on.
-            if (com.orebit.mod.Debug.VERBOSE) {
-                com.orebit.mod.OrebitCommon.LOGGER.info("[Orebit]   phase advance {}/{} -> {}/{} (left '{}')",
-                        cursor, plan.size(), cursor + 1, plan.size(), plan.phaseAt(cursor).name);
-            }
-            cursor++;
         }
         return false;
     }
