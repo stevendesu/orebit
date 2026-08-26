@@ -69,8 +69,7 @@ public final class EndSprintSwim implements Movement {
     @Override
     public void steer(BotSteering b, SteerView path) {
         b.setSprinting(false);
-        b.setForward(0f);
-        SteerControl.holdDepth(b, path, 0.0);
+        SteerControl.uprightSwimServo(b, path);
     }
 
     @Override
@@ -80,8 +79,23 @@ public final class EndSprintSwim implements Movement {
         plan.phase("standup")
                 .drive((b, v) -> {
                     b.setSprinting(false);      // KEEP: the whole mechanism — vanilla drops the pose from this
-                    b.setForward(0f);           // KEEP: a held forward impulse is what RETAINS the prone pose
-                    SteerControl.holdDepth(b, v, 0.0);
+                    // THE MOVE NOW STEERS (2026-08-26). It used to hold setForward(0f) on the stated grounds
+                    // that "a held forward impulse is what RETAINS the prone pose" — which is the CLIENT rule
+                    // (LocalPlayer), not the server one. Entity.updateSwimming is
+                    //     setSwimming(isSprinting() && isInWater() && !isPassenger())
+                    // for an already-swimming entity: the pose is keyed on isSprinting() ALONE, and a headless
+                    // bot never runs the client path at all. So clearing sprint above IS the whole mechanism,
+                    // and the forward key was free the entire time.
+                    //
+                    // That mattered, because this move had ZERO horizontal authority while its reach test
+                    // (Swim.reachedSwim) is an exact foot-cell match. The flagship wedge at (359,37,426) was
+                    // exactly that dead end: the predecessor delivered the bot 0.319 off-centre carrying
+                    // 0.0516 b/t, water's 4.0-block coast carried it 0.206 further into the NEXT cell, and the
+                    // move then sat for 3015 ticks failing a positional test it could not act on. The upstream
+                    // fix (a servo that nulls cross-track, plus containment in reachedSwim) is what stops the
+                    // bot arriving here off-centre; this is the second lock — even handed a bad delivery, the
+                    // stand-up can now correct it instead of deadlocking.
+                    SteerControl.uprightSwimServo(b, v);
                 })
                 .done(b -> !b.prone());
         return plan;

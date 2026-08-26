@@ -88,16 +88,11 @@ public class SprintSwim implements Movement {
      */
     public static final float COST = 20f / 5.612f;
 
-    /**
-     * Cruise steering strategy selector (read once). Default is {@code "servo"}: the input-only velocity servo
-     * ({@link SteerControl#swimServo}) — velocity feedback + a hazard-aware target-velocity profile (full cruise
-     * on safe straights, ramping to a velocity-target creep floor at hazard corners) tracked by facing the
-     * velocity error with reverse-thrust braking, plus a smooth diagonal corner blend, an outward racing-line
-     * bias, and a client-legal forward-input floor (W never released while prone). It threads the owner's Swims
-     * maze faster than the position-based {@code "directional"} cruise while holding the swim harness 17/17. The
-     * {@code -Dorebit.swim.bleed=forward|centered|directional|servo} switch stays for future A/B comparison.
-     */
-    private static final String BLEED = System.getProperty("orebit.swim.bleed", "servo");
+    // The -Dorebit.swim.bleed A/B switch was REMOVED on 2026-08-26 with the four position-based drives
+    // it selected between (forward / centered / directional / servo). All four wrote setForward and nothing
+    // else, and on a segment all four reduced to "hold full forward, face something"; the rewrite leaves one
+    // law with nothing to compare against. See SteerControl's swim-drive header for the full post-mortem.
+
 
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
@@ -146,7 +141,7 @@ public class SprintSwim implements Movement {
     }
 
     /**
-     * Look at the planned cell and swim forward ({@link SteerControl#swimTowards}), sprinting — so vanilla
+     * Look at the planned cell and swim forward ({@link SteerControl#swimServo}), sprinting — so vanilla
      * adopts the prone sprint-swim (fast, and the 0.6-tall pose that threads a 1×1 hole) — while the
      * {@link SteerControl#holdDepth depth autopilot} rides {@link SteerControl#SUBMERGE_BIAS} below the
      * planned depth: the short prone hitbox pinned under the surface never breaches, so vanilla keeps the
@@ -154,9 +149,8 @@ public class SprintSwim implements Movement {
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
-        SteerControl.swimPitched(b, path, SteerControl.SUBMERGE_BIAS);
         b.setSprinting(true);
-        SteerControl.holdDepth(b, path, SteerControl.SUBMERGE_BIAS);
+        SteerControl.swimServo(b, path, SteerControl.SUBMERGE_BIAS);
     }
 
     @Override
@@ -166,14 +160,14 @@ public class SprintSwim implements Movement {
         MovePlan plan = new MovePlan();
         plan.phase("swim")
                 .drive((b, v) -> {
-                    switch (BLEED) {
-                        case "forward":     SteerControl.swimPitched(b, v, SteerControl.SUBMERGE_BIAS); break;
-                        case "directional": SteerControl.swimPitchedDirectional(b, v, SteerControl.SUBMERGE_BIAS); break;
-                        case "servo":       SteerControl.swimServo(b, v, SteerControl.SUBMERGE_BIAS); break;
-                        default:            SteerControl.swimPitchedCentered(b, v, SteerControl.SUBMERGE_BIAS); break; // "centered"
-                    }
+                    // SPRINT FIRST, then steer. Entity.updateSwimming keys Pose.SWIMMING on isSprinting()
+                    // ALONE, and swimServo's vertical actuator (pitch) only does anything while prone — so
+                    // the sprint flag has to be set before the drive that depends on it, not after.
                     b.setSprinting(true);
-                    SteerControl.holdDepth(b, v, SteerControl.SUBMERGE_BIAS);
+                    // swimServo owns the whole prone control set now (2026-08-26) — the horizontal arrive,
+                    // the depth PITCH, and the jump/sink impulse this used to call holdDepth for separately.
+                    // All three run off one set-point inside the servo, so they cannot disagree.
+                    SteerControl.swimServo(b, v, SteerControl.SUBMERGE_BIAS);
                 })
                 .done(b -> Swim.reachedSwim(b, tx, ty + 1, tz, SteerControl.SUBMERGE_BIAS));
         return plan;

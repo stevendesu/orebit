@@ -34,29 +34,25 @@ public final class SteerControl {
      *  = smoother but lazier cornering; smaller = tighter line-holding but twitchier. The one steering knob. */
     static final double LOOKAHEAD = 1.5;
     /**
-     * Swim-local cross-track gain: the swim pursuit look-ahead is shrunk as the bot's cross-track error grows
-     * ({@code lookahead = LOOKAHEAD / (1 + SWIM_CTE_GAIN * cte)}). At {@code cte=0} the swim drive is the same
-     * lazy {@link #LOOKAHEAD} pursuit as the ground walk; as the bot slips off its lane the aim point collapses
-     * back toward the nearest point ON the line, so the correction turns HARD toward the centerline instead of
-     * converging gently. This is the tight 1-wide-lane hold the bubble-column channels need (a graze of a flank
-     * up-column ejects the bot). Ground steering keeps gain 0 (fixed look-ahead) — this is swim-only. */
+     * Swim pursuit cross-track gain: the look-ahead shrinks as cross-track error grows
+     * ({@code lookahead = LOOKAHEAD / (1 + SWIM_CTE_GAIN * cte)}). At {@code cte = 0} the swim drive is the
+     * same fixed-look-ahead pursuit ground steering uses; off the line the aim swings toward the
+     * PERPENDICULAR foot point, so the recovery is a hard return rather than a lazy diagonal.
+     *
+     * <p><b>Kept through the 2026-08-26 rewrite, and the reason matters.</b> That pass deleted the swim HAZARD
+     * probes (overshootHazard / flankHazard / hazardColumn) because they asked what was in a CELL — a question
+     * the follower has no business re-litigating after the planner priced it. This is a different kind of
+     * constant: it is about the bot's relationship to its own PLANNED LINE, which is the one thing the
+     * follower unambiguously does own. The first cut of the rewrite dropped it along with the probes, on the
+     * theory that a position-anchored law cannot cut a corner. That was wrong, and measurably so: anchoring on
+     * the next WAYPOINT CENTRE while still short of the current one IS a corner cut, because the desired
+     * velocity points diagonally across the lane. SwimCourse `mazeportal` convicted it in one run —
+     * "teleported out of the course dimension (clipped a portal wall)" — the exact 0.026-block graze the lane
+     * geometry was introduced to prevent. The endpoint is where the bot is GOING; the line is where it must
+     * STAY, and a law that tracks only the former has no opinion about the latter.
+     */
     static final double SWIM_CTE_GAIN = 6.0;
-    /**
-     * Swim lane-admission bound (blocks): the cross-track error above which the HAZARD-scoped pursuit clamp
-     * ({@code computeGeom}'s {@code laneGate}) gives up its along-advance and aims at the perpendicular foot
-     * point on the line — pure recentring until the bot's BOX is back inside the current segment's 1-wide
-     * lane. Geometry: the 0.6-wide box is fully inside a 1-wide lane iff |cte| ≤ 0.5 − 0.3 = 0.2; 0.05 of
-     * margin gives 0.15. Applied ONLY when the corner/flank is a swim hazard (see swimServo): on open water,
-     * cte above this bound is ordinary geometry (the rise card's diagonal zig-zag lives there by design and
-     * livelocked under an unscoped clamp — 2026-08-16). */
-    static final double LANE_ADMIT = 0.15;
-    /** How many cells past a turn waypoint the hazard-aware corner brake probes along the CURRENT travel
-     *  direction to decide whether an overshoot would carry the bot into a hazard (bubble column / lava). */
-    static final int HAZARD_LOOKAHEAD = 2;
-    /** Cross-track drift (blocks) past which a bot on a hazard-FLANKED lane is judged to be drifting toward the
-     *  flank column and is crawled to bleed the perpendicular momentum + recentre. Below it (a centred bot on a
-     *  bubble-flanked straight) the lane runs at full speed — so only the actual corner-departure drift is bled. */
-    static final double FLANK_DRIFT = 0.08;
+
     /** Lengths below this are treated as zero (degenerate segment / already on the point) — avoids /0. */
     static final double EPS = 1.0e-4;
     /** cos of the max off-heading angle treated as "in line" (~25 degrees) — above it a corner is a real turn. */
@@ -112,42 +108,6 @@ public final class SteerControl {
      */
     public static final double SUBMERGE_BIAS = 0.0;
     /**
-     * How far (blocks) the corner brake pulls its aim point BACK toward the incoming waypoint from the turn
-     * cell centre. A swim waypoint is "reached" when the bot's FOOT block enters the cell — at its NEAR face,
-     * ~0.5 block short of the centre — so a brake that decelerates toward the far centre still hands off (cursor
-     * advances) with the bot half a cell short and a full head of momentum, which then coasts THROUGH the lane
-     * into the far wall. Braking toward the near face instead zeroes the momentum right where the cursor
-     * releases, so the bot arrives centred on the lane.
-     *
-     * <p><b>BOUNDED BY THE BODY, NOT THE CELL</b> (owner ruling 2026-08-24). This was a hand-set {@code 0.45},
-     * justified as "kept under 0.5 so the aim still lies inside the turn cell". 0.5 is the CELL half-width;
-     * the bot is 0.6 wide, so an aim {@code 0.45} back from the centre sits 0.05 inside the near face and
-     * leaves {@code 0.25} of the body in the SOURCE cell. That is not a pose the bot has arrived in — on any
-     * surface, in any medium.
-     *
-     * <p>It went unnoticed because a same-height destination hides it: the foot cell flips the moment the
-     * CENTRE crosses the boundary, so the step completes wherever the body happens to be. The 2026-08-24
-     * slowstep cards removed that cover — walking onto a partial-height block (honey 15/16, soul sand 14/16)
-     * the foot cell is the block's OWN cell, so arrival demands the body physically clear the source block,
-     * which needs the centre at {@code 0.5 - BODY_RADIUS} or deeper. The bot held this anchor exactly, at
-     * {@code x≈1.95} against a 1.70 requirement, and hunted there forever: a correct servo, obediently
-     * holding an anchor that no completion test could ever accept.
-     *
-     * <p>So the offset is DERIVED: the deepest aim that still leaves the whole body inside the destination
-     * cell, less a small margin so support genuinely transfers rather than resting flush on the boundary.
-     * No per-surface arm and no "unless descending" special case — the same law for swim lanes, corners,
-     * slabs, honey and plain stone, which is the whole point of a servo. */
-    static final double TURN_ARRIVE_OFFSET = 0.45;
-
-
-    /** Crawl throttle cap at a HAZARD corner: the forward key is capped this low so a fast bot DECELERATES into
-     *  the corner (drag beats the reduced thrust) yet a slow bot keeps CREEPING across the cell face — a steady
-     *  near-crawl (owner: "velocity ≈ 0") that neither overshoots the lane into the flank hazard nor stalls the
-     *  cursor (a true dead-stop leaves nothing to advance the bot). Only ever applied when the corner's overshoot
-     *  is a hazard, so a harmless turn is never slowed. */
-    static final double TURN_CRAWL_THROTTLE = 0.28;
-
-    /**
      * A/B + revert switch for {@link #drive}'s LAND branch (the chokepoint the ground moves Traverse/Descend/
      * Diagonal steer through): {@code "servo"} (default) = the input-only velocity {@code groundServo} (deleted 2026-08-24) (hazard-
      * aware target-velocity with reverse-thrust braking — holds a 1-wide blue-ice lane); {@code "legacy"} = the
@@ -161,14 +121,6 @@ public final class SteerControl {
     private static final String GROUND_DRIVE = System.getProperty("orebit.ground.drive", "servo");
 
     // ---- velocity-servo cruise (swimServo) constants -------------------------------------------------
-    /**
-     * Desired-speed CEILING (blocks/tick) for the velocity servo on a safe straight. Set ABOVE the sprint-swim
-     * terminal (~0.26 b/t measured on a straight) so the velocity error {@code desired - current} stays large
-     * enough that the proportional forward key SATURATES to full ahead on every safe straight — i.e. the servo
-     * cruises a straight exactly as hard as the open-loop drive, and the clamp only ever bites inside the
-     * hazard-corner speed ramp (where {@code min(cruise, ramp*dist)} takes the ramp term). A pure-P servo can't
-     * hold a speed equal to its own ceiling (steady-state error), so the ceiling is deliberately unreachable. */
-    static final double SERVO_CRUISE = 0.35;
     /** Servo forward-key gain: {@code forward = clamp(SERVO_GAIN * |velocityError|, 0, 1)}. Large enough that a
      *  ~0.05 b/t error already saturates, so acceleration (under-speed) and braking (overshoot → reverse thrust)
      *  are both crisp; the hazard speed ramp — not this gain — sets the arrival speed. */
@@ -176,36 +128,6 @@ public final class SteerControl {
     /** Servo dead-band (b/t): below this velocity error the servo coasts (forward 0) and merely holds heading —
      *  bang-bang hysteresis so a bot at its desired velocity doesn't chatter the forward key on/off. */
     static final double SERVO_DEADBAND = 0.02;
-    /** Hazard speed-ramp rate (b/t of desired speed per block of distance to the hazard corner): the desired
-     *  speed is {@code min(SERVO_CRUISE, SERVO_HAZARD_RAMP * distanceToCorner)}, so the bot decelerates smoothly
-     *  to ~0 as it reaches a hazardous turn instead of a cliff-stop. Only applied when the corner's overshoot is
-     *  a hazard (reusing {@link #overshootHazard}/{@link #flankHazard}); a harmless turn keeps full cruise. */
-    static final double SERVO_HAZARD_RAMP = 0.16;
-    /**
-     * Hazard-corner creep FLOOR (b/t): the velocity-servo counterpart of {@link #TURN_CRAWL_THROTTLE}. The
-     * hazard speed ramp is clamped to never target BELOW this, so at a run of consecutive hazard waypoints (a
-     * bubble-walled maze channel) the bot holds a steady crawl through the corners instead of dead-stopping at
-     * each one and paying a slow re-acceleration from standstill (the swimturn stall). Small enough that the
-     * crawl still can't overshoot a 1-wide lane into the flank column, large enough to keep the swim cursor
-     * advancing — the same "creep, never stall" balance {@link #TURN_CRAWL_THROTTLE} strikes as a throttle cap,
-     * but expressed as a target SPEED the servo actively holds (reverse-thrust included) rather than a cap. */
-    static final double SERVO_TURN_FLOOR = 0.11;
-    /**
-     * Corner-blend onset distance (blocks): within this range of the turn waypoint the servo's desired-velocity
-     * DIRECTION starts rotating from the current segment toward the NEXT one (the {@link SteerView} look-ahead),
-     * so the bot carries diagonal velocity through the corner (efficiency: no stop-and-go; client-portability:
-     * some forward is always held, keeping the prone-sprint pose client-legal). Beyond this the drive is pure
-     * current-segment pursuit (full-speed straight). */
-    static final double CORNER_BLEND_DIST = 1.3;
-    /** Max corner-blend weight toward the next leg (the {@code w} in {@code (1-w)*current + w*next}). */
-    static final double CORNER_BLEND_MAX = 0.55;
-    /**
-     * OUTSIDE racing-line bias: the corner blend also pushes the desired direction toward the OUTSIDE of the
-     * turn (the side opposite the turn), scaled by the same proximity weight, so the bot rounds the corner on a
-     * WIDER radius and keeps its 0.6-wide hitbox off the INSIDE flank/corner column (the clip that ejects a
-     * prone swimmer — the actual correctness concern, not going slow). Pure next-leg blending alone cuts to the
-     * inside; this outward term is what makes the diagonal safe near a bubble/lava flank. */
-    static final double CORNER_RACING_BIAS = 0.5;
     /**
      * Client-legal FORWARD-INPUT floor: the servo never fully releases the forward key (W) while the bot is
      * prone-sprint-swimming and airborne (in water, not on ground). The vanilla CLIENT keeps the prone
@@ -277,19 +199,6 @@ public final class SteerControl {
      * the look-ahead collapses toward the on-line point as cross-track grows, tightening the lane hold.
      */
     private static void computeGeom(BotSteering b, SteerView p, double cteGain) {
-        computeGeom(b, p, cteGain, false);
-    }
-
-    /**
-     * As the 3-arg overload, with the swim <b>lane-admission clamp</b> ({@code laneGate}): while the bot's box
-     * is not fully inside the current segment's 1-wide lane ({@code cte > }{@link #LANE_ADMIT}), the pursuit
-     * gives up its along-advance and aims at the perpendicular foot point — pure recentring until admitted.
-     * HAZARD-SCOPED by the caller ({@code swimServo} passes its hazardCorner verdict): off-line pursuit is
-     * NORMAL swim geometry on open water (the rise card's diagonal zig-zag holds cte > LANE_ADMIT by design
-     * and livelocked under an unscoped clamp), but against a lethal flank the along-component of an off-lane
-     * pursuit is exactly what cuts the inside corner (the mazeportal 0.026 graze → teleport).
-     */
-    private static void computeGeom(BotSteering b, SteerView p, double cteGain, boolean laneGate) {
         double ax = p.sx(), az = p.sz();
         double tx = p.tx(), tz = p.tz();
         double px = b.x(), pz = b.z();
@@ -312,18 +221,10 @@ public final class SteerControl {
         double cx = px - fx, cz = pz - fz;
         double cte = Math.sqrt(cx * cx + cz * cz);
         G.cte = cte;
-        double lookahead = LOOKAHEAD / (1.0 + cteGain * cte);   // swim: shrink as cross-track grows
-        // LANE ADMISSION (2026-08-16, the mazeportal corner graze; hazard-scoped via laneGate — see the
-        // 4-arg overload doc): off-lane, zero the along-advance so the pursuit aims at the PERPENDICULAR foot
-        // point. The cte-shrunken lookahead above softens the diagonal but never eliminates it: at the
-        // measured corner handoff (cte 0.39) it still left a 0.45 along-component whose diagonal put the box
-        // corner 0.026 into the inside wall cell — survivable against a bubble column, a teleport against an
-        // end-portal wall.
-        if (laneGate && cte > LANE_ADMIT) lookahead = 0.0;
+        double lookahead = LOOKAHEAD / (1.0 + cteGain * cte);
         double q = Math.min(along + lookahead, len);
         G.qx = ax + ux * q; G.qz = az + uz * q;                 // pursuit point ahead on the line
     }
-
     /**
      * Walk the bot along the planned line: face the look-ahead pursuit point (which pulls the bot back onto
      * the line when it drifts) and hold the forward key. A vertical/degenerate segment has no line to follow,
@@ -721,7 +622,6 @@ public final class SteerControl {
         }
         holdClimbableStance(b, p);
     }
-
 
     /**
      * On a climbable, HOLD HEIGHT until the bot is over its target column — the lateral half of a step that
@@ -1200,7 +1100,6 @@ public final class SteerControl {
      */
     public static boolean terminalArrive;
 
-
     /**
      * The ONE grounded drive law: the {@link #anchoredServo unified core} in <b>ARRIVE</b> at the current
      * step's target CENTRE, {@link #SERVO_GROUND_CRUISE} capped over the per-tick friction-derived
@@ -1325,293 +1224,383 @@ public final class SteerControl {
         return (1.0 - q) / q;
     }
 
-    /**
-     * Swim along the planned line, HORIZONTALLY: face the look-ahead pursuit point and hold forward (the same
-     * W-key + look a player uses). Vertical is the caller's {@link #holdDepth} (each swim move calls it with
-     * its own bias — the moves own their vertical control). A pure vertical (degenerate) segment has no line
-     * to track, so it re-centres on the target column ({@link #recenterOnTarget}, as {@link #steerTowards}
-     * does) while {@code holdDepth} drives the dive/climb: carried momentum can drift the bot off the column,
-     * and the exact-cell swim reach ({@code Swim.reachedSwim}'s footX/footZ match) can never fire off-column.
-     */
-    public static void swimTowards(BotSteering b, SteerView p) {
-        computeGeom(b, p, SWIM_CTE_GAIN);
-        if (G.segLen < EPS) {
-            recenterOnTarget(b, p);
-            return;
-        }
-        b.faceHorizontally(G.qx - b.x(), G.qz - b.z());
-        b.setForward(1.0f);
-    }
+    // =================================================================================================
+    // THE SWIM DRIVE (rewritten 2026-08-26, owner ruling) — the fluid half of the servo normalization the
+    // ground family completed on 2026-08-24/25. Seven hand-tuned drives (swimTowards, swimPitched,
+    // swimPitchedCentered, swimPitchedBraked, swimPitchedDirectional, swimServo, uprightSwimServo) plus a
+    // five-probe hazard family collapse here into ONE position-anchored law with two actuators.
+    //
+    // WHY ALL SEVEN FAILED THE SAME WAY. Every one wrote setForward and nothing else, and on a segment every
+    // one reduced to "hold full forward, face something" — because SERVO_CRUISE was 0.35 b/t against a
+    // sprint-swim TERMINAL of 0.18, so the velocity error never left saturation. The two that were nominally
+    // velocity servos faced the velocity ERROR, which is the correct actuation for water; but with an
+    // unreachable set-point the error is dominated by its dir*cruise term, so the facing collapsed back onto
+    // the raw pursuit direction and the velocity feedback had no authority. AN UNREACHABLE CAP DOES NOT
+    // MERELY SATURATE THE THROTTLE — IT ROTATES THE FACING AWAY FROM THE CORRECTION, and in water the facing
+    // IS the entire control signal. Measured on the flagship's wp16 (a pure +X segment, bot 0.349 short in Z
+    // carrying +0.161 b/t of Z): desired = dir*0.35 = (0.284, +0.204) against vel (0.032, +0.161) gives
+    // err (+0.252, +0.044) — the servo read an already-committed overshoot as UNDER-speed and asked for more
+    // +Z. At the achievable 0.18 the same tick gives err (+0.114, -0.056): it brakes.
+    //
+    // WHY THE 21 GREEN SWIM CARDS NEVER CAUGHT IT. The maze family (swimmaze / mazeportal / mazelava) walls
+    // its lanes with bubble columns, END_PORTAL blocks and a lava blanket — all swimHazardAt — so every corner
+    // there took the HAZARD RAMP branch, min(0.35, max(0.11, 0.16*dist)), which falls below the 0.18 terminal
+    // inside the last ~1.1 blocks. IN THE MAZE THE CAP WAS REACHABLE EXACTLY WHERE IT MATTERED and the servo
+    // genuinely braked; open water never armed the ramp. The servo had only ever been validated in the one
+    // regime where its set-point was achievable. The flagship at (359,37,426) was the first open water it had
+    // ever driven: it handed EndSprintSwim 0.0516 b/t of un-nulled cross velocity which, on water's 4.0-block
+    // coast, carried the bot 0.206 blocks — a whole cell past the waypoint — into a deadlock.
+    //
+    // WHAT REPLACES IT: anchoredServo's cascade with water's own drag, over the existing line geometry.
+    // DIRECTION still comes from the cte-shrunken pursuit point (the cross-track return — deleting it was a
+    // false start, see SWIM_CTE_GAIN and `mazeportal`); SPEED becomes min(cap, gain*dist) with cap the
+    // ACHIEVABLE terminal and gain = 1/coast, so the ease begins exactly where a full-speed coast would just
+    // reach the anchor. No unreachable constant is needed, and the corner brake generalizes to EVERY waypoint,
+    // hazard or not — which is what makes the overshootHazard/flankHazard/hazardColumn/racing-line apparatus
+    // deletable rather than ported. The line drawn is CONTENTS vs GEOMETRY: probes that ask what is in a
+    // neighbouring cell are gone; the bot's relationship to its own planned line stays.
+    //
+    // WHAT DELIBERATELY DOES *NOT* CARRY OVER FROM THE GROUND CORE (each vanilla-verified — see the constants):
+    //   * NO STRAFE. actuate() decomposes the error into forward + strafe because on land the facing is
+    //     semantically load-bearing (the no-pirouettes ruling). In water the facing is ALSO the vertical
+    //     control, and "look where you are going and hold W" is how the medium is actually flown (owner
+    //     ruling 2026-08-26). Strafe DOES work in water — getInputVector rotates the full input vector by
+    //     YAW only, with no pose gate anywhere in Player.travel or LivingEntity.travel* — but horizontal
+    //     thrust is a disc of radius WATER_ACCEL that facing + forward already covers completely. Strafe only
+    //     buys a direction without moving the head, which is exactly the thing water does not want.
+    //   * PITCH IS AN ACTUATOR, and ONLY while PRONE. Player.travel steers vel.y toward lookAngle.y at
+    //     rate e, gated on isSwimming() — the prone pose. Upright swimming never enters that block, so pitch
+    //     is vertically INERT there and holdDepth's jump/sink is the only lever. Prone gets BOTH, off one
+    //     shared set-point (see swimArrive's vertical section for why the jump is load-bearing there and not
+    //     a rival controller — SwimCourse `rise` is the proof).
+    //   * PITCH IS A VELOCITY COMMAND, not an acceleration one — it sets the vertical set-point directly, so
+    //     it inverts in closed form (proneLookYFor) with no gain, no integrator and nothing to tune.
+    // =================================================================================================
 
-    /**
-     * Prone sprint-swim LOOK + forward: face the 3-D pursuit point (horizontal look-ahead on the line, pitch
-     * toward the planned depth {@code p.ty() - bias}) and hold forward. NO jump/sink here — the CALLER adds
-     * holdDepth for submersion/depth. Pass the SAME {@code bias} holdDepth uses so pitch and holdDepth target
-     * the identical depth and cooperate on a descent/cruise (an over-high pitch fights holdDepth's descent,
-     * bobbing the bot ~bias/2 above the target — the sink/lipdown stall); pass {@code bias=0} for the brief
-     * initiation move (StartSprintSwim), where aiming pitch at {@code p.ty()} keeps a surface crossing near the
-     * top so it rises and crosses instead of digging into the floor. Pitch fixes the yaw-spin on steep/vertical
-     * segments that plain faceHorizontally suffers. A pure vertical (degenerate) segment has no line to pursue,
-     * so it station-keeps over the target column ({@link #swimPitchedCentered}'s proportional pull at the same
-     * bias): carried momentum can drift the bot off the column, and the exact-cell swim reach
-     * ({@code Swim.reachedSwim}'s footX/footZ match) can never fire off-column. Centred, that reduces to the
-     * pure depth pitch with no horizontal push.
-     */
-    public static void swimPitched(BotSteering b, SteerView p, double bias) {
-        computeGeom(b, p, SWIM_CTE_GAIN);
-        if (G.segLen < EPS) {
-            swimPitchedCentered(b, p, bias);   // pure vertical: hold the column; pitch + holdDepth own the climb
-        } else {
-            double dy = swimDepthTarget(p, bias) - b.y();
-            b.faceTowards(G.qx - b.x(), dy, G.qz - b.z());
-            b.setForward(1.0f);
-        }
-    }
-
-    /**
-     * Prone sprint-swim CENTERED drive: like {@link #swimPitched} it faces a 3-D target with a depth pitch,
-     * but it aims at the waypoint CENTRE (not a LOOKAHEAD pursuit point) and eases the forward key in
-     * proportion to the horizontal distance to that centre — mirroring {@link #recenterOnTarget}'s proportional
-     * pull. As the bot nears the waypoint centre, forward decays to 0; on an overshoot the yaw re-faces the
-     * centre and forward pushes BACK, so the cruise DECELERATES into a corner instead of coasting full-forward
-     * past it (the swimturn drift). The depth pitch is unchanged from {@link #swimPitched}: it faces
-     * {@code p.ty() - bias} so it cooperates with the caller's {@link #holdDepth} at the same depth. A vertical
-     * (degenerate) segment collapses to a pure depth pitch with no horizontal push.
-     */
-    public static void swimPitchedCentered(BotSteering b, SteerView p, double bias) {
-        double cx = p.tx() - b.x();               // toward the waypoint CENTER (not a look-ahead)
-        double cz = p.tz() - b.z();
-        double dy = swimDepthTarget(p, bias) - b.y();       // depth pitch (same as swimPitched)
-        double d  = Math.sqrt(cx * cx + cz * cz);
-        if (d < EPS) {
-            b.faceTowards(0.0, dy, 0.0);
-            b.setForward(0.0f);
-        } else {
-            b.faceTowards(cx, dy, cz);             // pitch for depth + yaw toward center
-            b.setForward((float) Math.min(1.0, d)); // proportional: eases to 0 at center, re-faces + pushes back on overshoot
-        }
-    }
-
-    /**
-     * Prone sprint-swim AGGRESSIVE horizontal-turn brake — the wall-adjacent corner bleed. Where
-     * {@link #swimPitchedCentered} is the gentle proportional brake safe for a dive/rise transition, this is the
-     * hard decelerator reserved for a genuine HORIZONTAL turn (both the incoming and outgoing segments are
-     * horizontal — see {@link #swimPitchedDirectional}), where the bot must shed its full cruise momentum to
-     * hold a 1-wide lane through the corner or its 0.6 hitbox grazes the flank column and the bubble-up ejects
-     * it. Two mechanisms stacked:
-     * <ul>
-     *   <li><b>Near-face aim.</b> A swim waypoint is "reached" when the FOOT block enters the cell (its near
-     *       face, ~0.5 short of centre), so the cursor releases the brake half a cell early. Aiming at the near
-     *       face ({@link #TURN_ARRIVE_OFFSET} back toward the incoming waypoint) puts the deceleration where the
-     *       cursor actually hands off, so the bot arrives centred instead of coasting through into the wall. The
-     *       aim is a POINT, so an overshoot re-faces the bot back toward it — never away, which would drive it
-     *       into the hazard the brake exists for.</li>
-     *   <li><b>Crawl throttle cap.</b> The forward key is capped at {@link #TURN_CRAWL_THROTTLE} and eases to 0
-     *       at the arrive point: fast in, drag beats the reduced thrust and the bot DECELERATES; slow in, it
-     *       still creeps across the cell face so the cursor keeps advancing. Braking here is drag-assisted, not
-     *       an active reverse thrust.</li>
-     * </ul>
-     * <p><b>Documentation correction (2026-08-20).</b> This javadoc used to claim a second mechanism — a
-     * "reverse-brake zone" inside {@code TURN_REVERSE_ZONE} that faced UP-TRACK and pushed, bounded by
-     * {@code TURN_REVERSE_MAX}. No such code exists and neither constant does either (both {@code @link}s were
-     * dangling); the method has only ever aimed at the near-face point and capped the throttle. Described as
-     * built, not as once imagined.
+    /** Vanilla horizontal velocity RETENTION per tick in water while SPRINTING — {@code LivingEntity
+     *  .travelInWater}: {@code float f = this.isSprinting() ? 0.9F : this.getWaterSlowDown();}.
      *
-     * <p>A 90-degree horizontal turn continues AROUND (momentum carries the bot through the corner), so it
-     * tolerates this hard brake without stalling — unlike a dive/rise, which {@link #swimPitchedDirectional}
-     * keeps on the gentle {@link #swimPitchedCentered}.
-     */
-    public static void swimPitchedBraked(BotSteering b, SteerView p, double bias) {
-        double segx = p.tx() - p.sx(), segz = p.tz() - p.sz();
-        double sl = Math.sqrt(segx * segx + segz * segz);
-        double aimx = p.tx(), aimz = p.tz();
-        if (sl > EPS) {
-            aimx -= (segx / sl) * TURN_ARRIVE_OFFSET;  // near-face arrive point (pulled back toward incoming wp)
-            aimz -= (segz / sl) * TURN_ARRIVE_OFFSET;
-        }
-        double cx = aimx - b.x();                  // vector bot → arrive point
-        double cz = aimz - b.z();
-        double dy = swimDepthTarget(p, bias) - b.y();       // depth pitch (same as swimPitched)
-        double d  = Math.sqrt(cx * cx + cz * cz);
-        if (d < EPS) {
-            b.faceTowards(0.0, dy, 0.0);
-            b.setForward(0.0f);
-            return;
-        }
-        // Aim at the near-face arrive point — corrects BOTH the cross-track (drift toward the flank hazard) and,
-        // on an overshoot, faces the bot back toward centre (never away, which would drive it into the hazard).
-        b.faceTowards(cx, dy, cz);
-        // Crawl throttle: capped low so a fast bot decelerates into the corner while a slow bot still creeps
-        // across the cell face; eases to 0 right at the arrive point.
-        double throttle = d < TURN_CRAWL_THROTTLE ? d : TURN_CRAWL_THROTTLE;
-        b.setForward((float) throttle);
-    }
+     *  <p>Note this is numerically IDENTICAL to blue ice ({@code 0.989 * 0.91 = 0.900}). A sprint-swimming
+     *  bot is driving on the slipperiest surface in the game — 9.00 blocks of coast per b/t of velocity,
+     *  against stone's 1.20 — which is the whole reason a hand-set arrival constant was never going to hold
+     *  here, and the reason the ground family's derived-gain argument transfers rather than being re-tuned. */
+    static final double WATER_DRAG_SPRINT = 0.9;
+    /** ...and while NOT sprinting — {@code LivingEntity.getWaterSlowDown()} returns {@code 0.8F} (coast 4.0). */
+    static final double WATER_DRAG_UPRIGHT = 0.8;
+    /** Vanilla VERTICAL velocity retention in water — the {@code 0.8F} in {@code vec32.multiply(f, 0.8F, f)}.
+     *  Pose-INDEPENDENT, unlike the horizontal pair above. */
+    static final double WATER_DRAG_VERTICAL = 0.8;
+    /** Vanilla horizontal ACCELERATION per tick at full input in water — the {@code float g = 0.02F} handed to
+     *  {@code moveRelative}. The bot carries no depth strider, so {@code Attributes.WATER_MOVEMENT_EFFICIENCY}
+     *  is 0 and the {@code h > 0} branch (which would raise BOTH f and g) never runs. */
+    static final double WATER_ACCEL = 0.02;
 
+    /** Prone vertical steering rate toward the look pitch — the {@code e} in {@code Player.travel}, shallow
+     *  branch ({@code d >= -0.2}: any rise, and gentle descents). */
+    static final double PRONE_PITCH_RATE_SHALLOW = 0.06;
+    /** ...and the STEEP-DIVE branch ({@code d < -0.2}), which vanilla runs faster. */
+    static final double PRONE_PITCH_RATE_STEEP = 0.085;
+    /** The branch point between the two rates above ({@code double e = d < -0.2 ? 0.085 : 0.06;}). */
+    static final double PRONE_PITCH_STEEP_AT = -0.2;
     /**
-     * Prone sprint-swim DIRECTIONAL drive — the owner's <b>hazard-aware</b> cruise (how a human threads the
-     * maze). A straight run (next segment in-line) is full-throttle pursuit ({@link #swimPitched}). At a TURN,
-     * the drive brakes to a crawl ({@link #swimPitchedBraked}) <b>only if overshooting the corner would carry
-     * the bot into a hazard</b> ({@link #overshootHazard}: a bubble column / lava within a cell or two straight
-     * ahead) — the bubble-up ejection the maze punishes. When the overshoot is harmless (a solid wall stops the
-     * bot for free, or it is open safe water), the corner is taken at FULL speed, exactly like a straight — so
-     * the drive no longer stutters every harmless turn (which slowed the harness without helping the maze). The
-     * last segment (no look-ahead) is a plain pursuit. Same depth {@code bias} so pitch cooperates with holdDepth.
-     */
-    public static void swimPitchedDirectional(BotSteering b, SteerView p, double bias) {
-        // Crawl approaching DANGER: (a) a hazard lies within HAZARD_LOOKAHEAD cells straight AHEAD in the travel
-        // direction — a wall/column the bot is barrelling toward (whether the path turns here or the lane simply
-        // ends at it), so it must arrive slow enough to turn without overshooting into it; or (b) a lane FLANK is
-        // a hazard AND the bot has already drifted off-centre toward it (cross-track beyond FLANK_DRIFT), the
-        // corner-departure case where perpendicular momentum carries it into the flank column. A CENTRED bot on
-        // an open straight (no hazard ahead, none flanking it that it's drifting into) runs at FULL speed.
-        boolean crawl = overshootHazard(b, p)
-                || (flankHazard(b, p) && crossTrack(b, p) > FLANK_DRIFT);
-        if (crawl) swimPitchedBraked(b, p, bias);                    // approaching danger -> crawl centred
-        else swimPitched(b, p, bias);                                // safe -> full speed
-    }
-
-    /**
-     * Prone sprint-swim <b>velocity SERVO</b> horizontal drive — the input-only, velocity-feedback alternative
-     * to the position-based {@link #swimPitchedDirectional}. Instead of easing the forward key by DISTANCE to a
-     * waypoint (open-loop), it closes the loop on the bot's actual momentum: it computes a horizontal velocity
-     * ERROR {@code desired - current}, FACES along that error, and presses the forward key in proportion to its
-     * magnitude — so vanilla water drag is fought with forward thrust to HOLD speed, and an overshoot is killed
-     * with REVERSE thrust (the error points up-track → the yaw flips 180° → the W key becomes a brake). No
-     * velocity is ever written; only look + forward, exactly as a player steers.
+     * Ceiling on {@code |lookAngle.y|} the prone drive will command — {@code sin(80 degrees)}.
      *
-     * <ul>
-     *   <li><b>Desired direction</b> = the swim pursuit vector {@code (G.q - bot)} from {@link #computeGeom}
-     *       with the swim cross-track gain — along-track advance PLUS the cross-track return toward the lane
-     *       centerline, so the servo holds the 1-wide bubble lane the same way the cruise does.</li>
-     *   <li><b>Desired direction</b> also ROUNDS the corner: near a turn it blends toward the next leg with an
-     *       OUTSIDE racing-line bias ({@link #CORNER_BLEND_MAX}/{@link #CORNER_RACING_BIAS}) so the bot carries
-     *       diagonal velocity through the corner on a WIDE radius — efficiency (no stop-and-go) and keeping the
-     *       0.6-wide hitbox off the inside flank column (the clip = the ejection).</li>
-     *   <li><b>Desired speed</b> = a HAZARD-AWARE profile: {@link #SERVO_CRUISE} on a safe straight (unreachable
-     *       ceiling → forward saturates → full cruise), ramped DOWN as the bot nears a hazardous turn
-     *       ({@code min(cruise, max(SERVO_TURN_FLOOR, SERVO_HAZARD_RAMP * dist))}) so it can't coast through
-     *       into the flank hazard, but the ramp is clamped to a creep FLOOR ({@link #SERVO_TURN_FLOOR}) so a run
-     *       of consecutive hazard corners holds a steady crawl rather than dead-stopping and re-accelerating at
-     *       each one (the swimturn stall). Same {@link #overshootHazard}/{@link #flankHazard} probes as the
-     *       directional cruise.</li>
-     *   <li><b>Vertical</b> is unchanged from {@link #swimPitched}: the look PITCH aims at the depth target
-     *       {@code p.ty() - bias}, and the CALLER adds {@link #holdDepth} for the jump/sink. The servo owns only
-     *       horizontal momentum.</li>
-     * </ul>
-     * A degenerate (vertical) segment station-keeps over the target column ({@link #recenterOnTarget}'s
-     * proportional pull, pitched) with the same client-legal forward floor as the cruise: sprint momentum can
-     * drift the bot off the column, and the exact-cell swim reach ({@code Swim.reachedSwim}'s footX/footZ
-     * match) can never fire off-column. Centred, that reduces to a pure depth pitch.
+     * <p>Owner observation (2026-08-26), from in-game play: you can never sprint-swim straight up or straight
+     * down, you always slip sideways. Two mechanisms are consistent with that and BOTH are satisfied by this
+     * clamp, so it does not matter which is the true one: (a) the effective travel angle is bounded anyway,
+     * because pitch ADDS vertical without SUBTRACTING horizontal — moveRelative is yaw-only, so a bot holding
+     * forward keeps its full 0.18 b/t horizontal at any pitch, capping the climb at atan(0.194/0.18) ~ 47
+     * degrees; (b) the look itself is bounded near vertical. Clamping costs nothing either way and buys a real
+     * structural guarantee: it keeps the horizontal component of the synthesized look vector away from zero,
+     * where {@link BotSteering#faceTowards} deliberately KEEPS the current yaw and the drive would silently
+     * lose its steering. The planner never emits a pure-vertical sprint-swim (SprintSwim.candidates dropped
+     * its verticals 2026-08-07; the upright Swim rungs own that axis), so this is a guard, not a limit.
+     */
+    static final double PRONE_LOOK_Y_MAX = 0.9848;
+
+    /** Water's horizontal retention for the pose in question — the {@code q} every derived quantity below
+     *  is a function of. Prone moves sprint; upright ones deliberately do not (sprinting would re-enter the
+     *  prone pose — see {@code Entity.updateSwimming}, which keys the pose on {@code isSprinting()} ALONE). */
+    static double swimDrag(boolean sprinting) {
+        return sprinting ? WATER_DRAG_SPRINT : WATER_DRAG_UPRIGHT;
+    }
+
+    /**
+     * TERMINAL horizontal swim speed (b/t) at full forward input: {@code v = a*q/(1-q)}, the fixed point of
+     * vanilla's {@code v <- (v + a)*q}. Sprint 0.180, upright 0.080.
+     *
+     * <p>This is the servo's speed CAP, and it must be ACHIEVABLE — the single defect this rewrite exists to
+     * fix. The retired {@code SERVO_CRUISE = 0.35} was documented as "deliberately unreachable" so the
+     * forward key would saturate; the cost of that was paid in the FACING, which is the one thing that
+     * actually steers in water. A reachable cap costs a few percent of straight-line speed (the servo hovers
+     * just under terminal instead of pinned at it) and buys a velocity term with authority on every axis.
+     */
+    static double swimTerminal(boolean sprinting) {
+        double q = swimDrag(sprinting);
+        return WATER_ACCEL * q / (1.0 - q);
+    }
+
+    /**
+     * The swim ARRIVE gain: b/t of desired closing speed per block of position error, {@code (1-q)/q} — the
+     * reciprocal of the coast distance {@code q/(1-q)}. Sprint 0.1111 (coast 9.0), upright 0.2500 (coast 4.0).
+     * Identical in form to {@link #groundArriveGain}, which reads {@code blockFriction * 0.91} for its
+     * {@code q}; water's {@code q} is simply not a property of any block.
+     *
+     * <p>With this gain {@code min(cap, gain*dist)} is exactly the speed a pure-drag coast stops ON the
+     * anchor, so the servo asks for full speed until {@code cap/gain} blocks out and eases from there.
+     */
+    static double swimArriveGain(boolean sprinting) {
+        double q = swimDrag(sprinting);
+        return (1.0 - q) / q;
+    }
+
+    /** Steady-state vertical speed per unit of {@code lookAngle.y} at steering rate {@code e}: the fixed point
+     *  of {@code vy <- 0.8*(vy + (d - vy)*e)}, i.e. {@code 0.8*e/((1-0.8) + 0.8*e)}. Shallow 0.1935, steep
+     *  0.2537 — the slopes {@link #proneLookYFor} inverts. */
+    private static double proneVySlope(double rate) {
+        return WATER_DRAG_VERTICAL * rate / ((1.0 - WATER_DRAG_VERTICAL) + WATER_DRAG_VERTICAL * rate);
+    }
+
+    /** The vertical speed a prone swimmer settles at while holding {@code lookAngle.y == d}. */
+    static double proneVerticalTerminal(double d) {
+        return proneVySlope(d < PRONE_PITCH_STEEP_AT ? PRONE_PITCH_RATE_STEEP : PRONE_PITCH_RATE_SHALLOW) * d;
+    }
+
+    /**
+     * The inverse of {@link #proneVerticalTerminal}: the {@code lookAngle.y} to hold for a desired vertical
+     * speed. Closed form because pitch commands a vertical VELOCITY directly rather than an acceleration.
+     *
+     * <p>The relation is piecewise-linear with a small DISCONTINUITY at the {@code d = -0.2} rate change
+     * (the shallow branch reaches -0.0387 there, the steep branch starts at -0.0507). A desired speed inside
+     * that window is unachievable at any pitch; it resolves to the shallowest steep pitch, which errs toward
+     * a slightly faster descent than asked — bounded by 0.012 b/t and self-correcting on the next tick.
+     */
+    static double proneLookYFor(double desiredVy) {
+        double d = desiredVy / proneVySlope(PRONE_PITCH_RATE_SHALLOW);
+        if (d < PRONE_PITCH_STEEP_AT) {
+            d = desiredVy / proneVySlope(PRONE_PITCH_RATE_STEEP);
+            if (d > PRONE_PITCH_STEEP_AT) d = PRONE_PITCH_STEEP_AT;
+        }
+        return Math.max(-PRONE_LOOK_Y_MAX, Math.min(PRONE_LOOK_Y_MAX, d));
+    }
+
+    /**
+     * THE ONE SWIM DRIVE. Anchors on the waypoint, forms a desired velocity from the position error at the
+     * medium's own drag, and expresses the velocity ERROR as a look direction plus forward — the water
+     * actuation ("face it, hold W"), with pitch carrying the vertical set-point when prone.
+     *
+     * <h2>Horizontal</h2>
+     * {@code desired = unit(anchor - pos) * min(cap, gain * dist)}, then {@code err = desired - vel}, then
+     * {@code yaw <- err}, {@code forward <- min(1, SERVO_GAIN*|err|)}. Past the anchor
+     * {@code unit(anchor - pos)} reverses and the overshoot is answered with reverse thrust, exactly as
+     * {@link #anchoredServo} does on land — a position-anchored law cannot walk away from its anchor the way
+     * the retired velocity-only swim laws could.
+     *
+     * <h2>Carry-through</h2>
+     * A bare arrive would come to REST on every intermediate waypoint, turning a long swim into stop-and-go.
+     * So when the next leg continues STRAIGHT AHEAD ({@link #STRAIGHT_DOT}), the arrive ramp bottoms out at
+     * the cruise rather than at zero and the bot carries full speed through. Any other continuation — a real
+     * turn, a vertical next leg, the end of the plan — gets the honest arrive and comes to rest ON the
+     * waypoint. That IS the corner brake, and it needs no probe of what lies outside the lane: squaring a
+     * corner is what a 1-wide lane means, not a reaction to what happens to be standing in the next column.
+     * See the body for the direction-blending variant that was tried and refuted.
+     *
+     * <h2>Vertical</h2>
+     * PRONE holds a pitch whose steady-state vertical speed closes the depth error at the vertical drag's own
+     * gain; UPRIGHT delegates to {@link #holdDepthAt}, because pitch is vertically inert outside the prone
+     * pose ({@code Player.travel}'s steering block is gated on {@code isSwimming()}). The one place they still
+     * meet: vanilla only applies the prone RISE when {@code d <= 0 || jumping || <fluid above the head>}, so a
+     * prone bot rising into the surface layer — where there is no fluid above its head — needs jump held or
+     * the pitch does nothing. That is a mechanism, not a servo, and it is the only jump this drive presses.
+     */
+    private static void swimArrive(BotSteering b, SteerView p, double bias, boolean prone,
+                                   String tagName, String tagDead) {
+        double cap  = swimTerminal(prone);
+        double gain = swimArriveGain(prone);
+
+        // ---- horizontal desired velocity ------------------------------------------------------------------
+        //
+        // DIRECTION comes from the LINE, SPEED from the ARRIVE. That split is the whole design:
+        //   * the pursuit point (computeGeom, cte-shrunken) carries the cross-track RETURN, so the bot tracks
+        //     the planned segment rather than merely heading for its far end. Aiming straight at the endpoint
+        //     is a corner cut by construction, and in a 1-wide lane with a lethal wall a corner cut is the
+        //     whole failure mode (`mazeportal`, see SWIM_CTE_GAIN).
+        //   * the magnitude is min(cap, gain * distanceToAnchor) — the achievable terminal, eased so a
+        //     pure-drag coast stops ON the waypoint. This is the half the retired servo got wrong.
+        // A degenerate (vertical) segment needs no branch: computeGeom aims q at the column and reports the
+        // horizontal offset as cte, so the same two lines become a station-keep.
+        computeGeom(b, p, SWIM_CTE_GAIN);
+        double ax = p.tx(), az = p.tz();
+        double dist = Math.hypot(ax - b.x(), az - b.z());
+
+        // CARRY-THROUGH is a property of the SPEED, never of the direction (owner ruling 2026-08-26, after
+        // measuring the alternative). A bare arrive comes to REST on every intermediate waypoint, which turns
+        // a long swim into stop-and-go; the fix is to let the arrive ramp bottom out at the CRUISE instead of
+        // at zero when the plan continues straight ahead.
+        //
+        // THE VERSION THAT DID NOT WORK, recorded so it is not re-invented: blending the desired DIRECTION
+        // toward the next leg over the coast distance (cap/gain = 1.62 blocks). It reads well — "arrive
+        // already travelling along the next leg" — and it makes the corner brake fall out for free, but the
+        // length is wrong by construction. The coast distance is how far the bot needs to BRAKE; it has
+        // nothing to do with how far ahead it may begin to ROTATE. In a 1-wide lane a 1.62-block rounded turn
+        // puts the box in the neighbouring column long before the corner. SwimCourse `mazeportal` — end
+        // portal, where any box intersection is an instant teleport — caught it; `swimmaze` and `mazelava`
+        // tolerated the same graze and stayed green, which is exactly why a card with no margin earns its keep.
+        //
+        // So: STRAIGHT continuation (STRAIGHT_DOT, the existing ~25-degree in-line test) keeps full cruise
+        // through the waypoint. Anything else — a real turn, a vertical next leg, or the end of the plan —
+        // gets the honest arrive and comes to rest ON the waypoint before the next leg starts. Squaring the
+        // corner is not a hazard measure; it is what a 1-wide lane means, and it costs only the re-accel the
+        // arrive ramp was always going to pay.
+        double exit = 0.0;
+        if (p.hasNext()) {
+            double segX = ax - p.sx(), segZ = az - p.sz();
+            double segLen = Math.hypot(segX, segZ);
+            double nx = p.nx() - ax, nz = p.nz() - az;
+            double nl = Math.hypot(nx, nz);
+            if (segLen > EPS && nl > EPS
+                    && (segX * nx + segZ * nz) / (segLen * nl) >= STRAIGHT_DOT) {
+                exit = cap;
+            }
+        }
+
+        double dirx = G.qx - b.x(), dirz = G.qz - b.z();
+        double dl = Math.hypot(dirx, dirz);
+        double dvx = 0.0, dvz = 0.0;
+        if (dl >= EPS) {
+            double sp = Math.min(cap, gain * dist + exit);
+            dvx = (dirx / dl) * sp;
+            dvz = (dirz / dl) * sp;
+        }
+
+        // ---- the velocity error, and the TAG, BEFORE any input write -------------------------------------
+        // Ordering is the §4 tag invariant, not style: the vertical block below writes jump/sink, and an
+        // untagged tick reads the PREVIOUS servo's `src` in the exec log. Everything the error needs is
+        // already computed, so it costs nothing to establish it first.
+        double errx = dvx - b.velX();
+        double errz = dvz - b.velZ();
+        double emag = Math.sqrt(errx * errx + errz * errz);
+        boolean dead = emag < SERVO_DEADBAND;
+        tag(dead ? tagDead : tagName);
+
+        // ---- vertical: ONE set-point, and for the prone pose TWO actuators ------------------------------
+        //
+        // holdDepthAt is the jump/sink impulse and runs for BOTH poses. Upright it is the whole story, because
+        // Player.travel's pitch-steering block is gated on isSwimming() and so is inert out of the prone pose.
+        //
+        // PRONE ADDS PITCH ON TOP, and the two are complementary rather than rival — they are driven from the
+        // same `depth`, so their signs agree by construction. MEASURED (2026-08-26): dropping holdDepthAt from
+        // the prone path on the theory that "pitch owns prone vertical" regressed SwimCourse `rise` from PASS
+        // to a timeout at finalY 156.20 of a 160 goal. The card routes a prone DiagonalSprintSwim zig-zag —
+        // +1Y per +1X, a 45-degree climb — and pitch ALONE cannot hold that: moveRelative is yaw-only, so a
+        // bot holding forward keeps its full 0.18 b/t horizontal at any pitch, capping the climb at
+        // atan(0.1906/0.18) = 46.6 degrees BEFORE the in-water gravity term. 45 against 46.6 is not a margin.
+        // Vanilla's jumpInLiquid +0.04/t is what turns it into one.
+        //
+        // There is a second, sharper reason the jump belongs here. Vanilla applies the prone pitch-steering
+        // only when `d <= 0 || jumping || <fluid above the head>` — so on a RISE that breaks the surface, jump
+        // is not merely extra lift, it is what LICENSES the pitch term at all. Suppressing it would have made
+        // the pitch inert in exactly the case it was introduced to serve.
+        double depth = swimDepthTarget(p, bias);
+        holdDepthAt(b, depth);
+        double look = 0.0;
+        if (prone) {
+            // FEED-FORWARD + FEEDBACK, and the feed-forward is the load-bearing half.
+            //
+            // The error term alone (vgain * depthError) is a P-controller, and a climb is a RAMP input: a
+            // P-controller tracking a ramp settles at a STANDING OFFSET and never catches up. Measured on the
+            // SwimCourse `rise` card, whose route is a prone DiagonalSprintSwim zig-zag at +1 Y per +1 XZ —
+            // a 45-degree climb. With feedback only, a mid-segment depth error of ~0.5 commands
+            // 0.25*0.5 = 0.125 b/t of rise against 0.18 b/t of horizontal: 34.8 degrees, ten degrees shallower
+            // than the plan. The bot sinks below its own line until the accumulated error is big enough to
+            // command the pitch it needed from the start. That is the vertical twin of the class-1 defect the
+            // whole servo normalization exists to remove.
+            //
+            // So the set-point leads with what the SEGMENT'S OWN GEOMETRY demands — its slope times the speed
+            // actually being carried — and uses the error only to correct deviation from it. On a level
+            // segment the slope is 0 and this reduces exactly to the feedback-only law.
+            //
+            // Feasibility, for the record, because it was mis-stated once: pitch ADDS vertical without
+            // SUBTRACTING horizontal (moveRelative is yaw-only), so at FULL forward the climb ceiling is
+            // atan(0.1906/0.18) = 46.6 degrees — 45 fits, with ~6% to spare — and easing the forward key
+            // raises it steeply (0.8 of the key gives 52.9 degrees). There was never a planner-envelope
+            // problem here; there was a controller that did not ask for the climb it had been given.
+            // THE FEED-FORWARD IS DRIVEN BY THE COMMANDED HORIZONTAL SPEED, NOT THE CARRIED ONE — the two
+            // axes must ramp together. Driving it from the measured velocity regressed SwimCourse `gap2x1`
+            // (ejected, finalY 161.50 against a 161.0 surface): that card dips under a wall and climbs back
+            // to the surface layer, and while the horizontal arrive was easing toward the waypoint the
+            // vertical kept demanding the full slope rate. Same dy, less dx, so the EFFECTIVE climb angle
+            // steepened past what the plan asked and the bot flew up through the surface, breached, and lost
+            // the prone pose. Slaving the feed-forward to `sp` makes it decay in lockstep, so the bot levels
+            // off exactly as it arrives instead of climbing through the waypoint.
+            double vgain = (1.0 - WATER_DRAG_VERTICAL) / WATER_DRAG_VERTICAL;
+            double runXZ = Math.hypot(p.tx() - p.sx(), p.tz() - p.sz());
+            double slope = runXZ > EPS ? (p.ty() - p.sy()) / runXZ : 0.0;
+            // ...and specifically the ARRIVE component of it, never the carry-through. The colinearity test
+            // that keeps `exit` alive is HORIZONTAL, so a rising leg followed by a level one counts as
+            // "straight ahead" and holds full cruise into the waypoint — correct for the horizontal axis,
+            // fatal for the vertical if the feed-forward rides it, because THIS leg's slope keeps being
+            // demanded through a waypoint where the next leg is flat. Measured on `gap2x1` (block plan wp3
+            // DiagonalSprintSwim d(1,+1,0) into wp4 SprintSwim d(1,0,0)): the bot arrived at botY 160.725
+            // for a 160.2 set-point and kept going, breaching at 161.29 and losing the prone pose.
+            //
+            // Riding the arrive term instead makes the feed-forward RETIRE as the waypoint is reached — it is
+            // the rate needed to get to THIS waypoint's height, and it has no business outliving it. The next
+            // segment's slope takes over the moment the cursor advances.
+            double arriveXZ = Math.min(cap, gain * dist);
+            look = proneLookYFor(slope * arriveXZ + vgain * (depth - b.y()));
+        }
+
+        // ---- actuation: face the velocity error, hold forward --------------------------------------------
+        double hx = 0.0, hz = 0.0;
+        if (!dead) {
+            hx = errx / emag; hz = errz / emag;              // the correction IS the heading (water actuation)
+        } else {
+            double vl = Math.sqrt(dvx * dvx + dvz * dvz);    // at speed: hold the travel heading and coast
+            if (vl > EPS) { hx = dvx / vl; hz = dvz / vl; }
+        }
+        double fwd = dead ? 0.0 : Math.min(1.0, SERVO_GAIN * emag);
+
+        if (prone) {
+            // Synthesize a look vector whose NORMALIZED y is exactly the commanded set-point: scaling the
+            // horizontal part by sqrt(1-look^2) makes |(h*c, look)| == 1, so faceTowards' own normalization
+            // reproduces `look` rather than some pitch that merely points at a target.
+            double c = Math.sqrt(Math.max(0.0, 1.0 - look * look));
+            // Guard the fully-degenerate aim: station-keeping dead-centre at the exact planned depth leaves
+            // nothing to face at all, and faceTowards(0,0,0) has no defined heading. Hold the current look.
+            if (hx != 0.0 || hz != 0.0 || look != 0.0) {
+                b.faceTowards(hx * c, look, hz * c);
+            }
+            // Client-legality only: a headless bot's prone pose is held by isSprinting() ALONE
+            // (Entity.updateSwimming), so this floor is NOT load-bearing here — it exists so a future
+            // CLIENT-driven bot, whose LocalPlayer keeps the pose on hasForwardImpulse, behaves identically.
+            if (b.prone() && b.inWater() && !b.grounded()) fwd = Math.max(fwd, SERVO_FORWARD_MIN);
+        } else if (hx != 0.0 || hz != 0.0) {
+            b.faceHorizontally(hx, hz);
+        }
+        b.setForward((float) fwd);
+        b.setStrafe(0.0f);                                   // the zza invariant: never leave a stale key
+    }
+
+    /**
+     * PRONE sprint-swim drive — {@link #swimArrive} in the prone pose, where pitch owns the vertical axis.
+     * Drives {@link com.orebit.mod.pathfinding.blockpathfinder.movements.SprintSwim SprintSwim} and its
+     * diagonal subclass. The caller supplies the pose {@code bias}; it must NOT also call
+     * {@link #holdDepth} — jump/sink and pitch are two vertical controllers and they fight.
      */
     public static void swimServo(BotSteering b, SteerView p, double bias) {
-        // HAZARD corner? Decided FIRST (2026-08-16): it gates BOTH the racing-line blend below AND the
-        // pursuit's lane-admission clamp (computeGeom's laneGate) — the two corner-precision measures are
-        // deliberately hazard-scoped, because off-line pursuit is NORMAL swim geometry elsewhere: the rise
-        // card's DiagonalSprintSwim zig-zag holds cte > LANE_ADMIT chronically by design, and an unscoped
-        // admission clamp livelocked it (800-tick hover, measured same day). Where nothing lethal flanks the
-        // lane, the plain cte-shrunken pursuit converges fine — 19 cards' worth of evidence.
-        boolean hazardCorner = overshootHazard(b, p) || (flankHazard(b, p) && crossTrack(b, p) > FLANK_DRIFT);
-        computeGeom(b, p, SWIM_CTE_GAIN, hazardCorner);
-        double dy = swimDepthTarget(p, bias) - b.y();               // depth pitch target (same as swimPitched)
-        if (G.segLen < EPS) {                              // pure vertical: hold the column while diving/rising
-            double ox = p.tx() - b.x(), oz = p.tz() - b.z();
-            double od = Math.sqrt(ox * ox + oz * oz);
-            double vfwd;
-            if (od > EPS) {
-                b.faceTowards(ox, dy, oz);                 // yaw toward the column centre + depth pitch
-                vfwd = Math.min(1.0, od);                  // proportional: eases to 0 once centred (recenterOnTarget)
-            } else {
-                b.faceTowards(0.0, dy, 0.0);               // centred: pure depth pitch
-                vfwd = 0.0;
-            }
-            // Same client-legal floor as the cruise below: W never released while prone + in water + airborne.
-            if (b.prone() && b.inWater() && !b.grounded()) vfwd = Math.max(vfwd, SERVO_FORWARD_MIN);
-            b.setForward((float) vfwd);
-            return;
-        }
-        // Desired travel DIRECTION: the pursuit vector (along-track + cross-track return toward the centerline).
-        double dirx = G.qx - b.x(), dirz = G.qz - b.z();
-        double dl = Math.sqrt(dirx * dirx + dirz * dirz);
-        if (dl < EPS) { b.faceTowards(0.0, dy, 0.0); b.setForward(0.0f); return; }
-        dirx /= dl; dirz /= dl;
+        swimArrive(b, p, bias, true, "swim:prone", "swim:prone:dead");
+    }
 
-        double cruise = SERVO_CRUISE;
-
-        // Smooth DIAGONAL corner: as the bot nears the turn waypoint, rotate the desired direction from this
-        // segment toward the NEXT one, with an OUTSIDE racing-line bias so it rounds WIDE and keeps the hitbox
-        // off the inside flank column (the clip = the ejection). Weight grows with proximity to the corner.
-        //
-        // SUPPRESSED AT A HAZARD CORNER (2026-08-16, the mazeportal pre-turn drift): the blend's next-leg
-        // component outweighs its outward bias (z-weight w(1 − BIAS) > 0), so the net effect is an INSIDE
-        // pull — measured ticks 59-68: cte 0.00 → 0.12 with +0.034/tick cross velocity built BEFORE the
-        // cursor even advanced, momentum the corner had no room to forgive against a lethal wall.
-        // blendLeavesLane's bound (0.5 − PARKOUR_CELL_MARGIN ≈ 0.4) is parkour-lane semantics and lets all
-        // of that through. A racing line is a SPEED optimization for open water; a hazard corner is priced
-        // for correctness — square it: hold the centerline to the arrive point, then turn. Open-water
-        // corners keep the blend untouched.
-        if (p.hasNext() && !hazardCorner) {
-            double ndx = p.nx() - p.tx(), ndz = p.nz() - p.tz();
-            double nl = Math.sqrt(ndx * ndx + ndz * ndz);
-            if (nl > EPS) {                                // next leg horizontal (a vertical dive doesn't blend)
-                ndx /= nl; ndz /= nl;
-                double ccx = p.tx() - b.x(), ccz = p.tz() - b.z();
-                double dCorner = Math.sqrt(ccx * ccx + ccz * ccz);
-                double w = (CORNER_BLEND_DIST - dCorner) / CORNER_BLEND_DIST;
-                if (w > CORNER_BLEND_MAX) w = CORNER_BLEND_MAX;
-                if (w > 0.0) {
-                    // Outward normal = the side OPPOSITE the turn. cross = dir × next (y-component): >0 left turn
-                    // (outside is right), <0 right turn (outside is left). Right-hand perp of dir is (dz,-dx).
-                    double cross = dirx * ndz - dirz * ndx;
-                    double sgn = cross > 0 ? 1.0 : (cross < 0 ? -1.0 : 0.0);
-                    double outx = sgn * dirz, outz = -sgn * dirx;   // unit outward normal
-                    double bx = (1.0 - w) * dirx + w * ndx + CORNER_RACING_BIAS * w * outx;
-                    double bz = (1.0 - w) * dirz + w * ndz + CORNER_RACING_BIAS * w * outz;
-                    double bl = Math.sqrt(bx * bx + bz * bz);
-                    if (bl > EPS && !blendLeavesLane(b, p, bx / bl, bz / bl)) {
-                        dirx = bx / bl; dirz = bz / bl;
-                    }
-                }
-            }
-        }
-
-        // Desired SPEED: full cruise on a safe straight; ramp DOWN approaching a HAZARD corner, but clamp the
-        // ramp to a creep FLOOR so a maze channel of consecutive corners holds a crawl instead of stalling at
-        // each. The tight centerline pursuit above is the correctness lever (don't clip the column); the speed
-        // ramp just prevents an overshoot-through, and the floor keeps the corner from a full re-accel stall.
-        if (hazardCorner) {
-            double segx = p.tx() - p.sx(), segz = p.tz() - p.sz();
-            double sl = Math.sqrt(segx * segx + segz * segz);
-            double aimx = p.tx(), aimz = p.tz();
-            if (sl > EPS) {                                // near-face arrive point (as swimPitchedBraked aims)
-                aimx -= (segx / sl) * TURN_ARRIVE_OFFSET;
-                aimz -= (segz / sl) * TURN_ARRIVE_OFFSET;
-            }
-            double dcx = aimx - b.x(), dcz = aimz - b.z();
-            // Hazard speed-ramp, clamped to the creep FLOOR: at a run of consecutive hazard corners (a maze
-            // channel) the target never drops below SERVO_TURN_FLOOR, so the bot holds a steady crawl through
-            // the turns instead of dead-stopping and paying a slow re-accel from standstill (the swimturn stall).
-            double ramp = Math.max(SERVO_TURN_FLOOR, SERVO_HAZARD_RAMP * Math.sqrt(dcx * dcx + dcz * dcz));
-            cruise = Math.min(SERVO_CRUISE, ramp);
-        }
-
-        // Velocity error = desired - current (horizontal). Face ALONG the error, thrust proportional to |error|:
-        // under-speed → forward thrust; overshoot → error points up-track → yaw flips → reverse-thrust brake.
-        double errx = dirx * cruise - b.velX();
-        double errz = dirz * cruise - b.velZ();
-        double emag = Math.sqrt(errx * errx + errz * errz);
-        double fwd;
-        if (emag < SERVO_DEADBAND) {
-            b.faceTowards(dirx, dy, dirz);                 // at speed: hold heading + depth pitch, coast
-            fwd = 0.0;
-        } else {
-            b.faceTowards(errx / emag, dy, errz / emag);   // unit error dir → stable depth-pitch reference
-            fwd = Math.min(1.0, SERVO_GAIN * emag);
-        }
-        // Client-legal forward-input floor: never release W while prone + in water + airborne (a client keeps
-        // the prone pose only with hasForwardImpulse held). Braking is by facing (reverse-thrust) above, so W
-        // stays held — this floor just guarantees it's never exactly 0. Grounded/out-of-water: no floor.
-        if (b.prone() && b.inWater() && !b.grounded()) fwd = Math.max(fwd, SERVO_FORWARD_MIN);
-        b.setForward((float) fwd);
+    /**
+     * UPRIGHT swim drive — {@link #swimArrive} out of the prone pose, where the vertical axis belongs to
+     * {@link #holdDepthAt} (which this calls itself). Drives the tall {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Swim Swim} / {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Surface Surface} poses, the {@code EndSprintSwim}
+     * stand-up, and {@link #drive}'s in-water branch.
+     */
+    public static void uprightSwimServo(BotSteering b, SteerView p) {
+        swimArrive(b, p, 0.0, false, "swim:up", "swim:up:dead");
     }
 
     // groundServo was DELETED here on 2026-08-24 (owner ruling). It was the last non-normalized ground
@@ -1621,106 +1610,6 @@ public final class SteerControl {
     // stable limit cycle. Phase 2 (2026-08-20) retired its hazard branch onto arriveOnStep; Phase 3 does
     // the same for the pursuit branch, so ONE position-anchored law now owns every grounded drive tick.
     // The behaviour it was kept for -- holding a 1-wide low-friction lane -- is guarded by IceParkourCourse.
-
-    /**
-     * UPRIGHT-SWIM <b>velocity SERVO</b> horizontal drive (YAW-ONLY) — the fluid counterpart of
-     * {@code groundServo} (deleted 2026-08-24), and the control half of the "fluid is a medium" design
-     * . Drives the tall {@link
-     * com.orebit.mod.pathfinding.blockpathfinder.movements.Swim Swim} / {@link
-     * com.orebit.mod.pathfinding.blockpathfinder.movements.Surface Surface} pose and {@link #drive}'s in-water
-     * branch. Vertical is NOT its business — {@link #holdDepth} owns the jump/sink.
-     *
-     * <h2>Why the controller it replaces could not work</h2>
-     * Upright swim used to steer with {@link #swimTowards}, which faces a look-ahead point and holds forward,
-     * and whose degenerate (vertical) branch is {@link #recenterOnTarget} — a pure POSITION P-controller that
-     * commands EXACTLY ZERO inside {@link #COLUMN_DEADBAND}. A P-controller settles at a standing offset under
-     * any constant disturbance, and inside its dead-band it does not even try. On the flagship waterfall
-     * (2026-08-06) that is precisely what the log shows: {@code str=0.00} on every water tick while +Z velocity
-     * held at ~0.054 b/t across eight consecutive ticks — vanilla's ~0.014/t flow push against 0.8 drag settles
-     * at 0.07 b/t, the same order — so something external was moving the bot and nothing in the loop could see
-     * it. {@code arriveOnTarget}'s javadoc convicts the same controller for parkour, for the same reason: "no
-     * velocity term … always settles with standing overshoot."
-     *
-     * <h2>Why not {@link #swimServo}</h2>
-     * Owner physics: a PRONE sprint-swimmer travels along its LOOK vector (look down + hold forward = descend),
-     * so {@code swimServo} folds the depth pitch into its facing. An UPRIGHT swimmer does not — pitch is
-     * horizontally inert, and it "is more like grounded movement". Hence the {@code groundServo} mould, with no
-     * depth pitch and no {@link #SERVO_FORWARD_MIN} floor (that floor exists solely to retain the prone pose,
-     * and holding W every tick to keep a pose is exactly what injected the lateral drift that made
-     * {@code SprintSwim}'s verticals unusable).
-     *
-     * <h2>The two branches</h2>
-     * <ul>
-     *   <li><b>Along a segment</b> — desired velocity is the pursuit direction at an intentionally UNREACHABLE
-     *       {@link #SERVO_CRUISE} ceiling, so the forward key saturates and the bot swims flat out while the
-     *       error's CROSS-track component still tilts the heading against a current. This is the direct answer
-     *       to "if we push forward but we somehow have lateral velocity, adjust yaw to counteract it".</li>
-     *   <li><b>Degenerate (a pure vertical segment — the waterfall column)</b> — the case that actually
-     *       mattered, and the one the old code handled worst. Desired velocity is a proportional pull toward
-     *       the column centre, capped at {@link #UPRIGHT_SWIM_SPEED} (never ask the medium for more than it can
-     *       deliver, or the error never leaves saturation and the loop cannot converge). Centred, the desired
-     *       velocity is ZERO — so any residual momentum, from a current or from carried drift, becomes the
-     *       whole error and is answered with reverse thrust. "Hold this column" becomes an active
-     *       station-keep instead of a dead-band no-op.</li>
-     * </ul>
-     */
-    public static void uprightSwimServo(BotSteering b, SteerView p) {
-        computeGeom(b, p, SWIM_CTE_GAIN);
-
-        double dvx, dvz, dirx, dirz;
-        if (G.segLen < EPS) {
-            // Pure vertical: station-keep over the target column. Desired velocity closes the horizontal
-            // offset, capped at what an upright swimmer can actually swim; dead centre it is zero, which turns
-            // the servo into a brake on whatever the water is doing to the bot.
-            double ox = p.tx() - b.x(), oz = p.tz() - b.z();
-            double od = Math.sqrt(ox * ox + oz * oz);
-            if (od > EPS) {
-                double sp = Math.min(UPRIGHT_SWIM_SPEED, UPRIGHT_STATION_GAIN * od);
-                dvx = (ox / od) * sp; dvz = (oz / od) * sp;
-                dirx = ox / od; dirz = oz / od;
-            } else {
-                dvx = 0.0; dvz = 0.0;
-                dirx = 0.0; dirz = 0.0;
-            }
-        } else {
-            dirx = G.qx - b.x(); dirz = G.qz - b.z();       // pursuit (along-track + cross-track return)
-            double dl = Math.sqrt(dirx * dirx + dirz * dirz);
-            if (dl < EPS) { b.setForward(0.0f); return; }
-            dirx /= dl; dirz /= dl;
-            dvx = dirx * SERVO_CRUISE; dvz = dirz * SERVO_CRUISE;
-        }
-
-        // Velocity error = desired - current (horizontal). Face ALONG the error, thrust proportional to its
-        // magnitude: under-speed or pushed off-line → thrust that corrects BOTH; overshoot → the error points
-        // up-track, the yaw flips, and the forward key becomes a brake. No velocity is ever written.
-        double errx = dvx - b.velX();
-        double errz = dvz - b.velZ();
-        double emag = Math.sqrt(errx * errx + errz * errz);
-        if (emag < SERVO_DEADBAND) {
-            tag("uswim:coast");
-            if (dirx != 0.0 || dirz != 0.0) b.faceHorizontally(dirx, dirz);
-            b.setForward(0.0f);
-        } else {
-            tag("uswim:thrust");
-            b.faceHorizontally(errx, errz);
-            b.setForward((float) Math.min(1.0, SERVO_GAIN * emag));
-        }
-    }
-
-    /**
-     * Upright swim speed ceiling (blocks/tick) used as the station-keep cap: the wiki's 2.2 b/s surface paddle
-     * is {@code 2.2/20 = 0.11}. Unlike the cruise ceilings this one is deliberately ACHIEVABLE — a station-keep
-     * loop whose target the medium cannot reach would sit permanently saturated and never settle.
-     */
-    static final double UPRIGHT_SWIM_SPEED = 0.11;
-
-    /**
-     * Station-keep proportional gain (blocks/tick of desired closing speed per block of horizontal offset).
-     * At 1.0 the servo asks to close the whole offset in one tick and is immediately clamped by
-     * {@link #UPRIGHT_SWIM_SPEED}, so it means "return at full swim speed until nearly centred, then ease" —
-     * the ease is what stops the return from becoming the next overshoot.
-     */
-    static final double UPRIGHT_STATION_GAIN = 1.0;
 
     // ---- parkour predictive-airborne servo constants (see parkourAirborne) ---------------------------
     /** Vanilla sprint horizontal ground-accel (the {@code a} in the airborne recurrence); walk is {@link
@@ -2184,64 +2073,6 @@ public final class SteerControl {
         double alongGate = (gx - sx) * ux + (gz - sz) * uz;
         return alongBot >= alongGate - GATE_PASS_DEADBAND;
     }
-
-    /** The current segment's horizontal travel frame into scratch {@code F}; false if degenerate (a dive/rise). */
-    private static boolean travelFrame(SteerView p) {
-        double cdx = p.tx() - p.sx(), cdz = p.tz() - p.sz();
-        double cl = Math.sqrt(cdx*cdx + cdz*cdz);
-        if (cl < EPS) return false;
-        F.ux = cdx / cl; F.uz = cdz / cl;
-        // CHEBYSHEV cell-walk step (owner ruling 2026-08-20, defect 1b of the (340,69,481) creep-wedge
-        // conviction). The ground hazard probes step cells as {@code F.c* + round(step * k)}, and with the
-        // EUCLIDEAN unit a 45° leg has |ux| = |uz| = 0.70711, so {@code round(0.70711*1) == round(0.70711*2)
-        // == 1} — k=1 and k=2 name the SAME cell and a HAZARD_LOOKAHEAD of 2 inspects one cell twice while
-        // the cell genuinely two ahead is never read at all. Dividing by {@code max(|ux|,|uz|)} makes the
-        // dominant component exactly ±1, so each k advances exactly one cell along it — a proper cell walk.
-        // No constant: the divisor is the direction's own infinity-norm, and a CARDINAL leg (max == 1) is
-        // byte-identical to the Euclidean form it replaces. The EUCLIDEAN pair is retained above because the
-        // flank rotate and the swim probes are frames, not walks.
-        double cheb = Math.max(Math.abs(F.ux), Math.abs(F.uz));   // ≥ 1/√2 for a unit vector — never 0
-        F.wx = F.ux / cheb; F.wz = F.uz / cheb;
-        F.cx = (int) Math.floor(p.tx());
-        F.cz = (int) Math.floor(p.tz());
-        // The waypoint's FEET cell. Value-preserving across the 2026-08-15 frame change: this read
-        // `floor(p.ty()) - 1` when ty() was the feet cell's ceiling, which evaluated to the same cell index
-        // this now yields directly. (NOTE the old comment called it the "floor cell"; the arithmetic said
-        // otherwise then and says otherwise now. Left as-is deliberately — correcting the CELL would be a
-        // behaviour change, not a frame change, and belongs in its own commit with its own evidence.)
-        F.cy = (int) Math.floor(p.ty());
-        return true;
-    }
-
-    /** Whether barrelling PAST the turn waypoint in the current travel direction hits a hazard within
-     *  {@link #HAZARD_LOOKAHEAD} cells (the corner-overshoot ejection). */
-    private static boolean overshootHazard(BotSteering b, SteerView p) {
-        if (!travelFrame(p)) return false;
-        // NOTE (2026-08-20): deliberately still the EUCLIDEAN walk, not {@code F.wx/F.wz}. The Chebyshev
-        // cell-walk fix was ratified for the GROUND probes only; the swim family's 21 cards are green on
-        // this exact geometry and re-walking their diagonals is a behaviour change with its own evidence
-        // burden. Same latent double-probe, tracked, not fixed here.
-        for (int k = 1; k <= HAZARD_LOOKAHEAD; k++) {
-            if (hazardColumn(b, F.cx + (int) Math.round(F.ux * k), F.cy, F.cz + (int) Math.round(F.uz * k))) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** Whether either cell one step perpendicular to travel (the lane flanks at the waypoint) is a hazard —
-     *  the bubble-walled 1-wide lane the bot must not drift into. */
-    private static boolean flankHazard(BotSteering b, SteerView p) {
-        if (!travelFrame(p)) return false;
-        int fx = (int) Math.round(-F.uz), fz = (int) Math.round(F.ux);   // rotate travel dir 90 deg
-        return hazardColumn(b, F.cx + fx, F.cy, F.cz + fz) || hazardColumn(b, F.cx - fx, F.cy, F.cz - fz);
-    }
-
-    /** A hazard anywhere in the short swim-body column at {@code (x, y +/- 1, z)} (a bubble column spans water). */
-    private static boolean hazardColumn(BotSteering b, int x, int y, int z) {
-        return b.swimHazardAt(x, y, z) || b.swimHazardAt(x, y + 1, z) || b.swimHazardAt(x, y - 1, z);
-    }
-
     // ================================================================================================
     // The GROUND HAZARD FAMILY WAS DELETED HERE on 2026-08-25 (owner ruling). Removed together:
     // groundHazardCorner, groundOvershootHazard, groundFlankHazard, groundFlankVoid,
@@ -2277,12 +2108,21 @@ public final class SteerControl {
     // Fail-safe by construction too: where !solidAt() turned "no block" into HAZARD, getFriction() turns
     // "no block" into 0.6, the ordinary value.
     //
-    // NOT removed: the SWIM family (overshootHazard / flankHazard / hazardColumn / TURN_CRAWL_THROTTLE /
-    // SERVO_HAZARD_RAMP) and the shared travelFrame / HAZARD_LOOKAHEAD / FLANK_DRIFT / crossTrack they use.
-    // Water drag is uniform, so the friction argument does NOT transfer to it for free; that is its own
-    // question with its own evidence.
+    // THE SWIM HAZARD FAMILY FOLLOWED IT on 2026-08-26, once that evidence existed. Removed together:
+    // overshootHazard / flankHazard / hazardColumn / travelFrame / blendLeavesLane, plus HAZARD_LOOKAHEAD /
+    // FLANK_DRIFT / LANE_ADMIT / SWIM_CTE_GAIN / TURN_CRAWL_THROTTLE / TURN_ARRIVE_OFFSET / SERVO_CRUISE /
+    // SERVO_HAZARD_RAMP / SERVO_TURN_FLOOR / CORNER_BLEND_DIST / CORNER_BLEND_MAX / CORNER_RACING_BIAS and
+    // computeGeom's lane-gate overload.
+    //
+    // The note above was right that water's uniform drag does not, by itself, license the deletion — the
+    // swim family had a second job the ground one did not: its hazard ramp was the ONLY thing that ever made
+    // the servo's speed cap reachable (min(0.35, max(0.11, 0.16*dist)) drops below the 0.18 sprint terminal
+    // inside the last ~1.1 blocks). That is why the bubble-walled maze cards were green while open water
+    // wedged: the ramp was accidentally load-bearing, doing corner-braking duty for a controller whose
+    // nominal set-point it could never reach. The rewrite makes the cap achievable everywhere and derives
+    // the corner brake from the PLAN's own next leg, so both jobs are covered without asking what is in any
+    // cell. See the swim-drive header for the full post-mortem.
     // ================================================================================================
-
 
     /**
      * The water-column depth autopilot: press the inputs a player would to bring the bot's feet to the
@@ -2637,10 +2477,9 @@ public final class SteerControl {
         if (b.inWater()) {
             // A GROUND move still in water (leaving onto a bank, clipping a stream, knocked into a pool
             // mid-segment) is an UPRIGHT body in fluid, so it gets the upright velocity servo — same reason
-            // Swim/Surface do: the position-only swimTowards it used to call cannot see a current at all
-            // (§6). holdDepth still lifts/sinks it toward the planned cell.
+            // Swim/Surface do: the position-only drive it used to call cannot see a current at all (§6).
+            // The servo lifts/sinks it toward the planned cell itself (holdDepthAt, bias 0).
             uprightSwimServo(b, p);
-            holdDepth(b, p, 0.0);
         } else if (stepGateArmed) {
             // GATE-ARMED step — still grounded on the from column of a step whose step-off gate is armed
             // (PhaseRunner plumbs the bit around the phase drive): anchor on the CURRENT step's target
@@ -2690,45 +2529,6 @@ public final class SteerControl {
                                           // deliberately untouched by the mode switch (it never had a hazard mode)
         }
     }
-
-    /**
-     * LANE CONTAINMENT for the corner blend (owner ruling 2026-08-01). The blend may round toward the next
-     * leg only while doing so keeps the bot inside the CURRENT step's lane; once the bot is at the lane
-     * bound the blend is dropped for any tick whose cross component points further OUT.
-     *
-     * <p><b>Why.</b> The blend rotates up to {@link #CORNER_BLEND_MAX} of the heading toward the next leg and
-     * adds a {@link #CORNER_RACING_BIAS} OUTWARD push, starting {@link #CORNER_BLEND_DIST} = 1.3 blocks out —
-     * i.e. more than a full cell before arrival. Every converted movement's {@code failWhen} envelope admits
-     * only that step's own columns, so on any corner where the next leg turns, the steer deliberately drives
-     * the bot out of the lane and the envelope fail&rarr;HOLDs it for obeying the steer. Three instances in
-     * one 2026-08-01 flagship pair — {@code (58,113,160)}, {@code (62,135,189)}, {@code (143,113,13)} — and
-     * the instrumented capture at the last shows it plainly: the bot starts the step AT REST and centred
-     * ({@code vel=(0,0)}, {@code z=14.419} on a constant-z step) and the cross velocity is MANUFACTURED,
-     * growing monotonically with {@code w} as {@code dCorner} shrinks (−0.009 → −0.019 → −0.037 → −0.052)
-     * until {@code z} crosses the cell boundary. Not momentum, not terrain: the steering law and the
-     * validity envelope simply disagreed about where the bot is allowed to be.
-     *
-     * <p>Positional, not predictive — no horizon and no new constant. It reuses the same lane half-width the
-     * step-off gate uses ({@code 0.5 −} {@link #PARKOUR_CELL_MARGIN} {@code = 0.2}), so the bot may still
-     * round a corner up to the lane bound and only then holds the line. Where there IS room the blend
-     * survives untouched, which is what keeps its original purpose (an orthogonal run-up into a parkour,
-     * rounding wide to keep the hitbox off the inside flank column — the clip IS the ejection) alive.
-     *
-     * @return {@code true} when the blended heading would push the bot further outside its lane.
-     */
-    private static boolean blendLeavesLane(BotSteering b, SteerView p, double bx, double bz) {
-        double segx = p.tx() - p.sx(), segz = p.tz() - p.sz();
-        double sl = Math.sqrt(segx * segx + segz * segz);
-        if (sl < EPS) return false;                     // degenerate (vertical) segment — no lane to leave
-        segx /= sl; segz /= sl;
-        // Signed offset of the bot from the segment LINE, and the blend's cross component in the same sense
-        // (right-hand perpendicular of the segment is (segz, -segx)).
-        double cte = (b.x() - p.sx()) * segz - (b.z() - p.sz()) * segx;
-        if (Math.abs(cte) <= 0.5 - PARKOUR_CELL_MARGIN) return false;   // still inside the lane — blend freely
-        double bcross = bx * segz - bz * segx;
-        return cte > 0 ? bcross > 0 : bcross < 0;       // at the bound and still heading out
-    }
-
     /**
      * Horizontal cross-track distance (blocks) of the bot from the current planned segment — how far off the
      * line it has slipped. The follower watches this to <i>detect</i> a genuine slip (knocked by a mob/current,
