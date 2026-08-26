@@ -180,8 +180,60 @@ public interface Movement {
      * vanilla seats the bot 5/16 lower. That is a classification quirk of the force-solid blocks, and it is
      * fixed where it belongs — narrow tops are no longer {@code STANDABLE}, so nothing routes onto one.
      */
+    /**
+     * Half-width (blocks) of the HORIZONTAL arrival band: the deepest the bot's CENTRE may sit from a cell
+     * centre while its whole 0.6-wide box is still inside that cell. DERIVED from the body, never the cell
+     * ({@code 0.5 - BODY_RADIUS = 0.2}).
+     */
+    double ARRIVAL_HALF_SLACK = 0.5 - BotSteering.BODY_RADIUS;
+
+    /**
+     * Half-width (blocks) of the RESIDENCY test: the furthest a centre can be from a cell centre while any
+     * part of the box still OVERLAPS it ({@code 0.5 + BODY_RADIUS = 0.8}). The mirror of
+     * {@link #ARRIVAL_HALF_SLACK} — full containment to ARRIVE, any overlap to still COUNT AS THERE.
+     */
+    double RESIDENCY_HALF_SLACK = 0.5 + BotSteering.BODY_RADIUS;
+
+    /** {@link #atWaypoint}'s loose twin: does the bot's box still OVERLAP {@code (wx,wy,wz)} at all? Used by
+     *  the {@code failWhen} envelopes, which ask "has the bot left its origin cell?" rather than "has it
+     *  arrived?". Tightening those to containment would fire the envelope on a bot that is merely standing
+     *  a little off-centre in the cell it started in — a spurious fail, the exact opposite of the guard's
+     *  purpose. Full containment to ARRIVE, any overlap to still count as THERE. */
+    default boolean inWaypointCell(BotSteering b, int wx, int wy, int wz) {
+        return b.footY() == wy
+                && Math.abs(b.x() - (wx + 0.5)) < RESIDENCY_HALF_SLACK
+                && Math.abs(b.z() - (wz + 0.5)) < RESIDENCY_HALF_SLACK;
+    }
+
     default boolean atWaypoint(BotSteering b, int wx, int wy, int wz) {
-        return b.footX() == wx && b.footY() == wy && b.footZ() == wz
+        // THE HORIZONTAL BAND (owner ruling 2026-08-25) — the twin of the vertical settle band documented
+        // below, which had been left half-applied for eleven weeks. That band exists because "a move's
+        // arrival pose is the PRECONDITION of the next move"; the horizontal axis was nevertheless bare CELL
+        // EQUALITY, so a move declared success the instant the bot's CENTRE crossed the cell boundary, with
+        // up to 0.5 of the cell untraversed and up to 0.3 of the body still in the PREVIOUS cell.
+        //
+        // Convicted on IceCourse `iceturn` (2026-08-25), a 1-wide blue-ice L with lava in every other cell.
+        // The +X leg completed at x=46.015 — foot cell 46, so "arrived" — and the cursor handed over to the
+        // +Z leg while 0.485 of the turn cell was still ahead of the bot. That residue is not along-axis
+        // error any more: the axes swap roles at a 90° turn, so it became 0.485 of CROSS error, appearing in
+        // ONE tick with no approach over which to correct it. Six ticks later the box's west face was at
+        // x=45.913, inside the lava column at (45,151,15). hp 20 -> 16.
+        //
+        // No gain can fix that. Ice accelerates at 22.9% of stone, so the correction the bot needed was not
+        // available at ANY input — full throttle is already all there is. The bot has to not BE there, which
+        // is what this band enforces: the +Z leg cannot begin until the whole body is inside cell 46, and a
+        // body inside cell 46 cannot reach into cell 45. Corner-clipping stops being a case to detect and
+        // becomes geometrically impossible — no probe, no lookahead, no exemptions, and identical behaviour
+        // whether what lies outside the lane is lava, stone or open air.
+        //
+        // Scope is deliberately narrow: a multi-cell run advances its intermediate cells on the ALONG-AXIS
+        // projection ({@code advanceWhen}), not on this predicate, so intra-run stepping is untouched. Only
+        // move HANDOFF tightens — exactly where the "arrival pose is the next move's precondition" argument
+        // applies. The cost is that the bot can no longer cut a corner by declaring the turn started early;
+        // it must physically occupy the cell its own plan named.
+        return b.footY() == wy
+                && Math.abs(b.x() - (wx + 0.5)) <= ARRIVAL_HALF_SLACK
+                && Math.abs(b.z() - (wz + 0.5)) <= ARRIVAL_HALF_SLACK
                 // THE SETTLE BAND, not merely the cell (owner ruling 2026-08-05). A move's arrival pose is
                 // the PRECONDITION of the next move: every plan is framed from "feet resting at wy", i.e.
                 // [wy.00, wy.20], and its body-clearance cells are derived from that. Testing only the cell

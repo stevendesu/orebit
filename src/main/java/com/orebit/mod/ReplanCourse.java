@@ -578,7 +578,20 @@ public final class ReplanCourse {
             add("reversal",           Kind.REVERSAL);
             add("prefixseal",         Kind.PREFIXSEAL);
             add("currentseal",        Kind.CURRENTSEAL);
-            add("currentseal-on-ice", Kind.CURRENTSEAL_ICE);
+            // currentseal-on-ice was RETIRED here on 2026-08-25 (owner ruling: delete, do not re-assert).
+            //
+            // The tile asserted that after the U5 seal the ice SLIDE carries the bot EAST past the sealed
+            // turn, so the kept-rest gate has to outwait a real post-null carry. That premise died with the
+            // friction-derived ARRIVE gain: the servo's ease length is now (1-q)/q for the SURFACE's drag
+            // instead of a hard-coded stone constant, so on blue ice it brakes over ~9 blocks instead of
+            // ~1.2 and simply does not overshoot any more. Measured on the changeover run: slide 0.36
+            // against a fixture that needs the bot carried clean past the turn.
+            //
+            // Deleted rather than re-based because the thing it pinned no longer has a repro: it was a
+            // seam/adoption guard for a carry the servo no longer produces. If a future change reintroduces
+            // ice overshoot, this is the shape to rebuild -- but a fixture kept alive by weakening its own
+            // assertion pins nothing. The Kind.CURRENTSEAL_ICE arm is left in place (unreferenced by any
+            // trial) so the geometry and the U5 idiom stay readable for that rebuild.
             add("midstride",          Kind.MIDSTRIDE);
             add("marginal",           Kind.MARGINAL);
             // Sweep the whole in-flight window of the one-block climb, one trial per tick offset.

@@ -73,9 +73,24 @@ class MarginalArrivalTest {
         @Override public boolean gapFloorHazardAt(int x, int y, int z) { return false; }
     }
 
-    /** The witnessed run-2 arrival pose: block-exact, grounded, one tick from leaving the cell. */
+    /**
+     * A marginal arrival: as deep into the cell as the horizontal band allows, carrying enough speed that
+     * the one-tick projection still leaves the cell.
+     *
+     * <p>RE-BASED 2026-08-25. The original fixture was the witnessed run-2 pose verbatim — {@code z=516.007}
+     * with {@code velZ=-0.015}, a bot whose CENTRE had barely crossed the cell boundary. That pose can no
+     * longer be an arrival at all: {@link Movement#atWaypoint} now requires the whole 0.6-wide box inside
+     * the cell, so a move cannot complete before {@code z >= 516.3}. Left as it was, these tests would have
+     * been asserting the delivery invariant on a pose the containment band already refuses — green for the
+     * wrong reason, and blind to the invariant actually regressing.
+     *
+     * <p>The invariant itself is NOT subsumed and still needs pinning: containment bounds POSITION, not
+     * speed. From the band edge at cruise ({@code SERVO_GROUND_CRUISE} 0.35) the one-tick projection is
+     * {@code 516.32 - 0.35 = 515.97} — still out of the cell, still a delivery the successor cannot use.
+     * Same conviction, on a pose that can now occur.
+     */
     private static CarryBot marginal() {
-        return new CarryBot().at(WX + 0.5, WY, WZ + 0.007).vel(0, -0.015);
+        return new CarryBot().at(WX + 0.5, WY, WZ + 0.32).vel(0, -0.35);
     }
 
     @Test
@@ -92,11 +107,11 @@ class MarginalArrivalTest {
 
     @Test
     void theMirrorCarryTowardTheCellCentreStaysDelivered() {
-        // Same magnitude, opposite sign: the projection (516.022) stays inside the cell — refusing
+        // Same magnitude, opposite sign: the projection (516.67) stays inside the cell — refusing
         // this would be a false refusal of a perfectly delivered arrival.
-        CarryBot bot = new CarryBot().at(WX + 0.5, WY, WZ + 0.007).vel(0, +0.015);
+        CarryBot bot = new CarryBot().at(WX + 0.5, WY, WZ + 0.32).vel(0, +0.35);
         assertTrue(MovementRegistry.TRAVERSE.reached(bot, WX, WY, WZ, MovementRegistry.DESCEND),
-                "the +velZ mirror projects INTO the cell (516.022) and must stay an accepted delivery");
+                "the +velZ mirror projects INTO the cell (516.67) and must stay an accepted delivery");
     }
 
     @Test

@@ -100,6 +100,8 @@ public final class TrapdoorCourse {
     private static final int ATTEMPT_BUDGET = 600;
 
     private static final BlockState STONE = Blocks.STONE.defaultBlockState();
+    /** Shell material for the PARKOUR family — vanilla-unbreakable, so "the jump or nothing" really is. */
+    private static final BlockState BEDROCK = Blocks.BEDROCK.defaultBlockState();
     private static final BlockState AIR = Blocks.AIR.defaultBlockState();
 
     public static void register(PlatformEvents events) {
@@ -119,7 +121,8 @@ public final class TrapdoorCourse {
         HATCH_DROP,     // stand on a flush hatch, MineDown toggle arm -> fall through to the goal below
         CLOSE_PARKOUR,  // SET_CLOSED the only takeoff cell, then a flat 2-gap sprint jump from the plate
         SANDWICH,       // the §9-3b needle: TWO SET_OPENs, thread the 10/16 slot
-        EXT_TOGGLE      // hallwayopen + a one-shot external re-CLOSE after the bot's own toggle lands
+        EXT_TOGGLE,     // hallwayopen + a one-shot external re-CLOSE after the bot's own toggle lands
+        PARKOUR         // the TAKEOFF family: SET_CLOSED the panel, then jump from the surface it creates
     }
 
     /** One trapdoor challenge: a kind + its base grid cell, with start/goal geometry precomputed. */
@@ -134,6 +137,13 @@ public final class TrapdoorCourse {
         float startYaw;
         BlockPos goal;
         int minFloorY;              // a fall this far below the tile = off the course
+
+        // ---- PARKOUR family only (see the parkour ctor) ----
+        Half tdHalf;                // which half the takeoff trapdoor is — decides the surface CLOSING creates
+        int gap;                    // void cells between the takeoff column and the landing column
+        int jdy;                    // landing floor cell relative to Y0: 0 flat, +1 rising, -n falling
+        boolean expectRefusal;      // NEGATIVE pin: the envelope forbids this jump, so PASS == no route
+        int landX, landY;
         final List<BlockPos> tds = new ArrayList<>();      // the tile's trapdoor cells…
         final List<Boolean> expectOpen = new ArrayList<>(); // …and the OPEN state each must END in
 
@@ -189,6 +199,56 @@ public final class TrapdoorCourse {
             }
         }
 
+        /**
+         * A TRAPDOOR-TAKEOFF trial (2026-08-25): close the panel, jump from the surface that creates, land.
+         *
+         * <p>The family exists because a closed trapdoor is not one takeoff surface but TWO, and the
+         * envelope treats them as different worlds. {@code ParkourEnvelope.MAX_GAP} rows
+         * {@code {flat, rise, fall1, fall2, fall3, diag}}, read at class load from closed-form physics:
+         *
+         * <pre>
+         *   topY  3 (closed BOTTOM half, a 3/16 plate)   {2, 0, 3, 3, 4, 1}
+         *   topY 16 (closed TOP half, flush with the floor) {3, 2, 3, 4, 4, 2}
+         * </pre>
+         *
+         * because {@code effDy = classDy + (1 - takeoffSurfaceY)}: a bottom plate makes every jump behave
+         * as a 13/16 RISE, which costs a full gap of flat reach and takes rising jumps to ZERO. The cards
+         * sit on those boundaries — both the last admitted gap and the first refused one — so a table the
+         * follower cannot actually deliver shows up as a course failure rather than as a silent reroute.
+         *
+         * <p><b>The shell is BEDROCK, and that is load-bearing</b> (the closeparkour lesson, same day). The
+         * run enables mining for MineDown's hatch-drop arm, so a stone-boxed tile whose intended jump is
+         * refused does not read as a refusal at all: the bot tunnels through the wall instead, and the card
+         * reports a timeout that looks like a follower wedge. With an unmineable shell the only degrees of
+         * freedom are the jump and giving up, which is exactly what these cards are asking about.
+         *
+         * <p><b>Approach is 2-tall</b> so no full-block takeoff WEST of the hatch can clear the trapdoor
+         * column plus the gap — the toggle route is the only one. That is belt-and-braces rather than the
+         * whole guard: the end-of-trial assertion demands the panel be CLOSED, so a bot that somehow flew
+         * over without operating it fails on world state regardless.
+         */
+        Trial(String name, int baseX, int baseZ, Half half, int gap, int jdy, boolean expectRefusal) {
+            this.name = name;
+            this.kind = Kind.PARKOUR;
+            this.baseX = baseX;
+            this.baseZ = baseZ;
+            this.zc = baseZ + 6;
+            this.hatchX = baseX + 5;
+            this.tdHalf = half;
+            this.gap = gap;
+            this.jdy = jdy;
+            this.expectRefusal = expectRefusal;
+            this.landX = hatchX + gap + 1;
+            this.landY = Y0 + jdy;
+            this.minFloorY = Math.min(Y0, landY) - 4;
+            this.startX = baseX + 0.5;
+            this.startY = Y0 + 1;
+            this.startZ = zc + 0.5;
+            this.startYaw = yaw(1, 0);
+            this.goal = new BlockPos(landX + 3, landY + 1, zc);
+            td(hatchX, Y0, false);      // the takeoff panel must END closed — arriving without it is a FAIL
+        }
+
         private void td(int x, int y, boolean endsOpen) {
             tds.add(new BlockPos(x, y, zc));
             expectOpen.add(endsOpen);
@@ -233,9 +293,43 @@ public final class TrapdoorCourse {
             add("hallwayclose", Kind.HALLWAY_CLOSE);
             add("pocket",       Kind.POCKET);
             add("hatchdrop",    Kind.HATCH_DROP);
-            add("closeparkour", Kind.CLOSE_PARKOUR);
+            // closeparkour was RETIRED here on 2026-08-25 (owner ruling) — SUPERSEDED by pk.bottom.flat2,
+            // which asserts the same thing correctly.
+            //
+            // The tile was BROKEN, and had been since it was written: it carved body rows Y0+1..Y0+3 and
+            // left Y0+4 stone, one row short of the arc's apex head row (takeoff-feet+3). Its only intended
+            // route — SET_CLOSED the panel, stand the 3/16 plate, clear a 2-cell void — was therefore
+            // geometrically impossible, and the planner was right to refuse it. Because the shell was
+            // MINEABLE stone and the run enables mining for MineDown's hatch-drop arm, the refusal did not
+            // read as a refusal: the bot tunnelled north through the wall instead and the card reported a
+            // timeout that looked like a follower wedge. It was mis-read as one for weeks.
+            //
+            // Pinned in TrapdoorParkourTest: plateTakeoffJumpsTheTwoGap (4 body rows -> admitted) and
+            // plateTakeoffTwoGapNeedsTheApexHeadRow (3 -> refused). pk.bottom.flat2 rebuilds the scene with
+            // the head row present and a BEDROCK shell, so "the jump or nothing" really is.
             add("sandwich",     Kind.SANDWICH);
             add("exttoggle",    Kind.EXT_TOGGLE);
+
+            // ---- the TRAPDOOR-TAKEOFF family (2026-08-25) --------------------------------------------
+            // Each card names the takeoff half and the landing class, and sits ON an envelope boundary:
+            // the LAST gap the table admits, or the FIRST it refuses. Refusals are cards too — a negative
+            // pin is the only thing that catches the table quietly widening.
+            addParkour("pk.bottom.flat2",   Half.BOTTOM, 2,  0, false); // plate flat max      (row flat = 2)
+            addParkour("pk.bottom.flat3",   Half.BOTTOM, 3,  0, true);  // one past it         -> refused
+            addParkour("pk.bottom.rise1",   Half.BOTTOM, 1, +1, true);  // plate rise is ZERO  -> refused
+            addParkour("pk.bottom.fall1g3", Half.BOTTOM, 3, -1, false); // plate fall1 max     (row fall1 = 3)
+            addParkour("pk.bottom.fall3g4", Half.BOTTOM, 4, -3, false); // plate fall3 max     (row fall3 = 4)
+            addParkour("pk.top.flat3",      Half.TOP,    3,  0, false); // flush flat max      (row flat = 3)
+            addParkour("pk.top.rise2",      Half.TOP,    2, +1, false); // flush rise max      (row rise = 2)
+        }
+
+        void addParkour(String name, Half half, int gap, int jdy, boolean expectRefusal) {
+            int i = trials.size();
+            int row = i / COLS;
+            int col = i % COLS;
+            if ((row & 1) == 1) col = COLS - 1 - col;
+            trials.add(new Trial(name, BASE_X + col * STRIDE, BASE_Z + row * STRIDE,
+                    half, gap, jdy, expectRefusal));
         }
 
         void add(String name, Kind kind) {
@@ -383,6 +477,25 @@ public final class TrapdoorCourse {
                 record(tr, "FAIL", tr.kind == Kind.CLOSE_PARKOUR ? "fell through the gap" : "fell off the tile");
                 return;
             }
+            // NEGATIVE PIN (the PARKOUR family's refusal cards): the envelope forbids this jump, so the
+            // CORRECT behaviour is to offer no route at all. Crossing anyway means the table has quietly
+            // widened past what the physics admits — a worse bug than a refusal, and invisible without
+            // a card that asserts the refusal.
+            if (tr.expectRefusal) {
+                if (bot.navigator().navGaveUp()) {
+                    record(tr, "PASS", "no route offered — the envelope refuses this takeoff, as designed");
+                    return;
+                }
+                if (bot.mode() == AllyBotEntity.Mode.STAY && dist < 1.2) {
+                    record(tr, "FAIL", "CROSSED a gap the envelope forbids");
+                    return;
+                }
+                if (attemptTicks >= ATTEMPT_BUDGET) {
+                    record(tr, "FAIL", "neither crossed nor refused — timed out mid-attempt");
+                }
+                return;
+            }
+
             // Candidate PASS: the driver reverted to STAY (exact-tolerance arrival) near the goal cell —
             // then the tile's WORLD-STATE assertions decide (arriving without operating the hatch is a FAIL).
             if (bot.mode() == AllyBotEntity.Mode.STAY && dist < 1.2) {
@@ -570,6 +683,25 @@ public final class TrapdoorCourse {
                     set(tr.hatchX + 2, Y0, zc, AIR);
                     break;
                 }
+                case PARKOUR: {
+                    int loY = tr.minFloorY - 2;
+                    int hiY = Math.max(Y0, tr.landY) + 6;
+                    // Unmineable shell — see the parkour ctor for why this is not cosmetic.
+                    boxOf(BEDROCK, bx, tr.landX + 5, loY, hiY, zc - 1, zc + 1);
+                    // Approach + takeoff run: floor at Y0, FIVE rows of air above it. Four is the minimum
+                    // (the arc's apex head row is takeoff-feet+3); the fifth is margin for the rising cards.
+                    carve(bx, tr.hatchX, Y0 + 1, Y0 + 5, zc);
+                    // Landing platform + run-out to the goal.
+                    carve(tr.landX, tr.landX + 5, tr.landY + 1, Math.max(Y0, tr.landY) + 5, zc);
+                    // The gap: bottomless inside the tile, so a missed jump reads as a fall, not a walk.
+                    for (int x = tr.hatchX + 1; x <= tr.hatchX + tr.gap; x++) {
+                        carve(x, x, loY, Math.max(Y0, tr.landY) + 5, zc);
+                    }
+                    // 2-tall approach: HEADROOM_JUMP refuses every full-block takeoff west of the hatch.
+                    for (int x = bx; x < tr.hatchX; x++) set(x, Y0 + 3, zc, BEDROCK);
+                    set(tr.hatchX, Y0, zc, td(Direction.EAST, true, tr.tdHalf));
+                    break;
+                }
                 default: { // SANDWICH
                     // 2-tall boxed corridor; ONE column holds closed-TOP (feet, facing NORTH -> opens south)
                     // AND closed-BOTTOM (head, facing SOUTH -> opens north): opposite + perpendicular, the
@@ -608,10 +740,15 @@ public final class TrapdoorCourse {
 
         /** Solid stone fill over the inclusive box. */
         void box(int x0, int x1, int y0, int y1, int z0, int z1) {
+            boxOf(STONE, x0, x1, y0, y1, z0, z1);
+        }
+
+        /** {@link #box} in an arbitrary material (the PARKOUR family fills bedrock). */
+        void boxOf(BlockState fill, int x0, int x1, int y0, int y1, int z0, int z1) {
             for (int x = x0; x <= x1; x++)
                 for (int y = y0; y <= y1; y++)
                     for (int z = z0; z <= z1; z++)
-                        set(x, y, z, STONE);
+                        set(x, y, z, fill);
         }
 
         /** Carve the 1-wide corridor body (air) at {@code z} over the inclusive spans. */
