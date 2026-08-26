@@ -86,6 +86,38 @@ class TrapdoorParkourTest {
     }
 
     @Test
+    void plateTakeoffJumpsTheTwoGap() {
+        // The boundary case the table says is the plate's MAXIMUM flat reach. ParkourEnvelope.MAX_GAP[3][0][0]
+        // is {flat=2, rise=0, fall1=3, fall2=3, fall3=4, diag=1} -- effDy = 0 + (1 - 3/16) = 0.8125, a jump
+        // that is cell-flat but really rises 13/16. Added 2026-08-25 because the trapdoor course's
+        // `closeparkour` tile is built on exactly this shape (SET_CLOSED the panel, stand the plate, clear a
+        // 2-cell void) and the bot did NOT take it -- so either candidates() disagrees with its own baked
+        // table, or the tile is asking for something else. This pins which.
+        NavGridView grid = gapGrid(plate(), 2, Blocks.STONE.defaultBlockState());
+        Capture cap = new Capture(TX + 3, 0, Z);
+        new Parkour().candidates(new MovementContext(grid, WALK), TX, 0, Z, cap);
+        assertTrue(cap.got, "flat 2 is the plate row's own maximum -- candidates() must offer it");
+    }
+
+    @Test
+    void plateTakeoffTwoGapNeedsTheApexHeadRow() {
+        // Same scene as plateTakeoffJumpsTheTwoGap, ONE row of ceiling lower: 3 carved body rows instead of
+        // 4, i.e. a corridor whose ceiling sits at floor+4. The jump is refused. Not an envelope verdict --
+        // MAX_GAP[3][0][0] still reads flat=2 -- but the arc's APEX HEAD ROW (takeoff-feet+3) is solid, so
+        // candidates() has nowhere to put the bot's head at the top of the arc.
+        //
+        // This is what the trapdoor course's `closeparkour` tile was doing wrong (2026-08-25): it carved
+        // Y0+1..Y0+3 and left Y0+4 stone, so its ONLY intended route was geometrically impossible. The bot
+        // was right to refuse it, and right to go looking for another way out (it mined north through the
+        // wall, mining being enabled for MineDown's hatch-drop arm). A tile whose intended route the
+        // planner cannot take is a broken FIXTURE, not a planner bug.
+        NavGridView grid = gapGrid(plate(), 2, Blocks.STONE.defaultBlockState(), 3);
+        Capture cap = new Capture(TX + 3, 0, Z);
+        new Parkour().candidates(new MovementContext(grid, WALK), TX, 0, Z, cap);
+        assertFalse(cap.got, "3 body rows leaves no apex head row -- the 2-gap plate jump is refused");
+    }
+
+    @Test
     void plateTakeoffStillJumpsAShortGap() {
         // The plate row is narrowed, not zeroed: a 1-gap jump off the plate still lands.
         NavGridView grid = gapGrid(plate(), 1, Blocks.STONE.defaultBlockState());
@@ -146,6 +178,12 @@ class TrapdoorParkourTest {
      * the first standable column past the strip).
      */
     private static NavGridView gapGrid(BlockState takeoff, int gap, BlockState landing) {
+        return gapGrid(takeoff, gap, landing, 4);
+    }
+
+    /** @param bodyRows how many AIR rows are carved above the floor cell (the corridor's inner height).
+     *                  4 is the arc-clearing default; 3 models a corridor whose ceiling sits at floor+4. */
+    private static NavGridView gapGrid(BlockState takeoff, int gap, BlockState landing, int bodyRows) {
         BlockState air = Blocks.AIR.defaultBlockState();
         BlockState stone = Blocks.STONE.defaultBlockState();
         PalettedContainer<BlockState> s = new PalettedContainer<>(
@@ -155,10 +193,7 @@ class TrapdoorParkourTest {
                 for (int z = 0; z < 16; z++)
                     s.set(x, y, z, stone);
         for (int cx = 2; cx <= 12; cx++) {
-            s.set(cx, 1, Z, air);
-            s.set(cx, 2, Z, air);
-            s.set(cx, 3, Z, air);
-            s.set(cx, 4, Z, air); // the arc's apex head row (takeoff-feet+3; head-clearance fix 2026-08-17)
+            for (int cy = 1; cy <= bodyRows; cy++) s.set(cx, cy, Z, air);
         }
         s.set(TX, 0, Z, takeoff);
         for (int cx = TX + 1; cx <= TX + gap; cx++) s.set(cx, 0, Z, air); // bottomless gap columns

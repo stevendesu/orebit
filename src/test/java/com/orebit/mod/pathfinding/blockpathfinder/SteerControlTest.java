@@ -76,7 +76,19 @@ public class SteerControlTest {
         @Override public boolean doorOpenAt(int x, int y, int z) { return false; }
         // Parkour-servo seams (Phase 1-3) — stubbed: ordinary stone friction, no takeoff hazard.
         double slip = 0.6; // settable: the stepOffGate friction-horizon tests flip this to ice
-        @Override public double slipperinessAt(int x, int y, int z) { return slip; }
+        // PER-CELL friction override (2026-08-25). groundArriveGain reads TWO cells — the floor under the
+        // feet and the floor under the destination — and takes the slipperier, so a single uniform value
+        // cannot express the case the rule exists for (walking grippy ground toward an ice cell). Cells not
+        // named here fall back to `slip`, so every pre-existing test is unaffected.
+        final java.util.Map<Long, Double> slipAt = new java.util.HashMap<>();
+        FakeBot withSlip(int x, int y, int z, double f) {
+            slipAt.put((((long) x & 0x3FFFFFFL) << 38) | (((long) y & 0xFFFL) << 26) | ((long) z & 0x3FFFFFFL), f);
+            return this;
+        }
+        @Override public double slipperinessAt(int x, int y, int z) {
+            return slipAt.getOrDefault(
+                    (((long) x & 0x3FFFFFFL) << 38) | (((long) y & 0xFFFL) << 26) | ((long) z & 0x3FFFFFFL), slip);
+        }
         @Override public boolean gapFloorHazardAt(int x, int y, int z) { return false; }
     }
 
@@ -365,110 +377,86 @@ public class SteerControlTest {
     }
 
 
-    // ---- GROUND hazard probes: the cell walk + the planned-descent exemption -------------------------
-    // Owner ruling 2026-08-20, the (340,69,481) creep-wedge conviction (flagship r8). Two independent
-    // defects were fixed in the probe machinery, and these pin both:
-    //   1a  pathDropsAhead's leg-alignment test (dot >= STRAIGHT_DOT) was the wrong QUESTION — it asked
-    //       "is the next leg straight ahead?" and, when it fired, suppressed EVERY void probe around the
-    //       waypoint. Replaced by an exact per-probe-cell test (plannedDescentCell): a cell is exempt iff
-    //       it IS the next waypoint's column and the next waypoint lies below the current one.
-    //   1b  the probe walk was DEGENERATE on diagonals — cells came from F.c* + round(u*k) with u
-    //       EUCLIDEAN-normalised, so on a 45 deg leg round(0.70711*1) == round(0.70711*2) == 1 and both k
-    //       named the same cell: HAZARD_LOOKAHEAD=2 inspected one cell twice and never read the cell
-    //       genuinely two ahead. Replaced by a CHEBYSHEV cell walk (u / max(|ux|,|uz|)), one cell per k.
-    // The frame under test: a waypoint FEET cell at y=69 (ty 69.0 -> F.cy 69), so the lane floor a probe
-    // reads is y=68 (groundVoidColumn = !solidAt(x, F.cy-1, z)).
+    // ---- GROUND hazard probes: DELETED 2026-08-25 (owner ruling) ------------------------------------
+    // Five tests lived here pinning groundOvershootHazard / groundFlankHazard / plannedDescentCell: the
+    // Chebyshev cell walk, and the per-probe-cell planned-descent exemption. The predicates they pinned no
+    // longer exist. They are not being weakened to fit a changed model -- the model they described was
+    // removed wholesale, because it answered the wrong question:
+    //
+    //   a corner brake must answer "from how far out must I slow to stop ON the anchor?", which is a
+    //   function of SPEED and the SURFACE'S DRAG. The retired family instead inspected the CONTENTS of
+    //   cells past the waypoint and emitted one bit that shifted the anchor by a BODY-GEOMETRY constant
+    //   (0.5 - BODY_RADIUS - margin = 0.19 blocks), the same 0.19 whether the bot was creeping on stone
+    //   (0.42 b of run-out at cruise) or sliding on blue ice (2.88 b).
+    //
+    // Their subject matter is now covered by groundArriveGain_* below, which pins the replacement law, and
+    // the behavioural guard is the ice / iceparkour course family. See the tombstone in SteerControl.
+    //
+    // NOTE the exemption those tests pinned was itself the tell: plannedDescentCell existed only to stop
+    // the probe flagging cells THE PLAN HAD DELIBERATELY CHOSEN, it could exempt only ONE cell (SteerView
+    // is one waypoint deep) while the walk reached two, and only for a DESCENT. A predicate that needs a
+    // patch to stop contradicting the plan is asking a question the follower has no business asking.
 
-    /** 1a: a colinear planned descent exempts its OWN landing cell — and NOTHING else. The old whole-
-     *  predicate boolean suppressed both probes, so a genuine second void two cells on was invisible. */
+    /** The replacement law's core identity: the ARRIVE gain is {@code (1-q)/q} for the medium's per-tick
+     *  drag {@code q = friction x 0.91}, so {@code 1/gain} IS the coast distance per unit speed. Pinning
+     *  the numbers, not just the shape -- these are what decide how early the servo starts easing. */
     @Test
-    void groundOvershoot_plannedDescentExemptsOnlyItsLandingCell() {
-        // +x leg to the waypoint at cell (11,10); the plan then steps DOWN into (12,10). Probes: (12,10), (13,10).
-        View descendAhead = new View(10.5, 69, 10.5, 11.5, 69, 10.5, true, 12.5, 68.0, 10.5);
-        // Only the planned landing cell lacks a floor -> the plan's own drop, not a hazard.
-        FakeBot planned = new FakeBot(11.0, 69, 10.5);
-        planned.withSolid(13, 68, 10);
-        assertFalse(SteerControl.groundOvershootHazard(planned, descendAhead),
-                "the cell the plan descends into is the plan's own trajectory, never a hazard");
-        // The cell BEYOND it is void too — an unplanned drop the bot would coast into. Pre-fix this was
-        // suppressed with the landing cell (one boolean for both probes) and the servo cruised into it.
-        FakeBot beyond = new FakeBot(11.0, 69, 10.5);
-        assertTrue(SteerControl.groundOvershootHazard(beyond, descendAhead),
-                "a genuine void two cells off the route is still caught (the exemption is PER CELL)");
+    void groundArriveGain_isDerivedFromTheSurfaceDrag() {
+        View seg = new View(10.5, 69.0, 10.5, 11.5, 69.0, 10.5);
+        FakeBot stone = new FakeBot(11.0, 69.0, 10.5);          // f = 0.6 (the FakeBot default)
+        assertEquals(0.8315, SteerControl.groundArriveGain(stone, seg), 1e-3,
+                "stone: q = 0.546, coast 1.20 b -> gain 0.831 (the value the retired constant hard-coded)");
+
+        FakeBot ice = new FakeBot(11.0, 69.0, 10.5);
+        ice.slip = 0.98;
+        assertEquals(0.1213, SteerControl.groundArriveGain(ice, seg), 1e-3,
+                "ice: q = 0.892, coast 8.24 b -> gain 0.121, a 6.9x longer ease than stone");
+
+        FakeBot blue = new FakeBot(11.0, 69.0, 10.5);
+        blue.slip = 0.989;
+        assertTrue(SteerControl.groundArriveGain(blue, seg) < SteerControl.groundArriveGain(ice, seg),
+                "blue ice is slipperier still -> an even longer ease");
     }
 
-    /** 1a: the exemption is gated on the next waypoint actually being BELOW — a level next leg leaves the
-     *  same missing floor a hazard, which is what stops an ordinary walk-off being read as a descent. */
+    /** The conservative pick (owner ruling 2026-08-25): whichever of {current floor, destination floor} is
+     *  SLIPPERIER governs, so the ease begins BEFORE the bot steps onto ice rather than one tick after.
+     *  Note vanilla's naming inversion -- getFriction() is velocity RETENTION, so slipperier is the LARGER
+     *  value and the conservative pick is max(), not min(). */
     @Test
-    void groundOvershoot_levelNextLegLeavesTheDropAHazard() {
-        View levelAhead = new View(10.5, 69, 10.5, 11.5, 69, 10.5, true, 12.5, 69.0, 10.5);
-        FakeBot b = new FakeBot(11.0, 69, 10.5);
-        b.withSolid(13, 68, 10);                       // only the far probe has a floor
-        assertTrue(SteerControl.groundOvershootHazard(b, levelAhead),
-                "no planned descent -> the missing floor at (12,10) is an off-lane walk-off");
+    void groundArriveGain_takesTheSlipperierOfTheTwoSurfaces() {
+        // The bot stands in cell x=10 and the step targets cell x=11, so the two reads are DISTINCT cells:
+        // feet floor (10,68,10), destination floor (floor(tx), floor(ty)-1, floor(tz)) = (11,68,10).
+        View seg = new View(10.5, 69.0, 10.5, 11.5, 69.0, 10.5);
+
+        FakeBot ontoIce = new FakeBot(10.5, 69.0, 10.5);        // standing on stone...
+        ontoIce.withSlip(11, 68, 10, 0.98);                     // ...about to step onto ice
+        assertEquals(0.1213, SteerControl.groundArriveGain(ontoIce, seg), 1e-3,
+                "the ice ahead governs while still on stone — brake EARLY, the whole point of the rule");
+
+        FakeBot offIce = new FakeBot(10.5, 69.0, 10.5);         // standing ON ice...
+        offIce.slip = 0.98;
+        offIce.withSlip(11, 68, 10, 0.6);                       // ...stepping off onto stone
+        assertEquals(0.1213, SteerControl.groundArriveGain(offIce, seg), 1e-3,
+                "still on ice — the surface actually under the feet still governs this tick's physics");
     }
 
-    /** 1a, the FLANK half: a descent that turns ACROSS the lane. The old alignment test read dot = 0 and
-     *  declared no planned drop, so the plan's own landing column — sitting one step perpendicular to
-     *  travel — was braked for as a flank void. The per-cell test exempts exactly that column. */
+    /** No floor at all yields the ORDINARY gain, not a special case. This is the structural difference from
+     *  the retired probes: they read a floor's EXISTENCE (!solidAt) and turned "no block" into HAZARD; this
+     *  reads a VALUE, and air's getFriction() is 0.6 — the same as stone. It is why a partial-height floor
+     *  can no longer produce a bogus verdict (the trapdoor pocket / closeparkour wedge). */
     @Test
-    void groundFlank_plannedDescentAcrossTheLaneIsExempt() {
-        // +x leg to waypoint cell (11,10); the plan then steps DOWN into (11,11) — the +z FLANK cell.
-        View turnDown = new View(10.5, 69, 10.5, 11.5, 69, 10.5, true, 11.5, 68.0, 11.5);
-        FakeBot b = new FakeBot(11.0, 69, 10.5);
-        b.withSolid(11, 68, 9);                        // the OTHER flank is solid ground
-        assertFalse(SteerControl.groundFlankHazard(b, turnDown),
-                "the flank the plan descends into is the plan's own step-down, not a lane hazard");
-        // The opposite flank is a real unplanned drop and must still fire.
-        FakeBot otherSide = new FakeBot(11.0, 69, 10.5);
-        otherSide.withSolid(11, 68, 11);
-        assertTrue(SteerControl.groundFlankHazard(otherSide, turnDown),
-                "an unplanned void on the OTHER flank is still a hazard");
-    }
-
-    /** 1b: on a 45 deg leg the two probes must name two DIFFERENT cells. Pre-fix both k rounded to the
-     *  same cell, so a void exactly two cells along the diagonal was never read at all. */
-    @Test
-    void groundOvershoot_diagonalWalksTwoDistinctCells() {
-        // Diagonal (+x,+z) leg to waypoint cell (11,11): Chebyshev walk visits (12,12) then (13,13).
-        View diagonal = new View(10.5, 69, 10.5, 11.5, 69, 11.5);
-        FakeBot b = new FakeBot(11.0, 69, 11.0);
-        b.withSolid(12, 68, 12);                       // the first cell along the diagonal HAS a floor
-        assertTrue(SteerControl.groundOvershootHazard(b, diagonal),
-                "the cell two along the diagonal (13,13) is void — pre-fix k=2 re-read (12,12) and missed it");
-        b.withSolid(13, 68, 13);                       // floor the second cell too
-        assertFalse(SteerControl.groundOvershootHazard(b, diagonal),
-                "both walked cells floored -> no overshoot hazard");
-    }
-
-    /** 1b: a CARDINAL leg is byte-identical under the Chebyshev step (max(|ux|,|uz|) == 1), in both
-     *  travel senses — the walk is exactly the waypoint cell +1 and +2 along the axis. */
-    @Test
-    void groundOvershoot_cardinalWalkIsUnchanged() {
-        View plusX = new View(10.5, 69, 10.5, 11.5, 69, 10.5);
-        FakeBot near = new FakeBot(11.0, 69, 10.5);
-        near.withSolid(13, 68, 10);
-        assertTrue(SteerControl.groundOvershootHazard(near, plusX), "k=1 cell is (12,10) — void");
-        FakeBot far = new FakeBot(11.0, 69, 10.5);
-        far.withSolid(12, 68, 10);
-        assertTrue(SteerControl.groundOvershootHazard(far, plusX), "k=2 cell is (13,10) — void");
-        FakeBot floored = new FakeBot(11.0, 69, 10.5);
-        floored.withSolid(12, 68, 10).withSolid(13, 68, 10);
-        assertFalse(SteerControl.groundOvershootHazard(floored, plusX), "both floored — nothing to brake for");
-
-        // −z sense: waypoint cell (10,9), walk (10,8) then (10,7).
-        View minusZ = new View(10.5, 69, 10.5, 10.5, 69, 9.5);
-        FakeBot back = new FakeBot(10.5, 69, 10.0);
-        back.withSolid(10, 68, 8);
-        assertTrue(SteerControl.groundOvershootHazard(back, minusZ), "k=2 cell is (10,7) — void");
-        back.withSolid(10, 68, 7);
-        assertFalse(SteerControl.groundOvershootHazard(back, minusZ), "both floored — nothing to brake for");
+    void groundArriveGain_missingFloorIsOrdinaryNotHazardous() {
+        View seg = new View(10.5, 69.0, 10.5, 11.5, 69.0, 10.5);
+        FakeBot overVoid = new FakeBot(11.0, 69.0, 10.5);       // withSolid() never called: nothing anywhere
+        assertEquals(0.8315, SteerControl.groundArriveGain(overVoid, seg), 1e-3,
+                "an empty world reads ordinary friction — the gain never inspects whether a block is there");
     }
 
 
-    // ---- the LAND drive's hazard MODE SWITCH (owner ruling 2026-08-20, Phase 2) ----------------------
-    // groundServo's hazard branch is retired: drive() computes the hazard verdict once and routes the whole
-    // tick to arriveOnStep (position-anchored ARRIVE on the near-face point) instead of a speed schedule.
+    // ---- the LAND drive: ONE law for every grounded tick --------------------------------------------
+    // 2026-08-20 Phase 2 retired groundServo's hazard branch onto arriveOnStep; Phase 3 (2026-08-24) did the
+    // same for its pursuit branch; 2026-08-25 removed the hazard verdict itself. drive() now routes every
+    // grounded tick to the one position-anchored ARRIVE, whose ease length comes from groundArriveGain.
 
     /** The flagship-r8 creep-wedge pose, verbatim: step 2 Diagonal floor (339,68,480)→(340,68,481), bot at
      *  (339.926, 481.006) with vel (0.0963, 0.0651), grounded and ON its line (cte 0.0566), the plan turning
@@ -477,7 +465,7 @@ public class SteerControlTest {
      *  thrust due NORTH at a target east-north-east. The position-anchored ARRIVE wants −55.2° at full
      *  forward, and that is what the drive must now command. */
     @Test
-    void drive_hazardCorner_arrivesOnTheNearFace_insteadOfPirouetting() {
+    void drive_dropLipCorner_arrivesOnTheStep_insteadOfPirouetting() {
         View diagonalIntoDescend = new View(339.5, 69.0, 480.5, 340.5, 69.0, 481.5,
                 true, 341.5, 68.0, 481.5);
         FakeBot b = new FakeBot(339.926, 69.0, 481.006);
@@ -494,11 +482,11 @@ public class SteerControlTest {
         assertTrue(yaw < -30.0 && yaw > -80.0,
                 "the drive must head toward the target (≈ −55°), not spin north; got " + yaw);
         assertEquals(1.0f, b.forward, 1e-6f, "saturated ARRIVE pull, not the schedule's 0.51 half-throttle");
-        assertTrue(SteerControl.lastDrive.endsWith("arrive:stephaz"),
-                "hazard routes to the near-face ARRIVE, not servo:hazard; got " + SteerControl.lastDrive);
+        assertTrue(SteerControl.lastDrive.endsWith("arrive:step"),
+                "one law: the target-centre ARRIVE; got " + SteerControl.lastDrive);
     }
 
-    /** The A/B revert leg is untouched by the mode switch: a SAFE straight still runs the pursuit servo. */
+    /** The same law on an ordinary floored straight — no terrain-dependent mode to switch into any more. */
     @Test
     void drive_safeStraight_alsoArrivesOnTheStep() {
         // PHASE 3 (2026-08-24): this used to assert the SAFE corner kept groundServo's pursuit branch

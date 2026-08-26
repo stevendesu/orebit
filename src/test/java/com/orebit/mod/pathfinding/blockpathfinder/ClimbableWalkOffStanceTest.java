@@ -272,6 +272,12 @@ class ClimbableWalkOffStanceTest {
         b.grounded = false;
         b.climbable = true;
         b.vy = -0.15;
+        // CENTRED horizontally (2026-08-25). VineBot defaults to WEDGED_X = 60.289, the measured pose from
+        // the jungle-vine sneak-edge-guard wedge — 0.011 outside the horizontal containment band that
+        // Movement.atWaypoint now applies, which would make the second assertion below fail for a reason
+        // this test is not about. The subject here is purely VERTICAL: reached must not fire mid-fall and
+        // must fire once the hang arrests. The wedge x belongs to the wedge tests, which keep it.
+        b.x = FOOT_X + 0.5;
         // Feet cell exactly ON the waypoint — the fly-through: position matches, support does not.
         assertFalse(MovementRegistry.TRAVERSE.reached(b, b.footX(), b.footY(), b.footZ(), null),
                 "position alone must never advance the cursor: the falling bot's feet block merely TRANSITS "

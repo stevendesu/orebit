@@ -205,9 +205,28 @@ public final class ParkourCourse {
         boolean padTakeoff;             // the takeoff cell ALONE is raised one block, so the route must
                                         // ASCEND onto a 1-wide pad and launch from ON TOP of it -- the
                                         // no-lateral-runway shape. See padParkourTrial.
-        double launchFloor = 0.97;      // fraction of ParkourEnvelope.modelJumpTickSpeed the launch must
-                                        // reach. 0 = MEASURE AND REPORT ONLY, for cards where the stone
-                                        // sprint model is not a legitimate target (see iceRestTrial).
+        // Fraction of ParkourEnvelope.modelJumpTickSpeed the launch must reach. 0 = MEASURE AND REPORT
+        // ONLY, for cards where the stone sprint model is not a legitimate target (see iceRestTrial).
+        //
+        // RELAXED 0.97 -> 0.90 on 2026-08-26 (owner ruling), because the tighter value was asserting a
+        // quantity we do not actually care about. What matters is whether the bot CLEARS THE GAP, and the
+        // max-gap cards test that directly: with the speed-aware takeoff trigger (Parkour.TAKEOFF_LEAD_TICKS)
+        // every one of flat3 / rise2 / falld2g4 / falld3g4 / diag2 .rest reached its goal launching at
+        // 0.4349 -- the two-tick run-up rung, 95% of the three-tick model. Those are the cards sitting ON
+        // the envelope's admitted maximum, so they are the ones that fail first if reach is genuinely short.
+        // They did not.
+        //
+        // WHY 0.90 SPECIFICALLY, and not a round number picked for comfort. It is bounded on both sides by
+        // measurements: the off-centre launch bug this gate was built to catch produced 87% of model (the
+        // 2026-08-25 launch-speed arc, before the four stacked tolerance-vs-requirement fixes), and the
+        // achievable value on these fixtures today is 95%. A floor of 0.90 sits between them, so it still
+        // convicts the original defect while no longer convicting a legitimate two-tick run-up.
+        //
+        // What it no longer detects is a drift between 90% and 97%. That is deliberate: launch speed is a
+        // STEP function of run-up length (3 ticks = 0.4557, 2 ticks = 0.4350), so a card whose fixture gives
+        // it a short approach lands on the lower rung by physics, not by defect, and a floor that cannot
+        // tell those apart reports the fixture rather than the bot.
+        double launchFloor = 0.90;
         boolean jumpSpeedGate;          // STRICT verdict -- PASS requires the measured launch speed to reach
                                         // ParkourEnvelope.modelJumpTickSpeed. See offCentreTrial.
         double offCentre;               // REST spawn offset ALONG the jump axis, in blocks past the takeoff
