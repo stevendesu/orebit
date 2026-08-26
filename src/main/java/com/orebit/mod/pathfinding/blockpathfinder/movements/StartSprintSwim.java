@@ -87,9 +87,8 @@ public final class StartSprintSwim implements Movement {
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
-        SteerControl.swimTowards(b, path);
         b.setSprinting(true);
-        SteerControl.holdDepth(b, path, SteerControl.SUBMERGE_BIAS);
+        SteerControl.uprightSwimServo(b, path);
     }
 
     @Override
@@ -98,9 +97,19 @@ public final class StartSprintSwim implements Movement {
         MovePlan plan = new MovePlan();
         plan.phase("submerge")
                 .drive((b, v) -> {
-                    SteerControl.recenterOnTarget(b, v);    // horizontal servo to the initiation waypoint centre — eases to 0 at centre and re-pushes on overshoot, arresting the momentum coast past the column (mirrors parkour's landing recenter)
                     b.setSprinting(true);                   // KEEP: needed to enter Pose.SWIMMING
-                    SteerControl.holdDepth(b, v, SteerControl.SUBMERGE_BIAS);    // KEEP: the sink that pushes the head under → prone
+                    // The UPRIGHT servo, because the bot is still upright until the pose flips — it station-
+                    // keeps on the initiation column AND owns the sink (holdDepthAt at the planned depth) that
+                    // pushes the head under and makes the bot isUnderWater(), which is what vanilla's
+                    // Entity.updateSwimming actually requires to ENTER the prone pose.
+                    //
+                    // Was recenterOnTarget + holdDepth. recenterOnTarget is a pure POSITION P-controller with
+                    // an exact-zero deadband: it cannot see velocity, so on water's 4.0-block coast it settles
+                    // at a standing offset and answers a drift-through with a correction that becomes the next
+                    // overshoot. That is the class-1 defect the ground family was converted away from; the
+                    // dive-init is the last swim site that still had it. SUBMERGE_BIAS is 0.0 (identity since
+                    // 2026-08-15), so the depth set-point is byte-identical to the call it replaces.
+                    SteerControl.uprightSwimServo(b, v);
                 })
                 .done(BotSteering::prone);
         return plan;

@@ -69,8 +69,7 @@ public final class Surface implements Movement {
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
-        SteerControl.uprightSwimServo(b, path);
-        SteerControl.holdDepth(b, path, 0.0);
+        SteerControl.uprightSwimServo(b, path);   // owns the depth hold too (2026-08-26)
     }
 
     @Override
@@ -80,8 +79,7 @@ public final class Surface implements Movement {
         plan.phase("surface")
                 .drive((b, v) -> {
                     b.setSprinting(false);
-                    SteerControl.uprightSwimServo(b, v);
-                    SteerControl.holdDepth(b, v, 0.0);
+                    SteerControl.uprightSwimServo(b, v);   // owns the depth hold too (2026-08-26)
                 })
                 .done(b -> !b.prone() && b.footX() == tx && b.footZ() == tz);
         return plan;
