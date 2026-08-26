@@ -42,7 +42,7 @@ import com.orebit.mod.pathfinding.blockpathfinder.MovementContext;
  * Horizontal (X/Z) is driven by {@code SteerControl.computeGeom}'s pursuit projection <i>in the X-Z plane</i>
  * (independent of the Y component), while vertical (Y) is driven by {@code SteerControl.holdDepth} (a bang-bang
  * jump/sink autopilot keyed ONLY on {@code p.ty()} vs the bot's {@code y}, independent of the horizontal) plus
- * the depth PITCH folded into {@code swimServo}/{@code swimPitched}. A combined vertical-diagonal or corner
+ * the depth PITCH folded into {@code swimServo}. A combined vertical-diagonal or corner
  * target is therefore just the composition of two already-working independent controllers — the horizontal one
  * {@link SprintSwim}'s own (pure-XZ) candidates exercise, and the vertical one the upright {@link Swim} rungs
  * exercise — and {@code Swim.reachedSwim} gates arrival on all three axes. (This paragraph used to cite

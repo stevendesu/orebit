@@ -323,8 +323,7 @@ public final class Swim implements Movement {
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
-        SteerControl.uprightSwimServo(b, path);
-        SteerControl.holdDepth(b, path, 0.0);
+        SteerControl.uprightSwimServo(b, path);   // owns the depth hold too (2026-08-26)
     }
 
     @Override
@@ -337,8 +336,9 @@ public final class Swim implements Movement {
                     b.setSprinting(false);      // upright: sprinting would re-enter the prone pose AND, per
                                                 // getFluidFallingAdjustedMovement, cancel the gravity term the
                                                 // vertical costs above are derived from
+                    // uprightSwimServo calls holdDepthAt itself now — pitch is vertically inert
+                    // outside the prone pose, so the upright vertical axis IS holdDepth and the servo owns it.
                     SteerControl.uprightSwimServo(b, v);
-                    SteerControl.holdDepth(b, v, 0.0);
                 })
                 .done(b -> reachedSwim(b, tx, ty + 1, tz));
         return plan;
@@ -378,7 +378,27 @@ public final class Swim implements Movement {
      * on that floor puts the feet in the waypoint cell.
      */
     static boolean reachedSwim(BotSteering b, int wx, int wy, int wz, double bias) {
-        return b.footX() == wx && b.footY() == wy && b.footZ() == wz;
+        // HORIZONTAL CONTAINMENT (2026-08-26), the swim twin of {@link Movement#atWaypoint}'s band. The cell
+        // test above is the VERTICAL story and stays exactly as argued; horizontally it was bare cell
+        // membership, which declares arrival the instant the bot's CENTRE crosses the boundary — with up to
+        // 0.5 of the cell untraversed and up to 0.3 of the 0.6-wide body still in the previous one.
+        //
+        // On land that was fixed on 2026-08-25 (the iceturn corner clip). Water never got it, and water is
+        // where it bites hardest: a sprint-swimmer's drag is 0.9, numerically IDENTICAL to blue ice, so a
+        // residual that a stone-floor arrival would have absorbed in 1.2 blocks coasts for 9. The flagship
+        // wedge at (359,37,426) is the shape: DiagonalSprintSwim was accepted at z=426.819 — legal by cell
+        // membership, body already 0.119 INTO cell 427 — carrying 0.0516 b/t, which coasted it across the
+        // boundary before its successor's first tick. EndSprintSwim then spent 3015 ticks failing a foot-cell
+        // test for a cell the bot was no longer in.
+        //
+        // Ordering note, because it matters: this band is only SAFE because the swim drive was rewritten the
+        // same day to null cross-track (SteerControl's swim-drive header). Tightening the gate against the old
+        // full-forward pursuit would not have prevented the wedge, only relocated it — SprintSwim.reached also
+        // gates Movement.teedUp, so a refused successor stalls the CURSOR and the predecessor keeps driving
+        // until it leaves the cell on some other axis. Same deadlock, worse diagnosis.
+        return b.footY() == wy
+                && Math.abs(b.x() - (wx + 0.5)) <= Movement.ARRIVAL_HALF_SLACK
+                && Math.abs(b.z() - (wz + 0.5)) <= Movement.ARRIVAL_HALF_SLACK;
     }
 
     /** Upright (bias-free) swim reach test — delegates to the bias-aware form with bias 0.0. */
