@@ -582,10 +582,28 @@ public final class DiagonalParkour implements Movement {
                 })
                 .advanceWhen(b -> b.grounded()); // hold the arc inputs until touchdown
         plan.phase("land")
-                // Keep braking to the desired point via the same predictive servo until grounded on the target
-                // cell (once grounded the predictor returns the live along-position → a reverse-brake toward the
-                // cell centre, the ice-slide arrest).
-                .drive((b, v) -> SteerControl.parkourAirborne(b, v, uxn, uzn, tx, ty, tz, sprint || sprintInject[0]))
+                // AIRBORNE -> the ballistic servo (velocity IS the only lever mid-arc, and its position term
+                // is the touchdown predictor). GROUNDED -> the position-anchored ARRIVE, because that
+                // predictor DEGENERATES the moment the feet are down: standing still on the landing it
+                // reports the current position as the touchdown, both branches collapse to a zero-VELOCITY
+                // setpoint, and the bot holds wherever it stopped.
+                //
+                // The comment this replaces claimed the opposite ("once grounded the predictor returns the
+                // live along-position -> a reverse-brake toward the cell centre"). It does return the live
+                // position — that is precisely the degeneracy, not a brake. Parkour took this same split in
+                // 4edf3f4 (2026-08-25, measured on ice.chain.g3: 434 ticks parked 0.237 off centre at
+                // fwd=0.00); DiagonalParkour was missed and stayed latent until the long flagship of
+                // 2026-08-26 reached (1157,63,1033) and sat for 600+ ticks at fwd=0.00 str=0.00, 0.283 along
+                // past the landing centre — outside atWaypoint's containment band, which `done` needs and
+                // which a bot writing zero inputs can never reach. Pinned by
+                // DiagonalParkourGateTest.landPhaseCorrectsAnOffCentreTouchdown.
+                .drive((b, v) -> {
+                    if (b.grounded()) {
+                        SteerControl.arriveGrounded(b, v);
+                    } else {
+                        SteerControl.parkourAirborne(b, v, uxn, uzn, tx, ty, tz, sprint || sprintInject[0]);
+                    }
+                })
                 .done(b -> b.grounded()
                         && atWaypoint(b, tx, toFootY, tz));
         return plan;

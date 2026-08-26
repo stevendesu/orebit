@@ -39,6 +39,7 @@ class DiagonalParkourGateTest {
         // recorded outputs
         boolean jumping, sprinting;
         double faceDx, faceDz;
+        float forward = Float.NaN, strafe = Float.NaN;
         // settable gap-floor hazard cell (Fix 3), -1 = none
         int hazX = Integer.MIN_VALUE, hazY, hazZ;
 
@@ -62,7 +63,8 @@ class DiagonalParkourGateTest {
         @Override public boolean prone() { return false; }
         @Override public void faceHorizontally(double dx, double dz) { faceDx = dx; faceDz = dz; }
         @Override public void faceTowards(double dx, double dy, double dz) { faceDx = dx; faceDz = dz; }
-        @Override public void setForward(float zza) { }
+        @Override public void setForward(float zza) { forward = zza; }
+        @Override public void setStrafe(float xxa) { strafe = xxa; }
         @Override public void setSprinting(boolean s) { sprinting = s; }
         @Override public void setJumping(boolean j) { jumping = j; }
         @Override public void setSneak(boolean s) { }
@@ -106,6 +108,68 @@ class DiagonalParkourGateTest {
     /** Position the bot ON the takeoff diagonal, {@code along} blocks along-line past the cell centre. */
     private static PosBot onDiagonal(PosBot b, double along, boolean grounded) {
         return b.at(0.5 + along * ALONG, 11, 0.5 + along * ALONG, grounded);
+    }
+
+    /**
+     * Drive the plan to its LAND phase, then park the bot at rest on the landing cell, off centre by more
+     * than the arrival band. The land drive must command a correction; a zero-input tick here is a wedge,
+     * because {@code done} needs {@link Movement#atWaypoint} containment the bot cannot reach on its own.
+     */
+    private static PosBot drivenToLandPhase(PhaseRunner runner, View view) {
+        PosBot bot = new PosBot();
+        runner.begin(plan());
+        runner.run(onDiagonal(bot, 0.32, true), view);      // runup -> takeoff (past the gate, grounded)
+        runner.run(onDiagonal(bot, 0.40, false), view);     // takeoff -> airborne (feet left the ground)
+        bot.at(2.5, 11, 2.5, true);
+        runner.run(bot, view);                              // airborne -> land (touchdown)
+        return bot;
+    }
+
+    @Test
+    void landPhaseCorrectsAnOffCentreTouchdown_insteadOfHoldingWhereItStopped() {
+        // ============================================================================================
+        // THE (1157,63,1033) LONG-FLAGSHIP WEDGE, 2026-08-26. The bot completed a DiagonalParkour arc,
+        // came to rest 0.2 per-axis (0.283 along the diagonal) past the landing centre, and sat there for
+        // 600+ ticks at fwd=0.00 str=0.00 vel=(0,0), phase 3/4:
+        //
+        //   exec DiagonalParkour wp2 phase=3/4 botFoot=(1157,63,1033) grounded=true
+        //     botXZ=(1157.700,1033.700)  landing centre (1157.500,1033.500)
+        //     vel=(0.0000,0.0000) fwd=0.00 str=0.00 src=#19437 arrive:runup
+        //
+        // (`src` frozen at #19437 because parkourAirborne never calls tag() — a stale stamp, not evidence
+        // of which servo ran. The zero inputs are the evidence.)
+        //
+        // CAUSE: the land phase drove parkourAirborne unconditionally. That servo's position term IS the
+        // touchdown predictor, and the predictor DEGENERATES once the feet are down — standing still on the
+        // landing it reports the current position as the touchdown, so both branches collapse to a
+        // zero-VELOCITY setpoint and the bot holds wherever it stopped. Commit 4edf3f4 (2026-08-25) fixed
+        // exactly this in Parkour and measured it on ice.chain.g3 (434 ticks parked 0.237 off centre at
+        // fwd=0.00). DiagonalParkour was missed, and stayed latent until the swim rewrite let the flagship
+        // travel far enough to attempt a diagonal jump on this route.
+        //
+        // Airborne ticks keep the ballistic law — velocity IS the only lever mid-arc. Grounded ticks get the
+        // position-anchored ARRIVE, which is the same split Parkour already has.
+        // ============================================================================================
+        PhaseRunner runner = new PhaseRunner();
+        View view = new View();                              // its target IS the landing centre (2.5, 2.5)
+        PosBot bot = drivenToLandPhase(runner, view);
+        assertEquals(3, runner.phase(), "reached the land phase");
+
+        // Parked at rest past the landing centre, outside the arrival band (0.25 per axis = 0.354 along;
+        // the flagship sat at 0.2 per axis, right on the band's edge — this is the same state, unambiguously
+        // outside it so the assertion cannot turn on a floating-point tie).
+        bot.at(2.75, 11, 2.75, true);
+        bot.velX = 0.0;
+        bot.velZ = 0.0;
+        runner.run(bot, view);
+
+        assertFalse(runner.doneNow(bot), "containment is unmet, so the move must NOT be complete");
+        assertTrue(Math.abs(bot.forward) > 1e-6f || Math.abs(bot.strafe) > 1e-6f,
+                "the land drive commands a correction; zero input here is the wedge (fwd=" + bot.forward
+                        + " str=" + bot.strafe + ")");
+        // ...and it corrects the right way: back toward the landing centre, which lies at -x/-z from here.
+        assertTrue(bot.faceDx < 0 && bot.faceDz < 0,
+                "aims back at the landing centre (" + bot.faceDx + ", " + bot.faceDz + ")");
     }
 
     @Test
