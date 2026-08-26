@@ -139,34 +139,7 @@ public final class SteerControl {
      * slabs, honey and plain stone, which is the whole point of a servo. */
     static final double TURN_ARRIVE_OFFSET = 0.45;
 
-    /** Small support margin (blocks) past the body radius in {@link #STEP_ARRIVE_OFFSET} — slack so the
-     *  destination floor genuinely carries the bot rather than the box resting flush on the boundary
-     *  between the two cells. Mirrors {@code DiagonalParkour.GATE_MARGIN}, which folds the same slack into
-     *  its takeoff gate for the same reason. */
-    static final double STEP_ARRIVE_MARGIN = 0.01;
 
-    /**
-     * How far (blocks) a GROUNDED hazard-corner arrive pulls its anchor back from the step's target centre.
-     * Split out from {@link #TURN_ARRIVE_OFFSET} on 2026-08-24: the hazard arrive had borrowed the SWIM
-     * constant, and the two are different physical quantities that merely sat at similar numbers.
-     *
-     * <p><b>Swim</b> arrival is the foot BLOCK entering the cell — at the near face — and a buoyant bot is
-     * not supported by anything, so braking to that face is exactly right there. <b>Ground</b> arrival is
-     * standing ON the destination floor, which cannot happen until the 0.6-wide body clears the SOURCE
-     * block. Borrowing the swim number put the ground anchor 0.05 inside the near face, leaving 0.25 of the
-     * body still in the source cell — a pose the bot can hold forever without ever arriving.
-     *
-     * <p>A same-height destination hides it (the foot cell flips on the centre crossing, so the step
-     * completes wherever the body is). The 2026-08-24 slowstep cards removed that cover: onto a partial-
-     * height block (honey 15/16, soul sand 14/16) the destination foot cell is the block's OWN cell, so
-     * arrival demands the descent, the descent demands the body clear the source block, and the bot instead
-     * held the borrowed anchor at {@code x≈1.95} against a 1.70 requirement — a correct servo obediently
-     * holding an anchor no completion test could accept.
-     *
-     * <p>DERIVED, not tuned: the deepest anchor that still leaves the whole body inside the destination
-     * cell, less {@link #STEP_ARRIVE_MARGIN}. One law for every surface and medium — no per-block arm and
-     * no "unless descending" case, which is the entire point of a servo. */
-    static final double STEP_ARRIVE_OFFSET = 0.5 - BotSteering.BODY_RADIUS - STEP_ARRIVE_MARGIN; // 0.19
     /** Crawl throttle cap at a HAZARD corner: the forward key is capped this low so a fast bot DECELERATES into
      *  the corner (drag beats the reduced thrust) yet a slow bot keeps CREEPING across the cell face — a steady
      *  near-crawl (owner: "velocity ≈ 0") that neither overshoots the lane into the flank hazard nor stalls the
@@ -969,14 +942,27 @@ public final class SteerControl {
     static final double FACE_ERR_THRESHOLD = 1.0 / SERVO_GAIN;
 
     /**
-     * ARRIVE-mode GROUND position gain (b/t of desired closing speed per block of anchor distance) — a
-     * RE-EXPRESSION of {@link #GROUND_COAST}, not a new tuning constant (DESIGN-servo-normalization.md §2.3,
-     * ratified §7 Q3). The identity: with {@code gainP = 1/coast = (1−q)/q} for the medium's per-tick drag
-     * {@code q}, the cascade's error is exactly {@code gainP · (anchor − (pos + coast·vel))} — the unified
-     * law with this gain IS {@link #arriveOnTarget}'s projected-stop law. Physically, {@code desired_vel(d)}
-     * is precisely the speed from which a pure-drag coast stops ON the anchor. Ground {@code q = 0.546} →
-     * {@code ≈ 0.831}. Future media derive their gain the same way from NOTES-movement-physics §1, never
-     * from tuning sessions (the ratified derived-gainP rule).
+     * Vanilla's per-tick horizontal velocity-retention multiplier applied ALONGSIDE the block's friction:
+     * {@code LivingEntity.travel} forms its drag as {@code blockFriction x 0.91}. Named here because
+     * {@link #groundArriveGain} derives the ARRIVE gain from it per tick; {@link #AIR_COAST} and
+     * {@link #GROUND_COAST} still spell their own copies inline (they are pinned single-surface constants
+     * and left byte-identical on purpose).
+     */
+    static final double VANILLA_HORIZONTAL_DRAG = 0.91;
+
+    /**
+     * The STONE ARRIVE gain, {@code 1/}{@link #GROUND_COAST} = 0.831 — kept as a PINNED constant for
+     * {@link #parkourRunupAlign} ALONE after the 2026-08-25 ruling made the arrive gain per-tick and
+     * friction-derived ({@link #groundArriveGain}).
+     *
+     * <p>Why the launch composition does NOT take the derived gain. {@code parkourRunupAlign}'s along axis
+     * is not braking to a stop — it is a full-cruise advance toward a landing centre that always sits at
+     * least a whole jump (~1.4 blocks) ahead, and its documented invariant is that the cap SATURATES on
+     * every live tick, so the gain is inert by construction (crossover {@code 0.35/0.831 = 0.42} blocks).
+     * The derived gain would break exactly that: on ice it is 0.121, moving the crossover out to 2.89
+     * blocks — which puts a 1.4-block landing INSIDE the easing region and roughly HALVES the commanded
+     * launch speed. That is the takeoff-velocity failure the 2026-08-25 parkour launch-speed arc closed;
+     * an ice launch is a ballistic problem the envelope already prices, not an arrival to be eased.
      */
     static final double ARRIVE_GAIN_GROUND = 1.0 / GROUND_COAST;
 
@@ -1214,80 +1200,129 @@ public final class SteerControl {
      */
     public static boolean terminalArrive;
 
-    /**
-     * The GROUND <b>hazard-corner verdict</b> — the single mode-selection predicate the land drive branches on
-     * (owner-ratified 2026-08-20, Phase 2 of the servo normalization). Verbatim the expression
-     * {@code groundServo} (deleted 2026-08-24)'s retired hazard branch and {@link #arriveOnStep}'s near-face branch each used to
-     * spell out for themselves: an overshoot hazard straight ahead, or a hazardous lane FLANK that the bot has
-     * already drifted toward ({@link #crossTrack} beyond {@link #FLANK_DRIFT} — a centred bot on a flanked
-     * straight is not in danger and must not be slowed).
-     *
-     * <p>Factored out because it is now a MODE SWITCH rather than a branch inside one controller: {@link #drive}
-     * asks it once and routes the whole tick — hazard &rarr; {@link #arriveOnStep} (the position-anchored ARRIVE
-     * on the near-face point), safe &rarr; {@code groundServo} (deleted 2026-08-24) (pure pursuit). Asking it once also keeps the
-     * two consumers from ever disagreeing about the same tick, which is the failure the mode switch exists to
-     * end.
-     */
-    static boolean groundHazardCorner(BotSteering b, SteerView p) {
-        return groundOvershootHazard(b, p) || (groundFlankHazard(b, p) && crossTrack(b, p) > FLANK_DRIFT);
-    }
 
     /**
-     * Gate-armed CONTAINED-tick drive (owner-ratified 2026-08-19): the {@link #anchoredServo unified core}
-     * in <b>ARRIVE</b> at the CURRENT step's target centre — the {@link #SERVO_GROUND_CRUISE} cap over the
-     * physics-derived {@link #ARRIVE_GAIN_GROUND}, so the pull is full cruise beyond ~0.42 blocks with the
-     * easing emergent inside — and semantic yaw down the step's travel direction. Replaces the pursuit
-     * anchor ONLY while {@link #stepGateArmed} (see there for the conviction): the gate predicate is
-     * CROSS-axis only ({@code crossErr + vCross/(1−f)}), so with the drive pulling cross-ward toward the
-     * SAME centreline the gate's HOLD centres on, the cross error converges and stays converged, the
-     * predicate stays contained, and the along-axis ARRIVE advances the step until the foot leaves the
-     * from column and the gate disarms — where the normal drive (racing line and all) resumes. The
-     * look-ahead corner-cut this forgoes on gate-armed ticks is an accepted efficiency cost (owner,
-     * 2026-08-19); it survives everywhere else. The forward-pulled slice of Phase 2's hazard→ARRIVE mode
-     * switch (DESIGN-servo-normalization.md §2.5/§3).
+     * The ONE grounded drive law: the {@link #anchoredServo unified core} in <b>ARRIVE</b> at the current
+     * step's target CENTRE, {@link #SERVO_GROUND_CRUISE} capped over the per-tick friction-derived
+     * {@link #groundArriveGain}, with semantic yaw down the step's travel direction. Every grounded tick
+     * routes here — gate-armed, terminal, or ordinary ({@link #drive}) — so no two branches can hold
+     * different opinions about the same tick.
      *
-     * <p><b>Hazard → near-face anchor</b> (owner-ratified 2026-08-19, DESIGN-servo-normalization.md
-     * §2.5.1 — the (57,172,255) flagship conviction). The gate-armed drive consults the SAME hazard
-     * predicate call {@code groundServo} (deleted 2026-08-24)'s hazard branch selects its cornering line on —
-     * {@code groundOvershootHazard || (groundFlankHazard && crossTrack > FLANK_DRIFT)}, verbatim — and
-     * while it fires the ARRIVE anchor moves from the step's target centre to the NEAR-FACE point,
-     * target centre − {@link #STEP_ARRIVE_OFFSET} along the step's travel direction (groundServo's own
-     * hazard aim point). Same law otherwise: cap, gain and semantic yaw unchanged, zero new constants.
-     * Why: the target-centre ARRIVE bypasses groundServo's hazard machinery for the whole gate-armed
-     * approach, so at wp9 Diagonal → (58,172,255) chaining into wp10 Descend → (59,171,255) nothing
-     * braked for the drop lip — speed built to ~0.115 b/t, the foot entered the last cell, the gate
-     * disarmed, and the legacy hazard branch received a fast bot one cell from the lip: its one-tick
-     * saturated reverse (the documented class-2 overshoot) handed the Descend backward momentum and the
-     * bot slid off the from-column to (57,172,255) → envelope fail→HOLD. Anchored at the near face, the
-     * easing spans the whole approach and the handoff speed at the lip is bounded by the cascade.
-     * Tagged {@code arrive:stephaz}({@code :dead}) so the exec log shows the mode switch (§4).
+     * <p><b>Gate-armed</b> (owner-ratified 2026-08-19): while {@link #stepGateArmed} the anchor replaces the
+     * pursuit point, so the drive and the gate police ONE lane. The gate predicate is CROSS-axis only
+     * ({@code crossErr + vCross/(1−f)}), and with the drive pulling toward the same centreline the gate's
+     * HOLD centres on, the cross error converges and stays converged while the along-axis ARRIVE advances
+     * the step until the foot leaves the from column. The look-ahead corner-cut this forgoes on gate-armed
+     * ticks is an accepted efficiency cost (owner, 2026-08-19).
      *
-     * <p><b>Now also the HAZARD mode of the ordinary land drive</b> (owner-ratified 2026-08-20, Phase 2 — the
-     * {@code (340,69,481)} creep-wedge conviction). {@code groundServo} (deleted 2026-08-24)'s hazard branch is retired and
-     * {@link #drive} routes every hazard-corner tick here instead, gate-armed or not; see {@link #drive} for
-     * why a speed schedule could not steer and this can. The {@code hazard} verdict is passed IN rather than
-     * recomputed so the routing decision and the anchor choice are provably the same verdict.
+     * <p><b>The HAZARD near-face anchor is GONE</b> (owner ruling 2026-08-25). This method used to take a
+     * {@code hazard} bit and, while it fired, pull the anchor back by {@code STEP_ARRIVE_OFFSET} (0.19
+     * blocks) from the target centre. That bit was the sole output of ~90 lines of cell-contents probing,
+     * and it was answering the wrong question with the wrong shape of answer — see the tombstone further
+     * down this file for the full conviction. Two things it got wrong are worth restating here, because
+     * they are what this method now gets right:
+     *
+     * <ul>
+     *   <li>The corrections it made were sized by a BODY-GEOMETRY constant ({@code 0.5 − BODY_RADIUS}),
+     *       not by any braking quantity. Stopping distance is {@code coast × v} — 0.42 blocks on stone at
+     *       cruise, 2.88 on ice — so one fixed 0.19 was simultaneously unnecessary on stone and ~15× too
+     *       small on ice. {@link #groundArriveGain} makes the ease continuous in the surface instead.</li>
+     *   <li>Its 0.19 anchor was un-landable on a step DOWN onto a partial-height floor. At 0.31 into the
+     *       destination cell the 0.6-wide body clears the source block by 0.01 — an order of magnitude
+     *       under the servo's own hunting amplitude — so every other tick pushed the body back into the
+     *       source column, and vanilla resolves Y BEFORE X and then hands a grounded entity a step-assist
+     *       re-mount on a horizontal block ({@code Entity.collide}), which discards the descent entirely.
+     *       The bot held y to the exact millimetre for 600 ticks. Anchoring on the target centre leaves
+     *       the whole body 0.2 clear of the source face, so the descent simply happens.</li>
+     * </ul>
      */
+    /**
+     * The grounded ARRIVE, exposed for movements whose own phase drive is an AIRBORNE servo and which
+     * therefore need somewhere to hand over at touchdown (owner ruling 2026-08-25).
+     *
+     * <p>The case is {@code Parkour}'s {@code land} phase. {@link #parkourAirborne} keeps driving after the
+     * feet are down, and there it is not the position controller it is in the air: its position term is the
+     * TOUCHDOWN PREDICTOR, and once the bot is standing on the landing with {@code v == 0} the predictor is
+     * being asked "where will I land if I coast?" while already there. It returns the current position, both
+     * surviving branches collapse to {@code desiredAlong in {0, v}} — the same number when {@code v == 0} —
+     * and the servo is satisfied wherever the bot happens to have stopped.
+     *
+     * <p>Measured on IceParkourCourse {@code ice.chain.g3}: touchdown x=50.586 (0.086 from the cell centre,
+     * a good landing), braked slide to 50.886, servo pulls back to 50.737 — and then holds there for 434
+     * ticks with {@code fwd=0.00}. It had reversed to correct the overshoot and then braked its own
+     * correction to a halt, because a zero-VELOCITY setpoint is achieved at any position. That is exactly
+     * the class-1 defect {@link #anchoredServo} was written to end; {@code parkourAirborne} survived the
+     * conversion because it is classified as an AIR servo, and nobody asked what it does after touchdown.
+     *
+     * <p>So the fix is the conversion it missed rather than a new mechanism: airborne ticks keep the
+     * ballistic servo (velocity is genuinely the only lever mid-arc), grounded ticks get the same
+     * position-anchored ARRIVE that owns every other grounded tick in the codebase.
+     */
+    public static void arriveGrounded(BotSteering b, SteerView p) {
+        arriveOnStep(b, p);
+    }
+
     private static void arriveOnStep(BotSteering b, SteerView p) {
-        arriveOnStep(b, p, groundHazardCorner(b, p));
-    }
-
-    /** {@link #arriveOnStep} with the {@link #groundHazardCorner} verdict already in hand (see there). */
-    private static void arriveOnStep(BotSteering b, SteerView p, boolean hazard) {
-        double dx = p.tx() - p.sx(), dz = p.tz() - p.sz();
-        if (hazard) {
-            // A firing predicate implies travelFrame(p) admitted the probe, so the segment's horizontal
-            // length is ≥ EPS and the travel unit for the near-face offset is well-defined.
-            double len = Math.sqrt(dx * dx + dz * dz);
-            anchoredServo(b, "arrive:stephaz", "arrive:stephaz:dead",
-                    p.tx() - (dx / len) * STEP_ARRIVE_OFFSET,
-                    p.tz() - (dz / len) * STEP_ARRIVE_OFFSET,
-                    SERVO_GROUND_CRUISE, ARRIVE_GAIN_GROUND, dx, dz);
-            return;
-        }
         anchoredServo(b, "arrive:step", "arrive:step:dead",
                 p.tx(), p.tz(),
-                SERVO_GROUND_CRUISE, ARRIVE_GAIN_GROUND, dx, dz);
+                SERVO_GROUND_CRUISE, groundArriveGain(b, p),
+                p.tx() - p.sx(), p.tz() - p.sz());
+    }
+
+    /**
+     * The ARRIVE-mode GROUND position gain for THIS tick - {@code (1-q)/q} for the drag {@code q} of the
+     * surface the bot will actually brake against. Replaces the former {@code ARRIVE_GAIN_GROUND} constant
+     * and, with it, the entire deleted ground-hazard family (see the tombstone further down this file).
+     *
+     * <p><b>Why a function and not a constant.</b> {@link #anchoredServo}'s cascade already IS the correct
+     * braking law: with {@code gainP = 1/coast}, {@code desired_vel(d)} is exactly the speed from which a
+     * pure-drag coast stops ON the anchor, so the servo eases in over precisely the distance the physics
+     * needs. That was documented from the start ("future media derive their gain the same way, never from
+     * tuning sessions") - but the constant hard-coded STONE: {@code GROUND_COAST = 0.546/(1-0.546)} with
+     * {@code 0.546 = 0.6 x 0.91}. Vanilla drag is {@code q = blockFriction x 0.91}
+     * ({@code LivingEntity.travel}), so the law was right and the number was right for exactly one surface:
+     *
+     * <pre>
+     *   stone/dirt  f=0.600  q=0.546  coast=1.20 b   gainP=0.831   &lt;- what every arrive used
+     *   slime       f=0.800  q=0.728  coast=2.68 b   gainP=0.374
+     *   ice/packed  f=0.980  q=0.892  coast=8.24 b   gainP=0.121
+     *   blue ice    f=0.989  q=0.900  coast=9.00 b   gainP=0.111
+     * </pre>
+     *
+     * On ice the servo believed it could stop in 1.20 blocks when it needed 8.24 - it commanded a desired
+     * speed 6.9x too high at every distance. THAT is the ice-corner overshoot the hazard family was bolted
+     * on to paper over, and 0.19 blocks of anchor offset against a 2.88-block stopping distance at cruise
+     * never had a chance of covering it. Derive the gain and the patch has nothing left to do.
+     *
+     * <p><b>The SLIPPERIER of the two surfaces</b> (owner ruling 2026-08-25). Vanilla drags on the block
+     * below the feet, so the CURRENT surface governs this tick's real physics - but a bot walking stone
+     * toward an ice cell must begin easing BEFORE it steps on, not one tick after, and stepping onto ice is
+     * precisely the case that hurts. So the gain takes whichever of {current floor, destination floor} has
+     * the higher {@code getFriction()}. NOTE the inversion in vanilla's naming: {@code getFriction()} is a
+     * velocity-RETENTION factor, so HIGHER means MORE slippery (stone 0.6, ice 0.98) and the conservative
+     * pick is {@code max}, not {@code min}. Being early is free - an over-long ease on grippy ground just
+     * arrives gently - while being late is a walk-off.
+     *
+     * <p>Both reads use the feet-minus-one cell, matching
+     * {@code Entity.getBlockPosBelowThatAffectsMyMovement} (which resolves to {@code floor(y - 0.5)}) for a
+     * bot standing on a full block - and every slippery block in the game IS a full block. Deliberately NOT
+     * a floor-geometry derivation: this reads a VALUE with a sane default, never a floor's EXISTENCE, so a
+     * partial-height or absent floor yields the ordinary 0.6 rather than a bogus verdict. That is the
+     * specific failure mode being retired.
+     *
+     * <p>{@code q} is clamped to the open interval {@code (0,1)} - a well-formedness guard, not a tuning
+     * knob: drag must lose energy for a coast to converge at all. Vanilla friction never approaches either
+     * bound (max is blue ice's 0.989 -&gt; q = 0.900); the clamp exists so a modded block cannot produce a
+     * negative or infinite gain.
+     */
+    static double groundArriveGain(BotSteering b, SteerView p) {
+        double fHere = b.slipperinessAt(b.footX(), b.footY() - 1, b.footZ());
+        double fThere = b.slipperinessAt((int) Math.floor(p.tx()),
+                                         (int) Math.floor(p.ty()) - 1,
+                                         (int) Math.floor(p.tz()));
+        double q = Math.max(fHere, fThere) * VANILLA_HORIZONTAL_DRAG;
+        q = Math.max(EPS, Math.min(q, 1.0 - EPS));
+        return (1.0 - q) / q;
     }
 
     /**
@@ -1838,17 +1873,63 @@ public final class SteerControl {
         }
         if (d > C + 0.5 - margin) d = C + 0.5 - margin; // keep the aim inside the cell
 
-        // Predict the neutral-coast touchdown, then choose the along-axis desired velocity.
+        // ---- THE ALONG-AXIS OBJECTIVE (owner ruling 2026-08-25) ------------------------------------
+        //
+        // Two predictions, both from the verified ballistic recurrence: where the feet touch down if the bot
+        // COASTS from here, and where they touch down if it brakes as hard as it can from here.
+        //
+        // WHY THERE ARE TWO OBJECTIVES, not one. The old law had a single one -- put the touchdown at `d` --
+        // and it treated any touchdown within PARKOUR_PREDICT_DEAD of `d` as finished ("on target -> hold
+        // current momentum"). But a jump has TWO degrees of freedom inside the reach budget: WHERE you land
+        // and HOW FAST you are going when you get there. Constraining only the first leaves the second to
+        // fall out of whatever the arc happened to do, and the second is the one that decides where the bot
+        // ENDS UP -- because touchdown speed times the surface's coast IS the slide.
+        //
+        // Measured on IceParkourCourse ice.chain.g3: per-tick horizontal displacement over the final jump ran
+        // 0.403 0.356 0.335 0.326 0.321 0.318 0.314 0.312 | 0.284 0.258 0.235 0.214. Air drag alone is 0.91,
+        // so ratios ABOVE it are forward thrust and ratios AT it are free coast: the servo pushed FORWARD for
+        // seven ticks, then coasted at exactly 0.910/0.908/0.911/0.910. It applied no reverse braking at all,
+        // touched down at 0.194 b/t, and on ice that is a 1.6-block slide it then had to fight on the ground.
+        //
+        // THE NEW OBJECTIVE, when the plan is not carrying through: land as SLOWLY as the reach budget
+        // allows. That is a bang-bang optimal-control problem and its solution is "coast at full speed, then
+        // brake as LATE as possible" -- so the switching test is simply "would braking from here still reach
+        // the landing?", i.e. pReverse >= cnSafe. Before that point braking would undershoot into the gap;
+        // after it, every tick spent not braking is touchdown speed the ground servo has to absorb.
+        //
+        // Note what this does NOT need: pReverse was already being computed and already compared against
+        // cnSafe -- but only inside the overshoot branch, as a SAFETY CHECK on a decision made for other
+        // reasons. Promoting it from a veto to the objective is the whole change. PARKOUR_PREDICT_DEAD
+        // survives only on the carry-through path; nothing new is tuned.
+        //
+        // AND WHAT IT MUST NOT DO: brake when the plan wants the momentum. `colinear` (already computed
+        // above, from p.hasNext() and the next leg's direction) is exactly that question -- a chain whose
+        // next leg continues straight ahead is asking to arrive fast, and `d` is already displaced forward by
+        // PARKOUR_CARRY_AHEAD to suit. Minimising touchdown speed there would fight the plan, so the
+        // carry-through case keeps the position-only law verbatim.
         double pNeutral = predictAlongTouchdown(s, v, b.y(), b.velY(), landY, 0, accel);
+        double pReverse = predictAlongTouchdown(s, v, b.y(), b.velY(), landY, -1, accel);
         double desiredAlong;
-        if (pNeutral < d - PARKOUR_PREDICT_DEAD) {
-            desiredAlong = PARKOUR_CRUISE;                    // predicted short → accelerate forward
-        } else if (pNeutral > d + PARKOUR_PREDICT_DEAD) {
-            double pReverse = predictAlongTouchdown(s, v, b.y(), b.velY(), landY, -1, accel);
-            desiredAlong = (pReverse >= cnSafe) ? 0.0        // safe to brake to a stop-target (reverse-thrust)
-                                                : v;          // braking would undershoot into the gap → coast
+        if (colinear) {
+            // CARRY THROUGH: the next leg continues straight ahead, so momentum is wanted. Position-only
+            // law, unchanged -- aim the touchdown at `d` and hold whatever speed that takes.
+            if (pNeutral < d - PARKOUR_PREDICT_DEAD) {
+                desiredAlong = PARKOUR_CRUISE;                // predicted short → accelerate forward
+            } else if (pNeutral > d + PARKOUR_PREDICT_DEAD) {
+                desiredAlong = (pReverse >= cnSafe) ? 0.0     // safe to brake to a stop-target
+                                                    : v;      // braking would undershoot → coast
+            } else {
+                desiredAlong = v;                             // on target → hold current momentum
+            }
+        } else if (pReverse >= cnSafe) {
+            // ARRIVE SLOW: braking from here still reaches the landing, so brake. Held every tick from the
+            // switching point on, which is what makes this "brake late and hard" rather than "brake gently
+            // for the whole arc" -- the latter bleeds the speed that buys the reach in the first place.
+            desiredAlong = 0.0;
+        } else if (pNeutral < d - PARKOUR_PREDICT_DEAD) {
+            desiredAlong = PARKOUR_CRUISE;                    // still short of the landing → drive forward
         } else {
-            desiredAlong = v;                                 // on target → hold current along momentum
+            desiredAlong = v;                                 // cannot afford to brake yet → coast
         }
 
         // Cross-track return toward the landing centerline (independent of the along servo — the ice lane-hold).
@@ -2161,105 +2242,46 @@ public final class SteerControl {
         return b.swimHazardAt(x, y, z) || b.swimHazardAt(x, y + 1, z) || b.swimHazardAt(x, y - 1, z);
     }
 
-    /**
-     * GROUND overshoot hazard: whether barrelling PAST the turn waypoint along the current travel direction hits
-     * a hazard within {@link #HAZARD_LOOKAHEAD} cells — the corner-overshoot slide off a 1-wide path into the
-     * flank. The land counterpart of {@link #overshootHazard}, with one descent-aware distinction between its two
-     * hazard kinds:
-     * <ul>
-     *   <li><b>LAVA</b> ({@link #groundLavaColumn}) is ALWAYS a hazard — a lava pit ahead must brake the bot
-     *       whether the path turns or dives (this is what keeps iceturn safe).</li>
-     *   <li><b>VOID</b> ({@link #groundVoidColumn}) is a hazard EXCEPT on the one cell the plan itself descends
-     *       into ({@link #plannedDescentCell}). A Descend/Fall the search chose legitimately has no floor at the
-     *       waypoint's y-level in its own landing column — that is the path's OWN trajectory, not an off-lane
-     *       walk-off — and braking for it froze the bot on the ledge (the froze-on-descent bug).</li>
-     * </ul>
-     *
-     * <p><b>The exemption is PER PROBE CELL, not a whole-predicate boolean</b> (owner ruling 2026-08-20, defect
-     * 1a of the {@code (340,69,481)} creep-wedge conviction, flagship r8). It used to be {@code pathDropsAhead}:
-     * one alignment heuristic ({@code dot >= }{@link #STRAIGHT_DOT}) that, when it fired, suppressed EVERY void
-     * probe around the waypoint. That asked the wrong question — "is the next leg straight ahead?" instead of
-     * "is the void I am probing the plan's own descent target?" — and answered it with a tuned cosine. Both
-     * halves were wrong: a colinear descent blinded the probe to a genuine second void two cells on, and a TURN
-     * into a descent classified the plan's own drop as a hazard. The replacement is exact geometry with no
-     * threshold: a probe cell is exempt iff it IS the next waypoint's column AND the next waypoint lies below
-     * the current one — i.e. the plan descends into exactly that cell.
-     */
-    static boolean groundOvershootHazard(BotSteering b, SteerView p) {
-        if (!travelFrame(p)) return false;
-        for (int k = 1; k <= HAZARD_LOOKAHEAD; k++) {
-            int hx = F.cx + (int) Math.round(F.wx * k);   // Chebyshev cell walk — one cell per k (see travelFrame)
-            int hz = F.cz + (int) Math.round(F.wz * k);
-            if (groundLavaColumn(b, hx, F.cy, hz)) return true;              // lava: always a hazard
-            if (plannedDescentCell(p, hx, hz)) continue;                     // the plan's OWN landing cell
-            if (groundVoidColumn(b, hx, F.cy, hz)) return true;
-        }
-        return false;
-    }
-
-    /**
-     * GROUND flank hazard: whether either cell one step perpendicular to travel (the lane flanks at the waypoint)
-     * is a hazard — the 1-wide ice lane the bot must not drift off. Land counterpart of {@link #flankHazard}. As
-     * with {@link #groundOvershootHazard}, LAVA to the side is always a hazard, and a VOID is exempt only on the
-     * single cell the plan descends into ({@link #plannedDescentCell}) — the same per-cell test, so a flank that
-     * IS the planned landing column (a descent turning across the lane) is not braked for, while a genuine
-     * unplanned drop beside the lane still is. The perpendicular is taken from the EUCLIDEAN unit deliberately:
-     * a 90° rotate is a frame, not a walk, and for both cardinal and 45° legs it rounds to the same ±1 offsets
-     * a Chebyshev step would give.
-     */
-    static boolean groundFlankHazard(BotSteering b, SteerView p) {
-        if (!travelFrame(p)) return false;
-        int fx = (int) Math.round(-F.uz), fz = (int) Math.round(F.ux);   // rotate travel dir 90 deg
-        if (groundLavaColumn(b, F.cx + fx, F.cy, F.cz + fz) || groundLavaColumn(b, F.cx - fx, F.cy, F.cz - fz)) {
-            return true;                                                  // lava flank: always a hazard
-        }
-        return groundFlankVoid(b, p, F.cx + fx, F.cz + fz) || groundFlankVoid(b, p, F.cx - fx, F.cz - fz);
-    }
-
-    /** One flank cell's VOID verdict, carrying {@link #groundFlankHazard}'s per-cell planned-descent exemption. */
-    private static boolean groundFlankVoid(BotSteering b, SteerView p, int x, int z) {
-        return !plannedDescentCell(p, x, z) && groundVoidColumn(b, x, F.cy, z);
-    }
-
-    /**
-     * Whether the plan DESCENDS INTO the column {@code (cx,cz)} — the next waypoint occupies that column and
-     * lies below the current one. The exact geometric replacement for the retired {@code pathDropsAhead}
-     * alignment heuristic (owner ruling 2026-08-20 — see {@link #groundOvershootHazard} for the conviction):
-     * where that asked whether the next leg pointed roughly along travel, this asks the question the probe
-     * actually has, cell by cell — "is the missing floor I am looking at the floor the plan already means to
-     * step off?" No threshold, no travel-direction term, and therefore no dependence on {@link #travelFrame}.
-     *
-     * <p>A pure straight-DOWN next waypoint (a {@code Fall} at the waypoint's own column) needs no special case
-     * under this rule: it never matches an OVERSHOOT cell, which is by construction a different column from the
-     * waypoint, so the void guard ahead of a Fall survives exactly as the old {@code nl < EPS} arm arranged.
-     */
-    private static boolean plannedDescentCell(SteerView p, int cx, int cz) {
-        if (!p.hasNext()) return false;                      // nothing planned beyond → any void is a real walk-off
-        if (p.ny() >= p.ty() - EPS) return false;            // next waypoint not below → the plan does not drop here
-        return (int) Math.floor(p.nx()) == cx && (int) Math.floor(p.nz()) == cz;
-    }
-
-    /** LAVA anywhere in the short ground body column at {@code (x, y..y+1, z)} plus the floor cell below (reusing
-     *  {@link BotSteering#swimHazardAt}, which already covers lava / damaging fluid). {@code y} is the waypoint
-     *  FLOOR cell, feet at {@code y+1}. Always a hazard — see {@link #groundOvershootHazard}. */
-    private static boolean groundLavaColumn(BotSteering b, int x, int y, int z) {
-        return b.swimHazardAt(x, y, z) || b.swimHazardAt(x, y + 1, z) || b.swimHazardAt(x, y - 1, z);
-    }
-
-    /**
-     * A would-fall DROP-OFF at the overshoot cell {@code (x, y, z)} — a one-block DROP-HEIGHT check, not a
-     * downward scan. {@code y} is the overshoot cell's FEET/body level (air when a bot stands there, as
-     * {@link #groundLavaColumn}'s {@code y+1} body probe implies); the lane FLOOR is {@code y-1}. If that floor
-     * cell is standable the bot walks on level ground (drop 0); if it is absent the next possible floor is a
-     * full block lower at best, a drop of {@code >= 16/16} that exceeds the bot's step-assist
-     * ({@link MovementContext#STEP_ASSIST_MAX_RISE} = 9/16 ~ 0.56) — the bot would walk off the 1-wide path and
-     * can't step back up. So a single "is the lane floor here?" read is the whole test: it flags a
-     * recoverable-lip drop AND SUBSUMES a bottomless void (an infinite drop is just the limiting case of a drop
-     * past step-assist). Gated PER PROBE CELL by {@link #plannedDescentCell} at the call sites so the ONE cell
-     * the plan itself descends into is not mistaken for an off-lane walk-off. */
-    private static boolean groundVoidColumn(BotSteering b, int x, int y, int z) {
-        return !b.solidAt(x, y - 1, z);   // lane floor (one below feet) absent -> drop > step-assist (subsumes void)
-    }
+    // ================================================================================================
+    // The GROUND HAZARD FAMILY WAS DELETED HERE on 2026-08-25 (owner ruling). Removed together:
+    // groundHazardCorner, groundOvershootHazard, groundFlankHazard, groundFlankVoid,
+    // plannedDescentCell, groundLavaColumn, groundVoidColumn, plus STEP_ARRIVE_OFFSET /
+    // STEP_ARRIVE_MARGIN / ARRIVE_GAIN_GROUND. ~90 lines and three constants, whose ENTIRE effect on
+    // behaviour was one bit that moved arriveOnStep's anchor 0.19 blocks back along the travel axis.
+    //
+    // WHY IT WAS THE WRONG SHAPE. The question a corner brake has to answer is "from how far out must I
+    // start slowing so I come to rest ON the anchor rather than past it?" That is a function of SPEED and
+    // the SURFACE'S DRAG -- it is not a question about the contents of any cell. This family asked
+    // "is there something bad within HAZARD_LOOKAHEAD cells past my waypoint?" and used the answer as a
+    // proxy, which failed three independent ways:
+    //
+    //   1. BINARY where the quantity is CONTINUOUS. The correction was STEP_ARRIVE_OFFSET, i.e.
+    //      0.5 - BODY_RADIUS - margin -- a BODY-GEOMETRY constant with no relationship to braking at all.
+    //      A bot at the 0.35 b/t cruise cap needs 0.42 blocks of run-out on stone and 2.88 on ice; it got
+    //      0.19 on both. On ice that is ~15x too small, which is why it never actually solved the ice
+    //      corner it was introduced for.
+    //   2. CONTENTS-BASED, so it fired on cells the PLAN DELIBERATELY CHOSE. The planner already priced
+    //      that lava / that drop / that gap and routed through it anyway; the follower's job is to execute
+    //      the plan, not to re-litigate its cost model. plannedDescentCell was a one-cell patch over this,
+    //      and it could only ever exempt ONE cell (SteerView is one waypoint deep) and only for a DESCENT.
+    //   3. It re-derived geometry the NavGrid already models, WRONGLY. groundVoidColumn read
+    //      !solidAt(x, F.cy - 1, z) with F.cy the waypoint's FEET cell -- baking in "the floor is always
+    //      one below the feet". A partial-height floor block breaks that: standing on a 3/16 trapdoor
+    //      plate puts the feet cell INSIDE the floor block's own cell, so the probe read a cell BELOW the
+    //      corridor floor, found air, and flagged the entire lane ahead as void. That is what hung the
+    //      trapdoor course's `pocket` and `closeparkour` cards for 600 ticks apiece.
+    //
+    // THE REPLACEMENT is groundArriveGain: derive the ARRIVE gain from the friction the bot will actually
+    // brake against. One friction read, no lookahead, no cell contents, no flank probes, no crossTrack, no
+    // exemptions -- and no false positives are POSSIBLE, because it never inspects what is in a cell.
+    // Fail-safe by construction too: where !solidAt() turned "no block" into HAZARD, getFriction() turns
+    // "no block" into 0.6, the ordinary value.
+    //
+    // NOT removed: the SWIM family (overshootHazard / flankHazard / hazardColumn / TURN_CRAWL_THROTTLE /
+    // SERVO_HAZARD_RAMP) and the shared travelFrame / HAZARD_LOOKAHEAD / FLANK_DRIFT / crossTrack they use.
+    // Water drag is uniform, so the friction argument does NOT transfer to it for free; that is its own
+    // question with its own evidence.
+    // ================================================================================================
 
 
     /**
@@ -2662,7 +2684,7 @@ public final class SteerControl {
             // descent. arriveOnStep anchors on the step's target CENTRE (p.tx(), p.tz()) via anchoredServo,
             // whose error is unit(anchor - pos): a facing that cannot flip on residual velocity, and an
             // anchor far enough into the cell that the 0.6-wide box clears the previous block.
-            arriveOnStep(b, p, groundHazardCorner(b, p));
+            arriveOnStep(b, p);
         } else {
             steerTowards(b, p);           // legacy open-loop walk — the -Dorebit.ground.drive=legacy A/B leg,
                                           // deliberately untouched by the mode switch (it never had a hazard mode)

@@ -181,7 +181,7 @@ public final class Descend implements Movement {
         final int bandLo = Math.min(fromFootY, toFootY);
         final int bandHi = Math.max(fromFootY, toFootY);
         plan.failWhen(b -> (b.grounded() || b.inWater() || b.inLava())
-                && !(atWaypoint(b, fx, fromFootY, fz))
+                && !(inWaypointCell(b, fx, fromFootY, fz))
                 && !(b.footX() == tx && b.footZ() == tz
                         && b.footY() >= bandLo && b.footY() <= bandHi));
         // CLEAR: break the step-off transit column and build the step-down floor. The runner mines one AIR cell

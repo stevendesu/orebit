@@ -535,6 +535,46 @@ public final class Parkour implements Movement {
      *  — the measured trigger→last-grounded latency is ~3 ticks). */
     public static final double HAZARD_TAKEOFF_TICKS = 3.0;
 
+    /**
+     * Ticks of ACTUATION LAG between the takeoff gate firing and the feet actually leaving the ground.
+     * DERIVED, not tuned: the gate is evaluated against the bot's position on tick N, the jump input is
+     * written on tick N, and vanilla applies the impulse on the following move — so the bot travels one
+     * more tick of {@code vAlong} before it is airborne. One tick, by construction.
+     *
+     * <p><b>Why the trigger has to be speed-aware at all</b> (owner ruling 2026-08-26). Measured launch
+     * positions across the parkour suite, as along-axis projection past the takeoff cell's centre:
+     *
+     * <pre>
+     *   launch speed 0.3333 (ice)          proj 0.374
+     *   launch speed 0.3343 (ice)          proj 0.380
+     *   launch speed 0.1146 (ice, at rest) proj 0.396
+     *   launch speed 0.4551 (stone sprint) proj 0.564
+     *   launch speed 0.4557 (stone sprint) proj 0.559
+     *   launch speed 0.4729 (pad takeoff)  proj 0.608
+     * </pre>
+     *
+     * A 0.234-block spread, tracking how fast the bot crosses the trigger — because the lag is a TIME and
+     * the error it produces is a DISTANCE, {@code v * t}. {@link #TAKEOFF_EDGE} is a distance, so shifting
+     * it moves every launch uniformly and cannot compress that spread: tightening it far enough to bring
+     * the sprint launches back to the envelope's assumed takeoff point would put the slow ones ~0.2 EARLY.
+     *
+     * <p>And early is the dangerous direction. {@code ParkourEnvelope.dReqCard} prices reach as
+     * {@code g + 0.2 - TAKEOFF_EDGE_ALONG}, i.e. it ASSUMES the bot covers that much ground before the arc
+     * begins; launching early means the arc must make up the difference, and on a max-gap jump that is the
+     * platform versus the gap. Launching LATE — today's behaviour — is conservative for reach, which is why
+     * nothing has been failing on distance. Its cost is that the bot spends the extra tick standing with
+     * part of its body already over the gap, which over fire or magma is contact.
+     *
+     * <p>Corroboration that one constant was never going to fit: {@link #STAIR_TAKEOFF_EDGE} exists only
+     * because 0.35 did not work for stair takeoffs. A speed-aware trigger may subsume it; that is worth
+     * MEASURING once this lands rather than assuming.
+     *
+     * <p>What this does NOT remove: position is sampled once per tick, so which tick first satisfies the
+     * predicate is still quantised, leaving a sub-tick residual that is also proportional to speed. Expect
+     * the spread to TIGHTEN, not collapse.
+     */
+    public static final double TAKEOFF_LEAD_TICKS = 1.0;
+
     private static final int[][] CARDINALS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
     @Override
@@ -1238,11 +1278,16 @@ public final class Parkour implements Movement {
         // grounding or the re-centre, so the gate and the drive can both consult it without re-arming.
         final Predicate<BotSteering> rawTakeoffTrigger = b -> {
             double proj = ux * (b.x() - (fx + 0.5)) + uz * (b.z() - (fz + 0.5));
+            double vAlong = ux * b.velX() + uz * b.velZ();
             if (b.gapFloorHazardAt(gapX, fy, gapZ)) {
-                double vAlong = ux * b.velX() + uz * b.velZ();
                 return proj + HAZARD_TAKEOFF_TICKS * vAlong >= HAZARD_TAKEOFF_LOOKAHEAD;
             }
-            return proj >= (lowHalfStair.test(b) ? STAIR_TAKEOFF_EDGE : TAKEOFF_EDGE);
+            // ORDINARY takeoff: fire on the tick the bot WILL be past the edge, not the tick after it
+            // already is (see TAKEOFF_LEAD_TICKS). Same lookahead form the hazard arm above has always
+            // used — it was simply gated behind a hazard being DETECTED, so the ordinary launch carried a
+            // speed-proportional lag nobody was measuring.
+            return proj + TAKEOFF_LEAD_TICKS * vAlong
+                    >= (lowHalfStair.test(b) ? STAIR_TAKEOFF_EDGE : TAKEOFF_EDGE);
         };
 
         // THE FULL "may the runup be LEFT" predicate (owner ruling 2026-08-23). Every condition that makes
@@ -1502,7 +1547,19 @@ public final class Parkour implements Movement {
                 // Brake to the desired point on the ground until grounded on the target cell: the same servo
                 // (grounded, the predictor returns the live along-position → a reverse-brake toward the
                 // desired point — the slide arrest, ice or stone alike).
-                .drive((b, v) -> SteerControl.parkourAirborne(b, v, ux, uz, tx, ty, tz, sprint, falling))
+                // AIRBORNE -> the ballistic servo (velocity IS the only lever mid-arc, and its position
+                // term is the touchdown predictor). GROUNDED -> the position-anchored ARRIVE, because the
+                // predictor degenerates the moment the feet are down: standing still on the landing it
+                // reports the current position as the touchdown, both branches collapse to a zero-velocity
+                // setpoint, and the bot holds wherever it stopped. See SteerControl.arriveGrounded for the
+                // ice.chain.g3 measurement (434 ticks parked 0.237 off centre at fwd=0.00).
+                .drive((b, v) -> {
+                    if (b.grounded()) {
+                        SteerControl.arriveGrounded(b, v);
+                    } else {
+                        SteerControl.parkourAirborne(b, v, ux, uz, tx, ty, tz, sprint, falling);
+                    }
+                })
                 .done(b -> b.grounded()
                         && atWaypoint(b, tx, toFootY, tz));
         return plan;
