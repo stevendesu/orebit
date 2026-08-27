@@ -443,17 +443,39 @@ at `±0.0346`, permanently outside `SERVO_DEADBAND`. The servo's own error lande
 `FACE_ERR_THRESHOLD`, so `actuate` took the yaw-onto-the-error escape and commanded **full throttle**, which
 moves cross velocity by ~0.069 in a single tick and overshot a 0.035 error symmetrically. Forever.
 
-### §8.2 The rule
+### §8.2 What actually went wrong — TWO defects, and the first one is in `actuate`
 
-**A gate must not name a tolerance finer than one tick of the smallest useful actuation.** On stone that
-quantum is `A_G · QG ≈ 0.069` b/t of velocity; `SERVO_DEADBAND` is 0.02. Any velocity gate below the quantum
-is unsatisfiable *while the servo is driving*, and a phase whose advance condition is unsatisfiable is a wedge
-by construction — no timer, no recovery and no amount of servo tuning will rescue it.
+The first published version of this section blamed an "actuator quantum": one tick of the smallest useful
+input supposedly moved velocity more than `SERVO_DEADBAND`, making the gate unsatisfiable. **That was wrong,
+and it is corrected here rather than quietly rewritten because the wrong version was committed.**
+`setForward` takes a continuous float; there is no quantum. A partial-throttle tick settles this state
+exactly. Worked from the convicted numbers (the bot was `spr=false`, so `A = A_walk = 0.0980`, `QG = 0.5460`):
 
-Note carefully that the servos themselves use `SERVO_DEADBAND` safely. They are allowed to, because they are
-POSITION-ANCHORED: the chatter costs them a little thrust and nothing else, since the position term keeps
-pulling them in regardless. **The dead-band is fine as a "stop pushing" threshold and fatal as a "we are
-done" threshold.** That distinction is the whole of §8.
+| quantity | value |
+|---|---|
+| `crossVel`, `crossErr` | `−0.0346`, `+0.0350` → `desiredCross = 0.0263` |
+| `actuate` err (post-drag frame) | `0.0609` |
+| commanded `min(1, 18 · err)` | `1.095` → **clipped to 1.000** → next `v = +0.0346` (reverses) |
+| **exact** input `(desired/QG − v)/A` | **`0.844`** → next `v = +0.0263` = desired, **settles** |
+| implied correct gain here | `13.86`, not 18 |
+
+**DEFECT 1 — `actuate`'s gain is an approximation in the wrong frame.** `err = desired − actual` is formed in
+the POST-drag frame (what `velX()/velZ()` return), but the input acts PRE-drag, since vanilla applies friction
+at the end of the tick. The exact input is closed form, `u = (desired/QG − actual)/A`, and no linear gain can
+express it because of the `1/QG` on the desired term. `SERVO_GAIN = 18` ≈ `1/(A·QG)` = 18.7 — correct only if
+the error were already pre-drag — so the servo over-commands (~30% here), `min(1, …)` clips the excess to full
+throttle, and full throttle happens to reverse this velocity almost symmetrically. Hence the clean 2-cycle.
+Same frame confusion as the parkour takeoff lead term.
+
+**DEFECT 2 — the gate named an instantaneous velocity.** Even with a correct servo this is the wrong shape: a
+completion test that reads instantaneous velocity is hostage to whatever transient the servo is in, and an
+over-commanding or saturated servo can hold it unsatisfied indefinitely. A phase whose advance condition is
+unsatisfiable is a wedge by construction — no timer, no recovery, no servo tuning rescues it.
+
+Note that the servos themselves use `SERVO_DEADBAND` safely, because they are POSITION-ANCHORED: a transient
+costs them a little thrust and nothing else, since the position term keeps pulling them in regardless. **The
+dead-band is fine as a "stop pushing" threshold and wrong as a "we are done" threshold.** That distinction is
+the whole of §8; defect 1 is tracked separately as a fix to `actuate`.
 
 ### §8.3 The shape a gate should take
 
