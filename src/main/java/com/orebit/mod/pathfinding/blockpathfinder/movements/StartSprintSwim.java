@@ -117,7 +117,28 @@ public final class StartSprintSwim implements Movement {
 
     @Override
     public boolean reached(BotSteering b, int wx, int wy, int wz, Movement next) {
-        return b.prone() && b.footX() == wx && b.footZ() == wz
+        // THE VERTICAL TERM THIS NEVER HAD (2026-08-26). It used to read
+        //     b.prone() && b.footX() == wx && b.footZ() == wz && Movement.teedUp(...)
+        // which takes wy as a parameter and never uses it POSITIONALLY — teedUp is
+        // next.entryReady(b, wx, wy, wz), and every swim move answers that TRUE unconditionally, so it
+        // contributes no vertical constraint at all. The predicate was Y-blind, and any waypoint sharing
+        // the column matched.
+        //
+        // That is fatal for a DIVE in particular, because a dive plan IS a vertical column: every waypoint
+        // shares x and z, and the follower scans END->START for the furthest waypoint reached, so it takes
+        // the deepest one. Measured on the long flagship, in a 52-step underwater descent:
+        //
+        //     cursor-advance 14→34 via StartSprintSwim @wp(1465,33,1377) skipped=19
+        //
+        // Nineteen waypoints skipped without the bot moving: the cursor landed at feet y=34 while the bot
+        // stood at y=50. The swim servo then drove full throttle at a target 15 blocks below it, pressed
+        // into a wall at vel=(0,0), and — swim moves having no failWhen envelope — nothing could declare the
+        // step invalid. A permanent wedge out of one unused parameter.
+        //
+        // Swim.reachedSwim is the family's own arrival test (foot cell on all three axes plus the
+        // horizontal containment band), which is what the other four swim moves already use. SUBMERGE_BIAS
+        // matches SprintSwim's call and is identity (0.0) since 2026-08-15.
+        return b.prone() && Swim.reachedSwim(b, wx, wy, wz, SteerControl.SUBMERGE_BIAS)
                 && Movement.teedUp(b, wx, wy, wz, next);
     }
 
