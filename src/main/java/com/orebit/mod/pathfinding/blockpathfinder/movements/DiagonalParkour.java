@@ -515,6 +515,24 @@ public final class DiagonalParkour implements Movement {
         // the runup presses jump SAME-TICK — including the takeoff drive's first-grounded-tick work
         // (the sprint-injection predict, specified to run on the grounded jump tick so the arc
         // predictor sees the real accel). Entries with a normal runup tick stay byte-identical.
+        // PHASE 0 — CROSS-AXIS ALIGN, the diagonal twin of Parkour's (2026-08-27). Straighten the launch
+        // before building along-axis speed; self-gating, so a bot already square with its jump axis passes
+        // parkourCrossSettled on the first check and never runs the servo, keeping its carry.
+        //
+        // ADDED PROPHYLACTICALLY, and that is worth stating plainly. Parkour's version was convicted by the
+        // long flagship: a crooked commit left the bot 0.181 off the centreline and parkourAirborne then
+        // spent four ticks yawed up to 48 degrees correcting it, costing a max-gap jump 0.069 of reach.
+        // DiagonalParkour has the identical run-up structure and the identical parkourRunupAlign
+        // cross-vs-along vector saturation, so the defect class is present — but it could not be made to
+        // FAIL. ParkourCourse's perpdiag.* cards (enter +X/+Z, jump +X/-Z, at the diagonal max) all pass
+        // without this phase, because the diagonal envelope tops out at gap 2 against the cardinal gap 4
+        // that failed, and a gap-2 jump has margin to spare. The cards stand as the regression guard.
+        plan.phase("align")
+                .drive((b, v) -> {
+                    b.setSprinting(false);   // nothing to sprint toward yet; the run-up re-asserts it
+                    SteerControl.parkourCrossCancel(b, uxn, uzn, fx + 0.5, fz + 0.5);
+                })
+                .advanceWhen(b -> SteerControl.parkourCrossSettled(b, uxn, uzn, fx + 0.5, fz + 0.5));
         plan.phase("runup")
                 .drive((b, v) -> {
                     airborneOnce[0] = false; // re-attempt begins → disarm until the next arc is live
