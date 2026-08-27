@@ -53,6 +53,15 @@ public final class SteerControl {
      */
     static final double SWIM_CTE_GAIN = 6.0;
 
+    /** Vanilla's ground input SPEED for a sprinting player: {@code 0.1 × 1.3}. See {@link #actuate} for why
+     *  the sprint value is assumed rather than the walk one — under-command converges, over-command
+     *  oscillates. */
+    static final double GROUND_INPUT_SPEED = 0.1 * 1.3;
+    /** The numerator of vanilla's friction-compensated ground accel, {@code speed × (0.216/friction³)}. */
+    static final double VANILLA_ACCEL_NUMERATOR = 0.21600002;
+    /** Vanilla scales the movement input by this before applying it ({@code moveRelative}'s 0.98). */
+    static final double VANILLA_INPUT_SCALE = 0.98;
+
     /** Lengths below this are treated as zero (degenerate segment / already on the point) — avoids /0. */
     static final double EPS = 1.0e-4;
     /** cos of the max off-heading angle treated as "in line" (~25 degrees) — above it a corner is a real turn. */
@@ -944,16 +953,54 @@ public final class SteerControl {
         boolean dead = emag < SERVO_DEADBAND;
         tag(dead ? tagDead : tagName);                 // §4: unconditional, before any early-out
 
-        // §2.2 SEMANTIC yaw: face the step's target; yaw onto the error only for a saturated correction.
+        // ---- THE INPUT IS SOLVED, NOT APPROXIMATED (owner ruling 2026-08-26) ----------------------------
+        //
+        // This used to be `scale = min(1, SERVO_GAIN * emag) / emag` — a fixed linear gain applied to a
+        // velocity error. It was wrong in FRAME, and the error was systematic rather than incidental.
+        //
+        // Vanilla's ground tick is  v(t+1) = (v(t) + A·u) · q,  with friction applied at the END. So
+        // velX()/velZ() — and therefore `err` — are POST-drag quantities, while the input `u` acts PRE-drag.
+        // Solving that recurrence for the input that lands exactly on the desired velocity `d`:
+        //
+        //     u = (d − v·q) / (A·q)          and since err = d − v,   u = (err + v·(1−q)) / (A·q)
+        //
+        // No linear gain can express it, because of the `v·(1−q)` term. SERVO_GAIN = 18 was roughly
+        // 1/(A·q) = 18.7, which is what you get if you assume the error is already pre-drag — so the servo
+        // over-commanded by the whole `v·(1−q)` term, and `min(1, …)` quietly clipped the excess to full
+        // throttle. Measured on the convicted (278,113,352) state: exact input 0.844, commanded 1.095,
+        // clipped to 1.000, which reversed the velocity almost symmetrically into a permanent 2-cycle.
+        //
+        // BOTH CONSTANTS COME FROM THE BLOCK UNDER THE FEET, so ice, slime and soul sand are handled by the
+        // same expression rather than by cases: q = friction·0.91 is the drag, and vanilla's ground input
+        // accel is speed·(0.216/friction³)·0.98 — which is why ice is hard to steer (friction 0.98 gives
+        // A = 0.030 against stone's 0.130, a quarter of the authority).
+        //
+        // SPRINT is assumed. BotSteering has no sprint getter, and the direction of the error matters: using
+        // the SPRINT accel when the bot is walking UNDER-commands by 23% (achieved = 0.77·required), which
+        // converges geometrically over a couple of ticks. Using the walk value while sprinting would
+        // OVER-command — the exact failure this change exists to remove. Under-command is self-correcting;
+        // over-command oscillates. If a sprint seam is ever added, this becomes exact.
+        double fr = b.slipperinessAt(b.footX(), b.footY() - 1, b.footZ());
+        fr = Math.max(EPS, Math.min(fr, 1.0 - EPS));
+        double q = Math.max(EPS, Math.min(fr * VANILLA_HORIZONTAL_DRAG, 1.0 - EPS));
+        double accel = GROUND_INPUT_SPEED * (VANILLA_ACCEL_NUMERATOR / (fr * fr * fr)) * VANILLA_INPUT_SCALE;
+        double k = 1.0 / (accel * q);
+        double ux = (errx + b.velX() * (1.0 - q)) * k;   // the input vector, in key units
+        double uz = (errz + b.velZ() * (1.0 - q)) * k;
+        double umag = Math.sqrt(ux * ux + uz * uz);
+
+        // §2.2 SEMANTIC yaw: face the step's target; yaw onto the correction only when the keys cannot
+        // deliver it. That condition is now EXACT — |u| > 1 means "more than full input is required" —
+        // where it used to be the hand-set FACE_ERR_THRESHOLD standing in for the same idea.
         double hx, hz;
-        if (!dead && emag >= FACE_ERR_THRESHOLD) {
-            hx = errx / emag; hz = errz / emag;        // sprint-class: the hands alone can't deliver it
+        if (!dead && umag > 1.0) {
+            hx = ux / umag; hz = uz / umag;            // saturated: put every key along the need
         } else {
             double fl = Math.sqrt(faceX * faceX + faceZ * faceZ);
             if (fl >= EPS) {
                 hx = faceX / fl; hz = faceZ / fl;      // semantic: the head points where the bot is GOING
-            } else if (emag >= EPS) {
-                hx = errx / emag; hz = errz / emag;    // no semantic heading given — the error is all there is
+            } else if (umag >= EPS) {
+                hx = ux / umag; hz = uz / umag;        // no semantic heading given — the need is all there is
             } else {
                 b.setForward(0.0f);                    // nothing to face, nothing to correct — explicit
                 b.setStrafe(0.0f);                     // zeros, never a stale key (the zza invariant)
@@ -966,13 +1013,15 @@ public final class SteerControl {
             b.setStrafe(0.0f);
             return;
         }
-        // Decompose the error in the facing frame and drive BOTH channels (BotSteering's sign convention:
-        // positive strafe = the mover's LEFT, (hz,−hx) for unit heading), saturated as a VECTOR.
-        double along = errx * hx + errz * hz;          // signed: negative = backpedal (the moon-walk brake)
-        double cross = errx * hz - errz * hx;          // signed: positive = the error points LEFT of the facing
-        double scale = Math.min(1.0, SERVO_GAIN * emag) / emag;
-        b.setForward((float) (along * scale));
-        b.setStrafe((float) (cross * scale));
+        // Decompose the INPUT in the facing frame and drive BOTH channels (BotSteering's sign convention:
+        // positive strafe = the mover's LEFT, (hz,−hx) for unit heading), saturated as a VECTOR. Inside
+        // saturation the pair is now the exact solution, so a correction that fits within the keys lands on
+        // its target in ONE tick instead of asymptotically.
+        double along = ux * hx + uz * hz;              // signed: negative = backpedal (the moon-walk brake)
+        double cross = ux * hz - uz * hx;              // signed: positive = the need points LEFT of the facing
+        double clamp = umag > 1.0 ? 1.0 / umag : 1.0;
+        b.setForward((float) (along * clamp));
+        b.setStrafe((float) (cross * clamp));
     }
 
     /**
