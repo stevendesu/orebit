@@ -1449,6 +1449,17 @@ public final class Parkour implements Movement {
             if (recentring[0]) return false;   // re-centring - no takeoff until the run-up has room
             return rawTakeoffTrigger.test(b);
         };
+        // PHASE 0 -- CROSS-AXIS ALIGN (owner ruling 2026-08-26). Straighten the launch BEFORE building any
+        // along-axis speed. Self-gating: the runner advances before it drives, so a bot already square with
+        // its jump axis passes the test on the first check and never runs the servo, keeping its carry. Only
+        // a genuinely crooked entry -- a 90-degree predecessor like the flagship's Ascend -- pays for it.
+        // See SteerControl.parkourCrossCancel for the measurement.
+        plan.phase("align")
+                .drive((b, v) -> {
+                    b.setSprinting(false);   // nothing to sprint toward yet; the run-up re-asserts it
+                    SteerControl.parkourCrossCancel(b, ux, uz, fx + 0.5, fz + 0.5);
+                })
+                .advanceWhen(b -> SteerControl.parkourCrossSettled(b, ux, uz, fx + 0.5, fz + 0.5));
         plan.phase("runup")
                 .drive((b, v) -> {
                     airborneOnce[0] = false; // re-attempt begins -> disarm until the next arc is live

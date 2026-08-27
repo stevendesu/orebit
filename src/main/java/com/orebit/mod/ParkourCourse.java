@@ -589,6 +589,13 @@ public final class ParkourCourse {
             stairJumpRest("stair.high.fall2g4.rest", STAIR_EAST, 5, -2);
             stairJumpRest("stair.low.flat2.rest",    STAIR_WEST, 3,  0);
             stairJumpRest("stair.low.fall2g3.rest",  STAIR_WEST, 4, -2);
+
+            // ---- PERPENDICULAR-ENTRY family (2026-08-26) ---------------------------------------------
+            // The condition the long flagship actually died on, and which nothing in this suite reproduced:
+            // a jump committed while the bot still carries cross-axis momentum from a 90-degree predecessor.
+            // perp.fall2g4 is the flagship jump verbatim (drop 2, gap 4, entered from +Z).
+            perpJump("perp.fall2g4", 5, -2);
+            perpJump("perp.flat3",   4,  0);
         }
 
         /** The climbable-transit card set — also the {@code climbonly} fast gate's whole course.
@@ -1007,6 +1014,33 @@ public final class ParkourCourse {
             int[] b = nextBase();
             trials.add(withStair(new Trial(name, Approach.WALKIN, 1, 0, jdx, jdy, 0,
                     Template.REACH, false, b[0], b[1]), stair));
+        }
+
+        /**
+         * A PERPENDICULAR-ENTRY jump: the runway runs along +Z, the jump fires along +X. The bot therefore
+         * arrives on the takeoff cell carrying CROSS-AXIS momentum relative to the jump it is about to make.
+         *
+         * <p><b>The 2026-08-26 long-flagship shape.</b> Every jump card in this suite until now approached
+         * ALONG its own jump axis (WALKIN) or started at rest on it (REST), so every arc flew a straight
+         * line. The flagship's failing jump did not: its predecessor was {@code Ascend (77,145,261) ->
+         * (77,146,262)}, a +Z move feeding an +X jump, and it entered the takeoff cell centred but carrying
+         * {@code vel=(0.002, 0.130)} — 0.130 b/t of pure cross-axis.
+         *
+         * <p>Two grounded run-up ticks could not cancel that, so it launched 0.181 off-centre in Z, and
+         * {@code parkourAirborne} then spent the first four AIRBORNE ticks yawed up to 48 degrees off the
+         * jump axis correcting cross-track — {@code headX} 0.667, 0.783, 0.911, 0.991 — so only two thirds
+         * of its air acceleration went into reach. It arrived 0.069 blocks below the landing surface, hit
+         * the side of the landing block and dropped into the gap.
+         *
+         * <p><b>Launch speed was never the differentiator</b>, which is why {@code falld2g4.rest} (the same
+         * drop, the same gap, from rest) passes and always did: it launches at 0.1076 against the flagship's
+         * 0.1079. What it does not have is cross-axis momentum. The arc is the whole difference.
+         */
+        void perpJump(String name, int jdx, int jdy) {
+            int[] b = nextBase();
+            // runway along +Z (rdz = 1), jump along +X (jdx) — the 90-degree entry.
+            trials.add(new Trial(name, Approach.WALKIN, 0, 1, jdx, jdy, 0,
+                    Template.REACH, false, b[0], b[1]));
         }
 
         /** {@link #stairJump} entered from REST on the takeoff stair — the condition that actually fails. */

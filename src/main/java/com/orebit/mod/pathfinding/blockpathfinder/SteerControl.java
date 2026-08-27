@@ -1942,6 +1942,70 @@ public final class SteerControl {
     }
 
     /**
+     * CROSS-AXIS CANCEL — the grounded pre-run-up servo (owner ruling 2026-08-26). Drives the CROSS axis of
+     * the jump frame to zero, in both position and velocity, and asks for zero ALONG velocity so the whole
+     * input budget goes into the correction rather than competing with a run-up that has not started yet.
+     *
+     * <h2>Why a separate phase and not just the run-up's cross term</h2>
+     * {@link #parkourRunupAlign} already carries a cross term, but it runs SIMULTANEOUSLY with an along-axis
+     * ARRIVE that saturates to full cruise over the whole takeoff stand. {@link #actuate} then saturates the
+     * pair as a VECTOR, so the cross correction only ever gets whatever authority the along term leaves it —
+     * and the run-up is over in two ticks, which is not enough to cancel a real cross carry.
+     *
+     * <p>Measured on the 2026-08-26 long flagship, {@code Parkour} step 10. Its predecessor was
+     * {@code Ascend (77,145,261) -> (77,146,262)} — a +Z move feeding an +X jump — so the bot entered the
+     * takeoff cell CENTRED ({@code offCentre=(0.022,-0.011)}) but carrying {@code vel=(0.002, 0.130)}, i.e.
+     * 0.130 b/t of pure cross. Two run-up ticks took that to 0.0335 and left the bot 0.181 off-centre in Z at
+     * launch. The cost was not paid on the ground: {@code parkourAirborne} then spent the first FOUR airborne
+     * ticks yawed up to 48 degrees off the jump axis correcting cross-track ({@code headX} 0.667, 0.783,
+     * 0.911, 0.991), so a third of the air acceleration bought lateral correction instead of reach. The jump
+     * arrived 0.069 blocks under the landing surface, struck the side of the landing block and fell.
+     *
+     * <p><b>Launch SPEED was never the differentiator</b> — {@code falld2g4.rest} makes the identical jump
+     * from rest at 0.1076 against the flagship's 0.1079 and has always passed. What it does not carry is
+     * cross momentum. Straighten the launch and the same speed clears the gap; that is the whole finding, and
+     * it is why no amount of takeoff-edge or run-up tuning addressed it.
+     *
+     * <h2>Self-gating</h2>
+     * The phase this drives advances the moment cross position and cross velocity are both settled, and the
+     * runner advances BEFORE it drives — so a bot entering along its own jump axis (out of another Parkour, a
+     * Diagonal, a straight Traverse) satisfies the test on the first check, never runs this servo, and keeps
+     * its carry intact. It costs a tick only when there is genuinely something to cancel.
+     */
+    public static void parkourCrossCancel(BotSteering b, double ux, double uz,
+                                          double takeoffCx, double takeoffCz) {
+        final double crossUx = -uz, crossUz = ux;          // parkourAirborne's frame, verbatim
+        double crossErr = (takeoffCx * crossUx + takeoffCz * crossUz)
+                - (b.x() * crossUx + b.z() * crossUz);
+        double desiredCross = Math.max(-SERVO_CROSS_CAP,
+                Math.min(SERVO_CROSS_CAP, SERVO_CROSS_GAIN * crossErr));
+        // ALONG desired is ZERO: the run-up owns that axis and has not begun. Asking for zero here also
+        // brakes an along carry -- which is exactly why the gate below must let an aligned hot entry skip
+        // this phase entirely rather than have it stand the bot up.
+        double dvx = crossUx * desiredCross;
+        double dvz = crossUz * desiredCross;
+        actuate(b, "parkour:align", "parkour:align:dead", dvx - b.velX(), dvz - b.velZ(), ux, uz);
+    }
+
+    /**
+     * Is the jump frame's CROSS axis settled enough to commit a launch — position within
+     * {@link #COLUMN_DEADBAND} of the takeoff centreline and cross velocity inside the servo's own
+     * {@link #SERVO_DEADBAND}? Both bounds are existing derived quantities, not new tuning: the first is the
+     * tolerance parkour re-centring already treats as "on the column", the second is the threshold at which
+     * every servo in this file already calls a velocity error settled.
+     *
+     * <p>The flagship launched 0.181 off-centre carrying 0.0335 of cross — outside both.
+     */
+    public static boolean parkourCrossSettled(BotSteering b, double ux, double uz,
+                                              double takeoffCx, double takeoffCz) {
+        final double crossUx = -uz, crossUz = ux;
+        double crossErr = (takeoffCx * crossUx + takeoffCz * crossUz)
+                - (b.x() * crossUx + b.z() * crossUz);
+        double crossVel = b.velX() * crossUx + b.velZ() * crossUz;
+        return Math.abs(crossErr) < COLUMN_DEADBAND && Math.abs(crossVel) < SERVO_DEADBAND;
+    }
+
+    /**
      * The take-off <b>launch-momentum sufficiency</b> test (called on the grounded jump tick by {@link
      * com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour}): does a NON-sprint jump fired from
      * the bot's CURRENT along-axis momentum reach the landing cell, or will it drop short into the gap? Reuses the
