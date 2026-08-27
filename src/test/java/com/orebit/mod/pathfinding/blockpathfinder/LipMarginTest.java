@@ -124,9 +124,21 @@ class LipMarginTest {
         LipBot bot = new LipBot().at(158.031, P_FROM_FOOT, 114.029).vel(0.053, 0.052);
         PhaseRunner runner = parkourRunup();
 
+        // This pose is crooked as well as backwards: the jump axis is −Z (158,114)→(158,109), so CROSS is X,
+        // and x=158.031 sits 0.469 off the centreline carrying 0.053 of cross velocity. Since 2026-08-26 the
+        // plan therefore opens on the ALIGN phase, which straightens the launch before any along-axis
+        // re-centre — so the first tick corrects X, not Z. The invariant this test exists for is unchanged
+        // and asserted first: a backwards hot entry must not launch.
         assertFalse(runner.run(bot, parkourSeg()), "a re-centring runup is not done");
         assertFalse(runner.failed(), "re-centring is not an envelope failure — the bot is on its takeoff stand");
         assertFalse(bot.jumping, "a backwards hot entry must NOT launch: the envelope's reach assumes a sprint takeoff");
+        assertTrue(bot.faceDx > 0, "ALIGN first: the crooked entry is corrected toward the centreline (+x here)");
+
+        // Once the cross axis is settled the align phase releases and the original behaviour resumes: the
+        // run-up re-centres back along the jump axis rather than coasting off the lip.
+        bot.at(158.5, P_FROM_FOOT, 114.029).vel(0.0, 0.052);
+        assertFalse(runner.run(bot, parkourSeg()), "still re-centring, now along the jump axis");
+        assertFalse(bot.jumping, "and still no launch");
         assertTrue(bot.faceDz > 0, "the re-centre drives back toward the takeoff cell centre (+z here), not off the lip");
         assertTrue(bot.forward > 0, "and it walks, rather than coasting");
     }
