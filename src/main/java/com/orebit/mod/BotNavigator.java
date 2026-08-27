@@ -1242,7 +1242,50 @@ final class BotNavigator {
         // their anchor is a future waypoint, not the live floor.
         final boolean atRest = bot.atRest();
         if (atRest) restGateLogged = false; // rest reached → the next deferral episode logs once again
-        if (withinRange && stableMedium && !onDamagingFloor() && !midCommittedMove()) {
+        // SEATED ON A CLIMBABLE — the arrival test's own widening (owner-ratified 2026-08-27, the
+        // ShaftCourse topdown wedge). `stableMedium` above answers "dropping ALL inputs leaves the bot
+        // where it is", and it excludes a climbable because releasing there slides the bot out of the
+        // column at the -0.15/t clamp. That reasoning has one hole: it is only true when there is nothing
+        // underneath. A hang with a STANDABLE floor one cell below its feet slides onto the floor OF ITS
+        // OWN FEET CELL — the bot ends at the base of the cell it is already in, never a cell lower — so
+        // dropping the inputs is exactly as safe as standing, which is what this test is asking.
+        //
+        // <p><b>The wedge it closes</b> (ShaftCourse topdown-open / topdown-closed, both FAIL=timeout at
+        // 600t, reproduced twice 2026-08-27). The bot climbs the full 10-cell ladder, `reached` fires, the
+        // cursor advances 8->9 and the plan goes COMPLETE — with the bot at botY=141.086, i.e. INSIDE the
+        // goal cell and 0.086 above its floor, held there by the climbable sneak-arrest. `withinRange`
+        // passed (dy=0.086 against the caller's 0.75). Only `stableMedium` refused, so the drive fell to
+        // WAIT (plan consumed, not arrived) — which presses {@link SteerControl#clingHold}, i.e. sneak,
+        // i.e. the very arrest that keeps the bot off the floor `stableMedium` is waiting for. A closed
+        // loop: the hold preserved exactly the pose the arrival test rejected, forever.
+        //
+        // <p>Deliberately a SEPARATE local rather than a wider `stableMedium`: that variable also gates the
+        // plan-consumption settledFloor re-anchor below, which feeds the seam/adoption machinery (and whose
+        // climbable refusal is called out by name in the boundary forensic there). Widening it would change
+        // that subsystem too, on no evidence. This is the arrival test's rule and nothing else's.
+        //
+        // <p>Both conjuncts are load-bearing. `seatedFloorBelow()` alone is TRUE for a bot in BALLISTIC
+        // FLIGHT over a floor, which would call a falling bot arrived; `onClimbable()` alone is the hang with
+        // nothing underneath, which is the case the original exclusion was written for and which still
+        // (correctly) refuses.
+        //
+        // <p>And it is `seatedFloorBelow()`, NOT `standableBelow()`: the latter spans TWO cells on purpose
+        // ("close enough to step off onto"), which is a fine question for a lateral crossing and the wrong
+        // one here — a floor a cell below the feet cell means releasing DROPS the bot out of the pose being
+        // called arrived. Arrival may only accept a release that changes nothing.
+        // <p>And the SETTLE BAND, not merely the cell — the same rule {@code Movement.atWaypoint} already
+        // applies to exactly this medium ("GROUNDED and FLUID are exempt... the band therefore binds exactly
+        // the case that produced every failure above: a CLIMBABLE HANG, where nothing but the servo decides
+        // the height the bot stops at"). Without it the test fires the instant the descending bot enters the
+        // caller's Y tolerance: measured on the first fixed ShaftCourse run, topdown-open declared arrival at
+        // botY=141.543 while still sliding at -0.15/t, 4 ticks and half a block above the floor it was
+        // heading for. Legal by the range test, and still the wrong answer — "arrived" should not name a pose
+        // the bot is passing THROUGH. Inside the band the slide is over in one tick either way, and the
+        // wedge this whole change exists to close sits at 0.086, well inside it.
+        final boolean arrivalMedium = stableMedium
+                || (bot.onClimbable() && bot.seatedFloorBelow()
+                        && bot.getY() - bot.blockPosition().getY() <= SteerControl.SETTLE_BAND);
+        if (withinRange && arrivalMedium && !onDamagingFloor() && !midCommittedMove()) {
             driveState = "COMPLETE";
             finalizeJourney("reached"); // NAVSTATS: the continuous arrival test is the definition of done
             // Arrival-settle anchor (DESIGN-servo-normalization.md §2.6): the plan's final waypoint,

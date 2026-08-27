@@ -357,8 +357,15 @@ public final class Climb implements Movement {
                     // sibling `if`, NOT an `else if`: a scaffold deck satisfies BOTH this and §3.5 below,
                     // and must be offered both the jump-grab above and the sink-in below.
                     // Entering a ladder cell from BELOW is robust — the plate can push rising feet
-                    // sideways but never catch them (unlike from-above entry, which is the refused
-                    // 0.0125-block knife-edge). The passable-non-climb feet cell is load-bearing too: a
+                    // sideways but never catch them. (This used to read "unlike from-above entry, which is
+                    // the refused 0.0125-block knife-edge", borrowing MovementContext.hangable's ruling.
+                    // That ruling is about BALLISTIC FALL ARREST — feet arriving at speed, where the plate
+                    // may catch the bot on top instead of admitting it and the drop continues into a death
+                    // — and it says nothing about entry direction in general. The §3.5 sink-in below is a
+                    // CONTROLLED walk-off from rest: grounded, zero velocity, positioned by a servo to
+                    // whatever precision is asked of it. Different physics, different verdict; corrected
+                    // 2026-08-27 after the borrowed phrase made a live follower stall read as an
+                    // already-ruled-out move.) The passable-non-climb feet cell is load-bearing too: a
                     // grounded jump STARTED inside a climbable is truncated to the 0.2 climb by vanilla.
                     // (y+3) is jump clearance — a ceiling at y+4 still leaves the feet reaching ~+1.2.
                     int p2 = ctx.packedAt(x, y + 2, z);
@@ -650,8 +657,25 @@ public final class Climb implements Movement {
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
-        SteerControl.recenterOnTarget(b, path);
         double ddy = path.ty() - path.sy(); // the MOVE's planned Δy (feet targets), not the sagging pose
+        if (b.grounded() && ddy < -0.1 && !b.onClimbable()) {
+            // §3.5 SINK-IN, the re-centre (owner-ratified 2026-08-27). The bot is standing ON TOP of the
+            // climbable it is about to enter, and for a LADDER that top is a real 3/16 collision shelf: the
+            // descent happens by walking the body off it, not by pressing any input. Aiming at the cell
+            // CENTRE is not enough — the centre clears such a plate by just 0.0125, a twelfth of the
+            // re-centre's own deadband — so the servo quit inside that deadband with the bot on the shelf
+            // and pressed nothing
+            // for the rest of the trial (ShaftCourse control-plain-topdown: grounded, fwd=0.00,
+            // src=recenter:dead, x=14.417 against a plate edge at 14.1875, 600-tick timeout).
+            // recenterClearOf aims at the centre of the AIR instead, with a tolerance derived from the same
+            // span. Degenerate for every climbable WITHOUT partial collision — the vine family (no shape)
+            // and a scaffold deck (full footprint) both hand back the whole cell, so those keep the exact
+            // centre-and-deadband they have today and the sneak branch below still owns the scaffold sink.
+            SteerControl.recenterClearOf(b, (int) Math.floor(path.tx()), (int) Math.floor(path.ty()),
+                    (int) Math.floor(path.tz()));
+        } else {
+            SteerControl.recenterOnTarget(b, path);
+        }
         if (!b.grounded()) {
             // AIRBORNE — hand the whole stance to the per-tick servo, which classifies the step's vertical
             // intent (rise / hold / descend) and, crucially, TERMINATES each one against the bot's live

@@ -328,6 +328,52 @@ public final class SteerControl {
      * the last one costs 5% of launch speed. Passing the requirement in as the tolerance is what lets the
      * servo keep driving until it is actually met — see the (456,0,512) flagship wedge.
      */
+    /**
+     * Scratch for {@link #recenterClearOf}'s span read. Tick-thread only — every servo in this class runs
+     * inside the entity tick — so a single shared array is safe and keeps the per-tick read allocation-free.
+     */
+    private static final double[] SPAN = new double[4];
+
+    /**
+     * {@link #recenterOnTarget} for a bot that must stand clear of the COLLISION in the cell it is targeting
+     * — the sink-in re-centre (owner-ratified 2026-08-27, the ShaftCourse {@code control-plain-topdown}
+     * stall).
+     *
+     * <p>Aims at the centre of {@link BotSteering#clearSpan}'s free span rather than the cell centre, with a
+     * tolerance DERIVED from that span rather than the general {@link #COLUMN_DEADBAND}: the servo stops when
+     * the whole body is inside the air, and not before. Both numbers come out of the same geometry, so
+     * neither is tuned:
+     * <ul>
+     *   <li><b>anchor</b> = the span's midpoint. For an EAST-facing ladder (a 3/16 plate at
+     *       {@code x ∈ [cell, cell+0.1875]}) that is {@code cell + 0.59375}, not {@code cell + 0.5}.</li>
+     *   <li><b>tolerance</b> = {@code halfSpan − BODY_RADIUS}, i.e. exactly "the whole box fits in the free
+     *       span". For that ladder: {@code 0.40625 − 0.3 = 0.10625}.</li>
+     * </ul>
+     *
+     * <p><b>Why the tolerance cannot simply stay {@link #COLUMN_DEADBAND}.</b> 0.15 is WIDER than the 0.10625
+     * the geometry allows, so a bot approaching the plate from its own side would stop with the box still
+     * over the shelf — the original stall, merely relocated. And it is why the fix is an anchor rather than a
+     * tighter deadband: this servo writes {@code setForward(0)} inside its deadband, so tightening alone
+     * leaves the bot crawling toward a target that was never clear in the first place.
+     *
+     * <p><b>Inert wherever there is no partial collision</b>, which is nearly everywhere: an empty or
+     * full-footprint shape hands back the whole cell, giving anchor = cell centre and tolerance
+     * {@code 0.5 − 0.3 = 0.2}, capped by {@code COLUMN_DEADBAND} to 0.15 — the exact call
+     * {@link #recenterOnTarget} makes today. The vine family and scaffolding are therefore byte-identical.
+     *
+     * @param fx,fy,fz the FLOOR cell whose collision the body must clear — for a sink-in, the step's target
+     *                 cell (the climbable being entered), which is the cell the bot is currently standing on
+     *                 top of.
+     */
+    public static boolean recenterClearOf(BotSteering b, int fx, int fy, int fz) {
+        b.clearSpan(fx, fy, fz, SPAN);
+        final double ax = 0.5 * (SPAN[0] + SPAN[1]);
+        final double az = 0.5 * (SPAN[2] + SPAN[3]);
+        final double tol = Math.min(COLUMN_DEADBAND,
+                Math.min(0.5 * (SPAN[1] - SPAN[0]), 0.5 * (SPAN[3] - SPAN[2])) - BotSteering.BODY_RADIUS);
+        return recenterOn(b, ax, az, tol);
+    }
+
     public static boolean recenterOn(BotSteering b, double cx0, double cz0, double deadband) {
         double cx = cx0 - b.x();
         double cz = cz0 - b.z();
@@ -2404,6 +2450,11 @@ public final class SteerControl {
      * and ground one cell BELOW the frame its plan was built from — precisely what the closing paragraph of
      * {@link #holdClimbableStance(BotSteering, SteerView)} exists to forbid. So {@code false} is the default
      * and the relaxation is opt-in, applied only where the bot is genuinely being driven.
+     *
+     * <p><b>Still live after 2026-08-27</b>, though it is no longer the only term: the HOLD branch now
+     * releases unconditionally when {@link BotSteering#seatedFloorBelow} says the arrest is inert (the feet
+     * are already over their own floor). This flag continues to decide the case it was written for — a
+     * lateral crossing whose catch is up to two cells down.
      */
     /**
      * Diagnostic ONLY: the stance servo's decision on its last call — {@code intent}, the live {@code err},
@@ -2570,7 +2621,31 @@ public final class SteerControl {
             // crossed, so the edge-guard costs nothing and the hold is pure gain; relaxing there would slide
             // the bot off the frame its plan was built from during a mine (>=5 ticks at -0.15/t ~ a full
             // block) — the already-convicted (58,133,189) failure, re-entered from the other side.
-            if (!translating || !b.standableBelow()) b.setSneak(true);
+            //
+            // SEATED ON ITS OWN FLOOR — the one release that needs no `translating` (owner ruling 2026-08-27,
+            // the ShaftCourse topdown wedge). Reaching this branch means dy == 0, i.e. the feet are already
+            // inside the settle band [floorY, floorY + SETTLE_BAND] of the step's OWN target. If a standable
+            // sits at exactly footY()-1, then letting go seats the bot at floorY — the base of the cell it is
+            // already in — so the arrest is buying nothing at all and costs the edge-guard plus, downstream,
+            // the `grounded()` that the navigator's arrival test waits for. Releasing here is not a
+            // relaxation of the hold's purpose; it is the hold having no purpose left.
+            //
+            // seatedFloorBelow(), NOT standableBelow(): the latter spans TWO cells by design, so it is also
+            // true for a curtain hang whose catch is a cell BELOW the waypoint — releasing on that answer is
+            // exactly the jungle-canopy regression climbLateralTransferKeepsItsHoldOverACanopy pins. The
+            // single-cell probe is the only one that means "where I already am".
+            //
+            // Strictly ADDITIVE: it can only ever remove a sneak press, in the one state where the press is
+            // provably inert. Every other combination keeps the byte-identical behaviour above.
+            //
+            // <p>What it fixes: the last rung of a ladder descent. The bot stops 0.086 above the shaft floor
+            // — inside the band, stone directly below — and the old gate pressed sneak forever, pinning it
+            // off the floor and starving the arrival test (ShaftCourse topdown-open / topdown-closed, both
+            // 600t timeouts).
+            //
+            // Re-read EVERY tick, as before: these probes ask about the columns the box currently overlaps,
+            // so the answer flips by itself as the box crosses a lip — no state, no timers.
+            if (!b.seatedFloorBelow() && (!translating || !b.standableBelow())) b.setSneak(true);
         } else if (b.climbableBelow()) {
             // 0 — HOLD HEIGHT with the feet ABOVE a curtain (the top-out). Nothing to stand on, so the bot
             // sinks in and vanilla re-lifts it; jump out-runs the sink by re-climbing at the surface. Sneak
