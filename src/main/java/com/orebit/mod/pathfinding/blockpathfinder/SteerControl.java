@@ -2002,7 +2002,32 @@ public final class SteerControl {
         double crossErr = (takeoffCx * crossUx + takeoffCz * crossUz)
                 - (b.x() * crossUx + b.z() * crossUz);
         double crossVel = b.velX() * crossUx + b.velZ() * crossUz;
-        return Math.abs(crossErr) < COLUMN_DEADBAND && Math.abs(crossVel) < SERVO_DEADBAND;
+        // WHERE THE BOT WILL END UP, not where it is: the current cross offset PLUS the distance the
+        // remaining cross velocity will still carry it, against the lane tolerance. Taken as absolute values
+        // so the two never cancel — conservative in the direction of aligning, which is the safe one.
+        //
+        // NOT an instantaneous velocity test. That was the first cut (|crossVel| < SERVO_DEADBAND) and it
+        // WEDGED the long flagship at (278,113,352): the bot sat 0.035 off the centreline — comfortably
+        // inside COLUMN_DEADBAND — while its cross velocity chattered at ±0.0346, above the 0.02 band. The
+        // servo's own error then landed just past FACE_ERR_THRESHOLD, so actuate() took the yaw-onto-error
+        // escape and commanded FULL throttle, which moves cross velocity ~0.069 in a tick and overshot a
+        // 0.035 error symmetrically. A clean 2-cycle, forever:
+        //
+        //   x=278.465 vel=-0.0346 yaw=-90 fwd=1.00
+        //   x=278.528 vel=+0.0346 yaw=+90 fwd=1.00
+        //
+        // The lesson is general: NEVER GATE A PHASE TRANSITION ON A QUANTITY THAT CHATTERS BELOW THE
+        // ACTUATOR'S RESOLUTION. One tick of the smallest useful input changes cross velocity by more than
+        // SERVO_DEADBAND, so that test can never be satisfied on a surface the bot is actively driving. The
+        // other servos survive the same chatter only because they are position-anchored and never gate on it.
+        //
+        // Displacement is the honest quantity, and it separates the two cases cleanly:
+        //   flagship entry   0.011 + 0.130 * 1.202 = 0.167  > 0.15  -> align (correct: it launched 0.181 off)
+        //   the wedge        0.035 + 0.0346 * 1.202 = 0.077 < 0.15  -> settle (correct: harmless)
+        double q = Math.max(EPS, Math.min(b.slipperinessAt(b.footX(), b.footY() - 1, b.footZ())
+                * VANILLA_HORIZONTAL_DRAG, 1.0 - EPS));
+        double coast = q / (1.0 - q);
+        return Math.abs(crossErr) + Math.abs(crossVel) * coast < COLUMN_DEADBAND;
     }
 
     /**
