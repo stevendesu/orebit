@@ -225,14 +225,33 @@ pure-drag coast stops ON the anchor. `cap` must be a speed the medium can actual
   the bot in a limit cycle. Seen in `groundServo`, the whole retired swim family, and `parkourAirborne` on
   grounded ticks.
 
-**COROLLARY, and it is not the same rule (learned 2026-08-26, the hard way, in a fix for the rule above):**
-**never gate a PHASE TRANSITION on a quantity that chatters below the actuator's resolution.** A completion
-test is not a control law and does not get to be as tight. One tick of the smallest useful input changes
-horizontal velocity by ~0.069 on stone; a gate demanding `|velocity| < SERVO_DEADBAND (0.02)` therefore can
-*never* be satisfied while the servo is driving, and the move wedges forever — measured as a clean 2-cycle at
-`(278,113,352)`. Gate on the PROJECTED RESTING STATE instead: `|offset| + |velocity|·coast < tolerance`
-answers "where will I end up", which is both what you actually care about and a quantity that does not
-chatter. The position-anchored servos survive the same chatter only because they never gate on it.
+**THE GAIN IS AN APPROXIMATION IN THE WRONG FRAME (found 2026-08-26; `actuate` still has this).** `actuate`
+forms `err = desired − actual` in the POST-drag frame — that is what `velX()/velZ()` return — but the input it
+computes acts PRE-drag, because vanilla applies friction at the END of the tick. The exact input is closed
+form and needs no gain at all:
+
+```
+u = (desired/QG − actual) / A          // QG = blockFriction·0.91, A = the tick's input accel
+```
+
+`SERVO_GAIN = 18` is roughly `1/(A·QG)` = 18.7, which would be right IF the error were already pre-drag. It
+is not, so the servo systematically **over-commands** — measured at ~30% in one convicted state — and then
+`min(1, …)` clips the excess to full throttle. This is the same frame confusion as the parkour takeoff lead
+term (post-friction `vAlong` used as a pre-friction displacement); assume it is lurking anywhere a velocity
+read meets an input write.
+
+**COROLLARY FOR GATES (learned 2026-08-26, in a fix for the rule above — I wrote the new bug while fixing the
+old one):** **a completion test must not name an instantaneous velocity.** It is a different problem from a
+control law and does not get to be as tight: an instantaneous-velocity gate is hostage to whatever transient
+the servo happens to be in, so an over-commanding or saturated servo can hold it unsatisfied indefinitely.
+Convicted at `(278,113,352)`: the bot sat 0.035 off the centreline — deep inside `COLUMN_DEADBAND` — while a
+saturated cross correction flipped its velocity between ±0.0346 every tick, permanently outside
+`SERVO_DEADBAND (0.02)`, and the phase never advanced. (A partial-throttle tick of 0.844 would have settled it
+exactly; the gain asked for 1.095 and got clipped to 1.0. There is no actuator "quantum" — `setForward` is a
+continuous float — the servo simply asked for the wrong number.) Gate on the PROJECTED RESTING STATE instead:
+`|offset| + |velocity|·coast < tolerance` answers "where will I end up", which is what you actually care about
+and is smooth in the state. The position-anchored servos survive the same transient only because they never
+gate on it.
 
 **Before writing any new servo or gate:** read `internal_docs/DESIGN-servo-normalization.md` (§2.1 the law,
 §2.2 actuation, §8 gates), and `internal_docs/SERVO-INVENTORY.md` for what already exists — the answer is
