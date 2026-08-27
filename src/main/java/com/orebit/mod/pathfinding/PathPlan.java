@@ -1463,6 +1463,12 @@ public final class PathPlan {
                     skeleton.size(), committedIndex, windowStart, windowLast(), skeleton.size() - 1,
                     botFloor.getX(), botFloor.getY(), botFloor.getZ(),
                     target.getX(), target.getY(), target.getZ(), target.equals(goalFloor), cuboidCap);
+            // The CASCADE STACK, once per window swap. The window target alone cannot tell you whether the
+            // planner is healthy: a 1-cell target is the SYMPTOM of a collapsed lower level, and the cause is
+            // several levels up. This prints size / committed / reachesGoal / unbuilt for every level, so the
+            // two standing invariants are a grep rather than an inference — the TOP level must always read
+            // reachesGoal=true, and no level should reach committed == size-1 without having slid first.
+            OrebitCommon.LOGGER.info("[Orebit] {}", SkeletonDump.stackSummary(this));
             // The caps this search actually runs with — the one line that catches "the config file says X
             // but the search priced with Y" (stale reload, wrong server dir, a caller passing a preset).
             OrebitCommon.LOGGER.info(
