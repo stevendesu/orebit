@@ -213,6 +213,69 @@ final class SkeletonDump {
         return total == 0 ? null : "unbuilt steps in plan —" + sb;
     }
 
+    /**
+     * ONE LINE PER LEVEL of the cascade stack — size, committed cursor, whether that level reaches the goal
+     * region, and how many of its steps ride UNBUILT nav data. Cheap enough for every window swap, unlike
+     * {@link #describeSkeleton}, which dumps every step of every level and only fires on skeleton events.
+     *
+     * <p><b>The invariant it exists to make greppable</b> (owner, 2026-08-26). The TOP level must route all
+     * the way: it is chosen from the distance to the goal, so its skeleton should span start→goal and read
+     * {@code reachesGoal=true}. Every level below it is a sliding sub-skeleton toward a hand-down from its
+     * parent, so no level should ever EXHAUST — {@code committed} should never reach {@code size-1} without
+     * the level having slid first. A level that is 2 steps long while its parent is 24 is a collapse, and
+     * until this line existed it was only visible downstream, as a block-tier window target one cell away.
+     *
+     * <p><b>Why the unbuilt count belongs on the same line.</b> The levels do not fail independently. On the
+     * 2026-08-26 long flagship the state immediately before a livelock was
+     * {@code L3 24 steps reachedGoal=true / L2 9 / L1 2}, with {@code L3=19/24} steps unbuilt: the top level
+     * was routing 79% through terrain nobody had loaded, while the levels beneath it could only see the small
+     * built neighbourhood around the bot. Reading either number alone hides that; side by side it is one
+     * glance. See {@link #unbuiltSummary} for the same failure convicted a different way.
+     */
+    static String stackSummary(PathPlan plan) {
+        if (plan.hier == null) {
+            return "HPA stack: (no cascade)";
+        }
+        final NavGridView grid = new NavGridView(plan.level);
+        final StringBuilder sb = new StringBuilder("HPA stack: top=L").append(plan.hier.topLevel());
+        if (plan.hier.isFailed()) {
+            sb.append(" FAILED");
+        }
+        for (int L = plan.hier.topLevel(); L >= 1; L--) {
+            final RegionPathPlan sk = plan.hier.skeletonAt(L);
+            if (sk == null) {
+                sb.append(" | L").append(L).append("=none");
+                continue;
+            }
+            sb.append(" | L").append(L).append(" size=").append(sk.size())
+                    .append(" committed=").append(plan.hier.committedAt(L))
+                    .append(" reachesGoal=").append(sk.reachedGoalRegion())
+                    .append(" unbuilt=").append(countUnbuilt(grid, sk)).append('/').append(sk.size());
+        }
+        final RegionPathPlan l0 = plan.skeleton;
+        if (l0 != null && !l0.isEmpty()) {
+            sb.append(" | L0 size=").append(l0.size())
+                    .append(" committed=").append(plan.committedIndex)
+                    .append(" reachesGoal=").append(l0.reachedGoalRegion())
+                    .append(" unbuilt=").append(countUnbuilt(grid, l0)).append('/').append(l0.size());
+        }
+        return sb.toString();
+    }
+
+    /** How many of {@code sk}'s steps ride unbuilt nav data ({@link #stepUnbuilt}'s test). */
+    private static int countUnbuilt(NavGridView grid, RegionPathPlan sk) {
+        if (grid == null) {
+            return -1;
+        }
+        int n = 0;
+        for (int i = 0; i < sk.size(); i++) {
+            if (stepUnbuilt(grid, sk, i)) {
+                n++;
+            }
+        }
+        return n;
+    }
+
     /** A step rides unbuilt nav data when its portal OR its centre has none — {@link #probe}'s test. */
     private static boolean stepUnbuilt(NavGridView grid, RegionPathPlan sk, int i) {
         if (sk.hasPortal(i)) {
