@@ -126,6 +126,14 @@ public final class StaircaseCourse {
     private static final int STRIDE_X = 40;
     private static final int STRIDE_Z = 24;
 
+    /**
+     * Blocks of clearance above each tread on a COVERED tile — 3 clear body cells. Sized to block a JUMP's
+     * apex head-room while leaving a step-assist's ~0.5 head-rise untouched, so a covered tile can only be
+     * climbed by {@code Ascend}/step-assist and never by a parkour hop. That discriminator is the whole
+     * point of the covered cards (moved here from ParkourCourse 2026-08-26).
+     */
+    private static final int CEILING_GAP = 4;
+
     private static final int WARMUP_TICKS = 160;
     private static final int SETTLE_TICKS = 60;
     /**
@@ -212,6 +220,10 @@ public final class StaircaseCourse {
         final int steps;
         final int stepRun;
         final boolean snowy;
+        /** Cover every column {@link #CEILING_GAP} above its tread — forbids a jump, forces step-assist. */
+        final boolean ceiling;
+        /** Walk DOWN the staircase instead of up: start on the landing, goal on the pad. */
+        final boolean descend;
         /** Verbatim owner repro ({@link #EXACT_BLOCKS}) — ignores the synthetic layout entirely. */
         final boolean exact;
         final int baseX, baseZ;
@@ -245,6 +257,8 @@ public final class StaircaseCourse {
             this.steps = 5;
             this.stepRun = 1;
             this.snowy = false;
+            this.ceiling = false;
+            this.descend = false;
             this.runUp = 2;
             this.baseX = EXACT_BLOCKS[0][0];
             this.baseZ = EXACT_Z;
@@ -264,11 +278,18 @@ public final class StaircaseCourse {
 
         Trial(String name, int steps, int stepRun, boolean snowy, boolean diagonal, int runUp,
                 int baseX, int baseZ) {
+            this(name, steps, stepRun, snowy, diagonal, runUp, baseX, baseZ, false, false);
+        }
+
+        Trial(String name, int steps, int stepRun, boolean snowy, boolean diagonal, int runUp,
+                int baseX, int baseZ, boolean ceiling, boolean descend) {
             this.name = name;
             this.exact = false;
             this.steps = steps;
             this.stepRun = stepRun;
             this.snowy = snowy;
+            this.ceiling = ceiling;
+            this.descend = descend;
             this.runUp = runUp;
             this.baseX = baseX;
             this.baseZ = baseZ;
@@ -283,11 +304,22 @@ public final class StaircaseCourse {
             this.halfW = diagonal ? 4 : 1;
             this.zStart = diagonal ? zc - 3 : zc;
             this.zGoal = diagonal ? zc + 3 : zc;
-            this.startX = baseX - runUp + 0.5; // stand at the FAR end of the pad — the whole run-up is used
-            this.startY = Y0;
-            this.startZ = zStart + 0.5;
-            this.startYaw = yaw(1, 0); // face +X, up the slope
-            this.goal = new BlockPos(baseX + span + 2, topFeetY, zGoal);
+            if (descend) {
+                // Mirror of the climb: stand on the top landing and walk DOWN to the pad. Same treads, same
+                // profile, opposite direction — the descent is Descend/step-down rather than Ascend, and it
+                // is the direction the covered-tile pathology was never checked in.
+                this.startX = baseX + span + 2 + 0.5;
+                this.startY = topFeetY;
+                this.startZ = zGoal + 0.5;
+                this.startYaw = yaw(-1, 0);
+                this.goal = new BlockPos(baseX - runUp + 1, Y0, zStart);
+            } else {
+                this.startX = baseX - runUp + 0.5; // stand at the FAR end of the pad — the whole run-up is used
+                this.startY = Y0;
+                this.startZ = zStart + 0.5;
+                this.startYaw = yaw(1, 0); // face +X, up the slope
+                this.goal = new BlockPos(baseX + span + 2, topFeetY, zGoal);
+            }
         }
 
         /**
@@ -365,6 +397,17 @@ public final class StaircaseCourse {
             // adjacency, pre-first-step run-up (3/6/12) and off-lane diagonal entry — so none of them
             // isolates the defect and all they cost was runtime. One tile keeps the fix loop at ~15 s.
             trials.add(new Trial());
+            // The two COVERED stair-traversal cards, moved out of ParkourCourse on 2026-08-26. They were
+            // never parkour: ParkourCourse's own field comment read "a staircase-traversal trial (custom
+            // build + pass/fail), NOT a jump", and their ceiling exists specifically to FORBID jumping so
+            // the climb has to come from step-assist. A jump-forbidden card in the jump harness is a
+            // category error; iterated Ascend is this harness's subject.
+            //
+            // They are kept (rather than deleted with the 2026-08-10 synthetic tiles) because neither is
+            // redundant with the verbatim repro: that tile is uncovered and ascent-only, so the COVER
+            // (step-assist forced) and the DESCENT direction are both uncovered by it.
+            trials.add(new Trial("covered.up",   4, 1, false, false, 3, BASE_X, BASE_Z + STRIDE_Z, true, false));
+            trials.add(new Trial("covered.down", 4, 1, false, false, 3, BASE_X, BASE_Z + 2 * STRIDE_Z, true, true));
         }
 
         void start(MinecraftServer server) {
@@ -479,7 +522,7 @@ public final class StaircaseCourse {
                 return;
             }
             if (bot.mode() == AllyBotEntity.Mode.STAY && dist < 1.2) {
-                record(tr, "PASS", "reached the top landing");
+                record(tr, "PASS", tr.descend ? "reached the bottom pad" : "reached the top landing");
                 return;
             }
             if (bot.navigator().navGaveUp()) {
@@ -623,6 +666,17 @@ public final class StaircaseCourse {
             }
             // Top landing (4 columns) so the goal never sits on a step edge.
             fill(bx + tr.span, bx + tr.span + 3, tr.topFeetY - 1, tr);
+            if (tr.ceiling) {
+                // One solid cell CEILING_GAP above each column's own tread, following the profile — pad,
+                // treads and landing alike. A jump's apex head hits it; a step-assist's head-rise does not.
+                for (int x = bx - tr.runUp; x <= bx + tr.span + 3; x++) {
+                    int feet = tr.surfaceFeetYAt(x);
+                    if (feet == Integer.MIN_VALUE) continue;
+                    for (int z = tr.zc - tr.halfW; z <= tr.zc + tr.halfW; z++) {
+                        set(x, feet + CEILING_GAP, z, STONE);
+                    }
+                }
+            }
         }
 
         /**

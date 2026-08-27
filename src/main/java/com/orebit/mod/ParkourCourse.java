@@ -90,10 +90,6 @@ public final class ParkourCourse {
      *  arrival radius measured from the honey lip, so a honey-edge teeter can never score "arrived". */
     private static final int HONEY_GOAL_PAST = 3;
 
-    /** Blocks of clearance above each stair floor for the staircase-trial ceiling (see {@code buildStairs}):
-     *  3 clear body cells — the cover that blocks a jump's apex head but not a step-assist's ~0.5 head-rise. */
-    private static final int STAIR_CEILING_GAP = 4;
-
     /** Ticks to let the WHOLE starting area's nav grid build before the first goto (chunk gen + nav build). */
     private static final int WARMUP_TICKS = 120;
     /** Ticks to let the local nav grid build after each subsequent teleport before issuing the goto. */
@@ -128,6 +124,18 @@ public final class ParkourCourse {
             .setValue(BlockStateProperties.HORIZONTAL_FACING, Direction.EAST)
             .setValue(BlockStateProperties.HALF, Half.BOTTOM)
             .setValue(BlockStateProperties.STAIRS_SHAPE, StairsShape.STRAIGHT);
+    /**
+     * The MIRROR of {@link #STAIR_EAST}: a BOTTOM straight stair FACING WEST, so its LOW 8/16 front is on
+     * +X. A bot jumping +X off this one launches from the SHORT half — {@code directionalTopY} reads 8, the
+     * follower's {@code lowHalfStair} predicate fires, and the takeoff bound becomes
+     * {@code Parkour.STAIR_TAKEOFF_EDGE} instead of the full-block edge. That is the geometry the whole
+     * stair-takeoff special case exists for, and until 2026-08-26 nothing in any course ever stood on it.
+     */
+    private static final BlockState STAIR_WEST = Blocks.STONE_STAIRS.defaultBlockState()
+            .setValue(BlockStateProperties.HORIZONTAL_FACING, Direction.WEST)
+            .setValue(BlockStateProperties.HALF, Half.BOTTOM)
+            .setValue(BlockStateProperties.STAIRS_SHAPE, StairsShape.STRAIGHT);
+
     /** Climbable-transit palette (the 2026-07-31 held-jump × vine-transit elevator repro family).
      *  VINE_SOUTH clings to the wall block at z+1 (its SOUTH face); VINE_WEST to the block at x−1 —
      *  always place the supporting solid FIRST so no neighbour update pops an unsupported vine. */
@@ -171,8 +179,6 @@ public final class ParkourCourse {
         boolean soulRunway;             // soul-sand takeoff+runway (slow floor — tighter envelope row)
         boolean soulTakeoff;            // STONE runway but the takeoff cell ONLY is soul sand (issue-1 repro:
                                         //   +X momentum builds on stone, only the launch block is slow)
-        boolean stairRun;               // a staircase-traversal trial (custom build + pass/fail), not a jump
-        int stairSteps;                 // number of stair blocks in the run
         BlockState gapFloor;            // magma/honey placed in the FIRST gap cell (null = normal void gap)
         boolean fastEntry;              // owner-gate: force a full-SPRINT approach (real 3-stone run) into the jump
         boolean descendRunway;          // raised (Y0+1) approach stepping DOWN onto the takeoff cell — the
@@ -202,7 +208,9 @@ public final class ParkourCourse {
                                         // the cell centre a carry gate would hold at. See centrePostTrial.
         BlockState iceRunway;           // != null: runway AND takeoff cell are this slippery block, so the
                                         // bot must launch from ICE. See iceRestTrial.
-        boolean padTakeoff;             // the takeoff cell ALONE is raised one block, so the route must
+        boolean padTakeoff;
+        /** Non-null = put this STAIR on the takeoff cell (stone runway elsewhere) — the stair-takeoff family. */
+        BlockState stairTakeoff;             // the takeoff cell ALONE is raised one block, so the route must
                                         // ASCEND onto a 1-wide pad and launch from ON TOP of it -- the
                                         // no-lateral-runway shape. See padParkourTrial.
         // Fraction of ParkourEnvelope.modelJumpTickSpeed the launch must reach. 0 = MEASURE AND REPORT
@@ -430,8 +438,10 @@ public final class ParkourCourse {
             // proves the walk-up must read as a step-assist, not an Ascend jump (bug 1). stairdown descends -X;
             // its ceiling sits one higher (Descend's step-off needs 3 clear over the dest cell) so the DOWN
             // move is never head-blocked — it isolates the feet-Y / reached model (bug 2), not the jump gate.
-            stairUp("stairup", 4);
-            stairDown("stairdown", 4);
+            // stairup / stairdown MOVED to StaircaseCourse on 2026-08-26. They were never parkour: their
+            // own field comment said "a staircase-traversal trial ... not a jump", and their ceiling exists
+            // to FORBID jumping so the climb must come from step-assist. A jump-forbidden card has no
+            // business in the jump harness. They live on there as covered.up / covered.down.
 
             // ==== PHASE 2 additions =========================================================================
             // (A) FLAT PRECISION-on-stone — the REAL overshoot validation. flat1/flat2 above use a WIDE REACH
@@ -553,6 +563,32 @@ public final class ParkourCourse {
             // vocabulary + the descend vine-bounce regression pin (COLUMN_DEADBAND, owner ruling
             // 2026-07-31). Explicit west bases, continuing the descendCard column (nav-dead-tail rule).
             climbCards();
+
+            // ---- STAIR-TAKEOFF family (2026-08-26) ---------------------------------------------------
+            // The jump classes MAX_GAP[16] admits from a full block are {flat 3, rise 2, fall1 3, fall2 4,
+            // fall3 4, diag 2}. A stair top is the same HEIGHT as a full block on its tall half, so the
+            // envelope offers the same gaps there — the open question these cards answer is whether the
+            // SHORTER RUNWAY can actually launch them. `fall2` at gap 4 is the case the long flagship failed
+            // from FLAT ground on 2026-08-26 (floor (77,146,262)->(82,144,262), launched at 87% of the
+            // modelled speed and hit the side of the landing block 0.069 below its top), so it is the one
+            // that matters most here: a stair has strictly less runway than the flat cell that already
+            // missed it.
+            stairJump("stair.high.flat3",   STAIR_EAST, 4,  0);  // MAX_GAP[16] flat max
+            stairJump("stair.high.fall2g4", STAIR_EAST, 5, -2);  // MAX_GAP[16] fall2 max — the flagship shape
+            stairJump("stair.high.fall1g3", STAIR_EAST, 4, -1);  // MAX_GAP[16] fall1 max
+            stairJump("stair.low.flat2",    STAIR_WEST, 3,  0);  // the 8/16 front: one class down, conservative
+            stairJump("stair.low.fall2g3",  STAIR_WEST, 4, -2);  // ditto for the drop
+
+            // REST variants — and these are the ones that matter. A WALKIN card arrives with carried
+            // momentum and never re-centres, so it launches near the model speed and says nothing about
+            // the failure mode under investigation. The flagship jump started from REST on the takeoff
+            // cell (the run-up gate armed a re-centre), giving only two acceleration ticks and 87% of
+            // the modelled launch. From a stair the runway is shorter still, so REST is the condition
+            // the stair-takeoff path has to survive.
+            stairJumpRest("stair.high.flat3.rest",   STAIR_EAST, 4,  0);
+            stairJumpRest("stair.high.fall2g4.rest", STAIR_EAST, 5, -2);
+            stairJumpRest("stair.low.flat2.rest",    STAIR_WEST, 3,  0);
+            stairJumpRest("stair.low.fall2g3.rest",  STAIR_WEST, 4, -2);
         }
 
         /** The climbable-transit card set — also the {@code climbonly} fast gate's whole course.
@@ -945,25 +981,44 @@ public final class ParkourCourse {
             m.assertNoDamage = true;
             trials.add(m);
         }
-
-        /** Ascending staircase climbing +X: {@code steps} stairs, each +1 up/+1 over, under a tight 2-block
-         *  ceiling. The bot walks the flat runway then up the stairs to a goal on the top platform. */
-        void stairUp(String name, int steps) {
+        /**
+         * A STAIR-TAKEOFF jump: run in along +X over flat stone, take off from a stair, land {@code jdy}
+         * below at {@code jdx} away (so the void gap is {@code jdx - 1} cells).
+         *
+         * <p><b>Why this family exists</b> (2026-08-26). {@code Parkour.STAIR_TAKEOFF_EDGE},
+         * {@code MovementContext.directionalTopY}'s stair rule and {@code StairRunupReachTest} were all
+         * written for a takeoff whose surface is a stair — and no course card ever built one. {@link
+         * #STAIR_EAST} sat defined-but-unused in this very file. So the entire stair-takeoff path was
+         * shipped unexercised end to end.
+         *
+         * <p>It matters because a stair takeoff has a SHORTER RUNWAY than a full block. On flat ground the
+         * bot may run from {@code -0.2} (hitbox trailing edge on the near boundary) out to the cell edge; on
+         * a stair anything past {@code 0.8} from the near edge drops it onto the lower step, which both
+         * loses the height the jump was priced at and can put the bot AIRBORNE on the tick the jump input is
+         * written — so no impulse is applied at all. {@code ParkourEnvelope.vRunup} does not model that: it
+         * integrates until cumulative travel passes {@code RUNUP_BLOCKS}, which for this runway happens at
+         * 0.5594 blocks — 0.0594 PAST the lip — and returns the speed from a tick the geometry never grants.
+         *
+         * <p>Cards are named {@code stair.<half>.<class><gap>}: {@code high} launches off the 16/16 back
+         * ({@link #STAIR_EAST}, ordinary takeoff edge), {@code low} off the 8/16 front ({@link #STAIR_WEST},
+         * {@code lowHalfStair} true). Both halves are covered because they take DIFFERENT code paths.
+         */
+        void stairJump(String name, BlockState stair, int jdx, int jdy) {
             int[] b = nextBase();
-            Trial t = new Trial(name, Approach.WALKIN, 1, 0, steps, steps, 0, Template.REACH, false, b[0], b[1]);
-            t.stairRun = true;
-            t.stairSteps = steps;
-            trials.add(t);
+            trials.add(withStair(new Trial(name, Approach.WALKIN, 1, 0, jdx, jdy, 0,
+                    Template.REACH, false, b[0], b[1]), stair));
         }
 
-        /** Descending staircase walked -X and down: the bot starts on the top runway and walks down {@code steps}
-         *  stairs to a goal on the bottom platform. Its ceiling clears the down-step (see {@link #buildStairs}). */
-        void stairDown(String name, int steps) {
+        /** {@link #stairJump} entered from REST on the takeoff stair — the condition that actually fails. */
+        void stairJumpRest(String name, BlockState stair, int jdx, int jdy) {
             int[] b = nextBase();
-            Trial t = new Trial(name, Approach.WALKIN, -1, 0, -steps, -steps, 0, Template.REACH, false, b[0], b[1]);
-            t.stairRun = true;
-            t.stairSteps = steps;
-            trials.add(t);
+            trials.add(withStair(new Trial(name, Approach.REST, 1, 0, jdx, jdy, 0,
+                    Template.REACH, false, b[0], b[1]), stair));
+        }
+
+        Trial withStair(Trial t, BlockState stair) {
+            t.stairTakeoff = stair;
+            return t;
         }
 
         void diag(String name, int jdx, int jdy, int jdz) {
@@ -1197,7 +1252,6 @@ public final class ParkourCourse {
                 }
             }
 
-            if (tr.stairRun) { tickStair(tr); return; }
 
             double proj = tr.proj(bot.getX(), bot.getZ());
             if (proj > maxProj) maxProj = proj;
@@ -1427,48 +1481,6 @@ public final class ParkourCourse {
                 record(tr, "FAIL", "timeout");
             }
         }
-
-        /** Pass/fail for a staircase-traversal trial: unlike a jump, the bot spends the whole trial low on the
-         *  stairs, so the jump-centric proj/leftTakeoff/fell logic can't be reused. PASS = arrived (mode back to
-         *  STAY) at the goal height; FAIL = died, fell off the structure into the void, nav gave up, or timeout. */
-        void tickStair(Trial tr) {
-            if (!bot.isAlive()) {
-                record(tr, "FAIL", "died");
-                return;
-            }
-            // A step-assist WALK up/down stairs stays grounded; a JUMP leaves the ground. On the ASCENDING
-            // trial that is the whole discriminator: the pre-fix model reads each +0.5 stair riser as a +1.0
-            // Ascend and JUMPS the steps, so "reached the goal but went airborne on the way" is the mispriced
-            // walk-up and FAILS — the fix makes the bot walk it (grounded throughout).
-            boolean ascending = tr.jdy > 0;
-            if (!EntityState.onGround(bot)) stairAirborne = true;
-            if (bot.mode() == AllyBotEntity.Mode.STAY && bot.getY() > tr.landedFeetY - 1.5) {
-                if (ascending && stairAirborne) {
-                    record(tr, "FAIL", "climbed by jumping (walk-up mispriced as a jump)");
-                } else {
-                    record(tr, "PASS", "reached goal");
-                }
-                return;
-            }
-            int lowestFloor = Math.min(Y0, tr.landY); // runway (Y0) for stairup, bottom platform (landY) for down
-            if (bot.getY() < lowestFloor - 5) {        // missed the structure entirely — a real fall to the void
-                record(tr, "FAIL", "fell");
-                return;
-            }
-            if (bot.navigator().navGaveUp()) {
-                if (attemptTicks <= NAV_RETRY_WINDOW && navRetries < MAX_NAV_RETRY) {
-                    navRetries++;
-                    bot.comeTo(tr.goal, 0.75, 0.75, 0);
-                    return;
-                }
-                record(tr, "FAIL", "nav gave up (no route offered)");
-                return;
-            }
-            if (attemptTicks >= ATTEMPT_BUDGET) {
-                record(tr, "FAIL", "timeout");
-            }
-        }
-
         void trace(Trial tr) {
             double x = bot.getX(), z = bot.getZ();
             double spd = Math.sqrt((x - prevX) * (x - prevX) + (z - prevZ) * (z - prevZ));
@@ -1593,6 +1605,12 @@ public final class ParkourCourse {
                 // (ahead of wideRunway) so the pad stays 1x1: a 3-wide takeoff would hand the bot lateral
                 // room the in-game shape never has.
                 else if (tr.padTakeoff) place(cx, k == RUN - 1 ? Y0 + 1 : Y0, cz);
+                // stairTakeoff: flat stone approach with a STAIR on the last (takeoff) cell. 1-wide, in this
+                // same branch chain, for the padTakeoff reason — a 3-wide stair top would hand the bot
+                // lateral room the in-game shape never has.
+                else if (tr.stairTakeoff != null) {
+                    placeState(cx, Y0, cz, k == RUN - 1 ? tr.stairTakeoff : FLOOR);
+                }
                 else if (tr.wideRunway) placeWide(cx, Y0, cz, tr.rdx, tr.rdz);
                 else place(cx, Y0, cz);
             }
@@ -1636,7 +1654,6 @@ public final class ParkourCourse {
                 int px = -tr.cdz, pz = tr.cdx;
                 for (int k = 1; k <= WALK; k++) place(tr.landX + k * px, tr.landY, tr.landZ + k * pz);
             }
-            if (tr.stairRun) buildStairs(tr); // fill the diagonal staircase + its ceiling between the platforms
             if (tr.climb != null) buildClimb(tr); // vine/leaf structure over the standard geometry
         }
 
@@ -1726,33 +1743,6 @@ public final class ParkourCourse {
                     break;
             }
         }
-
-        /** Fill the diagonal staircase (BOTTOM stairs FACING=EAST) between the takeoff cell and the landing,
-         *  plus a following ceiling. buildTile has already laid the flat runway (start level) and the 3-wide
-         *  REACH platform (end level); this bridges them with {@code stairSteps} stairs, each +1 over ({@code sx})
-         *  and +1 in Y ({@code sy}).
-         *
-         *  <p><b>Ceiling height = the bug-1 discriminator.</b> Each step is covered {@link #STAIR_CEILING_GAP}
-         *  blocks above its own floor (3 clear body cells). This is the one cover that separates a WALK from a
-         *  JUMP: a vanilla jump's apex raises the head ~3.05 blocks above the feet, so the apex head clips the
-         *  3-clear ceiling — while step-assist raises the head only ~0.5, which fits under it. So a bot that can
-         *  ONLY jump the steps (the pre-fix model, which reads each +0.5 stair riser as a +1.0 Ascend) tries to
-         *  jump, bonks the ceiling and never gains the step; a bot that reads the directional stair surface takes
-         *  the step-assist WALK and climbs. (A tighter 2-clear cover would block the walk too — vanilla's
-         *  step-assist transiently raises the head into the same source+3 cell a jump-block fills — so it can't
-         *  demonstrate a PASS; a looser 4-clear cover lets the jump through and stops discriminating.) */
-        void buildStairs(Trial tr) {
-            int sx = Integer.signum(tr.jdx);        // +1 = climb +X (stairup), -1 = walk -X down (stairdown)
-            int sy = Integer.signum(tr.jdy);        // +1 ascending, -1 descending
-            int n = tr.stairSteps;
-            for (int s = 1; s <= n; s++) {          // the stair blocks (the s=N cell coincides with landX/landY)
-                placeState(tr.takeoffX + sx * s, Y0 + sy * s, tr.baseZ, STAIR_EAST);
-            }
-            for (int s = 0; s <= n; s++) {          // ceiling over the takeoff cell + every stair (1-wide)
-                place(tr.takeoffX + sx * s, Y0 + sy * s + STAIR_CEILING_GAP, tr.baseZ);
-            }
-        }
-
         /** Lay the owner's EXACT 7-block honey-flyover course (see {@link #ownerRepro}) — nothing else, void all
          *  around, so the geometry the bot sees is byte-for-byte the owner's in-game setup. rdx=-1 (travel -X):
          *  takeoff cell = takeoffX (owner 81), two back stones behind it (owner 82,83), a single HONEY in the
