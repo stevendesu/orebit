@@ -596,6 +596,12 @@ public final class ParkourCourse {
             // perp.fall2g4 is the flagship jump verbatim (drop 2, gap 4, entered from +Z).
             perpJump("perp.fall2g4", 5, -2);
             perpJump("perp.flat3",   4,  0);
+            // The DIAGONAL twin: enter +X/+Z, jump +X/-Z, at the diagonal max gap (2 => jd 3 per axis).
+            // NOTE: fall1 at gap 2 is REFUSED by the planner while fall2 and fall3 are admitted — a
+            // non-monotonic hole in the diagonal envelope, noted 2026-08-27, not chased here.
+            perpDiagJump("perpdiag.flat2", 3, 0);
+            perpDiagJump("perpdiag.fall2g2", 3, -2);
+            perpDiagJump("perpdiag.fall3g2", 3, -3);
         }
 
         /** The climbable-transit card set — also the {@code climbonly} fast gate's whole course.
@@ -1036,6 +1042,31 @@ public final class ParkourCourse {
          * drop, the same gap, from rest) passes and always did: it launches at 0.1076 against the flagship's
          * 0.1079. What it does not have is cross-axis momentum. The arc is the whole difference.
          */
+        /**
+         * A PERPENDICULAR-ENTRY DIAGONAL jump: run in along the {@code +X/+Z} diagonal, then jump along the
+         * {@code +X/-Z} diagonal — a 90-degree turn between two diagonals, so the bot arrives on the takeoff
+         * cell carrying momentum square across the jump it is about to make.
+         *
+         * <p>The diagonal twin of {@link #perpJump}. Every existing diag card runs in ALONG its own jump
+         * axis ({@code addDiagTrial} uses rdx=1, rdz=1 for a {@code +X/+Z} jump), so the whole
+         * DiagonalParkour family has only ever been exercised with a straight approach. {@code Parkour} got
+         * its cross-axis ALIGN phase on 2026-08-26 after the long flagship proved a crooked commit costs the
+         * arc up to 48 degrees of heading; DiagonalParkour has the identical run-up structure and the same
+         * parkourRunupAlign cross-vs-along saturation, and was left alone only because it had no failing
+         * artifact. This card is that artifact.
+         *
+         * <p>Gap 2 is the DIAGONAL maximum ({@code MAX_GAP[16][DIAG] == 2}), i.e. {@code jd = 3} per axis —
+         * chosen because a max-gap jump is where a wasted third of the air acceleration is the whole margin.
+         */
+        void perpDiagJump(String name, int jd, int jdy) {
+            int[] b = nextBase();
+            if (Math.floorMod(b[0] - b[1], RegionAddress.LEAF_SIZE) == 0) {
+                b[1] += 1;                     // the region-corner degeneracy addDiagTrial also avoids
+            }
+            trials.add(new Trial(name, Approach.WALKIN, 1, 1, jd, jdy, -jd,
+                    Template.REACH, false, b[0], b[1]));
+        }
+
         void perpJump(String name, int jdx, int jdy) {
             int[] b = nextBase();
             // runway along +Z (rdz = 1), jump along +X (jdx) — the 90-degree entry.
