@@ -502,6 +502,31 @@ public class SteerControlTest {
     }
 
     @Test
+    void parkourCrossSettled_firesOnTheFlagshipCarry_andReleasesTheChatterThatWedgedIt() {
+        // Both states measured on the 2026-08-26 long flagship, one from each failure.
+        //
+        // (1) MUST ALIGN — Parkour step 10's entry, handed over by a +Z Ascend into an +X jump: centred to
+        // 0.011 but carrying 0.130 b/t of pure cross. It launched 0.181 off the centreline and the airborne
+        // servo then burnt four ticks yawed up to 48 degrees correcting it, costing the jump 0.069 of reach.
+        FakeBot carry = new FakeBot(77.522, 147.0, 262.489);
+        carry.velX = 0.002;
+        carry.velZ = 0.130;
+        assertFalse(SteerControl.parkourCrossSettled(carry, 1, 0, 77.5, 262.5),
+                "0.130 of cross carry must not be committed to a jump");
+
+        // (2) MUST RELEASE — the state that WEDGED the flagship at (278,113,352) once an align phase existed.
+        // Jump axis +Z, so cross is X; the bot sits 0.035 off the centreline with cross velocity chattering
+        // at ±0.0346. An instantaneous |crossVel| < SERVO_DEADBAND test can never be satisfied here, because
+        // one tick of the smallest useful input moves cross velocity ~0.069 — more than the band itself. The
+        // gate must therefore ask about DISPLACEMENT, not instantaneous velocity.
+        FakeBot chatter = new FakeBot(278.465, 113.0, 352.5);
+        chatter.velX = -0.0346;
+        chatter.velZ = 0.0;
+        assertTrue(SteerControl.parkourCrossSettled(chatter, 0, 1, 278.5, 352.5),
+                "0.035 off-centre with 0.035 of cross is harmless — releasing here is what avoids the wedge");
+    }
+
+    @Test
     void recenterOnTarget_pullsBackWhenDrifted_andIdlesWhenCentred() {
         View column = new View(3, 1, 3, 3, 5, 3);
         FakeBot drifted = new FakeBot(3.7, 2, 3);

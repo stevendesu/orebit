@@ -411,3 +411,74 @@ any phase.
    ARRIVE: q = 0.900 → gainP 0.111) get their gains from NOTES-movement-physics instead of
    tuning sessions. The alternative keeps per-site constants and treats the identity as
    documentation only.
+
+---
+
+## §8 Gates and completion tests are NOT control laws (added 2026-08-26)
+
+§2 governs the LAW — what the servo drives toward. This section governs the TEST — when a phase, a move or a
+re-centre is allowed to declare itself finished. They are different problems and the same tolerances do not
+serve both.
+
+### §8.1 The incident
+
+The parkour ALIGN phase (added the same day, to stop a jump being committed while carrying cross-axis
+momentum) shipped with this gate:
+
+```java
+return Math.abs(crossErr) < COLUMN_DEADBAND && Math.abs(crossVel) < SERVO_DEADBAND;
+```
+
+Position term, velocity term, both present — and it still wedged the long flagship at `(278,113,352)` inside
+600 ticks. The trace is unambiguous:
+
+```
+phase=0/5 src=parkour:align x=278.465 vel=(-0.0346,0) yaw=-90 fwd=1.00
+phase=0/5 src=parkour:align x=278.528 vel=(+0.0346,0) yaw=+90 fwd=1.00
+phase=0/5 src=parkour:align x=278.465 vel=(-0.0346,0) yaw=-90 fwd=1.00
+```
+
+The bot sat **0.035** off the centreline — deep inside `COLUMN_DEADBAND` — while its cross velocity chattered
+at `±0.0346`, permanently outside `SERVO_DEADBAND`. The servo's own error landed just past
+`FACE_ERR_THRESHOLD`, so `actuate` took the yaw-onto-the-error escape and commanded **full throttle**, which
+moves cross velocity by ~0.069 in a single tick and overshot a 0.035 error symmetrically. Forever.
+
+### §8.2 The rule
+
+**A gate must not name a tolerance finer than one tick of the smallest useful actuation.** On stone that
+quantum is `A_G · QG ≈ 0.069` b/t of velocity; `SERVO_DEADBAND` is 0.02. Any velocity gate below the quantum
+is unsatisfiable *while the servo is driving*, and a phase whose advance condition is unsatisfiable is a wedge
+by construction — no timer, no recovery and no amount of servo tuning will rescue it.
+
+Note carefully that the servos themselves use `SERVO_DEADBAND` safely. They are allowed to, because they are
+POSITION-ANCHORED: the chatter costs them a little thrust and nothing else, since the position term keeps
+pulling them in regardless. **The dead-band is fine as a "stop pushing" threshold and fatal as a "we are
+done" threshold.** That distinction is the whole of §8.
+
+### §8.3 The shape a gate should take
+
+Ask where the bot will END UP, not where it is:
+
+```java
+double coast = q / (1.0 - q);                      // q = blockFriction × 0.91, the medium's own drag
+return Math.abs(offset) + Math.abs(velocity) * coast < tolerance;
+```
+
+This is a projected resting position. It is a smooth function of the state (no chatter), it needs no tolerance
+of its own beyond the geometric one the phase already has, and it separates the real cases cleanly — measured
+on the two flagship states this gate has to tell apart:
+
+| state | offset | cross vel | projected | verdict |
+|---|---|---|---|---|
+| step-10 entry (a +Z `Ascend` into an +X jump) | 0.011 | 0.130 | **0.167** | align — it launched 0.181 off and lost the jump |
+| the `(278,113,352)` chatter | 0.035 | 0.0346 | **0.077** | settle — harmless, and releasing is what avoids the wedge |
+
+Pinned by `SteerControlTest.parkourCrossSettled_firesOnTheFlagshipCarry_andReleasesTheChatterThatWedgedIt`,
+which asserts both rows directly.
+
+### §8.4 Generalisation
+
+Every completion test in the follower should be read against this: `Movement.atWaypoint`'s containment band,
+`Swim.reachedSwim`'s band, `PhaseRunner` advance conditions, and every `failWhen` envelope. A test that names
+an instantaneous velocity, or a distance smaller than a tick of travel at the speed in play, is the same bug.
+See also the `cell-quantized-length-bugs` memory — that is this rule in the position axis.
