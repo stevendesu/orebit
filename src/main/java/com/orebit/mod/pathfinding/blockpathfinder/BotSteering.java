@@ -319,6 +319,81 @@ public interface BotSteering {
 
     default boolean standableBelow() { return false; }
 
+    /**
+     * Whether releasing every input would seat the bot on the floor <b>of the cell its feet are already
+     * in</b> — a standable at exactly {@code footY()-1}, whose top face IS the feet cell's base.
+     *
+     * <p><b>Why this is NOT {@link #standableBelow}</b> (owner-ratified 2026-08-27). The two read almost the
+     * same world and answer different questions, and the difference is a whole cell of altitude:
+     * <ul>
+     *   <li>{@code standableBelow} asks <i>"is there a floor close enough that stepping off is safe?"</i> and
+     *       spans TWO cells by deliberate derivation — a hanging bot sits low in its feet cell, so the floor
+     *       that actually catches it can be at {@code footY()-2} while its top face is barely a block down.
+     *       That window is correct for the lateral cling it serves: a step-off of up to 2.0 is damage-free.</li>
+     *   <li>This asks <i>"would letting go leave me WHERE I AM?"</i>, which admits no step at all. A floor at
+     *       {@code footY()-2} seats the feet a full cell BELOW the waypoint the plan framed — fine as a
+     *       step-off, fatal as an arrival or as a reason to stop arresting.</li>
+     * </ul>
+     * Using the two-cell answer for this question is precisely the jungle-canopy regression
+     * {@code ClimbableWalkOffStanceTest.climbLateralTransferKeepsItsHoldOverACanopy} pins, from the other
+     * side: it would drop every lateral vine transfer a cell under its own plan.
+     *
+     * <p>Its callers are the ones for which "close enough" is not good enough: the stance servo's HOLD branch
+     * (stop arresting only when the arrest is buying nothing — the feet are already over their own floor) and
+     * the navigator's arrival test (a pose is "arrived" only if dropping the inputs keeps it arrived).
+     *
+     * <p>Same live read and same {@link com.orebit.mod.worldmodel.navblock.NavBlock#isStandable} classifier
+     * as {@link #standableBelow}, across the columns the box actually overlaps. Default {@code false} for the
+     * test doubles — the conservative answer, since it leaves every pre-existing sneak hold untouched.
+     */
+    default boolean seatedFloorBelow() { return false; }
+
+    /**
+     * The FREE SPAN of cell {@code (x,y,z)}: the part of its horizontal footprint NOT occupied by the parts
+     * of its own collision shape that could hold a bot standing on the cell's TOP face. Written into
+     * {@code out} as world coordinates {@code {minX, maxX, minZ, maxZ}}.
+     *
+     * <p><b>Why this exists</b> (owner-ratified 2026-08-27; the ShaftCourse {@code control-plain-topdown}
+     * stall). Some blocks are passable to STAND IN yet carry real collision off to one side — a LADDER is a
+     * 3/16 plate against its support wall, full cell height, and a bot walking its top is genuinely resting
+     * on that 3/16 shelf. Every servo in this codebase aims at the cell CENTRE, and the cell centre clears
+     * such a plate by only {@code 0.0125}: at {@code x = cell + 0.5} the 0.6-wide body reaches back to
+     * {@code cell + 0.2}, a hair past the plate's edge at {@code cell + 0.1875}. That margin is a TWELFTH of
+     * {@link SteerControl#COLUMN_DEADBAND}, inside which the re-centre writes exact-zero forward and stops
+     * driving — so "descend into the column by walking off the plate" ({@code Climb}'s §3.5 sink-in) is
+     * asked of a servo that is allowed to quit 0.15 short of the only pose that satisfies it, and usually
+     * does. Measured: 600-tick timeout, grounded, {@code fwd=0.00}, {@code src=recenter:dead}, x settled at
+     * {@code 14.417} — body west face {@code 14.117}, a full {@code 0.07} onto a plate ending at
+     * {@code 14.1875}.
+     *
+     * <p>The answer is not a tighter tolerance — that only makes the servo crawl at the same wrong target,
+     * and it cannot tell "toward the ladder" from "away from it". The answer is to aim at the centre of the
+     * AIR, and to accept only a pose whose whole body is inside it. This seam supplies the geometry; the
+     * arithmetic (anchor, tolerance) lives in {@link SteerControl#recenterClearOf}, MC-free.
+     *
+     * <p><b>Only TOP-SUPPORTING boxes count.</b> The question is what the feet can rest on, so a sub-box is
+     * subtracted only if it reaches the cell's top face. This is what makes scaffolding answer honestly from
+     * both of its shapes: {@code SHAPE_STABLE}'s deck ({@code Block.column(16,14,16)} = a FULL-WIDTH plate
+     * at y 14..16) occupies the entire footprint and leaves no free span, while {@code SHAPE_UNSTABLE_BOTTOM}
+     * (y 0..2) reaches nothing and is correctly ignored.
+     *
+     * <p><b>The degenerate answer is the WHOLE CELL, and that is the point.</b> Empty collision (the vine
+     * family) and full-footprint collision (a scaffold deck) both yield "no constraint", i.e. the cell
+     * centre with the ordinary {@link SteerControl#COLUMN_DEADBAND} — byte-identical to the behaviour before
+     * this seam existed. Scaffolding therefore needs no special case even though walking off it is NOT how
+     * a bot descends one: it descends by sneaking (vanilla returns {@code Shapes.empty()} for a descending
+     * entity), which is a different branch of {@code Climb}'s steer and is untouched here. Exactly one block
+     * in the admitted set — the ladder — has a partial footprint, and it is the one that was broken.
+     *
+     * <p>Default: the whole cell, so every headless double behaves exactly as it does today.
+     */
+    default void clearSpan(int x, int y, int z, double[] out) {
+        out[0] = x;
+        out[1] = x + 1.0;
+        out[2] = z;
+        out[3] = z + 1.0;
+    }
+
     /** Aim the body + head yaw along a horizontal delta (folds the {@code atan2} the follower used to repeat). */
     void faceHorizontally(double dx, double dz);
 

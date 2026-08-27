@@ -59,6 +59,7 @@ import net.minecraft.util.Mth;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.BooleanOp;
+import net.minecraft.world.phys.shapes.CollisionContext;
 import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
@@ -1236,10 +1237,31 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     @Override
     public boolean standableBelow() {
+        return standableAtDepth(1);
+    }
+
+    /**
+     * The seat-where-I-am probe ({@link BotSteering#seatedFloorBelow}) — a standable at exactly
+     * {@code footY()-1}, i.e. one whose TOP FACE is the base of the cell the feet already occupy, so
+     * releasing every input lands the bot inside that same cell rather than a cell lower.
+     *
+     * <p>Deliberately the single-cell depth, and deliberately a SEPARATE method from
+     * {@link #standableBelow} rather than a parameter with a default: the two are different questions (see
+     * the seam), and a shared name is how a two-cell "close enough" answer would silently leak into a place
+     * that can only accept "exactly here".
+     */
+    @Override
+    public boolean seatedFloorBelow() {
+        return standableAtDepth(1);
+    }
+
+    /** Shared column scan for the {@code *Below} floor probes: is any column the bot's BOX overlaps standable
+     *  {@code depth} cells under its feet cell? Half-open on the max edge — a box that merely TOUCHES the next
+     *  column's boundary is not overhanging it. */
+    private boolean standableAtDepth(int depth) {
         ServerLevel level = (ServerLevel) Worlds.of(this);
         final AABB box = this.getBoundingBox();
-        final int y = this.blockPosition().getY() - 1;
-        // Half-open on the max edge: a box that merely TOUCHES the next column's boundary is not overhanging it.
+        final int y = this.blockPosition().getY() - depth;
         final int x0 = Mth.floor(box.minX), x1 = Mth.floor(box.maxX - 1.0E-7);
         final int z0 = Mth.floor(box.minZ), z1 = Mth.floor(box.maxZ - 1.0E-7);
         for (int x = x0; x <= x1; x++) {
@@ -1251,6 +1273,72 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             }
         }
         return false;
+    }
+
+    /**
+     * The live free-span read ({@link BotSteering#clearSpan}) — which part of a cell's footprint is NOT
+     * covered by the parts of its collision shape a bot standing on the cell's top face could rest on.
+     *
+     * <p>Read through {@code CollisionContext.of(this)}, not the context-free overload, and that is
+     * load-bearing for exactly one block: {@code ScaffoldingBlock.getCollisionShape} branches on
+     * {@code isAbove(...) && !isDescending()}, returning its full-width deck for a bot standing on it and
+     * {@code Shapes.empty()} for a sneaking one. Both answers are honest here and both reduce to the same
+     * "no constraint" verdict below, so the entity context costs nothing and keeps the read truthful rather
+     * than merely convenient.
+     *
+     * <p>Per box, the escape is resolved on ONE axis — the one with the wider remainder — and the other axis
+     * is left unconstrained. That is what keeps a ladder's answer right: its plate spans the full cell in Z,
+     * so a per-axis subtraction would "prove" Z impossible when in fact the bot never needs to move in Z at
+     * all. The admitted set is closed and tiny (the {@code climbableFloorAt} climbables: the vine family with
+     * empty collision, the ladder with one plate, scaffolding with a full deck), so the single-axis rule is
+     * exact for every case that can reach it rather than merely a good heuristic.
+     *
+     * <p>If what remains cannot hold the body on either axis, the whole cell is handed back: there is no pose
+     * that satisfies the constraint, so the caller keeps its ordinary centre-and-deadband behaviour instead
+     * of chasing an impossible target. Cold path (one follower tick, one bot) — a live shape read here is
+     * the same afford as {@link #movementBlockedAt} and {@link #standableBelow} beside it.
+     */
+    @Override
+    public void clearSpan(int x, int y, int z, double[] out) {
+        out[0] = x;
+        out[1] = x + 1.0;
+        out[2] = z;
+        out[3] = z + 1.0;
+        ServerLevel level = (ServerLevel) Worlds.of(this);
+        scratchPos.set(x, y, z);
+        VoxelShape shape = level.getBlockState(scratchPos)
+                .getCollisionShape(level, scratchPos, CollisionContext.of(this));
+        if (shape.isEmpty()) {
+            return;
+        }
+        for (AABB box : shape.toAabbs()) {
+            // Only a box reaching the cell's TOP FACE can hold feet standing on top of the cell; anything
+            // lower (scaffolding's y 0..2 unstable bottom) is irrelevant to where those feet may stand.
+            if (box.maxY < 1.0 - 1.0E-7) {
+                continue;
+            }
+            final double xLo = out[0], xHi = out[1], zLo = out[2], zHi = out[3];
+            final double bxLo = x + box.minX, bxHi = x + box.maxX;
+            final double bzLo = z + box.minZ, bzHi = z + box.maxZ;
+            final double xBefore = Math.max(0.0, Math.min(xHi, bxLo) - xLo);
+            final double xAfter = Math.max(0.0, xHi - Math.max(xLo, bxHi));
+            final double zBefore = Math.max(0.0, Math.min(zHi, bzLo) - zLo);
+            final double zAfter = Math.max(0.0, zHi - Math.max(zLo, bzHi));
+            if (Math.max(xBefore, xAfter) >= Math.max(zBefore, zAfter)) {
+                if (xBefore >= xAfter) out[1] = Math.min(xHi, bxLo);
+                else out[0] = Math.max(xLo, bxHi);
+            } else {
+                if (zBefore >= zAfter) out[3] = Math.min(zHi, bzLo);
+                else out[2] = Math.max(zLo, bzHi);
+            }
+        }
+        if (out[1] - out[0] < BotSteering.BODY_RADIUS * 2.0
+                || out[3] - out[2] < BotSteering.BODY_RADIUS * 2.0) {
+            out[0] = x;
+            out[1] = x + 1.0;
+            out[2] = z;
+            out[3] = z + 1.0;
+        }
     }
 
     // ---- Live-world geometry + block actions (the reconcile seam a MovePlan drives through) -----------

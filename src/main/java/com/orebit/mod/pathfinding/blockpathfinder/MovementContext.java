@@ -1561,6 +1561,13 @@ public final class MovementContext {
      * deliberately excluded: scaffolding's top catches a faller ON TOP (never inside), and a ladder cell
      * entered from above is a 0.0125-block knife-edge between hanging inside and standing on the 3/16
      * plate — a nondeterministic landing the planner must not emit (NOTES-movement-physics.md §3/§4).
+     *
+     * <p><b>Scope: BALLISTIC arrival only.</b> The knife-edge is a property of arriving at SPEED with no
+     * control over where in that 0.0125 the feet land — miss the hang and the plate does not stop the drop,
+     * so a ladder-arrested fall is a coin-flip on a death. It is emphatically NOT a rule about entering a
+     * ladder from above in general: {@code Climb}'s §3.5 sink-in enters the same cell from the same side
+     * from REST, grounded and servo-positioned, and is a supported move. Said explicitly because the phrase
+     * was once quoted in {@code Climb} as a general refusal and cost a live stall its diagnosis (2026-08-27).
      * One extra mask on the already-loaded long — never a new grid read.
      */
     public boolean hangable(long d) {
