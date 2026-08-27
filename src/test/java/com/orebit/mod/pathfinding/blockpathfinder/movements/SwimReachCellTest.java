@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 import com.orebit.mod.pathfinding.blockpathfinder.BotSteering;
+import com.orebit.mod.pathfinding.blockpathfinder.MovementRegistry;
 import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
 
 /**
@@ -56,6 +57,36 @@ class SwimReachCellTest {
             Bot b = new Bot(WX + 0.5, WY + off, WZ + 0.5);
             assertTrue(Swim.reachedSwim(b, WX, WY, WZ), "wy+" + off + " is inside the feet cell");
         }
+    }
+
+    @Test
+    void startSprintSwimDoesNotArriveOnAColumnMate_theVerticalTermItNeverHad() {
+        // StartSprintSwim.reached took wy as a parameter and never used it positionally: the test was
+        // `prone && footX == wx && footZ == wz`, plus Movement.teedUp(b, wx, wy, wz, next) — and teedUp is
+        // next.entryReady(...), which every swim move answers TRUE unconditionally. So the predicate was
+        // Y-BLIND, and any waypoint sharing the column matched.
+        //
+        // That is fatal specifically for a DIVE, because a dive plan is a vertical column in which EVERY
+        // waypoint shares x and z. The follower scans END->START for the furthest waypoint it has reached,
+        // so it takes the deepest one in the column. Measured on the 2026-08-26 long flagship, in a 52-step
+        // underwater descent:
+        //
+        //     cursor-advance 14→34 via StartSprintSwim @wp(1465,33,1377) skipped=19
+        //
+        // Nineteen waypoints skipped without the bot moving a block: the cursor landed at feet y=34 while
+        // the bot stood at y=50. The swim servo then drove full throttle at a target 15 blocks below it,
+        // pressed into a wall at vel=(0,0), and — swim moves having no failWhen envelope — could never
+        // declare the step invalid. A permanent wedge from one unused parameter.
+        Bot high = new Bot(WX + 0.5, WY + 17.0, WZ + 0.5);
+        high.prone = true;
+        assertFalse(MovementRegistry.START_SPRINT_SWIM.reached(high, WX, WY, WZ, null),
+                "same column, 17 blocks up: a dive waypoint far below must NOT read as reached");
+
+        // ...and the honest arrival still does, or the dive-init could never complete.
+        Bot atCell = new Bot(WX + 0.5, WY + 0.2, WZ + 0.5);
+        atCell.prone = true;
+        assertTrue(MovementRegistry.START_SPRINT_SWIM.reached(atCell, WX, WY, WZ, null),
+                "prone at the ride height inside the waypoint cell IS the dive-init's arrival");
     }
 
     @Test
