@@ -190,6 +190,55 @@ routinely regress.** Understand why before touching anything hot:
   `-Pscenario=<X>` fresh-JVM interleaved pairs before believing it (a phantom +5% OPEN "regression" was
   cleared exactly this way).
 
+## 🚨 SERVOS: never gate — or drive — on position alone or velocity alone
+
+**This is the single most-repeated bug class in the project.** Roughly fifteen distinct defects have had
+exactly one root cause: a control law or a completion test that looked at POSITION but not VELOCITY, or at
+VELOCITY but not POSITION. It has been rediscovered, re-diagnosed and re-fixed in the ground family, the air
+family, the swim family and the parkour family independently. If you are touching anything that moves the
+bot, read this before you write a line.
+
+**What a servo here is.** A *servo* is a per-tick controller that converts "where the bot should be" into the
+inputs a player would press. The bot has no velocity setter — it presses forward/strafe/jump/sneak and vanilla
+integrates. So every servo is a closed loop over a plant it does not command directly, and it must be written
+as a cascade, never as a single term:
+
+```
+anchor − position            →  position error
+unit(error) · min(cap, gain·|error|)  →  DESIRED VELOCITY     (position enters here)
+desired − actual velocity    →  velocity error                (velocity enters here)
+min(1, GAIN·|velocity error|) →  thrust, decomposed into keys
+```
+
+`SteerControl.anchoredServo` → `actuate` IS this cascade. Use it. `groundArriveGain` / `swimArriveGain`
+derive `gain` as `(1−q)/q` from the medium's drag `q`, so `min(cap, gain·dist)` is exactly the speed a
+pure-drag coast stops ON the anchor. `cap` must be a speed the medium can actually reach.
+
+**The two failure modes, both fatal, both seen repeatedly:**
+
+- **POSITION-ONLY** (a P-controller) settles at a standing offset under any constant disturbance and does
+  nothing inside its dead-band. It cannot see that it is already moving, so it drives into an overshoot it
+  has no term to anticipate. Seen in `recenterOnTarget`, `arriveOnTarget`, `swimPitchedCentered`, and as a
+  *missing feed-forward* it re-appears as "tracks a ramp with a permanent lag" (the prone swim climb).
+- **VELOCITY-ONLY** cannot see where it is, so it walks away from its anchor, and near a target — where the
+  scheduled speed drops under the residual — its facing flips 180° per tick at saturated throttle and parks
+  the bot in a limit cycle. Seen in `groundServo`, the whole retired swim family, and `parkourAirborne` on
+  grounded ticks.
+
+**COROLLARY, and it is not the same rule (learned 2026-08-26, the hard way, in a fix for the rule above):**
+**never gate a PHASE TRANSITION on a quantity that chatters below the actuator's resolution.** A completion
+test is not a control law and does not get to be as tight. One tick of the smallest useful input changes
+horizontal velocity by ~0.069 on stone; a gate demanding `|velocity| < SERVO_DEADBAND (0.02)` therefore can
+*never* be satisfied while the servo is driving, and the move wedges forever — measured as a clean 2-cycle at
+`(278,113,352)`. Gate on the PROJECTED RESTING STATE instead: `|offset| + |velocity|·coast < tolerance`
+answers "where will I end up", which is both what you actually care about and a quantity that does not
+chatter. The position-anchored servos survive the same chatter only because they never gate on it.
+
+**Before writing any new servo or gate:** read `internal_docs/DESIGN-servo-normalization.md` (§2.1 the law,
+§2.2 actuation, §8 gates), and `internal_docs/SERVO-INVENTORY.md` for what already exists — the answer is
+usually an existing servo with a different anchor, not a new one. Related hard rules: [no arbitrary timers],
+[no recovery], [cell-quantized length bugs] — all three are this same mistake wearing a different hat.
+
 ## Gotchas / known issues (in REAL code)
 
 - **(RESOLVED s38)** The bot now runs the **full vanilla player tick**: `FakePlayerEntity.tick()` is a `super.tick()` pass-through, and `AllyBotEntity.tick()` = forge inputs → `super.tick()` (ServerPlayer housekeeping) → `doTick()` (Player physics + pose + survival) → `MoveReport.after()`. No more skipped-`ServerPlayer.tick` whack-a-mole or double-aiStep. Survival flags (`survival.takesDamage`/`hunger`/`needsBreath`) enforced at runtime; `platform/ClientLoad` (1.21.11+ permanent-invuln fix) + `platform/MoveReport` are overlay seams from that pass (committed s38).
