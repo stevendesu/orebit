@@ -28,6 +28,12 @@ import com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour;
  */
 class DiagonalParkourGateTest {
 
+    // PHASE INDICES ARE +1 SINCE 2026-08-27. DiagonalParkour gained a CROSS-AXIS ALIGN phase at index 0, so
+    // runup is 1, takeoff 2, airborne 3, land 4. These fixtures place the bot exactly on the diagonal
+    // centreline with zero velocity, so parkourCrossSettled holds on the first check and align advances
+    // without ever driving — the behaviour every assertion below describes is unchanged, only its index.
+
+
     private static final double ALONG = 1.0 / Math.sqrt(2.0); // per-axis blocks per along-line block
 
     /** A {@link BotSteering} double with a continuously positionable pose + settable velocity/gap-hazard,
@@ -153,7 +159,7 @@ class DiagonalParkourGateTest {
         PhaseRunner runner = new PhaseRunner();
         View view = new View();                              // its target IS the landing centre (2.5, 2.5)
         PosBot bot = drivenToLandPhase(runner, view);
-        assertEquals(3, runner.phase(), "reached the land phase");
+        assertEquals(4, runner.phase(), "reached the land phase");
 
         // Parked at rest past the landing centre, outside the arrival band (0.25 per axis = 0.354 along;
         // the flagship sat at 0.2 per axis, right on the band's edge — this is the same state, unambiguously
@@ -181,12 +187,12 @@ class DiagonalParkourGateTest {
 
         // At the cell centre the runup holds — the gate crossing is well ahead.
         runner.run(onDiagonal(bot, 0.0, true), view);
-        assertEquals(0, runner.phase(), "at the takeoff centre the runup holds");
+        assertEquals(1, runner.phase(), "at the takeoff centre the runup holds");
 
         // Just past the gate's (deadbanded) projection ≈ 0.307 along-line — the centre is still ≈ 0.27
         // blocks inside the cell on each axis, the foot cell unchanged. The trigger must fire HERE.
         runner.run(onDiagonal(bot, 0.32, true), view);
-        assertEquals(1, runner.phase(), "the corner-gate crossing advances runup → takeoff");
+        assertEquals(2, runner.phase(), "the corner-gate crossing advances runup → takeoff");
         assertTrue(bot.footX() == 0 && bot.footZ() == 0 && bot.grounded(),
                 "…while the bot is still grounded ON the takeoff cell (the anti-spill property)");
         assertFalse(runner.failed(), "inside the validity envelope the whole way");
@@ -203,7 +209,7 @@ class DiagonalParkourGateTest {
         runner.begin(plan());
         PosBot bot = new PosBot();
         runner.run(onDiagonal(bot, 0.20, true), new View());
-        assertEquals(0, runner.phase(), "along 0.20 is short of the gate — keep running up");
+        assertEquals(1, runner.phase(), "along 0.20 is short of the gate — keep running up");
         assertFalse(bot.jumping, "no jump pressed during the runup");
     }
 
@@ -213,7 +219,7 @@ class DiagonalParkourGateTest {
         runner.begin(plan());
         PosBot bot = new PosBot();
         runner.run(onDiagonal(bot, 0.32, false), new View());
-        assertEquals(0, runner.phase(), "past the gate but airborne: the trigger never fires off the ground");
+        assertEquals(1, runner.phase(), "past the gate but airborne: the trigger never fires off the ground");
     }
 
     @Test
@@ -226,7 +232,10 @@ class DiagonalParkourGateTest {
         // along the axis and never corrected the offset — the spill hole.
         PosBot bot = new PosBot().at(0.55, 11, 0.85, true);
         runner.run(bot, new View());
-        assertEquals(0, runner.phase(), "short of the gate — still the runup");
+        // This pose is 0.212 off the diagonal centreline — past COLUMN_DEADBAND — so since 2026-08-27 it is
+        // the ALIGN phase that holds and corrects it, not the runup. That is the phase added for precisely
+        // this case, and the commanded direction is unchanged: cross-cancel toward the axis is +x/−z here.
+        assertEquals(0, runner.phase(), "crooked entry — ALIGN holds until the cross axis is settled");
         assertTrue(bot.faceDx > 0, "thrusts toward the gate");
         assertTrue(bot.faceDz < 0, "…and pulls BACK toward the diagonal axis (position correction)");
     }
@@ -243,7 +252,7 @@ class DiagonalParkourGateTest {
         hot.hazX = 1; hot.hazY = 10; hot.hazZ = 1;
         hot.velX = 0.2; hot.velZ = 0.2;
         runner.run(onDiagonal(hot, 0.0, true), view);
-        assertEquals(1, runner.phase(), "hazardous gap floor: the predictive early takeoff fires at the centre");
+        assertEquals(2, runner.phase(), "hazardous gap floor: the predictive early takeoff fires at the centre");
 
         // Control: identical pose + momentum over a safe gap floor holds the runup (the gate is positional —
         // velocity never fires it early).
@@ -252,6 +261,6 @@ class DiagonalParkourGateTest {
         PosBot safe = new PosBot();
         safe.velX = 0.2; safe.velZ = 0.2;
         control.run(onDiagonal(safe, 0.0, true), view);
-        assertEquals(0, control.phase(), "safe gap floor: the gate trigger stays positional");
+        assertEquals(1, control.phase(), "safe gap floor: the gate trigger stays positional");
     }
 }
