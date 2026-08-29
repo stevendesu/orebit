@@ -680,6 +680,15 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
             this.zza *= Climb.SNEAK_SPEED_FACTOR;
         }
 
+        // VISUALS ONLY: restore the mining head-aim ahead of the physics tick. mining.tick() runs AFTER
+        // doTick (deliberately — the break must reflect THIS tick's inputs and position), so the aim it
+        // writes lands after the pose/rotation the client will see and is then cleared by the next tick's
+        // pitch reset. Re-applying the current target's aim here puts the head where a mining player's
+        // would be for the whole tick. Nothing functional rides on it: no code in the mod raycasts or reads
+        // getLookAngle/getViewVector, and the break is driven by getDestroyProgress on an explicit BlockPos,
+        // never by where the bot looks. A no-op when idle, and one tick behind on a target switch.
+        mining.reaim();
+
         super.tick(); // ServerPlayer housekeeping (i-frames, containers, advancements, attributes, …)
         this.doTick(); // Player.tick physics + pose + survival
 

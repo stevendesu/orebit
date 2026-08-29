@@ -187,6 +187,21 @@ public final class BotMining {
         }
     }
 
+    /**
+     * Re-apply the current target's head-aim — <b>visuals only</b>, called from {@code AllyBotEntity.tick}
+     * just before {@code doTick}. {@link #tick} runs after the physics (so the break reflects this tick's
+     * inputs and position), which puts its {@link #lookAtCenter} write after the rotation the client sees
+     * and before the next tick's pitch reset clears it; this hoists the same aim in front of the physics so
+     * a mining bot's head is where a player's would be. No-op when idle, and one tick behind on a target
+     * switch. Nothing functional depends on the look: the break is {@code getDestroyProgress} on an explicit
+     * {@code BlockPos}, never a raycast.
+     */
+    public void reaim() {
+        if (target != null) {
+            lookAtCenter(target);
+        }
+    }
+
     /** Point the bot's head (yaw + pitch) at the centre of {@code pos} — the mining look, for the animation. */
     private void lookAtCenter(BlockPos pos) {
         double dx = pos.getX() + 0.5 - bot.getX();
