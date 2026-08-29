@@ -584,6 +584,26 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                                   // sneakHeld() -> hangingOnClimbable() -> settled() -> Fall.done/reached.
                                   // sneakAppliedLastTick (snapshotted post-physics, end of this method) is
                                   // what keeps PRE-drive readers honest across this reset — see sneakHeld().
+        this.setXRot(0.0f);       // PITCH IS A MOVEMENT INPUT, so it resets with the others (owner ruling
+                                  // 2026-08-29). It was the one movement-relevant property that did NOT,
+                                  // and that asymmetry is a bug generator: faceHorizontally (the upright
+                                  // servos' only aim call) writes yaw/body/head rot and never pitch, so a
+                                  // pitch written once -- by BotMining's block aim, by MobStrategy, by a
+                                  // prone faceTowards -- survived indefinitely into moves that never aim
+                                  // vertically. Harmless while STANDING, where Player.travel's look-steering
+                                  // is gated on isSwimming() and pitch is mechanically inert. NOT harmless
+                                  // the moment vanilla flips the bot PRONE, where that same term hands the
+                                  // stale pitch up to 0.085/t of authority over the whole vertical axis --
+                                  // against jumpInLiquid's 0.04/t. That is the (337,59,414) wedge: pitch
+                                  // left at ~-90 gave a terminal -0.1444 b/t (measured -0.147) with jump
+                                  // held down, so the bot sank to the seabed under its own rise command.
+                                  //
+                                  // LEVEL is the right neutral, not "aim at the destination": upright it is
+                                  // inert either way, and prone it makes the vanilla look term a DAMPER
+                                  // toward zero vertical velocity instead of a driver (level + jump rises at
+                                  // +0.121 b/t). A move that wants a vertical aim writes it after this, and
+                                  // for the prone swim drive that writer is swimArrive's depth set-point --
+                                  // a real servo output, strictly better than a naive geometric aim.
         this.steeredThisTick = false;       // reset the swim-pose diagnostic snapshot for this tick
 
         // Stage-1 mining test hook: while a /bot mine target is set, request it each tick until it's gone, then
