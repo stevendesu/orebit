@@ -95,15 +95,34 @@ Fall walkoff (latched into its advance gate).
 one-tick velocity feed-forward on the descend edge (sneak tap); jump above/below band per rules;
 grounded → no-op. Writes `lastStance` diagnostic, never `tag`.
 
-**`holdDepth`/`holdDepthAt` (SC:1926/1945)** — vertical **P bang-bang**, target `ty + SWIM_RIDE(0.2)
-− bias`, hysteresis ±`WATER_RISE_DEADBAND(0.2)` (jump/sink). No velocity term — fine because fluid
-vertical rates (~0.04 b/t) ≪ the 0.4 band.
+**`holdDepth`/`holdDepthAt` (SC:2321/2340)** — vertical bang-bang, target `ty + SWIM_RIDE(0.2) −
+bias`, hysteresis ±`WATER_RISE_DEADBAND(0.2)` (jump/sink) — but decided on the **PROJECTED RESTING
+HEIGHT** `y + velY·(q/(1−q))`, not on `y`. Bang-bang is correct here (the actuators ARE discrete
+±0.04 impulses, nothing to proportion); the projection supplies the velocity half of the choice.
+Identical to the old law at rest (`velY == 0 ⇒ projected == y`), which preserves the settle /
+station-keep band semantics and their pinned tests.
+
+> ⚠️ **The pre-2026-08-29 entry here read "No velocity term — fine because fluid vertical rates
+> (~0.04 b/t) ≪ the 0.4 band." That premise was FALSE and cost a flagship wedge.** 0.04 is the
+> per-tick *impulse*, not the rate it produces: under the 0.8 vertical drag it integrates to a
+> terminal `0.04·0.8/0.2 = 0.16 b/t`, and `Swim`'s own cost model had said so all along ("sink one
+> cell: `1/0.185 ≈ 5.41` t/block"). At the measured 0.148 b/t the ±0.2 band is crossed in under
+> three ticks, so the hysteresis bought nothing. **Never justify a missing velocity term by
+> comparing an impulse to a distance** — integrate it first.
 
 ## D. Swim family
 
 Vertical for all = caller's `holdDepth`; pitch servos aim the look at `swimDepthTarget` so pitch and
 autopilot cooperate. SprintSwim drive selected by `-Dorebit.swim.bleed`, default **`servo`** →
 `swimServo` is the live prone drive.
+
+**Pose truth (2026-08-29):** `swimArrive` takes the caller's `declaredProne` but steers on
+`declaredProne || b.prone()`. The caller constant states what the MOVE believes; the two disagree
+for the length of any pose transition, and `StartSprintSwim` *is* that transition. Both pose-gated
+behaviours are load-bearing: **pitch** (`faceTowards` is the only pitch write on the path, and in
+the prone pose vanilla steers the whole vertical axis off the look, ≤0.085/t vs jump's 0.04/t) and
+**client legality** (the `SERVO_FORWARD_MIN` floor — without it the bot holds sprint at `fwd=0.00`
+airborne in water, which `LocalPlayer.shouldStopSwimSprinting` makes impossible for a real player).
 
 **`swimTowards` (SC:897)** — face pursuit (cteGain 6), forward 1. Open-loop along.
 **`swimPitched` (SC:921)** — `faceTowards(pursuit, depth)`, forward 1. Open-loop along.

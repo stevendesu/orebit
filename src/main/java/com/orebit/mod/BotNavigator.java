@@ -2944,7 +2944,8 @@ final class BotNavigator {
         OrebitCommon.LOGGER.info(
                 "[Orebit] exec {} wp{} -> {} ({}) phase={}/{} botFoot=({},{},{}) botY={} grounded={}"
                         + " climbable={} reached={} targetY={} seg=({},{})->({},{}) x={} z={} vel=({},{})"
-                        + " sneak={} jump={} spr={} fwd={} str={} src={} yaw={} head=({},{}) hcol={} dm=({},{},{})"
+                        + " sneak={} jump={} spr={} fwd={} str={} src={} yaw={} pitch={} pose={}"
+                        + " head=({},{}) hcol={} dm=({},{},{})"
                         + " stance[{}]",
                 move, waypointIndex, AllyBotEntity.compact(wp), medium,
                 phaseRunner.phase(), phaseRunner.phases(),
@@ -2973,7 +2974,16 @@ final class BotNavigator {
                 // mechanisms got published on 2026-08-06.
                 String.format("%.2f", strafe),
                 com.orebit.mod.pathfinding.blockpathfinder.SteerControl.lastDrive,
-                String.format("%.1f", yaw), String.format("%.3f", hx), String.format("%.3f", hz),
+                String.format("%.1f", yaw),
+                // PITCH + POSE (2026-08-29, the (337,59,414) StartSprintSwim wedge). `head` is the
+                // HORIZONTAL thrust unit (hx,hz) and says nothing about the look's vertical component, so
+                // the log could not distinguish "pitch is level" from "pitch is buried at -60 degrees" —
+                // and pitch is not a cosmetic field: in the PRONE pose Player.travel steers the whole
+                // vertical axis off getLookAngle().y (gated on isSwimming(), hence inert upright), with up
+                // to 0.085/t of authority against jumpInLiquid's 0.04/t. Pose is logged beside it because
+                // it is exactly what decides whether pitch is load-bearing or ignored on that tick.
+                String.format("%.1f", bot.getXRot()), bot.prone() ? "PRONE" : "STANDING",
+                String.format("%.3f", hx), String.format("%.3f", hz),
                 bot.horizontalCollision,
                 String.format("%.4f", bot.getDeltaMovement().x),
                 String.format("%.4f", bot.getDeltaMovement().y),
