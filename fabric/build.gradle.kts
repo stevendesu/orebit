@@ -245,6 +245,22 @@ loom {
             project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
             isIdeConfigGenerated = false
         }
+        // Offset-collider mining diagnostic: a superflat server that arms the common-src BambooCourse hook
+        // (-Dorebit.bamboo) in its own run dir (run/bamboo). Launch: ./gradlew :fabric:1.21.11:runBamboo
+        // (after scripts/run-bamboo.ps1 preps the run dir with a FLAT server.properties + a mining-enabled
+        // orebit.properties). Mirrors the gate config exactly.
+        create("bamboo") {
+            server()
+            configName = "Orebit Bamboo ($minecraft)"
+            runDir = "../../../run/bamboo"
+            vmArg("-Dorebit.bamboo=true")
+            for (key in listOf("debug")) {
+                val v = project.findProperty("orebit.bamboo.$key")
+                if (v != null) vmArg("-Dorebit.bamboo.$key=$v")
+            }
+            project.findProperty("orebit.ground.drive")?.let { vmArg("-Dorebit.ground.drive=$it") }
+            isIdeConfigGenerated = false
+        }
         // Trapdoor-ladder-arc diagnostic: a superflat server that arms the common-src ShaftCourse hook
         // (-Dorebit.shaft) in its own run dir (run/shaft). Launch: ./gradlew :fabric:1.21.11:runShaft
         // (after scripts/run-shaft.ps1 preps the run dir with a FLAT server.properties + climb-isolating
