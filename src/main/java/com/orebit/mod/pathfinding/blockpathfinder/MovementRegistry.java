@@ -6,6 +6,8 @@ import com.orebit.mod.pathfinding.blockpathfinder.movements.Ascend;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Climb;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Descend;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.Diagonal;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalAscend;
+import com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalDescend;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalParkour;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.DiagonalSprintSwim;
 import com.orebit.mod.pathfinding.blockpathfinder.movements.EndSprintSwim;
@@ -53,6 +55,11 @@ public final class MovementRegistry {
     /** The UPRIGHT water exit ({@link Surface} is the prone one). Restores the shape {@code Ascend}'s R1 gate
      *  removed from a fluid stance on 2026-08-01 — as its own class, so R1 stays intact. */
     public static final Movement EXIT_WATER = new ExitWater();
+    /** The dry 3-axis pair (DESIGN-diagonal-vertical-moves.md): Diagonal's corner rule fused with
+     *  Ascend's jump / Descend's controlled step-down — the moves that realize the region tier's vertex
+     *  corner chain (DESIGN-region-corner-crossing-v2.md §2.1). */
+    public static final Movement DIAGONAL_ASCEND = new DiagonalAscend();
+    public static final Movement DIAGONAL_DESCEND = new DiagonalDescend();
 
     /**
      * Tier 1 (ground + water): walk + step-assist, diagonal walk, jump-up-1, step-down-1, safe drop, the
@@ -78,5 +85,6 @@ public final class MovementRegistry {
     public static final List<Movement> TIER1 =
             List.of(TRAVERSE, DIAGONAL, ASCEND, DESCEND, FALL, PILLAR, MINE_DOWN, SWIM, SPRINT_SWIM,
                     START_SPRINT_SWIM, SURFACE, CLIMB, PARKOUR, DIAGONAL_PARKOUR, WALK_OFF,
-                    DIAGONAL_SPRINT_SWIM, RIDE_BUBBLE_COLUMN, END_SPRINT_SWIM, EXIT_WATER);
+                    DIAGONAL_SPRINT_SWIM, RIDE_BUBBLE_COLUMN, END_SPRINT_SWIM, EXIT_WATER,
+                    DIAGONAL_ASCEND, DIAGONAL_DESCEND);
 }

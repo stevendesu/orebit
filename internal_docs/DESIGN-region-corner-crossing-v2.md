@@ -243,7 +243,7 @@ axes — the region graph is 6-face, so such a move has no edge to ride.
 | `DiagonalSprintSwim` | 20 offsets: 4 same-Y horizontal diagonals, 8 cardinal + ±Y edges, **8 full corners `{±1,±1,±1}`** | **X+Z**, **X+Y**, **Z+Y**, and **X+Y+Z** |
 | `DiagonalParkour` (flat-only today) | spans a gap; endpoints 2–3 cells apart, same Y | **X+Z**, but NOT corner-adjacent |
 | *future* `DiagonalParkour` rising/falling | gap + `dy` (`DiagonalParkour.java:17`: "**v1 is FLAT only**; rising/falling" is planned) | **X+Y+Z** |
-| *future* `DiagonalAscend` / `DiagonalDescend` | `(±1, ±1, ±1)` | **X+Y+Z** |
+| `DiagonalAscend` / `DiagonalDescend` (**LANDED** — DESIGN-diagonal-vertical-moves.md) | `(±1, +1, ±1)` / `(±1, −1, ±1)` | **X+Y+Z** |
 
 Single-axis movements cannot produce the gap: `Traverse`, `Fall`, `Pillar`, `MineDown`, `SprintSwim` (its
 6 faces), `Climb` and `RideBubbleColumn`.
@@ -1569,9 +1569,9 @@ R30's re-merge is a plain tick-thread call and needs no epoch machinery.
 | A9 | **Vertex C-node exit derivation walks `nodes.parent[]`** to recover A (C's key carries `fromFrag = CORNER`, which does not pin A) — two vertex chains sharing (B,C) collide and keep the cheaper parent | Accepted approximation; re-parenting cannot corrupt it (a `cfrom=CORNER` key is only ever relaxed from a corner row). Documented at the walk |
 | A10 | **§4.10's consult**: exact `(leaf, fragment)`-keyed at parentLevel 1, region-masked over the corner leaf pairs at ≥2 (ANY surviving row in either direction refuses), sig-blind | The design specified only the L1 form; region-masked over-refusal at coarse levels degrades to get-close-then-figure-it-out. The I3 residual (capability-scoped consult) is documented in code |
 
-Minor recorded (no ratification needed): vertex precondition 3's edge-adjacent arm is a conservative
-economy gate (may under-emit vertices; no shipped dry-land 3-axis move exists — revisit with
-rising/falling DiagonalParkour); §5.1's [0]/[7] counters are per-row-pop and the field's reset stomps the
+Minor recorded (no ratification needed): vertex precondition 3's edge-adjacent arm shipped as a
+conservative economy gate and was RETIRED when the dry 3-axis moves landed — it is now the two-leg
+fidelity test (`edgeRouteExists`; DESIGN-diagonal-vertical-moves.md O1/D7); §5.1's [0]/[7] counters are per-row-pop and the field's reset stomps the
 forward search's stats (granularity documented at the accessor); §6 items 16/17 are enforced by the
 pre-existing `fragGate` pin + the R41b restructure's review rather than dedicated unit tests; corner
 re-merge failures count in their own `cornerRemergeFailures`, not `buildFailures`; the codec's legacy
