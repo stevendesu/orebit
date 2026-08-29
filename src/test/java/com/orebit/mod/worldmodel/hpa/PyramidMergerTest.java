@@ -144,32 +144,32 @@ public final class PyramidMergerTest {
     }
 
     // ===================================================================================================
-    // The component cap at merge (62 = RegionFragments.MAX_FRAGMENTS): exactly 62 disjoint components are
-    // kept; a 63rd collapses the parent. Faceless fragments never union, so each child fragment is its own
-    // component and the counts are exact.
+    // The component cap at merge (61 = RegionFragments.MAX_FRAGMENTS since the corner sentinel took 61):
+    // exactly MAX_FRAGMENTS disjoint components are kept; one more collapses the parent. Faceless fragments
+    // never union, so each child fragment is its own component and the counts are exact.
     // ===================================================================================================
     @Test
-    void mergeAtCap_62Components_notCollapsed() {
+    void mergeAtCap_61Components_notCollapsed() {
         final CostPyramid p = new CostPyramid();
         for (int i = 1; i < 8; i++) seedUniform(p, i, RegionFragments.KIND_SOLID); // walls — no items
-        seedMixedFragments(p, 0, RegionFragments.MAX_FRAGMENTS); // 62 disjoint fragments in one child
+        seedMixedFragments(p, 0, RegionFragments.MAX_FRAGMENTS); // an at-cap set of disjoint fragments in one child
         final RegionFragments parent = merge8(p);
 
         assertEquals(RegionFragments.KIND_MIXED, parent.kind());
-        assertFalse(parent.isCollapsed(), "62 components sit AT the cap — no collapse");
-        assertEquals(RegionFragments.MAX_FRAGMENTS, parent.fragmentCount(), "all 62 components kept exactly");
+        assertFalse(parent.isCollapsed(), "an at-cap component count — no collapse");
+        assertEquals(RegionFragments.MAX_FRAGMENTS, parent.fragmentCount(), "all at-cap components kept exactly");
     }
 
     @Test
-    void mergeOverCap_63rdComponent_collapses() {
+    void mergeOverCap_62ndComponent_collapses() {
         final CostPyramid p = new CostPyramid();
         for (int i = 1; i < 8; i++) seedUniform(p, i, RegionFragments.KIND_SOLID);
-        seedMixedFragments(p, 0, RegionFragments.MAX_FRAGMENTS); // 62 components…
-        seedMixedFragments(p, 3, 1);                             // …plus a 63rd (diagonal child, faceless anyway)
+        seedMixedFragments(p, 0, RegionFragments.MAX_FRAGMENTS); // an at-cap component set…
+        seedMixedFragments(p, 3, 1);                             // …plus one more (diagonal child, faceless anyway)
         final RegionFragments parent = merge8(p);
 
         assertEquals(RegionFragments.KIND_MIXED, parent.kind());
-        assertTrue(parent.isCollapsed(), "the 63rd component exceeds the 62 cap → collapsed");
+        assertTrue(parent.isCollapsed(), "one component past the cap → collapsed");
         assertEquals(0, parent.fragmentCount(), "a collapsed parent stores no fragment records");
     }
 
@@ -247,6 +247,129 @@ public final class PyramidMergerTest {
         assertEquals(1, wparent.fragmentCount());
         assertTrue(wparent.typeW(0), "uniform WATER child ⇒ W");
         assertFalse(wparent.typeS(0), "uniform records never claim S");
+    }
+
+    // ===================================================================================================
+    // §4.9 CORNER UNIONS (DESIGN-region-corner-crossing-v2.md, R27/R27a/R38, and the I2 confirmation of
+    // §0.2): two corner-adjacent child masses whose footprints meet at the shared edge fuse into ONE
+    // parent fragment iff BOTH masses carry TYPE_S; a refuted L0 corner row (§4.10's consult) refuses the
+    // union. disjointAirColumns_twoFragments above stays the ¬S pin: typeless air columns never fuse.
+    // ===================================================================================================
+
+    /** Seed child {@code i} as MIXED with one TYPE_S fragment whose footprints cover the given faces fully. */
+    private static void seedCornerMass(CostPyramid p, int i, int faceMaskBits) {
+        final int rx = i & 1, rz = (i >> 1) & 1, ry = (i >> 2) & 1;
+        final int row = p.rowFor(0, rx, ry, rz);
+        final RegionFragments rf = p.ensureFragments(0, row);
+        rf.reset(RegionAddress.LEAF_SIZE);
+        rf.setKind(RegionFragments.KIND_MIXED);
+        rf.setPassFrac(8);
+        final int[] packed = new int[6];
+        for (int f = 0; f < 6; f++) {
+            packed[f] = ((faceMaskBits >> f) & 1) != 0
+                    ? RegionFragments.packFootprint(0, 15, 0, 15) : RegionFragments.NO_FACE;
+        }
+        rf.setFragment(0, faceMaskBits, packed);
+        rf.setFragmentTypes(0, RegionFragments.TYPE_S);
+        rf.setFragmentCount(1);
+        p.setBuilt(0, row, true);
+    }
+
+    /** The I2 confirmation (§0.2): an X+Z corner-connected TYPE_S pair — slots 0 (x0,z0) and 3 (x1,z1),
+     *  everything else solid — WAS two parent fragments under the 6-face union; the §4.9 corner union
+     *  makes it ONE, because both masses are S and their full face footprints meet at the shared edge. */
+    @Test
+    void cornerConnectedTypeSPair_fusesToOneParentFragment() {
+        final CostPyramid p = new CostPyramid();
+        for (int i = 0; i < 8; i++) seedUniform(p, i, RegionFragments.KIND_SOLID);
+        seedCornerMass(p, 0, 0x3F);
+        seedCornerMass(p, 3, 0x3F);
+        final RegionFragments parent = merge8(p);
+
+        assertEquals(RegionFragments.KIND_MIXED, parent.kind());
+        assertEquals(1, parent.fragmentCount(),
+                "an S+S corner-connected pair fuses (I2: the split WAS real under 6-face union — "
+                        + "disjointAirColumns pins the ¬S case at two)");
+        assertTrue(parent.typeS(0), "the fused mass ORs both children's S");
+    }
+
+    /** R38: one mass typeless ⇒ NO union — the gate is MASS-level TYPE_S on both sides. */
+    @Test
+    void cornerPairWithTypelessMass_doesNotFuse() {
+        final CostPyramid p = new CostPyramid();
+        for (int i = 0; i < 8; i++) seedUniform(p, i, RegionFragments.KIND_SOLID);
+        seedCornerMass(p, 0, 0x3F);
+        // Slot 3: same shape but TYPELESS (a pure-air pocket) — the §2 case the airGated gate refuses;
+        // fusing it would launder it into a surfaceable mass at BUILD time (R38's exact hazard).
+        final int row = p.rowFor(0, 1, 0, 1);
+        final RegionFragments rf = p.ensureFragments(0, row);
+        rf.reset(RegionAddress.LEAF_SIZE);
+        rf.setKind(RegionFragments.KIND_MIXED);
+        rf.setPassFrac(8);
+        final int[] packed = new int[6];
+        for (int f = 0; f < 6; f++) packed[f] = RegionFragments.packFootprint(0, 15, 0, 15);
+        rf.setFragment(0, 0x3F, packed);
+        rf.setFragmentTypes(0, 0);
+        rf.setFragmentCount(1);
+        p.setBuilt(0, row, true);
+        final RegionFragments parent = merge8(p);
+
+        assertEquals(2, parent.fragmentCount(), "a typeless mass never corner-fuses (R38)");
+    }
+
+    /** §4.10's consult: a surviving L0 corner-refutation row between the two leaves' exact fragments
+     *  refuses the union — the structural half of R30's settling argument. */
+    @Test
+    void cornerConsult_refutedRowRefusesTheFusion() {
+        final CostPyramid p = new CostPyramid();
+        final RegionCrossingMemory mem = new RegionCrossingMemory();
+        // The refuted diagonal pair the blame collapse emits: (leaf 0,0,0 frag 0) → (leaf 1,0,1 frag 0).
+        mem.record(0, InvalidationRollup.fragmentKey(0, 0, 0, 0), InvalidationRollup.fragmentKey(1, 0, 1, 0),
+                0L, RegionCrossingMemory.PROV_PROOF, (a, b) -> a == b);
+        p.setCrossingMemory(mem);
+        for (int i = 0; i < 8; i++) seedUniform(p, i, RegionFragments.KIND_SOLID);
+        seedCornerMass(p, 0, 0x3F);
+        seedCornerMass(p, 3, 0x3F);
+        final RegionFragments parent = merge8(p);
+
+        assertEquals(2, parent.fragmentCount(),
+                "the surviving L0 refutation gates the union — the parent stays split (§4.10/R30)");
+    }
+
+    /** The consult is exact-keyed at L1: a row naming a DIFFERENT fragment pair does not refuse. */
+    @Test
+    void cornerConsult_unrelatedRowDoesNotRefuse() {
+        final CostPyramid p = new CostPyramid();
+        final RegionCrossingMemory mem = new RegionCrossingMemory();
+        mem.record(0, InvalidationRollup.fragmentKey(0, 0, 0, 7), InvalidationRollup.fragmentKey(1, 0, 1, 7),
+                0L, RegionCrossingMemory.PROV_PROOF, (a, b) -> a == b);
+        p.setCrossingMemory(mem);
+        for (int i = 0; i < 8; i++) seedUniform(p, i, RegionFragments.KIND_SOLID);
+        seedCornerMass(p, 0, 0x3F);
+        seedCornerMass(p, 3, 0x3F);
+        final RegionFragments parent = merge8(p);
+
+        assertEquals(1, parent.fragmentCount(),
+                "a row naming other fragments is not this corner's refutation — the union stands");
+    }
+
+    /** R30's structural corrective end-to-end at the merge layer: fuse, refute, re-merge ⇒ split. */
+    @Test
+    void remergeAfterRefutation_splitsTheParent() {
+        final CostPyramid p = new CostPyramid();
+        final RegionCrossingMemory mem = new RegionCrossingMemory();
+        p.setCrossingMemory(mem);
+        for (int i = 0; i < 8; i++) seedUniform(p, i, RegionFragments.KIND_SOLID);
+        seedCornerMass(p, 0, 0x3F);
+        seedCornerMass(p, 3, 0x3F);
+        assertEquals(1, merge8(p).fragmentCount(), "fused while unrefuted");
+
+        mem.record(0, InvalidationRollup.fragmentKey(0, 0, 0, 0), InvalidationRollup.fragmentKey(1, 0, 1, 0),
+                0L, RegionCrossingMemory.PROV_PROOF, (a, b) -> a == b);
+        PyramidMerger.remergeSharedAncestors(p, 0, 0, 0, 1, 0, 1);
+        final RegionFragments parent = p.fragmentRecord(1, p.rowFor(1, 0, 0, 0));
+        assertEquals(2, parent.fragmentCount(),
+                "the refutation un-fuses the parent on re-merge (R30 — evict-and-rediscover is upstream)");
     }
 
     @Test

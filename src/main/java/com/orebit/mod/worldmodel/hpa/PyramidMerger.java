@@ -69,15 +69,18 @@ public final class PyramidMerger {
         return 2;
     }
 
-    /** Max fragment items in one merge = childCount × cap (8 × 62) + 8 synthetic slots — the union-find universe.
+    /** Max fragment items in one merge = childCount × cap (8 × 61) + 8 synthetic slots — the union-find universe.
      *  Package-private: {@link InvalidationRollup} sizes its containment scratch to the same universe. */
-    static final int MAX_ITEMS = 8 * RegionFragments.MAX_FRAGMENTS + 8; // 504
+    static final int MAX_ITEMS = 8 * RegionFragments.MAX_FRAGMENTS + 8; // 496
 
     // Reusable per-merge scratch (one merge is single-threaded; reset at the top of combineFragments).
     private static final ThreadLocal<int[]> ITEM_SLOT = ThreadLocal.withInitial(() -> new int[MAX_ITEMS]);
     private static final ThreadLocal<int[]> ITEM_MASK = ThreadLocal.withInitial(() -> new int[MAX_ITEMS]);
     private static final ThreadLocal<int[]> ITEM_FP   = ThreadLocal.withInitial(() -> new int[MAX_ITEMS * 6]);
     private static final ThreadLocal<int[]> ITEM_TYPE = ThreadLocal.withInitial(() -> new int[MAX_ITEMS]);
+    /** The item's OWN child-fragment id (real MIXED fragments; {@code 0} for synthetic items — a uniform /
+     *  collapsed / unbuilt child is keyed as its fragment 0 by the search, and by the §4.10 consult). */
+    private static final ThreadLocal<int[]> ITEM_FRAG = ThreadLocal.withInitial(() -> new int[MAX_ITEMS]);
     private static final ThreadLocal<int[]> UF        = ThreadLocal.withInitial(() -> new int[MAX_ITEMS]);
     private static final ThreadLocal<int[]> COMP_OF   = ThreadLocal.withInitial(() -> new int[MAX_ITEMS]);
     /** Per-component OR of the merged items' type bits (typed fragments §5.5: parent S/W = OR of children). */
@@ -154,6 +157,236 @@ public final class PyramidMerger {
     public static void reconcileNode(CostPyramid p, int level, int rx, int ry, int rz) {
         final int row = p.rowFor(level, rx, ry, rz);
         combineFragments(p, level, row, rx, ry, rz);
+    }
+
+    /**
+     * R30 (DESIGN-region-corner-crossing-v2.md §4.10): after a corner crossing between the diagonal leaves
+     * {@code A}/{@code D} is durably refuted, recompute every SHARED ancestor of the two — unconditionally,
+     * with no unchanged-signature early-out ({@link #mergeUpFrom} would stop below the fused level: the
+     * unshared ancestors between the leaves and their first common parent really are unchanged). Only
+     * shared ancestors can hold a record fused ACROSS the refuted corner; below the first-shared level the
+     * crossing was cross-region and holds no union to undo. Above the first split, the two masses become
+     * same-slot items, which no union rule ever joins — so the split propagates upward through the ordinary
+     * recomputes here. Tick-thread only, cold.
+     */
+    public static void remergeSharedAncestors(CostPyramid p, int aRx, int aRy, int aRz,
+                                              int dRx, int dRy, int dRz) {
+        int aX = aRx, aY = aRy, aZ = aRz, dX = dRx, dY = dRy, dZ = dRz;
+        for (int parentLevel = 1; parentLevel <= RegionAddress.MAX_COARSE_LEVEL; parentLevel++) {
+            final int paX = RegionAddress.parentRX(aX);
+            final int paZ = RegionAddress.parentRZ(aZ);
+            final int paY = RegionAddress.parentRY(aY, parentLevel - 1);
+            final int pdX = RegionAddress.parentRX(dX);
+            final int pdZ = RegionAddress.parentRZ(dZ);
+            final int pdY = RegionAddress.parentRY(dY, parentLevel - 1);
+            if (paX == pdX && paY == pdY && paZ == pdZ) {
+                final int row = p.rowFor(parentLevel, paX, paY, paZ);
+                combineFragments(p, parentLevel, row, paX, paY, paZ);
+            }
+            aX = paX; aY = paY; aZ = paZ;
+            dX = pdX; dY = pdY; dZ = pdZ;
+        }
+    }
+
+    /**
+     * Component labeling over a gathered item universe, WITH the §4.9 corner-union pass iterated to
+     * fixpoint (a union ORs mass types, and {@link RegionFragments#TYPE_S} only ever grows, so unions can
+     * only enable further unions — the loop terminates in ≤ nItems rounds; cold path). Face unions must
+     * already be in {@code uf}. Fills {@code compOf[0..n-1]} (component per item, least-item-index
+     * numbering) and {@code compType[0..compCount-1]}; returns the component count, or {@code −1} on
+     * cap-collapse.
+     *
+     * <p><b>The corner-union rule (§4.9, owner-ratified R27/R27a/R38):</b> two items in corner-adjacent
+     * child slots (slot xor of 2 or 3 bits; Y-bearing xors skipped in the quadtree — R33's structural
+     * analogue) union only when (i) their footprints actually MEET at the shared edge/vertex — the
+     * evidence the face union's overlap test carries, expressed at the corner ({@link
+     * #cornerFootprintsMeet}); (ii) BOTH MASSES carry {@code TYPE_S} (R38 — mass-level via
+     * {@code compType}, never item-level: a mass's S may come from a different item than the one at the
+     * corner); and (iii) no surviving L0 corner refutation names the corner (§4.10's consult,
+     * {@link #cornerConsultRefuses} — sig-blind per the ruling; refining it by capability is the I3
+     * residual). This is NOT a 26-connected flood: a corner union carries corner-local evidence, and the
+     * L0 {@code FragmentBuilder} site is deliberately untouched (gated on I4 — a wrong L0 merge has no
+     * crossing to blame).
+     *
+     * <p><b>MIRROR CONTRACT:</b> shared by {@link #combineFragments} and
+     * {@code InvalidationRollup.gather}, which re-derives this partition byte-for-byte; any drift makes
+     * the fold's component-count cross-check refuse every fold over a corner-merged parent (safe, but
+     * silently degrading).
+     */
+    static int componentsWithCornerUnions(int[] uf, int[] compOf, int[] compType,
+                                          int[] itemSlot, int[] itemMask, int[] itemFp, int[] itemType,
+                                          int[] itemFrag, int nItems, int children,
+                                          RegionCrossingMemory mem, int parentLevel,
+                                          int prx, int pry, int prz) {
+        while (true) {
+            Arrays.fill(compOf, 0, nItems, -1);
+            int compCount = 0;
+            boolean collapsed = false;
+            for (int k = 0; k < nItems; k++) {
+                final int root = find(uf, k);
+                int comp = compOf[root];
+                if (comp == -1) {
+                    if (compCount >= RegionFragments.MAX_FRAGMENTS) { collapsed = true; continue; }
+                    comp = compCount++;
+                    compOf[root] = comp;
+                    compType[comp] = 0;
+                }
+                compOf[k] = comp;
+                compType[comp] |= itemType[k]; // union-merge ORs the type bits (parent S/W = OR of children)
+            }
+            if (collapsed) return -1;
+            boolean changed = false;
+            for (int a = 0; a < nItems; a++) {
+                for (int b = a + 1; b < nItems; b++) {
+                    final int xor = itemSlot[a] ^ itemSlot[b];
+                    if (xor != 3 && xor != 5 && xor != 6 && xor != 7) continue; // corner/vertex slot deltas
+                    if ((xor & 4) != 0 && children == 4) continue;              // quadtree: Y is not split
+                    final int ca = compOf[a], cb = compOf[b];
+                    if (ca < 0 || cb < 0 || ca == cb) continue;                 // already one mass
+                    if ((compType[ca] & RegionFragments.TYPE_S) == 0
+                            || (compType[cb] & RegionFragments.TYPE_S) == 0) continue; // R38: both masses S
+                    if (!cornerFootprintsMeet(itemSlot[a], itemSlot[b], itemMask, itemFp, a, b, xor)) continue;
+                    if (cornerConsultRefuses(mem, parentLevel, prx, pry, prz, children,
+                            itemSlot[a], itemFrag[a], itemSlot[b], itemFrag[b], xor)) continue;
+                    union(uf, a, b);
+                    changed = true;
+                }
+            }
+            if (!changed) return compCount;
+        }
+    }
+
+    /** The world axis (0=X, 1=Y, 2=Z) of child-slot bit {@code bitIdx} ({@code bit0=X, bit1=Z, bit2=Y}). */
+    private static int slotBitWorldAxis(int bitIdx) {
+        return bitIdx == 0 ? 0 : (bitIdx == 1 ? 2 : 1);
+    }
+
+    /** Whether {@code packed} (a child footprint on {@code face}) reaches the extreme bucket on world axis
+     *  {@code worldAxis} toward the {@code high} side. In-face axes per {@link RegionFragments}:
+     *  ±X → u=Y,v=Z; ±Y → u=X,v=Z; ±Z → u=X,v=Y. {@code NO_FACE} covers the full face. The Y axis carries
+     *  the same ONE-BUCKET tolerance as the search-side corner-touch test (a Y-bearing corner's floors sit
+     *  AT the corner rows, so passable footprints stop one bucket short of the vertical extreme on both
+     *  sides — see {@code RegionPathfinder.footprintReachesExtreme}). */
+    static boolean fpReachesExtreme(int packed, int face, int worldAxis, boolean high) {
+        if (packed == RegionFragments.NO_FACE) return true;
+        final boolean axisIsU = (face >> 1) == 0 ? worldAxis == 1 : worldAxis == 0;
+        final int slack = worldAxis == 1 ? 1 : 0;
+        if (high) {
+            return (axisIsU ? RegionFragments.footprintMaxU(packed) : RegionFragments.footprintMaxV(packed))
+                    >= 15 - slack;
+        }
+        return (axisIsU ? RegionFragments.footprintMinU(packed) : RegionFragments.footprintMinV(packed))
+                <= slack;
+    }
+
+    /**
+     * §4.9's corner evidence: for EACH item and EACH corner axis, the item touches its toward-corner face
+     * on that axis and its footprint there reaches the corner extreme along every OTHER corner axis. The
+     * corner sits at the boundary between the two slots on every xor axis, so an item on the low side of
+     * an axis meets it at bucket 15, the high side at bucket 0. (Face footprints cannot express the
+     * orthogonal-sibling passability the L0 rule carries — the evidence asymmetry §4.9 records; this is
+     * the strongest test the data supports.)
+     */
+    private static boolean cornerFootprintsMeet(int slotA, int slotB, int[] itemMask, int[] itemFp,
+                                                int a, int b, int xor) {
+        for (int side = 0; side < 2; side++) {
+            final int item = side == 0 ? a : b;
+            final int slot = side == 0 ? slotA : slotB;
+            for (int bit = 0; bit < 3; bit++) {
+                if (((xor >> bit) & 1) == 0) continue;
+                final int axisInternal = bit == 0 ? 0 : (bit == 1 ? 1 : 2); // plusFace/minusFace encoding
+                final boolean low = ((slot >> bit) & 1) == 0;
+                final int face = low ? plusFace(axisInternal) : minusFace(axisInternal);
+                if (((itemMask[item] >> face) & 1) == 0) return false;
+                final int packed = itemFp[item * 6 + face];
+                for (int bit2 = 0; bit2 < 3; bit2++) {
+                    if (bit2 == bit || ((xor >> bit2) & 1) == 0) continue;
+                    final boolean low2 = ((slot >> bit2) & 1) == 0;
+                    if (!fpReachesExtreme(packed, face, slotBitWorldAxis(bit2), low2)) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * §4.10's consult: whether a surviving L0 corner-refutation row names THIS corner, refusing the union.
+     * A refuted row is the diagonal {@code (A-leaf, fragA) → (D-leaf, fragD)} pair the blame collapse
+     * emits; the corner between two child cells at {@code parentLevel} covers a set of L0 leaf pairs (one
+     * per free-axis position along the shared edge), and ANY surviving row on one of them refuses —
+     * conservative in the safe direction (over-refusal degrades to "get close, then figure it out"; the
+     * fail-open alternative breaks R30's settling at aligned coarse corners). At {@code parentLevel == 1}
+     * the children ARE the leaves, so the row is additionally matched against the two items' exact
+     * fragment ids. Sig-blind per the §4.10 ruling (the record is shared; I3 owns any capability
+     * refinement). Cold — a linear scan of the (small) L0 store per candidate union.
+     */
+    private static boolean cornerConsultRefuses(RegionCrossingMemory mem, int parentLevel,
+                                                int prx, int pry, int prz, int children,
+                                                int slotA, int fragItemA, int slotB, int fragItemB, int xor) {
+        if (mem == null || mem.count(0) == 0) return false;
+        final int childLevel = parentLevel - 1;
+        // The two child cells' region coords at childLevel.
+        final int aRx = RegionAddress.childRX(prx, slotA);
+        final int aRz = RegionAddress.childRZ(prz, slotA);
+        final int aRy = RegionAddress.childRY(pry, slotA, parentLevel);
+        final int bRx = RegionAddress.childRX(prx, slotB);
+        final int bRz = RegionAddress.childRZ(prz, slotB);
+        final int bRy = RegionAddress.childRY(pry, slotB, parentLevel);
+        // Per world axis: the corner's L0 leaf coordinate on each side (xor axes), or the shared span
+        // (free axes). A child cell at childLevel spans leaves [r << childLevel, ((r+1) << childLevel) − 1];
+        // at childLevel ≥ OCTREE_TOP the Y span is the whole column (ry pinned 0) — treated as unbounded.
+        final boolean xIsCorner = (xor & 1) != 0;
+        final boolean zIsCorner = (xor & 2) != 0;
+        final boolean yIsCorner = (xor & 4) != 0;
+        final int aCx = cornerLeafCoord(aRx, slotA, 0, childLevel);
+        final int bCx = cornerLeafCoord(bRx, slotB, 0, childLevel);
+        final int aCz = cornerLeafCoord(aRz, slotA, 1, childLevel);
+        final int bCz = cornerLeafCoord(bRz, slotB, 1, childLevel);
+        final int aCy = cornerLeafCoord(aRy, slotA, 2, childLevel);
+        final int bCy = cornerLeafCoord(bRy, slotB, 2, childLevel);
+        final boolean yBounded = childLevel < RegionAddress.OCTREE_TOP;
+        final int n0 = mem.count(0);
+        for (int i = 0; i < n0; i++) {
+            final long f = mem.fromAt(0, i);
+            final long t = mem.toAt(0, i);
+            for (int orient = 0; orient < 2; orient++) {
+                final long sideA = orient == 0 ? f : t;   // the row endpoint tested against the A child
+                final long sideB = orient == 0 ? t : f;
+                final int fax = RegionAddress.unpackRX(sideA), fay = RegionAddress.unpackRY(sideA),
+                        faz = RegionAddress.unpackRZ(sideA);
+                final int tbx = RegionAddress.unpackRX(sideB), tby = RegionAddress.unpackRY(sideB),
+                        tbz = RegionAddress.unpackRZ(sideB);
+                if (xIsCorner ? (fax != aCx || tbx != bCx)
+                        : (fax != tbx || !inChildSpan(fax, aRx, childLevel, true))) continue;
+                if (zIsCorner ? (faz != aCz || tbz != bCz)
+                        : (faz != tbz || !inChildSpan(faz, aRz, childLevel, true))) continue;
+                if (yIsCorner ? (fay != aCy || tby != bCy)
+                        : (fay != tby || (yBounded && !inChildSpan(fay, aRy, childLevel, yBounded)))) continue;
+                if (parentLevel == 1) {
+                    // Children are leaves — the exact-fragment match the design's L1 consult names.
+                    final int rowFragA = (int) ((sideA >>> 49) & 0x3F);
+                    final int rowFragB = (int) ((sideB >>> 49) & 0x3F);
+                    if (rowFragA != fragItemA || rowFragB != fragItemB) continue;
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** The L0 leaf coordinate of a child cell's toward-corner boundary on one axis ({@code axisBit}:
+     *  0=X, 1=Z, 2=Y — the slot-bit encoding): the child's high-side leaf when the slot sits on the low
+     *  side of the split (the corner is between the two), else its low-side leaf. */
+    private static int cornerLeafCoord(int childR, int slot, int axisBit, int childLevel) {
+        final boolean low = ((slot >> axisBit) & 1) == 0;
+        return low ? (((childR + 1) << childLevel) - 1) : (childR << childLevel);
+    }
+
+    /** Whether L0 coord {@code leaf} lies within the child cell {@code childR}'s span at {@code childLevel}
+     *  ({@code bounded == false} ⇒ the quadtree Y column — always in span). */
+    private static boolean inChildSpan(int leaf, int childR, int childLevel, boolean bounded) {
+        if (!bounded) return true;
+        return leaf >= (childR << childLevel) && leaf < ((childR + 1) << childLevel);
     }
 
     /** Built-state + content signature of a node (a distinct sentinel for unbuilt/absent), for the merge damping. */
@@ -263,6 +496,7 @@ public final class PyramidMerger {
         final int[] itemMask = ITEM_MASK.get();
         final int[] itemFp = ITEM_FP.get();
         final int[] itemType = ITEM_TYPE.get();
+        final int[] itemFrag = ITEM_FRAG.get();
         final int[] packed = PACKED.get();
 
         int nItems = 0;
@@ -286,7 +520,7 @@ public final class PyramidMerger {
                 // OPTIMISTICALLY as S (walkable) — the type-level expression of the same optimism: a gate must
                 // never refuse a crossing because unexplored terrain "proved" ¬S·¬W. No W claim (don't
                 // swim-price the unknown).
-                nItems = addSynthetic(itemSlot, itemMask, itemFp, itemType, nItems, i, RegionFragments.TYPE_S);
+                nItems = addSynthetic(itemSlot, itemMask, itemFp, itemType, itemFrag, nItems, i, RegionFragments.TYPE_S);
                 continue;
             }
             anyChildBuilt = true;
@@ -305,12 +539,12 @@ public final class PyramidMerger {
                 case RegionFragments.KIND_AIR:
                     airBuilt++;
                     // Truly-uniform AIR ⇒ provably dry (§5.5 amended); uniform records never claim S.
-                    nItems = addSynthetic(itemSlot, itemMask, itemFp, itemType, nItems, i, 0);
+                    nItems = addSynthetic(itemSlot, itemMask, itemFp, itemType, itemFrag, nItems, i, 0);
                     break;
                 case RegionFragments.KIND_WATER:
                     waterBuilt++;
                     // Truly-uniform WATER ⇒ all water (kind implies W); ¬S is exact for a submerged cube.
-                    nItems = addSynthetic(itemSlot, itemMask, itemFp, itemType, nItems, i,
+                    nItems = addSynthetic(itemSlot, itemMask, itemFp, itemType, itemFrag, nItems, i,
                             RegionFragments.TYPE_W);
                     break;
                 default: // MIXED
@@ -323,7 +557,7 @@ public final class PyramidMerger {
                         // ⇒ pathable" optimism, and the collapsed record kept no per-fragment water truth
                         // to claim W from.
                         if (rf.passFrac() > 0) {
-                            nItems = addSynthetic(itemSlot, itemMask, itemFp, itemType, nItems, i,
+                            nItems = addSynthetic(itemSlot, itemMask, itemFp, itemType, itemFrag, nItems, i,
                                     RegionFragments.TYPE_S);
                         }
                     } else {
@@ -332,6 +566,7 @@ public final class PyramidMerger {
                             itemSlot[nItems] = i;
                             itemMask[nItems] = rf.faceMask(f);
                             itemType[nItems] = rf.typeBits(f); // real fragments carry their own S/W bits
+                            itemFrag[nItems] = f;              // exact child id — the §4.10 L1 consult key
                             for (int face = 0; face < 6; face++) {
                                 itemFp[base + face] = rf.footprint(f, face); // NO_FACE where untouched
                             }
@@ -408,36 +643,24 @@ public final class PyramidMerger {
             }
         }
 
-        // --- components → parent fragments --------------------------------------------------------------
+        // --- components → parent fragments (face unions + the §4.9 corner-union pass) -------------------
         final int[] compOf = COMP_OF.get();
         final int[] compType = COMP_TYPE.get();
         final int[] accMinU = ACC_MINU.get(), accMaxU = ACC_MAXU.get();
         final int[] accMinV = ACC_MINV.get(), accMaxV = ACC_MAXV.get();
-        Arrays.fill(compOf, 0, nItems, -1);
-        int compCount = 0;
-        boolean collapsed = false;
+        final int compCount = componentsWithCornerUnions(uf, compOf, compType, itemSlot, itemMask, itemFp,
+                itemType, itemFrag, nItems, children, p.crossingMemory(), parentLevel, prx, pry, prz);
 
-        for (int k = 0; k < nItems; k++) {
-            final int root = find(uf, k);
-            int comp = compOf[root];
-            if (comp == -1) {
-                if (compCount >= RegionFragments.MAX_FRAGMENTS) { collapsed = true; continue; }
-                comp = compCount++;
-                compOf[root] = comp;
-                compType[comp] = 0;
-                final int cb = comp * 6;
-                for (int f = 0; f < 6; f++) { accMinU[cb + f] = Integer.MAX_VALUE; accMaxU[cb + f] = -1;
-                                              accMinV[cb + f] = Integer.MAX_VALUE; accMaxV[cb + f] = -1; }
-            }
-            compOf[k] = comp;
-            compType[comp] |= itemType[k]; // union-merge ORs the type bits (parent S/W = OR of merged children)
-        }
-
-        if (collapsed) {
+        if (compCount < 0) {
             out.setCollapsed(true);
             out.setFragmentCount(0);
             p.setBuilt(parentLevel, parentRow, true);
             return;
+        }
+        for (int comp = 0; comp < compCount; comp++) {
+            final int cb = comp * 6;
+            for (int f = 0; f < 6; f++) { accMinU[cb + f] = Integer.MAX_VALUE; accMaxU[cb + f] = -1;
+                                          accMinV[cb + f] = Integer.MAX_VALUE; accMaxV[cb + f] = -1; }
         }
 
         // Project each item's outer-flush footprints onto the parent faces of its component.
@@ -476,12 +699,15 @@ public final class PyramidMerger {
     }
 
     /** Append one synthetic full-face item (uniform-open / unbuilt / collapsed-mass child) for child slot
-     *  {@code i}, typed {@code typeBits} (see the call sites for the per-case optimism rationale). */
-    private static int addSynthetic(int[] slot, int[] mask, int[] fp, int[] type, int n, int i, int typeBits) {
+     *  {@code i}, typed {@code typeBits} (see the call sites for the per-case optimism rationale). The
+     *  item's child-fragment id is {@code 0} — how the search (and the §4.10 consult) key such a child. */
+    private static int addSynthetic(int[] slot, int[] mask, int[] fp, int[] type, int[] frag,
+                                    int n, int i, int typeBits) {
         if (n >= MAX_ITEMS) return n;
         slot[n] = i;
         mask[n] = 0x3F; // all six faces
         type[n] = typeBits;
+        frag[n] = 0;
         final int base = n * 6;
         for (int f = 0; f < 6; f++) fp[base + f] = RegionFragments.NO_FACE; // full face
         return n + 1;

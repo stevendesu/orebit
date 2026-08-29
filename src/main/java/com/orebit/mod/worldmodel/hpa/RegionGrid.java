@@ -133,6 +133,7 @@ public final class RegionGrid {
         this.pyramid.setResidency(residency);
         this.resourcePyramid.setResidency(residency);
         this.crossingMemory = new RegionCrossingMemory();
+        this.pyramid.setCrossingMemory(crossingMemory); // §4.10 merge-consult collaborator
         this.minY = LevelBounds.minY(level);
     }
 
@@ -173,6 +174,7 @@ public final class RegionGrid {
         this.pyramid.setResidency(residency);
         this.resourcePyramid.setResidency(residency);
         this.crossingMemory = new RegionCrossingMemory();
+        this.pyramid.setCrossingMemory(crossingMemory); // §4.10 merge-consult collaborator
         this.minY = minY;
     }
 

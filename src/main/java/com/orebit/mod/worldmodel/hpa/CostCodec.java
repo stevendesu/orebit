@@ -76,10 +76,13 @@ public final class CostCodec {
     //       RegionFragments still exposes a passFrac field, but it is meaningful only for MIXED. ---
     //   passFrac         : 4 bits   (MIXED only — the collapsed/uniform-mass crossing cost)
     //   fragmentCount    : 6 bits   (MIXED only — 0 = honestly-ZERO kept fragments (coarse no-passable-item
-    //                                mass, collapsed=false); 1..62 = exact count;
+    //                                mass, collapsed=false); 1..61 = exact count (was 1..62 before the
+    //                                2026-08-28 MAX_FRAGMENTS 62→61 corner-crossing reduction — a LEGACY
+    //                                over-cap count decodes as collapsed, see unpackRegion);
     //                                63 = RegionFragments.FRAGMENT_COUNT_COLLAPSED, the cap-collapsed sentinel
-    //                                (collapsed=true). Both 0 and 63 carry no fragment records; cross-cost
-    //                                comes from passFrac. Depth-nibble precedent: 0..N exact, top code = flag.)
+    //                                (collapsed=true). 0, 62-legacy and 63 carry no decoded fragment records;
+    //                                cross-cost comes from passFrac. Depth-nibble precedent: 0..N exact, top
+    //                                code = flag.)
     //   fragment[count] {
     //     faceMask       : 6 bits
     //     typeS          : 1 bit    (surfaceable — DESIGN-typed-fragments.md §2; the type bits sit after
@@ -153,6 +156,19 @@ public final class CostCodec {
         if (count == RegionFragments.FRAGMENT_COUNT_COLLAPSED) {
             out.setFragmentCount(0);   // the sentinel is a flag, not a count — no fragment records on the wire
             out.setCollapsed(true);    // cap-collapsed spongey mass; cross-cost from passFrac
+            return p;
+        }
+        if (count > RegionFragments.MAX_FRAGMENTS) {
+            // LEGACY over-cap count (2026-08-28, corner-crossing R21): a file written before the
+            // MAX_FRAGMENTS 62 → 61 reduction can legitimately carry count == 62 (a then-at-cap region).
+            // Decoding its records would index past the 61-sized arrays (AIOOBE), and the persistence
+            // version is PINNED at 1 pre-release (owner ruling) so no version fence exists. Treat it as
+            // cap-collapsed: same shape the region would have been built with under today's cap, priced
+            // from passFrac. The returned bit offset is NOT advanced over the fragment records, which is
+            // safe because the production caller (CostPyramidCodec.decode) frames records at the BYTE
+            // level (one length-prefixed run buffer per record) and never uses the returned offset.
+            out.setFragmentCount(0);
+            out.setCollapsed(true);
             return p;
         }
         out.setFragmentCount(count);
