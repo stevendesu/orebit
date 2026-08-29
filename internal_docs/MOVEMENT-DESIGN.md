@@ -7,14 +7,15 @@ ratified decisions live on in code.
 - `src/main/java/com/orebit/mod/pathfinding/blockpathfinder/` — `Movement.java` (base class:
   candidate emission + cold `steer`/`plan`/`reached` hooks; the default `reached` is
   grounded-gated for `commitsAcrossArrival()` moves — see the execution addendum below),
-  `MovementRegistry.java` (TIER1 — **18 moves**, appended-at-end tie-priority order),
+  `MovementRegistry.java` (TIER1 — **21 moves**, appended-at-end tie-priority order),
   `BotCaps.java`, `EditScratch.java`, `StepEdits.java`, `MovementContext.java`,
   `MovePlan.java`/`PhaseRunner.java` (the phase-execution framework)
-- `movements/` — Traverse, Diagonal, Ascend, Descend, Fall, Pillar, MineDown, Climb, Parkour,
+- `movements/` — Traverse, Diagonal, Ascend, Descend, DiagonalAscend, DiagonalDescend (the dry
+  3-axis pair — DESIGN-diagonal-vertical-moves.md), Fall, Pillar, MineDown, Climb, Parkour,
   DiagonalParkour, WalkOff (no-jump gap-1/descend-1 crossing, self-gates on jump-REFUSED start
   cells), RideBubbleColumn, and the **water family** Swim, SprintSwim, DiagonalSprintSwim,
   StartSprintSwim, EndSprintSwim, Surface — plus `ParkourEnvelope.java` (derived gap-jump
-  admission table, not a Movement). **17 of the 18 carry a `plan()`**; only `DiagonalSprintSwim`
+  admission table, not a Movement). **20 of the 21 carry a `plan()`**; only `DiagonalSprintSwim`
   has none, because it SUBCLASSES `SprintSwim` and inherits its execution whole.
 - Grid encoding: `worldmodel/pathing/TraversalGrid.java` + `NavFlags.java`
 

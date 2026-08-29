@@ -610,6 +610,19 @@ public final class ParkourCourse {
             perpDiagJump("perpdiag.flat2", 3, 0);
             perpDiagJump("perpdiag.fall2g2", 3, -2);
             perpDiagJump("perpdiag.fall3g2", 3, -3);
+
+            // ---- The dry 3-axis family (DESIGN-diagonal-vertical-moves.md) ---------------------------
+            // Forced-DiagonalAscend staircases OFF the region degeneracies (diagstair: no boundary at
+            // all; diagstair2x: a 2-axis X+Y corner on the final step — the regionCornerYPin class), the
+            // VERTEX pin ON the triple degeneracy, and the forced-DiagonalDescend hot-entry chain. All
+            // explicit-base. Registered at the TAIL deliberately: every trials.add() shifts nextBase()
+            // for all LATER snake cards, and the snake cards inherit their region alignment from their
+            // slot (the §0.1 positional degeneracy class — convicted 2026-08-29 when a mid-list insert
+            // here moved slowstep.honey onto a region-boundary base and flipped it red).
+            diagStairCard("diagstair.walkin", -64, 32, 0, 7);
+            diagStairCard("diagstair2x.walkin", -39, 32, 3, 10);
+            regionCornerXYZPin();
+            diagDescendCard();
         }
 
         /** The climbable-transit card set — also the {@code climbonly} fast gate's whole course.
@@ -1171,6 +1184,59 @@ public final class ParkourCourse {
             trials.add(t);
         }
 
+        /**
+         * A free-standing 1-wide DIAGONAL staircase — {@code (+1,+1,+1)} per runway step, ending in one
+         * more such step onto the landing strip (DESIGN-diagonal-vertical-moves.md's movement cards).
+         * Every step's two corner cells are air over void, so orthogonal decomposition has no footing and
+         * each of the {@code RUN} steps is a FORCED {@code DiagonalAscend} (the DIAG_TOP forcing logic;
+         * the course's canPlace=false / canMine=false close the pillar/dig escapes).
+         *
+         * <p>{@code Template.OFFSET} is LOAD-BEARING: REACH's 3-wide platform would place a block in the
+         * final step's corner cell and quietly hand back an orthogonal route (the DIAG_TOP-documented
+         * trap — see that fixture's NOTE). {@code jdy = stairBase + RUN}, the {@link #regionCornerYPin}
+         * bookkeeping rule.
+         */
+        void diagStairCard(String name, int baseX, int baseZ, int stairBase, int jdy) {
+            Trial t = new Trial(name, Approach.WALKIN, 1, 1, 1, jdy, 1, Template.OFFSET, false,
+                    baseX, baseZ);
+            t.stairRunway = true;
+            t.stairBase = stairBase;
+            trials.add(t);
+        }
+
+        /**
+         * REGION-CORNER <b>XYZ</b> PIN (DESIGN-diagonal-vertical-moves.md; corner-crossing §2.1's vertex) —
+         * the {@link #regionCornerPin} family's 3-axis member: a diagonal staircase whose FINAL step
+         * crosses the x, y AND z region boundaries at once, so the route's last {@code DiagonalAscend}
+         * hops vertex-to-vertex and the region tier must emit the §4.3 chain-of-two
+         * ({@code A → B.61 → C.61 → D}).
+         *
+         * <p>Arithmetic ({@code >> 4} form — §0.1's caveat): base {@code (−39,−23)}, {@code stairBase=3},
+         * takeoff floor {@code (−33, 159, −17)} — {@code −33>>4 = −3}, {@code (159+64)>>4 = 13},
+         * {@code −17>>4 = −2} — and the {@code (+1,+1,+1)} step lands on {@code (−32, 160, −16)} —
+         * {@code rx −2, ry 14, rz −1}. All three boundaries cross on that one step and on NO other:
+         * runway x {@code −39..−33} stays in rx −3, z {@code −23..−17} in rz −2, floors {@code 153..159}
+         * in ry 13. The OFFSET landing strip and goal stay wholly inside D.
+         */
+        void regionCornerXYZPin() {
+            diagStairCard("regioncornerXYZ.walkin", -39, -23, 3, 10);
+        }
+
+        /**
+         * The {@code DiagonalDescend} card (DESIGN-diagonal-vertical-moves.md O4/D3): a RAISED 1-wide
+         * DIAGONAL runway ({@code descendRunway} composed with {@code rd=(1,1)} — the loop math is
+         * direction-agnostic) whose final step down onto the takeoff cell is diagonally adjacent with both
+         * corner cells air, so the step-down is a FORCED {@code (+1,−1,+1)} DiagonalDescend, chained into
+         * a flat Diagonal onto the OFFSET strip. Exercises Descend's servo shape (projected-stop braking)
+         * on the diagonal frame with carried momentum — WALKIN-only, like every descendRunway card.
+         */
+        void diagDescendCard() {
+            Trial t = new Trial("diagdescend.walkin", Approach.WALKIN, 1, 1, 1, 0, 1, Template.OFFSET,
+                    false, -64, 60);
+            t.descendRunway = true;
+            trials.add(t);
+        }
+
         /** OFFSET (c,±lat) knight's-move jump, both precursor conditions. */
         void offset(String name, int c, int lat) {
             addTrial(name + ".walkin", Approach.WALKIN, 1, 0, c, 0, lat, Template.OFFSET, false);
@@ -1189,7 +1255,10 @@ public final class ParkourCourse {
          *  flagship wedge, a Descend chained into an offset (3,+1) Parkour). WALKIN-only — the chained
          *  momentum IS the condition. The offset/diagonal shapes are deliberate: no DIRECT falling jump
          *  from the raised runway exists in the movement vocabulary (falling is aligned-only,
-         *  offset/diagonal are flat-only), so the planner MUST chain Descend → Parkour. */
+         *  offset/diagonal JUMPS are flat-only), so the planner MUST chain Descend → Parkour. (Re-verified
+         *  when {@code DiagonalDescend} landed: it is a ±1 STEP, not a jump — both cards' landings sit
+         *  ≥ 2 cells out and every diagonal-down-1 destination off these CARDINAL runways is air, so the
+         *  forced chain stands.) */
         void descendCard(String name, int rdx, int rdz, int jdx, int jdy, int jdz, Template t,
                 boolean fast, int baseX, int baseZ) {
             Trial tr = new Trial(name + ".walkin", Approach.WALKIN, rdx, rdz, jdx, jdy, jdz, t,

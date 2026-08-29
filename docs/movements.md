@@ -42,6 +42,8 @@ which is what lets hazards be *costs* instead of walls.
 | Fall (hang) | 4.633 + 2.5 / block + 2 | walk-off + drop to the vine + arrest settle — **no damage term** |
 | Parkour | 15.6 / 18.6 / 21.6 | run-up + airtime + commit penalty |
 | DiagonalParkour | ≈ 20.1 / 24.1 | the Parkour table at diagonal reach (base cap 2) |
+| DiagonalAscend | 6.552 | 4.633 × √2 — diagonal walk whose jump overlaps the motion |
+| DiagonalDescend | 6.552 | 4.633 × √2 — diagonal walk with the free one-block drop |
 | Swim (surface, lateral) | 9.09 / block | 20 ÷ 2.2 (head-in-air paddle speed) |
 | Swim (submerged, lateral) | 10.15 / block | 20 ÷ 1.97 (fully-submerged paddle speed) |
 | Swim (rise) | 7.41 / block | 1 ÷ 0.135 (hold-jump terminal rise in fluid) |
@@ -73,9 +75,19 @@ no edits — a blocked diagonal just isn't offered (the two cardinal steps still
 It also enforces the **rise gate**: a same-level diagonal whose destination surface
 sits more than the 9/16 auto-step above the start surface (a carpet-to-full-block
 lip, say) is refused rather than emitted as an impossible walk — the cardinal jump
-arm owns that lip.
+arm owns that lip (and the *diagonal* jump to a floor one level up is **DiagonalAscend**'s,
+below).
 
-**Ascend / Descend** — the ±1-level steps, each priced as one walk step. Ascend may
+**DiagonalAscend / DiagonalDescend** — the diagonal ±1-level steps (the dry 3-axis pair):
+Diagonal's corner-clearance rule fused with Ascend's jump / Descend's controlled step-down,
+each priced as a diagonal walk step (6.552 — the jump or drop overlaps the motion). Both fold
+**no edits, ever**: grid-aligned edits are per-axis by necessity, so any edit route is
+Ascend+Traverse's job — these emit only cleanly-walkable geometry. DiagonalAscend jumps only a
+rise in (9, 20] sixteenths (the ascend window; the diagonal *small*-rise one-up band is owned by
+nobody — a documented hole) and sweeps both corner columns three rows high for the jump arc;
+DiagonalDescend keeps the flat corner sweep and adds the one-block drop.
+
+**Ascend / Descend** — the cardinal ±1-level steps, each priced as one walk step. Ascend may
 place a step block to climb where none exists; Descend may dig one out. Ascend also
 carries the **same-level jump arm**: a lip between two floors at the *same* block
 level that is too tall for the auto-step but within one jump's 1.25-block gain
