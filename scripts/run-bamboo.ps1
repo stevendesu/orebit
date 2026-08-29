@@ -24,7 +24,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot
-$runDir = Join-Path $repo "runbamboo"
+$runDir = Join-Path $repo "run\bamboo"
 $templates = Join-Path $PSScriptRoot "bamboo"
 $resultFile = Join-Path $runDir "orebit-bamboo-result.properties"
 
