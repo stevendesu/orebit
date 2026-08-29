@@ -2149,11 +2149,11 @@ public final class RegionPathfinder {
     /**
      * §4.1 preconditions 2–5 for the 3-axis vertex {@code (sx,sy,sz)} out of {@code (A, fragA)} — the
      * chain-of-two form (§4.3), which exists only below {@link RegionAddress#OCTREE_TOP} (R33). Returns
-     * the first qualifying D fragment id, or −1. Precondition 3's edge-adjacent arm is a CONSERVATIVE
-     * economy gate (any usable-looking content rejects the vertex): a faithful "would a 2-hop route
-     * exist" test needs the intermediates' own face graph, and today's movement set has no dry-land
-     * 3-axis move to strand (§2.1 — DiagonalSprintSwim is excluded by TYPE_S/note 3), so under-emission
-     * here costs nothing real yet. Revisit when rising/falling DiagonalParkour lands.
+     * the first qualifying D fragment id, or −1. Precondition 3's edge-adjacent arm is the
+     * {@link #edgeRouteExists} two-leg fidelity test (DESIGN-diagonal-vertical-moves.md D7 — the
+     * conservative any-typed-fragment gate was RETIRED with the owner's O1 ruling when the dry 3-axis
+     * moves {@code DiagonalAscend}/{@code DiagonalDescend} landed and vertex under-emission stopped
+     * being free).
      */
     private static int vertexPreconditions(RegionGrid grid, int level, int arx, int ary, int arz,
                                            RegionFragments rfA, int fragA, int sx, int sy, int sz,
@@ -2182,10 +2182,11 @@ public final class RegionPathfinder {
             if (stats != null) stats[3]++;
             return -1;
         }
-        // ...plus the three edge-adjacent regions, conservatively (see the method Javadoc).
-        if (edgeRegionLooksRoutable(grid, level, arx + sx, ary + sy, arz)
-                || edgeRegionLooksRoutable(grid, level, arx + sx, ary, arz + sz)
-                || edgeRegionLooksRoutable(grid, level, arx, ary + sy, arz + sz)) {
+        // ...plus the three edge-adjacent regions via the D7 two-leg test: once the face arm has passed,
+        // the only ordinary family left through an edge region E is corner-2(A→E) then face(E→D).
+        if (edgeRouteExists(grid, level, arx, ary, arz, 0, sx, 1, sy, 2, sz, canBreak)      // Exy, exits across Z
+                || edgeRouteExists(grid, level, arx, ary, arz, 0, sx, 2, sz, 1, sy, canBreak)  // Exz, across Y
+                || edgeRouteExists(grid, level, arx, ary, arz, 1, sy, 2, sz, 0, sx, canBreak)) { // Eyz, across X
             if (stats != null) stats[3]++;
             return -1;
         }
@@ -2226,21 +2227,71 @@ public final class RegionPathfinder {
     }
 
     /**
-     * The vertex form's conservative edge-adjacent gate (see {@link #vertexPreconditions}): the region
-     * LOOKS routable — unbuilt (optimism says every lateral connection exists), water, a collapsed mass
-     * (uniform-transit edges exist into one), or any typed fragment — so an ordinary multi-hop route
-     * plausibly exists and the vertex is not offered. Pure-air content (uniform AIR / all-typeless MIXED)
-     * is exactly what the no-place gates refuse, so it does NOT reject.
+     * The vertex's edge-adjacent precondition-3 arm at full fidelity (DESIGN-diagonal-vertical-moves.md
+     * D7, replacing the retired conservative gate — owner ruling O1). An edge region E differs from A on
+     * TWO axes ({@code (aP,sP)} and {@code (aQ,sQ)}), so A→E is not a face hop — it is itself a 2-axis
+     * corner — and E is face-adjacent to D across the third axis {@code (aR,sR)}. The ordinary route the
+     * chain could take through E is therefore corner-2(A→E) then face(E→D), and the vertex is moot if
+     * some fragment {@code fe} of E satisfies BOTH legs: (i) {@code fe} qualifies as the D-side of the
+     * 2-axis corner A→E ({@link #cornerFragQualifiesD} — corner-touch evidence, no footprint overlap,
+     * exactly as corner-2's own precondition 4 tests it); (ii) {@code fe} offers a gate-passing face
+     * route into D — {@link #faceRouteExists}' arms with E as the source (sealed-face {@code canBreak}
+     * dig-through, unbuilt/uniform-D arms incl. the falling-in {@code −Y} air-gate exemption, MIXED-D
+     * via opposite-face touch + the no-place type gate + footprint overlap against ANY {@code fd}, and
+     * the no-overlap {@code canBreak} mine-fallback).
+     *
+     * <p>A uniform/unbuilt/collapsed E has no fragment record ⇒ no corner-2 into it exists ⇒ it
+     * contributes NO rejection. This deliberately drops the old gate's uniform-WATER auto-reject: a
+     * water E with no face access is locally unreachable, so it cannot substitute for the vertex (§2.1
+     * note 3's swimmer argument covers the reachable-water case via the face arm). An unbuilt E still
+     * refuses the vertex downstream, at precondition 5 ({@link #intermediatePassableAtCorner} cannot
+     * prove a recordless corner passable). Two-leg depth is an under-approximation of full routability
+     * (E→D via a further intermediate is uncovered) — acceptable for an economy gate, stated in D7.
      */
-    private static boolean edgeRegionLooksRoutable(RegionGrid grid, int level, int irx, int iry, int irz) {
-        ensureNode(grid, level, irx, iry, irz);
-        final RegionFragments rf = grid.fragmentRecord(level, irx, iry, irz);
-        if (rf == null) return true;                                     // unbuilt ⇒ optimistic ordinary route
-        if (rf.isUniform()) return rf.kind() == RegionFragments.KIND_WATER; // AIR gated, SOLID blocked
-        final int count = rf.fragmentCount();
-        if (count == 0) return true;                                     // collapsed mass takes transit edges
-        for (int fi = 0; fi < count; fi++) {
-            if (rf.typeBits(fi) != 0) return true;
+    private static boolean edgeRouteExists(RegionGrid grid, int level, int arx, int ary, int arz,
+                                           int aP, int sP, int aQ, int sQ, int aR, int sR,
+                                           boolean canBreak) {
+        final int erx = stepRX(stepRX(arx, aP, sP), aQ, sQ);
+        final int ery = stepRY(stepRY(ary, aP, sP), aQ, sQ);
+        final int erz = stepRZ(stepRZ(arz, aP, sP), aQ, sQ);
+        ensureNode(grid, level, erx, ery, erz);
+        final RegionFragments rfE = grid.fragmentRecord(level, erx, ery, erz);
+        if (isUniformNode(rfE)) return false; // no record ⇒ no corner-2 into E ⇒ no rejection from E
+        final int ef1 = cornerFace(aP, -sP);
+        final int ef2 = cornerFace(aQ, -sQ);
+        final int dF = cornerFace(aR, sR);
+        // D's record, fetched once (precondition 4 re-fetches later on the non-rejected path — a cached
+        // map lookup on this cold path, kept so §4.1's ratified precondition ORDER stays intact).
+        final int drx = stepRX(erx, aR, sR);
+        final int dry = stepRY(ery, aR, sR);
+        final int drz = stepRZ(erz, aR, sR);
+        ensureNode(grid, level, drx, dry, drz);
+        final RegionFragments rfD = grid.fragmentRecord(level, drx, dry, drz);
+        final boolean dUniform = isUniformNode(rfD);
+        final int oppF = RegionAddress.opposite(dF);
+        final int countE = rfE.fragmentCount();
+        for (int fe = 0; fe < countE; fe++) {
+            // Leg (i) — fe is the D-side of the 2-axis corner A→E.
+            if (!cornerFragQualifiesD(rfE, fe, ef1, aP, -sP, ef2, aQ, -sQ, -1, -1, 0)) continue;
+            // Leg (ii) — fe routes into D across the third axis (faceRouteExists' arms, E as source).
+            if (!rfE.touchesFace(fe, dF)) {
+                if (canBreak) return true; // sealed E-face: only the dig-through branch emits
+                continue;
+            }
+            if (dUniform) {
+                if (!canBreak && rfD != null && rfD.kind() == RegionFragments.KIND_SOLID) continue;
+                if (rfD != null && rfD.kind() == RegionFragments.KIND_AIR && dF != 2) continue; // no-place air gate
+                return true; // unbuilt / AIR-below / WATER / collapsed mass: a transit edge is emitted
+            }
+            final int packedE = rfE.footprint(fe, dF);
+            final boolean airGated = dF != 2; // !canPlace is given here (precondition 1 hoisted)
+            final int countD = rfD.fragmentCount();
+            for (int fd = 0; fd < countD; fd++) {
+                if (!rfD.touchesFace(fd, oppF)) continue;
+                if (airGated && rfD.typeBits(fd) == 0) continue;
+                if (footprintsOverlap(packedE, rfD.footprint(fd, oppF))) return true; // walk edge
+            }
+            if (canBreak) return true; // no overlap: the mine-fallback / mine-solid branches still emit
         }
         return false;
     }

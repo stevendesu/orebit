@@ -72,11 +72,14 @@ row deeper than the fluid one.
 ## pathfinding/blockpathfinder — block-tier A\* + movements + cuboids + phases + steering
 `BlockPathfinder.findPath` — allocation-free A\* over floor cells (SoA node state, open-addressed
 long→row map, binary heap, per-search `EditPool` arena); returns `BlockPathPlan` (waypoints + per-step
-`Movement` + `StepEdits`). **18 movements** behind `MovementRegistry.TIER1` (registration order =
+`Movement` + `StepEdits`). **21 movements** behind `MovementRegistry.TIER1` (registration order =
 cost-tie priority): Traverse, Diagonal, Ascend, Descend, Fall, Pillar, MineDown, Swim, SprintSwim,
 StartSprintSwim, Surface, Climb, Parkour, DiagonalParkour, **WalkOff** (no-jump gap-1/descend-1 — the
 honey crosser), **DiagonalSprintSwim** (26-connected underwater diagonals/corners),
-**RideBubbleColumn** (up-column conveyor ride, 3-phase enter/ride/settle), and **EndSprintSwim**.
+**RideBubbleColumn** (up-column conveyor ride, 3-phase enter/ride/settle), **EndSprintSwim**,
+**ExitWater**, and the dry 3-axis pair **DiagonalAscend**/**DiagonalDescend** (diagonal jump-up-1 /
+controlled diagonal step-down-1 — DESIGN-diagonal-vertical-moves.md; what makes the region tier's
+vertex corner chain realizable).
 **Fall carries two 2026-08 additions** (`internal_docs/NOTES-movement-physics.md` §7–§8). *Wet endpoints*:
 a fall into water deeper than entry momentum can cross now ENDS floating at the knee of the in-water decay
 (`Fall.waterStop`) instead of being refused, and `Swim` continues from there — the node is an ordinary
@@ -108,7 +111,7 @@ static ballistics admission table (`MAX_GAP[startTopY][gsf][occ]`) read by Parko
 `NavGridCuboidsView`). Phase framework: `Movement.plan()` → `MovePlan` (guard-based phases —
 `need(Need.AIR|FOOTING|OPEN)`, `drive`, `advanceWhen`, `done`; plan-level `resetWhen`/`failWhen`/
 `requireDoor`) → `PhaseRunner` (per-tick self-healing cursor; `failed()`, `doneNow()` terminal-guard
-probe). **17 of the 18 movements now execute via `plan()`** (Climb and Diagonal converted; every fluid
+probe). **20 of the 21 movements now execute via `plan()`** (Climb and Diagonal converted; every fluid
 move but one carries a phase plan, `RideBubbleColumn` three of them — enter/ride/settle) — only
 `DiagonalSprintSwim` remains plan-less. Steering: `BotSteering`/`SteerView` seams + `SteerControl` statics (`steerTowards`,
 `drive`, `steerViaGate`, `recenterOnTarget`, `stationKeep`/`settleOnOwnColumn`/`arriveOnTarget`, the
