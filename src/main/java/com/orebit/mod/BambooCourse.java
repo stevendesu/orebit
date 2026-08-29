@@ -68,6 +68,16 @@ import net.minecraft.world.phys.Vec3;
  *       {@code z=512} and leaves along {@code z=513}, so the exit step is the {@code Diagonal} that wedged.
  *       {@code Diagonal} deliberately keeps intact-transit pricing and folds no breaks of its own, so if
  *       the entering Traverse's break is lost there is nothing downstream to recover it.</li>
+ *   <li><b>trapped</b> — the PERMANENCE test, and the one that does not need a plan swap. The bot STARTS
+ *       inside the stalk's own cell, at the exact rest position it settles into when pressed against the
+ *       post ({@code x = 352.35625}). {@code stalk}/{@code dogleg} both PASS, which proves the break path
+ *       itself works and the geometry alone traps nothing — so the interesting question is not how the bot
+ *       gets in, but whether it can ever get out. The structural claim under test: the bot's own cell is
+ *       the search START, a start cell is never a break target, and therefore no plan can schedule the
+ *       break that frees it. In the flagship that produced 934 searches with ZERO break edits, and
+ *       {@code BREAK(352,71,512)} appearing exactly once in 124k lines. A region swap is only ONE way to
+ *       arrive here; a knock-back (creeper, piston, a player's sword) or any off-path replan lands in the
+ *       same state, which is why this tile is worth more than the two that reproduce the approach.</li>
  * </ol>
  * Both tiles FAIL on timeout — a hold is not a failure, and the wedge is precisely a bot holding forever.
  *
@@ -112,8 +122,9 @@ public final class BambooCourse {
     }
 
     private enum Kind {
-        STALK,  // straight 1-wide corridor through the stalk
-        DOGLEG  // arrive along z=512, leave along z=513 — the flagship's Traverse-in / Diagonal-out shape
+        STALK,   // straight 1-wide corridor through the stalk
+        DOGLEG,  // arrive along z=512, leave along z=513 — the flagship's Traverse-in / Diagonal-out shape
+        TRAPPED  // START inside the stalk cell — the permanence test, no plan swap required
     }
 
     /** One bamboo challenge: a kind + its tile floor Y, with start/goal geometry precomputed. */
@@ -135,8 +146,14 @@ public final class BambooCourse {
             this.kind = kind;
             this.y = y;
             this.exitZ = kind == Kind.DOGLEG ? BAMBOO_Z + 1 : BAMBOO_Z;
+            // TRAPPED reuses the straight corridor, so the only obstruction between the bot and the goal
+            // is the post it is already standing against.
             this.minFloorY = y - 6;
-            this.startX = BAMBOO_X - 4.5;
+            // TRAPPED starts INSIDE the stalk's own cell, at the exact rest position a bot pressed against
+            // the post settles into: the post spans [352.65625, 352.84375], so a 0.6-wide body rests at
+            // 352.65625 - 0.3 = 352.35625 — the flagship's logged x=352.356. blockPosition() is therefore
+            // (352, y+1, 512): the bot's foot cell IS the cell it must break, which is the whole point.
+            this.startX = kind == Kind.TRAPPED ? BAMBOO_X + 6.5 / 16.0 + 0.25 - 0.3 : BAMBOO_X - 4.5;
             this.startY = y + 1;
             this.startZ = BAMBOO_Z + 0.5;
             this.startYaw = (float) Math.toDegrees(Math.atan2(-1, 0)); // face +X
@@ -177,6 +194,7 @@ public final class BambooCourse {
         void buildTrialList() {
             add("stalk", Kind.STALK);
             add("dogleg", Kind.DOGLEG);
+            add("trapped", Kind.TRAPPED);
         }
 
         void add(String name, Kind kind) {
