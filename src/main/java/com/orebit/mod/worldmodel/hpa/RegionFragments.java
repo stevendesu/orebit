@@ -97,9 +97,13 @@ public final class RegionFragments {
 
     /**
      * Hard cap on fragments per region (HPA-FRAGMENTS.md §3, §5). Over-cap ⇒ collapse. Real fragment ids are
-     * {@code 0..MAX_FRAGMENTS-1} = 0..61 in the 6-bit id space, and the top of that space is reserved for
+     * {@code 0..MAX_FRAGMENTS-1} = 0..60 in the 6-bit id space, and the top of that space is reserved for
      * SEARCH SENTINELS — so any id {@code >= MAX_FRAGMENTS} is never a real fragment:
      * <ul>
+     *   <li><b>61 = {@code RegionPathfinder.CORNER_FRAG}</b> — the corner-cut virtual fragment
+     *       (DESIGN-region-corner-crossing-v2.md §4.3, R6): the chain node an optimistic corner crossing
+     *       routes through. TWO-SIDED — it appears in the "to" field on the intermediate hop and in the
+     *       from-field one hop later, which is why it cannot reuse either one-sided sentinel below (§1).</li>
      *   <li><b>62 = {@code RegionPathfinder.VIRTUAL_START_FRAG}</b> — the search ROOT's from-fragment (the
      *       bot's own fragment has no predecessor), and every reverse/virtual node whose from-fragment is
      *       not load-bearing.</li>
@@ -108,14 +112,19 @@ public final class RegionFragments {
      * <b>A sentinel means the SAME thing in both 6-bit fields of the node key</b> (fragment id, bits 49-54;
      * from-fragment, bits 58-63), and that is deliberate: a fragment id becomes a from-fragment one hop
      * later, so a value that meant different things per field would be read wrong the moment the search
-     * walked through it. ({@code isVirtualStart}/{@code isVirtualGoal} both take a bare {@code int} with
-     * nothing to say which field it came from — the shared meaning is what makes that safe.) An earlier
-     * revision of this javadoc called 62 "unused/reserved", which predates VIRTUAL_START_FRAG claiming it.
+     * walked through it. ({@code isVirtualStart}/{@code isVirtualGoal}/{@code isCornerCut} all take a bare
+     * {@code int} with nothing to say which field it came from — the shared meaning is what makes that
+     * safe.)
      *
-     * <p>The cap is 62 (not 63) so the persisted 6-bit fragment-count field can spend 63 on the
-     * {@link #FRAGMENT_COUNT_COLLAPSED} sentinel — a COUNT-field value, a different space again.
+     * <p>The cap was 62 until the corner-cut sentinel took id 61 (2026-08-28, R6/R7 — one fewer fragment
+     * before collapse, owner-accepted). It is not 63 because the persisted 6-bit fragment-count field spends
+     * 63 on the {@link #FRAGMENT_COUNT_COLLAPSED} sentinel — a COUNT-field value, a different space again;
+     * on-wire counts 62 (the old cap) and 63 are both non-count codepoints now, and
+     * {@code CostCodec.unpackRegion} absorbs a legacy over-cap count as CAP-COLLAPSED (the region
+     * survives, priced from {@code passFrac} — deliberately NOT a bad-shard rejection; see the guard's
+     * own comment).
      */
-    public static final int MAX_FRAGMENTS = 62;
+    public static final int MAX_FRAGMENTS = 61;
 
     /**
      * Persisted-count-field sentinel (the on-wire {@code fragmentCount} value, NOT a fragment id and NOT an

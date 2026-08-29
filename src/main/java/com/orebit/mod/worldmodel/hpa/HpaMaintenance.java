@@ -338,6 +338,68 @@ public final class HpaMaintenance {
     /** Count of leaf-build failures swallowed by {@link #buildLeafSafe} (diagnostics + log throttle). */
     private static volatile long buildFailures = 0;
 
+    /**
+     * R30 — the corner-refutation corrective (DESIGN-region-corner-crossing-v2.md §4.10): a corner
+     * crossing {@code A → D} between diagonal leaves was durably refuted, so the coarse merges that corner
+     * justified must be RE-RUN — the shared ancestor's fragment splits, and the split propagates upward
+     * (above the first split level the two masses are same-slot items, which the union never joins).
+     * The re-merge renumbers coarse fragment ids, so every L1+ invalidation row touching either endpoint
+     * is evicted first ({@link RegionCrossingMemory#evictCoarseTouching} — L0 rows, including the gating
+     * refutation itself, survive), with each eviction re-dirtying its FROM shard exactly as the
+     * block-change flush does. {@code PyramidMerger.remergeSharedAncestors} walks WITHOUT the
+     * unchanged-signature early-out ({@code mergeUpFrom} would stop below the fused level, since the
+     * unshared ancestors between here and there really are unchanged). Tick-thread only, cold (one call
+     * per durable corner refutation).
+     */
+    public static void onCornerRefuted(RegionGrid grid, int aRx, int aRy, int aRz,
+                                       int dRx, int dRy, int dRz) {
+        // A HEADLESS grid (RegionGrid.headless — level deliberately null; the cascade test seam) has no
+        // persistence to mark: RegionPersistence's dirty maps NPE on a null level key, and the sink fires
+        // OUTSIDE the try below. Guard every mark (review 2026-08-29, dim5 F2/dim3 F2) — the structural
+        // half (evict + re-merge) still runs, which is exactly what the refutation-lifecycle tests drive.
+        final ServerLevel level = grid.level();
+        final CostPyramid pyramid = grid.pyramid();
+        final RegionCrossingMemory mem = grid.crossingMemory();
+        final RegionCrossingMemory.EvictSink evictSink = level == null ? null : (lvl, fromKey) -> {
+            if (lvl >= RegionAddress.MAX_COARSE_LEVEL) {
+                RegionPersistence.markCoarseDirty(level);
+            } else {
+                RegionPersistence.markShardDirty(level,
+                        RegionAddress.shardOf(RegionAddress.unpackRX(fromKey), lvl),
+                        RegionAddress.shardOf(RegionAddress.unpackRZ(fromKey), lvl));
+            }
+        };
+        if (mem.total() > 0) {
+            mem.evictCoarseTouching(aRx, aRy, aRz, evictSink);
+            mem.evictCoarseTouching(dRx, dRy, dRz, evictSink);
+        }
+        try {
+            PyramidMerger.remergeSharedAncestors(pyramid, aRx, aRy, aRz, dRx, dRy, dRz);
+            // The re-merged ancestors' records changed on disk terms too: the shard files carry levels
+            // 0..SHARD_LEVEL for their columns and the coarse file carries L6, so re-dirty both endpoints'
+            // shards + the coarse file (over-marking is a cheap re-flush; under-marking resurrects the
+            // fused records on reload).
+            if (level != null) {
+                RegionPersistence.markDirty(level, aRx, aRz);
+                RegionPersistence.markDirty(level, dRx, dRz);
+                RegionPersistence.markCoarseDirty(level);
+            }
+        } catch (Throwable t) {
+            // Its OWN counter — inflating buildFailures would muddy the leaf-build throttle denominator
+            // and misattribute the failure class (review dim5 F3).
+            long n = ++cornerRemergeFailures;
+            if (n == 1 || n % 256 == 0) {
+                OrebitCommon.LOGGER.error("[Orebit] corner-refutation re-merge failed for ({},{},{})→({},{},{}) "
+                        + "[{} corner-remerge failures total] — coarse records may stay fused until the next "
+                        + "leaf rebuild", aRx, aRy, aRz, dRx, dRy, dRz, n, t);
+            }
+        }
+    }
+
+    /** Count of corner-refutation re-merge failures swallowed by {@link #onCornerRefuted} (distinct from
+     *  {@link #buildFailures} — a different failure class with its own log throttle). */
+    private static volatile long cornerRemergeFailures = 0;
+
     // ---------------------------------------------------------------------------------------------------
     // The block-change listener — mark dirty (debounced; thread-safe; cheap)
     // ---------------------------------------------------------------------------------------------------

@@ -181,7 +181,12 @@ public final class RegionCostField {
     void record(int rx, int ry, int rz, int frag, float g, int ex, int ey, int ez, float onwardCost) {
         int ri = regionIndex(rx, ry, rz);
         if (ri < 0) return;
-        int f = frag < 0 ? 0 : (frag >= MAX_FRAGMENTS ? MAX_FRAGMENTS - 1 : frag);
+        // A sentinel id must never fold into a REAL slot: the field Dijkstra interns no virtual rows (V is
+        // never relaxed there, and R29 keeps corner cuts out of the field as nodes — the corner enters only
+        // as a direct D→A edge), so an out-of-range id here is a caller bug — drop it rather than silently
+        // corrupting the last real fragment's cost (the old clamp).
+        if (frag >= MAX_FRAGMENTS) return;
+        int f = frag < 0 ? 0 : frag;
         int i = ri * MAX_FRAGMENTS + f;
         if (g < cost[i]) {
             if (cost[i] >= UNREACHED) reachedFrags[ri]++;   // first settle of this slot

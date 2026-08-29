@@ -212,7 +212,7 @@ public class RegionInvalPersistenceTest {
 
     // ===================================================================================================
     // The virtual-goal decode filter (journey-scoped rows must not be durable): a row whose TO fragment id
-    // is not a real fragment (>= RegionFragments.MAX_FRAGMENTS = 62 — the reserved id 62 or the search's
+    // is not a real fragment (>= RegionFragments.MAX_FRAGMENTS = 61 — the corner-cut id 61, the reserved id 62 or the search's
     // VIRTUAL_GOAL_FRAG 63, which lives in the fragment-ID space, deliberately NOT MAX_FRAGMENTS since the
     // 63→62 cap change) carries no realized evidence and names only the goal REGION — not the goal cell —
     // so a persisted V-row from one goal would poison every later goal in that region. The record site no
@@ -242,6 +242,32 @@ public class RegionInvalPersistenceTest {
         assertRow(memBack, 0, fp, tp, sig, RegionCrossingMemory.PROV_PROOF);
         assertEquals(-1, rowOf(memBack, 0, fv, tv),
                 "a TO-fragment-63 (virtual goal) row must not survive the round-trip");
+    }
+
+    /** R21's SECOND site (corner-crossing arc): since the MAX_FRAGMENTS 62 → 61 reduction the same
+     *  {@code >= MAX_FRAGMENTS} decode filter also drops a legacy row naming the then-real TO fragment id
+     *  61 — now the corner-cut sentinel, which no durable row may name. Cache semantics: the stale
+     *  negative is re-learned, never resurrected. */
+    @Test
+    void legacyToFragment61Rows_doNotSurviveRoundTrip() throws IOException {
+        CostPyramid cp = new CostPyramid();
+        seedUniform(cp, 2, 3, 3, RegionFragments.KIND_SOLID, 6); // shard (0,0)
+        long sig = walkOnly().realizabilitySig();
+
+        RegionCrossingMemory mem = new RegionCrossingMemory();
+        long fp = key(2, 3, 3, 0), tp = key(3, 3, 3, 1);                          // real row — persists
+        long f61 = key(2, 3, 3, 2), t61 = key(3, 3, 3, RegionPathfinder.CORNER_FRAG); // legacy real-61 TO
+        mem.record(0, fp, tp, sig, RegionCrossingMemory.PROV_PROOF, BotCaps::sigDominates);
+        mem.record(0, f61, t61, sig, RegionCrossingMemory.PROV_PROOF, BotCaps::sigDominates);
+
+        CostPyramid back = new CostPyramid();
+        RegionCrossingMemory memBack = new RegionCrossingMemory();
+        decodeInto(encodeShard(cp, 0, 0, mem), back, memBack);
+
+        assertEquals(1, memBack.total(), "the TO-fragment-61 row is filtered exactly like 62/63");
+        assertRow(memBack, 0, fp, tp, sig, RegionCrossingMemory.PROV_PROOF);
+        assertEquals(-1, rowOf(memBack, 0, f61, t61),
+                "a legacy row naming the then-real fragment 61 must not reload as a corner-sentinel row");
     }
 
     // ===================================================================================================

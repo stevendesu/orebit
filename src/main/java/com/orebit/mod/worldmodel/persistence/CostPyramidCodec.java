@@ -815,10 +815,13 @@ public final class CostPyramidCodec {
                 int level = (int) (fromStored >>> INVAL_LEVEL_SHIFT) & 0xFF;
                 if (level > RegionAddress.MAX_COARSE_LEVEL) continue; // corrupt row — skip, keep reading
                 // Non-real-fragment legacy filter: a row whose TO fragment id (key bits 49..54) is not a real
-                // fragment — id >= {@link RegionFragments#MAX_FRAGMENTS} (62), i.e. the reserved id 62 or the
-                // search's virtual-goal id 63 ({@code RegionPathfinder.VIRTUAL_GOAL_FRAG}; this codec never
-                // imports pathfinding, so the bound is expressed in the fragment-ID space's own terms) — is
-                // dropped. The virtual-goal case is journey-scoped knowledge that should never have been
+                // fragment — id >= {@link RegionFragments#MAX_FRAGMENTS} (61), i.e. the corner-cut id 61,
+                // the reserved id 62 or the search's virtual-goal id 63 ({@code RegionPathfinder}'s
+                // CORNER_FRAG / VIRTUAL_START_FRAG / VIRTUAL_GOAL_FRAG; this codec never imports
+                // pathfinding, so the bound is expressed in the fragment-ID space's own terms) — is
+                // dropped. Since the 2026-08-28 62→61 cap reduction this also drops any legacy row naming
+                // the then-real fragment id 61 (acceptable under cache semantics — a stale negative is
+                // re-learned; corner-crossing R21's second site). The virtual-goal case is journey-scoped knowledge that should never have been
                 // durable: an (approach → V) blame carries no realized evidence, and the key encodes only
                 // the goal REGION, not the goal cell — so a persisted V-row from one goal poisons every later
                 // goal in that region. The record site (HierarchicalRegionPlan.onBlocked) no longer writes

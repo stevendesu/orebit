@@ -51,11 +51,43 @@ public class VirtualStartFragmentKeyTest {
         assertTrue(RegionPathfinder.isVirtualStart(S));
         assertFalse(RegionPathfinder.isVirtualStart(V));
         assertFalse(RegionPathfinder.isVirtualStart(0));
-        assertFalse(RegionPathfinder.isVirtualStart(RegionFragments.MAX_FRAGMENTS - 1)); // 61, a real frag
-        // Both sentinels sit ABOVE every real fragment id (0..MAX_FRAGMENTS-1), so a from-fragment field can
-        // carry either a real predecessor id or the S sentinel without collision.
+        assertFalse(RegionPathfinder.isVirtualStart(RegionFragments.MAX_FRAGMENTS - 1)); // 60, a real frag
+        // Every sentinel sits ABOVE every real fragment id (0..MAX_FRAGMENTS-1), so a from-fragment field can
+        // carry a real predecessor id or a sentinel without collision.
         assertTrue(S >= RegionFragments.MAX_FRAGMENTS, "S is beyond the real fragment id range");
         assertTrue(S <= 0x3F && V <= 0x3F, "both sentinels fit the 6-bit from/current-fragment field");
+    }
+
+    // ===================================================================================================
+    // The THIRD sentinel (corner-crossing R6): 61 = the corner-cut virtual fragment. TWO-SIDED — it
+    // appears in the "to" field on the chain's intermediate hop AND in the successor's from-field one hop
+    // later — so it could reuse neither one-sided vacancy (X2) and took its codepoint by shrinking
+    // MAX_FRAGMENTS 62 → 61 (R7). Same-meaning-in-every-field invariant as S and V.
+    // ===================================================================================================
+    @Test
+    void cornerCutSentinel_isDistinctTwoSidedAndAboveTheRealRange() {
+        assertEquals(61, RegionPathfinder.CORNER_FRAG, "corner-cut sentinel is 61");
+        assertEquals(RegionFragments.MAX_FRAGMENTS, RegionPathfinder.CORNER_FRAG,
+                "the corner id is exactly the codepoint the 62→61 cap reduction freed");
+        assertTrue(RegionPathfinder.isCornerCut(RegionPathfinder.CORNER_FRAG));
+        assertFalse(RegionPathfinder.isCornerCut(S));
+        assertFalse(RegionPathfinder.isCornerCut(V));
+        assertFalse(RegionPathfinder.isCornerCut(0));
+        assertFalse(RegionPathfinder.isCornerCut(RegionFragments.MAX_FRAGMENTS - 1)); // 60, the top real id
+        assertFalse(RegionPathfinder.isVirtualStart(RegionPathfinder.CORNER_FRAG));
+        assertFalse(RegionPathfinder.isVirtualGoal(RegionPathfinder.CORNER_FRAG));
+        // Two-sided key packing: the corner id round-trips through BOTH 6-bit fields independently — the
+        // (B, CORNER, face, fragA) node and the (D, fragD, oppFace, CORNER) successor are distinct rows.
+        final int C = RegionPathfinder.CORNER_FRAG;
+        long bNode = RegionPathfinder.approachRowKey(3, 2, 1, C, 0, 5);   // corner id in the CURRENT field
+        long dNode = RegionPathfinder.approachRowKey(4, 2, 2, 5, 1, C);   // corner id in the FROM field
+        assertNotEquals(bNode, dNode, "corner id in the to-field vs from-field are different rows");
+        assertEquals((long) C << CUR_FRAG_SHIFT,
+                (bNode ^ RegionPathfinder.approachRowKey(3, 2, 1, 0, 0, 5)) & (0x3FL << CUR_FRAG_SHIFT),
+                "the corner id packs into the current-fragment field verbatim");
+        assertEquals((long) C << FROM_FRAG_SHIFT,
+                (dNode ^ RegionPathfinder.approachRowKey(4, 2, 2, 5, 1, 0)) & (0x3FL << FROM_FRAG_SHIFT),
+                "the corner id packs into the from-fragment field verbatim");
     }
 
     // ===================================================================================================

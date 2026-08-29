@@ -190,6 +190,34 @@ public final class RegionCrossingMemory {
     }
 
     /**
+     * The corner-refutation re-merge's eviction (DESIGN-region-corner-crossing-v2.md §4.10, R30): as
+     * {@link #evictLeafTouching}, but starting at level <b>1</b> — the L0 rows survive, DELIBERATELY. A
+     * re-merge changes no leaf content, only coarse fragment records (their ids renumber under the split),
+     * so L0 keys still resolve — and the L0 row just recorded is precisely what gates the corner's
+     * re-emission (precondition 6) and what the merge's own consult reads. Evicting it would re-open the
+     * refuted corner. Returns the rows dropped.
+     */
+    public int evictCoarseTouching(int leafRx, int leafRy, int leafRz, EvictSink sink) {
+        int evicted = 0;
+        for (int L = 1; L <= RegionAddress.MAX_COARSE_LEVEL; L++) {
+            if (size[L] == 0) continue;
+            final int cellRx = leafRx >> L;
+            final int cellRz = leafRz >> L;
+            final int cellRy = (L >= RegionAddress.OCTREE_TOP) ? 0 : (leafRy >> L);
+            final long cell = RegionAddress.packLevelKey(cellRx, cellRy, cellRz);
+            for (int i = 0; i < size[L]; i++) {
+                if ((from[L][i] & REGION_MASK) != cell && (to[L][i] & REGION_MASK) != cell) continue;
+                final long fromKey = from[L][i];
+                removeAt(L, i);
+                i--; // re-examine the row swapped into this slot
+                evicted++;
+                if (sink != null) sink.evicted(L, fromKey);
+            }
+        }
+        return evicted;
+    }
+
+    /**
      * Whether this store holds a <b>proof-grade</b> row ({@link #PROV_PROOF} or {@link #PROV_ROLLED_UP} —
      * never {@link #PROV_ESCALATION}, which is cascade inference, not proof) for the exact crossing
      * {@code fromKey → toKey} at {@code level} whose sig dominates-or-equals {@code capsSig}. The Phase-2b
