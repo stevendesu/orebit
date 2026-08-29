@@ -1508,8 +1508,33 @@ public final class SteerControl {
      * prone bot rising into the surface layer — where there is no fluid above its head — needs jump held or
      * the pitch does nothing. That is a mechanism, not a servo, and it is the only jump this drive presses.
      */
-    private static void swimArrive(BotSteering b, SteerView p, double bias, boolean prone,
+    private static void swimArrive(BotSteering b, SteerView p, double bias, boolean declaredProne,
                                    String tagName, String tagDead) {
+        // THE POSE IS THE BOT'S FACT, NOT THE CALLER'S ASSUMPTION (2026-08-29; the (337,59,414) wedge).
+        // `declaredProne` is a per-callsite CONSTANT -- true from swimServo, false from uprightSwimServo --
+        // so it states what the MOVE believes, and the two disagree for as long as a pose transition takes.
+        // StartSprintSwim is *definitionally* that disagreement: it is the STANDING->PRONE transition, and
+        // vanilla flips the pose out from under it the moment isSprinting() && isUnderWater() (updateSwimming),
+        // while its steer keeps calling uprightSwimServo. Everything below that reads the pose then reads it
+        // WRONG for the rest of the move, and two of those are load-bearing:
+        //
+        //   * PITCH. faceTowards -- the only pitch write on this path -- is inside `if (prone)`. Declared
+        //     upright, nothing commands pitch, and Player.travel's look-steering (live in the prone pose, up
+        //     to 0.085/t) steers the whole vertical axis off whatever stale value was left behind. Measured:
+        //     pitch ~-90 => terminal -0.1444 b/t WITH jump held; the bot sank to the seabed under its own
+        //     rise command and no swim move has a failWhen to end it.
+        //   * CLIENT LEGALITY. The SERVO_FORWARD_MIN floor below is likewise inside `if (prone)`. Skipping it
+        //     let the bot hold sprint at fwd=0.00 while airborne in water -- a combination NO real player can
+        //     produce, because LocalPlayer.shouldStopSwimSprinting drops sprint on exactly
+        //     `!hasForwardImpulse() && !onGround() && !shift`. That illegal state is what held the pose for
+        //     3,648 ticks of pressing nothing.
+        //
+        // OR rather than replace, so the prone callers are bit-identical (they already pass true, and a
+        // declared-prone move mid-transition must keep its prone law rather than flip laws for a tick). Only
+        // the upright-declared path changes, and only when the bot is PHYSICALLY prone -- where the prone
+        // terminal/gain are also simply the correct physics for the hitbox it actually has. Safe on the depth
+        // target because SUBMERGE_BIAS is identity, so both callers aim at the same wy+SWIM_RIDE.
+        boolean prone = declaredProne || b.prone();
         double cap  = swimTerminal(prone);
         double gain = swimArriveGain(prone);
 
@@ -2341,9 +2366,36 @@ public final class SteerControl {
         if (!b.inWater() && !b.inLava()) { // the autopilot works in ANY fluid (lava swims like slow water)
             return;
         }
-        if (b.y() < depth - WATER_RISE_DEADBAND) {
+        // DECIDE ON THE PROJECTED RESTING HEIGHT, NEVER THE RAW ONE (2026-08-29; the (337,59,414)
+        // StartSprintSwim wedge). This was a pure POSITION bang-bang, and SERVO-INVENTORY justified the
+        // missing velocity term with "fluid vertical rates (~0.04 b/t) << the 0.4 band". That premise is
+        // FALSE and the arithmetic was always available to refute it: 0.04 is the per-tick IMPULSE, not the
+        // rate it produces. Under the 0.8 vertical drag it integrates to a terminal 0.04*0.8/0.2 = 0.16 b/t
+        // -- and Swim's own cost model has said so all along ("sink one cell: 1/0.185 = 5.41 t/block").
+        //
+        // At 0.148 b/t (measured) the +-0.2 band is crossed in under three ticks, so the hysteresis bought
+        // nothing and the law had no term that could see the momentum it had itself built. Convicted
+        // tick-exactly: the bot entered the column at y=62.922 ABOVE a 61.2 set-point, so this method
+        // commanded sinkInWater for nine straight ticks (log: jump=false, 62.922 -> 61.529, the exact
+        // y > depth+0.2 boundary), coasted the two ticks the band was wide (61.306, 61.128), and only then
+        // pressed jump -- by which point it carried 0.148 b/t downward into a 2-block ride to the seabed,
+        // where the move's arrival test could never be met and no swim move has a failWhen to end it.
+        //
+        // The fix is the CLAUDE.md rule for gates applied to the decision variable: ask WHERE THIS COAST
+        // ENDS, not where the bot is. A pure-drag coast from velY travels a further velY*q/(1-q) blocks, so
+        // `projected` is the height the bot arrives at with no further input -- smooth in the state, and
+        // identical to the old law at rest (velY == 0 => projected == y), which is why the settle/station-
+        // keep semantics and their pinned band tests are preserved exactly. Moving it makes the controller
+        // BRAKE: descending at 0.148 it now presses jump from y ~ 61.5 instead of 61.0, arresting inside the
+        // waypoint's own cell instead of overshooting two blocks past it.
+        //
+        // Still a bang-bang, deliberately: the actuators ARE discrete +-0.04 impulses, so there is no
+        // continuous thrust to proportion. The cascade's job here is choosing WHICH impulse, and the
+        // projection is what supplies the velocity half of that choice.
+        double projected = b.y() + b.velY() * (WATER_DRAG_VERTICAL / (1.0 - WATER_DRAG_VERTICAL));
+        if (projected < depth - WATER_RISE_DEADBAND) {
             b.setJumping(true);
-        } else if (b.y() > depth + WATER_RISE_DEADBAND) {
+        } else if (projected > depth + WATER_RISE_DEADBAND) {
             b.sinkInWater();
         }
     }
