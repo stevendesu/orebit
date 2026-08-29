@@ -197,6 +197,25 @@ public final class CostPyramid {
         this.residency = residency;
     }
 
+    /**
+     * The dimension's crossing memory, or {@code null} (headless/test builds that keep none). Installed by
+     * {@link RegionGrid} at construction beside {@link #setResidency} — the installed-collaborator pattern —
+     * so {@link PyramidMerger#combineFragments}'s §4.9 corner-union pass can consult surviving L0 corner
+     * refutations (DESIGN-region-corner-crossing-v2.md §4.10: a durably-refuted corner must not keep
+     * justifying the union). {@code null} means "no negatives known" ⇒ corner unions stand.
+     */
+    private RegionCrossingMemory crossingMemory;
+
+    /** The installed crossing memory, or {@code null} (see the field note). */
+    public RegionCrossingMemory crossingMemory() {
+        return crossingMemory;
+    }
+
+    /** Install the dimension's crossing memory (the §4.10 merge-consult collaborator). */
+    public void setCrossingMemory(RegionCrossingMemory mem) {
+        this.crossingMemory = mem;
+    }
+
     /** The level table, allocating it on first touch. {@code level} must be {@code 0..MAX_LEVEL}. */
     private Level level(int level) {
         Level l = levels[level];

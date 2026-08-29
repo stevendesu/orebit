@@ -25,7 +25,7 @@ import com.orebit.mod.worldmodel.persistence.CostPyramidCodec;
  * in each dataset directory via the production {@link CostPyramidCodec#decode} into a fresh
  * {@link CostPyramid}, then tallies per level 0..{@link RegionAddress#MAX_COARSE_LEVEL}: total rows, kind
  * distribution, and for MIXED rows a fragmentCount histogram (min/median/p90/max, count==0 = COLLAPSED,
- * count==63 = at the {@link RegionFragments#MAX_FRAGMENTS} cap but not collapsed). Non-v5 files (e.g. a
+ * an at-cap count = {@link RegionFragments#MAX_FRAGMENTS} exactly, not collapsed). Non-v5 files (e.g. a
  * legacy {@code hpa.bin} OBHP blob) are reported as skipped.
  *
  * <p><b>Caveat pinned by {@link com.orebit.mod.worldmodel.hpa.CostCodec}'s schema comment:</b> the on-disk
@@ -147,7 +147,7 @@ public class RegionRecordCensusTest {
             int[] kinds = new int[4];
             List<Integer> mixedCounts = new ArrayList<>();
             int collapsed = 0;  // MIXED, fragmentCount == 0 (the persisted collapsed/uniform-mass marker)
-            int atCap = 0;      // MIXED, fragmentCount == MAX_FRAGMENTS (63) — at the cap, NOT collapsed
+            int atCap = 0;      // MIXED, fragmentCount == MAX_FRAGMENTS (61) — at the cap, NOT collapsed
             for (int r = 0; r < rows; r++) {
                 RegionFragments rf = pyramid.fragmentRecord(level, r);
                 if (rf == null || !pyramid.isBuilt(level, r)) continue;

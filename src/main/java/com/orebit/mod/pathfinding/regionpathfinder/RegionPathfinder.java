@@ -71,7 +71,7 @@ public final class RegionPathfinder {
      * whose start→goal box (horizontal area × vertical depth) fits within this many nodes, sized well under the
      * {@link #MAX_REGION_EXPANSIONS} backstop (~2.4×) to absorb A* detours/walk-arounds (which explore outside
      * the start→goal box). NOTE: the box bound no longer strictly bounds in-box node COUNT — per-cell identity is
-     * now up to ~8×62 (entry-face × from-fragment), not ≤8, since from-fragment was folded into the node key, so
+     * now up to ~8×61 (entry-face × from-fragment), not ≤8, since from-fragment was folded into the node key, so
      * a dense merged-fragment cluster can exceed CAP_SAFE_NODES and hit MAX_REGION_EXPANSIONS (returning a
      * partial). Accepted degradation, retired by capability-aware fragments (#6).
      */
@@ -97,7 +97,8 @@ public final class RegionPathfinder {
      *     C &lt;kind&gt; -&gt; x,y,z frag=&lt;f&gt; cost=&lt;c&gt; crossing=wx,wy,wz &lt;OK|worse&gt;
      * </pre>
      * {@code kind} ∈ {walk, air-fall, air-pillar, solid-mine, water-swim, collapsed, unbuilt, mine-sibling,
-     * mine-fallback, mine-solid}. An {@code E} line is one pop (expansion order); the indented {@code C} lines
+     * mine-fallback, mine-solid, corner-hop, corner-exit, corner-field} (the last three are the §4.1
+     * optimistic corner chain / field relaxes — DESIGN-region-corner-crossing-v2.md). An {@code E} line is one pop (expansion order); the indented {@code C} lines
      * under it are the edges it emitted ({@code OK} = relaxed onto the open set, {@code worse} = not an
      * improvement / blacklisted). Writing per node does file I/O on the calling thread — a one-shot debug path
      * driven by {@code /bot rtrace}, never on in normal play (the trace is huge + slow).
@@ -281,13 +282,16 @@ public final class RegionPathfinder {
      * belongs to no real fragment; instead of routing to a nearest-centroid pocket, the level-0 skeleton A* gets a
      * synthetic node V at the goal region, reachable from each dig-flood pocket by a virtual edge priced at that
      * pocket's dig cost — so the search routes to whichever pocket is <b>cheapest to reach</b>, then digs in.
-     * Real fragments top out at {@link RegionFragments#MAX_FRAGMENTS}−1 = 61 ({@link FragmentBuilder} keeps a
-     * component only while {@code kept < MAX_FRAGMENTS}); id 62 is unused/reserved, so 63 is free and packs into
-     * the 6-bit fragment field. NOTE: 63 lives in the fragment-ID/key space — it is deliberately NOT
-     * {@code RegionFragments.MAX_FRAGMENTS} (now 62) and must not collide with the persisted count field's
-     * {@link RegionFragments#FRAGMENT_COUNT_COLLAPSED} (also 63, a different value space entirely).
+     * Real fragments top out at {@link RegionFragments#MAX_FRAGMENTS}−1 = 60 ({@link FragmentBuilder} keeps a
+     * component only while {@code kept < MAX_FRAGMENTS}); 61 = {@link #CORNER_FRAG}, 62 =
+     * {@link #VIRTUAL_START_FRAG}, and 63 packs into the 6-bit fragment field as V. NOTE: 63 lives in the
+     * fragment-ID/key space — it is deliberately NOT {@code RegionFragments.MAX_FRAGMENTS} and must not
+     * collide with the persisted count field's {@link RegionFragments#FRAGMENT_COUNT_COLLAPSED} (also 63, a
+     * different value space entirely).
      * V is a search-only node: it never enters a {@link RegionFragments} record or a {@link RegionCostField}, so
-     * consumers that read a fragment record by a skeleton step's id MUST guard it via {@link #isVirtualGoal}.
+     * consumers that read a fragment record by a skeleton step's id MUST guard it — and since the corner-cut
+     * sentinel joined the space, "guard via {@link #isVirtualGoal}" is no longer sufficient on its own: a
+     * skeleton step's id is a real fragment only when it is {@code < RegionFragments.MAX_FRAGMENTS}.
      */
     public static final int VIRTUAL_GOAL_FRAG = 63;
 
@@ -299,7 +303,7 @@ public final class RegionPathfinder {
     /**
      * Reserved <b>from-fragment SENTINEL</b> for the search ROOT (the bot's fragment A, which has no predecessor)
      * and for every reverse-Dijkstra / virtual node whose from-fragment is not load-bearing. Real fragments top
-     * out at {@link RegionFragments#MAX_FRAGMENTS}−1 = 61; 62 was the reserved id, 63 = {@link #VIRTUAL_GOAL_FRAG}.
+     * out at {@link RegionFragments#MAX_FRAGMENTS}−1 = 60; 61 = {@link #CORNER_FRAG}, 63 = {@link #VIRTUAL_GOAL_FRAG}.
      * Stamping the root's from-fragment with this sentinel keeps {@code (A|from=S → V)} and {@code (A′|from=B → V)}
      * distinct rows — the A==G cliff collapse — AND journey-scopes {@code from=S} rows structurally (S differs each
      * {@code /bot goto}, so a row naming it can't be world knowledge). NOTES-region-tier.md §2.
@@ -309,6 +313,30 @@ public final class RegionPathfinder {
     /** Whether {@code frag} is the {@link #VIRTUAL_START_FRAG} sentinel (the search root's / a reverse node's from-fragment). */
     public static boolean isVirtualStart(int frag) {
         return frag == VIRTUAL_START_FRAG;
+    }
+
+    /**
+     * Reserved fragment id for a <b>corner-cut virtual node</b> (DESIGN-region-corner-crossing-v2.md §4.3,
+     * R5/R6): the intermediate hop(s) an optimistically-emitted corner crossing routes through
+     * ({@code A → B.61 [→ C.61] → D}). Unlike the two one-sided sentinels above, the corner cut is
+     * <b>TWO-SIDED</b> — the id appears in the "to" field on the chain's intermediate node AND, one hop
+     * later, in the successor's from-field — which is why it needs a codepoint vacant in BOTH 6-bit fields
+     * and cannot reuse 62 or 63 (§1, X2). Taken by shrinking {@code RegionFragments.MAX_FRAGMENTS} 62 → 61
+     * (R7, owner-accepted).
+     *
+     * <p>A corner-cut node is NOT a place: it carries {@code RegionPathPlan.NO_PORTAL} (R32), is expanded
+     * only by the corner short-circuit at the top of {@code expandNode} (R14/R35 — never the face loop),
+     * never enters a {@link RegionFragments} record or a {@link RegionCostField} (R29 keeps the reverse
+     * field corner-node-free), and no skeleton boundary index may name one (R40 —
+     * {@code RegionPathPlan.splice} asserts it, {@code reconstructFragments} trims a partial-best corner
+     * tail). Same-meaning-in-every-field invariant as the other sentinels: {@link #isCornerCut} takes a
+     * bare {@code int}.
+     */
+    public static final int CORNER_FRAG = 61;
+
+    /** Whether {@code frag} is the {@link #CORNER_FRAG} sentinel (a corner-cut chain node — not a place). */
+    public static boolean isCornerCut(int frag) {
+        return frag == CORNER_FRAG;
     }
 
     /** Per-block MINE ticks at the reference (stone) hardness; scaled by {@code avgSolidHardness/STONE_REF}. */
@@ -680,6 +708,7 @@ public final class RegionPathfinder {
         // Tube-drain signal: cleared per search like the flood flag. The touch mask is NOT cleared — it is
         // read only behind lastWasTubeConfined(), so a stale mask is unreachable.
         LAST_TUBE_CONFINED.get()[0] = false;
+        resetCornerStats(canPlace);
 
         // Heuristic scale: SimpleRegionHeuristic is calibrated per LEVEL-0 region (COST_PER_REGION = one leaf
         // walk). At level L the derived edge costs scale with sideOf(L) = LEAF<<L, so scale h the same (×2^L)
@@ -1189,6 +1218,7 @@ public final class RegionPathfinder {
 
         final Nodes nodes = FIELD_SEARCH.get();
         nodes.reset();
+        resetCornerStats(canPlace);
 
         // Multi-source seeds (goal dig-flood): a buried goal is a SOLID cell in no fragment, so seed EVERY
         // occupiable pocket it can be dug into from, each at its dig cost — the goal-side analog of the s48
@@ -1591,6 +1621,17 @@ public final class RegionPathfinder {
         final int[] wb = nodes.wb; // neighbour (fragB) boundary-opening center / centroid
         final int[] wc = nodes.wc; // scratch for centroid accumulation
 
+        // CORNER-CUT NODE short-circuit (R14/R35, DESIGN-region-corner-crossing-v2.md §4.3): a virtual chain
+        // node is not a fragment — rfN.typeBits(CORNER_FRAG)/footprint(CORNER_FRAG,·) below would index past
+        // the kept range (AIOOBE in a MIXED intermediate; a uniform/unbuilt one hides the crash in testing),
+        // and the mine-sibling block between here and the face loop would emit sibling edges out of a
+        // non-place. Return BEFORE typeA/countN: a corner node emits ONLY its re-derived corner exits.
+        if (fragA == CORNER_FRAG) {
+            expandCornerNode(nodes, current, seq, grid, level, minY, grx, gry, grz,
+                    canBreak, canPlace, safeFall, blacklist, hScale, bound, tube, dijkstra);
+            return;
+        }
+
         ensureNode(grid, level, crx, cry, crz);
         final RegionFragments rfN = grid.fragmentRecord(level, crx, cry, crz);
         final boolean uniformN = isUniformNode(rfN);
@@ -1793,6 +1834,775 @@ public final class RegionPathfinder {
                     if (TRACE) traceCand("mine-solid", mrx, mry, mrz, 0, edge, wb[0], wb[1], wb[2], ok);
                 }
             }
+        }
+
+        // (C) OPTIMISTIC CORNER CROSSINGS (DESIGN-region-corner-crossing-v2.md §4, R8): guessed from
+        // region-tier facts alone whenever the §4.1 preconditions hold, retracted by invalidation when the
+        // block tier cannot realize one. The whole enumerator sits behind the HOISTED precondition 1 — a
+        // place-capable search pays exactly this branch and nothing else (§6 item 5) — plus note 2's
+        // fragment-level requirement (fragA must be TYPE_S; a uniform node has no footprints to test).
+        // Forward mode routes each crossing through the §4.3 virtual chain; the goal-rooted field
+        // (dijkstra) takes R29's direct diagonal relax instead — no corner node, no cfrom identity to erase.
+        if (!canPlace && !uniformN && (typeA & RegionFragments.TYPE_S) != 0) {
+            emitCornerCrossings(nodes, current, gCur, grid, level, minY, crx, cry, crz, fragA, rfN, typeA,
+                    entX, entY, entZ, grx, gry, grz, canBreak, safeFall, blacklist, pillarField, hScale,
+                    bound, tube, dijkstra);
+        }
+    }
+
+    // ===================================================================================================
+    // Optimistic corner crossings (DESIGN-region-corner-crossing-v2.md). The region graph is strictly
+    // 6-face, so a block move that changes ≥2 axes in one step (§2.1's diagonal set) can hop between
+    // corner-adjacent regions with no edge to ride — for a NO-PLACE bot over pure-air intermediates that
+    // is a total, fail-closed refusal (§0). The §4.1 preconditions below emit the crossing OPTIMISTICALLY
+    // (R8 — proof-gating deadlocks, §3/X5); the §4.6 diagonal blame collapse retracts a wrong one.
+    // ===================================================================================================
+
+    /**
+     * §5.1 instrumentation for the last region search on this thread: {@code [0]} corner candidates
+     * considered (past the hoisted gates), {@code [1]} 1 iff precondition 1 kept the mechanism dormant
+     * (place-capable search), {@code [2..6]} rejections by §4.1 preconditions 2..6, {@code [7]} crossings
+     * emitted (chain first-hops forward; direct diagonal relaxes in the field). Reset per search; the
+     * per-precondition split exists because "never fires (rare geometry)" and "never fires (inverted
+     * gate)" are indistinguishable without it (§5.1).
+     *
+     * <p><b>Granularity caveats (review 2026-08-29):</b> every counter is EMISSION-time only — the corner
+     * node's pop-time exit re-derivations pass {@code null} stats, so a blacklisted pair counts once in
+     * {@code [6]}, not once per pop. {@code [0]}/{@code [7]} count per popped search ROW, and one region
+     * node can pop as several {@code (entryFace, fromFrag)} rows, so both mildly over-count per REGION.
+     * And {@code costToGoalField} shares the array with the forward search on a thread — a search that
+     * builds a field mid-flight stomps its own forward counters (one array was kept deliberately; these
+     * are §5.1 rate diagnostics, not invariants).
+     */
+    private static final ThreadLocal<int[]> LAST_CORNER_STATS = ThreadLocal.withInitial(() -> new int[8]);
+
+    /** The last search's §5.1 corner counters on this thread (see {@link #LAST_CORNER_STATS} for indices). */
+    public static int[] lastCornerStats() {
+        return LAST_CORNER_STATS.get();
+    }
+
+    private static void resetCornerStats(boolean canPlace) {
+        final int[] s = LAST_CORNER_STATS.get();
+        for (int i = 0; i < s.length; i++) s[i] = 0;
+        if (canPlace) s[1] = 1; // §4.1 precondition 1: dormant for this search
+    }
+
+    /** The {@link RegionAddress} face for world axis {@code axis} (0=X, 1=Y, 2=Z) toward {@code sign}. */
+    private static int cornerFace(int axis, int sign) {
+        return (axis << 1) | (sign > 0 ? 1 : 0);
+    }
+
+    private static int stepRX(int rx, int axis, int sign) { return axis == 0 ? rx + sign : rx; }
+    private static int stepRY(int ry, int axis, int sign) { return axis == 1 ? ry + sign : ry; }
+    private static int stepRZ(int rz, int axis, int sign) { return axis == 2 ? rz + sign : rz; }
+
+    /**
+     * Whether a packed face footprint reaches the extreme bucket toward {@code sign} along world axis
+     * {@code axis} — the §4.1 corner-touch test, quantized exactly as the footprints are (note 4: 1 block
+     * at L0, 32 at L5 — the fuzz is the argument FOR optimism, not against it). {@code axis} must be an
+     * in-face axis of {@code face} ({@link RegionFragments} conventions: ±X → u=Y,v=Z; ±Y → u=X,v=Z;
+     * ±Z → u=X,v=Y). {@code NO_FACE} covers the full face.
+     *
+     * <p><b>The Y axis carries a ONE-BUCKET tolerance (implementation deviation, flagged 2026-08-28).</b>
+     * Fragments are PASSABLE space, but a Y-bearing corner's floors sit exactly AT the corner rows — the
+     * §2.1 vertical worked example's takeoff step occupies A's corner cell and the landing block occupies
+     * D's, so the two fragments' footprints stop one bucket short of the vertical extreme on BOTH sides
+     * and an exact test rejects the design's own canonical geometry. A surfaceable (TYPE_S) fragment
+     * reaches a horizontal boundary THROUGH its floor row (the standing space is one above the floor by
+     * construction), so the vertical reach test accepts one bucket of slack. Horizontal extremes stay
+     * exact (air really does hug a vertical corner column laterally). One more bucket of optimism,
+     * corrected by invalidation like the rest of §4.2.
+     */
+    private static boolean footprintReachesExtreme(int packed, int face, int axis, int sign) {
+        if (packed == RegionFragments.NO_FACE) return true;
+        final boolean axisIsU = (face >> 1) == 0 ? axis == 1 : axis == 0;
+        final int slack = axis == 1 ? 1 : 0;
+        if (sign > 0) {
+            return (axisIsU ? RegionFragments.footprintMaxU(packed) : RegionFragments.footprintMaxV(packed))
+                    >= 15 - slack;
+        }
+        return (axisIsU ? RegionFragments.footprintMinU(packed) : RegionFragments.footprintMinV(packed))
+                <= slack;
+    }
+
+    /**
+     * §4.1 precondition 3 — whether {@link #expandNode}'s face loop would relax at least one edge from
+     * {@code fragA} into the neighbour across face {@code f}: an ordinary route exists, so no corner is
+     * wanted (an ECONOMY gate, not a correctness gate — a dear-but-existing route still rejects). This
+     * MIRRORS the face loop's own gates rather than paraphrasing them: the sealed-face dig branch, the
+     * uniform SOLID/AIR gates (both {@code rfM != null}-guarded, so an UNBUILT neighbour always routes —
+     * note 1b/R34, which is why preconditions 4/5 only ever see regions with records), the collapsed-mass
+     * uniform transit, the per-fragment air gate + footprint overlap, and the canBreak mine fallbacks.
+     * Always called with {@code canPlace == false} (the enumerator sits behind precondition 1).
+     */
+    private static boolean faceRouteExists(RegionGrid grid, int level, RegionFragments rfN, int fragA,
+                                           int packedA, int crx, int cry, int crz, int f, boolean canBreak) {
+        final boolean noVertical = level >= RegionAddress.OCTREE_TOP && (f == 2 || f == 3);
+        if (!rfN.touchesFace(fragA, f)) {
+            return canBreak && !noVertical; // sealed face: only the dig-through branch emits
+        }
+        if (noVertical) return false;
+        final int mrx = RegionAddress.neighborRX(crx, f);
+        final int mry = RegionAddress.neighborRY(cry, f);
+        final int mrz = RegionAddress.neighborRZ(crz, f);
+        ensureNode(grid, level, mrx, mry, mrz);
+        final RegionFragments rfM = grid.fragmentRecord(level, mrx, mry, mrz);
+        if (isUniformNode(rfM)) {
+            if (!canBreak && rfM != null && rfM.kind() == RegionFragments.KIND_SOLID) return false;
+            if (rfM != null && rfM.kind() == RegionFragments.KIND_AIR && f != 2) return false; // no-place air gate
+            return true; // unbuilt / AIR-below / WATER / collapsed mass: a transit edge is emitted
+        }
+        final int oppF = RegionAddress.opposite(f);
+        final boolean airGated = f != 2; // !canPlace is given here
+        final int countM = rfM.fragmentCount();
+        for (int fb = 0; fb < countM; fb++) {
+            if (!rfM.touchesFace(fb, oppF)) continue;
+            if (airGated && rfM.typeBits(fb) == 0) continue;
+            if (footprintsOverlap(packedA, rfM.footprint(fb, oppF))) return true; // walk edge
+        }
+        return canBreak; // no overlap: the mine-fallback / mine-solid branches still emit for a digger
+    }
+
+    /**
+     * §4.1 precondition 5 for one intermediate — passable AT the corner: uniform {@code KIND_AIR}, or MIXED
+     * with some fragment whose footprint on {@code face} (the intermediate's face toward the chain) covers
+     * the corner ({@code (ca,sa)} and, for a vertex, {@code (cb,sb)} name the corner's position on the
+     * face's two in-face axes). {@code KIND_SOLID} ⇒ no diagonal exists (§2); {@code KIND_WATER} and an
+     * UNBUILT record never reach this test (precondition 3 rejected first — R34); a collapsed mass offers
+     * no passability proof. Defensive {@code false} on the unreachable arms.
+     */
+    private static boolean intermediatePassableAtCorner(RegionGrid grid, int level, int irx, int iry, int irz,
+                                                        int face, int ca, int sa, int cb, int sb) {
+        ensureNode(grid, level, irx, iry, irz);
+        final RegionFragments rfI = grid.fragmentRecord(level, irx, iry, irz);
+        if (rfI == null) return false;
+        if (rfI.isUniform()) return rfI.kind() == RegionFragments.KIND_AIR;
+        final int count = rfI.fragmentCount();
+        if (count == 0) return false; // collapsed / uniform mass — interior unknowable
+        for (int fi = 0; fi < count; fi++) {
+            if (!rfI.touchesFace(fi, face)) continue;
+            final int packed = rfI.footprint(fi, face);
+            if (!footprintReachesExtreme(packed, face, ca, sa)) continue;
+            if (cb >= 0 && !footprintReachesExtreme(packed, face, cb, sb)) continue;
+            return true;
+        }
+        return false;
+    }
+
+    /** Whether D fragment {@code fd} satisfies §4.1 precondition 4 for the corner seen from D's side:
+     *  {@code TYPE_S}, touching D's corner faces {@code df1}/{@code df2}, footprints reaching the matching
+     *  opposite corner ({@code t1}/{@code t2} are the A-side signs NEGATED). {@code df3 < 0} for a 2-axis
+     *  corner; a vertex additionally requires the third face and both cross-extremes per face. */
+    private static boolean cornerFragQualifiesD(RegionFragments rfD, int fd,
+                                                int df1, int a1, int t1, int df2, int a2, int t2,
+                                                int df3, int a3, int t3) {
+        if (!rfD.typeS(fd)) return false;
+        if (!rfD.touchesFace(fd, df1) || !rfD.touchesFace(fd, df2)) return false;
+        if (df3 >= 0 && !rfD.touchesFace(fd, df3)) return false;
+        final int p1 = rfD.footprint(fd, df1);
+        final int p2 = rfD.footprint(fd, df2);
+        if (df3 < 0) {
+            return footprintReachesExtreme(p1, df1, a2, t2) && footprintReachesExtreme(p2, df2, a1, t1);
+        }
+        final int p3 = rfD.footprint(fd, df3);
+        return footprintReachesExtreme(p1, df1, a2, t2) && footprintReachesExtreme(p1, df1, a3, t3)
+                && footprintReachesExtreme(p2, df2, a1, t1) && footprintReachesExtreme(p2, df2, a3, t3)
+                && footprintReachesExtreme(p3, df3, a1, t1) && footprintReachesExtreme(p3, df3, a2, t2);
+    }
+
+    /**
+     * The corner-column anchor cell on one side of a crossing — §4.3.1's "anchor both on the corner
+     * column, never face centroids". Crossing axes pin at the corner cell (the A side at its {@code +s}
+     * edge, the D side — {@code dSide} — at its {@code −s} edge); a 2-axis corner's FREE axis is anchored
+     * from the fragment's footprint on this side's first crossing face, FLOOR on Y / midpoint on a
+     * horizontal axis ({@link #footprintCenterWorld}'s standable-Δy convention — R15's "same class of
+     * estimate every other crossing uses"). Writes {@code out[0..2]}.
+     */
+    private static void cornerAnchor(int level, int minY, int rx, int ry, int rz, RegionFragments rf, int frag,
+                                     int a1, int s1, int a2, int s2, int a3, int s3, boolean dSide, int[] out) {
+        final int shift = RegionAddress.shift(level);
+        final int sideH = 1 << shift;
+        final boolean octree = level < RegionAddress.OCTREE_TOP;
+        final int vExtent = octree ? sideH : RegionAddress.PAD_HEIGHT;
+        final int hScale = 1 << level;
+        final int vScale = vExtent >> 4;
+        final int ox = rx << shift;
+        final int oy = octree ? (minY + (ry << shift)) : minY;
+        final int oz = rz << shift;
+        out[0] = ox; out[1] = oy; out[2] = oz;
+        boolean xPinned = false, yPinned = false, zPinned = false;
+        final int nAxes = a3 >= 0 ? 3 : 2;
+        for (int k = 0; k < nAxes; k++) {
+            final int a = k == 0 ? a1 : (k == 1 ? a2 : a3);
+            int s = k == 0 ? s1 : (k == 1 ? s2 : s3);
+            if (dSide) s = -s;
+            switch (a) {
+                case 0: out[0] = s > 0 ? ox + sideH - 1 : ox; xPinned = true; break;
+                case 1: out[1] = s > 0 ? oy + vExtent - 1 : oy; yPinned = true; break;
+                default: out[2] = s > 0 ? oz + sideH - 1 : oz; zPinned = true; break;
+            }
+        }
+        if (nAxes == 2) {
+            // Ordered pairs (a1 < a2) make the free-axis/face mapping exact: Y free ⇒ pair (X,Z), face ±X,
+            // Y = u; X free ⇒ pair (Y,Z), face ±Y, X = u; Z free ⇒ pair (X,Y), face ±X, Z = v.
+            final int face = cornerFace(a1, dSide ? -s1 : s1);
+            final int packed = rf.footprint(frag, face);
+            int minU = 0, maxU = 15, minV = 0, maxV = 15;
+            if (packed != RegionFragments.NO_FACE) {
+                minU = RegionFragments.footprintMinU(packed); maxU = RegionFragments.footprintMaxU(packed);
+                minV = RegionFragments.footprintMinV(packed); maxV = RegionFragments.footprintMaxV(packed);
+            }
+            if (!yPinned) {
+                out[1] = oy + minU * vScale;                    // floor-anchored (standable-Δy)
+            } else if (!xPinned) {
+                out[0] = ox + ((minU + maxU) >> 1) * hScale;    // horizontal midpoint
+            } else if (!zPinned) {
+                out[2] = oz + ((minV + maxV) >> 1) * hScale;
+            }
+        }
+        if (yPinned) {
+            // A PINNED Y is clamped into the fragment's own vertical footprint (R15's "footprint bbox ∩
+            // the corner column"): a Y-bearing corner's floors sit AT the corner rows, so the raw region
+            // edge lands the anchor/portal IN the takeoff/landing block — one bucket into the passable
+            // space is the standing cell (the same one-bucket geometry footprintReachesExtreme tolerates).
+            // The Y range is read off a non-Y crossing face (a corner always has one: Y is at most one of
+            // its axes): u on ±X, v on ±Z.
+            final int aH = a1 != 1 ? a1 : a2;
+            final int sH = a1 != 1 ? s1 : s2;
+            final int hFace = cornerFace(aH, dSide ? -sH : sH);
+            final int packedH = rf.footprint(frag, hFace);
+            if (packedH != RegionFragments.NO_FACE) {
+                final boolean yIsU = (hFace >> 1) == 0; // ±X: u=Y; ±Z: v=Y
+                final int yMin = yIsU ? RegionFragments.footprintMinU(packedH)
+                        : RegionFragments.footprintMinV(packedH);
+                final int yMax = yIsU ? RegionFragments.footprintMaxU(packedH)
+                        : RegionFragments.footprintMaxV(packedH);
+                final int lo = oy + yMin * vScale;
+                final int hi = oy + yMax * vScale;
+                if (out[1] < lo) out[1] = lo;
+                if (out[1] > hi) out[1] = hi;
+            }
+        }
+    }
+
+    /**
+     * §4.1 preconditions 2–5 for the 2-axis corner {@code (a1,s1)×(a2,s2)} out of {@code (A, fragA)}
+     * ({@code a1 < a2} — the §4.4 X→Y→Z chain order). Returns the FIRST qualifying D fragment id, or −1;
+     * {@code stats} (nullable at re-derivation) takes the §5.1 per-precondition reject counters.
+     * {@code canPlace} is FALSE for every caller (precondition 1 hoisted).
+     */
+    private static int corner2Preconditions(RegionGrid grid, int level, int arx, int ary, int arz,
+                                            RegionFragments rfA, int fragA, int a1, int s1, int a2, int s2,
+                                            boolean canBreak, int[] stats) {
+        if (stats != null) stats[0]++;
+        final int f1 = cornerFace(a1, s1);
+        final int f2 = cornerFace(a2, s2);
+        // Precondition 2 — fragA (TYPE_S, checked hoisted) touches both faces at the shared corner.
+        if (!rfA.touchesFace(fragA, f1) || !rfA.touchesFace(fragA, f2)) {
+            if (stats != null) stats[2]++;
+            return -1;
+        }
+        final int packed1 = rfA.footprint(fragA, f1);
+        final int packed2 = rfA.footprint(fragA, f2);
+        if (!footprintReachesExtreme(packed1, f1, a2, s2) || !footprintReachesExtreme(packed2, f2, a1, s1)) {
+            if (stats != null) stats[2]++;
+            return -1;
+        }
+        // Precondition 3 — an ordinary face route through either intermediate makes the corner moot.
+        if (faceRouteExists(grid, level, rfA, fragA, packed1, arx, ary, arz, f1, canBreak)
+                || faceRouteExists(grid, level, rfA, fragA, packed2, arx, ary, arz, f2, canBreak)) {
+            if (stats != null) stats[3]++;
+            return -1;
+        }
+        // Precondition 4 — D holds a TYPE_S fragment at the matching opposite corner.
+        final int drx = stepRX(stepRX(arx, a1, s1), a2, s2);
+        final int dry = stepRY(stepRY(ary, a1, s1), a2, s2);
+        final int drz = stepRZ(stepRZ(arz, a1, s1), a2, s2);
+        ensureNode(grid, level, drx, dry, drz);
+        final RegionFragments rfD = grid.fragmentRecord(level, drx, dry, drz);
+        if (isUniformNode(rfD)) {
+            if (stats != null) stats[4]++;
+            return -1;
+        }
+        final int df1 = cornerFace(a1, -s1);
+        final int df2 = cornerFace(a2, -s2);
+        final int countD = rfD.fragmentCount();
+        int firstD = -1;
+        for (int fd = 0; fd < countD; fd++) {
+            if (cornerFragQualifiesD(rfD, fd, df1, a1, -s1, df2, a2, -s2, -1, -1, 0)) { firstD = fd; break; }
+        }
+        if (firstD < 0) {
+            if (stats != null) stats[4]++;
+            return -1;
+        }
+        // Precondition 5 — both intermediates passable AT the corner column.
+        if (!intermediatePassableAtCorner(grid, level, stepRX(arx, a1, s1), stepRY(ary, a1, s1),
+                        stepRZ(arz, a1, s1), cornerFace(a1, -s1), a2, s2, -1, 0)
+                || !intermediatePassableAtCorner(grid, level, stepRX(arx, a2, s2), stepRY(ary, a2, s2),
+                        stepRZ(arz, a2, s2), cornerFace(a2, -s2), a1, s1, -1, 0)) {
+            if (stats != null) stats[5]++;
+            return -1;
+        }
+        return firstD;
+    }
+
+    /**
+     * §4.1 preconditions 2–5 for the 3-axis vertex {@code (sx,sy,sz)} out of {@code (A, fragA)} — the
+     * chain-of-two form (§4.3), which exists only below {@link RegionAddress#OCTREE_TOP} (R33). Returns
+     * the first qualifying D fragment id, or −1. Precondition 3's edge-adjacent arm is a CONSERVATIVE
+     * economy gate (any usable-looking content rejects the vertex): a faithful "would a 2-hop route
+     * exist" test needs the intermediates' own face graph, and today's movement set has no dry-land
+     * 3-axis move to strand (§2.1 — DiagonalSprintSwim is excluded by TYPE_S/note 3), so under-emission
+     * here costs nothing real yet. Revisit when rising/falling DiagonalParkour lands.
+     */
+    private static int vertexPreconditions(RegionGrid grid, int level, int arx, int ary, int arz,
+                                           RegionFragments rfA, int fragA, int sx, int sy, int sz,
+                                           boolean canBreak, int[] stats) {
+        if (stats != null) stats[0]++;
+        final int fx = cornerFace(0, sx);
+        final int fy = cornerFace(1, sy);
+        final int fz = cornerFace(2, sz);
+        if (!rfA.touchesFace(fragA, fx) || !rfA.touchesFace(fragA, fy) || !rfA.touchesFace(fragA, fz)) {
+            if (stats != null) stats[2]++;
+            return -1;
+        }
+        final int px = rfA.footprint(fragA, fx);
+        final int py = rfA.footprint(fragA, fy);
+        final int pz = rfA.footprint(fragA, fz);
+        if (!footprintReachesExtreme(px, fx, 1, sy) || !footprintReachesExtreme(px, fx, 2, sz)
+                || !footprintReachesExtreme(py, fy, 0, sx) || !footprintReachesExtreme(py, fy, 2, sz)
+                || !footprintReachesExtreme(pz, fz, 0, sx) || !footprintReachesExtreme(pz, fz, 1, sy)) {
+            if (stats != null) stats[2]++;
+            return -1;
+        }
+        // Precondition 3: the three face-adjacent intermediates, mirrored exactly...
+        if (faceRouteExists(grid, level, rfA, fragA, px, arx, ary, arz, fx, canBreak)
+                || faceRouteExists(grid, level, rfA, fragA, py, arx, ary, arz, fy, canBreak)
+                || faceRouteExists(grid, level, rfA, fragA, pz, arx, ary, arz, fz, canBreak)) {
+            if (stats != null) stats[3]++;
+            return -1;
+        }
+        // ...plus the three edge-adjacent regions, conservatively (see the method Javadoc).
+        if (edgeRegionLooksRoutable(grid, level, arx + sx, ary + sy, arz)
+                || edgeRegionLooksRoutable(grid, level, arx + sx, ary, arz + sz)
+                || edgeRegionLooksRoutable(grid, level, arx, ary + sy, arz + sz)) {
+            if (stats != null) stats[3]++;
+            return -1;
+        }
+        // Precondition 4 — D at the full diagonal.
+        final int drx = arx + sx;
+        final int dry = ary + sy;
+        final int drz = arz + sz;
+        ensureNode(grid, level, drx, dry, drz);
+        final RegionFragments rfD = grid.fragmentRecord(level, drx, dry, drz);
+        if (isUniformNode(rfD)) {
+            if (stats != null) stats[4]++;
+            return -1;
+        }
+        final int dfx = cornerFace(0, -sx);
+        final int dfy = cornerFace(1, -sy);
+        final int dfz = cornerFace(2, -sz);
+        final int countD = rfD.fragmentCount();
+        int firstD = -1;
+        for (int fd = 0; fd < countD; fd++) {
+            if (cornerFragQualifiesD(rfD, fd, dfx, 0, -sx, dfy, 1, -sy, dfz, 2, -sz)) { firstD = fd; break; }
+        }
+        if (firstD < 0) {
+            if (stats != null) stats[4]++;
+            return -1;
+        }
+        // Precondition 5 — all six intermediates passable AT the vertex.
+        final boolean ok = intermediatePassableAtCorner(grid, level, arx + sx, ary, arz, cornerFace(0, -sx), 1, sy, 2, sz)
+                && intermediatePassableAtCorner(grid, level, arx, ary + sy, arz, cornerFace(1, -sy), 0, sx, 2, sz)
+                && intermediatePassableAtCorner(grid, level, arx, ary, arz + sz, cornerFace(2, -sz), 0, sx, 1, sy)
+                && intermediatePassableAtCorner(grid, level, arx + sx, ary + sy, arz, cornerFace(0, -sx), 1, -sy, 2, sz)
+                && intermediatePassableAtCorner(grid, level, arx + sx, ary, arz + sz, cornerFace(0, -sx), 1, sy, 2, -sz)
+                && intermediatePassableAtCorner(grid, level, arx, ary + sy, arz + sz, cornerFace(1, -sy), 0, sx, 2, -sz);
+        if (!ok) {
+            if (stats != null) stats[5]++;
+            return -1;
+        }
+        return firstD;
+    }
+
+    /**
+     * The vertex form's conservative edge-adjacent gate (see {@link #vertexPreconditions}): the region
+     * LOOKS routable — unbuilt (optimism says every lateral connection exists), water, a collapsed mass
+     * (uniform-transit edges exist into one), or any typed fragment — so an ordinary multi-hop route
+     * plausibly exists and the vertex is not offered. Pure-air content (uniform AIR / all-typeless MIXED)
+     * is exactly what the no-place gates refuse, so it does NOT reject.
+     */
+    private static boolean edgeRegionLooksRoutable(RegionGrid grid, int level, int irx, int iry, int irz) {
+        ensureNode(grid, level, irx, iry, irz);
+        final RegionFragments rf = grid.fragmentRecord(level, irx, iry, irz);
+        if (rf == null) return true;                                     // unbuilt ⇒ optimistic ordinary route
+        if (rf.isUniform()) return rf.kind() == RegionFragments.KIND_WATER; // AIR gated, SOLID blocked
+        final int count = rf.fragmentCount();
+        if (count == 0) return true;                                     // collapsed mass takes transit edges
+        for (int fi = 0; fi < count; fi++) {
+            if (rf.typeBits(fi) != 0) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Enumerate and emit this node's optimistic corner crossings (§4.1–§4.4). Called from
+     * {@link #expandNode} behind the hoisted gates ({@code !canPlace}, MIXED node, {@code fragA} TYPE_S).
+     * 2-axis corners run over ordered axis pairs — X+Z at every level, Y-bearing pairs and the 8 vertices
+     * only below {@link RegionAddress#OCTREE_TOP} (R33, the quadtree slab has no ±Y neighbour). Forward
+     * mode relaxes the §4.3 chain's FIRST hop ({@code A → B.CORNER}; later hops re-derive at the corner
+     * node's pop — §4.3, no memoization); {@code dijkstra} mode relaxes R29's direct diagonal edge.
+     * Containment (R36) names D, never an intermediate: D is pre-tested here and the chain hops pass
+     * {@code bound=null, tube=null} (a box-rejected D still sets {@code outOfBoxRejected}, exactly as
+     * {@link #relaxFrag} would for a real node, so {@code isSealedWithin}'s closed-flood harvest stays
+     * honest).
+     */
+    private static void emitCornerCrossings(Nodes nodes, int current, float gCur, RegionGrid grid, int level,
+                                            int minY, int crx, int cry, int crz, int fragA,
+                                            RegionFragments rfN, int typeA,
+                                            int entX, int entY, int entZ, int grx, int gry, int grz,
+                                            boolean canBreak, int safeFall, RegionEdgeBlacklist blacklist,
+                                            float pillarField, float hScale, RegionBox bound, RegionTube tube,
+                                            boolean dijkstra) {
+        final int[] stats = LAST_CORNER_STATS.get();
+        final int[] wa = nodes.wa;
+        final int[] wb = nodes.wb;
+        final boolean hasY = level < RegionAddress.OCTREE_TOP;
+        for (int a1 = 0; a1 <= 1; a1++) {
+            if (a1 == 1 && !hasY) break;
+            for (int a2 = a1 + 1; a2 <= 2; a2++) {
+                if (a2 == 1 && !hasY) continue;
+                for (int s1 = -1; s1 <= 1; s1 += 2) {
+                    for (int s2 = -1; s2 <= 1; s2 += 2) {
+                        final int firstD = corner2Preconditions(grid, level, crx, cry, crz, rfN, fragA,
+                                a1, s1, a2, s2, canBreak, stats);
+                        if (firstD < 0) continue;
+                        emitCorner2(nodes, current, gCur, grid, level, minY, crx, cry, crz, fragA, rfN,
+                                typeA, entX, entY, entZ, grx, gry, grz, safeFall, blacklist, pillarField,
+                                hScale, bound, tube, dijkstra, a1, s1, a2, s2, firstD, stats, wa, wb, true);
+                    }
+                }
+            }
+        }
+        if (hasY) {
+            for (int sx = -1; sx <= 1; sx += 2) {
+                for (int sy = -1; sy <= 1; sy += 2) {
+                    for (int sz = -1; sz <= 1; sz += 2) {
+                        final int firstD = vertexPreconditions(grid, level, crx, cry, crz, rfN, fragA,
+                                sx, sy, sz, canBreak, stats);
+                        if (firstD < 0) continue;
+                        emitVertexFirstHop(nodes, current, gCur, grid, level, minY, crx, cry, crz, fragA,
+                                rfN, typeA, entX, entY, entZ, grx, gry, grz, safeFall, blacklist,
+                                pillarField, hScale, bound, tube, dijkstra, sx, sy, sz, firstD, stats,
+                                wa, wb);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Precondition 6 + R36 containment + emission for one qualified 2-axis corner. Iterates every
+     * qualifying D fragment (each is its own blacklist key — §4.1's "the CORNER id carries no stable
+     * identity across (A, D) pairs"); {@code firstHop} distinguishes A's expansion (relax {@code B.CORNER}
+     * once if any exit survives / direct-relax D in the field) from the corner node's own pop (relax each
+     * D — the caller passes the B row as {@code current}).
+     */
+    private static void emitCorner2(Nodes nodes, int current, float gCur, RegionGrid grid, int level,
+                                    int minY, int arx, int ary, int arz, int fragA, RegionFragments rfA,
+                                    int typeA, int entX, int entY, int entZ, int grx, int gry, int grz,
+                                    int safeFall, RegionEdgeBlacklist blacklist, float pillarField,
+                                    float hScale, RegionBox bound, RegionTube tube, boolean dijkstra,
+                                    int a1, int s1, int a2, int s2, int firstD, int[] stats,
+                                    int[] wa, int[] wb, boolean firstHop) {
+        final int drx = stepRX(stepRX(arx, a1, s1), a2, s2);
+        final int dry = stepRY(stepRY(ary, a1, s1), a2, s2);
+        final int drz = stepRZ(stepRZ(arz, a1, s1), a2, s2);
+        final RegionFragments rfD = grid.fragmentRecord(level, drx, dry, drz);
+        if (rfD == null) return; // defensive — precondition 4 just saw a record
+        final int df1 = cornerFace(a1, -s1);
+        final int df2 = cornerFace(a2, -s2);
+        final long aKey = fragmentKey(arx, ary, arz, fragA);
+        final int countD = rfD.fragmentCount();
+        boolean anyExit = false;
+        for (int fd = firstD; fd < countD; fd++) {
+            if (fd > firstD && !cornerFragQualifiesD(rfD, fd, df1, a1, -s1, df2, a2, -s2, -1, -1, 0)) continue;
+            // Precondition 6 — the DIAGONAL pair (§4.6: relaxFrag's per-hop probe only ever sees the
+            // chain's halves, so without this probe a refuted corner is re-emitted forever).
+            if (blacklist != null && blacklist.contains(aKey, fragmentKey(drx, dry, drz, fd))) {
+                if (stats != null) stats[6]++;
+                continue;
+            }
+            // R36 — containment names D, never an intermediate.
+            if (bound != null && !bound.contains(drx, dry, drz)) { nodes.outOfBoxRejected = true; continue; }
+            if (tube != null && !tube.contains(drx, dry, drz)) continue;
+            anyExit = true;
+            if (dijkstra) {
+                // R29: the field takes a DIRECT diagonal relax — no corner node, no cfrom identity to
+                // erase. Chain-shaped price (§4.8): the real traverse across this fragment to the corner
+                // column + one floored boundary hop per chain leg.
+                cornerAnchor(level, minY, arx, ary, arz, rfA, fragA, a1, s1, a2, s2, -1, 0, false, wa);
+                cornerAnchor(level, minY, drx, dry, drz, rfD, fd, a1, s1, a2, s2, -1, 0, true, wb);
+                final float edge = transitCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, typeA,
+                        false, safeFall, true, pillarField) + 2 * WALK_PER_BLOCK;
+                final boolean ok = relaxFrag(nodes, current, gCur, edge, drx, dry, drz, fd,
+                        wb[0], wb[1], wb[2], grx, gry, grz, hScale, null,
+                        RegionAddress.opposite(cornerFace(a2, s2)), false, bound, tube, true, false,
+                        grid, level);
+                if (stats != null) stats[7]++;
+                if (TRACE) traceCand("corner-field", drx, dry, drz, fd, edge, wb[0], wb[1], wb[2], ok);
+            } else if (!firstHop) {
+                // The corner node's own exit: 0 virtual traverse + the ~1 dry boundary hop (§4.3.1 —
+                // typeB is priced dry/walk for a virtual source; relaxFrag's floor keeps it ≥ 1). The D
+                // portal is R15's estimate: D's corner-touching footprint ∩ the corner column.
+                cornerAnchor(level, minY, drx, dry, drz, rfD, fd, a1, s1, a2, s2, -1, 0, true, wb);
+                final boolean ok = relaxFrag(nodes, current, gCur, WALK_PER_BLOCK, drx, dry, drz, fd,
+                        wb[0], wb[1], wb[2], grx, gry, grz, hScale, null,
+                        RegionAddress.opposite(cornerFace(a2, s2)), false, bound, tube, false, false,
+                        grid, level);
+                if (TRACE) traceCand("corner-exit", drx, dry, drz, fd, WALK_PER_BLOCK,
+                        wb[0], wb[1], wb[2], ok);
+            }
+        }
+        if (anyExit && firstHop && !dijkstra) {
+            // Hop 1 of the §4.3 chain: A → B.CORNER through the FIRST crossing axis (a1 < a2 — the §4.4
+            // X→Y→Z order collectRealizedCrossings forces; anything else falsely blames the corner hop).
+            // Cost carries the REAL across-A traverse (what stops corners out-competing face crossings at
+            // A's expansion, §4.3.1) + the ~1 dry boundary hop; the B row is NO_PORTAL (R32) so no
+            // consumer can mistake it for a place, and R31's zero-traverse rule leaves its entry portal
+            // unread at its own pop.
+            cornerAnchor(level, minY, arx, ary, arz, rfA, fragA, a1, s1, a2, s2, -1, 0, false, wa);
+            final int brx = stepRX(arx, a1, s1);
+            final int bry = stepRY(ary, a1, s1);
+            final int brz = stepRZ(arz, a1, s1);
+            final float edge1 = transitCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, typeA,
+                    false, safeFall, false, pillarField) + WALK_PER_BLOCK;
+            final boolean ok = relaxFrag(nodes, current, gCur, edge1, brx, bry, brz, CORNER_FRAG,
+                    NO_PORTAL, NO_PORTAL, NO_PORTAL, grx, gry, grz, hScale, null,
+                    RegionAddress.opposite(cornerFace(a1, s1)), false, null, null, false, false,
+                    grid, level);
+            if (stats != null) stats[7]++;
+            if (TRACE) traceCand("corner-hop", brx, bry, brz, CORNER_FRAG, edge1, wa[0], wa[1], wa[2], ok);
+        }
+    }
+
+    /** The vertex's first hop / field relax (the §4.3 three-hop chain's A-side — exits re-derive at the
+     *  B and C pops). Mirrors {@link #emitCorner2}'s emission discipline. */
+    private static void emitVertexFirstHop(Nodes nodes, int current, float gCur, RegionGrid grid, int level,
+                                           int minY, int arx, int ary, int arz, int fragA,
+                                           RegionFragments rfA, int typeA, int entX, int entY, int entZ,
+                                           int grx, int gry, int grz, int safeFall,
+                                           RegionEdgeBlacklist blacklist, float pillarField, float hScale,
+                                           RegionBox bound, RegionTube tube, boolean dijkstra,
+                                           int sx, int sy, int sz, int firstD, int[] stats,
+                                           int[] wa, int[] wb) {
+        final int drx = arx + sx, dry = ary + sy, drz = arz + sz;
+        final RegionFragments rfD = grid.fragmentRecord(level, drx, dry, drz);
+        if (rfD == null) return;
+        final int dfx = cornerFace(0, -sx);
+        final int dfy = cornerFace(1, -sy);
+        final int dfz = cornerFace(2, -sz);
+        final long aKey = fragmentKey(arx, ary, arz, fragA);
+        final int countD = rfD.fragmentCount();
+        boolean anyExit = false;
+        for (int fd = firstD; fd < countD; fd++) {
+            if (fd > firstD && !cornerFragQualifiesD(rfD, fd, dfx, 0, -sx, dfy, 1, -sy, dfz, 2, -sz)) continue;
+            if (blacklist != null && blacklist.contains(aKey, fragmentKey(drx, dry, drz, fd))) {
+                if (stats != null) stats[6]++;
+                continue;
+            }
+            if (bound != null && !bound.contains(drx, dry, drz)) { nodes.outOfBoxRejected = true; continue; }
+            if (tube != null && !tube.contains(drx, dry, drz)) continue;
+            anyExit = true;
+            if (dijkstra) {
+                cornerAnchor(level, minY, arx, ary, arz, rfA, fragA, 0, sx, 1, sy, 2, sz, false, wa);
+                cornerAnchor(level, minY, drx, dry, drz, rfD, fd, 0, sx, 1, sy, 2, sz, true, wb);
+                final float edge = transitCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, typeA,
+                        false, safeFall, true, pillarField) + 3 * WALK_PER_BLOCK;
+                final boolean ok = relaxFrag(nodes, current, gCur, edge, drx, dry, drz, fd,
+                        wb[0], wb[1], wb[2], grx, gry, grz, hScale, null,
+                        RegionAddress.opposite(cornerFace(2, sz)), false, bound, tube, true, false,
+                        grid, level);
+                if (stats != null) stats[7]++;
+                if (TRACE) traceCand("corner-field", drx, dry, drz, fd, edge, wb[0], wb[1], wb[2], ok);
+            }
+        }
+        if (anyExit && !dijkstra) {
+            cornerAnchor(level, minY, arx, ary, arz, rfA, fragA, 0, sx, 1, sy, 2, sz, false, wa);
+            final int brx = arx + sx;
+            final float edge1 = transitCost(wa[0] - entX, wa[1] - entY, wa[2] - entZ, typeA,
+                    false, safeFall, false, pillarField) + WALK_PER_BLOCK;
+            final boolean ok = relaxFrag(nodes, current, gCur, edge1, brx, ary, arz, CORNER_FRAG,
+                    NO_PORTAL, NO_PORTAL, NO_PORTAL, grx, gry, grz, hScale, null,
+                    RegionAddress.opposite(cornerFace(0, sx)), false, null, null, false, false,
+                    grid, level);
+            if (stats != null) stats[7]++;
+            if (TRACE) traceCand("corner-hop", brx, ary, arz, CORNER_FRAG, edge1, wa[0], wa[1], wa[2], ok);
+        }
+    }
+
+    /**
+     * Expansion of a popped CORNER-CUT node (R14/R35): derive the source {@code (A, fragA)} back from the
+     * key/rows, re-derive the up-to-N exits from the §4.1 bbox preconditions (§4.3 — cheap, no
+     * memoization), and relax each surviving exit. Touches NOTHING else — no fragment record of its own
+     * region, no mine block, no face loop.
+     *
+     * <p><b>Source derivation.</b> A 2-axis corner's B pins A uniquely: {@code entryFace} names A's
+     * region, {@code fromFrag} its fragment (§4.3). A vertex's C node carries {@code fromFrag ==
+     * CORNER_FRAG}, so A is recovered by walking {@code nodes.parent[]} to the B row — two vertex chains
+     * sharing (B, C) collide on C's key and keep the cheaper parent, an ACCEPTED approximation (the
+     * geometry needs two simultaneous vertex corners through one B and C; today's movement set has no
+     * dry-land vertex move at all, §2.1).
+     *
+     * <p><b>Exit axes follow the §4.4 X→Y→Z order:</b> a B entered along axis {@code a1} exits along a
+     * LATER axis only (2-axis exit straight to D, or — from an X-entered B below the quadtree — the
+     * vertex's Y continuation to {@code C.CORNER}); a C exits along Z. Preconditions are re-checked in
+     * full (records can differ from emission time only across searches, never mid-search — the region
+     * tier is tick-confined — but the re-check is the design's own no-memoization rule).
+     */
+    private static void expandCornerNode(Nodes nodes, int current, int seq, RegionGrid grid, int level,
+                                         int minY, int grx, int gry, int grz, boolean canBreak,
+                                         boolean canPlace, int safeFall, RegionEdgeBlacklist blacklist,
+                                         float hScale, RegionBox bound, RegionTube tube, boolean dijkstra) {
+        if (canPlace || dijkstra) return; // defensive — only a no-place FORWARD search mints corner nodes
+        final int nrx = nodes.x[current], nry = nodes.y[current], nrz = nodes.z[current];
+        final int entryFace = nodes.entryFace[current];
+        if (entryFace > 5) return; // defensive — a chain hop always crosses a real face
+        final int inAxis = entryFace >> 1;
+        final int inSign = (entryFace & 1) == 0 ? 1 : -1; // even face = the −side face toward A ⇒ chain sign +
+        final int fromFrag = nodes.fromFrag[current];
+        final float gCur = nodes.g[current];
+        final int[] wa = nodes.wa;
+        final int[] wb = nodes.wb;
+        final int[] stats = LAST_CORNER_STATS.get();
+        if (TRACE) trace("E " + seq + " L" + level + " region=" + nrx + "," + nry + "," + nrz
+                + " frag=CORNER g=" + gCur + " f=" + nodes.f[current] + " [corner via face " + entryFace + "]");
+        if (fromFrag == CORNER_FRAG) {
+            // Vertex mid-node C: entered along Y (the only §4.4-legal shape); A is two hops back.
+            final int bRow = nodes.parent[current];
+            if (bRow < 0 || nodes.frag[bRow] != CORNER_FRAG) return;
+            final int bEntry = nodes.entryFace[bRow];
+            if (bEntry > 5 || (bEntry >> 1) != 0 || inAxis != 1) return; // chain is X then Y here
+            final int sX = (bEntry & 1) == 0 ? 1 : -1;
+            final int sY = inSign;
+            final int brx = RegionAddress.neighborRX(nrx, entryFace);
+            final int bry = RegionAddress.neighborRY(nry, entryFace);
+            final int brz = RegionAddress.neighborRZ(nrz, entryFace);
+            final int arx = RegionAddress.neighborRX(brx, bEntry);
+            final int ary = RegionAddress.neighborRY(bry, bEntry);
+            final int arz = RegionAddress.neighborRZ(brz, bEntry);
+            final int fragA = nodes.fromFrag[bRow];
+            ensureNode(grid, level, arx, ary, arz);
+            final RegionFragments rfA = grid.fragmentRecord(level, arx, ary, arz);
+            if (isUniformNode(rfA) || fragA < 0 || fragA >= rfA.fragmentCount()) return;
+            if ((rfA.typeBits(fragA) & RegionFragments.TYPE_S) == 0) return; // note-2 re-check (B-branch parity)
+            for (int sZ = -1; sZ <= 1; sZ += 2) {
+                final int firstD = vertexPreconditions(grid, level, arx, ary, arz, rfA, fragA,
+                        sX, sY, sZ, canBreak, null);
+                if (firstD < 0) continue;
+                emitVertexExit(nodes, current, gCur, grid, level, minY, arx, ary, arz, fragA,
+                        grx, gry, grz, blacklist, hScale, bound, tube, sX, sY, sZ, firstD, null, wb);
+            }
+            return;
+        }
+        // 2-axis B node (or the vertex's first hop): A across entryFace, fragA in the key.
+        final int arx = RegionAddress.neighborRX(nrx, entryFace);
+        final int ary = RegionAddress.neighborRY(nry, entryFace);
+        final int arz = RegionAddress.neighborRZ(nrz, entryFace);
+        final int fragA = fromFrag;
+        ensureNode(grid, level, arx, ary, arz);
+        final RegionFragments rfA = grid.fragmentRecord(level, arx, ary, arz);
+        if (isUniformNode(rfA) || fragA < 0 || fragA >= rfA.fragmentCount()) return;
+        if ((rfA.typeBits(fragA) & RegionFragments.TYPE_S) == 0) return;
+        final boolean hasY = level < RegionAddress.OCTREE_TOP;
+        for (int a2 = inAxis + 1; a2 <= 2; a2++) {
+            if (a2 == 1 && !hasY) continue;
+            for (int s2 = -1; s2 <= 1; s2 += 2) {
+                final int firstD = corner2Preconditions(grid, level, arx, ary, arz, rfA, fragA,
+                        inAxis, inSign, a2, s2, canBreak, null);
+                if (firstD < 0) continue;
+                emitCorner2(nodes, current, gCur, grid, level, minY, arx, ary, arz, fragA, rfA,
+                        0 /* typeA unused off the first hop */, 0, 0, 0, grx, gry, grz, safeFall,
+                        blacklist, 0f, hScale, bound, tube, false, inAxis, inSign, a2, s2, firstD,
+                        null /* §5.1 counters are EMISSION-time only — a pop re-derivation would
+                                double-count [6] (review dim1 F3) */, wa, wb, false);
+            }
+        }
+        if (inAxis == 0 && hasY) {
+            // Vertex continuation: B (entered along X) hands the chain to C along Y when the full vertex
+            // preconditions hold for SOME (sz, fragD) — the exits themselves re-derive at C's pop.
+            for (int sY = -1; sY <= 1; sY += 2) {
+                boolean anyVertex = false;
+                for (int sZ = -1; sZ <= 1 && !anyVertex; sZ += 2) {
+                    anyVertex = vertexPreconditions(grid, level, arx, ary, arz, rfA, fragA,
+                            inSign, sY, sZ, canBreak, null) >= 0
+                            && vertexExitSurvives(grid, level, arx, ary, arz, fragA, blacklist, bound,
+                                    tube, nodes, inSign, sY, sZ);
+                }
+                if (!anyVertex) continue;
+                final int cry2 = nry + sY;
+                final boolean ok = relaxFrag(nodes, current, gCur, WALK_PER_BLOCK, nrx, cry2, nrz,
+                        CORNER_FRAG, NO_PORTAL, NO_PORTAL, NO_PORTAL, grx, gry, grz, hScale, null,
+                        RegionAddress.opposite(cornerFace(1, sY)), false, null, null, false, false,
+                        grid, level);
+                if (TRACE) traceCand("corner-hop", nrx, cry2, nrz, CORNER_FRAG, WALK_PER_BLOCK,
+                        NO_PORTAL, NO_PORTAL, NO_PORTAL, ok);
+            }
+        }
+    }
+
+    /** Whether at least one of a vertex's D exits survives precondition 6 + R36 (probed before minting the
+     *  C hop, so a fully-refuted vertex stops paying chain nodes; a box-rejected D records the reject and
+     *  a tube-rejected D is silently skipped — full parity with {@link #emitCorner2}'s exit gates). */
+    private static boolean vertexExitSurvives(RegionGrid grid, int level, int arx, int ary, int arz,
+                                              int fragA, RegionEdgeBlacklist blacklist, RegionBox bound,
+                                              RegionTube tube, Nodes nodes, int sx, int sy, int sz) {
+        final int drx = arx + sx, dry = ary + sy, drz = arz + sz;
+        final RegionFragments rfD = grid.fragmentRecord(level, drx, dry, drz);
+        if (rfD == null) return false;
+        final int dfx = cornerFace(0, -sx);
+        final int dfy = cornerFace(1, -sy);
+        final int dfz = cornerFace(2, -sz);
+        final long aKey = fragmentKey(arx, ary, arz, fragA);
+        final int countD = rfD.fragmentCount();
+        for (int fd = 0; fd < countD; fd++) {
+            if (!cornerFragQualifiesD(rfD, fd, dfx, 0, -sx, dfy, 1, -sy, dfz, 2, -sz)) continue;
+            if (blacklist != null && blacklist.contains(aKey, fragmentKey(drx, dry, drz, fd))) continue;
+            if (bound != null && !bound.contains(drx, dry, drz)) { nodes.outOfBoxRejected = true; continue; }
+            if (tube != null && !tube.contains(drx, dry, drz)) continue;
+            return true;
+        }
+        return false;
+    }
+
+    /** A vertex C node's terminal exit into {@code (D, fd)} — mirrors {@link #emitCorner2}'s exit arm for
+     *  the three-hop chain (0 virtual traverse + one floored dry boundary hop; R15 portal; R36 containment
+     *  on D via {@link #relaxFrag}'s own test). */
+    private static void emitVertexExit(Nodes nodes, int current, float gCur, RegionGrid grid, int level,
+                                       int minY, int arx, int ary, int arz, int fragA,
+                                       int grx, int gry, int grz, RegionEdgeBlacklist blacklist,
+                                       float hScale, RegionBox bound, RegionTube tube,
+                                       int sx, int sy, int sz, int firstD, int[] stats, int[] wb) {
+        final int drx = arx + sx, dry = ary + sy, drz = arz + sz;
+        final RegionFragments rfD = grid.fragmentRecord(level, drx, dry, drz);
+        if (rfD == null) return;
+        final int dfx = cornerFace(0, -sx);
+        final int dfy = cornerFace(1, -sy);
+        final int dfz = cornerFace(2, -sz);
+        final long aKey = fragmentKey(arx, ary, arz, fragA);
+        final int countD = rfD.fragmentCount();
+        for (int fd = firstD; fd < countD; fd++) {
+            if (fd > firstD && !cornerFragQualifiesD(rfD, fd, dfx, 0, -sx, dfy, 1, -sy, dfz, 2, -sz)) continue;
+            if (blacklist != null && blacklist.contains(aKey, fragmentKey(drx, dry, drz, fd))) {
+                if (stats != null) stats[6]++;
+                continue;
+            }
+            cornerAnchor(level, minY, drx, dry, drz, rfD, fd, 0, sx, 1, sy, 2, sz, true, wb);
+            final boolean ok = relaxFrag(nodes, current, gCur, WALK_PER_BLOCK, drx, dry, drz, fd,
+                    wb[0], wb[1], wb[2], grx, gry, grz, hScale, null,
+                    RegionAddress.opposite(cornerFace(2, sz)), false, bound, tube, false, false,
+                    grid, level);
+            if (TRACE) traceCand("corner-exit", drx, dry, drz, fd, WALK_PER_BLOCK, wb[0], wb[1], wb[2], ok);
         }
     }
 
@@ -2018,9 +2828,20 @@ public final class RegionPathfinder {
     /**
      * Walk {@code parent} back from {@code reachedRow} to {@code startRow}, emitting region coords + fragment id
      * + portal cell per step in travel order (the fragment-model {@link #reconstruct}).
+     *
+     * <p><b>R40 (corner-crossing §4.5.1) is enforced HERE, at the source:</b> a skeleton never begins or
+     * ends on a corner-cut step. The start row is always real, but a budget-drained PARTIAL reconstructs
+     * from the best-so-far row, which CAN be a mid-chain corner node — trailing corner steps are trimmed
+     * before the walk (the chain's tail covers no ground, so nothing real is lost), which is what lets
+     * every downstream boundary walk (R37's hand-down, {@code splice}'s assert) treat a corner boundary
+     * as a caller bug rather than a normal case.
      */
     private static RegionPathPlan reconstructFragments(Nodes nodes, int startRow, int reachedRow, int minY,
                                                        int level, boolean reachedGoalRegion) {
+        while (reachedRow != startRow && nodes.parent[reachedRow] != -1
+                && nodes.frag[reachedRow] == CORNER_FRAG) {
+            reachedRow = nodes.parent[reachedRow];
+        }
         int len = 0;
         for (int n = reachedRow; n != -1; n = nodes.parent[n]) {
             len++;

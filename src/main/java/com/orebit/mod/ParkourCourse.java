@@ -209,6 +209,13 @@ public final class ParkourCourse {
         BlockState iceRunway;           // != null: runway AND takeoff cell are this slippery block, so the
                                         // bot must launch from ICE. See iceRestTrial.
         boolean padTakeoff;
+        /** Region-corner Y pin: the runway is a free-standing 1-wide STAIRCASE — cell {@code k} at
+         *  {@code Y0 + stairBase + k}, so the takeoff floor sits at {@code Y0 + stairBase + RUN - 1} and
+         *  the (jdx,jdy,jdz) step off it crosses lateral and vertical region boundaries at once. The
+         *  Trial's Y bookkeeping (landY/landedFeetY/goal/fell/atGoal) is all {@code jdy}-derived, so the
+         *  card passes {@code jdy = stairBase + RUN} and everything downstream stays consistent. */
+        boolean stairRunway;
+        int stairBase;
         /** Non-null = put this STAIR on the takeoff cell (stone runway elsewhere) — the stair-takeoff family. */
         BlockState stairTakeoff;             // the takeoff cell ALONE is raised one block, so the route must
                                         // ASCEND onto a 1-wide pad and launch from ON TOP of it -- the
@@ -404,6 +411,7 @@ public final class ParkourCourse {
             // The region-corner pin lives beside the diag cards because it shares their shape — but it is
             // a REGION-tier fixture, not a parkour one. See regionCornerPin().
             regionCornerPin();
+            regionCornerYPin();
             // OFFSET (c,±1): approach +X, jump lands 1 cell OFF the cardinal line — the gated tier. The cardinal
             // line is kept pure gap (1-wide runway + 1-wide off-axis landing) so the aligned scan finds no
             // landing and ARMS the offset probe; nothing else can reach the landing. Both lateral signs.
@@ -1140,6 +1148,29 @@ public final class ParkourCourse {
                     Template.REACH, false, BASE_X - STRIDE, BASE_Z - STRIDE));
         }
 
+        /**
+         * REGION-CORNER <b>Y</b> PIN (2026-08-28, corner-crossing §6 item 0) — the {@link #regionCornerPin}'s
+         * vertical sibling: a free-standing 1-wide staircase whose LATERAL and VERTICAL region boundaries
+         * coincide on the final step, so the route's last {@code Ascend} hops corner-to-corner between
+         * X- and Y-diagonal regions and (before the corner-crossing arc) the region tier had no edge for it.
+         *
+         * <p>Arithmetic ({@code >> 4} form — §0.1's caveat): {@code stairBase = 3} puts runway floors at
+         * {@code 153 + k} for {@code k = 0..RUN-1}, takeoff floor {@code (−17, 159)} — the TOP row of
+         * {@code ry = (159+64)>>4 = 13} — and the {@code (+1,+1)} step lands on floor {@code (−16, 160)},
+         * the BOTTOM row of {@code ry = 14}. {@code baseX = −23 ⇒ takeoffX = −17 (rx −2), landX = −16
+         * (rx −1)}: both boundaries cross on that one step. {@code z = −44} is constant (no third axis —
+         * this is the X+Y corner, not the vertex), off-snake like every explicit-base pin. The staircase
+         * being free-standing INSIDE region A is load-bearing: the lower steps give A's air fragment its
+         * footing (TYPE_S), exactly the §2.1 worked example.
+         */
+        void regionCornerYPin() {
+            Trial t = new Trial("regioncornerY.walkin", Approach.WALKIN, 1, 0, 1, 10, 0,
+                    Template.REACH, false, -23, -44);
+            t.stairRunway = true;
+            t.stairBase = 3; // jdy = stairBase + RUN = 10 keeps landY/landedFeetY/goal/fell/atGoal honest
+            trials.add(t);
+        }
+
         /** OFFSET (c,±lat) knight's-move jump, both precursor conditions. */
         void offset(String name, int c, int lat) {
             addTrial(name + ".walkin", Approach.WALKIN, 1, 0, c, 0, lat, Template.OFFSET, false);
@@ -1236,7 +1267,8 @@ public final class ParkourCourse {
             bot.reviveIfDead();
             bot.setHealth(bot.getMaxHealth());
             bot.setMode(AllyBotEntity.Mode.STAY);
-            bot.setPos(tr.startX, Y0 + 1 + (tr.descendRunway ? 1 : 0), tr.startZ); // raised-runway spawn +1
+            bot.setPos(tr.startX, Y0 + 1 + (tr.descendRunway ? 1 : 0)
+                    + (tr.stairRunway ? tr.stairBase : 0), tr.startZ); // raised-runway spawn +1 / stair base
             bot.setDeltaMovement(Vec3.ZERO);
             bot.setYRot(tr.startYaw);
             bot.setYHeadRot(tr.startYaw);
@@ -1670,6 +1702,10 @@ public final class ParkourCourse {
                 // (ahead of wideRunway) so the pad stays 1x1: a 3-wide takeoff would hand the bot lateral
                 // room the in-game shape never has.
                 else if (tr.padTakeoff) place(cx, k == RUN - 1 ? Y0 + 1 : Y0, cz);
+                // stairRunway (region-corner Y pin): every runway cell rises +1 — a free-standing 1-wide
+                // staircase, ahead of wideRunway so it stays 1-wide (side floors would hand the region
+                // tier a face route and void the corner fixture).
+                else if (tr.stairRunway) place(cx, Y0 + tr.stairBase + k, cz);
                 // stairTakeoff: flat stone approach with a STAIR on the last (takeoff) cell. 1-wide, in this
                 // same branch chain, for the padTakeoff reason — a 3-wide stair top would hand the bot
                 // lateral room the in-game shape never has.

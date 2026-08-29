@@ -201,6 +201,19 @@ public final class RegionPathPlan {
         if (drop < 0 || drop > old.size() - 1) {
             throw new IllegalArgumentException("splice drop " + drop + " out of range for size " + old.size());
         }
+        // R40 (DESIGN-region-corner-crossing-v2.md §4.5.1): no index naming a skeleton POSITION may name a
+        // corner-cut step — a chain node is not a place, and a boundary landing on one would surface three
+        // layers away as a finer level aiming at open air. The producers are corner-free by construction
+        // (reconstructFragments trims a partial-best corner tail; the commit cursor is fragment-gated; the
+        // window target rides R32's NO_PORTAL) — so a corner boundary HERE is a caller bug, failed at the
+        // boundary. (The splice RENUMBERS every step; no corner index is stable across one.)
+        if (RegionPathfinder.isCornerCut(old.fragmentId(drop))) {
+            throw new IllegalArgumentException("splice drop " + drop + " lands on a corner-cut step (R40)");
+        }
+        if (RegionPathfinder.isCornerCut(suffix.fragmentId(suffix.size() - 1))
+                || RegionPathfinder.isCornerCut(old.fragmentId(old.size() - 1))) {
+            throw new IllegalArgumentException("splice join/tail lands on a corner-cut step (R40)");
+        }
         final int keep = old.size() - drop;             // old[drop .. size-1], preserved verbatim
         final int extra = Math.max(0, suffix.size() - 1); // suffix[1 ..] (suffix[0] == old tail, deduped)
         final int n = keep + extra;
@@ -245,6 +258,30 @@ public final class RegionPathPlan {
         }
         return new RegionPathPlan(rx, ry, rz, fr, px, py, pz, dg, n, old.minY, old.level,
                 suffix.reachedGoalRegion);
+    }
+
+    /**
+     * The §4.6 corner-run COLLAPSE (DESIGN-region-corner-crossing-v2.md, R17), as an instance primitive so
+     * every blame producer shares ONE walk: hop {@code hop} is the edge {@code step[hop] → step[hop+1]};
+     * when either endpoint is a corner-cut chain step, walk the FROM endpoint BACKWARD and the TO endpoint
+     * FORWARD past the run and fill {@code out[0]/out[1]} with the physical
+     * {@link RegionPathfinder#fragmentNodeKey}s of the REAL endpoints — the invalidation must say
+     * {@code (A, fragA) → (D, fragD)}, never a virtual intermediate (a chain node carries no stable
+     * identity across {@code (A, D)} pairs, and a row naming one would kill every corner through it).
+     * Key CONSTRUCTION, not blame selection: the FROM walk deliberately ignores any window bound, and R40
+     * guarantees both walks terminate on a real step (a skeleton never begins or ends on a corner-cut
+     * step). Consumers: {@code PathPlan.blockedHop} (the block-tier blame) and
+     * {@code HierarchicalRegionPlan.blameTubeConfined} (the escalation blame — a §4.5.1-census member the
+     * design's table missed).
+     */
+    public void collapsedHopKeys(int hop, long[] out) {
+        int from = hop;
+        while (from > 0 && RegionPathfinder.isCornerCut(fragmentId(from))) from--;
+        int to = hop + 1;
+        final int lastStep = size() - 1;
+        while (to < lastStep && RegionPathfinder.isCornerCut(fragmentId(to))) to++;
+        out[0] = RegionPathfinder.fragmentNodeKey(rx(from), ry(from), rz(from), fragmentId(from));
+        out[1] = RegionPathfinder.fragmentNodeKey(rx(to), ry(to), rz(to), fragmentId(to));
     }
 
     /** Trim {@code a} to exactly {@code size} (returns it unchanged when already that length). */

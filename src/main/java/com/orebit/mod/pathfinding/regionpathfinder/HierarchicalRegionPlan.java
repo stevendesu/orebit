@@ -614,6 +614,9 @@ public final class HierarchicalRegionPlan {
         }
         l0ExtAttempted = true;
         final int tail = sk.size() - 1;
+        // The tail is a REAL step by R40 (corner-crossing §4.5.1): reconstructFragments trims a
+        // partial-best corner tail at the source and splice asserts its join/tail, so the join test below
+        // never compares against the CORNER id (the "permanent degraded" trap R37 describes).
         BlockPos from = sk.portalCell(tail); // the tail's real on-face cell — anchors the search AT the tail node
         if (from == null) {
             from = sk.centerOf(tail); // NO_PORTAL tail (§4.1 — start step / center-model fallback)
@@ -718,13 +721,21 @@ public final class HierarchicalRegionPlan {
         // per-goal by construction) is the correct scope: this navigation still reroutes to another approach.
         // Legacy files written before this rule may still carry V-rows; CostPyramidCodec.decode filters them.
         final boolean virtualGoalHop = RegionPathfinder.isVirtualGoal((int) ((l0ToKey >>> 49) & 0x3F));
+        // Corner-crossing §4.6/§5.1: a DIAGONAL row (the from/to regions differ on ≥2 axes — the shape
+        // PathPlan.blockedHop's corner-run collapse emits) is a refuted optimistic corner. NEAR vs FAR is
+        // §5.1's refutation split: NEAR (= startScoped) rows stay journey-scoped, so R30's un-merge has
+        // nothing durable to consume (§4.6a — the ordinary HPA relationship, not a defect).
+        final int cornerAxes = (RegionAddress.unpackRX(l0FromKey) != RegionAddress.unpackRX(l0ToKey) ? 1 : 0)
+                + (RegionAddress.unpackRY(l0FromKey) != RegionAddress.unpackRY(l0ToKey) ? 1 : 0)
+                + (RegionAddress.unpackRZ(l0FromKey) != RegionAddress.unpackRZ(l0ToKey) ? 1 : 0);
+        final boolean cornerHop = cornerAxes >= 2;
         // COLD diagnostic (one line per BLOCKED result): the #5 record decision with the exact guard inputs,
         // so a repeated-blame oracle anomaly is attributable to record-time scoping vs persistence loss.
         com.orebit.mod.OrebitCommon.LOGGER.info(
-                "[Orebit] #5 record-decision hop={}->{} startScoped={} vGoal={} recorded={} searchStartFloor={}",
+                "[Orebit] #5 record-decision hop={}->{} startScoped={} vGoal={} corner={} recorded={} searchStartFloor={}",
                 RegionPathfinder.describeFragKey(l0FromKey), RegionPathfinder.describeFragKey(l0ToKey),
-                startScoped, virtualGoalHop, recordToMemory && !startScoped && !virtualGoalHop,
-                searchStartFloor);
+                startScoped, virtualGoalHop, cornerHop ? (startScoped ? "NEAR" : "FAR") : "no",
+                recordToMemory && !startScoped && !virtualGoalHop, searchStartFloor);
         if (recordToMemory && !startScoped && !virtualGoalHop) {
             crossingMemory.record(0, l0FromKey, l0ToKey, capsSig,
                     RegionCrossingMemory.PROV_PROOF, BotCaps::sigDominates);
@@ -733,8 +744,25 @@ public final class HierarchicalRegionPlan {
             // a PROV_ROLLED_UP row at the parent level and recurse upward. Cold (a few per goal), tick-
             // confined, read-only on the pyramid. Deliberately NOT invoked from blameTubeConfined:
             // PROV_ESCALATION rows are inference, not proof — they neither trigger nor count in a fold.
+            // (A diagonal corner row is a safe no-op here: InvalidationRollup.faceOf returns −1 for a
+            // non-face-adjacent pair and the fold bails — §4.6.)
             InvalidationRollup.foldFrom(grid.pyramid(), crossingMemory, 0, l0FromKey, l0ToKey, capsSig,
                     BotCaps::sigDominates);
+            if (cornerHop) {
+                // R30 (corner-crossing §4.10): the corner that justified fusing two coarse children is now
+                // durably refuted — RE-MERGE the shared ancestor chain so the parent fragment splits
+                // (coarse levels are corrected STRUCTURALLY; diagonal rows never roll up as blame), and
+                // evict every L1+ invalidation row touching either endpoint (the split renumbers coarse
+                // fragment ids; the L0 rows — including the one just recorded, which gates re-emission —
+                // survive). Tick-thread direct is safe: the region tier is tick-confined and planner-pool
+                // workers read only RegionCostField's bakeSlabs copies, never live records (I5, resolved
+                // 2026-08-28). The mechanics live beside the block-change flush's twin machinery.
+                com.orebit.mod.worldmodel.hpa.HpaMaintenance.onCornerRefuted(grid,
+                        RegionAddress.unpackRX(l0FromKey), RegionAddress.unpackRY(l0FromKey),
+                        RegionAddress.unpackRZ(l0FromKey),
+                        RegionAddress.unpackRX(l0ToKey), RegionAddress.unpackRY(l0ToKey),
+                        RegionAddress.unpackRZ(l0ToKey));
+            }
         }
         // Re-plan L0 within the current L1 window; a tube-confined failure (the obstacle is bigger than the
         // corridor at some level) escalates with REALIZED blame — the first parent-window hop the failed
@@ -917,9 +945,17 @@ public final class HierarchicalRegionPlan {
                 break;
             }
         }
-        final int from = to - 1;
-        final long fromKey = RegionPathfinder.fragmentNodeKey(sk.rx(from), sk.ry(from), sk.rz(from), sk.fragmentId(from));
-        final long toKey = RegionPathfinder.fragmentNodeKey(sk.rx(to), sk.ry(to), sk.rz(to), sk.fragmentId(to));
+        // CORNER-RUN COLLAPSE (corner-crossing §4.6/R17/R40 — this site joins §4.5.1's census, which the
+        // design's table missed): the blamed parent hop can land on a corner chain — a corner intermediate
+        // is exactly the parent cell a corner-following child route never ENTERS, so it reads untouched —
+        // and a row naming (A, CORNER) would be inert (the emitter's precondition-6 probe tests only the
+        // DIAGONAL (A, D) pair), making the second escalation hit the contains() bail below and give up on
+        // a route with a viable parent detour. Collapse BOTH endpoints to the real steps first — the same
+        // walk PathPlan.blockedHop uses, shared via RegionPathPlan.collapsedHopKeys.
+        final long[] hopKeys = new long[2]; // cold path (one per escalation event) — alloc fine
+        sk.collapsedHopKeys(to - 1, hopKeys);
+        final long fromKey = hopKeys[0];
+        final long toKey = hopKeys[1];
         if (blacklists[parent].contains(fromKey, toKey)) {
             return false; // defensive: no NEW fact to add — bail rather than loop unchanged
         }
@@ -959,7 +995,16 @@ public final class HierarchicalRegionPlan {
      */
     private BlockPos handDown(int L, LevelPlan lp) {
         final RegionPathPlan sk = lp.skeleton;
-        final int far = windowFar(L, lp);
+        int far = windowFar(L, lp);
+        // R37/R40 (corner-crossing §4.5): windowFar is purely positional, so it CAN land on a corner-cut
+        // chain step — a NO_PORTAL non-place whose centerOf is the middle of the pure-air intermediate the
+        // corner exists to route around. Walk FORWARD to the next real-fragment step (that is D, ≤ 2 away;
+        // R40 — a skeleton never ends on a corner step) and hand down ITS portal, which R15 stamps on the
+        // corner column. The goal check runs AFTER the walk so a corner run abutting the tail still hands
+        // down the REAL GOAL when this level reaches the goal region (the javadoc's own contract).
+        while (far < sk.size() - 1 && RegionPathfinder.isCornerCut(sk.fragmentId(far))) {
+            far++;
+        }
         if (sk.reachedGoalRegion() && far == sk.size() - 1) {
             return goal;
         }
@@ -970,7 +1015,9 @@ public final class HierarchicalRegionPlan {
     /**
      * Resolve which level-0 fragment of region {@code (brx,bry,brz)} the bot at {@code floor} occupies — the
      * commit-advance identity for the {@link #onBotMoved} fragment gate. Returns a kept fragment id
-     * ({@code 0..62}), or {@code -1} when membership cannot be resolved unambiguously (then NO skeleton step
+     * ({@code 0..}{@link RegionFragments#MAX_FRAGMENTS}{@code −1} — NEVER a sentinel, which is what keeps
+     * the fragment gate from ever advancing onto a corner-cut step, R41), or {@code -1} when membership
+     * cannot be resolved unambiguously (then NO skeleton step
      * matches — declining to advance is the safe fallback: advancing is only an optimization, and the window
      * slide is also driven by block-plan progress at the driver).
      *

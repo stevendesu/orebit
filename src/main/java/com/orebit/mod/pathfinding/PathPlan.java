@@ -2198,17 +2198,27 @@ public final class PathPlan {
             // entry-face + from-fragment. The skeleton stores only region+fragment per step, so entry-face is
             // reconstructed geometrically and from-fragment is the previous step's fragment (VIRTUAL_START_FRAG
             // at the root). This makes (A|from=S → V) independently blameable from (A|from=staircase → V) when
-            // A==G — the cliff false-give-up fix.
+            // A==G — the cliff false-give-up fix. A corner-cut predecessor stamps fromFrag=CORNER_FRAG into
+            // the approach row — intended (corner-crossing R28: search-side parity holds because D's live
+            // row carries the same, and the row is journey-scoped by onBlocked's virtualGoalHop guard).
             out[0] = RegionPathfinder.approachRowKeyForStep(skeleton, hop);
             out[1] = RegionPathfinder.fragmentNodeKey(skeleton.rx(hop + 1), skeleton.ry(hop + 1),
                     skeleton.rz(hop + 1), skeleton.fragmentId(hop + 1));
             return true;
         }
-        out[0] = RegionPathfinder.fragmentNodeKey(skeleton.rx(hop), skeleton.ry(hop),
-                skeleton.rz(hop), skeleton.fragmentId(hop));
-        out[1] = RegionPathfinder.fragmentNodeKey(skeleton.rx(hop + 1), skeleton.ry(hop + 1),
-                skeleton.rz(hop + 1), skeleton.fragmentId(hop + 1));
+        collapseCornerRun(skeleton, hop, out);
         return true;
+    }
+
+    /**
+     * CORNER-RUN COLLAPSE (corner-crossing §4.6, R17): the skeleton says A.f → B.CORNER [→ C.CORNER]
+     * → D.f' but the invalidation must say (A, fragA) → (D, fragD). The ONE shared walk lives on
+     * {@link RegionPathPlan#collapsedHopKeys} so the escalation blame
+     * ({@code HierarchicalRegionPlan.blameTubeConfined}) can never drift from this block-tier site; this
+     * package-private static remains as the blame-parity tests' seam and simply delegates.
+     */
+    static void collapseCornerRun(RegionPathPlan skeleton, int hop, long[] out) {
+        skeleton.collapsedHopKeys(hop, out);
     }
 
     /** The hop index {@link #blockedHop} would blame right now, or {@code -1} (no onward hop) — the single
@@ -2287,8 +2297,19 @@ public final class PathPlan {
                 // The unreached virtual goal V is NOT a physical bot position — it shares the goal region, so when
                 // A==G it would falsely match the start region and anchor the walk at V (⇒ lo==hi ⇒ -1 give-up).
                 // Skip virtual fragments so the anchor lands on the real start step and the V-hop below fires
-                // (the A==G false-give-up fix — NOTES-region-tier.md §2).
-                if (RegionPathfinder.isVirtualGoal(sk.fragmentId(i))) continue;
+                // (the A==G false-give-up fix — NOTES-region-tier.md §2). A corner-cut chain step is skipped
+                // for the SAME reason (corner-crossing §4.6): it sits in a real region B the bot can never
+                // occupy, so anchoring on it when the search started in B mis-scopes the walk.
+                // KNOWN RESIDUAL (review 2026-08-29, dim2 F4): when the failing search STARTS inside B's
+                // region (B holds real floor elsewhere; the skeleton names B only via this corner step),
+                // the anchor falls back to windowStart and blame can land on A→B — unrealizable by
+                // construction — collapsing to an (A, D) row whose FROM (A) is NOT the start region, so it
+                // escapes startScoped and records durably against a possibly-realizable corner. The V-skip's
+                // analog is journey-scoped by virtualGoalHop; no corner equivalent exists. Rare geometry,
+                // the skip itself is §4.6-mandated, and §5.1's NEAR/FAR split is the instrument that would
+                // surface it — recorded here so the silence is not read as an oversight.
+                if (RegionPathfinder.isVirtualGoal(sk.fragmentId(i))
+                        || RegionPathfinder.isCornerCut(sk.fragmentId(i))) continue;
                 if (rawRegionKey(sk, i, minY) == startRegionRawKey) {
                     lo = i;
                     break;

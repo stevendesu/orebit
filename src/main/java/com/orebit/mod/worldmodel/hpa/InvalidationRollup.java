@@ -37,6 +37,17 @@ import java.util.Arrays;
  * fold proves only what the walk-opening enumeration covers, and killing on vacuous truth would blacklist a
  * dig a stronger proof never examined.
  *
+ * <p><b>The corner property (corner-crossing arc, 2026-08-29 — review dim3 F1).</b> Since optimistic
+ * corner crossings shipped, face-openings are no longer the ONLY realization the child-level A* can offer
+ * for a parent crossing: an emittable §4.1 corner between the two parent fragments' masses (a corner-
+ * adjacent child-item pair across the fold face, both masses TYPE_S, footprints meeting at the shared
+ * corner) is a realization the kill-set enumeration below cannot see, and a ROLLED_UP row recorded over a
+ * live one would be a durable, persisted false negative that R30 can never repair (the corner was never
+ * refuted, so no diagonal row exists to trigger the un-merge). {@code foldOnce} therefore BAILS when such
+ * a pair exists — deliberately WITHOUT evaluating the corner's preconditions 3/5/6 (conservative over-bail
+ * degrades to "no fold", the pre-existing safe outcome; evaluating live emission state here would couple
+ * the fold to search-time data it must not read).
+ *
  * <h2>Sig rule (soundness)</h2>
  * The fold is evaluated at {@code S0}, the effective sig of the row being recorded. A constituent counts as
  * dead iff the memory holds a {@code PROV_PROOF}/{@code PROV_ROLLED_UP} row for that exact crossing whose
@@ -110,6 +121,8 @@ public final class InvalidationRollup {
         final int[] mask = new int[PyramidMerger.MAX_ITEMS];       // 6-bit face mask
         final int[] fp = new int[PyramidMerger.MAX_ITEMS * 6];     // packed footprint per face (NO_FACE ok)
         final int[] frag = new int[PyramidMerger.MAX_ITEMS];       // the child's OWN fragment id (0 synthetic)
+        final int[] type = new int[PyramidMerger.MAX_ITEMS];       // item type bits — the §4.9 mirror's R38 input
+        final int[] compType = new int[RegionFragments.MAX_FRAGMENTS]; // per-component OR (mirror scratch)
         final boolean[] unbuilt = new boolean[PyramidMerger.MAX_ITEMS]; // synthetic from an UNBUILT child
         final int[] uf = new int[PyramidMerger.MAX_ITEMS];
         final int[] comp = new int[PyramidMerger.MAX_ITEMS];       // derived parent-fragment id per item
@@ -244,8 +257,84 @@ public final class InvalidationRollup {
         if (constituents == 0) {
             return false; // vacuous kill-set (all-sealed face) — never kill what was never enumerated
         }
+        if (cornerCapablePairExists(a, b, face, fPA, fPB, parentLevel)) {
+            return false; // the corner property (class header): an emittable corner could realize the
+                          // parent crossing — the face-only kill-set cannot prove it dead. Safe no-fold.
+        }
         out[0] = fragmentKey(pAx, pAy, pAz, fPA);
         out[1] = fragmentKey(pBx, pBy, pBz, fPB);
+        return true;
+    }
+
+    /**
+     * The corner property's scan (class header; review dim3 F1): whether any child-item pair — one mapping
+     * into {@code fPA}'s component on side {@code a}, one into {@code fPB}'s on side {@code b} — is
+     * CORNER-adjacent across the fold {@code face} (child cells differing on ≥2 axes, each by ≤1, with the
+     * face axis crossing the parent boundary in the face's direction), with BOTH ITEMS carrying
+     * {@code TYPE_S} and both items' footprints meeting at their shared corner (the same evidence and
+     * face/axis conventions as {@link PyramidMerger}'s §4.9 union pass). The type test is deliberately
+     * ITEM-level, not mass-level: the question is "could the CHILD-level A* emit this corner", and §4.1's
+     * preconditions 2/4 test the child fragments themselves — a typeless item is one the emitter's own
+     * gates refuse regardless of what its mass ORs to (contrast the merge's R38, which unions MASSES and
+     * so tests mass types). Such a pair is a corner the child A* could optimistically emit, so the parent
+     * crossing is not provably dead by face openings alone. Deliberately does NOT evaluate §4.1
+     * preconditions 3/5/6 (conservative over-bail is the safe degrade).
+     */
+    private static boolean cornerCapablePairExists(Side a, Side b, int face, int fPA, int fPB,
+                                                   int parentLevel) {
+        final int faceAxis = face >> 1;               // 0=X, 1=Y, 2=Z (RegionAddress face encoding)
+        final int faceDir = (face & 1) == 1 ? 1 : -1; // PB sits toward +axis of PA iff the face is odd
+        for (int ka = 0; ka < a.n; ka++) {
+            if (parentFragOf(a, ka) != fPA) continue;
+            if ((a.type[ka] & RegionFragments.TYPE_S) == 0) continue;
+            final int sa = a.slot[ka];
+            final int caX = RegionAddress.childRX(a.prx, sa);
+            final int caY = RegionAddress.childRY(a.pry, sa, parentLevel);
+            final int caZ = RegionAddress.childRZ(a.prz, sa);
+            for (int kb = 0; kb < b.n; kb++) {
+                if (parentFragOf(b, kb) != fPB) continue;
+                if ((b.type[kb] & RegionFragments.TYPE_S) == 0) continue;
+                final int sb = b.slot[kb];
+                final int dx = RegionAddress.childRX(b.prx, sb) - caX;
+                final int dy = RegionAddress.childRY(b.pry, sb, parentLevel) - caY;
+                final int dz = RegionAddress.childRZ(b.prz, sb) - caZ;
+                if (dx < -1 || dx > 1 || dy < -1 || dy > 1 || dz < -1 || dz > 1) continue;
+                final int faceDelta = faceAxis == 0 ? dx : (faceAxis == 1 ? dy : dz);
+                if (faceDelta != faceDir) continue; // must actually cross the parent boundary
+                final int axes = (dx != 0 ? 1 : 0) + (dy != 0 ? 1 : 0) + (dz != 0 ? 1 : 0);
+                if (axes < 2) continue;             // face-adjacent pairs are the kill-set's own business
+                if (cornerFootprintsMeetAcross(a, ka, b, kb, dx, dy, dz)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Both items' footprints meet at the shared corner between their child cells (deltas {@code d*} from
+     *  a's cell to b's): for each moving axis, each item touches its toward-corner face and its footprint
+     *  there reaches the corner extreme along every OTHER moving axis — the fold-side twin of
+     *  {@code PyramidMerger.cornerFootprintsMeet}, expressed in world-cell deltas because the two items
+     *  live in DIFFERENT parents (slot xor does not apply across a parent boundary). */
+    private static boolean cornerFootprintsMeetAcross(Side a, int ka, Side b, int kb,
+                                                      int dx, int dy, int dz) {
+        final int[] d = {dx, dy, dz};
+        for (int side = 0; side < 2; side++) {
+            final Side s = side == 0 ? a : b;
+            final int item = side == 0 ? ka : kb;
+            final int sign = side == 0 ? 1 : -1; // b sees the corner toward −d
+            for (int w = 0; w < 3; w++) {
+                if (d[w] == 0) continue;
+                final int toward = d[w] * sign;
+                final int face = (w << 1) | (toward > 0 ? 1 : 0);
+                if (((s.mask[item] >> face) & 1) == 0) return false;
+                final int packed = s.fp[item * 6 + face];
+                for (int w2 = 0; w2 < 3; w2++) {
+                    if (w2 == w || d[w2] == 0) continue;
+                    if (!PyramidMerger.fpReachesExtreme(packed, face, w2, d[w2] * sign > 0)) return false;
+                }
+            }
+        }
         return true;
     }
 
@@ -283,11 +372,16 @@ public final class InvalidationRollup {
      * Gather parent {@code (parentLevel, prx, pry, prz)}'s child items and derive the child-fragment →
      * parent-fragment containment, mirroring {@link PyramidMerger#combineFragments}'s item pass and
      * internal-face union-find exactly (same child order, same uniform/collapsed/unbuilt item rules, same
-     * adjacency/overlap unions) so the derived component ids equal the live parent record's fragment ids.
-     * Skips the footprint projection and every write — read-only. Returns {@code false} only on the Stage-2
-     * deferral condition (an absent/unbuilt child in a persisted-non-resident shard — the live record may be
-     * the persisted one, so containment cannot be trusted) or a component-count mismatch against the parent
-     * record ({@code allZero} handling aside) — the caller then skips the fold.
+     * adjacency/overlap unions, same item TYPES, and — via the shared
+     * {@link PyramidMerger#componentsWithCornerUnions} — the same §4.9 corner-union pass with the same
+     * §4.10 consult against {@code mem}) so the derived component ids equal the live parent record's
+     * fragment ids. Skips the footprint projection and every write — read-only. Returns {@code false} only
+     * on the Stage-2 deferral condition (an absent/unbuilt child in a persisted-non-resident shard — the
+     * live record may be the persisted one, so containment cannot be trusted) or a component-count mismatch
+     * against the parent record ({@code allZero} handling aside) — the caller then skips the fold. (A
+     * consult that shifted between the record's merge and this fold shows up as exactly that mismatch —
+     * the safe bail.) The consult memory is read off the pyramid ({@link CostPyramid#crossingMemory}) —
+     * the SAME collaborator the merge consulted, never a caller-supplied one.
      */
     private static boolean gather(CostPyramid p, int parentLevel, int prx, int pry, int prz, Side s) {
         final int childLevel = parentLevel - 1;
@@ -317,21 +411,23 @@ public final class InvalidationRollup {
                                 RegionAddress.shardOf(crz, childLevel))) {
                     return false;
                 }
-                n = addSynthetic(s, n, i, true);
+                n = addSynthetic(s, n, i, true, RegionFragments.TYPE_S); // combineFragments' unbuilt optimism
                 continue;
             }
             switch (rf.kind()) {
                 case RegionFragments.KIND_SOLID:
                     break; // a wall — no item
                 case RegionFragments.KIND_AIR:
+                    n = addSynthetic(s, n, i, false, 0); // truly-uniform AIR: provably dry, never S
+                    break;
                 case RegionFragments.KIND_WATER:
-                    n = addSynthetic(s, n, i, false);
+                    n = addSynthetic(s, n, i, false, RegionFragments.TYPE_W);
                     break;
                 default: // MIXED
                     final int fc = rf.fragmentCount();
                     if (fc == 0) {
                         if (rf.passFrac() > 0) {
-                            n = addSynthetic(s, n, i, false);
+                            n = addSynthetic(s, n, i, false, RegionFragments.TYPE_S); // collapse optimism
                         }
                     } else {
                         for (int f = 0; f < fc && n < PyramidMerger.MAX_ITEMS; f++) {
@@ -342,6 +438,7 @@ public final class InvalidationRollup {
                                 s.fp[base + face] = rf.footprint(f, face);
                             }
                             s.frag[n] = f;
+                            s.type[n] = rf.typeBits(f);
                             s.unbuilt[n] = false;
                             n++;
                         }
@@ -371,21 +468,13 @@ public final class InvalidationRollup {
             }
         }
 
-        // Components numbered in order of least item index — combineFragments' partition-invariant numbering.
-        final int[] comp = s.comp;
-        Arrays.fill(comp, 0, n, -1);
-        int compCount = 0;
-        for (int k = 0; k < n; k++) {
-            final int root = PyramidMerger.find(uf, k);
-            int c = comp[root];
-            if (c == -1) {
-                if (compCount >= RegionFragments.MAX_FRAGMENTS) { s.collapsed = true; continue; }
-                c = compCount++;
-                comp[root] = c;
-            }
-            comp[k] = c;
-        }
-        s.compCount = compCount;
+        // Components numbered in order of least item index — combineFragments' partition-invariant numbering,
+        // INCLUDING the §4.9 corner-union pass (the shared helper is the mirror contract: the fold's
+        // component-count cross-check below only holds if this partition equals the merge's).
+        final int compCount = PyramidMerger.componentsWithCornerUnions(uf, s.comp, s.compType, s.slot,
+                s.mask, s.fp, s.type, s.frag, n, children, p.crossingMemory(), parentLevel, prx, pry, prz);
+        s.collapsed = compCount < 0;
+        s.compCount = Math.max(0, compCount);
 
         // Mapping mode from the LIVE parent record — the ids consumers key crossings by.
         final int parentRow = p.rowIfPresent(parentLevel, prx, pry, prz);
@@ -406,14 +495,16 @@ public final class InvalidationRollup {
         return true;
     }
 
-    /** Append one synthetic full-face item (uniform-open or unbuilt child) at child slot {@code i}. */
-    private static int addSynthetic(Side s, int n, int i, boolean unbuilt) {
+    /** Append one synthetic full-face item (uniform-open or unbuilt child) at child slot {@code i}, typed
+     *  {@code typeBits} — MIRRORING combineFragments' per-case typing exactly (the §4.9 R38 gate reads it). */
+    private static int addSynthetic(Side s, int n, int i, boolean unbuilt, int typeBits) {
         if (n >= PyramidMerger.MAX_ITEMS) return n;
         s.slot[n] = i;
         s.mask[n] = 0x3F;
         final int base = n * 6;
         for (int f = 0; f < 6; f++) s.fp[base + f] = RegionFragments.NO_FACE;
         s.frag[n] = 0;
+        s.type[n] = typeBits;
         s.unbuilt[n] = unbuilt;
         return n + 1;
     }

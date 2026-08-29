@@ -189,7 +189,26 @@ final class WindowTargeting {
             // wrongly committed. Gated on STRICTLY descending: you can only cheaply fall to a far target going
             // down, so we stop the instant the skeleton stops dropping (never aim the search at a far up/lateral
             // cell). Iterative, bounded by the skeleton length and the first floor found.
-            for (int i = last + 1; i < skeleton.size() && skeleton.ry(i) < skeleton.ry(i - 1); i++) {
+            // R41b (DESIGN-region-corner-crossing-v2.md §4.5): the descent test compares each REAL step
+            // against the previous REAL step — a corner-cut chain node holds a real ry (an X+Z corner holds
+            // it FLAT) but is not a place, so letting it into an adjacent-step comparison terminated the
+            // scan before the landing it exists to find. Corner steps are skipped for the monotonicity test
+            // AND as targets (they carry NO_PORTAL regardless, R32).
+            int prevRealRy = skeleton.ry(last);
+            for (int b = last; b >= 0; b--) {
+                if (!RegionPathfinder.isCornerCut(skeleton.fragmentId(b))) {
+                    prevRealRy = skeleton.ry(b);
+                    break;
+                }
+            }
+            for (int i = last + 1; i < skeleton.size(); i++) {
+                if (RegionPathfinder.isCornerCut(skeleton.fragmentId(i))) {
+                    continue;
+                }
+                if (skeleton.ry(i) >= prevRealRy) {
+                    break; // first non-descending REAL step — same stop rule as the old adjacent-step test
+                }
+                prevRealRy = skeleton.ry(i);
                 if (!skeleton.hasPortal(i)) {
                     continue;
                 }
@@ -203,9 +222,27 @@ final class WindowTargeting {
                 }
             }
         }
-        BlockPos center = skeleton.centerOf(last);
+        final int centerStep = centerFallbackStep(skeleton, last);
+        BlockPos center = skeleton.centerOf(centerStep);
         BlockPos floor = projectToStandableFloor(center, botFeetY);
-        return new Result((floor != null) ? floor : center, last, PathPlan.TargetKind.CENTER);
+        return new Result((floor != null) ? floor : center, centerStep, PathPlan.TargetKind.CENTER);
+    }
+
+    /**
+     * R40's producer rule for the CENTER fallback (corner-crossing §4.5.1 — the one arm the design's
+     * census missed): {@code last} is purely positional, so it can name a corner-cut chain step, whose
+     * {@code centerOf} is the middle of the pure-air intermediate the corner exists to route around (the
+     * target R37 calls "strictly worse") — and a corner {@code choice.step} would flow into the
+     * forward-slide's {@code committedIndex}/{@code windowStart} and from there into
+     * {@code maybeExtendL0}'s {@code drop}, where the splice assert throws. Walk FORWARD past the run,
+     * consistent with {@code handDown}/R37 (the tail is real by the reconstruct trim; the clamp is
+     * defensive). Package-private static for the boundary tests.
+     */
+    static int centerFallbackStep(RegionPathPlan skeleton, int last) {
+        while (last < skeleton.size() - 1 && RegionPathfinder.isCornerCut(skeleton.fragmentId(last))) {
+            last++;
+        }
+        return last;
     }
 
     /**
@@ -337,11 +374,14 @@ final class WindowTargeting {
         final int face = entranceFace(skeleton, step);
         final RegionFragments rf = regionGrid.fragmentRecord(0, skeleton.rx(step), skeleton.ry(step),
                 skeleton.rz(step));
-        // The virtual goal node has no real fragment record — snap within the whole region (NO_FACE) rather than
-        // indexing rf.footprint with the sentinel id. (In practice the goal-in-window branch fires before a virtual
-        // tail is portal-snapped, but guard defensively against an AIOOBE.)
+        // A virtual step (the goal node V, or a corner-cut chain node) has no real fragment record — snap
+        // within the whole region (NO_FACE) rather than indexing rf.footprint with a sentinel id. Only an
+        // id < MAX_FRAGMENTS is a real fragment; the old isVirtualGoal-only guard stopped being sufficient
+        // the moment CORNER_FRAG joined the sentinel space (R32 keeps corner steps out of both call sites
+        // via hasPortal, but guard defensively against the AIOOBE — a MIXED record would index past the
+        // kept range).
         final int packed = (rf != null && !rf.isUniform()
-                && !RegionPathfinder.isVirtualGoal(skeleton.fragmentId(step)))
+                && skeleton.fragmentId(step) < RegionFragments.MAX_FRAGMENTS)
                 ? rf.footprint(skeleton.fragmentId(step), face) : RegionFragments.NO_FACE;
         int uMin = 0, uMax = s - 1, vMin = 0, vMax = s - 1;
         if (packed != RegionFragments.NO_FACE) {

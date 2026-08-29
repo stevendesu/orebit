@@ -259,13 +259,13 @@ public class CostCodecTest {
     }
 
     // ===================================================================================================
-    // Cap boundary: a record with the full 62 fragments round-trips exactly (the largest legal count —
-    // one below the sentinel in the 6-bit field).
+    // Cap boundary: a record with the full MAX_FRAGMENTS (61) fragments round-trips exactly (the largest
+    // legal count — the corner sentinel 61 and the collapsed sentinel 63 sit above it in the 6-bit field).
     // ===================================================================================================
     @Test
-    void mixedAtCap_62Fragments_roundTripsExactly() {
-        // 62 isolated 2-tall pockets on the 8×8 odd-(x,z) grid (the FragmentBuilderTest cap fixture, two
-        // pockets short of 64 so the build keeps every component).
+    void mixedAtCap_61Fragments_roundTripsExactly() {
+        // 61 isolated 2-tall pockets on the 8×8 odd-(x,z) grid (the FragmentBuilderTest cap fixture, short
+        // of 64 so the build keeps every component).
         boolean[] passable = new boolean[CELLS];
         boolean[] standable = new boolean[CELLS];
         int columns = 0;
@@ -278,12 +278,35 @@ public class CostCodecTest {
             }
         }
         RegionFragments rf = build(passable, standable);
-        assertFalse(rf.isCollapsed(), "62 components sit AT the cap — no collapse");
-        assertEquals(RegionFragments.MAX_FRAGMENTS, rf.fragmentCount(), "fixture builds the full 62 fragments");
+        assertFalse(rf.isCollapsed(), "an at-cap component count — no collapse");
+        assertEquals(RegionFragments.MAX_FRAGMENTS, rf.fragmentCount(), "fixture builds the full at-cap fragments");
 
         RegionFragments back = roundTrip(rf);
         assertSchemaEqual(rf, back);
         assertFalse(back.isCollapsed(), "an at-cap record reloads exact, never as the sentinel");
         assertEquals(RegionFragments.MAX_FRAGMENTS, back.fragmentCount());
+    }
+
+    // ===================================================================================================
+    // LEGACY over-cap count (corner-crossing R21): a file written before the MAX_FRAGMENTS 62 → 61
+    // reduction can carry count == 62 (a then-at-cap region). The persistence version is PINNED at 1
+    // pre-release, so no version fence exists — the decoder must absorb it as cap-collapsed instead of
+    // indexing past the 61-sized arrays (AIOOBE on load).
+    // ===================================================================================================
+    @Test
+    void legacyOverCapCount_decodesAsCollapsed() {
+        // Hand-write the wire prefix a pre-reduction encoder produced: kind=MIXED(2b), hardness(4b),
+        // passFrac(4b), count=62(6b). The fragment records that would follow are never reached.
+        byte[] buf = new byte[8];
+        int p = 0;
+        p = CostCodec.writeBits(buf, p, RegionFragments.KIND_MIXED, 2);
+        p = CostCodec.writeBits(buf, p, 5, 4);   // hardness
+        p = CostCodec.writeBits(buf, p, 9, 4);   // passFrac
+        p = CostCodec.writeBits(buf, p, RegionFragments.MAX_FRAGMENTS + 1, 6); // 62 — legal pre-reduction
+        RegionFragments out = new RegionFragments();
+        CostCodec.unpackRegion(buf, 0, RegionAddress.LEAF_SIZE, out);
+        assertEquals(0, out.fragmentCount(), "a legacy over-cap count decodes with no fragment records");
+        assertTrue(out.isCollapsed(), "…as cap-collapsed (priced from passFrac), never an AIOOBE");
+        assertEquals(9, out.passFrac(), "the header fields before the count still decode");
     }
 }
