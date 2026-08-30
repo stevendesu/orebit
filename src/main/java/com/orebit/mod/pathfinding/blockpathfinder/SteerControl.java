@@ -1043,21 +1043,24 @@ public final class SteerControl {
      * yaw onto the correction — and not a hand-set speed threshold. It is the exact statement of "the keys
      * can do this", it scales itself to the block underfoot (ice has a quarter of stone's authority), and
      * it cannot drift out of agreement with the servo because it is the servo's own number.
+     *
+     * <p><b>VELOCITY only, NOT the position pull</b> (corrected 2026-08-29 after it broke
+     * {@code PhaseRunnerDoorTest} / {@code BreakAtFeetFloorCarryTest}). The first version formed the error
+     * against the hold's full desired velocity, which folds in the recentre pull — so a bot standing
+     * PERFECTLY STILL half a block off its column scored {@code |u| = 2.4} and was refused the break. That
+     * is the wrong question twice over: a stationary bot is stable to mine from however off-centre it is,
+     * and being off-centre is the hold's own job to fix, not a reason to withhold the break. What makes
+     * mining unstable is MOVING, so the test is exactly "can the keys cancel the velocity I have" —
+     * {@code err = −v}, giving {@code u = −v·q·k}. Zero velocity therefore always passes (the tests'
+     * at-rest fakes included), and the practical bound lands near 0.1 b/t on stone.
      */
     public static boolean holdWithinKeyBudget(BotSteering b) {
-        final double ax = Math.floor(b.x()) + 0.5, az = Math.floor(b.z()) + 0.5;
-        final double dx = ax - b.x(), dz = az - b.z();
-        final double dist = Math.sqrt(dx * dx + dz * dz);
-        double dvx = 0.0, dvz = 0.0;
-        if (dist >= EPS) {
-            double sp = Math.min(SERVO_CROSS_CAP, SERVO_CROSS_GAIN * dist);
-            dvx = (dx / dist) * sp;
-            dvz = (dz / dist) * sp;
-        }
         final double q = dragQ(b);
         final double k = inputK(b, q);
-        final double ux = (dvx - b.velX() + b.velX() * (1.0 - q)) * k;
-        final double uz = (dvz - b.velZ() + b.velZ() * (1.0 - q)) * k;
+        // err = (0 − v) ⇒ u = (err + v·(1−q))·k = −v·q·k. The keys must be able to null the carried
+        // velocity in one tick; where the bot sits inside its cell is irrelevant to that question.
+        final double ux = -b.velX() * q * k;
+        final double uz = -b.velZ() * q * k;
         return Math.sqrt(ux * ux + uz * uz) <= 1.0;
     }
 
