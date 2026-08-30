@@ -689,8 +689,47 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // never by where the bot looks. A no-op when idle, and one tick behind on a target switch.
         mining.reaim();
 
+        // ---- PHYSICS STRADDLE PROBE (2026-08-29, the (352,71,512) hold-drift) -------------------------
+        // The exec line is emitted BEFORE physics, so it proves what was COMMANDED but never what vanilla
+        // did with it. At the bamboo wedge that gap hid the whole question: recenterOn's inputs verify
+        // exactly (fwd == distance-to-anchor to 2dp, head == the unit vector TOWARD the anchor to 3dp), and
+        // the bot still travelled AWAY from that anchor. A correct input producing opposite motion is not
+        // answerable from a pre-physics log, so straddle the tick: same fields either side of doTick, plus
+        // the applied-input triple, so the per-tick dm delta can be attributed to input vs. something else.
+        // Diagnostic ONLY, VERBOSE-gated, no behaviour.
+        final boolean probe = Debug.VERBOSE;
+        final double preX = probe ? this.getX() : 0, preZ = probe ? this.getZ() : 0;
+        final double preDX = probe ? this.getDeltaMovement().x : 0;
+        final double preDZ = probe ? this.getDeltaMovement().z : 0;
+        final float preYaw = probe ? this.getYRot() : 0;
+        final float preZza = probe ? this.zza : 0, preXxa = probe ? this.xxa : 0;
+
         super.tick(); // ServerPlayer housekeeping (i-frames, containers, advancements, attributes, …)
         this.doTick(); // Player.tick physics + pose + survival
+
+        if (probe) {
+            // The input's own world-space direction, so "commanded" and "moved" are directly comparable:
+            // vanilla's forward vector for a yaw in degrees is (-sin, cos) over (x, z), and strafe is its
+            // left-hand normal — the same convention BotNavigator's `head` uses.
+            final double yawRad = Math.toRadians(preYaw);
+            final double fwdX = -Math.sin(yawRad), fwdZ = Math.cos(yawRad);
+            final double inX = fwdX * preZza + fwdZ * preXxa;
+            final double inZ = fwdZ * preZza - fwdX * preXxa;
+            OrebitCommon.LOGGER.info(
+                    "[Orebit] straddle pos=({},{})->({},{}) dm=({},{})->({},{}) in=({},{})"
+                            + " yaw={} zza={} xxa={} hcol={} onGround={} frict={}",
+                    String.format("%.4f", preX), String.format("%.4f", preZ),
+                    String.format("%.4f", this.getX()), String.format("%.4f", this.getZ()),
+                    String.format("%.4f", preDX), String.format("%.4f", preDZ),
+                    String.format("%.4f", this.getDeltaMovement().x),
+                    String.format("%.4f", this.getDeltaMovement().z),
+                    String.format("%.4f", inX), String.format("%.4f", inZ),
+                    String.format("%.1f", preYaw), String.format("%.3f", preZza),
+                    String.format("%.3f", preXxa), this.horizontalCollision,
+                    com.orebit.mod.platform.EntityState.onGround(this),
+                    String.format("%.3f", this.level().getBlockState(this.blockPosition().below())
+                            .getBlock().getFriction()));
+        }
 
         // Completed-teleport detection: vanilla's portal process (and any other dimension change) runs
         // inside the player tick above, so a level change is visible HERE first — re-anchor everything

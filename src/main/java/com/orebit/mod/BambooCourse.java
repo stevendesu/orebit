@@ -34,10 +34,10 @@ import net.minecraft.world.phys.Vec3;
  * The planner is RIGHT about bamboo: the nav grid treats it as a wall, and the search duly folded
  * {@code BREAK(352,71,512) BREAK(352,72,512)} onto the Traverse that enters the cell. One tick later a
  * region re-derive ({@code REVEALED unbuilt->built ... verdict=SWAPPED}) replaced the block plan, and the
- * bot ended up standing IN the bamboo cell with the stalk intact. From then on the wedge is permanent for a
- * structural reason: the bot's own cell is the search START, and a start cell is never a break target — so
- * across 934 subsequent full re-searches, {@code BREAK(352,71,512)} was never scheduled again. It appears
- * exactly ONCE in a 124k-line log.
+ * bot ended up standing IN the bamboo cell with the stalk intact, and never mined it across 934 further
+ * searches: {@code BREAK(352,71,512)} appears exactly ONCE in a 124k-line log. (The obvious explanation —
+ * "a start cell is never a break target" — is REFUTED by the {@code trapped} tile below, which passes.
+ * See the tile list for what remains.)
  *
  * <h2>Why bamboo, and why THIS column</h2>
  * Bamboo is the cheap reproduction of a general hazard: a block whose COLLISION is narrower than its cell,
@@ -68,18 +68,28 @@ import net.minecraft.world.phys.Vec3;
  *       {@code z=512} and leaves along {@code z=513}, so the exit step is the {@code Diagonal} that wedged.
  *       {@code Diagonal} deliberately keeps intact-transit pricing and folds no breaks of its own, so if
  *       the entering Traverse's break is lost there is nothing downstream to recover it.</li>
- *   <li><b>trapped</b> — the PERMANENCE test, and the one that does not need a plan swap. The bot STARTS
- *       inside the stalk's own cell, at the exact rest position it settles into when pressed against the
- *       post ({@code x = 352.35625}). {@code stalk}/{@code dogleg} both PASS, which proves the break path
- *       itself works and the geometry alone traps nothing — so the interesting question is not how the bot
- *       gets in, but whether it can ever get out. The structural claim under test: the bot's own cell is
- *       the search START, a start cell is never a break target, and therefore no plan can schedule the
- *       break that frees it. In the flagship that produced 934 searches with ZERO break edits, and
- *       {@code BREAK(352,71,512)} appearing exactly once in 124k lines. A region swap is only ONE way to
- *       arrive here; a knock-back (creeper, piston, a player's sword) or any off-path replan lands in the
- *       same state, which is why this tile is worth more than the two that reproduce the approach.</li>
+ *   <li><b>trapped</b> — the PERMANENCE test, needing no plan swap: the bot STARTS inside the stalk's own
+ *       cell, at the exact rest position it settles into when pressed against the post
+ *       ({@code x = 352.35625}), so {@code blockPosition()} IS the cell it must break. <b>It PASSES in 17
+ *       ticks</b>, which REFUTES the tempting structural claim that "the bot's own cell is the search
+ *       START and a start cell is never a break target". A bot standing in a cell it must break schedules
+ *       and executes that break perfectly well. Kept as the control that pins the refutation.</li>
+ *   <li><b>trappeddogleg</b> — {@code trapped}'s only live variable changed: the corridor dog-legs, so the
+ *       exit move is a {@code Diagonal} rather than a {@code Traverse}. That is the flagship's actual
+ *       combination, and the two differ in exactly the way that matters — {@code Traverse} calls
+ *       {@code MovementContext.transitOrBreak} and CAN fold a break, while {@code Diagonal} deliberately
+ *       keeps intact-transit pricing and folds NONE (CLAUDE.md: "Diagonal/Fall/the airborne family
+ *       deliberately keep intact-transit pricing"). So a bot whose only way out of an occupied cell is a
+ *       Diagonal has no move in its vocabulary that can schedule the break — which is the candidate
+ *       mechanism for the flagship's 934 searches with ZERO break edits.</li>
  * </ol>
- * Both tiles FAIL on timeout — a hold is not a failure, and the wedge is precisely a bot holding forever.
+ * Every tile FAILS on timeout — a hold is not a failure, and the wedge is precisely a bot holding forever.
+ *
+ * <p><b>What the passing tiles rule out.</b> {@code stalk}/{@code dogleg}/{@code trapped} all pass, so the
+ * break path works, the offset post traps nothing on approach, and mere occupancy of a to-be-broken cell is
+ * survivable. Whatever the flagship hit needs more than geometry: either the Diagonal-only exit
+ * ({@code trappeddogleg}), or the swapped/seam-truncated plan state that a fully-built synthetic course
+ * cannot reproduce (see the config template's KNOWN LIMITATION note).
  *
  * <p><b>Config</b> ({@code scripts/bamboo/orebit.properties}): {@code mining.canMine=true} (the break under
  * test), {@code placement.canPlace=false} (no bridging around the post).
@@ -124,7 +134,9 @@ public final class BambooCourse {
     private enum Kind {
         STALK,   // straight 1-wide corridor through the stalk
         DOGLEG,  // arrive along z=512, leave along z=513 — the flagship's Traverse-in / Diagonal-out shape
-        TRAPPED  // START inside the stalk cell — the permanence test, no plan swap required
+        TRAPPED,        // START inside the stalk cell, straight corridor -> the exit move is a Traverse
+        TRAPPED_DOGLEG, // START inside the stalk cell, dog-legged -> the exit move is a DIAGONAL
+        TURNHOLD        // approach along +Z and TURN east into the stalk — cross-axis momentum at the hold
     }
 
     /** One bamboo challenge: a kind + its tile floor Y, with start/goal geometry precomputed. */
@@ -145,18 +157,29 @@ public final class BambooCourse {
             this.name = name;
             this.kind = kind;
             this.y = y;
-            this.exitZ = kind == Kind.DOGLEG ? BAMBOO_Z + 1 : BAMBOO_Z;
-            // TRAPPED reuses the straight corridor, so the only obstruction between the bot and the goal
-            // is the post it is already standing against.
+            this.exitZ = (kind == Kind.DOGLEG || kind == Kind.TRAPPED_DOGLEG) ? BAMBOO_Z + 1 : BAMBOO_Z;
+            // The exit MOVE is what the dog-leg selects, and it is the live variable: a straight corridor
+            // leaves by Traverse, which calls MovementContext.transitOrBreak and CAN fold a break; a
+            // dog-leg leaves by Diagonal, which deliberately keeps intact-transit pricing and folds NONE.
+            // TRAPPED (straight) passes in 17 ticks; TRAPPED_DOGLEG is the flagship's actual combination.
             this.minFloorY = y - 6;
             // TRAPPED starts INSIDE the stalk's own cell, at the exact rest position a bot pressed against
             // the post settles into: the post spans [352.65625, 352.84375], so a 0.6-wide body rests at
             // 352.65625 - 0.3 = 352.35625 — the flagship's logged x=352.356. blockPosition() is therefore
             // (352, y+1, 512): the bot's foot cell IS the cell it must break, which is the whole point.
-            this.startX = kind == Kind.TRAPPED ? BAMBOO_X + 6.5 / 16.0 + 0.25 - 0.3 : BAMBOO_X - 4.5;
+            // TURNHOLD approaches along +Z one cell WEST of the stalk, so the bot reaches the hold cell
+            // carrying CROSS-AXIS momentum and must then turn east into the stalk — the flagship's actual
+            // arrival (it entered (351,71,512) from (351,71,511) at vel z=+0.113, then the next step was
+            // +X). That perpendicular momentum is what a position-only P-law cannot arrest, and the four
+            // straight-approach tiles all pass precisely because their momentum is ALIGNED with the anchor.
+            this.startX = (kind == Kind.TRAPPED || kind == Kind.TRAPPED_DOGLEG)
+                    ? BAMBOO_X + 6.5 / 16.0 + 0.25 - 0.3
+                    : (kind == Kind.TURNHOLD ? BAMBOO_X - 1 + 0.5 : BAMBOO_X - 4.5);
             this.startY = y + 1;
-            this.startZ = BAMBOO_Z + 0.5;
-            this.startYaw = (float) Math.toDegrees(Math.atan2(-1, 0)); // face +X
+            this.startZ = kind == Kind.TURNHOLD ? BAMBOO_Z - 7 + 0.5 : BAMBOO_Z + 0.5;
+            this.startYaw = kind == Kind.TURNHOLD
+                    ? (float) Math.toDegrees(Math.atan2(0, 1))    // face +Z
+                    : (float) Math.toDegrees(Math.atan2(-1, 0));  // face +X
             this.goal = new BlockPos(BAMBOO_X + 4, y + 1, exitZ);
             this.stalkLo = new BlockPos(BAMBOO_X, y + 1, BAMBOO_Z);
             this.stalkHi = new BlockPos(BAMBOO_X, y + 2, BAMBOO_Z);
@@ -195,6 +218,8 @@ public final class BambooCourse {
             add("stalk", Kind.STALK);
             add("dogleg", Kind.DOGLEG);
             add("trapped", Kind.TRAPPED);
+            add("trappeddogleg", Kind.TRAPPED_DOGLEG);
+            add("turnhold", Kind.TURNHOLD);
         }
 
         void add(String name, Kind kind) {
@@ -395,14 +420,27 @@ public final class BambooCourse {
             int y = tr.y;
             int x0 = BAMBOO_X - 6, x1 = BAMBOO_X + 6;
             int z0 = Math.min(BAMBOO_Z, tr.exitZ) - 1, z1 = Math.max(BAMBOO_Z, tr.exitZ) + 1;
+            if (tr.kind == Kind.TURNHOLD) {
+                z0 = BAMBOO_Z - 8; // room for the +Z approach leg
+            }
 
             // Solid block, then carve the corridor out of it — walls/roof/floor come free.
             box(x0, x1, y, y + 3, z0, z1);
-            // West approach + the stalk cell itself, along the arrival line.
-            carve(x0, BAMBOO_X, y + 1, y + 2, BAMBOO_Z);
+            if (tr.kind == Kind.TURNHOLD) {
+                // The approach runs +Z up the column ONE WEST of the stalk, then turns east into it. The
+                // bot therefore arrives at the hold cell (BAMBOO_X-1, BAMBOO_Z) carrying +Z momentum that
+                // is PERPENDICULAR to the recenter anchor it is about to hold on — the flagship's state.
+                for (int z = BAMBOO_Z - 7; z <= BAMBOO_Z; z++) {
+                    carve(BAMBOO_X - 1, BAMBOO_X - 1, y + 1, y + 2, z);
+                }
+            }
+            // West approach + the stalk cell itself, along the arrival line. TURNHOLD gets only the last
+            // cell of it — its approach is the +Z leg above, and a carved west corridor would hand the bot
+            // an ALIGNED entry, which is exactly the condition the other tiles already prove is survivable.
+            carve(tr.kind == Kind.TURNHOLD ? BAMBOO_X - 1 : x0, BAMBOO_X, y + 1, y + 2, BAMBOO_Z);
             // East exit, along the (possibly dog-legged) departure line.
             carve(BAMBOO_X, x1, y + 1, y + 2, tr.exitZ);
-            if (tr.kind == Kind.DOGLEG) {
+            if (tr.kind == Kind.DOGLEG || tr.kind == Kind.TRAPPED_DOGLEG) {
                 // The Diagonal's two corner cells, exactly as the flagship had them: both AIR, so the
                 // corner is geometrically clear and the ONLY obstruction is the offset post.
                 carve(BAMBOO_X + 1, BAMBOO_X + 1, y + 1, y + 2, BAMBOO_Z);
