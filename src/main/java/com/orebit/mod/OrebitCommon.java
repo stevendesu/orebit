@@ -313,12 +313,6 @@ public final class OrebitCommon {
         // inert-unless-armed discipline (-Dorebit.gate).
         GateCourse.register(events);
 
-        // Headless OFFSET-COLLIDER MINING diagnostic (the :fabric:<ver>:runBamboo run config): a 1-wide
-        // corridor whose only through-route is a bamboo stalk, placed in the flagship wedge's OWN column
-        // (352,512) so the position-hashed sub-cell post lands exactly where it did there. Reproduces the
-        // 2026-08-29 (352,71,512) wedge — the bot standing in a cell it had been told to mine, never
-        // mining it, holding forever. Same inert-unless-armed discipline (-Dorebit.bamboo).
-        BambooCourse.register(events);
 
         // Headless TRAPDOOR-LADDER-ARC diagnostic (the :fabric:<ver>:runShaft run config): floating stone
         // slabs bored with 1x1 ladder shafts whose mouth holds an equal-facing trapdoor (open/closed x

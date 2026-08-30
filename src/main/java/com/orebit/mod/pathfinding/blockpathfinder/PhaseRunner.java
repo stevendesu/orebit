@@ -285,9 +285,28 @@ public final class PhaseRunner {
                     // movementBlockedAt ("does its collision intrude into my corridor") — the latter is the
                     // judgement call that belongs to the planner and that offset blocks make unanswerable.
                     if (plan.isPlannedBreak(r.x, r.y, r.z) && bot.solidAt(r.x, r.y, r.z)) {
-                        bot.mine(r.x, r.y, r.z);
                         if (holdNeed == null) { holdNeed = r.kind; holdX = r.x; holdY = r.y; holdZ = r.z; }
                         holding = true;
+                        // STOP, THEN TURN, THEN BREAK (owner ruling 2026-08-29). Mining waits until the
+                        // station-keep can actually hold the bot -- |u| <= 1, i.e. the hold's whole
+                        // correction fits inside forward/strafe (a backpedal counts) without saturating.
+                        //
+                        // Two reasons, neither about this cell's geometry. (1) A bot still carrying
+                        // momentum the servo cannot cancel mines from a MOVING body, so the break's reach
+                        // and progress are judged against a position drifting under it. (2) The mining
+                        // head-aim and the drive both want the yaw, and yaw is HALF of the velocity
+                        // command -- an aim issued while a real input stands re-points the thrust unless
+                        // it re-solves the keys. Waiting for authority removes that conflict rather than
+                        // arbitrating it: at |u| <= 1 the servo settles this tick and the aim has nothing
+                        // left to fight.
+                        //
+                        // `holding` is asserted BEFORE the gate, so a not-yet-settled tick still HOLDS the
+                        // step instead of advancing it -- the hold IS the settling, not a wait beside it.
+                        // No timer: a state test re-asked every tick, self-clearing the moment the servo
+                        // has the authority it needs.
+                        if (SteerControl.holdWithinKeyBudget(bot)) {
+                            bot.mine(r.x, r.y, r.z);
+                        }
                         break; // one timed break per tick
                     }
                 } else { // FOOTING

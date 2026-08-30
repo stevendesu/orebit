@@ -57,8 +57,13 @@ heading frame → signed `setForward` (along) + `setStrafe` (cross), vector-satu
 (steer/walkoff/fall), Descend step (replaced the convicted `descend:dead` law 2026-08-14). The
 rejected `steppingOff` pre-brake variant is documented at SC:473–489 — do not reintroduce.
 
-**`stationKeep` (SC:653–700)** tags `hold(:floor/:depth/:sneak)` — PhaseRunner unmet-need hold while
-settled/on-climbable. Horizontal: `recenterOn` the bot's OWN column (never the target). Vertical:
+**`stationKeep` (SC:653–700)** tags `hold(:dead)/hold(:floor/:depth/:sneak)` — PhaseRunner unmet-need
+hold while settled/on-climbable. Horizontal: **`anchoredServo` → `actuate`** on the bot's OWN column
+(never the target), same cap/gain as `restHold`. **NORMALIZED 2026-08-29**: it was the last hold still
+on the legacy `recenterOn` P-law — `restHold` moved on 08-19 and this one was missed. `recenterOn`
+faces its *position* error with no velocity term, no strafe and no signed forward, so rotation is its
+only lever and cross-axis momentum makes it chase its own overshoot (observed: a ~200° facing sweep,
+yaw 174→126, throttle 0.16→0.48 — exactly `fwd == distance-to-anchor`). Vertical: unchanged —
 grounded → nothing; fluid → `holdDepthAt(standableBelow ? footY : footY+0.5)` (floor-settle beats
 buoyancy); climbable → sneak; else `holdClimbableStance(false)`. Floor target one-sided by
 construction (can only arrest descent).
