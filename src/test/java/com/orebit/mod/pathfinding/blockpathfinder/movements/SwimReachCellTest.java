@@ -16,9 +16,9 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  * <p>This file replaces {@code SwimCeilingReachTest}, which pinned two CLAMPS that no longer exist. Those
  * clamps were corrections to a set-point that was wrong: the ride height was {@code wy + 1.0}, the feet
  * cell's CEILING, and the reach window {@code |botY - target| < 0.6} therefore straddled the cell boundary
- * in both directions. {@link SteerControl#SWIM_RIDE} now parks the bot at {@code wy + 0.2} with a
- * {@code ±0.2} dead-band — {@code [wy+0.0, wy+0.4]}, wholly inside the cell — so the height question and the
- * cell question became the same question and the clamps had nothing left to correct.
+ * in both directions. {@link SteerControl#SWIM_RIDE} now parks the bot at {@code wy + 0.2} with the
+ * one-sided dead-band below it — {@code [wy+0.0, wy+0.2]}, wholly inside the cell — so the height question
+ * and the cell question became the same question and the clamps had nothing left to correct.
  *
  * <p>The fixture is kept because the geometry is real, read out of the flagship save at {@code x=154 z=103}:
  * water at {@code y=-7} (the top of the fall), air at {@code y=-6}, tuff at {@code y=-5}. It is the shape
@@ -51,8 +51,11 @@ class SwimReachCellTest {
 
     @Test
     void theWholeDeadBandIsInsideTheCell() {
-        // SWIM_RIDE 0.2 with WATER_RISE_DEADBAND 0.2 => [wy+0.0, wy+0.4]. Every point of it must arrive,
-        // or the bot chatters between "arrived" and "not arrived" while merely holding station.
+        // The settle band is [wy+0.0, wy+0.2] (SWIM_RIDE is the TOP, dead-band one-sided below it since
+        // 2026-08-30). Every point of it must arrive, or the bot chatters between "arrived" and "not
+        // arrived" while merely holding station. The points above 0.2 stay in the sweep deliberately:
+        // the autopilot now presses sink there, but a bot transiting them is still in the waypoint CELL
+        // and the cell test must keep saying so.
         for (double off : new double[] { 0.0, 0.1, 0.2, 0.3, 0.399 }) {
             Bot b = new Bot(WX + 0.5, WY + off, WZ + 0.5);
             assertTrue(Swim.reachedSwim(b, WX, WY, WZ), "wy+" + off + " is inside the feet cell");
