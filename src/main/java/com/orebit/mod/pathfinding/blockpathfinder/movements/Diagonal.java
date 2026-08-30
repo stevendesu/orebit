@@ -118,10 +118,25 @@ public final class Diagonal implements Movement {
      * <p><b>The envelope admits four columns, not two.</b> A diagonal's foot cell legitimately transits a
      * CORNER column mid-step — that is exactly why {@code candidates} demands both corners be clear — so
      * {@code (fx,tz)} and {@code (tx,fz)} are on-plan. Settled anywhere outside that 2×2, or off the step's
-     * height band, means the bot has left the move's model. The band is {@code [fromFootY..toFootY]}: equal
-     * for a flat diagonal, but written as a band so a partial-top destination (whose feet seat lower than
-     * the floor+1 cell) stays admitted.
+     * height band, means the bot has left the move's model. The band is {@code [fromFootY..toFootY]} in
+     * cells — equal for a flat diagonal, written as a band so a partial-top destination (whose feet seat
+     * lower than the floor+1 cell) stays admitted — and its vertical extent is CONTINUOUS on both sides:
+     * {@link Traverse#STEP_ASSIST_RECOVERY} of dip below, and {@link #CORNER_LIFT_MAX} of lift above,
+     * because the admitted corner columns come with admitted corner HEIGHTS (the 2026-08-30 village-path
+     * ruling — see the failWhen).
      */
+
+    /**
+     * The vertical headroom of the envelope's swept 2×2 above {@code bandHi} (blocks). A corner the
+     * {@link #candidates} clearance admitted can carry a floor up to full-block height — never more,
+     * since a taller corner occupies the crossing's body cells and the edge is refused — so a box
+     * straddling a corner mid-step legitimately rests up to exactly {@code bandHi + 1.0}. Convicted at
+     * the flagship (1215,65,1223): dirt-path floors (topY 15) with full grass corners lift the bot
+     * 1/16 to exactly the cell boundary, which the old cell-quantized test read as a whole-cell
+     * departure.
+     */
+    static final double CORNER_LIFT_MAX = 1.0;
+
     @Override
     public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
         if (ty != fy) return null;                                  // Diagonal is strictly flat
@@ -148,10 +163,24 @@ public final class Diagonal implements Movement {
             // against a band that for a flat diagonal (fromFootY == toFootY) has ZERO room below. Allow
             // exactly what the physics recovers on its own and not a block more.
             //
-            // The upper bound stays a CELL test: being lifted off the line is a different failure with no
-            // self-recovering transient behind it (and off a climbable it is the involuntary-climb ratchet,
-            // which holdUntilOverTargetColumn already owns).
-            if (b.y() < bandLo - Traverse.STEP_ASSIST_RECOVERY || b.footY() > bandHi) {
+            // THE UPPER BOUND IS NOW CONTINUOUS TOO (owner ruling 2026-08-30; the flagship (1215,65,1223)
+            // village-path wedge, pinned by the VineBridgeCourse `pathdiag` card). The old cell test
+            // (`footY() > bandHi`) contradicted this envelope's own XZ sweep: the corner columns are
+            // explicitly admitted below — a diagonal's box legitimately transits them — but their HEIGHT
+            // was not. Between two dirt-path cells (topY 15, resting bandHi+0.938) with full grass at the
+            // crossing corners, vanilla rests the straddling box on the corner top: botY snaps to exactly
+            // bandHi+1.000 — a 1/16 physical rise — the foot cell flips, and the cell test read it as
+            // "lifted off the step". Fail->hold made it permanent; village paths make it common.
+            //
+            // The bound needs no world read: candidates() demanded both corners CLEAR for the crossing,
+            // and a clear corner's floor cannot exceed full-block height (anything taller occupies the
+            // body cells and the candidate is never emitted), so the supremum of legitimate resting
+            // height anywhere in the swept 2x2 is exactly bandHi + 1.0 — CORNER_LIFT_MAX. Strict >:
+            // resting ON a full corner sits exactly AT the bound and is admitted (vanilla collision Y is
+            // exact). The involuntary-climb ratchet the cell test also caught climbs at +0.2/t and
+            // crosses this bound within ~5 ticks, so the backstop survives (and
+            // holdUntilOverTargetColumn owns that case anyway).
+            if (b.y() < bandLo - Traverse.STEP_ASSIST_RECOVERY || b.y() > bandHi + CORNER_LIFT_MAX) {
                 return true;                                        // fell off / was lifted off the step
             }
             final int bx = b.footX();

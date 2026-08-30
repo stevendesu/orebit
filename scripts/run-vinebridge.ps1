@@ -10,6 +10,10 @@
 #                     down-step. Pre-servo-fix EXPECTED result: FAIL budget exhausted, finalPos
 #                     z ≈ +6.03 / y ≈ Y0+1.75, with `recenter:dead` → 180° flip → `step FAILED
 #                     (validity envelope) Climb` in the log — the flagship signature 1:1.
+#   pathdiag        — the flagship (1215,65,1223) Diagonal cell-quantization wedge: a village dirt path
+#                     (top 15/16) crossing a grass field diagonally, full grass at every crossing
+#                     corner. Pre-envelope-fix EXPECTED: FAIL budget exhausted on the diagonal with
+#                     botY = Y0+1.000 exactly and `step FAILED (validity envelope) Diagonal` in the log.
 #
 # What it does (mirrors run-replan.ps1):
 #   1. resets run/replan to a deterministic state (fresh flat world, replan templates, stale results cleared),
