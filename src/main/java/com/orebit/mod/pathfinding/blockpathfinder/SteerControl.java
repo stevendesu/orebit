@@ -478,6 +478,40 @@ public final class SteerControl {
             recenterOn(b, p.tx(), p.tz());
             return;
         }
+        arriveProjected(b, p, "arrive", "arrive:dead");
+    }
+
+    /**
+     * The projected-stop arrive for the CLIMB family — {@link #arriveOnTarget}'s law WITHOUT the
+     * climbable short-circuit (owner ruling 2026-08-30; the flagship {@code (431,66,606)} wedge, pinned
+     * by the VineBridgeCourse {@code grab} card).
+     *
+     * <p>Why Climb must not short-circuit: a lateral grab takes off carrying the previous move's arrival
+     * velocity (~0.1 b/t measured) and flies the approach AIRBORNE, where control authority is ~0.02/t.
+     * The position-only {@code recenterOn} goes dead 0.04 short of the column while the bot still carries
+     * 0.105 b/t — a coast of {@code 0.105 × 10.11 ≈ 1.06} blocks — then flips 180° and loses; the bot
+     * lands one column past the vine, outside its envelope. The projected law starts braking mid-arc,
+     * the only time air authority is enough.
+     *
+     * <p>Why this PRESERVES what the vine-bounce ruling actually protects (no wall-press → no
+     * involuntary {@code +0.2/t} climb ratchet): inside the deadband the output is still EXACTLY zero
+     * input — the deadband is merely evaluated on the projected resting point instead of the raw offset,
+     * which is the CLAUDE.md gate rule. And outside it, the correction aims the projected miss at the
+     * anchor: an overshoot correction points BACK ALONG the corridor, away from the neighbour the old
+     * law drifted into — it does not press the trunk.
+     *
+     * <p>Scope guard (the climbable constraints, owner 2026-08-30): this is the HORIZONTAL axis only.
+     * On a climbable no 3-D velocity vector exists — X/Z ride yaw-based input, Y is exclusively
+     * jump (+0.2/t) / no-input slide (−0.15/t) / sneak (hold, and it resets downward momentum), and the
+     * bot's FEET-BOTTOM must never leave the bottom climbable cell (below it is free-fall, possibly
+     * lethal). All of that stays with {@link #holdClimbableStance} and Climb's Δy regime branches —
+     * this method writes facing/forward/strafe and nothing vertical.
+     */
+    public static void climbArrive(BotSteering b, SteerView p) {
+        arriveProjected(b, p, "climb:arrive", "climb:arrive:dead");
+    }
+
+    private static void arriveProjected(BotSteering b, SteerView p, String tagName, String tagDead) {
         // Heading: the step's own segment (previous waypoint → target). Stable for the whole move, so the
         // facing never flips; degenerate (vertical) segments fall back to the target bearing.
         double hx = p.tx() - p.sx();
@@ -497,12 +531,12 @@ public final class SteerControl {
 
         b.faceHorizontally(hx, hz);
         if (Math.sqrt(ex * ex + ez * ez) <= COLUMN_DEADBAND) {
-            tag("arrive:dead");
+            tag(tagDead);
             b.setForward(0.0f);         // projected arrival is on the column — no input; see COLUMN_DEADBAND
             b.setStrafe(0.0f);
             return;
         }
-        tag("arrive");
+        tag(tagName);
         // Decompose the projected miss into the heading frame and drive BOTH channels, so cross-track error is
         // corrected without yawing (BotSteering.setStrafe): along = forward/brake, cross = strafe. Positive
         // strafe is the mover's LEFT, which for unit heading (hx,hz) is the direction (hz,−hx).

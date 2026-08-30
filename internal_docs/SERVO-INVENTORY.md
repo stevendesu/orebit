@@ -43,11 +43,14 @@ waypoint is by design (handoff = cursor advance).
 
 **`recenterOnTarget`/`recenterOn` (SC:386/398)** tags `recenter(:dead)` — radial **P**:
 `d > COLUMN_DEADBAND(0.15)` → face, `forward=min(1,d)`; else forward 0 exactly (vine ruling).
-Callers: Pillar, MineDown, RideBubbleColumn settle, StartSprintSwim submerge, Climb, Ascend build,
-PhaseRunner airborne-hold, Parkour hot-entry (rear-lip stair frame), degenerate fallbacks.
+Callers: Pillar, MineDown, RideBubbleColumn settle, StartSprintSwim submerge, Ascend build,
+PhaseRunner airborne-hold, Parkour hot-entry (rear-lip stair frame), degenerate fallbacks. (Climb
+migrated OFF this to `climbArrive` 2026-08-30 — the (431,66,606) wedge.)
 **Documented conviction** (SC:432–440): pure P + deadband = standing overshoot; deadband zeroes
 output exactly where a walk-off bot carries max momentum. Kept only where the climbable
-involuntary-climb hazard requires zero-input.
+involuntary-climb hazard requires zero-input — and note the Climb migration showed the projected
+deadband gives the SAME zero-input guarantee, so "requires" is now doubted; remaining callers are
+low-momentum in-place holds.
 
 **`arriveOnTarget` (SC:491–535)** tags `arrive(:dead)` — the velocity-aware arrival. Heading pinned
 to the segment (braking = signed reverse forward, never a yaw flip). Projected miss `e = target −
@@ -56,6 +59,18 @@ heading frame → signed `setForward` (along) + `setStrafe` (cross), vector-satu
 = **P on the projected stop point** (effectively PD). Overshoot-safe both directions. Callers: Fall
 (steer/walkoff/fall), Descend step (replaced the convicted `descend:dead` law 2026-08-14). The
 rejected `steppingOff` pre-brake variant is documented at SC:473–489 — do not reintroduce.
+
+**`climbArrive`** tags `climb:arrive(:dead)` — `arriveOnTarget`'s law WITHOUT the climbable
+short-circuit, the CLIMB family's horizontal axis (owner ruling 2026-08-30; the flagship
+`(431,66,606)` wedge, pinned by the VineBridgeCourse `grab` card). A lateral grab flies its approach
+airborne carrying ~0.1 b/t at ~0.02/t authority; the raw-offset deadband went dead 0.04 short of
+the column and the ×10.11 coast carried the bot a cell past the vine. The projected deadband still
+outputs EXACT zero input inside — the vine-bounce guarantee — and an overshoot correction points
+back along the corridor, not into the trunk. HORIZONTAL ONLY by contract: on a climbable X/Z ride
+yaw input while Y is exclusively jump (+0.2/t) / no-input slide (−0.15/t) / sneak (holds height AND
+resets downward momentum), and the feet-bottom must never leave the bottom climbable cell (below it
+is free-fall, possibly lethal) — all owned by `holdClimbableStance` + Climb's Δy regimes, never by
+this law. Degenerate (vertical) segments still fall back to `recenterOn` own-column.
 
 **`stationKeep` (SC:653–700)** tags `hold(:dead)/hold(:floor/:depth/:sneak)` — PhaseRunner unmet-need
 hold while settled/on-climbable. Horizontal: **`anchoredServo` → `actuate`** on the bot's OWN column
@@ -195,6 +210,7 @@ Descends. `blendLeavesLane` — signed cte vs half-width `0.2`, drops outward bl
 | groundServo hazard | V×P-ramp | P→V | — | yes-ish (speed ≤0.11 at corner) |
 | recenterOn(Target) | P radial, deadband 0.15 | (radial) | — | **NO** (convicted SC:432–440) |
 | arriveOnTarget | P projected (PD) | P projected → strafe | — | **YES** |
+| climbArrive | P projected (PD) | P projected → strafe | — (stance servo owns Y) | **YES** |
 | stationKeep | P own-col | P own-col | P bang-bang / sneak | YES |
 | settleIntoBand | P own-col | P own-col | P band + vel FF | YES |
 | holdUntilOverTargetColumn | — | — | sneak hold | n/a |

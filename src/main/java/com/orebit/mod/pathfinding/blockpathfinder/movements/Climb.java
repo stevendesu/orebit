@@ -674,7 +674,16 @@ public final class Climb implements Movement {
             SteerControl.recenterClearOf(b, (int) Math.floor(path.tx()), (int) Math.floor(path.ty()),
                     (int) Math.floor(path.tz()));
         } else {
-            SteerControl.recenterOnTarget(b, path);
+            // Was recenterOnTarget — the position-only law that produced the flagship (431,66,606)
+            // wedge (pinned by the VineBridgeCourse `grab` card): a lateral grab flies its approach
+            // AIRBORNE carrying ~0.1 b/t, the raw-offset deadband went dead 0.04 short of the column,
+            // and the coast (×10.11 in air) carried the bot a full cell past the vine, out of the
+            // envelope. climbArrive is the same projected-stop law the Descend family adopted, minus
+            // the climbable short-circuit — its deadband is evaluated on the projected resting point,
+            // so it brakes mid-arc, and inside the deadband it still writes exactly zero input (the
+            // vine-bounce ruling's actual guarantee). Vertical (jump/sneak) stays with the regime
+            // branches below and holdClimbableStance — see climbArrive's scope guard.
+            SteerControl.climbArrive(b, path);
         }
         if (!b.grounded()) {
             // AIRBORNE — hand the whole stance to the per-tick servo, which classifies the step's vertical
