@@ -746,8 +746,11 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
                     String.format("%.1f", preYaw), String.format("%.3f", preZza),
                     String.format("%.3f", preXxa), this.horizontalCollision,
                     com.orebit.mod.platform.EntityState.onGround(this),
-                    String.format("%.3f", this.level().getBlockState(this.blockPosition().below())
-                            .getBlock().getFriction()));
+                    // Through the BotSteering seam, NOT level().getBlockState(...).getBlock().getFriction():
+                    // `level()` does not exist before 1.20 and broke chiseledCompileCommon on every version
+                    // 1.17.1–1.19.4. slipperinessAt is the same number the servo itself reads, and it is
+                    // already version-safe.
+                    String.format("%.3f", this.slipperinessAt(this.footX(), this.footY() - 1, this.footZ())));
         }
 
         // Completed-teleport detection: vanilla's portal process (and any other dimension change) runs
