@@ -104,6 +104,41 @@ public final class VineBridgeCourse {
         return "grab".equalsIgnoreCase(System.getProperty("orebit.vinebridge", ""));
     }
 
+    /**
+     * {@code -Dorebit.vinebridge=pathdiag} — the flagship (1215,65,1223) Diagonal cell-quantization
+     * wedge (run 2026-08-30 16:25:04), replayed as a deterministic scene: a worn VILLAGE PATH crossing
+     * a grass field diagonally. The flagship geometry (read out of the run save): {@code dirt_path}
+     * cells (collision top 15/16, resting feet Y0+0.9375, foot cell Y0) on the diagonal, full-height
+     * {@code grass_block}s (top Y0+1.000) at every crossing corner.
+     *
+     * <p>The wedge: a {@code Diagonal} between two path cells has band {@code [Y0, Y0]} (both floors
+     * topY=15), but the diagonal track unavoidably straddles the corner grass mid-step — vanilla rests
+     * the box on the highest overlapped surface, botY snaps {@code Y0+0.938 → Y0+1.000} (a physical
+     * rise of 1/16), the quantized foot cell flips {@code Y0 → Y0+1}, and the envelope's CELL-test
+     * upper bound reads a 0.062-block bump as "lifted off the step": {@code step FAILED (validity
+     * envelope) Diagonal} → fail→hold forever. The corner COLUMNS are explicitly admitted by the
+     * envelope's 2×2 XZ sweep; only their HEIGHT was not. EXPECTED (pre-envelope-fix): FAIL budget
+     * exhausted, finalPos on the diagonal with botY = Y0+1.000 exactly. PASS = standing on the goal
+     * pad past the path.
+     *
+     * <p>Scene (travel −X/+Z, matching the flagship's heading): 3×3 grass spawn pad → a 1/16 step down
+     * onto {@code PATH_LEN} dirt-path cells on the diagonal {@code (BASE_X−i, Y0, BASE_Z+i)}, with HOP
+     * 1's two crossing corners full grass (and only hop 1's — see the paint comment for why corners on
+     * every hop hand the planner a parallel grass bypass). The GOAL is the path's far end — no terminal
+     * step up. A stone CEILING at {@code Y0+3} covers the whole field: this card's first two cuts
+     * taught that a pathfinder this good must be fenced honestly — cut 1 routed a parallel grass
+     * diagonal, cut 2 {@code DiagonalParkour}'d pad → isolated corner → goal pad, never touching the
+     * path. The ceiling kills every jump ARC (a takeoff's head tops out above {@code Y0+3}) while the
+     * walking moves and the corner straddle-lift need none, so the path diagonals are finally the only
+     * route. Void elsewhere.
+     */
+    private static boolean pathdiagVariant() {
+        return "pathdiag".equalsIgnoreCase(System.getProperty("orebit.vinebridge", ""));
+    }
+
+    /** Diagonal dirt-path cells in the pathdiag scene — enough hops that one takes off with cruise carry. */
+    private static final int PATH_LEN = 5;
+
     public static void register(PlatformEvents events) {
         if (System.getProperty("orebit.vinebridge") == null) {
             return;
@@ -112,7 +147,8 @@ public final class VineBridgeCourse {
         events.onServerStarted(course::start);
         events.onWorldTickEnd(course::tick);
         OrebitCommon.LOGGER.info("[Orebit/vinebridge] armed: variant={}",
-                grabVariant() ? "GRAB (flagship Climb-overshoot replay)"
+                pathdiagVariant() ? "PATHDIAG (flagship Diagonal cell-quantization replay)"
+                        : grabVariant() ? "GRAB (flagship Climb-overshoot replay)"
                         : floorVariant() ? "FLOOR (Traverse-owned, span=" + SPAN + ")"
                         : "FEET (Climb-owned curtain, span=" + SPAN + ")");
     }
@@ -138,7 +174,13 @@ public final class VineBridgeCourse {
             Debug.VERBOSE = true;
             this.level = server.overworld();
             paint();
-            this.goal = grabVariant()
+            this.goal = pathdiagVariant()
+                    // comeTo takes a FEET cell and targets floor = feet-1, so the goal is passed as
+                    // Y0+1 over the path block even though a 15/16 floor SEATS the feet in the floor
+                    // cell itself — passing the path cell's own Y sends the search after a void floor
+                    // at Y0-1 (16 expansions, BLOCKED, bot never leaves spawn; measured, cut 3).
+                    ? new BlockPos(BASE_X - (PATH_LEN - 1), Y0 + 1, BASE_Z + PATH_LEN - 1)
+                    : grabVariant()
                     ? new BlockPos(BASE_X, Y0 + 2, BASE_Z + 8)
                     : new BlockPos(BASE_X + SPAN + 2, Y0 + 1, BASE_Z);
             owner = new FakePlayerEntity(server, level, new GameProfile(
@@ -146,7 +188,9 @@ public final class VineBridgeCourse {
                     "VineBridge"));
             // NB: no addFreshEntity — BotManager.spawnBotFor owns placement. Adding a connection-less
             // FakePlayerEntity to the level NPEs the first packet send (learned the hard way).
-            if (grabVariant()) {
+            if (pathdiagVariant()) {
+                owner.setPos(BASE_X + 2.5, Y0 + 1, BASE_Z - 0.5);   // middle of the 3x3 grass spawn pad
+            } else if (grabVariant()) {
                 owner.setPos(BASE_X + 0.5, Y0 + 1, BASE_Z + 1.5);   // middle of the 3-wide start pad
             } else {
                 owner.setPos(BASE_X + 0.5, Y0 + 1, BASE_Z + 0.5);
@@ -213,8 +257,57 @@ public final class VineBridgeCourse {
             level.setBlockAndUpdate(new BlockPos(BASE_X, Y0 + 1, BASE_Z + 9), stone);
         }
 
+        /**
+         * The village-path diagonal — see {@link #pathdiagVariant} for the cell map and the flagship
+         * provenance. Everything else is void, so the path diagonal is the only route.
+         */
+        void paintPathdiag() {
+            BlockState air = Blocks.AIR.defaultBlockState();
+            BlockState grass = Blocks.GRASS_BLOCK.defaultBlockState();
+            BlockState path = Blocks.DIRT_PATH.defaultBlockState();
+            for (int dx = -(PATH_LEN + 4); dx <= 5; dx++) {
+                for (int dy = -4; dy <= 8; dy++) {
+                    for (int dz = -4; dz <= PATH_LEN + 4; dz++) {
+                        level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0 + dy, BASE_Z + dz), air);
+                    }
+                }
+            }
+            // 3x3 grass spawn pad (feet Y0+1), east of the path head; its west edge touches P0.
+            for (int dx = 1; dx <= 3; dx++) {
+                for (int dz = -2; dz <= 0; dz++) {
+                    level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0, BASE_Z + dz), grass);
+                }
+            }
+            // The worn path on the diagonal. Grass corners on HOP 1 ONLY — the exact flagship
+            // neighbourhood at (1214..1215, 64, 1223..1224), entered with cruise carry from hop 0,
+            // matching the flagship's previous-diagonal takeoff (vel 0.1167). Deliberately NOT on every
+            // hop: corner cells of consecutive hops line up into grass diagonals PARALLEL to the path,
+            // and the first cut of this card learned the planner will happily route along that flat
+            // grass line and never touch the path at all (PASS in 72 ticks, wedge untouched). One
+            // isolated corner pair has no such bypass: leaving the path over a corner costs an
+            // Ascend+Descend pair against one flat Diagonal.
+            for (int i = 0; i < PATH_LEN; i++) {
+                level.setBlockAndUpdate(new BlockPos(BASE_X - i, Y0, BASE_Z + i), path);
+            }
+            level.setBlockAndUpdate(new BlockPos(BASE_X - 2, Y0, BASE_Z + 1), grass);
+            level.setBlockAndUpdate(new BlockPos(BASE_X - 1, Y0, BASE_Z + 2), grass);
+            // The ceiling that makes the path the ONLY route (see the variant Javadoc): low enough that
+            // no jump arc fits (apex head > Y0+3), high enough that a walking body on any floor here —
+            // grass feet Y0+1, body top Y0+2.8 — still clears it.
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int dx = -(PATH_LEN + 2); dx <= 4; dx++) {
+                for (int dz = -3; dz <= PATH_LEN + 2; dz++) {
+                    level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0 + 3, BASE_Z + dz), stone);
+                }
+            }
+        }
+
         /** Start ledge -> SPAN vines on a 4-tall north wall -> end ledge. Everything else is void. */
         void paint() {
+            if (pathdiagVariant()) {
+                paintPathdiag();
+                return;
+            }
             if (grabVariant()) {
                 paintGrab();
                 return;
@@ -286,7 +379,12 @@ public final class VineBridgeCourse {
             // the ledge and not grounded on anything. The crossing is only proven when the bot is STANDING on
             // the far ledge, so that is what this asserts: feet on (or past) the ledge column AND on real
             // ground, which no cell of the span can satisfy.
-            if (grabVariant()) {
+            if (pathdiagVariant()) {
+                if (bot.blockPosition().getX() <= BASE_X - (PATH_LEN - 1) && bot.grounded()) {
+                    finish("PASS standing on the path's far end past the corner straddle");
+                    return;
+                }
+            } else if (grabVariant()) {
                 if (bot.blockPosition().getZ() >= BASE_Z + 8 && bot.grounded()) {
                     finish("PASS standing on the goal ledge past the vine grab");
                     return;
