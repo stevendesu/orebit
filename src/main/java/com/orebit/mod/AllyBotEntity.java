@@ -687,7 +687,16 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // would be for the whole tick. Nothing functional rides on it: no code in the mod raycasts or reads
         // getLookAngle/getViewVector, and the break is driven by getDestroyProgress on an explicit BlockPos,
         // never by where the bot looks. A no-op when idle, and one tick behind on a target switch.
-        mining.reaim();
+        // mining.reaim() was called HERE and is REVERTED (2026-08-29). It was committed as "visuals only";
+        // it is not. lookAtCenter writes setYRot/setYBodyRot/setYHeadRot, and yaw IS the movement direction
+        // vanilla's moveRelative uses — so aiming the head at the block being mined also aims the bot's
+        // THRUST at it. Sitting between the servo (which runs at driveToward, above) and doTick, it
+        // silently overrode every steering decision while a mine target was set. The straddle probe caught
+        // it directly: exec logged the servo's yaw sweeping 174 -> 126 degrees while physics used a
+        // near-constant -101, which is exactly atan2 toward the target block's centre.
+        //
+        // The mining head-aim can only be restored by a writer that does NOT touch yaw (pitch alone is
+        // inert on the ground), or by re-aiming AFTER physics as BotMining.tick already does.
 
         // ---- PHYSICS STRADDLE PROBE (2026-08-29, the (352,71,512) hold-drift) -------------------------
         // The exec line is emitted BEFORE physics, so it proves what was COMMANDED but never what vanilla
