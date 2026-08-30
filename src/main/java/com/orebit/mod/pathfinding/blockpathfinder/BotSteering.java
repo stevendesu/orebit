@@ -63,6 +63,26 @@ public interface BotSteering {
     boolean inLava();
 
     /**
+     * Whether the bot's EYES are under the water surface — vanilla {@code Entity.isUnderWater()}, the exact
+     * predicate {@code Entity.updateSwimming} requires (with sprint) to enter {@code Pose.SWIMMING}. This is
+     * a strictly deeper condition than {@link #inWater}: at a flowing surface block the fluid tops out at
+     * {@code amount/9} of its cell, so a bot can be chest-deep in "water" with its eyes in air.
+     *
+     * <p>The dive-init ({@code StartSprintSwim}) gates its sprint on this, mirroring the vanilla client's
+     * own legality rule ({@code LocalPlayer.shouldStopSwimSprinting} drops sprint with no forward impulse
+     * off-ground): a headless bot holding the sprint FLAG with zero input is a state no real player can
+     * produce, and it is load-bearing — {@code LivingEntity.getFluidFallingAdjustedMovement} skips water
+     * gravity entirely for a sprinting entity, so an eyes-dry bot holding sprint hovers forever instead of
+     * sinking the last fraction that would flip its pose (the (909,61,1095) flagship wedge, 2026-08-30).
+     *
+     * <p>Default {@code false} (the conservative reading for headless test doubles: never claim submerged
+     * eyes without a world to prove it); {@code AllyBotEntity} overrides with the live entity read.
+     */
+    default boolean eyesUnderWater() {
+        return false;
+    }
+
+    /**
      * Whether the bot's FEET block is a climbable — vanilla {@code LivingEntity.onClimbable()} (the
      * feet-cell {@code #climbable} test, incl. the open-trapdoor-above-same-facing-ladder special case).
      * This is the arrest state a hang landing completes in ({@code Fall}'s done predicate) and the

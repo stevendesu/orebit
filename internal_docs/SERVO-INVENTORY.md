@@ -101,11 +101,22 @@ one-tick velocity feed-forward on the descend edge (sneak tap); jump above/below
 grounded → no-op. Writes `lastStance` diagnostic, never `tag`.
 
 **`holdDepth`/`holdDepthAt` (SC:2321/2340)** — vertical bang-bang, target `ty + SWIM_RIDE(0.2) −
-bias`, hysteresis ±`WATER_RISE_DEADBAND(0.2)` (jump/sink) — but decided on the **PROJECTED RESTING
-HEIGHT** `y + velY·(q/(1−q))`, not on `y`. Bang-bang is correct here (the actuators ARE discrete
+bias` = the **band TOP** (owner ruling 2026-08-30): quiet zone `[depth − WATER_RISE_DEADBAND, depth]`,
+sink anywhere above `depth`, jump below the band — decided on the **PROJECTED RESTING HEIGHT**
+`y + velY·(q/(1−q))`, not on `y`. Bang-bang is correct here (the actuators ARE discrete
 ±0.04 impulses, nothing to proportion); the projection supplies the velocity half of the choice.
-Identical to the old law at rest (`velY == 0 ⇒ projected == y`), which preserves the settle /
-station-keep band semantics and their pinned tests.
+Identical to the old law at rest inside the band (`velY == 0 ⇒ projected == y`).
+
+> ⚠️ **The pre-2026-08-30 band was symmetric (±0.2 around `wy+0.2` → `[wy, wy+0.4]`), which
+> double-counted the +0.2 settle allowance.** The universal settle band is `[expected, expected+0.2]`
+> — at +0.2 a 1.8-tall bot still clears a 2-cell ceiling; `SWIM_RIDE` *is* that +0.2, so hysteresis
+> above it admits heights the planner never checked. Convicted on the flagship at `(909,61,1095)`:
+> the dive-init parked at `y=61.304` (legal in the old band), 0.035 above the eyes-underwater line
+> `surface(62.889) − 1.62`, where sprint-held water physics (`getFluidFallingAdjustedMovement` skips
+> gravity for `isSprinting()`) held it static for 51k ticks and `Pose.SWIMMING` could never engage.
+> The companion fix: `StartSprintSwim` now gates sprint on `prone() || eyesUnderWater()` — the vanilla
+> client's own `shouldStopSwimSprinting` legality rule — so an eyes-dry bot sinks under normal
+> gravity instead of hovering.
 
 > ⚠️ **The pre-2026-08-29 entry here read "No velocity term — fine because fluid vertical rates
 > (~0.04 b/t) ≪ the 0.4 band." That premise was FALSE and cost a flagship wedge.** 0.04 is the
@@ -197,7 +208,7 @@ Descends. `blendLeavesLane` — signed cte vs half-width `0.2`, drops outward bl
 | parkourAirborne | **P predictive + cnSafe hard floor** | P→V | ballistic | **YES — the correct braking pattern** |
 | parkourRunupAlign | V cruise | **V-only, setpoint 0, NO position anchor** | — | **NO** (same class; 1-tick exposure) |
 | steerViaGate | V cruise pass-through | P point pursuit | — | pass-through by contract |
-| holdDepth(At) | — | — | P bang-bang ±0.2 | YES for fluid rates |
+| holdDepth(At) | — | — | P bang-bang, one-sided band [top−0.2, top] on projection | YES for fluid rates |
 | holdClimbableStance | — | — | P band + vel FF | YES |
 
 ## Consolidated bug-class flags
