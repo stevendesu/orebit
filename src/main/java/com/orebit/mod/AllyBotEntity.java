@@ -687,10 +687,68 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
         // would be for the whole tick. Nothing functional rides on it: no code in the mod raycasts or reads
         // getLookAngle/getViewVector, and the break is driven by getDestroyProgress on an explicit BlockPos,
         // never by where the bot looks. A no-op when idle, and one tick behind on a target switch.
+        // Mining head-aim, ahead of the physics tick so the head is where a mining player's would be for
+        // the whole tick (BotMining.tick runs AFTER doTick by design, so its own aim lands too late to be
+        // seen and is cleared by the next tick's pitch reset).
+        //
+        // THIS CALL WAS REVERTED ONCE AND IS BACK ONLY BECAUSE THE AIM IS NOW INPUT-SAFE. The first
+        // version wrote yaw bare and was justified as "visuals only"; it was not. Yaw is HALF the velocity
+        // command — vanilla thrusts zza/xxa along it — so aiming the head at the block also aimed the
+        // bot's THRUST at it, and the bot drove into the block it was mining. The straddle probe below
+        // convicted it: exec logged the servo's yaw sweeping 174 -> 126 degrees while physics used a
+        // near-constant -101, exactly atan2 toward the target's centre.
+        //
+        // lookAtCenter now routes through aimPreservingInput, which re-solves forward/strafe into the new
+        // frame so the commanded world velocity is unchanged and only the heading moves. With no input
+        // standing it degenerates to a plain aim. Do NOT reintroduce a bare setYRot on this path.
         mining.reaim();
+
+        // ---- PHYSICS STRADDLE PROBE (2026-08-29) -------------------------------------------------------
+        // The exec line is emitted BEFORE physics, so it proves what the servo COMMANDED but never what
+        // vanilla actually used. Those are different claims, and the gap between them can hide a bug
+        // completely: anything writing yaw or the movement keys between the servo and doTick is invisible
+        // to every log we had. Its first catch was exactly that — a head-aim call added ahead of doTick
+        // (reverted in the commit above) silently re-pointed the thrust, so the exec line showed the
+        // servo's yaw sweeping 174 -> 126 degrees while physics used a near-constant -101.
+        //
+        // Straddling the tick makes the two comparable: the same fields either side of doTick, plus the
+        // applied input resolved into world space, so a tick's dm delta can be attributed to the input or
+        // to something else. Keep it: the class of bug it finds (a half-written yaw/key pair) is invisible
+        // otherwise, and it cost several wrong hypotheses before it existed.
+        // Diagnostic ONLY, VERBOSE-gated, no behaviour.
+        final boolean probe = Debug.VERBOSE;
+        final double preX = probe ? this.getX() : 0, preZ = probe ? this.getZ() : 0;
+        final double preDX = probe ? this.getDeltaMovement().x : 0;
+        final double preDZ = probe ? this.getDeltaMovement().z : 0;
+        final float preYaw = probe ? this.getYRot() : 0;
+        final float preZza = probe ? this.zza : 0, preXxa = probe ? this.xxa : 0;
 
         super.tick(); // ServerPlayer housekeeping (i-frames, containers, advancements, attributes, …)
         this.doTick(); // Player.tick physics + pose + survival
+
+        if (probe) {
+            // The input's own world-space direction, so "commanded" and "moved" are directly comparable:
+            // vanilla's forward vector for a yaw in degrees is (-sin, cos) over (x, z), and strafe is its
+            // left-hand normal — the same convention BotNavigator's `head` uses.
+            final double yawRad = Math.toRadians(preYaw);
+            final double fwdX = -Math.sin(yawRad), fwdZ = Math.cos(yawRad);
+            final double inX = fwdX * preZza + fwdZ * preXxa;
+            final double inZ = fwdZ * preZza - fwdX * preXxa;
+            OrebitCommon.LOGGER.info(
+                    "[Orebit] straddle pos=({},{})->({},{}) dm=({},{})->({},{}) in=({},{})"
+                            + " yaw={} zza={} xxa={} hcol={} onGround={} frict={}",
+                    String.format("%.4f", preX), String.format("%.4f", preZ),
+                    String.format("%.4f", this.getX()), String.format("%.4f", this.getZ()),
+                    String.format("%.4f", preDX), String.format("%.4f", preDZ),
+                    String.format("%.4f", this.getDeltaMovement().x),
+                    String.format("%.4f", this.getDeltaMovement().z),
+                    String.format("%.4f", inX), String.format("%.4f", inZ),
+                    String.format("%.1f", preYaw), String.format("%.3f", preZza),
+                    String.format("%.3f", preXxa), this.horizontalCollision,
+                    com.orebit.mod.platform.EntityState.onGround(this),
+                    String.format("%.3f", this.level().getBlockState(this.blockPosition().below())
+                            .getBlock().getFriction()));
+        }
 
         // Completed-teleport detection: vanilla's portal process (and any other dimension change) runs
         // inside the player tick above, so a level change is visible HERE first — re-anchor everything
@@ -1123,6 +1181,31 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
      * hand the next move a frame the bot does not fit — the same class of defect as the Surface cursor skip.
      */
     @Override public boolean prone() { return this.getPose() == Pose.SWIMMING; }
+
+    /**
+     * {@link BotSteering#aimPreservingInput} — re-aim the head, then re-solve the movement keys so the
+     * COMMANDED world-space velocity is unchanged. See the seam's Javadoc for why a bare yaw write is a
+     * steering change; this is the only correct way to re-aim a bot mid-drive.
+     */
+    @Override
+    public void aimPreservingInput(double dx, double dy, double dz) {
+        // The standing command, resolved into world axes under the CURRENT (old) frame. Convention is
+        // SteerControl.actuate's: forward runs along (-sin yaw, cos yaw), positive strafe is its LEFT,
+        // i.e. (hz, -hx).
+        final double oldYaw = Math.toRadians(this.getYRot());
+        final double ofx = -Math.sin(oldYaw), ofz = Math.cos(oldYaw);
+        final double inX = ofx * this.zza + ofz * this.xxa;
+        final double inZ = ofz * this.zza - ofx * this.xxa;
+
+        faceTowards(dx, dy, dz);
+
+        // Re-decompose the SAME world vector in the new frame. With no input standing this is all zeros
+        // and the call degenerates to a plain aim, which is why it is always safe to use.
+        final double newYaw = Math.toRadians(this.getYRot());
+        final double nfx = -Math.sin(newYaw), nfz = Math.cos(newYaw);
+        this.zza = (float) (inX * nfx + inZ * nfz);   // along
+        this.xxa = (float) (inX * nfz - inZ * nfx);   // cross (LEFT-positive)
+    }
 
     @Override
     public void faceTowards(double dx, double dy, double dz) {
