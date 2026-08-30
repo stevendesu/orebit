@@ -66,8 +66,10 @@ public final class SteerControl {
     static final double EPS = 1.0e-4;
     /** cos of the max off-heading angle treated as "in line" (~25 degrees) — above it a corner is a real turn. */
     static final double STRAIGHT_DOT = 0.9;
-    /** Dead-band (blocks) around the planned depth inside which {@link #holdDepth} presses neither rise nor
-     *  sink — bang-bang controller hysteresis so a bot at its target depth doesn't chatter jump on/off. */
+    /** Dead-band (blocks) extending BELOW the planned depth inside which {@link #holdDepth} presses neither
+     *  rise nor sink — bang-bang controller hysteresis so a bot at its target depth doesn't chatter jump
+     *  on/off. One-sided since 2026-08-30: the depth argument is the band TOP (the highest legal resting
+     *  height), so the quiet zone is {@code [depth - 0.2, depth]} and anything above the depth sinks. */
     static final double WATER_RISE_DEADBAND = 0.2;
 
     /**
@@ -78,8 +80,12 @@ public final class SteerControl {
      * <p><b>Why 0.2 and not the cell centre.</b> The band is {@code [wy, wy+0.2]} because the bot is 1.8 tall:
      * at {@code +0.20} its head still occupies exactly the headroom cells the planner assumed, and anything
      * higher risks fouling a ceiling the search never checked — aiming at the centre would wedge a bot in a
-     * tight cave. With {@link #WATER_RISE_DEADBAND} also 0.2 the bang-bang controller then oscillates over
-     * {@code [wy+0.0, wy+0.4]}, entirely inside the feet cell, so the ride can never round to a neighbour.
+     * tight cave. The ride height is therefore the band <b>TOP</b>, and {@link #holdDepthAt}'s one-sided
+     * {@link #WATER_RISE_DEADBAND} extends only downward: the hold is quiet over exactly {@code [wy, wy+0.2]}
+     * and sinks from anywhere above it. (Until 2026-08-30 the dead-band was symmetric, which double-counted
+     * the +0.2 allowance into {@code [wy, wy+0.4]} — the upper half of which violates this very ceiling
+     * rationale, and parked a dive-init 0.035 above the eyes-underwater line on the flagship at
+     * {@code (909,61,1095)}, where sprint-suppressed water gravity held it forever.)
      *
      * <p><b>Three other places already computed this exact number.</b> {@code Swim.reachedSwim}'s ceiling
      * clamp evaluated {@code (wy+2) - 1.8 == wy+0.2}; the ground settle band's top is {@code wy+0.2}; and
@@ -2404,8 +2410,9 @@ public final class SteerControl {
 
     /**
      * The water-column depth autopilot: press the inputs a player would to bring the bot's feet to the
-     * planned depth ({@code path.ty() - bias}). Below it (past the {@link #WATER_RISE_DEADBAND dead-band}) →
-     * hold jump (vanilla {@code jumpInLiquid} rises +0.04/t); above it → {@link BotSteering#sinkInWater}
+     * planned depth ({@code path.ty() - bias}), the TOP of the legal settle band. Below the band (past the
+     * {@link #WATER_RISE_DEADBAND dead-band}) → hold jump (vanilla {@code jumpInLiquid} rises +0.04/t);
+     * anywhere above the depth itself → {@link BotSteering#sinkInWater}
      * (the client-only -0.04 down-swim a headless bot must replicate). No-op out of water — a move that
      * just exited onto a bank must not hop. This is how the bot dives to a submerged hole, holds depth,
      * surfaces, and climbs out: called by each water-capable move's {@code steer} (the four swim moves with
@@ -2461,10 +2468,23 @@ public final class SteerControl {
         // Still a bang-bang, deliberately: the actuators ARE discrete +-0.04 impulses, so there is no
         // continuous thrust to proportion. The cascade's job here is choosing WHICH impulse, and the
         // projection is what supplies the velocity half of that choice.
+        //
+        // `depth` IS THE BAND TOP, NOT ITS CENTRE (owner ruling 2026-08-30; the (909,61,1095)
+        // StartSprintSwim wedge). The settle band for every movement is [expected, expected+0.2] -- at
+        // +0.2 a 1.8-tall bot still clears a 2-cell ceiling, anything higher fouls headroom the planner
+        // never checked -- and SWIM_RIDE already IS that +0.2. The old symmetric +-WATER_RISE_DEADBAND
+        // around it double-counted the allowance into [wy, wy+0.4], whose entire upper half violates
+        // SWIM_RIDE's own ceiling rationale. Convicted on the flagship: the dive-init parked at
+        // y=61.304 -- legal under the symmetric band, but 0.035 above the eyes-underwater line
+        // (surface 62.889 - 1.62), where sprint-held water physics (LivingEntity.
+        // getFluidFallingAdjustedMovement skips gravity for isSprinting()) holds it FOREVER and
+        // Pose.SWIMMING can never be entered. So: quiet only in [depth - WATER_RISE_DEADBAND, depth],
+        // sink anywhere above depth, jump below the band. The hysteresis width is unchanged (0.2), so
+        // the no-chatter property is intact; strict > keeps a bot resting exactly AT depth quiet.
         double projected = b.y() + b.velY() * (WATER_DRAG_VERTICAL / (1.0 - WATER_DRAG_VERTICAL));
         if (projected < depth - WATER_RISE_DEADBAND) {
             b.setJumping(true);
-        } else if (projected > depth + WATER_RISE_DEADBAND) {
+        } else if (projected > depth) {
             b.sinkInWater();
         }
     }

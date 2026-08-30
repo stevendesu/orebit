@@ -246,11 +246,16 @@ class StationKeepMediumTest {
     }
 
     @Test
-    void onceOnTheFloorTheHoldIsQuiet() {
+    void justAboveTheFloorTheHoldStillPressesSinkUntilTheBlockStopsIt() {
+        // Changed 2026-08-30 with holdDepthAt's one-sided band (depth = band TOP): the floor hold's whole
+        // purpose is to make the bot GROUNDED (the 5x mining rate), so hovering 0.05 above the block is
+        // not a settled state — the hold closes the gap under its own power, the block stops it, and from
+        // the next tick the grounded short-circuit (aBotStandingOnThePoolFloorPressesNothing) owns the
+        // quiet. No chatter is possible: the sink ends on a collision, not on re-crossing a band edge.
         MediumBot b = new MediumBot().submerged().overAFloor().atY(FOOT_Y + 0.05);
         SteerControl.stationKeep(b, lateral());
 
-        assertEquals(0, b.sank, "inside the deadband around the cell floor the bang-bang controller must not chatter");
+        assertEquals(1, b.sank, "0.05 above a real floor is not settled — close it and become grounded");
         assertFalse(b.jumping);
         assertEquals(0.0f, b.forward, 1e-6f, "and the own-column re-centre is still exact zero");
     }

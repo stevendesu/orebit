@@ -87,7 +87,7 @@ public final class StartSprintSwim implements Movement {
      */
     @Override
     public void steer(BotSteering b, SteerView path) {
-        b.setSprinting(true);
+        b.setSprinting(b.prone() || b.eyesUnderWater());    // see plan()'s drive — same legality gate
         SteerControl.uprightSwimServo(b, path);
     }
 
@@ -97,7 +97,20 @@ public final class StartSprintSwim implements Movement {
         MovePlan plan = new MovePlan();
         plan.phase("submerge")
                 .drive((b, v) -> {
-                    b.setSprinting(true);                   // KEEP: needed to enter Pose.SWIMMING
+                    // SPRINT ONLY WHEN IT CAN DO ITS JOB (owner ruling 2026-08-30; the (909,61,1095)
+                    // flagship wedge). Sprint's one purpose here is Entity.updateSwimming's
+                    // `isSprinting() && isUnderWater()` — but holding the FLAG while the eyes are still
+                    // dry is a state no real client can produce (LocalPlayer.shouldStopSwimSprinting
+                    // drops sprint with no forward impulse off-ground), and it is actively harmful:
+                    // LivingEntity.getFluidFallingAdjustedMovement skips water gravity entirely for a
+                    // sprinting entity, so an eyes-dry bot holding sprint HOVERS at whatever height the
+                    // dive transient left it. Convicted: parked at y=61.304 for 51k ticks, 0.035 above
+                    // the eyes-under line, pose forever STANDING. Gating sprint on the eye test is the
+                    // vanilla client's own rule: no sprint => normal water gravity sinks the bot the
+                    // last fraction, the eyes go under, sprint comes on, and the pose flips next tick.
+                    // `prone()` keeps it held once the pose HAS flipped (dropping sprint would drop the
+                    // pose right back out from under the move).
+                    b.setSprinting(b.prone() || b.eyesUnderWater());
                     // The UPRIGHT servo, because the bot is still upright until the pose flips — it station-
                     // keeps on the initiation column AND owns the sink (holdDepthAt at the planned depth) that
                     // pushes the head under and makes the bot isUnderWater(), which is what vanilla's

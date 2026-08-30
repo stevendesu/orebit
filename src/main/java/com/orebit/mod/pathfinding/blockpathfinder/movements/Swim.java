@@ -365,8 +365,8 @@ public final class Swim implements Movement {
      * accepted at {@code 161.000} while still standing DRY on the lip, one cell ABOVE. Same defect, both
      * directions.
      *
-     * <p>{@link SteerControl#SWIM_RIDE} now parks the bot at {@code wy + 0.2} with a {@code ±0.2} dead-band,
-     * i.e. {@code [wy+0.0, wy+0.4]} — entirely inside the feet cell. So "is the ride at the right height" and
+     * <p>{@link SteerControl#SWIM_RIDE} now parks the bot at {@code wy + 0.2} with the one-sided dead-band
+     * below it, i.e. {@code [wy+0.0, wy+0.2]} — entirely inside the feet cell. So "is the ride at the right height" and
      * "is the bot in the right cell" became the same question, and the cell test is the honest spelling of it.
      * Both clamps computed heights inside that same cell and are simply gone; the ceiling clamp in particular
      * evaluated {@code (wy+2) - 1.8 == wy + 0.2}, which IS the new set-point, so its case is now the default

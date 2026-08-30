@@ -1164,6 +1164,9 @@ public class AllyBotEntity extends FakePlayerEntity implements BotSteering {
 
     @Override public boolean inLava() { return this.isInLava(); }
 
+    /** The live eye test {@code Entity.updateSwimming} gates the prone pose on — see {@link BotSteering#eyesUnderWater}. */
+    @Override public boolean eyesUnderWater() { return this.isUnderWater(); }
+
     @Override
     public void faceHorizontally(double dx, double dz) {
         float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
