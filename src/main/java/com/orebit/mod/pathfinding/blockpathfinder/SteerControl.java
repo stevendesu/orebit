@@ -630,8 +630,27 @@ public final class SteerControl {
      * bot arrive at one the code already treats as normal.
      */
     public static void stationKeep(BotSteering b, SteerView p) {
-        recenterOn(b, Math.floor(b.x()) + 0.5, Math.floor(b.z()) + 0.5);
-        tag("hold");   // after recenterOn, so the log names the CALLER's intent, not the shared column servo
+        // NORMALIZED 2026-08-29 (owner ruling). This was `recenterOn` + tag("hold") — the legacy
+        // position-only P-law, and the LAST hold still on it: restHold was moved to anchoredServo on
+        // 08-19 and this one was missed. recenterOn faces its POSITION error and presses forward, with
+        // no velocity term, no strafe and no signed forward, so it has exactly one lever — rotation.
+        // Arriving with cross-axis momentum it therefore chases its own overshoot rather than arresting
+        // it. Observed directly on a 2026-08-29 hold: a smooth ~200-degree facing sweep (yaw 174 -> 126)
+        // with throttle ramping 0.16 -> 0.48, both exactly as the law predicts, since it faces its
+        // position error and fwd == distance-to-anchor by construction. (That hold did NOT by itself wedge
+        // the bot — the wedge in that run had a separate, since-reverted cause — but the sweep is genuine
+        // recenterOn behaviour and is what this normalization removes.)
+        //
+        // anchoredServo runs the §2.1 cascade (anchor -> desired velocity -> velocity error) and actuates
+        // through §2.2, which is the law this hold actually wants: it keeps a SEMANTIC facing (the head
+        // points where the bot is going) and corrects with BOTH key channels — a signed forward, so a
+        // brake is a backpedal tap rather than a 180-degree spin, plus strafe for the cross axis. It only
+        // yaws onto the correction when the keys genuinely cannot deliver it (|u| > 1). Same anchor as
+        // before (the bot's OWN column centre, never the step's target — the (58,133,189) rule), and the
+        // same cap/gain restHold proved on the ground, so this is the sibling hold's law applied here.
+        final double ax = Math.floor(b.x()) + 0.5, az = Math.floor(b.z()) + 0.5;
+        anchoredServo(b, "hold", "hold:dead", ax, az,
+                SERVO_CROSS_CAP, SERVO_CROSS_GAIN, ax - b.x(), az - b.z());
         // A HOLD IS A HOLD — including vertically (2026-08-05, the third (55,173,256) miss). This is the
         // runner's stop-and-fix path: the bot is mining or placing and must not move AT ALL until the
         // geometry is established. Delegating to holdClimbableStance broke that on a hang, because its
@@ -992,6 +1011,56 @@ public final class SteerControl {
      * for the rationale of each piece; behavior through the anchored path is byte-identical to the
      * pre-factoring inline tail.
      */
+    /** The tick's ground drag {@code q = friction·0.91}, clamped — see {@link #actuate}'s derivation. */
+    private static double dragQ(BotSteering b) {
+        double fr = b.slipperinessAt(b.footX(), b.footY() - 1, b.footZ());
+        fr = Math.max(EPS, Math.min(fr, 1.0 - EPS));
+        return Math.max(EPS, Math.min(fr * VANILLA_HORIZONTAL_DRAG, 1.0 - EPS));
+    }
+
+    /** The tick's input scale {@code k = 1/(A·q)} — the other half of {@link #actuate}'s exact solve.
+     *  Split out (with {@link #dragQ}) so the §2.2 physics has ONE copy that both the actuation and the
+     *  {@link #holdWithinKeyBudget} authority test read. */
+    private static double inputK(BotSteering b, double q) {
+        double fr = b.slipperinessAt(b.footX(), b.footY() - 1, b.footZ());
+        fr = Math.max(EPS, Math.min(fr, 1.0 - EPS));
+        double accel = GROUND_INPUT_SPEED * (VANILLA_ACCEL_NUMERATOR / (fr * fr * fr)) * VANILLA_INPUT_SCALE;
+        return 1.0 / (accel * q);
+    }
+
+    /**
+     * <b>Can the station-keep hold reach its desired velocity within the key budget this tick?</b> — i.e.
+     * is the exact input {@code |u| ≤ 1}, so forward/strafe (including a backpedal) can deliver the whole
+     * correction without saturating?
+     *
+     * <p>This is the gate the {@code PhaseRunner} holds on before aiming at and mining a block (owner
+     * ruling 2026-08-29). Mining while still carrying momentum the servo cannot cancel is unstable in both
+     * directions: the break's own reach and progress are evaluated from a moving body, and the aim
+     * competes with the drive for the yaw. Waiting for authority makes "stop, then turn, then break" true
+     * by construction rather than by hope.
+     *
+     * <p>Deliberately {@code |u| ≤ 1} — the SAME quantity {@link #actuate} uses to decide whether it must
+     * yaw onto the correction — and not a hand-set speed threshold. It is the exact statement of "the keys
+     * can do this", it scales itself to the block underfoot (ice has a quarter of stone's authority), and
+     * it cannot drift out of agreement with the servo because it is the servo's own number.
+     */
+    public static boolean holdWithinKeyBudget(BotSteering b) {
+        final double ax = Math.floor(b.x()) + 0.5, az = Math.floor(b.z()) + 0.5;
+        final double dx = ax - b.x(), dz = az - b.z();
+        final double dist = Math.sqrt(dx * dx + dz * dz);
+        double dvx = 0.0, dvz = 0.0;
+        if (dist >= EPS) {
+            double sp = Math.min(SERVO_CROSS_CAP, SERVO_CROSS_GAIN * dist);
+            dvx = (dx / dist) * sp;
+            dvz = (dz / dist) * sp;
+        }
+        final double q = dragQ(b);
+        final double k = inputK(b, q);
+        final double ux = (dvx - b.velX() + b.velX() * (1.0 - q)) * k;
+        final double uz = (dvz - b.velZ() + b.velZ() * (1.0 - q)) * k;
+        return Math.sqrt(ux * ux + uz * uz) <= 1.0;
+    }
+
     private static void actuate(BotSteering b, String tagName, String tagDead,
                                 double errx, double errz, double faceX, double faceZ) {
         double emag = Math.sqrt(errx * errx + errz * errz);
@@ -1026,11 +1095,8 @@ public final class SteerControl {
         // converges geometrically over a couple of ticks. Using the walk value while sprinting would
         // OVER-command — the exact failure this change exists to remove. Under-command is self-correcting;
         // over-command oscillates. If a sprint seam is ever added, this becomes exact.
-        double fr = b.slipperinessAt(b.footX(), b.footY() - 1, b.footZ());
-        fr = Math.max(EPS, Math.min(fr, 1.0 - EPS));
-        double q = Math.max(EPS, Math.min(fr * VANILLA_HORIZONTAL_DRAG, 1.0 - EPS));
-        double accel = GROUND_INPUT_SPEED * (VANILLA_ACCEL_NUMERATOR / (fr * fr * fr)) * VANILLA_INPUT_SCALE;
-        double k = 1.0 / (accel * q);
+        double q = dragQ(b);
+        double k = inputK(b, q);
         double ux = (errx + b.velX() * (1.0 - q)) * k;   // the input vector, in key units
         double uz = (errz + b.velZ() * (1.0 - q)) * k;
         double umag = Math.sqrt(ux * ux + uz * uz);

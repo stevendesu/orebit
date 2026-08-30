@@ -188,13 +188,17 @@ public final class BotMining {
     }
 
     /**
-     * Re-apply the current target's head-aim — <b>visuals only</b>, called from {@code AllyBotEntity.tick}
-     * just before {@code doTick}. {@link #tick} runs after the physics (so the break reflects this tick's
-     * inputs and position), which puts its {@link #lookAtCenter} write after the rotation the client sees
-     * and before the next tick's pitch reset clears it; this hoists the same aim in front of the physics so
-     * a mining bot's head is where a player's would be. No-op when idle, and one tick behind on a target
-     * switch. Nothing functional depends on the look: the break is {@code getDestroyProgress} on an explicit
-     * {@code BlockPos}, never a raycast.
+     * Re-apply the current target's head-aim. Safe to call at ANY point in the tick, including before
+     * {@code doTick}: {@link #lookAtCenter} routes through
+     * {@link com.orebit.mod.pathfinding.blockpathfinder.BotSteering#aimPreservingInput}, which re-solves
+     * the movement keys so the commanded world-space velocity survives the yaw change.
+     *
+     * <p><b>History, because the naive version was shipped and had to be reverted.</b> An earlier build
+     * called this ahead of {@code doTick} and justified it as "visuals only". It was not: yaw is half of
+     * the velocity command, so aiming the head at the block also aimed the bot's THRUST at it, and the bot
+     * drove into the very block it was mining. The straddle probe caught it — the exec line logged the
+     * servo's yaw sweeping 174 to 126 degrees while physics used a near-constant -101, which is exactly
+     * atan2 toward the target's centre. The aim itself was never the problem; writing half a command was.
      */
     public void reaim() {
         if (target != null) {
@@ -202,11 +206,27 @@ public final class BotMining {
         }
     }
 
-    /** Point the bot's head (yaw + pitch) at the centre of {@code pos} — the mining look, for the animation. */
+    /**
+     * Point the bot's head (yaw + pitch) at the centre of {@code pos} — the mining look.
+     *
+     * <p>Routed through {@code aimPreservingInput} for an {@link AllyBotEntity}, so the yaw change carries
+     * the movement keys with it and the COMMANDED velocity is unchanged (see {@link #reaim}). A bare
+     * {@code setYRot} here is a steering change, not an animation: vanilla thrusts {@code zza}/{@code xxa}
+     * along the yaw, so re-aiming without re-solving the keys silently re-points — and near 180 degrees
+     * inverts — whatever drive was standing. Aiming at feet/head cells (a {@code dy} of either sign) is
+     * exactly when the yaw swing is largest, which is when getting this wrong hurts most.
+     *
+     * <p>The plain-{@code ServerPlayer} fallback keeps the old behaviour for any non-Orebit bot: those
+     * write no movement keys, so there is no pair to preserve.
+     */
     private void lookAtCenter(BlockPos pos) {
         double dx = pos.getX() + 0.5 - bot.getX();
         double dy = pos.getY() + 0.5 - bot.getEyeY();
         double dz = pos.getZ() + 0.5 - bot.getZ();
+        if (bot instanceof AllyBotEntity ally) {
+            ally.aimPreservingInput(dx, dy, dz);
+            return;
+        }
         double distXZ = Math.sqrt(dx * dx + dz * dz);
         float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
         float pitch = (float) Math.toDegrees(-Math.atan2(dy, distXZ));

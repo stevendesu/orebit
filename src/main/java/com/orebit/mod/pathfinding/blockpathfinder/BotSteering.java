@@ -406,6 +406,29 @@ public interface BotSteering {
      *  a vertical dive/rise doesn't spin the head. */
     void faceTowards(double dx, double dy, double dz);
 
+    /**
+     * Aim yaw AND pitch at a world-space offset <b>without disturbing the commanded velocity</b> — the
+     * safe way to re-aim a bot that is currently being steered.
+     *
+     * <p><b>Why this exists (2026-08-29).</b> Yaw and the movement keys are ONE command, not two fields:
+     * vanilla's {@code moveRelative} thrusts {@code zza}/{@code xxa} along {@code getYRot()}, so the pair
+     * encodes a single world-space velocity. Any writer that changes yaw and leaves the keys alone
+     * silently re-points a thrust computed for a different heading — and near 180 degrees it INVERTS it,
+     * because nothing flips {@code zza} negative to compensate. A head-aim added ahead of {@code doTick}
+     * did exactly that and drove the bot into the block it was aiming at.
+     *
+     * <p>So a re-aim must re-decompose: capture the standing input in world axes under the OLD yaw, set
+     * the new yaw, then solve the same world vector in the NEW frame ({@code along = u·h},
+     * {@code cross = u × h} — the convention {@link SteerControl}'s {@code actuate} uses). The commanded
+     * velocity is then unchanged and only the heading has moved, which is what an aim should be.
+     *
+     * <p>The default is the naive {@link #faceTowards}, correct only for callers that write no keys (test
+     * fakes, and aims issued AFTER physics); the live entity overrides it.
+     */
+    default void aimPreservingInput(double dx, double dy, double dz) {
+        faceTowards(dx, dy, dz);
+    }
+
     /** Set the forward movement input ({@code zza}); {@code 1} = full ahead, {@code 0} = none. */
     void setForward(float zza);
 

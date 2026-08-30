@@ -1,3 +1,0 @@
-# Accepted for the local Orebit bamboo-course dev-server run (plain Loom run configs do not auto-accept;
-# only the fabricApi.configureTests DSL has eula=true).
-eula=true
