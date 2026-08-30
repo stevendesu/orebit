@@ -73,6 +73,37 @@ public final class VineBridgeCourse {
         return "floor".equalsIgnoreCase(System.getProperty("orebit.vinebridge", ""));
     }
 
+    /**
+     * {@code -Dorebit.vinebridge=grab} — the flagship (431,66,606) Climb-overshoot wedge, replayed as a
+     * deterministic scene (run 2026-08-30-1, 00:05:26). The flagship geometry, mapped verbatim in shape
+     * (flagship y-65 → Y0, flagship z-600 → BASE_Z; travel along +Z, corridor at x = BASE_X):
+     *
+     * <pre>
+     *   z+0..2   3-wide start pad, floor Y0 (feet Y0+1)
+     *   z+3      1-wide funnel, floor Y0
+     *   z+4      up-step, floor Y0+1 (top Y0+2) — the flagship's bot-PLACED takeoff, pre-painted
+     *   z+5      COCOA POD age 2 at floor level (collision top 12/16 — the flagship's toFloorTopY=12)
+     *            on a jungle-log trunk at x−1, with a VINE curtain in the feet+head cells (west-attached)
+     *   z+6      down-step, floor Y0 (top Y0+1) — the flagship's Descend wp2 floor
+     *   z+7      up-step, floor Y0+1
+     *   z+8..9   goal ledge, floor Y0+1 (goal feet at z+8)
+     * </pre>
+     *
+     * The flagship plan through this strip was {@code Ascend(z4,pre-placed) → Climb(z5, lateral grab) →
+     * Descend(z6) → Ascend(z7)}. The wedge: the Ascend arrives at the takeoff carrying ~0.106 b/t, the
+     * Climb grab arms jump, and while AIRBORNE over the vine (control authority ~0.02/t) the
+     * position-only {@code recenter} law goes dead 0.04 short of the column, coasts through it, flips
+     * 180° and loses — the bot lands straddling the cocoa with its centre in the z+6 column, outside the
+     * Climb's admitted cells AND outside the Descend's settle band, so the envelope fails and the
+     * fail→hold policy parks it forever. EXPECTED (pre-servo-fix): FAIL budget exhausted with finalPos z
+     * ≈ BASE_Z+6.03, y ≈ Y0+1.75; the log carries the same {@code recenter:dead} → 180°-flip → {@code
+     * step FAILED (validity envelope) Climb} signature as the flagship. PASS = standing on the goal
+     * ledge.
+     */
+    private static boolean grabVariant() {
+        return "grab".equalsIgnoreCase(System.getProperty("orebit.vinebridge", ""));
+    }
+
     public static void register(PlatformEvents events) {
         if (System.getProperty("orebit.vinebridge") == null) {
             return;
@@ -80,8 +111,10 @@ public final class VineBridgeCourse {
         Course course = new Course();
         events.onServerStarted(course::start);
         events.onWorldTickEnd(course::tick);
-        OrebitCommon.LOGGER.info("[Orebit/vinebridge] armed: span={} vines, variant={}",
-                SPAN, floorVariant() ? "FLOOR (Traverse-owned)" : "FEET (Climb-owned curtain)");
+        OrebitCommon.LOGGER.info("[Orebit/vinebridge] armed: variant={}",
+                grabVariant() ? "GRAB (flagship Climb-overshoot replay)"
+                        : floorVariant() ? "FLOOR (Traverse-owned, span=" + SPAN + ")"
+                        : "FEET (Climb-owned curtain, span=" + SPAN + ")");
     }
 
     private static final class Course {
@@ -105,13 +138,19 @@ public final class VineBridgeCourse {
             Debug.VERBOSE = true;
             this.level = server.overworld();
             paint();
-            this.goal = new BlockPos(BASE_X + SPAN + 2, Y0 + 1, BASE_Z);
+            this.goal = grabVariant()
+                    ? new BlockPos(BASE_X, Y0 + 2, BASE_Z + 8)
+                    : new BlockPos(BASE_X + SPAN + 2, Y0 + 1, BASE_Z);
             owner = new FakePlayerEntity(server, level, new GameProfile(
                     UUID.nameUUIDFromBytes("OrebitVineBridge:owner".getBytes(StandardCharsets.UTF_8)),
                     "VineBridge"));
             // NB: no addFreshEntity — BotManager.spawnBotFor owns placement. Adding a connection-less
             // FakePlayerEntity to the level NPEs the first packet send (learned the hard way).
-            owner.setPos(BASE_X + 0.5, Y0 + 1, BASE_Z + 0.5);
+            if (grabVariant()) {
+                owner.setPos(BASE_X + 0.5, Y0 + 1, BASE_Z + 1.5);   // middle of the 3-wide start pad
+            } else {
+                owner.setPos(BASE_X + 0.5, Y0 + 1, BASE_Z + 0.5);
+            }
             BotManager.spawnBotFor(owner);
             bot = BotManager.botFor(owner);
             if (bot == null) {
@@ -127,8 +166,59 @@ public final class VineBridgeCourse {
             }
         }
 
+        /**
+         * The flagship Climb-overshoot strip — see {@link #grabVariant} for the cell-by-cell map and the
+         * flagship provenance. Everything else is void, so there is no way around the vine curtain.
+         */
+        void paintGrab() {
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            BlockState air = Blocks.AIR.defaultBlockState();
+            for (int dx = -4; dx <= 4; dx++) {
+                for (int dy = -4; dy <= 10; dy++) {
+                    for (int dz = -2; dz <= 12; dz++) {
+                        level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0 + dy, BASE_Z + dz), air);
+                    }
+                }
+            }
+            // 3-wide start pad (the bot spawns beside the owner; a 1-wide pad risks a void spawn).
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = 0; dz <= 2; dz++) {
+                    level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0, BASE_Z + dz), stone);
+                }
+            }
+            // 1-wide funnel, then the pre-painted takeoff up-step (the flagship's bot-placed block).
+            level.setBlockAndUpdate(new BlockPos(BASE_X, Y0, BASE_Z + 3), stone);
+            level.setBlockAndUpdate(new BlockPos(BASE_X, Y0 + 1, BASE_Z + 4), stone);
+            // The jungle trunk (west of the corridor), painted FIRST so the cocoa + vines survive their
+            // placement support checks.
+            for (int dy = 1; dy <= 3; dy++) {
+                level.setBlockAndUpdate(new BlockPos(BASE_X - 1, Y0 + dy, BASE_Z + 5),
+                        Blocks.JUNGLE_LOG.defaultBlockState());
+            }
+            // The cocoa pod: the flagship's 12/16-top floor cell (every cocoa age tops out at 12/16).
+            level.setBlockAndUpdate(new BlockPos(BASE_X, Y0 + 1, BASE_Z + 5),
+                    Blocks.COCOA.defaultBlockState()
+                            .setValue(net.minecraft.world.level.block.CocoaBlock.AGE, 2)
+                            .setValue(net.minecraft.world.level.block.HorizontalDirectionalBlock.FACING,
+                                    net.minecraft.core.Direction.WEST));
+            // The vine curtain in the feet + head cells, hanging on the trunk's east face.
+            for (int dy = 2; dy <= 3; dy++) {
+                level.setBlockAndUpdate(new BlockPos(BASE_X, Y0 + dy, BASE_Z + 5),
+                        Blocks.VINE.defaultBlockState().setValue(VineBlock.WEST, Boolean.TRUE));
+            }
+            // Down-step past the curtain (the flagship Descend's floor), up-step, goal ledge.
+            level.setBlockAndUpdate(new BlockPos(BASE_X, Y0, BASE_Z + 6), stone);
+            level.setBlockAndUpdate(new BlockPos(BASE_X, Y0 + 1, BASE_Z + 7), stone);
+            level.setBlockAndUpdate(new BlockPos(BASE_X, Y0 + 1, BASE_Z + 8), stone);
+            level.setBlockAndUpdate(new BlockPos(BASE_X, Y0 + 1, BASE_Z + 9), stone);
+        }
+
         /** Start ledge -> SPAN vines on a 4-tall north wall -> end ledge. Everything else is void. */
         void paint() {
+            if (grabVariant()) {
+                paintGrab();
+                return;
+            }
             BlockState stone = Blocks.STONE.defaultBlockState();
             BlockState air = Blocks.AIR.defaultBlockState();
             // Clear a generous box so no worldgen remnant offers an alternate route.
@@ -174,9 +264,10 @@ public final class VineBridgeCourse {
             double d = Math.sqrt(dx * dx + dz * dz);
             if (d < closest) closest = d;
 
-            // Over the span: record the sub-cell dip that the cell-band envelope cannot see.
+            // Over the span: record the sub-cell dip that the cell-band envelope cannot see. (The grab
+            // variant has no span; its whole verdict is the goal-ledge stance below.)
             final int bx = (int) Math.floor(bot.getX());
-            if (bx >= BASE_X + 2 && bx < BASE_X + 2 + SPAN) {
+            if (!grabVariant() && bx >= BASE_X + 2 && bx < BASE_X + 2 + SPAN) {
                 if (bot.getY() < minYoverSpan) minYoverSpan = bot.getY();
                 if (bot.blockPosition().getY() < minFootYoverSpan) minFootYoverSpan = bot.blockPosition().getY();
             }
@@ -195,7 +286,12 @@ public final class VineBridgeCourse {
             // the ledge and not grounded on anything. The crossing is only proven when the bot is STANDING on
             // the far ledge, so that is what this asserts: feet on (or past) the ledge column AND on real
             // ground, which no cell of the span can satisfy.
-            if (bot.blockPosition().getX() >= BASE_X + SPAN + 2 && bot.grounded()) {
+            if (grabVariant()) {
+                if (bot.blockPosition().getZ() >= BASE_Z + 8 && bot.grounded()) {
+                    finish("PASS standing on the goal ledge past the vine grab");
+                    return;
+                }
+            } else if (bot.blockPosition().getX() >= BASE_X + SPAN + 2 && bot.grounded()) {
                 finish("PASS standing on the far ledge");
                 return;
             }
