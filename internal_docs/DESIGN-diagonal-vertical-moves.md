@@ -63,3 +63,22 @@ becomes ~2.1–2.2 µs.
 - D4's unowned rise-≤9 diagonal band; the descending staircase buildTile branch (deferred); `hotdiag1`/`hotoffset3`'s "must chain Descend→Parkour" forcing note re-verified post-landing; SUBSYSTEMS/MOVEMENT-DESIGN rosters were already stale at "18" (real: 19 → now 21); CLAUDE.md's "18" is owner-maintained — flagged, not edited.
 - **DiagonalDescend's corner cell at START-FLOOR level is unswept and unpriced** (review 2026-08-29): on an off-center crossing the descending feet can transit `(nx,y,z)`/`(x,y,nz)` — verified benign for clearance (a solid there is landable support inside the envelope's corner band; `arrestCarryFrom` containment makes corner-only free-fall unreachable), but a passable hazard there is transited unpriced. One-cell search-preference error, accepted v1, documented at the sweep.
 - The slowstep incident (registration-order base shift) exposed a PRE-EXISTING positional degeneracy — confirmed corner-free from the failing run's log (zero corner ids, all face hops, and a FAIL-exhausted block search that strictly-additive candidates cannot un-fail): a no-place bot whose takeoff cell sits on a region's first column (x ≡ 0 mod 16) near a V-approach window FAIL-exhausts and cycles V-approach hop identities through the blacklist (the key is wider than (region,frag), so one physical crossing consumes several repair generations) before an honest give-up. Registered in the open-bugs memory, not chased in this arc.
+
+## Amendment 2026-08-31 — the arc rule applies to DiagonalAscend (owner-ratified)
+
+The v1 design ported cardinal Ascend's TAKEOFF gates (R1 `solidFooting` et al.) but not the
+2026-07-31 **arc rule** (`MovementContext.arcPassable`: a jump arc must not fly through a climbable)
+to the swept cells. Convicted on the 2026-08-30 flagship at (207,118,297): a vine in the landing
+feet cell arrests the arc at touchdown, the drive's held jump becomes vanilla's climb, and the bot
+rides the curtain top in a permanent never-grounded hover (envelope gated on grounded/water/lava —
+silent). Deterministic card: `run-vinebridge.ps1 -Variant vineup` (9 cuts; the race needs cruise
+carry cross-axis against the step, an intermediate-waypoint landing, and a bare crossed corner).
+Fix: corner cells c1–c6 → `arcPassable` (mask widening, zero new reads); landing FEET cell always
+arc-checked when built (the headroom bit is passability-aligned and climb-blind); landing HEAD keeps
+the flags fast path (Parkour's landing-body idiom — `onClimbable` is a feet-block test); UNBUILT
+stays optimistic. Vined diagonals compose from the vetted vocabulary instead (Traverse-in/Climb-up/
+Traverse-out, cardinal Ascend's discriminator) — the vineup card's own cuts 4/6/8 show the planner
+finding those routes whenever the cells offer them. DiagonalDescend is NOT arc-gated: it is a
+walk-off, not a jump, and inherits Descend's deliberate settled-on-climbable handling. Known gap
+left open (logged): an isolated curtain reachable ONLY by jumping into it has no route post-rule —
+would need a diagonal/lateral jump-grab Climb edge, built only if terrain demands it.

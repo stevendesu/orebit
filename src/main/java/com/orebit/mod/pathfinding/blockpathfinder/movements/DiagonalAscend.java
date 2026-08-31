@@ -29,6 +29,17 @@ import com.orebit.mod.pathfinding.blockpathfinder.SteerControl;
  * diagonal stair directionality, {@link Diagonal}'s own conservative-16 reading (a diagonal edge has no
  * single facing for {@link MovementContext#directionalTopY} to resolve).
  *
+ * <p><b>The swept cells are {@link MovementContext#arcPassable ARC}-gated, not merely passable (owner
+ * arc rule 2026-07-31, extended here 2026-08-31).</b> This is a JUMP — its feet path flies through the
+ * corner columns and lands in the destination feet cell, and vanilla arrests any airborne feet the
+ * moment they enter a climbable (±0.15 clamp), which the drive's held jump then converts into a climb:
+ * a vine in the landing feet cell rode the bot to the curtain top in a permanent never-grounded hover
+ * (flagship (207,118,297), 2026-08-30; deterministic card {@code run-vinebridge.ps1 -Variant vineup}).
+ * A vined diagonal is instead composed from the vetted vocabulary — Traverse-in / Climb-up /
+ * Traverse-out, or cardinal {@link Ascend}'s climbable-transit discriminator — exactly what the planner
+ * already emits when the cells offer it (the vineup card's cuts 4/6/8). The landing HEAD cell keeps the
+ * flags fast path ({@link Parkour}'s landing-body idiom: {@code onClimbable} is a FEET-block test).
+ *
  * <p><b>Corner sweep is {@code y+1..y+3}, strict passable (D2).</b> One row taller than walking
  * {@link Diagonal}'s {@code y+1..y+2} — the jump arc carries the feet through the corner columns' second
  * row and the head to {@code +3.05} — and capped at {@code y+3} by {@link Ascend}'s own truncated-apex
@@ -89,27 +100,43 @@ public final class DiagonalAscend implements Movement {
             if (rise <= MovementContext.STEP_ASSIST_MAX_RISE) continue; // D4: unowned diagonal small-rise
             if (rise > MovementContext.JUMP_RISE) continue;            // taller than one jump gains
 
-            // Destination body (feet + head over the raised floor) — Diagonal's pattern at uy.
+            // Destination body — Diagonal's pattern at uy, under the ARC RULE (owner ruling
+            // 2026-07-31, extended to this move 2026-08-31 after the vineup card conviction): a
+            // jump arc must not fly through a climbable. The landing FEET cell is ALWAYS
+            // arc-checked when built — the resident headroom bit proves PASSABILITY and is
+            // climb-blind, and a vine there arrests the arc at touchdown where the drive's held
+            // jump becomes vanilla's climb: the bot rides the curtain to its top and hovers
+            // forever, never grounded, envelope never evaluating (flagship (207,118,297);
+            // `run-vinebridge.ps1 -Variant vineup`, red at vineTop+0.9). The HEAD cell keeps the
+            // flags fast path (Parkour's landing-body idiom): onClimbable is a FEET-block test, a
+            // head-only vine cannot arrest. UNBUILT stays optimistic-air, as before.
             int flags = MovementContext.flagsOf(packed);
+            int pfeet = ctx.packedAt(nx, uy + 1, nz);
+            if (pfeet != MovementContext.UNBUILT
+                    && !ctx.arcPassable(ctx.descriptorOf(nx, uy + 1, nz, pfeet))) {
+                continue;
+            }
             if (!ctx.headroomProves(flags, nx, uy, nz, MovementContext.HEADROOM_WALK)
-                    && (!ctx.passable(nx, uy + 1, nz) || !ctx.passable(nx, uy + 2, nz))) {
+                    && !ctx.passable(nx, uy + 2, nz)) {
                 continue;
             }
 
             // Both corner columns swept y+1..y+3 (D2), descriptors read once and reused for pricing —
-            // Diagonal's read-once form, one row taller for the jump arc.
+            // Diagonal's read-once form, one row taller for the jump arc. arcPassable, not passable
+            // (the same 2026-07-31 arc rule, a pure mask widening on the already-loaded longs): the
+            // arc's feet path crosses the corner columns, and a vine there arrests it mid-gap.
             long c1 = ctx.descriptorAt(nx, y + 1, z);
-            if (!ctx.passable(c1)) continue;
+            if (!ctx.arcPassable(c1)) continue;
             long c2 = ctx.descriptorAt(nx, y + 2, z);
-            if (!ctx.passable(c2)) continue;
+            if (!ctx.arcPassable(c2)) continue;
             long c3 = ctx.descriptorAt(nx, y + 3, z);
-            if (!ctx.passable(c3)) continue;
+            if (!ctx.arcPassable(c3)) continue;
             long c4 = ctx.descriptorAt(x, y + 1, nz);
-            if (!ctx.passable(c4)) continue;
+            if (!ctx.arcPassable(c4)) continue;
             long c5 = ctx.descriptorAt(x, y + 2, nz);
-            if (!ctx.passable(c5)) continue;
+            if (!ctx.arcPassable(c5)) continue;
             long c6 = ctx.descriptorAt(x, y + 3, nz);
-            if (!ctx.passable(c6)) continue;
+            if (!ctx.arcPassable(c6)) continue;
 
             float cost = (ctx.isSlow(dstDesc) ? COST * Traverse.SLOW_COST_FACTOR : COST)
                     + ctx.floorHazardCost(dstDesc)
