@@ -14,6 +14,13 @@
 #                     (top 15/16) crossing a grass field diagonally, full grass at every crossing
 #                     corner. Pre-envelope-fix EXPECTED: FAIL budget exhausted on the diagonal with
 #                     botY = Y0+1.000 exactly and `step FAILED (validity envelope) Diagonal` in the log.
+#   pathdown        — pathdiag one level down: the path DESCENDS (DiagonalDescend), wedge grass at hop
+#                     1's from-floor level (the candidates' unswept start-floor residual). Pre-fix
+#                     EXPECTED: FAIL budget with `step FAILED (validity envelope) DiagonalDescend`.
+#   pathup          — the ascending twin (DiagonalAscend): wedge grass forward-diagonal of hop 1's
+#                     landing at the landing's floor level. Pre-fix EXPECTED: FAIL budget with
+#                     `step FAILED (validity envelope) DiagonalAscend` (landing-tick lift; see the
+#                     variant Javadoc for the cursor race if it comes back green).
 #
 # What it does (mirrors run-replan.ps1):
 #   1. resets run/replan to a deterministic state (fresh flat world, replan templates, stale results cleared),
