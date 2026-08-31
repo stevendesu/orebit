@@ -172,6 +172,62 @@ public final class VineBridgeCourse {
         return "pathup".equalsIgnoreCase(System.getProperty("orebit.vinebridge", ""));
     }
 
+    /**
+     * {@code -Dorebit.vinebridge=vineup} — the flagship (207,118,297) DiagonalAscend-into-a-vine
+     * livelock (run 2026-08-30 22:10, attempt 3), replayed as a deterministic scene. The flagship
+     * geometry (read out of the run save AND byte-identical in the master — no growth involved): a
+     * plain diagonal-up step whose LANDING feet cell is the bottom of a 3-cell vine curtain
+     * (landing feet + 2 above) over a solid floor, both crossing corners carrying from-level floors.
+     *
+     * <p>The wedge is the 3ccb23d jump gate, proven by same-cell before/after across flagship runs:
+     * attempt 1 (old {@code footY() < landFootY} gate) executed the IDENTICAL step — {@code exec
+     * DiagonalAscend wp1 -> (207,118,297)} — released jump mid-arc at botY=118.001 and landed clean;
+     * attempt 3 (waypoint gate {@code !(grounded && atWaypoint)}) wedged. The onset trace refines
+     * the mechanism to an <b>arrival-tick re-jump race</b> ({@code climb=false} through the whole
+     * arc — no mid-flight grab): entered at CRUISE the descent is shallow, the box grounds at
+     * exactly landFootY on the landing's LIP one tick before the foot cell flips, and the flip
+     * tick's jump input — computed from the stale not-at-waypoint state — fires a full grounded
+     * jump off the landing (cardinal Ascend's comment names this exact "mirror case" its release
+     * rule stops). Now airborne with feet in the vine and jump held, the +0.2/t climb ratchet rides
+     * the curtain to its top and bobs there forever — never grounded, so the gate never releases,
+     * the envelope (gated on grounded/water/lava) never evaluates, and the steer pirouettes
+     * 180°/tick over the dead-centred XZ. A STANDSTILL launch lands centre-first inside the
+     * waypoint cell and releases cleanly (cuts 1–2 of this card, both PASS) — hence the lead-in
+     * hop. EXPECTED pre-fix: FAIL budget exhausted, ZERO {@code step FAILED} lines, finalPos
+     * hovering over the landing at y ≈ vineTop+0.9..1.1 (here Y0+4.9..Y0+5.1). PASS = standing on
+     * the landing floor.
+     *
+     * <p>Scene — the flagship's own wp5..wp7 mapped verbatim (see {@code paintVineup}): grass pad →
+     * FLAT Diagonal (−x,+z) through the vined to-x corner onto takeoff C (feet {@code Y0+1}) →
+     * wedge DiagonalAscend (+x,+z) to D (feet {@code Y0+2}), whose column holds vines
+     * {@code Y0+2..Y0+4} hung on a stone wall one further east (the flagship's trunk side). The
+     * to-x corner carries the flagship's full from-level vine column — triple-duty: arc support,
+     * the flat lead-in's transit cell, and the fence that kills the cardinal-ladder bypass (Ascend
+     * cannot launch from a climbable feet cell). Void elsewhere; the goal IS the landing.
+     */
+    private static boolean vineupVariant() {
+        return "vineup".equalsIgnoreCase(System.getProperty("orebit.vinebridge", ""));
+    }
+
+    /**
+     * {@code -Dorebit.vinebridge=vineupgreen} — {@link #vineupVariant vineup}'s ROUTE-EXISTS sibling:
+     * the same vined landing with cut 4's corner rung restored (from-level grass on the to-x corner),
+     * which hands the planner the cardinal ladder — Traverse onto the rung, cardinal {@link
+     * com.orebit.mod.pathfinding.blockpathfinder.movements.Ascend} up INTO the vined feet cell (its
+     * climbable-transit discriminator lands it correctly), Traverse out along the strip. Post-arc-rule
+     * this is the green gate proving vined-diagonal terrain still routes when ANY composable cells
+     * exist (the plain vineup geometry deliberately offers none, so its post-fix expectation is a
+     * clean refusal at the pad instead). EXPECTED: PASS crossing to the strip end.
+     */
+    private static boolean vineupGreenVariant() {
+        return "vineupgreen".equalsIgnoreCase(System.getProperty("orebit.vinebridge", ""));
+    }
+
+    /** Either member of the vineup pair — shared scene, goal, spawn, and arrival oracle. */
+    private static boolean vineupFamily() {
+        return vineupVariant() || vineupGreenVariant();
+    }
+
     /** Diagonal dirt-path cells in the path scenes — enough hops that one takes off with cruise carry. */
     private static final int PATH_LEN = 5;
 
@@ -183,7 +239,9 @@ public final class VineBridgeCourse {
         events.onServerStarted(course::start);
         events.onWorldTickEnd(course::tick);
         OrebitCommon.LOGGER.info("[Orebit/vinebridge] armed: variant={}",
-                pathdownVariant() ? "PATHDOWN (DiagonalDescend corner-lift)"
+                vineupVariant() ? "VINEUP (DiagonalAscend into a vine curtain — flagship 207,118,297 replay)"
+                        : vineupGreenVariant() ? "VINEUPGREEN (vined landing routed via the cardinal ladder — the route-exists gate)"
+                        : pathdownVariant() ? "PATHDOWN (DiagonalDescend corner-lift)"
                         : pathupVariant() ? "PATHUP (DiagonalAscend corner-lift)"
                         : pathdiagVariant() ? "PATHDIAG (flagship Diagonal cell-quantization replay)"
                         : grabVariant() ? "GRAB (flagship Climb-overshoot replay)"
@@ -216,7 +274,11 @@ public final class VineBridgeCourse {
             // floor+1 even though a 15/16 floor SEATS the feet in the floor cell itself — passing the
             // path cell's own Y sends the search after a void floor one below (16 expansions, BLOCKED,
             // bot never leaves spawn; measured, pathdiag cut 3).
-            this.goal = pathdownVariant()
+            this.goal = vineupFamily()
+                    // The exit strip's far end, PAST the vined landing — D must be an intermediate
+                    // waypoint or comeTo's arrival radius masks the race (cuts 6–7).
+                    ? new BlockPos(BASE_X + 1, Y0 + 2, BASE_Z + 3)
+                    : pathdownVariant()
                     ? new BlockPos(BASE_X - (PATH_LEN - 1), Y0 - (PATH_LEN - 1) + 1, BASE_Z + PATH_LEN - 1)
                     : pathupVariant()
                     // pathup's path floors run Y0+2..Y0+PATH_LEN (pad one level up) — P4 floor Y0+PATH_LEN.
@@ -233,6 +295,8 @@ public final class VineBridgeCourse {
             // FakePlayerEntity to the level NPEs the first packet send (learned the hard way).
             if (pathupVariant()) {
                 owner.setPos(BASE_X + 2.5, Y0 + 2, BASE_Z - 0.5);   // pathup's stone pad is one level up
+            } else if (vineupFamily()) {
+                owner.setPos(BASE_X + 2.5, Y0 + 1, BASE_Z - 1.5);   // middle of vineup's grass pad
             } else if (pathdiagVariant() || pathdownVariant()) {
                 owner.setPos(BASE_X + 2.5, Y0 + 1, BASE_Z - 0.5);   // middle of the 3x3 grass spawn pad
             } else if (grabVariant()) {
@@ -245,6 +309,13 @@ public final class VineBridgeCourse {
             if (bot == null) {
                 finish("bot never spawned");
                 return;
+            }
+            if (vineupFamily()) {
+                // Deterministic start: spawn-beside-owner snapped the bot straight onto the wedge
+                // TAKEOFF in cut 5, collapsing the whole approach into a standstill launch (which is
+                // exactly the shape that does NOT arm the race). Pin it to the pad's far corner so
+                // the plan is the full Traverse → flat-Diagonal → DiagonalAscend chain at cruise.
+                bot.setPos(BASE_X + 3.5, Y0 + 1, BASE_Z - 2.5);
             }
             try {
                 trace = Files.newBufferedWriter(ConfigDir.serverDir(server).resolve("orebit-vinebridge-trace.txt"),
@@ -434,8 +505,86 @@ public final class VineBridgeCourse {
             }
         }
 
+        /**
+         * The vine-curtain landing — see {@link #vineupVariant} for the flagship provenance. One
+         * DiagonalAscend hop; the landing feet cell is the bottom of a 3-vine curtain over solid stone.
+         */
+        void paintVineup() {
+            BlockState air = Blocks.AIR.defaultBlockState();
+            BlockState grass = Blocks.GRASS_BLOCK.defaultBlockState();
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int dx = -4; dx <= 7; dx++) {
+                for (int dy = -4; dy <= 11; dy++) {
+                    for (int dz = -6; dz <= 6; dz++) {
+                        level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0 + dy, BASE_Z + dz), air);
+                    }
+                }
+            }
+            // 3x3 grass spawn pad (feet Y0+1). The route is the flagship's own (wp5..wp7 read out of
+            // the attempt-3 log): Traverse +z along the pad → FLAT Diagonal (−x,+z) onto the wedge
+            // takeoff C, WALKING THROUGH the vined corner at from-level (climbable=true flickers
+            // mid-crossing in the flagship trace) → DiagonalAscend (+x,+z) up to the vined landing D.
+            // The flat-diagonal lead-in is what arms the race (cuts 1–4 all PASSED without it): the
+            // launch carries −x cruise AGAINST the wedge step's +x, the arc lands x-SHORT, grounding
+            // at exactly landFootY on D's LIP one tick before the foot cell flips.
+            for (int dx = 1; dx <= 3; dx++) {
+                for (int dz = -3; dz <= -1; dz++) {
+                    level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0, BASE_Z + dz), grass);
+                }
+            }
+            // Wedge takeoff C (flagship (206,117,296)) — same LEVEL as the pad; the lead-in is flat.
+            level.setBlockAndUpdate(new BlockPos(BASE_X, Y0, BASE_Z), stone);
+            // Vined landing D (flagship (207,117,297) floor, vines 118..120), one up from C.
+            level.setBlockAndUpdate(new BlockPos(BASE_X + 1, Y0 + 1, BASE_Z + 1), stone);
+            for (int dy = 2; dy <= 4; dy++) {   // host wall first (support check) — the trunk side
+                level.setBlockAndUpdate(new BlockPos(BASE_X + 2, Y0 + dy, BASE_Z + 1), stone);
+            }
+            for (int dy = 2; dy <= 4; dy++) {
+                level.setBlockAndUpdate(new BlockPos(BASE_X + 1, Y0 + dy, BASE_Z + 1),
+                        Blocks.VINE.defaultBlockState().setValue(VineBlock.EAST, Boolean.TRUE));
+            }
+            // vineupgreen: cut 4's corner rung restored — the cardinal-ladder route exists (Traverse
+            // onto the rung, cardinal Ascend into the vined landing via its discriminator).
+            if (vineupGreenVariant()) {
+                level.setBlockAndUpdate(new BlockPos(BASE_X + 1, Y0, BASE_Z), grass);
+            }
+            // (plain vineup) The TO-x corner (BASE_X+1,·,BASE_Z) is BARE VOID — a deliberate deviation from the
+            // flagship's vined-and-supported corner (207,116..120,296), earned across cuts 4–8: any
+            // occupancy there hands this pathfinder a route that skips the wedge hop (grass alone →
+            // the cardinal Ascend ladder, cut 4; a full vine column → the Traverse-in/Climb-up
+            // thread, cut 6; a lone host block → the shelf walk, cut 7; even ONE vine → a Climb
+            // exit-top edge, cut 8). The flagship terrain blocked all of those with context this
+            // card cannot afford to reproduce. Cost of the deviation: a z-short wedge arc falls
+            // through the empty corner — a distinguishable "FAIL fell off the span", never a false
+            // pass. Flat diagonals cross unsupported corners fine (pathdiag's non-wedge hops).
+            // NO from-x corner support (deviation from the flagship's (206,116,297), deliberate):
+            // with the exit strip in place it is the launch pad of an EXACT-COST-TIE bypass
+            // (Traverse +z onto it, DiagonalAscend straight to the strip, skipping D), leaving the
+            // wedge hop untested on a tie-break. Its only role was catching z-short arcs — those now
+            // show as a distinguishable "FAIL fell off the span", not a false pass.
+            // EXIT STRIP past D (+z), goal at its end: cuts 6–7 proved a goal ON D lets comeTo's
+            // 0.75 arrival radius forgive any race that recovers onto the lip — the flagship's
+            // wedge was an INTERMEDIATE waypoint with the plan wanting to continue, so the vine-top
+            // bob (never grounded, cursor never advancing) parked it forever. Same shape here.
+            level.setBlockAndUpdate(new BlockPos(BASE_X + 1, Y0 + 1, BASE_Z + 2), stone);
+            level.setBlockAndUpdate(new BlockPos(BASE_X + 1, Y0 + 1, BASE_Z + 3), stone);
+            // Pad-column cap at Y0+4: with the corner void, a rising gap-1 Parkour from the pad's
+            // (BASE_X+1,·,BASE_Z−1) cell would clear the corner straight onto D — the cap refuses
+            // its takeoff headroom (pathup's pad-cap idiom). C's column and everything the wedge
+            // arc flies through stay uncapped.
+            for (int dx = 1; dx <= 3; dx++) {
+                for (int dz = -3; dz <= -1; dz++) {
+                    level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0 + 4, BASE_Z + dz), stone);
+                }
+            }
+        }
+
         /** Start ledge -> SPAN vines on a 4-tall north wall -> end ledge. Everything else is void. */
         void paint() {
+            if (vineupFamily()) {
+                paintVineup();
+                return;
+            }
             if (pathdownVariant()) {
                 paintPathdown();
                 return;
@@ -519,7 +668,16 @@ public final class VineBridgeCourse {
             // the ledge and not grounded on anything. The crossing is only proven when the bot is STANDING on
             // the far ledge, so that is what this asserts: feet on (or past) the ledge column AND on real
             // ground, which no cell of the span can satisfy.
-            if (pathdiagVariant() || pathdownVariant() || pathupVariant()) {
+            if (vineupFamily()) {
+                // Standing at the strip's far end, PAST the vined landing — a stance the vine-top
+                // bob (never grounded, cursor parked on D) can never reach. Radius-matched to
+                // comeTo's own 0.75 arrival tolerance (cut 6's foot-cell-exact oracle turned a
+                // legitimate lip arrival into a false red).
+                if (d < 0.75 && bot.blockPosition().getY() == Y0 + 2 && bot.grounded()) {
+                    finish("PASS crossed the vine-curtain landing to the strip end");
+                    return;
+                }
+            } else if (pathdiagVariant() || pathdownVariant() || pathupVariant()) {
                 if (bot.blockPosition().getX() <= BASE_X - (PATH_LEN - 1) && bot.grounded()) {
                     finish("PASS standing on the path's far end past the corner straddle");
                     return;
@@ -539,6 +697,21 @@ public final class VineBridgeCourse {
                 return;
             }
             if (ticks >= BUDGET_TICKS) {
+                if (vineupVariant()) {
+                    // Post-arc-rule, plain vineup's geometry has NO route (every composable cell is
+                    // deliberately fenced), so the CORRECT outcome is a clean refusal: the bot never
+                    // commits to the arc and stays parked on/near the pad. Distinguish that from the
+                    // defect this card exists to pin — the never-grounded vine-top hover over D.
+                    if (bot.getY() > Y0 + 3.5) {
+                        finish("FAIL vine-top hover livelock (the arc-rule defect: held jump riding the curtain)");
+                        return;
+                    }
+                    if (bot.getX() >= BASE_X + 0.5 && bot.getZ() <= BASE_Z - 0.5
+                            && Math.abs(bot.getY() - (Y0 + 1)) < 0.5) {
+                        finish("PASS-REFUSED parked at the pad (no route to the vined arc — the post-arc-rule expectation)");
+                        return;
+                    }
+                }
                 finish("FAIL budget exhausted (wedged on the span?)");
             }
         }

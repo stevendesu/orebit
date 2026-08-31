@@ -21,6 +21,15 @@
 #                     landing at the landing's floor level. Pre-fix EXPECTED: FAIL budget with
 #                     `step FAILED (validity envelope) DiagonalAscend` (landing-tick lift; see the
 #                     variant Javadoc for the cursor race if it comes back green).
+#   vineup          — the flagship (207,118,297) DiagonalAscend-into-a-vine livelock (2026-08-30
+#                     attempt 3): flat-diagonal lead-in at cruise into a diagonal-up hop whose
+#                     landing feet cell bottoms a 3-vine curtain; every composable corner cell
+#                     deliberately fenced. Pre-arc-rule EXPECTED: FAIL vine-top hover livelock,
+#                     ZERO step-FAILED lines, finalPos y ~ Y0+4.9 over the landing. Post-arc-rule
+#                     EXPECTED: PASS-REFUSED parked at the pad (the geometry has no legal route).
+#   vineupgreen     — vineup's ROUTE-EXISTS sibling: the corner rung restored, so the cardinal
+#                     ladder (Traverse + Ascend-with-discriminator INTO the vined feet cell)
+#                     routes it. EXPECTED: PASS crossing to the strip end.
 #
 # What it does (mirrors run-replan.ps1):
 #   1. resets run/replan to a deterministic state (fresh flat world, replan templates, stale results cleared),
