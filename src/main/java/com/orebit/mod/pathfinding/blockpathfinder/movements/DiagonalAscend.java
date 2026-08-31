@@ -141,9 +141,11 @@ public final class DiagonalAscend implements Movement {
      * stand-to-landing feet band; the TARGET column its {@code [landFootY−1, landFootY]} (the face-press
      * transit); the two CORNER columns the from band {@code [fromFootY, landFootY]} — the body legitimately
      * sweeps them between takeoff and landing heights, and settled DEEPER in a corner column (fell off the
-     * move) is off-plan. Cell-quantised bands, Ascend's convention (logged choice: Diagonal's continuous
-     * climbable-dip lower bound is a flat-move top-out concern; this move's takeoff refuses climbable
-     * stances outright via solidFooting, so the dip transient cannot arise at the start).
+     * move) is off-plan. LOWER bounds cell-quantised, Ascend's convention (logged choice: Diagonal's
+     * continuous climbable-dip lower bound is a flat-move top-out concern; this move's takeoff refuses
+     * climbable stances outright via solidFooting, so the dip transient cannot arise at the start).
+     * UPPER bounds continuous with {@link Diagonal#CORNER_LIFT_MAX} of headroom since 2026-08-30 — the
+     * corner-lift rule; see the failWhen.
      */
     @Override
     public MovePlan plan(int fx, int fy, int fz, int tx, int ty, int tz, int fromFootY, int toFootY) {
@@ -170,11 +172,22 @@ public final class DiagonalAscend implements Movement {
             final int bx = b.footX();
             final int bz = b.footZ();
             final int by = b.footY();
+            // EVERY column's UPPER bound gains Diagonal.CORNER_LIFT_MAX of continuous headroom (owner
+            // ruling 2026-08-30, Diagonal's village-path corner-lift rule — pinned here by the pathup
+            // card). The candidate's own y+1..y+3 corner sweep bounds in-2×2 corner floors at the FROM
+            // level (rest ≤ fromFootY+1.0 = landFootY — the old cell band happened to cover it), but a
+            // 15/16 LANDING (resting landFootY+0.938) straddling a full block just BEYOND the 2×2 — the
+            // next hop's corner terrain, exactly the pathdiag shape one level up — rests the box at
+            // exactly landFootY+1.000, a 1/16 rise the old cell tests read as a whole-cell departure.
+            // Lower bounds unchanged: the face-press transit floor and "settled deeper in a corner
+            // column fell off the move" both keep their cell tests.
             if (bx == tx && bz == tz) {
-                return !(by >= landFootY - 1 && by <= landFootY); // face-press transit + the landing stand
+                // face-press transit + the landing stand (+ the corner-lift headroom)
+                return !(by >= landFootY - 1 && b.y() <= landFootY + Diagonal.CORNER_LIFT_MAX);
             }
             if ((bx == fx || bx == tx) && (bz == fz || bz == tz)) {
-                return !(by >= fromFootY && by <= landFootY);     // from column + both corner sweeps
+                // from column + both corner sweeps (+ the same headroom)
+                return !(by >= fromFootY && b.y() <= landFootY + Diagonal.CORNER_LIFT_MAX);
             }
             return true;                                          // settled outside the 2×2 — off-plan
         });
@@ -190,9 +203,19 @@ public final class DiagonalAscend implements Movement {
                     if (b.onClimbable() && b.footY() < landFootY) {
                         b.setForward(0.0f);
                     }
-                    // Hold the jump only while the climb still NEEDS height (Ascend's release rule — also
-                    // stops the arrival-tick re-launch, which is the same predicate).
-                    b.setJumping(b.footY() < landFootY);
+                    // Hold the jump until GROUNDED AT THE WAYPOINT — not until the landing's foot CELL
+                    // (owner-directed fix 2026-08-30, pinned by the pathup card's drive livelock). The
+                    // old cell gate (footY() < landFootY) is 15/16-blind: a partial landing seats its
+                    // feet in its own floor cell, so any support at the landing's cell-floor height —
+                    // hop corner terrain, exactly where a short arc grounds — satisfies the gate while
+                    // the bot still stands 0.938 BELOW the landing rest. Measured: 1150 ticks of
+                    // fwd=1.00 jump=false hcol=true wall-pressing the path block's face, envelope
+                    // silent (the support is inside the admitted band — correctly). On FULL blocks a
+                    // short landing keeps footY < landFootY and the re-jump wall-hops the face, which
+                    // is why this never fired before partial floors. The waypoint gate re-fires the
+                    // jump from ANY admitted short stance and still releases on the arrival tick
+                    // (grounded at the waypoint), which was the old predicate's other job.
+                    b.setJumping(!(b.grounded() && atWaypoint(b, tx, landFootY, tz)));
                 })
                 .done(b -> b.grounded()
                         && atWaypoint(b, tx, landFootY, tz));

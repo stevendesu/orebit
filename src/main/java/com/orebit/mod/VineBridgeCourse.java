@@ -136,7 +136,43 @@ public final class VineBridgeCourse {
         return "pathdiag".equalsIgnoreCase(System.getProperty("orebit.vinebridge", ""));
     }
 
-    /** Diagonal dirt-path cells in the pathdiag scene — enough hops that one takes off with cruise carry. */
+    /**
+     * {@code -Dorebit.vinebridge=pathdown} — {@link #pathdiagVariant pathdiag}'s corner-lift wedge, one
+     * level down: the village path DESCENDS one block per diagonal hop, so the steps are
+     * {@code DiagonalDescend}. The wedge grass sits at hop 1's FROM-floor level — exactly the cell the
+     * candidates' own KNOWN RESIDUAL declines to sweep (corner at start-floor level), whose claim that a
+     * solid there is "inside the envelope's corner band" holds only for FULL floors. On the 15/16 path
+     * (resting fromFootY+0.938) the straddle lifts the box to exactly fromFootY+1.000 during the
+     * GROUNDED walk-off (no jump, no race), the foot cell flips out of every column's cell band, and
+     * fail→hold parks it. EXPECTED pre-fix: FAIL budget with {@code step FAILED (validity envelope)
+     * DiagonalDescend}. The route never jumps, so a full ceiling at Y0+3 kills the pad-level parkour
+     * arcs onto the isolated wedge grass; mid-path arcs are transit-blocked by the contiguous staircase
+     * itself.
+     */
+    private static boolean pathdownVariant() {
+        return "pathdown".equalsIgnoreCase(System.getProperty("orebit.vinebridge", ""));
+    }
+
+    /**
+     * {@code -Dorebit.vinebridge=pathup} — the ASCENDING twin: {@code DiagonalAscend} steps up the
+     * 15/16 path. Its candidates sweep corners {@code y+1..y+3}, so an in-2×2 landing-level corner is
+     * refused outright and the wedge must come from just BEYOND the swept 2×2: the NEXT hop's from-level
+     * corner terrain — full grass diagonally forward of hop 1's landing, at the landing's own floor
+     * level (top landFootY+1.000). The jump arc lands past the cell centre with its leading edge over
+     * that grass; a grounded touchdown (or first settle tick) at exactly landFootY+1.000 sits outside
+     * the target column's {@code [landFootY−1, landFootY]} cell band → {@code step FAILED (validity
+     * envelope) DiagonalAscend}. NOTE the cursor race: a lift AFTER the cursor advances to the next hop
+     * lands in that hop's from-band (which already spans +1) and is tolerated — the card relies on the
+     * landing-tick lift, so a green pre-fix run means the arc landed short; read the trace before
+     * touching the fix. No full ceiling (the route IS jump arcs); the pad columns alone are capped at
+     * Y0+4 so a rising DiagonalParkour cannot skip the wedge hops from the pad (the takeoff headroom
+     * refusal), while P0 — outside the cap — keeps its own entry jump.
+     */
+    private static boolean pathupVariant() {
+        return "pathup".equalsIgnoreCase(System.getProperty("orebit.vinebridge", ""));
+    }
+
+    /** Diagonal dirt-path cells in the path scenes — enough hops that one takes off with cruise carry. */
     private static final int PATH_LEN = 5;
 
     public static void register(PlatformEvents events) {
@@ -147,7 +183,9 @@ public final class VineBridgeCourse {
         events.onServerStarted(course::start);
         events.onWorldTickEnd(course::tick);
         OrebitCommon.LOGGER.info("[Orebit/vinebridge] armed: variant={}",
-                pathdiagVariant() ? "PATHDIAG (flagship Diagonal cell-quantization replay)"
+                pathdownVariant() ? "PATHDOWN (DiagonalDescend corner-lift)"
+                        : pathupVariant() ? "PATHUP (DiagonalAscend corner-lift)"
+                        : pathdiagVariant() ? "PATHDIAG (flagship Diagonal cell-quantization replay)"
                         : grabVariant() ? "GRAB (flagship Climb-overshoot replay)"
                         : floorVariant() ? "FLOOR (Traverse-owned, span=" + SPAN + ")"
                         : "FEET (Climb-owned curtain, span=" + SPAN + ")");
@@ -174,11 +212,16 @@ public final class VineBridgeCourse {
             Debug.VERBOSE = true;
             this.level = server.overworld();
             paint();
-            this.goal = pathdiagVariant()
-                    // comeTo takes a FEET cell and targets floor = feet-1, so the goal is passed as
-                    // Y0+1 over the path block even though a 15/16 floor SEATS the feet in the floor
-                    // cell itself — passing the path cell's own Y sends the search after a void floor
-                    // at Y0-1 (16 expansions, BLOCKED, bot never leaves spawn; measured, cut 3).
+            // comeTo takes a FEET cell and targets floor = feet-1, so path goals are passed as
+            // floor+1 even though a 15/16 floor SEATS the feet in the floor cell itself — passing the
+            // path cell's own Y sends the search after a void floor one below (16 expansions, BLOCKED,
+            // bot never leaves spawn; measured, pathdiag cut 3).
+            this.goal = pathdownVariant()
+                    ? new BlockPos(BASE_X - (PATH_LEN - 1), Y0 - (PATH_LEN - 1) + 1, BASE_Z + PATH_LEN - 1)
+                    : pathupVariant()
+                    // pathup's path floors run Y0+2..Y0+PATH_LEN (pad one level up) — P4 floor Y0+PATH_LEN.
+                    ? new BlockPos(BASE_X - (PATH_LEN - 1), Y0 + PATH_LEN + 1, BASE_Z + PATH_LEN - 1)
+                    : pathdiagVariant()
                     ? new BlockPos(BASE_X - (PATH_LEN - 1), Y0 + 1, BASE_Z + PATH_LEN - 1)
                     : grabVariant()
                     ? new BlockPos(BASE_X, Y0 + 2, BASE_Z + 8)
@@ -188,7 +231,9 @@ public final class VineBridgeCourse {
                     "VineBridge"));
             // NB: no addFreshEntity — BotManager.spawnBotFor owns placement. Adding a connection-less
             // FakePlayerEntity to the level NPEs the first packet send (learned the hard way).
-            if (pathdiagVariant()) {
+            if (pathupVariant()) {
+                owner.setPos(BASE_X + 2.5, Y0 + 2, BASE_Z - 0.5);   // pathup's stone pad is one level up
+            } else if (pathdiagVariant() || pathdownVariant()) {
                 owner.setPos(BASE_X + 2.5, Y0 + 1, BASE_Z - 0.5);   // middle of the 3x3 grass spawn pad
             } else if (grabVariant()) {
                 owner.setPos(BASE_X + 0.5, Y0 + 1, BASE_Z + 1.5);   // middle of the 3-wide start pad
@@ -302,8 +347,103 @@ public final class VineBridgeCourse {
             }
         }
 
+        /**
+         * The DESCENDING path — see {@link #pathdownVariant}. Pad → path stepping one down per diagonal
+         * hop, wedge grass at hop 1's from-floor level, full ceiling at Y0+3 (the route never jumps).
+         */
+        void paintPathdown() {
+            BlockState air = Blocks.AIR.defaultBlockState();
+            BlockState grass = Blocks.GRASS_BLOCK.defaultBlockState();
+            BlockState path = Blocks.DIRT_PATH.defaultBlockState();
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int dx = -(PATH_LEN + 4); dx <= 5; dx++) {
+                for (int dy = -(PATH_LEN + 5); dy <= 9; dy++) {
+                    for (int dz = -4; dz <= PATH_LEN + 4; dz++) {
+                        level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0 + dy, BASE_Z + dz), air);
+                    }
+                }
+            }
+            for (int dx = 1; dx <= 3; dx++) {
+                for (int dz = -2; dz <= 0; dz++) {
+                    level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0, BASE_Z + dz), grass);
+                }
+            }
+            for (int i = 0; i < PATH_LEN; i++) {
+                level.setBlockAndUpdate(new BlockPos(BASE_X - i, Y0 - i, BASE_Z + i), path);
+            }
+            // The wedge: hop 1's crossing corners at hop 1's FROM-floor level (the candidates' unswept
+            // start-floor-level residual). Full grass, tops at Y0 — a 1/16 ledge above P1's 15/16 rest.
+            level.setBlockAndUpdate(new BlockPos(BASE_X - 2, Y0 - 1, BASE_Z + 1), grass);
+            level.setBlockAndUpdate(new BlockPos(BASE_X - 1, Y0 - 1, BASE_Z + 2), grass);
+            for (int dx = -(PATH_LEN + 2); dx <= 4; dx++) {
+                for (int dz = -3; dz <= PATH_LEN + 2; dz++) {
+                    level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0 + 3, BASE_Z + dz), stone);
+                }
+            }
+        }
+
+        /**
+         * The ASCENDING path — see {@link #pathupVariant}. Pad → full-stone P0 (flat entry, its own jump
+         * stays clear) → path stepping one UP per diagonal hop; wedge grass forward-diagonal of hop 1's
+         * landing at the landing's floor level; pad columns alone capped at Y0+4.
+         */
+        void paintPathup() {
+            BlockState air = Blocks.AIR.defaultBlockState();
+            BlockState grass = Blocks.GRASS_BLOCK.defaultBlockState();
+            BlockState path = Blocks.DIRT_PATH.defaultBlockState();
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            for (int dx = -(PATH_LEN + 4); dx <= 5; dx++) {
+                for (int dy = -4; dy <= PATH_LEN + 10; dy++) {
+                    for (int dz = -4; dz <= PATH_LEN + 4; dz++) {
+                        level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0 + dy, BASE_Z + dz), air);
+                    }
+                }
+            }
+            // Stone pad + stone P0 one level up (feet Y0+2): the WEDGE hop is the FIRST jump, taken off
+            // FULL STONE — the robust arc shape (cuts 1 and 2 of this variant: a stone→15/16-path
+            // diagonal arc from a mid-course cell reliably landed z-short, first falling through a bare
+            // corner, then parking on the corner support in an envelope-silent jump-in-place livelock —
+            // a separate latent finding, logged in the audit memory).
+            for (int dx = 1; dx <= 3; dx++) {
+                for (int dz = -2; dz <= 0; dz++) {
+                    level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0 + 1, BASE_Z + dz), stone);
+                }
+            }
+            level.setBlockAndUpdate(new BlockPos(BASE_X, Y0 + 1, BASE_Z), stone);   // P0, feet Y0+2
+            // The ascending path: P1..P4 at floors Y0+2..Y0+5.
+            for (int i = 1; i < PATH_LEN; i++) {
+                level.setBlockAndUpdate(new BlockPos(BASE_X - i, Y0 + 1 + i, BASE_Z + i), path);
+            }
+            // Corner support at every hop's FROM level (rests inside the ascend's admitted band —
+            // recovery terrain, not wedge sources). Hop 1's from-level corners are the wedge cells below.
+            for (int i = 0; i < PATH_LEN - 1; i++) {
+                if (i == 1) continue;
+                level.setBlockAndUpdate(new BlockPos(BASE_X - i - 1, Y0 + 1 + i, BASE_Z + i), grass);
+                level.setBlockAndUpdate(new BlockPos(BASE_X - i, Y0 + 1 + i, BASE_Z + i + 1), grass);
+            }
+            // The wedge: full grass diagonally FORWARD of hop 0's landing (P1), at P1's own floor level
+            // (Y0+2, tops exactly landFootY+1.0) — just beyond hop 0's swept 2x2.
+            level.setBlockAndUpdate(new BlockPos(BASE_X - 2, Y0 + 2, BASE_Z + 1), grass);
+            level.setBlockAndUpdate(new BlockPos(BASE_X - 1, Y0 + 2, BASE_Z + 2), grass);
+            // Pad-column cap: refuses rising-parkour takeoffs from the pad (headroom) without touching
+            // P0's own wedge-hop jump one column west.
+            for (int dx = 1; dx <= 3; dx++) {
+                for (int dz = -3; dz <= 1; dz++) {
+                    level.setBlockAndUpdate(new BlockPos(BASE_X + dx, Y0 + 5, BASE_Z + dz), stone);
+                }
+            }
+        }
+
         /** Start ledge -> SPAN vines on a 4-tall north wall -> end ledge. Everything else is void. */
         void paint() {
+            if (pathdownVariant()) {
+                paintPathdown();
+                return;
+            }
+            if (pathupVariant()) {
+                paintPathup();
+                return;
+            }
             if (pathdiagVariant()) {
                 paintPathdiag();
                 return;
@@ -379,7 +519,7 @@ public final class VineBridgeCourse {
             // the ledge and not grounded on anything. The crossing is only proven when the bot is STANDING on
             // the far ledge, so that is what this asserts: feet on (or past) the ledge column AND on real
             // ground, which no cell of the span can satisfy.
-            if (pathdiagVariant()) {
+            if (pathdiagVariant() || pathdownVariant() || pathupVariant()) {
                 if (bot.blockPosition().getX() <= BASE_X - (PATH_LEN - 1) && bot.grounded()) {
                     finish("PASS standing on the path's far end past the corner straddle");
                     return;
@@ -393,7 +533,8 @@ public final class VineBridgeCourse {
                 finish("PASS standing on the far ledge");
                 return;
             }
-            if (bot.getY() < Y0 - 3) {
+            // The descending path legitimately walks below Y0 — its fell-floor tracks the path bottom.
+            if (bot.getY() < (pathdownVariant() ? Y0 - PATH_LEN - 3 : Y0 - 3)) {
                 finish("FAIL fell off the span");
                 return;
             }

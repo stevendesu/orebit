@@ -102,8 +102,10 @@ public final class DiagonalDescend implements Movement {
      * hold, {@code arriveOnTarget}'s projected-stop braking (owner ruling O4 — the Descend servo shape,
      * never WalkOff's ballistic cross), and the settled-not-grounded completion.
      *
-     * <p><b>Envelope:</b> Descend's shape widened to the 2×2 — the from STAND (via {@code inWaypointCell}),
+     * <p><b>Envelope:</b> Descend's shape widened to the 2×2 — the from STAND (residency slack, with
+     * {@link Diagonal#CORNER_LIFT_MAX} of continuous headroom above — the 2026-08-30 corner-lift rule),
      * plus the target and both corner columns over the topY-aware band {@code [toFootY..fromFootY]}
+     * (upper bound continuous with the same headroom)
      * ({@code fromFootY} on the target/corner columns is the LIP TRANSIT: stepping off the corner, the
      * centre crosses while the box is still grounded on the from-block's lip — Descend's longrun-8 rule,
      * legitimately on any of the three swept columns for a diagonal). The from column below its stand is
@@ -126,12 +128,26 @@ public final class DiagonalDescend implements Movement {
         // admits the from-cell and the arrive servo keeps driving at the target.
         plan.resetWhen(b -> left[0]
                 && b.grounded() && atWaypoint(b, fx, fromFootY, fz));
+        // EVERY column's UPPER bound is continuous with Diagonal.CORNER_LIFT_MAX of headroom (owner
+        // ruling 2026-08-30, Diagonal's village-path corner-lift rule — pinned there by the pathdiag
+        // card, here by pathdown). The candidates' own KNOWN RESIDUAL above documents the trigger: the
+        // corner cell at START-FLOOR level is neither swept nor cleared, and its claim that a solid
+        // there is "landable support inside the envelope's corner band" is only true for FULL floors.
+        // On a 15/16 from-floor (resting fromFootY+0.938) that same full corner rests the straddling
+        // box at exactly fromFootY+1.000 — a 1/16 physical rise the old cell tests read as a
+        // whole-cell departure, in the from column (foot flips out of inWaypointCell's footY==wy) and
+        // corner columns (out of [bandLo, bandHi]) alike. The supremum derivation carries over: a
+        // corner passable for the crossing carries a floor of at most full-block height, so
+        // band-top + 1.0 bounds every legitimate rest. Lower bounds unchanged — the from column below
+        // its stand stays off-plan, exactly as in Descend.
         plan.failWhen(b -> (b.grounded() || b.inWater() || b.inLava())
-                && !inWaypointCell(b, fx, fromFootY, fz)
+                && !(Math.abs(b.x() - (fx + 0.5)) < Movement.RESIDENCY_HALF_SLACK
+                        && Math.abs(b.z() - (fz + 0.5)) < Movement.RESIDENCY_HALF_SLACK
+                        && b.y() >= fromFootY && b.y() <= fromFootY + Diagonal.CORNER_LIFT_MAX)
                 && !(b.footX() == tx && b.footZ() == tz
-                        && b.footY() >= bandLo && b.footY() <= bandHi)
+                        && b.footY() >= bandLo && b.y() <= bandHi + Diagonal.CORNER_LIFT_MAX)
                 && !(((b.footX() == fx && b.footZ() == tz) || (b.footX() == tx && b.footZ() == fz))
-                        && b.footY() >= bandLo && b.footY() <= bandHi));
+                        && b.footY() >= bandLo && b.y() <= bandHi + Diagonal.CORNER_LIFT_MAX));
         plan.phase("step")
                 .arrestCarryFrom(fx, fz)   // the declarative carry gate — a chained step's cross-axis
                                            // carry would drift the bot off the corner during the walk-off
